@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   chmodSync,
   cpSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   realpathSync,
@@ -12,6 +13,7 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { packExtension } from "../cli/extensions.mjs";
 import { createAdapterRegistry } from "./adapters/index.mjs";
 import { RUNTIME_ROOT, resolveConfigPath } from "./config.mjs";
 import { openDb } from "./db.mjs";
@@ -23,8 +25,10 @@ import {
   ExtensionError,
   RESERVED_CONTRIBUTIONS,
   applyConfigDefaults,
+  collectSecretFields,
   collectHarnessRoots,
   contributionCounts,
+  discoverExtensionPackRoots,
   extensionSecretEnvVar,
   formatContributionCounts,
   getExtensionConfig,
@@ -33,6 +37,7 @@ import {
   loadExtensions,
   loadedExtensions,
   looksLikePackageName,
+  maskExtensionSecrets,
   resetExtensionSecretsCache,
   resolveExtensionPackage,
   validateExtensionManifest,
@@ -118,6 +123,175 @@ function load(
     packRoots: [],
   }).then((result) => ({ ...result, adapterRegistry, hookRegistry }));
 }
+
+describe("extension pack metadata discovery (gh-857)", () => {
+  test("discovers path and package extension packs without importing adapters", () => {
+    const pathExtension = tempExtension();
+    const sentinel = path.join(tmpDir("event-extension-sentinel-"), "ran");
+    writeFileSync(
+      path.join(pathExtension, "adapters", "echo.mjs"),
+      `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(sentinel)}, "ran"); export default {};`,
+    );
+    const pathPacks = discoverExtensionPackRoots({
+      policy: policyFor(pathExtension),
+    });
+    expect(pathPacks).toEqual([
+      {
+        kind: "fs",
+        name: "sample-ext",
+        path: path.join(pathExtension, "pack"),
+      },
+    ]);
+    expect(existsSync(sentinel)).toBe(false);
+
+    const { factoryRoot, name, installed } = sampleAsPackage();
+    const packagePacks = discoverExtensionPackRoots({
+      root: factoryRoot,
+      policy: { extensions: [{ package: name }] },
+    });
+    expect(packagePacks).toEqual([
+      {
+        kind: "fs",
+        name: "sample-ext",
+        path: path.join(realpathSync(installed), "pack"),
+      },
+    ]);
+  });
+
+  test("fails closed for invalid manifests and duplicate contributed pack names", () => {
+    const escaped = tempExtension((manifest) => {
+      manifest.contributes.packs = ["../outside"];
+    });
+    expect(() =>
+      discoverExtensionPackRoots({ policy: policyFor(escaped) }),
+    ).toThrow(/contributes\.packs\[0\].*escapes/);
+
+    const first = tempExtension();
+    const second = tempExtension();
+    expect(() =>
+      discoverExtensionPackRoots({ policy: policyFor(first, second) }),
+    ).toThrow(/pack name "sample-ext" is already configured/);
+    expect(() =>
+      discoverExtensionPackRoots({
+        policy: policyFor(first),
+        packRoots: [{ kind: "fs", name: "sample-ext", path: SAMPLE_PACK }],
+      }),
+    ).toThrow(/pack name "sample-ext" is already configured/);
+  });
+
+  test("scopes discovery failures to the requested pack name", () => {
+    const broken = tempExtension((manifest) => {
+      manifest.contributes.packs = ["../outside"];
+    });
+    const healthy = tempExtension((manifest) => {
+      manifest.name = "factory/healthy";
+    });
+    writeFileSync(
+      path.join(healthy, "pack", "pack.json"),
+      `${JSON.stringify({ name: "healthy-ext", version: "1.0.0", namespace: "healthy" })}\n`,
+    );
+    const policy = policyFor(broken, healthy);
+
+    // Unscoped discovery still fails closed on the unrelated broken manifest.
+    expect(() => discoverExtensionPackRoots({ policy })).toThrow(
+      /contributes\.packs\[0\].*escapes/,
+    );
+    // A request for the healthy pack is not blocked by the broken sibling.
+    expect(discoverExtensionPackRoots({ policy, name: "healthy-ext" })).toEqual(
+      [{ kind: "fs", name: "healthy-ext", path: path.join(healthy, "pack") }],
+    );
+    // A miss surfaces the collected errors so the operator sees why.
+    expect(() =>
+      discoverExtensionPackRoots({ policy, name: "missing-ext" }),
+    ).toThrow(/pack "missing-ext" not found; rejected: .*escapes/);
+    // A clean miss stays a plain miss.
+    expect(
+      discoverExtensionPackRoots({ policy: policyFor(healthy), name: "nope" }),
+    ).toEqual([]);
+
+    // A duplicate of the requested name itself still fails closed, while a
+    // duplicate elsewhere is skipped.
+    const first = tempExtension();
+    const second = tempExtension();
+    const duplicated = policyFor(first, second, healthy);
+    expect(() =>
+      discoverExtensionPackRoots({ policy: duplicated, name: "sample-ext" }),
+    ).toThrow(/pack name "sample-ext" is already configured/);
+    expect(
+      discoverExtensionPackRoots({ policy: duplicated, name: "healthy-ext" }),
+    ).toEqual([
+      { kind: "fs", name: "healthy-ext", path: path.join(healthy, "pack") },
+    ]);
+  });
+
+  test("update-pins repairs a stale extension pack without executing it", async () => {
+    const factoryRoot = tmpDir("event-extension-repair-root-");
+    const extension = tempExtension();
+    const sentinel = path.join(factoryRoot, "extension-imported");
+    writeFileSync(
+      path.join(extension, "adapters", "echo.mjs"),
+      `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(sentinel)}, "ran");
+export const SANDBOX_SUPPORT = "unsupported";
+export async function execute({ spec } = {}) {
+  return { ok: true, echoed: spec?.input ?? null };
+}
+`,
+    );
+    writeFileSync(
+      path.join(extension, "pack", "agents", "echo.md"),
+      "drifted extension prompt\n",
+    );
+    mkdirSync(path.join(factoryRoot, "config"), { recursive: true });
+    writeFileSync(
+      path.join(factoryRoot, "config", "policy.yaml"),
+      `extensions:\n  - path: ${JSON.stringify(extension)}\n`,
+    );
+    const pins = path.join(extension, "pack", "pins.json");
+    const stalePins = readFileSync(pins, "utf8");
+    const policy = policyFor(extension);
+    const ordinaryLoad = () =>
+      loadExtensions({
+        root: factoryRoot,
+        policy,
+        adapterRegistry: createAdapterRegistry(),
+        hookRegistry: createHookRegistry(),
+        packRoots: [],
+      });
+    expect((await ordinaryLoad()).disabled[0].reason).toMatch(
+      /does not match pin/,
+    );
+
+    const run = (...args) =>
+      Bun.spawnSync({
+        cmd: [
+          process.execPath,
+          "event-runtime/cli.mjs",
+          "update-pins",
+          ...args,
+        ],
+        cwd: path.dirname(RUNTIME_ROOT),
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, FACTORY_REPOS_ROOT: factoryRoot },
+      });
+    const checked = run("--pack", "sample-ext", "--check");
+    expect(checked.exitCode).not.toBe(0);
+    expect(checked.stderr.toString()).toContain("pins stale: sample-ext");
+    expect(readFileSync(pins, "utf8")).toBe(stalePins);
+    expect(existsSync(sentinel)).toBe(false);
+
+    const repaired = run("--pack", "sample-ext");
+    expect(repaired.exitCode).toBe(0);
+    expect(repaired.stdout.toString()).toContain("re-pinned: sample-ext");
+    expect(readFileSync(pins, "utf8")).not.toBe(stalePins);
+    expect(existsSync(sentinel)).toBe(false);
+
+    const loaded = await ordinaryLoad();
+    expect(loaded.anomalies).toEqual([]);
+    expect(loaded.extensions).toHaveLength(1);
+  });
+});
 
 describe("factory-extension.json schema", () => {
   test("accepts the decided manifest shape and rejects bad names/versions", () => {
@@ -776,6 +950,255 @@ describe("extension config (contributes.config)", () => {
     expect(denied.anomalies[0]).toMatch(
       /config\.apiToken must not be set in policy\.yaml — use env FACTORY_EXT_SAMPLE_API_TOKEN/,
     );
+  });
+
+  test("secret discovery covers fixed nested objects and rejects dynamic schema locations", async () => {
+    const nestedSecretSchema = {
+      type: "object",
+      properties: {
+        auth: {
+          type: "object",
+          properties: {
+            label: { type: "string" },
+            value: { type: "string", format: "secret" },
+          },
+        },
+      },
+    };
+    expect(collectSecretFields(nestedSecretSchema)).toEqual([
+      { path: ["auth", "value"], key: "value" },
+    ]);
+
+    const nestedDir = tempExtension((manifest, extensionDir) => {
+      manifest.name = "factory/nested-secret";
+      manifest.contributes.config.namespace = "nested-secret";
+      writeFileSync(
+        path.join(extensionDir, "config.schema.json"),
+        JSON.stringify(nestedSecretSchema),
+      );
+    });
+    const nestedEnv = extensionSecretEnvVar("nested-secret", ["auth", "value"]);
+    const previousNestedEnv = process.env[nestedEnv];
+    try {
+      process.env[nestedEnv] = "resolved-innocuous-secret";
+      const nested = await load({
+        extensions: [
+          { path: nestedDir, config: { auth: { label: "primary" } } },
+        ],
+      });
+      expect(nested.anomalies).toEqual([]);
+      expect(nested.extensions[0].config.values).toEqual({
+        auth: { label: "primary", value: "resolved-innocuous-secret" },
+      });
+      const nestedMeta =
+        loadedExtensions().extensions[0].config.secretMeta["auth.value"];
+      expect(nestedMeta).toEqual({
+        set: true,
+        source: "env",
+      });
+      expect(
+        maskExtensionSecrets(
+          nested.extensions[0].config.values,
+          nestedSecretSchema,
+          { "auth.value": nestedMeta },
+        ),
+      ).toEqual({
+        auth: { label: "primary", value: { set: true, source: "env" } },
+      });
+    } finally {
+      if (previousNestedEnv === undefined) delete process.env[nestedEnv];
+      else process.env[nestedEnv] = previousNestedEnv;
+    }
+
+    const cases = [
+      {
+        name: "array of objects",
+        schema: {
+          type: "object",
+          properties: {
+            destinations: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  label: { type: "string" },
+                  value: { type: "string", format: "secret" },
+                },
+              },
+            },
+          },
+        },
+        error:
+          /\$\.destinations\[\]\.value.*beneath schema\.items at \$\.destinations/,
+      },
+      {
+        name: "nested arrays",
+        schema: {
+          type: "object",
+          properties: {
+            groups: {
+              type: "array",
+              items: {
+                type: "array",
+                items: { type: "string", format: "secret" },
+              },
+            },
+          },
+        },
+        error: /\$\.groups\[\]\[\].*beneath schema\.items at \$\.groups/,
+      },
+      {
+        name: "additional properties",
+        schema: {
+          type: "object",
+          additionalProperties: {
+            type: "object",
+            properties: {
+              value: { type: "string", format: "secret" },
+            },
+          },
+        },
+        error: /\$\.\*\.value.*beneath schema\.additionalProperties at \$/,
+      },
+    ];
+
+    for (const item of cases) {
+      const dir = tempExtension((manifest, extensionDir) => {
+        manifest.name = `factory/${item.name.replaceAll(" ", "-")}`;
+        manifest.contributes.config.namespace = item.name.replaceAll(" ", "-");
+        writeFileSync(
+          path.join(extensionDir, "config.schema.json"),
+          JSON.stringify(item.schema),
+        );
+      });
+      const out = await load({
+        extensions: [{ path: dir, config: {} }],
+      });
+      expect(out.extensions, item.name).toEqual([]);
+      expect(out.anomalies[0], item.name).toMatch(item.error);
+      expect(out.anomalies[0], item.name).toMatch(
+        /dynamic secret locations are unsupported/,
+      );
+    }
+  });
+
+  test("ordinary non-secret arrays remain supported", async () => {
+    const dir = tempExtension((manifest, extensionDir) => {
+      manifest.name = "factory/array-config";
+      manifest.contributes.config.namespace = "array-config";
+      writeFileSync(
+        path.join(extensionDir, "config.schema.json"),
+        JSON.stringify({
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            destinations: {
+              type: "array",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: ["label", "value"],
+                properties: {
+                  label: { type: "string" },
+                  value: { type: "string" },
+                },
+              },
+            },
+          },
+        }),
+      );
+    });
+    const destinations = [{ label: "prod", value: "ordinary" }];
+    const out = await load({
+      extensions: [{ path: dir, config: { destinations } }],
+    });
+    expect(out.anomalies).toEqual([]);
+    expect(out.extensions[0].config.values.destinations).toEqual(destinations);
+  });
+
+  test("rejects prototype-polluting schema paths before loading or masking", async () => {
+    const marker = "factoryExtensionPrototypePollution";
+    delete Object.prototype[marker];
+
+    try {
+      for (const segment of ["__proto__", "prototype", "constructor"]) {
+        const schema = {
+          type: "object",
+          properties: {
+            [segment]: {
+              type: "object",
+              properties: {
+                [marker]: { type: "string", format: "secret" },
+              },
+            },
+          },
+        };
+        expect(() => maskExtensionSecrets({}, schema)).toThrow(
+          `config schema path contains forbidden segment "${segment}"`,
+        );
+        expect(Object.prototype[marker]).toBeUndefined();
+      }
+
+      const dir = tempExtension((_manifest, extensionDir) => {
+        writeFileSync(
+          path.join(extensionDir, "config.schema.json"),
+          JSON.stringify({
+            type: "object",
+            properties: {
+              ["__proto__"]: {
+                type: "object",
+                properties: {
+                  [marker]: { type: "string", format: "secret" },
+                },
+              },
+            },
+          }),
+        );
+      });
+      const out = await load({ extensions: [{ path: dir }] });
+      expect(out.extensions).toEqual([]);
+      expect(out.anomalies[0]).toMatch(
+        /config schema path contains forbidden segment "__proto__"/,
+      );
+      expect(Object.prototype[marker]).toBeUndefined();
+    } finally {
+      delete Object.prototype[marker];
+    }
+  });
+
+  test("secret masking never descends through an inherited config record", () => {
+    const inheritedKey = "factoryInheritedExtensionConfig";
+    const inherited = {};
+    Object.defineProperty(Object.prototype, inheritedKey, {
+      value: inherited,
+      configurable: true,
+    });
+
+    try {
+      const masked = maskExtensionSecrets(
+        {},
+        {
+          type: "object",
+          properties: {
+            [inheritedKey]: {
+              type: "object",
+              properties: {
+                token: { type: "string", format: "secret" },
+              },
+            },
+          },
+        },
+        { [`${inheritedKey}.token`]: { set: true, source: "env" } },
+      );
+      expect(inherited).toEqual({});
+      expect(Object.hasOwn(masked, inheritedKey)).toBe(true);
+      expect(masked[inheritedKey].token).toEqual({
+        set: true,
+        source: "env",
+      });
+    } finally {
+      delete Object.prototype[inheritedKey];
+    }
   });
 
   test("a group/world-readable secrets.env warns once, is ignored (not read), and does not fail the load", () => {
@@ -1516,8 +1939,12 @@ describe("contributes.harness (WM-849)", () => {
 
     const loaded = await load(policyFor(extra));
     expect(loaded.anomalies).toEqual([]);
-    expect(loaded.harnessRoots).toHaveLength(1);
-    expect(loaded.harnessRoots[0].plugin).toBe("acme-tools");
+    expect(loaded.harnessRoots.map((root) => root.plugin)).toEqual([
+      CORE_HARNESS_PLUGIN,
+      "acme-tools",
+    ]);
+    expect(loaded.harnessRoots[0].builtin).toBe(true);
+    expect(loaded.harnessRoots[1].plugin).toBe("acme-tools");
     expect(loaded.extensions[0].harness).toEqual({
       plugin: "acme-tools",
       prefix: "acme-tools",
@@ -1706,6 +2133,75 @@ describe("extension packages (WM-922)", () => {
     );
   });
 
+  test("extensions pack rejects mismatched or incomplete npm metadata", () => {
+    const dir = tempExtension();
+    writeFileSync(
+      path.join(dir, "package.json"),
+      JSON.stringify({
+        name: "@test/pack-ext",
+        version: "0.1.0",
+        type: "module",
+        files: ["factory-extension.json", "pack", "adapters"],
+      }),
+    );
+    const diagnostics = [];
+    for (const report of [
+      [{ name: "factory/sample", version: "1.0.0", files: [] }],
+      [{ name: "@test/pack-ext", version: "0.1.0" }],
+      [{}],
+    ]) {
+      expect(() =>
+        packExtension(dir, {
+          spawn: () => ({
+            status: 0,
+            stdout: JSON.stringify(report),
+            stderr: "",
+          }),
+          exit: (code) => {
+            throw new Error(`exit:${code}`);
+          },
+          error: (message) => diagnostics.push(message),
+        }),
+      ).toThrow("exit:1");
+    }
+    expect(diagnostics.join("\n")).toContain("npm_pack_metadata_invalid");
+    expect(diagnostics.join("\n")).toContain("@test/pack-ext@0.1.0");
+  });
+
+  test("extensions pack uses an isolated npm cache and explicit target", () => {
+    const dir = tempExtension();
+    writeFileSync(
+      path.join(dir, "package.json"),
+      JSON.stringify({ name: "@test/pack-ext", version: "0.1.0" }),
+    );
+    let invocation;
+    packExtension(dir, {
+      spawn: (command, args, options) => {
+        invocation = { command, args, options };
+        return {
+          status: 0,
+          // Workspace-aware npm may key the one metadata object by package.
+          stdout: JSON.stringify({
+            "@test/pack-ext": {
+              name: "@test/pack-ext",
+              version: "0.1.0",
+              files: [{ path: "package.json" }],
+            },
+          }),
+          stderr: "",
+        };
+      },
+    });
+    expect(invocation.command).toBe("npm");
+    expect(invocation.args).toContain(".");
+    expect(invocation.args).toContain("--cache");
+    expect(invocation.args).toContain("--ignore-scripts");
+    const cache = invocation.args[invocation.args.indexOf("--cache") + 1];
+    expect(cache).toContain("factory-npm-pack-");
+    expect(existsSync(cache)).toBe(false);
+    expect(invocation.options.cwd).toBe(dir);
+  });
+
   test("extensions pack validates then lists npm pack --dry-run files", () => {
     const dir = tempExtension();
     writeFileSync(
@@ -1723,10 +2219,26 @@ describe("extension packages (WM-922)", () => {
       stdout: "pipe",
       stderr: "pipe",
     });
-    expect(packed.exitCode).toBe(0);
+    if (packed.exitCode !== 0) {
+      throw new Error(
+        `extensions pack CLI exited ${packed.exitCode}: ${packed.stderr.toString().trim() || "no stderr"}`,
+      );
+    }
+    // The CLI parses `npm pack --dry-run --json` structurally and prints its
+    // own stable summary, so this asserts the code's behavior — not npm's
+    // human text, which varies by npm version (object-keyed vs array report).
     const text = packed.stdout.toString();
-    expect(text).toMatch(/@test\/pack-ext@0\.1\.0: would pack/);
-    expect(text).toMatch(/factory-extension\.json/);
-    expect(text).toMatch(/package\.json/);
+    const summary = text.match(
+      /@test\/pack-ext@0\.1\.0: would pack (\d+) files/,
+    );
+    expect(summary).not.toBeNull();
+    // A real file set was resolved from the manifest's `files` list, not the
+    // empty/fallback shape a mis-parsed report would yield.
+    expect(Number(summary[1])).toBeGreaterThan(0);
+    // The listing still names each packed path, so a genuinely broken pack
+    // (missing the manifest or a contributed dir) would fail here.
+    expect(text).toMatch(/^ {2}factory-extension\.json$/m);
+    expect(text).toMatch(/^ {2}adapters\/echo\.mjs$/m);
+    expect(text).toMatch(/^ {2}package\.json$/m);
   });
 });

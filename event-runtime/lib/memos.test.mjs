@@ -14,12 +14,14 @@ import {
 import {
   KIND_DEFAULT_TTL_MS,
   LEARNINGS_MAX,
+  MEMO_RETENTION_MS,
   MEMO_SCHEMA_VERSION,
   learningsToMemos,
   listMemos,
   memoDigest,
   normalizeSubjectId,
   registerMemos,
+  sweepMemos,
   validateMemo,
   withProvenance,
 } from "./memos.mjs";
@@ -121,6 +123,51 @@ describe("factory.memo/v1 contract", () => {
     });
     expect(validateMemo(decision).valid).toBe(true);
     expect(validateMemo(postmortemDoc({ kind: "decision" })).valid).toBe(false);
+  });
+
+  test("rejects an unparsable expiresAt binding at validation time", () => {
+    const naturalLanguage = validateMemo(
+      postmortemDoc({ bindings: { expiresAt: "next sprint" } }),
+    );
+    expect(naturalLanguage.valid).toBe(false);
+    expect(
+      naturalLanguage.errors.some((error) =>
+        error.startsWith("$.bindings.expiresAt:"),
+      ),
+    ).toBe(true);
+
+    const { valid, errors } = validateMemo(
+      postmortemDoc({ bindings: { expiresAt: "2026-99-99T99:99:99Z" } }),
+    );
+    expect(valid).toBe(false);
+    expect(errors).toContain("$.bindings.expiresAt: not a valid time");
+  });
+
+  test("rejects an expiresAt binding that is already in the past", () => {
+    const now = Date.parse("2026-08-30T12:00:00.000Z");
+    const past = validateMemo(
+      postmortemDoc({ bindings: { expiresAt: "2026-08-30T11:59:59Z" } }),
+      { now },
+    );
+    expect(past.valid).toBe(false);
+    expect(past.errors).toContain("$.bindings.expiresAt: already in the past");
+    const future = validateMemo(
+      postmortemDoc({ bindings: { expiresAt: "2026-08-30T12:00:01Z" } }),
+      { now },
+    );
+    expect(future.valid).toBe(true);
+  });
+
+  test("rejects an abbreviated headSha binding", () => {
+    const { valid, errors } = validateMemo(
+      postmortemDoc({ bindings: { headSha: "abc1234" } }),
+    );
+    expect(valid).toBe(false);
+    expect(errors.some((e) => e.startsWith("$.bindings.headSha"))).toBe(true);
+    expect(
+      validateMemo(postmortemDoc({ bindings: { headSha: "a".repeat(40) } }))
+        .valid,
+    ).toBe(true);
   });
 });
 
@@ -256,6 +303,225 @@ describe("registerMemos / listMemos", () => {
         { now: now + KIND_DEFAULT_TTL_MS.postmortem + 1 },
       ),
     ).toHaveLength(0);
+    db.close();
+  });
+
+  test("live SQL filtering keeps the existing mixed-subject fold and applies max", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-18T14:02:11.000Z");
+    const useful = accepted(postmortemDoc({ body: "useful" }), { now });
+    const newer = accepted(postmortemDoc({ body: "newer" }), { now: now + 1 });
+    const expired = accepted(postmortemDoc({ body: "expired" }), { now });
+    const retired = accepted(postmortemDoc({ body: "retired" }), { now });
+    const superseded = accepted(postmortemDoc({ body: "superseded" }), {
+      now,
+    });
+    registerMemos(db, "run_useful", useful.result, { now });
+    registerMemos(db, "run_newer", newer.result, { now: now + 1 });
+    registerMemos(db, "run_expired", expired.result, { now });
+    registerMemos(db, "run_retired", retired.result, { now });
+    registerMemos(db, "run_superseded", superseded.result, { now });
+    db.query(`UPDATE memos SET expires_at = ? WHERE sha256 = ?`).run(
+      now,
+      expired.sha256,
+    );
+    db.query(`UPDATE memos SET retired_at = ? WHERE sha256 = ?`).run(
+      now,
+      retired.sha256,
+    );
+    db.query(`UPDATE memos SET superseded_by = ? WHERE sha256 = ?`).run(
+      newer.sha256,
+      superseded.sha256,
+    );
+    registerMemos(
+      db,
+      "run_consumer",
+      { usedMemos: [{ sha256: useful.sha256, verdict: "useful" }] },
+      { now: now + 2 },
+    );
+
+    const allLive = listMemos(
+      db,
+      { type: "ticket", id: "WM-809" },
+      { now: now + 2 },
+    );
+    expect(allLive.map((row) => row.sha256)).toEqual([
+      useful.sha256,
+      newer.sha256,
+    ]);
+    const live = listMemos(
+      db,
+      { type: "ticket", id: "WM-809" },
+      { now: now + 2, max: 1 },
+    );
+    expect(live.map((row) => row.sha256)).toEqual([useful.sha256]);
+    expect(live[0].usefulCount).toBe(1);
+    db.close();
+  });
+
+  test("sweepMemos removes retained dead memos and their use rows only", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-18T14:02:11.000Z");
+    const expired = accepted(repoNoteDoc({ body: "expired" }), { now });
+    const retired = accepted(repoNoteDoc({ body: "retired" }), { now });
+    const predecessor = accepted(repoNoteDoc({ body: "predecessor" }), { now });
+    const replacement = accepted(repoNoteDoc({ body: "replacement" }), {
+      now: now - MEMO_RETENTION_MS - 1,
+    });
+    const live = accepted(repoNoteDoc({ body: "live" }), { now });
+    for (const [runId, memo] of [
+      ["run_expired", expired],
+      ["run_retired", retired],
+      ["run_predecessor", predecessor],
+      ["run_replacement", replacement],
+      ["run_live", live],
+    ]) {
+      registerMemos(db, runId, memo.result, { now });
+    }
+    db.query(`UPDATE memos SET expires_at = ? WHERE sha256 = ?`).run(
+      now - MEMO_RETENTION_MS - 1,
+      expired.sha256,
+    );
+    db.query(`UPDATE memos SET retired_at = ? WHERE sha256 = ?`).run(
+      now - MEMO_RETENTION_MS - 1,
+      retired.sha256,
+    );
+    db.query(`UPDATE memos SET superseded_by = ? WHERE sha256 = ?`).run(
+      replacement.sha256,
+      predecessor.sha256,
+    );
+    db.query(
+      `INSERT INTO memo_uses (sha256, run_id, verdict, run_state, at)
+       VALUES (?, 'run_use', 'useful', 'COMPLETED', ?)`,
+    ).run(expired.sha256, now);
+    db.query(
+      `INSERT INTO memo_uses (sha256, run_id, verdict, run_state, at)
+       VALUES (?, 'run_use', 'wrong', 'COMPLETED', ?)`,
+    ).run(predecessor.sha256, now);
+
+    expect(sweepMemos(db, { now })).toEqual({ deleted: 3, usesDeleted: 2 });
+    expect(
+      db
+        .query(`SELECT sha256 FROM memos ORDER BY sha256`)
+        .all()
+        .map((row) => row.sha256),
+    ).toEqual([live.sha256, replacement.sha256].sort());
+    expect(db.query(`SELECT COUNT(*) AS n FROM memo_uses`).get().n).toBe(0);
+    db.close();
+  });
+
+  test("sweepMemos keeps memos that died inside the retention window", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-18T14:02:11.000Z");
+    const expired = accepted(repoNoteDoc({ body: "expired" }), { now });
+    const retired = accepted(repoNoteDoc({ body: "retired" }), { now });
+    const predecessor = accepted(repoNoteDoc({ body: "predecessor" }), {
+      now: now - MEMO_RETENTION_MS - 1,
+    });
+    const replacement = accepted(repoNoteDoc({ body: "replacement" }), {
+      now,
+    });
+    registerMemos(db, "run_expired", expired.result, { now });
+    registerMemos(db, "run_retired", retired.result, { now });
+    registerMemos(db, "run_predecessor", predecessor.result, {
+      now: now - MEMO_RETENTION_MS - 1,
+    });
+    registerMemos(db, "run_replacement", replacement.result, { now });
+    db.query(`UPDATE memos SET expires_at = ? WHERE sha256 = ?`).run(
+      now - 1,
+      expired.sha256,
+    );
+    db.query(`UPDATE memos SET retired_at = ? WHERE sha256 = ?`).run(
+      now - 1,
+      retired.sha256,
+    );
+    db.query(`UPDATE memos SET superseded_by = ? WHERE sha256 = ?`).run(
+      replacement.sha256,
+      predecessor.sha256,
+    );
+
+    expect(sweepMemos(db, { now })).toEqual({ deleted: 0, usesDeleted: 0 });
+    expect(db.query(`SELECT COUNT(*) AS n FROM memos`).get().n).toBe(4);
+    db.close();
+  });
+
+  test("sweepMemos treats a dangling superseded_by as retained from the predecessor's own age", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-18T14:02:11.000Z");
+    const old = accepted(repoNoteDoc({ body: "old predecessor" }), {
+      now: now - MEMO_RETENTION_MS - 1,
+    });
+    const young = accepted(repoNoteDoc({ body: "young predecessor" }), {
+      now,
+    });
+    registerMemos(db, "run_old", old.result, {
+      now: now - MEMO_RETENTION_MS - 1,
+    });
+    registerMemos(db, "run_young", young.result, { now });
+    // The replacement was itself swept in an earlier pass: no row exists.
+    db.query(`UPDATE memos SET superseded_by = ? WHERE sha256 IN (?, ?)`).run(
+      "f".repeat(64),
+      old.sha256,
+      young.sha256,
+    );
+
+    expect(sweepMemos(db, { now })).toEqual({ deleted: 1, usesDeleted: 0 });
+    expect(
+      db
+        .query(`SELECT sha256 FROM memos`)
+        .all()
+        .map((row) => row.sha256),
+    ).toEqual([young.sha256]);
+    db.close();
+  });
+
+  test("sweepMemos bounds each pass and drains the backlog across passes", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-18T14:02:11.000Z");
+    const memos = ["one", "two", "three"].map((body) =>
+      accepted(repoNoteDoc({ body }), { now }),
+    );
+    for (const [i, memo] of memos.entries()) {
+      registerMemos(db, `run_${i}`, memo.result, { now });
+      db.query(`UPDATE memos SET expires_at = ? WHERE sha256 = ?`).run(
+        now - MEMO_RETENTION_MS - 1,
+        memo.sha256,
+      );
+    }
+
+    expect(sweepMemos(db, { now, limit: 2 })).toEqual({
+      deleted: 2,
+      usesDeleted: 0,
+    });
+    expect(db.query(`SELECT COUNT(*) AS n FROM memos`).get().n).toBe(1);
+    expect(sweepMemos(db, { now, limit: 2 })).toEqual({
+      deleted: 1,
+      usesDeleted: 0,
+    });
+    expect(db.query(`SELECT COUNT(*) AS n FROM memos`).get().n).toBe(0);
+    db.close();
+  });
+
+  test("listMemos orders ties on useful_count and created_at by sha256", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-18T14:02:11.000Z");
+    const memos = ["alpha", "beta", "gamma"].map((body) =>
+      accepted(repoNoteDoc({ body }), { now }),
+    );
+    for (const [i, memo] of memos.entries()) {
+      registerMemos(db, `run_${i}`, memo.result, { now });
+    }
+    const expected = memos
+      .map((memo) => memo.sha256)
+      .sort()
+      .reverse();
+    for (let i = 0; i < 3; i += 1) {
+      expect(
+        listMemos(db, { type: "repo", id: "factory" }, { now }).map(
+          (row) => row.sha256,
+        ),
+      ).toEqual(expected);
+    }
     db.close();
   });
 
@@ -455,6 +721,38 @@ describe("verifyResult memo collection", () => {
     expect(out.result.memos).toHaveLength(1);
     expect(out.result.memos[0].document.provenance.runId).toBe("run_memo_test");
     expect(out.result.artifacts[0].kind).toBe("memo");
+  });
+
+  test("rejects an unparsable expiresAt before memo registration", () => {
+    const def = { ...statusDef, emits: { memos: ["postmortem"] } };
+    const dir = writeMemoWorkspace(
+      postmortemDoc({ bindings: { expiresAt: "2026-99-99T99:99:99Z" } }),
+    );
+    expect(() =>
+      verifyResult({
+        spec: makeSpec(),
+        def,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+      }),
+    ).toThrow(ContractViolation);
+  });
+
+  test("rejects an abbreviated headSha before memo registration", () => {
+    const def = { ...statusDef, emits: { memos: ["postmortem"] } };
+    const dir = writeMemoWorkspace(
+      postmortemDoc({ bindings: { headSha: "abc1234" } }),
+    );
+    expect(() =>
+      verifyResult({
+        spec: makeSpec(),
+        def,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+      }),
+    ).toThrow(ContractViolation);
   });
 
   test("a memo without emits.memos is a contract violation", () => {

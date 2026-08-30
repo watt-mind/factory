@@ -236,6 +236,12 @@ Both verbs surface `404` (unknown proposal) and `409` (already decided) as
 inline errors and refetch — a second browser tab or the CLI may have acted
 first.
 
+Both verbs can also return `503 {error:"db_busy", retryable:true}` while
+SQLite is contended. Treat this as a transient transport failure, not as a
+rejection or an already-decided proposal: retain the operator's intended
+action, retry with backoff, then refetch the proposal before showing the final
+outcome.
+
 ### 4.3 Runs — `GET /runs`, `GET /runs/:id`
 
 List with FSM state filter tabs (the `?state=` parameter): run ID, state
@@ -1381,7 +1387,9 @@ worktrees a repo owns.
   `#/projects/:name` is shareable per §10.8, and the empty state names the
   file that is empty (`config/repos.yaml`) rather than saying "no results".
 - **Detail panel.** Repository settings are grouped by what they govern, and
-  every group names `config/repos.yaml` as its source. **Dispatch** shows the
+  every group names `config/repos.yaml` as its source; field semantics live in
+  the [repository config reference](event-runtime-repos.md#config-reference).
+  **Dispatch** shows the
   dispatchable/report-only mode, effective max in flight and whether it came
   from the repo or the planner default, base branch, worktree root and script
   capabilities, and the verify command verbatim. **Merge gate** shows the
@@ -1390,8 +1398,8 @@ worktrees a repo owns.
   empty list says so. **Owned paths policy** shows direct source/required-path
   rules and pin manifests, or the default. **Deploy & smoke** shows deploy
   branch, the allow-listed deployment URL/branch/revision field, smoke
-  workflow/URL/deadline. **Security** currently allow-lists only
-  `python_version`, or states that defaults apply. Long path/check lists are
+  workflow/URL/deadline. **Security** shows the allow-listed
+  [`security.python_version`](event-runtime-repos.md#config-reference), or states that defaults apply. Long path/check lists are
   untruncated monospace chips inside their own scrolling containers, and all
   other absent values use the shared empty-value placeholder.
 - **Janitor, Dry before Apply (OPS-362).** `POST /repos/:name/janitor` — §2's
@@ -1545,9 +1553,25 @@ scheme or port) in the environment that starts `bin/live-stack.sh`:
 
 ```sh
 export FACTORY_EVENT_WEB_ALLOWED_HOSTS=runner.whale-pike.ts.net
+export FACTORY_CONTROL_API_TOKEN=... # mandatory when allowed hosts are set
 ```
 
 The `/api/*` proxy presents itself as loopback upstream (rewrites `Host`,
 drops `Origin`), so the control API's own loopback/rebinding guard
 (`api.mjs`) is unchanged — the web layer enforces the same defense against
-unlisted Hosts and cross-site Origins before anything is served.
+unlisted Hosts and cross-site Origins before anything is served. The control
+API token is mandatory: without it all non-intake API routes fail closed, and
+when allowed hosts are configured the web proxy also returns 503 for writes.
+
+Read-only dashboard requests stay credential-free on the tailnet. For a
+mutating action, supply the operator token once in the route fragment (for
+example
+`https://runner.whale-pike.ts.net/#/inbox?token=...`). Because fragments are
+not sent in HTTP requests, this avoids exposing the token to proxy access logs.
+The web app immediately removes it from the visible URL and keeps it only in
+`sessionStorage`, so closing the tab clears it; it is never written to
+`localStorage` or logged by the app. A top-level `?token=...` URL parameter is
+also accepted for compatibility, but the fragment form is preferred. A missing
+or rejected token is surfaced as “control API token required”. The proxy
+validates the browser bearer on non-loopback writes, then replaces it with its
+own upstream bearer rather than forwarding client-supplied authorization.

@@ -84,16 +84,18 @@ approved tick and a replayed one converge on the same run.
 A laptop asleep from 22:00 to 04:00 misses six hourly slots. There is no
 universally right answer, so each loop declares one:
 
-| `catchUp`        | Behaviour                                                       | Use for                                                                                    |
-| :--------------- | :-------------------------------------------------------------- | :----------------------------------------------------------------------------------------- |
-| `none` (default) | Fire only the current slot; missed ones are recorded as skipped | Idempotent maintenance — running the reaper once now is equivalent to running it six times |
-| `last`           | Fire the most recent missed slot, then resume                   | Loops where one late run still has value                                                   |
-| `all`            | Fire every missed slot in order                                 | Anything that accumulates per-interval work; rare, and expensive by construction           |
+| `catchUp`        | Behaviour                                                                           | Use for                                                                                    |
+| :--------------- | :---------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------- |
+| `none` (default) | Fire only the current slot; missed ones are recorded as skipped                     | Idempotent maintenance — running the reaper once now is equivalent to running it six times |
+| `last`           | Fire the most recent missed slot (the slot immediately before current), then resume | Loops where one late run still has value                                                   |
+| `all`            | Fire every missed slot in order                                                     | Anything that accumulates per-interval work; rare, and expensive by construction           |
 
 The count of skipped slots travels on the tick that did fire
-(`payload.skippedSlots`), and `serve` logs it — so a six-hour gap reads as one
-run standing for six slots rather than as silence. There is no separate journal
-record per skipped slot.
+(`payload.skippedSlots`), and `serve` logs it. For `last`, this counts the
+older missed slots: the newest missed slot fires, while the current slot fires
+on the following tick; if there are no missed slots, `last` fires the current
+slot with `skippedSlots: 0`. There is no separate journal record per skipped
+slot.
 
 ## 5. Overlap: a loop is a singleton by default
 

@@ -49,13 +49,25 @@
  * path, so the two cannot drift. See lib/adapters/sandboxed.mjs.
  */
 import { spawn } from "node:child_process";
-import { createWriteStream, readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
-import { FACTORY_ROOT } from "../config.mjs";
+import { FACTORY_ROOT, transcriptMaxBytes } from "../config.mjs";
 import { normalizePolicy } from "../sandbox/gondolin.mjs";
-import { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV } from "./claude.mjs";
+import { PROMPT_SUFFIX, verifiedPrompt } from "./claude.mjs";
+import {
+  BASE_INHERITED_ENV,
+  PROVIDER_CREDENTIAL_ENV,
+  PUSH_CREDENTIAL_ENV,
+  RUNTIME_IDENTITY_ENV,
+  safeChildEnvironment as sharedSafeChildEnvironment,
+} from "./child-env.mjs";
+import {
+  boundedTranscriptStream,
+  DETACHED_SPAWN_OPTIONS,
+  killProcessGroup,
+} from "./child-process.mjs";
 import {
   guestBinary,
   guestEnvironment,
@@ -65,7 +77,13 @@ import {
 
 // PUSH_CREDENTIAL_ENV is imported, not redeclared: the WM-128 carve-out is one
 // list shared by both LLM adapters (WM-223), so it cannot drift between them.
-export { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV };
+export {
+  BASE_INHERITED_ENV,
+  PROVIDER_CREDENTIAL_ENV,
+  PROMPT_SUFFIX,
+  PUSH_CREDENTIAL_ENV,
+  RUNTIME_IDENTITY_ENV,
+};
 
 /** This adapter executes inside the VM when a definition asks (WM-313). */
 export const SANDBOX_SUPPORT = "gondolin";
@@ -103,23 +121,7 @@ export const SANDBOX_PROMPT_FILE = ".prompt.md";
 export const KILL_GRACE_MS = 30_000;
 
 /** Terminate a detached CLI and every subprocess it started (WM-263). */
-export function killProcessGroup(
-  child,
-  signal = "SIGTERM",
-  kill = process.kill,
-) {
-  const pid = child?.pid;
-  if (!pid) return;
-  try {
-    kill(-pid, signal);
-  } catch {
-    try {
-      child.kill(signal);
-    } catch {
-      // already terminated
-    }
-  }
-}
+export { killProcessGroup };
 
 /** Trace events preview text; the recorder's byte bound is the real limit. */
 const TEXT_PREVIEW_CHARS = 4000;
@@ -282,21 +284,6 @@ export function piExtensions(def) {
   ];
 }
 
-export const BASE_INHERITED_ENV = [
-  "HOME",
-  "LANG",
-  "LC_ALL",
-  "LC_CTYPE",
-  "LOGNAME",
-  "PATH",
-  "SHELL",
-  "TERM",
-  "TMPDIR",
-  "USER",
-  "XDG_CACHE_HOME",
-  "XDG_CONFIG_HOME",
-];
-
 /**
  * Keep untrusted model subprocesses from inheriting the worker's authority.
  *
@@ -312,50 +299,16 @@ export const BASE_INHERITED_ENV = [
  * The strip runs *after* the caller's `env` is merged in, so a read-only run
  * cannot be handed a token through `env` either.
  *
- * Deliberate divergence from claude.mjs: only an explicit `mutating: true` (or a
- * boolean argument) counts as mutating here, where claude.mjs also treats any
- * other non-`undefined` value as mutating. Identical for every real agent
- * definition — `mutating` is a JSON boolean — but this direction fails closed.
+ * The shared helper treats only an explicit `mutating: true` (or boolean
+ * argument) as mutating, so malformed definitions fail closed everywhere.
+ * Nested Claude Code session markers are stripped by the shared helper too.
  */
-export function safeChildEnvironment(env = {}, defOrOpts = {}) {
-  const isMutating =
-    typeof defOrOpts === "boolean" ? defOrOpts : defOrOpts?.mutating === true;
-  const inherited = isMutating
-    ? [...BASE_INHERITED_ENV, ...PUSH_CREDENTIAL_ENV]
-    : BASE_INHERITED_ENV;
-  const childEnv = Object.fromEntries(
-    inherited.flatMap((key) =>
-      process.env[key] === undefined ? [] : [[key, process.env[key]]],
-    ),
-  );
-  Object.assign(childEnv, env);
-  // Read-only repository workspaces contain the selected target checkout, not
-  // Factory's runtime support code. Expose the running Factory checkout through
-  // one adapter-owned, non-overridable path so pinned agent procedures can call
-  // shared helpers without assuming the target repo is Factory (WM-433).
-  childEnv.FACTORY_ROOT = FACTORY_ROOT;
-  // Subscription auth (Codex/ChatGPT OAuth) is the point of routing through
-  // pi at all — an inherited key would silently switch a run to per-token
-  // billing (same rationale as run-agent.sh's UNSET_KEYS, all providers pi
-  // itself recognizes, not just OpenAI's).
-  for (const key of [
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "GOOGLE_GENAI_API_KEY",
-    "MISTRAL_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "GROQ_API_KEY",
-  ]) {
-    delete childEnv[key];
-  }
-  if (!isMutating) {
-    for (const key of PUSH_CREDENTIAL_ENV) {
-      delete childEnv[key];
-    }
-  }
-  return childEnv;
+export function safeChildEnvironment(
+  env = {},
+  defOrOpts = {},
+  { factoryRoot = FACTORY_ROOT } = {},
+) {
+  return sharedSafeChildEnvironment(env, defOrOpts, { factoryRoot });
 }
 
 /**
@@ -481,15 +434,32 @@ export function extractUsage(msg) {
  *
  * @param {import("node:stream").Readable|null} stdout
  */
-function attachOutput({ stdout, workspaceDir, spec, def, onTrace, onUsage }) {
+function attachOutput({
+  stdout,
+  workspaceDir,
+  spec,
+  def,
+  onTrace,
+  onUsage,
+  transcriptMaxBytes: maxTranscriptBytes,
+}) {
   // Capture the CLI's structured output as a runtime artifact, same
   // contract as the claude adapter: NDJSON, one message per line.
-  const transcript = createWriteStream(
+  const transcript = boundedTranscriptStream(
     path.join(workspaceDir, ".transcript.json"),
+    {
+      maxBytes: maxTranscriptBytes,
+      onTruncated: ({ bytes }) =>
+        onTrace?.("lifecycle", { note: "transcript_truncated", bytes }),
+    },
   );
   transcript.on("error", () => {});
   if (stdout) {
     stdout.pipe(transcript);
+  } else {
+    // No stdout means nothing will ever end the transcript; close it now so
+    // execute()'s wait for the stream to finish cannot hang (mirrors acp).
+    transcript.end();
   }
 
   // Live trace: same stdout, line by line. Observational only — a trace
@@ -593,6 +563,7 @@ function attachOutput({ stdout, workspaceDir, spec, def, onTrace, onUsage }) {
       timedOut,
       policyDenials: exitCode === 0 ? [] : policyDenials,
       usage: normalized,
+      ...(transcript.truncated ? { transcriptTruncated: true } : {}),
     };
   };
 
@@ -628,6 +599,7 @@ async function executeSandboxed({
   timeoutMs,
   onTrace,
   onUsage,
+  transcriptMaxBytes: maxTranscriptBytes,
   resume,
   abortSignal,
   runSandbox,
@@ -644,7 +616,7 @@ async function executeSandboxed({
   // this preflight also covers injected VM runners used by tests and leaves
   // no stray prompt behind when the definition itself is invalid.
   normalizePolicy(def.sandbox, { workspaceDir });
-  const prompt = readFileSync(def.promptPath, "utf8") + PROMPT_SUFFIX;
+  const prompt = verifiedPrompt(def, "pi");
   writeFileSync(path.join(workspaceDir, SANDBOX_PROMPT_FILE), prompt, "utf8");
   const argv = [
     bin,
@@ -659,6 +631,7 @@ async function executeSandboxed({
     def,
     onTrace,
     onUsage,
+    transcriptMaxBytes: maxTranscriptBytes,
   });
   const transcriptClosed = new Promise((done) => {
     transcript.on("close", done);
@@ -709,6 +682,7 @@ export async function execute({
   abortSignal,
   signal,
   runSandbox,
+  transcriptMaxBytes: maxTranscriptBytes = transcriptMaxBytes(),
 }) {
   // The sandbox decision comes first, before the host env is assembled or a
   // host CLI is looked for: a sandboxed definition must never reach the host
@@ -721,14 +695,21 @@ export async function execute({
       timeoutMs,
       onTrace,
       onUsage,
+      transcriptMaxBytes: maxTranscriptBytes,
       resume,
       abortSignal: abortSignal ?? signal,
       runSandbox,
     });
   }
 
-  const prompt = readFileSync(def.promptPath, "utf8") + PROMPT_SUFFIX;
-  const childEnv = safeChildEnvironment(env, def);
+  const prompt = verifiedPrompt(def, "pi");
+  // A remote worker can execute this checked-out adapter from a persistent
+  // runner checkout, whose ignored config/ is intentionally absent. Preserve
+  // the launching operator's root for the ticket CLI instead of replacing it
+  // with this module's checkout-derived fallback (GH-975).
+  const childEnv = safeChildEnvironment(env, def, {
+    factoryRoot: process.env.FACTORY_ROOT || FACTORY_ROOT,
+  });
 
   const resolved = resolvePiCommand({
     which: (name) => Bun.which(name, { PATH: childEnv.PATH ?? "" }),
@@ -755,7 +736,7 @@ export async function execute({
       cwd: workspaceDir,
       env: childEnv,
       stdio: ["pipe", "pipe", "pipe"],
-      detached: true,
+      ...DETACHED_SPAWN_OPTIONS,
     });
 
     child.stdin.on("error", () => {}); // a child that exits before reading stdin must not crash the worker
@@ -769,29 +750,25 @@ export async function execute({
       def,
       onTrace,
       onUsage,
+      transcriptMaxBytes: maxTranscriptBytes,
+    });
+    const transcriptClosed = new Promise((done) => {
+      transcript.once("close", done);
+      transcript.once("finish", done);
     });
 
     let timedOut = false;
-    let killTimer = null;
+    let cancelTermination = null;
+    const terminate = () => {
+      cancelTermination ??= killProcessGroup(child, { killGraceMs });
+    };
     const termTimer = setTimeout(() => {
       timedOut = true;
-      killProcessGroup(child, "SIGTERM");
-      killTimer = setTimeout(
-        () => killProcessGroup(child, "SIGKILL"),
-        killGraceMs,
-      );
-      killTimer.unref?.();
+      terminate();
     }, timeoutMs);
 
     const onAbort = () => {
-      killProcessGroup(child, "SIGTERM");
-      if (!killTimer) {
-        killTimer = setTimeout(
-          () => killProcessGroup(child, "SIGKILL"),
-          killGraceMs,
-        );
-        killTimer.unref?.();
-      }
+      terminate();
     };
     const abortSig = abortSignal ?? signal;
     if (abortSig) {
@@ -804,15 +781,16 @@ export async function execute({
 
     child.on("error", (err) => {
       clearTimeout(termTimer);
-      if (killTimer) clearTimeout(killTimer);
+      cancelTermination?.();
       if (abortSig) abortSig.removeEventListener?.("abort", onAbort);
       transcript.destroy();
       reject(err);
     });
-    child.on("close", (exitCode) => {
+    child.on("close", async (exitCode) => {
       clearTimeout(termTimer);
-      if (killTimer) clearTimeout(killTimer);
+      cancelTermination?.();
       if (abortSig) abortSig.removeEventListener?.("abort", onAbort);
+      await transcriptClosed;
       resolve(finish({ exitCode, timedOut }));
     });
   });

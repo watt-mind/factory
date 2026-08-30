@@ -212,10 +212,14 @@ wholesale. Provider API keys are removed so the CLIs use their configured
 subscription authentication.
 
 `PUSH_CREDENTIAL_ENV` is the shared list `SSH_AUTH_SOCK`, `SSH_AGENT_PID`,
-`GITHUB_TOKEN`, and `GH_TOKEN`. `pi.mjs` imports the list from `claude.mjs`
-rather than duplicating it. A `mutating: true` run may inherit those four
+`GITHUB_TOKEN`, and `GH_TOKEN`, exported by `adapters/child-env.mjs`. A
+`mutating: true` run may inherit those four
 values. A non-mutating run strips them _after_ merging the caller's `env`, so a
 caller cannot smuggle mutation authority back in through the overlay.
+
+Nested Claude Code session markers (`CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT`)
+are stripped for all adapters so child processes do not inherit the operator's
+interactive session context.
 
 [WM-223](https://linear.app/watt-mind/issue/WM-223/fixevent-runtime-pi-adapter-strips-push-credentials-for-mutating-runs)
 is the incident that proves the signature matters: pi's environment helper did
@@ -263,7 +267,8 @@ The LLM adapter shutdown contract is:
    capture streams on every exit/error path.
 
 Adapters that can create process trees must terminate the relevant process
-group; `command.mjs:killProcessGroup()` is the precedent. Never resolve while a
+group; `child-process.mjs:killProcessGroup()` is the shared helper (TERM, then
+KILL after `killGraceMs`; repeat calls for one child are no-ops). Never resolve while a
 background child remains running.
 
 ### CLI preflight
@@ -293,21 +298,20 @@ Both LLM adapters implement the shared execution, result, workspace,
 transcript, credential, timeout, and cancellation shapes above. Their deliberate
 differences and known conformance gaps are:
 
-| Concern                      | Claude                                                                                   | pi                                                                 |
-| :--------------------------- | :--------------------------------------------------------------------------------------- | :----------------------------------------------------------------- |
-| Prompt transport             | `-p <prompt>` argv                                                                       | stdin                                                              |
-| Structured stream            | `stream-json`                                                                            | `--mode json`                                                      |
-| Non-mutating containment     | generated settings/sandbox plus worker integrity gate                                    | restricted tool list; audited-not-enforced                         |
-| Required result write path   | `Write`/`Edit` remain available outside denied checkout                                  | `write` remains in `READ_ONLY_TOOLS`                               |
-| Usage                        | terminal result plus `onUsage` callback                                                  | accumulated turns, emitted as trace                                |
-| Observer failure isolation   | per-line trace and terminal usage callbacks guarded                                      | per-line trace guarded; terminal usage trace gap tracked by WM-305 |
-| Policy denial matching       | confirmed Claude-authored patterns                                                       | empty until a pi-authored shape is observed                        |
-| Missing CLI                  | generic spawn error (known gap)                                                          | typed preflight with `npx` fallback                                |
-| `safeChildEnvironment` guard | valid registered booleans; legacy helper also treats some non-boolean values as mutating | only explicit `true` grants push credentials                       |
+| Concern                      | Claude                                                      | pi                                                                 |
+| :--------------------------- | :---------------------------------------------------------- | :----------------------------------------------------------------- |
+| Prompt transport             | `-p <prompt>` argv                                          | stdin                                                              |
+| Structured stream            | `stream-json`                                               | `--mode json`                                                      |
+| Non-mutating containment     | generated settings/sandbox plus worker integrity gate       | restricted tool list; audited-not-enforced                         |
+| Required result write path   | `Write`/`Edit` remain available outside denied checkout     | `write` remains in `READ_ONLY_TOOLS`                               |
+| Usage                        | terminal result plus `onUsage` callback                     | accumulated turns, emitted as trace                                |
+| Observer failure isolation   | per-line trace and terminal usage callbacks guarded         | per-line trace guarded; terminal usage trace gap tracked by WM-305 |
+| Policy denial matching       | confirmed Claude-authored patterns                          | empty until a pi-authored shape is observed                        |
+| Missing CLI                  | generic spawn error (known gap)                             | typed preflight with `npx` fallback                                |
+| `safeChildEnvironment` guard | shared helper: only explicit `true` grants push credentials | shared helper: only explicit `true` grants push credentials        |
 
-For valid registered definitions, both environment helpers agree on
-`mutating: true` and `mutating: false`. New code should copy pi's fail-closed
-`=== true` authority check, not Claude's legacy non-boolean behavior.
+All adapters delegate the fail-closed authority check to the shared helper, so
+non-boolean values never gain push credentials.
 
 ## Fail closed at trust boundaries
 

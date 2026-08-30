@@ -1,6 +1,6 @@
 import "../test-dom";
 import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import {
   CHUNK_RELOAD_STORAGE_KEY,
   ErrorBoundary,
@@ -92,5 +92,119 @@ describe("chunk-load recovery", () => {
     );
     expect(second.getByRole("button", { name: "Reload" })).toBeTruthy();
     expect(reloads).toBe(1);
+  });
+});
+
+describe("local recovery", () => {
+  test("a pane-level chunk failure neither reloads nor claims the route's reload", async () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+    };
+    let reloads = 0;
+    const view = render(
+      <ErrorBoundary
+        storage={storage}
+        route="/#/inbox"
+        now={() => 1_000}
+        reload={() => {
+          reloads += 1;
+        }}
+        fallback={(_error, retry) => (
+          <section role="alert">
+            Pane unavailable
+            <button type="button" onClick={retry}>
+              Retry
+            </button>
+          </section>
+        )}
+      >
+        <BrokenRoute />
+      </ErrorBoundary>,
+    );
+    await waitFor(() => view.getByRole("alert"));
+    expect(view.getByRole("alert").textContent).toContain("Pane unavailable");
+    expect(reloads).toBe(0);
+    expect(values.has(CHUNK_RELOAD_STORAGE_KEY)).toBe(false);
+    // The route-level reload is still available afterwards.
+    expect(claimChunkReload(chunkFailure(), storage, "/#/inbox", 1_001)).toBe(
+      true,
+    );
+  });
+
+  test("logs the caught error with its component stack", async () => {
+    const original = console.error;
+    const calls: unknown[][] = [];
+    console.error = (...args: unknown[]) => {
+      calls.push(args);
+    };
+    try {
+      const error = new Error("detail failed");
+      const view = render(
+        <ErrorBoundary fallback={() => <section role="alert">Down</section>}>
+          <BrokenRoute error={error} />
+        </ErrorBoundary>,
+      );
+      await waitFor(() => view.getByRole("alert"));
+      const logged = calls.find((args) => args[0] === error);
+      expect(logged).toBeTruthy();
+      expect(typeof logged?.[1]).toBe("string");
+      expect(logged?.[1] as string).toContain("BrokenRoute");
+    } finally {
+      console.error = original;
+    }
+  });
+
+  test("retries without reloading and resets when its key changes", async () => {
+    let failDetail = true;
+    let reloads = 0;
+    const Detail = () => {
+      if (failDetail) throw new Error("detail failed");
+      return <p>Normal detail</p>;
+    };
+    const fallback = (_error: Error, retry: () => void) => (
+      <section role="alert">
+        Detail unavailable
+        <button type="button" onClick={retry}>
+          Retry
+        </button>
+      </section>
+    );
+
+    const view = render(
+      <ErrorBoundary
+        resetKey="first"
+        reload={() => {
+          reloads += 1;
+        }}
+        fallback={fallback}
+      >
+        <Detail />
+      </ErrorBoundary>,
+    );
+    await waitFor(() => view.getByRole("alert"));
+    expect(reloads).toBe(0);
+
+    failDetail = false;
+    fireEvent.click(view.getByRole("button", { name: "Retry" }));
+    await waitFor(() => view.getByText("Normal detail"));
+    expect(reloads).toBe(0);
+
+    failDetail = true;
+    view.rerender(
+      <ErrorBoundary resetKey="first" fallback={fallback}>
+        <Detail />
+      </ErrorBoundary>,
+    );
+    await waitFor(() => view.getByRole("alert"));
+
+    failDetail = false;
+    view.rerender(
+      <ErrorBoundary resetKey="second" fallback={fallback}>
+        <Detail />
+      </ErrorBoundary>,
+    );
+    await waitFor(() => view.getByText("Normal detail"));
   });
 });

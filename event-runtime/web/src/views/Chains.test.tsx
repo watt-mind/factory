@@ -8,6 +8,7 @@ import {
   restoreApi,
   withApi,
 } from "../test-render";
+import { shortId } from "../components/ui";
 import { Chains } from "./Chains";
 
 afterEach(() => {
@@ -128,6 +129,28 @@ describe("Chains list (WM-537)", () => {
           view.container.querySelector('[data-chain-id="single-root"]'),
         ).toBeTruthy();
       });
+    });
+  });
+
+  test("focuses rows and opens a chain with Enter or Space", async () => {
+    const onOpenChain = mock(() => {});
+    await withApi({ chains: async () => ({ chains: rows }) }, async () => {
+      const view = renderChains({ onOpenChain });
+      const row = await waitFor(() => {
+        const element = view.container.querySelector(
+          '[data-chain-id="corr-active"]',
+        ) as HTMLTableRowElement | null;
+        if (!element) throw new Error("row not rendered");
+        return element;
+      });
+
+      row.focus();
+      expect(document.activeElement).toBe(row);
+      fireEvent.keyDown(row, { key: "Enter" });
+      fireEvent.keyDown(row, { key: " " });
+
+      expect(onOpenChain).toHaveBeenCalledWith("corr-active");
+      expect(onOpenChain).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -264,11 +287,41 @@ describe("Chains list (WM-537)", () => {
       expect(originCell.className).toContain("whitespace-nowrap");
       expect(originCell.querySelector("svg")).toBeTruthy();
 
-      // Repos cell should contain GitHub icon
-      const reposCell = activeRow.querySelectorAll("td")[7];
+      // Repos cell should contain GitHub icon (Root hidden by default, so index 6)
+      const reposCell = activeRow.querySelectorAll("td")[6];
       expect(reposCell.className).toContain("whitespace-nowrap");
       expect(reposCell.querySelector("svg")).toBeTruthy();
       expect(reposCell.textContent).toContain("factory");
+    });
+  });
+
+  test("hides the Root column by default and titles Depth as hops (WM-831)", async () => {
+    await withApi({ chains: async () => ({ chains: rows }) }, async () => {
+      const view = renderChains();
+      await waitFor(() => {
+        expect(
+          view.container.querySelector('[data-chain-id="corr-active"]'),
+        ).toBeTruthy();
+      });
+
+      // Root event column is default-hidden: no header, no cell.
+      const headers = Array.from(
+        view.container.querySelectorAll("thead th"),
+      ).map((th) => th.textContent ?? "");
+      expect(headers.some((text) => text.includes("Root"))).toBe(false);
+      expect(view.queryByText(shortId("event-corr-active"))).toBeNull();
+
+      // Depth header abbreviates and explains the metric is hops in its title.
+      const depthTitle = view.container.querySelector('[title*="hops"]');
+      expect(depthTitle).toBeTruthy();
+      expect(depthTitle?.textContent).toContain("Dep");
+
+      // Cell values stay plain integers.
+      const activeRow = view.container.querySelector(
+        '[data-chain-id="corr-active"]',
+      ) as HTMLElement;
+      const depthCell = activeRow.querySelectorAll("td")[1];
+      expect(depthCell.textContent).toBe("1");
     });
   });
 });

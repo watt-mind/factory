@@ -15,6 +15,11 @@
   --sl-font: var(--wm-font-body);
   --sl-font-mono: var(--wm-font-mono);
   --sl-content-width: 52rem;
+  --sl-nav-height: 5rem;
+}
+
+:root[data-has-hero]:not([data-has-sidebar]) {
+  --sl-content-width: 82rem;
 }
 
 :root[data-theme="light"] {
@@ -94,9 +99,31 @@ pre {
 }
 
 header.header {
+  padding: 0;
   border-bottom: var(--wm-rule);
   background: color-mix(in oklch, var(--sl-color-black) 84%, transparent);
   backdrop-filter: blur(12px);
+}
+
+header.header > .header {
+  width: 100%;
+  max-width: var(--wm-container-max);
+  height: 100%;
+  margin-inline: auto;
+  padding-inline: var(--wm-page-margin);
+}
+
+header.header site-search > button[data-open-modal],
+header.header starlight-theme-select select {
+  border-radius: var(--wm-radius-sm);
+  font-family: var(--wm-font-mono);
+  font-size: var(--sl-text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+header.header starlight-theme-select select {
+  text-transform: uppercase;
 }
 
 .sidebar-pane,
@@ -109,20 +136,6 @@ header.header {
   border-radius: var(--wm-radius-lg) !important;
   background: var(--wm-color-panel) !important;
   backdrop-filter: blur(12px);
-  transition:
-    transform var(--wm-duration-short) var(--wm-ease-out),
-    border-color var(--wm-duration-short) var(--wm-ease-out),
-    background-color var(--wm-duration-short) var(--wm-ease-out) !important;
-}
-
-.card:hover {
-  border-color: color-mix(
-    in oklch,
-    var(--wm-color-primary) 55%,
-    transparent
-  ) !important;
-  background: var(--wm-color-panel-hover) !important;
-  transform: translateY(-2px);
 }
 
 .card .title {
@@ -139,6 +152,35 @@ header.header {
   line-height: 1.6 !important;
 }
 
+.sidebar-content a[aria-current="page"],
+.sidebar-content a[aria-current="page"]:hover,
+.sidebar-content a[aria-current="page"]:focus {
+  background: transparent;
+  color: var(--wm-color-primary);
+  font-family: var(--wm-font-mono);
+  font-weight: 700;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
+
+.sidebar-content a[aria-current="page"] > span:first-child::before {
+  content: "[ ";
+}
+
+.sidebar-content a[aria-current="page"] > span:first-child::after {
+  content: " ]";
+}
+
+.metrics-rail .card-grid {
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--wm-space-md);
+}
+
+.metrics-rail .card {
+  height: 100%;
+  padding: var(--wm-space-md) !important;
+}
+
 .tenet-card-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -153,16 +195,6 @@ header.header {
   border-radius: var(--wm-radius-lg);
   background: var(--wm-color-panel);
   backdrop-filter: blur(12px);
-  transition:
-    transform var(--wm-duration-short) var(--wm-ease-out),
-    border-color var(--wm-duration-short) var(--wm-ease-out),
-    background-color var(--wm-duration-short) var(--wm-ease-out);
-}
-
-.tenet-card:hover {
-  border-color: color-mix(in oklch, var(--wm-color-primary) 55%, transparent);
-  background: var(--wm-color-panel-hover);
-  transform: translateY(-2px);
 }
 
 .tenet-card__illustration {
@@ -275,6 +307,24 @@ tr:last-child td {
 :focus-visible {
   outline: 2px solid var(--wm-color-focus);
   outline-offset: 3px;
+}
+
+@media (min-width: 40rem) {
+  .metrics-rail .card-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 50rem) {
+  :root {
+    --wm-page-margin: 4rem;
+  }
+}
+
+@media (min-width: 72rem) {
+  .metrics-rail .card-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 50rem) {

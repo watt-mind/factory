@@ -8,6 +8,7 @@
 
 import { nextScheduledRetry, scheduledRetryLabel } from "./chainTimeline";
 import { REASONS, humanizeReason } from "./reasons";
+import type { Attempt } from "./types";
 
 export const TICKET_ID_PATTERN = /^[A-Z][A-Z0-9]{1,9}-\d+$/;
 
@@ -223,6 +224,8 @@ export interface JourneyRun {
     };
   };
   lifecycle: JourneyLifecycle[];
+  /** Attempts emitted by `runView`, ordered by ascending attempt number. */
+  attempts?: Array<Partial<Attempt>>;
   result: Record<string, any> | null;
   usage?: {
     totals?: { attempts?: number; totalTokens?: number; costUSD?: number };
@@ -502,7 +505,8 @@ function runDuration(run: JourneyRun): number | null {
   return window ? window.end - window.start : null;
 }
 
-export function formatDuration(ms: number | null): string {
+/** Formats a duration expressed in milliseconds. */
+export function formatDurationMs(ms: number | null): string {
   if (ms == null || !Number.isFinite(ms) || ms < 0) return "—";
   const seconds = Math.round(ms / 1000);
   if (seconds < 60) return `${seconds}s`;
@@ -606,24 +610,29 @@ export interface ScanVerdict {
   round: number | null;
 }
 
+type ArtifactPrEntry = Record<string, unknown>;
+
+function isArtifactPrEntry(value: unknown): value is ArtifactPrEntry {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 export function scanVerdictFor(
   artifact: unknown,
   pr: number,
 ): ScanVerdict | null {
-  if (!artifact || typeof artifact !== "object") return null;
-  const record = artifact as Record<string, unknown>;
+  if (!isArtifactPrEntry(artifact)) return null;
   const buckets: Array<[ScanVerdict["bucket"], string]> = [
     ["MERGE", "plan"],
     ["FIX", "fix"],
     ["ESCALATE", "escalate"],
   ];
   for (const [bucket, key] of buckets) {
-    const list = record[key];
+    const list = artifact[key];
     if (!Array.isArray(list)) continue;
     const entry = list.find(
-      (item) =>
-        item && typeof item === "object" && Number((item as any).pr) === pr,
-    ) as Record<string, unknown> | undefined;
+      (item): item is ArtifactPrEntry =>
+        isArtifactPrEntry(item) && Number(item.pr) === pr,
+    );
     if (!entry) continue;
     return {
       bucket,
@@ -998,7 +1007,7 @@ export function subjectJourney(
       run.run.spec.agent,
       run.run.spec.adapter,
       model,
-      formatDuration(duration),
+      formatDurationMs(duration),
       attempts > 0 ? `$${Number(totals?.costUSD ?? 0).toFixed(2)}` : "—",
     ]
       .filter(Boolean)
@@ -1398,9 +1407,14 @@ export function selectPrSource(
     const ticket = ticketOfRun(run);
     if (ticket) tickets.add(ticket);
     for (const bucket of ["plan", "fix", "escalate"]) {
-      const list = (run.result?.artifact as any)?.[bucket];
+      const artifact = run.result?.artifact;
+      if (!isArtifactPrEntry(artifact)) continue;
+      const list = artifact[bucket];
       if (!Array.isArray(list)) continue;
-      const entry = list.find((item: any) => Number(item?.pr) === pr);
+      const entry = list.find(
+        (item): item is ArtifactPrEntry =>
+          isArtifactPrEntry(item) && Number(item.pr) === pr,
+      );
       if (typeof entry?.ticket === "string")
         tickets.add(entry.ticket.toUpperCase());
     }

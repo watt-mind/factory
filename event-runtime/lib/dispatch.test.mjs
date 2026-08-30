@@ -540,11 +540,17 @@ describe("dispatch e2e: propose → approve → execute → receipt (WM-108)", (
       fetchTicket: () => readyTicket({ labels: { nodes: labels } }),
     });
 
-    admitEvent(
-      db,
-      registry,
-      dispatchEnvelope({ repo: "wt29", ticket: "WM-503" }, "d-stale-security"),
-    );
+    // A chain-sourced (unattended) dispatch: the claim-time recheck must still
+    // refuse a ticket that BECOMES security after approval. Operator-sourced
+    // dispatch legitimately bypasses this (see the operatorAuthorized case in
+    // worker.test.mjs / planner.test.mjs); an unattended run may not.
+    admitEvent(db, registry, {
+      ...dispatchEnvelope(
+        { repo: "wt29", ticket: "WM-503" },
+        "d-stale-security",
+      ),
+      source: "chain",
+    });
     planAdmittedEvents(db, registry, { policyVersion: PV, dispatch: world });
     const proposal = openProposals(db, {}).find(
       (p) => p.spec?.agent === "dispatch@1",
@@ -580,6 +586,64 @@ describe("dispatch e2e: propose → approve → execute → receipt (WM-108)", (
     });
     expect(adapterCalls).toBe(0);
     expect(calls()).not.toContain("up WM-503");
+  });
+
+  test("operator-sourced dispatch proceeds past the claim-time security recheck (operatorAuthorized)", async () => {
+    const db = openDb(":memory:");
+    const workspaces = tmpDir("evrt-dispatch-ws-");
+    fixtures.push(workspaces);
+    // Security present from the start; an operator explicitly dispatching it IS
+    // the review the gate demands, so the claim-time recheck must NOT refuse it.
+    let adapterReached = false;
+    const world = openWorld({
+      fetchTicket: () =>
+        readyTicket({
+          labels: {
+            nodes: [{ name: "ai:agent-ready" }, { name: "type:security" }],
+          },
+        }),
+    });
+
+    admitEvent(
+      db,
+      registry,
+      dispatchEnvelope(
+        { repo: "wt29", ticket: "WM-504" },
+        "d-operator-security",
+      ),
+    );
+    planAdmittedEvents(db, registry, { policyVersion: PV, dispatch: world });
+    const proposal = openProposals(db, {}).find(
+      (p) => p.spec?.agent === "dispatch@1",
+    );
+    approveProposal(db, registry, proposal.id, {
+      actor: "operator",
+      policyVersion: PV,
+    });
+
+    const summary = await runOnce(
+      db,
+      registry,
+      {
+        pi: {
+          async execute() {
+            adapterReached = true;
+            throw new Error("stop after gate");
+          },
+        },
+      },
+      {
+        workspacesRoot: workspaces,
+        owner: "w-test",
+        policyVersion: PV,
+        dispatch: world,
+      },
+    );
+
+    // The claim-time security gate did not refuse: execution advanced to the
+    // worktree/adapter stage (where our stub fails on purpose).
+    expect(summary.reasonCode).not.toBe("ticket_security");
+    expect(adapterReached || calls().includes("up WM-504")).toBe(true);
   });
 
   test("a failing run without retain still tears the worktree down (down-on-failure)", async () => {

@@ -8,6 +8,7 @@
     "terminalState": { "enum": ["completed", "refused"] },
     "reasonCode": { "type": "string", "minLength": 1 },
     "decision": {},
+    "presentation": {},
     "artifact": {},
     "evidence": {},
     "artifacts": {

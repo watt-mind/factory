@@ -246,9 +246,39 @@ export function translateGitHubEvent({
  *
  * @returns {{ admitted: true, duplicate: false, event: object }
  *         | { admitted: false, duplicate: true, event: object }
+ *         | { admitted: false, duplicate: false, conflict: true, errors: string[] }
  *         | { admitted: false, duplicate: false, errors: string[] }}
  */
-export const RESERVED_INTERNAL_SOURCES = new Set(["chain"]);
+/**
+ * Provenance a caller may never select. `chain` is durable proof the chain
+ * resolver created the event; `handoff` proof the handoff boundary did; and
+ * `schedule` proof the in-process tick loop did — the fact
+ * `autoApproveScheduled` reads as authority to approve a run nobody watched
+ * (#960). Each is written only by a trusted in-process producer that calls
+ * `admitEvent` (or a narrow wrapper) directly.
+ */
+export const RESERVED_INTERNAL_SOURCES = new Set([
+  "chain",
+  "handoff",
+  "schedule",
+]);
+
+function reservedSourceRefusal(envelope, allowed = new Set()) {
+  if (
+    envelope &&
+    typeof envelope === "object" &&
+    !Array.isArray(envelope) &&
+    RESERVED_INTERNAL_SOURCES.has(envelope.source) &&
+    !allowed.has(envelope.source)
+  ) {
+    return {
+      admitted: false,
+      duplicate: false,
+      errors: [`source: reserved internal provenance "${envelope.source}"`],
+    };
+  }
+  return null;
+}
 
 /**
  * Persist an envelope supplied by a public/operator boundary. Reserved runtime
@@ -257,19 +287,19 @@ export const RESERVED_INTERNAL_SOURCES = new Set(["chain"]);
  * the event, rather than untrusted envelope text.
  */
 export function admitExternalEvent(db, registry, envelope, options = {}) {
-  if (
-    envelope &&
-    typeof envelope === "object" &&
-    !Array.isArray(envelope) &&
-    RESERVED_INTERNAL_SOURCES.has(envelope.source)
-  ) {
-    return {
-      admitted: false,
-      duplicate: false,
-      errors: [`source: reserved internal provenance "${envelope.source}"`],
-    };
-  }
-  return admitEvent(db, registry, envelope, options);
+  const refusal = reservedSourceRefusal(envelope);
+  return refusal ?? admitEvent(db, registry, envelope, options);
+}
+
+/**
+ * Persist an envelope after the existing factory HMAC boundary authenticated
+ * its exact bytes. Handoff is the one reserved provenance that boundary may
+ * admit; chain and schedule remain in-process-only, so a holder of the shared
+ * event secret cannot forge scheduler provenance and inherit auto-approval.
+ */
+export function admitSignedEvent(db, registry, envelope, options = {}) {
+  const refusal = reservedSourceRefusal(envelope, new Set(["handoff"]));
+  return refusal ?? admitEvent(db, registry, envelope, options);
 }
 
 /**
@@ -316,10 +346,21 @@ export function admitEvent(db, registry, envelope, { now = Date.now() } = {}) {
   }
 
   return txImmediate(db, () => {
+    const payloadHash = hashJson(stored.payload);
     const existing = db
       .query(`SELECT * FROM events WHERE source = ? AND event_id = ?`)
       .get(stored.source, stored.eventId);
-    if (existing) return { admitted: false, duplicate: true, event: existing };
+    if (existing) {
+      if (existing.payload_hash !== payloadHash) {
+        return {
+          admitted: false,
+          duplicate: false,
+          conflict: true,
+          errors: ["eventId: already admitted with a different payload"],
+        };
+      }
+      return { admitted: false, duplicate: true, event: existing };
+    }
     db.query(
       `INSERT INTO events
          (source, event_id, type, subject, occurred_at, received_at,
@@ -335,7 +376,7 @@ export function admitEvent(db, registry, envelope, { now = Date.now() } = {}) {
       stored.correlationId ?? null,
       stored.causationId ?? null,
       canonicalJson(stored),
-      hashJson(stored.payload),
+      payloadHash,
       receivedAt,
     );
     const event = db

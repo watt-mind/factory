@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { ApiError } from "../api";
 import type { DecisionRequest, InboxItem } from "../types";
 import { decisionRequestHash } from "../lib/decision";
+import { fieldErrors } from "../lib/decisionForm";
 import { DecisionCard } from "./DecisionCard";
 
 const request: DecisionRequest = {
@@ -69,6 +70,28 @@ const request: DecisionRequest = {
   ],
 };
 
+const requiredTextRequest: DecisionRequest = {
+  schemaVersion: "factory.decision-request/v1",
+  question: "Why should we proceed?",
+  options: [
+    {
+      id: "confirm",
+      label: "Confirm",
+      effect: "dismiss",
+      tone: "primary",
+    },
+  ],
+  fields: [
+    {
+      id: "reason",
+      kind: "text",
+      label: "Reason",
+      required: true,
+      maxLength: 120,
+    },
+  ],
+};
+
 function item(overrides: Partial<InboxItem> = {}): InboxItem {
   return {
     id: "inbox_decision",
@@ -127,7 +150,100 @@ afterEach(() => {
   cleanup();
 });
 
+// Drives a controlled text input's React `onChange`. Under happy-dom React
+// takes its input-event polyfill path (focus tracking + key events), so a bare
+// `fireEvent.change` never reaches `onChange`; bracket it with focus + keyup.
+function typeInto(element: HTMLElement, value: string): void {
+  fireEvent.focusIn(element);
+  fireEvent.change(element, { target: { value } });
+  fireEvent.keyUp(element);
+}
+
 describe("DecisionCard", () => {
+  test("shows the field error for touched empty required text and clears it for meaningful text", () => {
+    const view = render(
+      <DecisionCard
+        itemId="inbox_required_text"
+        request={requiredTextRequest}
+        apiCalls={apiCalls}
+      />,
+    );
+    fireEvent.click(
+      view.getByRole("group", { name: "Options" }).querySelector("button")!,
+    );
+
+    const reason = view.getByRole("textbox", {
+      name: /Reason/,
+    }) as HTMLInputElement;
+    const submit = view.getByRole("button", {
+      name: "Confirm",
+    }) as HTMLButtonElement;
+    // Untouched: no inline hint yet, but the status line still names the gap.
+    expect(reason.hasAttribute("aria-describedby")).toBe(false);
+    expect(reason.hasAttribute("aria-invalid")).toBe(false);
+    expect(view.getByRole("status").textContent).toBe("Reason is required.");
+    expect(submit.disabled).toBe(true);
+
+    const expectedError = fieldErrors(requiredTextRequest, "confirm", {
+      reason: "   ",
+    }).reason;
+    typeInto(reason, "   ");
+    const hint = view.getByText(expectedError);
+    expect(view.queryByRole("status")).toBeNull();
+    expect(submit.disabled).toBe(true);
+    expect(reason.getAttribute("aria-invalid")).toBe("true");
+    expect(reason.getAttribute("aria-describedby")).toBe(hint.id);
+
+    typeInto(reason, "Reviewed the scope.");
+    expect(view.queryByText("Reason is required.")).toBeNull();
+    expect(reason.hasAttribute("aria-invalid")).toBe(false);
+    expect(reason.hasAttribute("aria-describedby")).toBe(false);
+    expect(submit.disabled).toBe(false);
+
+    typeInto(reason, "");
+    expect(view.getByText(expectedError)).toBeTruthy();
+    expect(submit.disabled).toBe(true);
+  });
+
+  test("resets required-text interaction state when a stale request is loaded", async () => {
+    const changed = {
+      ...requiredTextRequest,
+      question: "The required-text question changed. Continue?",
+    };
+    apiCalls.decide = mock(async () => {
+      throw new ApiError("stale_request", 409);
+    });
+    apiCalls.get = mock(async () => ({
+      item: item({ decision: changed, response: null }),
+    }));
+    const view = render(
+      <DecisionCard
+        itemId="inbox_required_text"
+        request={requiredTextRequest}
+        apiCalls={apiCalls}
+      />,
+    );
+    fireEvent.click(
+      view.getByRole("group", { name: "Options" }).querySelector("button")!,
+    );
+    typeInto(
+      view.getByRole("textbox", { name: /Reason/ }),
+      "Reviewed the original question.",
+    );
+    fireEvent.click(view.getByRole("button", { name: "Confirm" }));
+
+    await waitFor(() =>
+      view.getByText("This question changed — please re-read"),
+    );
+    fireEvent.click(
+      view.getByRole("group", { name: "Options" }).querySelector("button")!,
+    );
+    const reason = view.getByRole("textbox", { name: /Reason/ });
+    expect(reason.hasAttribute("aria-describedby")).toBe(false);
+    expect(reason.hasAttribute("aria-invalid")).toBe(false);
+    expect(view.getByRole("status").textContent).toBe("Reason is required.");
+  });
+
   test("renders the §2.1 options recommended-first and gates its fields", () => {
     const view = render(
       <DecisionCard

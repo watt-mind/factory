@@ -9,7 +9,12 @@ import {
 } from "bun:test";
 import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { useState } from "react";
-import { Runs, runDrilldownFilters, statesForRunTab } from "./Runs";
+import {
+  Runs,
+  countRunsByTab,
+  runDrilldownFilters,
+  statesForRunTab,
+} from "./Runs";
 import {
   changeInput,
   createAgentsFixture,
@@ -56,6 +61,26 @@ test("reads a complete metrics drill-down contract from the hash", () => {
     agent: undefined,
   });
   expect(runDrilldownFilters("#/runs?population=terminal")).toBeNull();
+});
+
+test("counts each run state into its tab badge exactly once", () => {
+  const counts = countRunsByTab([
+    stubListItem("run_queued", "QUEUED"),
+    stubListItem("run_running", "RUNNING"),
+    stubListItem("run_completed", "COMPLETED"),
+    stubListItem("run_failed", "FAILED"),
+    stubListItem("run_refused", "REFUSED"),
+    stubListItem("run_cancelled", "CANCELLED"),
+    stubListItem("run_proposed", "PROPOSED"),
+  ]);
+
+  expect(counts).toEqual({
+    ALL: 7,
+    ACTIVE: 2,
+    COMPLETED: 1,
+    FAILED: 2,
+    CANCELLED: 1,
+  });
 });
 
 function stubListItem(
@@ -624,6 +649,36 @@ describe("Runs component harness: selection & filter retention", () => {
     );
   });
 
+  test("focuses rows and selects a run with Enter or Space", async () => {
+    const onSelectRun = mock(() => {});
+    const r1 = stubListItem("run_keyboard_test", "RUNNING");
+    await withApi(
+      {
+        runs: async () => ({ runs: [r1] }),
+        run: async () => stubDetail(r1.runId, "RUNNING", []),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { container } = renderRuns({ onSelectRun });
+        const row = await waitFor(() => {
+          const element = container
+            .querySelector(`td[title="${r1.runId}"]`)
+            ?.closest("tr");
+          if (!element) throw new Error("row not rendered");
+          return element;
+        });
+
+        row.focus();
+        expect(document.activeElement).toBe(row);
+        fireEvent.keyDown(row, { key: "Enter" });
+        fireEvent.keyDown(row, { key: " " });
+
+        expect(onSelectRun).toHaveBeenCalledWith(r1.runId);
+        expect(onSelectRun).toHaveBeenCalledTimes(2);
+      },
+    );
+  });
+
   test("focusRunId highlights the selected row and renders the detail pane", async () => {
     const r1 = stubListItem("run_selected_1", "RUNNING");
     const detail = stubDetail("run_selected_1", "RUNNING", [
@@ -694,8 +749,17 @@ describe("Runs component harness: selection & filter retention", () => {
 
   test("tab counts describe the filtered set instead of the unfiltered totals", async () => {
     const rows = [
+      stubListItem("run_match_queued", "QUEUED", { agent: "triage-scan" }),
       stubListItem("run_match_active", "RUNNING", { agent: "triage-scan" }),
       stubListItem("run_match_done", "COMPLETED", { agent: "triage-scan" }),
+      stubListItem("run_match_failed", "FAILED", { agent: "triage-scan" }),
+      stubListItem("run_match_refused", "REFUSED", { agent: "triage-scan" }),
+      stubListItem("run_match_cancelled", "CANCELLED", {
+        agent: "triage-scan",
+      }),
+      stubListItem("run_match_proposed", "PROPOSED", {
+        agent: "triage-scan",
+      }),
       stubListItem("run_other_failed", "FAILED", { agent: "review-scan" }),
     ];
 
@@ -717,10 +781,11 @@ describe("Runs component harness: selection & filter retention", () => {
           );
         });
 
-        expect(r.getByRole("tab", { name: /^All 2$/i })).toBeTruthy();
-        expect(r.getByRole("tab", { name: /^Active 1$/i })).toBeTruthy();
+        expect(r.getByRole("tab", { name: /^All 7$/i })).toBeTruthy();
+        expect(r.getByRole("tab", { name: /^Active 2$/i })).toBeTruthy();
         expect(r.getByRole("tab", { name: /^Completed 1$/i })).toBeTruthy();
-        expect(r.getByRole("tab", { name: /^Failed$/i })).toBeTruthy();
+        expect(r.getByRole("tab", { name: /^Failed 2$/i })).toBeTruthy();
+        expect(r.getByRole("tab", { name: /^Cancelled 1$/i })).toBeTruthy();
       },
     );
   });

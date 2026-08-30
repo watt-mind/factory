@@ -1,5 +1,8 @@
 import { trackTmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-api-http-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { EventEmitter } from "node:events";
+import { Readable } from "node:stream";
+import { MAX_BODY_BYTES, PayloadTooLargeError, readBody } from "./api-http.mjs";
 import {
   GH_SECRET,
   PV,
@@ -40,6 +43,29 @@ const makeServer = async (...args) => {
   trackTmpDir(path.dirname(result.db.filename));
   return result;
 };
+
+describe("request body limits", () => {
+  test("readBody rejects streamed oversized bodies with a typed error", async () => {
+    const err = await rejection(
+      readBody(Readable.from([Buffer.alloc(MAX_BODY_BYTES + 1)])),
+    );
+
+    expect(err).toBeInstanceOf(PayloadTooLargeError);
+    expect(err).toMatchObject({
+      code: "payload_too_large",
+      status: 413,
+      limitBytes: MAX_BODY_BYTES,
+    });
+  });
+
+  test("readBody refuses an oversized Content-Length before subscribing", async () => {
+    const req = new EventEmitter();
+    req.headers = { "content-length": String(MAX_BODY_BYTES + 1) };
+
+    await expect(readBody(req)).rejects.toBeInstanceOf(PayloadTooLargeError);
+    expect(req.listenerCount("data")).toBe(0);
+  });
+});
 
 describe("Host and Origin header security confinement (OPS-408)", () => {
   let s;

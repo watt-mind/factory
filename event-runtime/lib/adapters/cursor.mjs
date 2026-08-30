@@ -26,15 +26,31 @@
  * editor CLI.
  */
 import { spawn } from "node:child_process";
-import { createWriteStream, readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
-import { FACTORY_ROOT } from "../config.mjs";
+import { FACTORY_ROOT, transcriptMaxBytes } from "../config.mjs";
 import { DEFAULT_MODEL } from "../registry.mjs";
-import { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV } from "./claude.mjs";
+import { PROMPT_SUFFIX, verifiedPrompt } from "./claude.mjs";
+import {
+  PROVIDER_CREDENTIAL_ENV,
+  PUSH_CREDENTIAL_ENV,
+  RUNTIME_IDENTITY_ENV,
+  safeChildEnvironment as sharedSafeChildEnvironment,
+} from "./child-env.mjs";
+import {
+  boundedTranscriptStream,
+  DETACHED_SPAWN_OPTIONS,
+  killProcessGroup,
+} from "./child-process.mjs";
 import { refuseSandbox } from "./sandboxed.mjs";
 
-export { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV };
+export {
+  PROVIDER_CREDENTIAL_ENV,
+  PROMPT_SUFFIX,
+  PUSH_CREDENTIAL_ENV,
+  RUNTIME_IDENTITY_ENV,
+};
 
 /**
  * No guest execution path exists for this adapter (WM-313): a sandboxed
@@ -65,23 +81,7 @@ export const HARNESS_LAYOUT = Object.freeze({
 export const KILL_GRACE_MS = 30_000;
 
 /** Terminate a detached CLI and every subprocess it started (WM-263). */
-export function killProcessGroup(
-  child,
-  signal = "SIGTERM",
-  kill = process.kill,
-) {
-  const pid = child?.pid;
-  if (!pid) return;
-  try {
-    kill(-pid, signal);
-  } catch {
-    try {
-      child.kill(signal);
-    } catch {
-      // already terminated
-    }
-  }
-}
+export { killProcessGroup };
 
 const TEXT_PREVIEW_CHARS = 4000;
 
@@ -118,25 +118,6 @@ export function buildCursorArgv({ prompt, model }) {
   return args;
 }
 
-export const BASE_INHERITED_ENV = [
-  "HOME",
-  "LANG",
-  "LC_ALL",
-  "LC_CTYPE",
-  "LOGNAME",
-  "PATH",
-  "SHELL",
-  "TERM",
-  "TMPDIR",
-  "USER",
-  "XDG_CACHE_HOME",
-  "XDG_CONFIG_HOME",
-  // `agent -p` ignores the login session and requires this Cursor user key
-  // (WM-443). It authenticates as the account and bills the user's plan —
-  // not a provider BYOK key. Still strip CURSOR_API_ENDPOINT below.
-  "CURSOR_API_KEY",
-];
-
 /**
  * Keep untrusted model subprocesses from inheriting the worker's authority.
  * Fail-closed: only an explicit `mutating: true` (or a boolean `true`)
@@ -147,39 +128,17 @@ export const BASE_INHERITED_ENV = [
  * `CURSOR_API_ENDPOINT` stay stripped.
  */
 export function safeChildEnvironment(env = {}, defOrOpts = {}) {
-  const isMutating =
-    typeof defOrOpts === "boolean" ? defOrOpts : defOrOpts?.mutating === true;
-  const inherited = isMutating
-    ? [...BASE_INHERITED_ENV, ...PUSH_CREDENTIAL_ENV]
-    : BASE_INHERITED_ENV;
-  const childEnv = Object.fromEntries(
-    inherited.flatMap((key) =>
-      process.env[key] === undefined ? [] : [[key, process.env[key]]],
-    ),
-  );
-  Object.assign(childEnv, env);
-  childEnv.FACTORY_ROOT = FACTORY_ROOT;
-  for (const key of [
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "GOOGLE_GENAI_API_KEY",
-    "MISTRAL_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "GROQ_API_KEY",
-    "CURSOR_API_ENDPOINT",
-    "CLAUDECODE",
-    "CLAUDE_CODE_ENTRYPOINT",
-  ]) {
-    delete childEnv[key];
+  const cursorEnv = { ...env };
+  if (
+    !Object.hasOwn(cursorEnv, "CURSOR_API_KEY") &&
+    process.env.CURSOR_API_KEY !== undefined
+  ) {
+    cursorEnv.CURSOR_API_KEY = process.env.CURSOR_API_KEY;
   }
-  if (!isMutating) {
-    for (const key of PUSH_CREDENTIAL_ENV) {
-      delete childEnv[key];
-    }
-  }
-  return childEnv;
+  return sharedSafeChildEnvironment(cursorEnv, defOrOpts, {
+    factoryRoot: FACTORY_ROOT,
+    extraStrip: ["CURSOR_API_ENDPOINT"],
+  });
 }
 
 /** No confirmed Cursor-authored refusal shape yet (WM-127). */
@@ -328,9 +287,10 @@ export async function execute({
   onUsage,
   abortSignal,
   signal,
+  transcriptMaxBytes: maxTranscriptBytes = transcriptMaxBytes(),
 }) {
   refuseSandbox("cursor", def, SANDBOX_REFUSAL_REASON);
-  const prompt = readFileSync(def.promptPath, "utf8") + PROMPT_SUFFIX;
+  const prompt = verifiedPrompt(def, "cursor");
   const childEnv = safeChildEnvironment(env, def);
 
   const resolved = resolveCursorCommand({
@@ -351,13 +311,25 @@ export async function execute({
       cwd: workspaceDir,
       env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
-      detached: true,
+      ...DETACHED_SPAWN_OPTIONS,
     });
 
-    const transcript = createWriteStream(
+    const transcript = boundedTranscriptStream(
       path.join(workspaceDir, ".transcript.json"),
+      {
+        maxBytes: maxTranscriptBytes,
+        onTruncated: ({ bytes }) =>
+          onTrace?.("lifecycle", { note: "transcript_truncated", bytes }),
+      },
     );
     transcript.on("error", () => {});
+    // Child close only says its stdio handles are closed; the file stream may
+    // still have buffered bytes. Register before piping so a fast child cannot
+    // finish before we can observe the output flush.
+    const transcriptClosed = new Promise((done) => {
+      transcript.once("finish", done);
+      transcript.once("close", done);
+    });
     if (child.stdout) {
       child.stdout.pipe(transcript);
     }
@@ -428,26 +400,17 @@ export async function execute({
     }
 
     let timedOut = false;
-    let killTimer = null;
+    let cancelTermination = null;
+    const terminate = () => {
+      cancelTermination ??= killProcessGroup(child, { killGraceMs });
+    };
     const termTimer = setTimeout(() => {
       timedOut = true;
-      killProcessGroup(child, "SIGTERM");
-      killTimer = setTimeout(
-        () => killProcessGroup(child, "SIGKILL"),
-        killGraceMs,
-      );
-      killTimer.unref?.();
+      terminate();
     }, timeoutMs);
 
     const onAbort = () => {
-      killProcessGroup(child, "SIGTERM");
-      if (!killTimer) {
-        killTimer = setTimeout(
-          () => killProcessGroup(child, "SIGKILL"),
-          killGraceMs,
-        );
-        killTimer.unref?.();
-      }
+      terminate();
     };
     const abortSig = abortSignal ?? signal;
     if (abortSig) {
@@ -460,14 +423,14 @@ export async function execute({
 
     child.on("error", (err) => {
       clearTimeout(termTimer);
-      if (killTimer) clearTimeout(killTimer);
+      cancelTermination?.();
       if (abortSig) abortSig.removeEventListener?.("abort", onAbort);
       transcript.destroy();
       reject(err);
     });
-    child.on("close", (exitCode) => {
+    child.on("close", async (exitCode) => {
       clearTimeout(termTimer);
-      if (killTimer) clearTimeout(killTimer);
+      cancelTermination?.();
       if (abortSig) abortSig.removeEventListener?.("abort", onAbort);
       try {
         onUsage?.({
@@ -488,6 +451,7 @@ export async function execute({
       } catch {
         // same
       }
+      await transcriptClosed;
       if (exitCode !== 0 && stderrBuf) {
         try {
           writeFileSync(
@@ -511,6 +475,7 @@ export async function execute({
         exitCode,
         timedOut,
         policyDenials: exitCode === 0 ? [] : policyDenials,
+        ...(transcript.truncated ? { transcriptTruncated: true } : {}),
       });
     });
   });

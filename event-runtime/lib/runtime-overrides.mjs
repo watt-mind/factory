@@ -6,11 +6,22 @@
  * in runtime.db and the planner applies it at plan time. Packs cannot shadow
  * built-ins (WM-470); this is not a pack.
  */
+import path from "node:path";
 import { builtinAdapters } from "./adapters/index.mjs";
+import { hashJson } from "./canonical.mjs";
 import { txImmediate } from "./db.mjs";
+import {
+  MODEL_ADAPTERS,
+  MODEL_TIERS as REGISTRY_MODEL_TIERS,
+  RegistryError,
+  agentDefinitionFile,
+  composeModelTierMap,
+} from "./registry.mjs";
+import { reposRoot } from "./repos.mjs";
 
 export const KIND_EVENT_TYPE = "eventType";
 export const KIND_AGENT = "agent";
+export const KIND_MODEL_TIER_CELL = "modelTierCell";
 export const MODEL_TIERS = new Set(["strong", "standard", "light"]);
 
 export class OverlayError extends Error {
@@ -26,7 +37,7 @@ export class OverlayError extends Error {
 }
 
 export function emptyOverrides() {
-  return { eventTypes: {}, agents: {} };
+  return { eventTypes: {}, agents: {}, modelTierCells: {} };
 }
 
 /** Adapters the overlay may name: builtins plus any currently routed. */
@@ -51,8 +62,181 @@ export function listOverrides(db) {
     const patch = JSON.parse(row.patch_json);
     if (row.kind === KIND_EVENT_TYPE) out.eventTypes[row.key] = patch;
     else if (row.kind === KIND_AGENT) out.agents[row.key] = patch;
+    else if (row.kind === KIND_MODEL_TIER_CELL)
+      out.modelTierCells[row.key] = patch;
   }
   return out;
+}
+
+export function modelTierCellKey(adapter, tier) {
+  return `${adapter}:${tier}`;
+}
+
+function parseModelTierCellKey(key) {
+  const parts = key.split(":");
+  if (parts.length !== 2 || parts.some((part) => part === "")) {
+    throw new OverlayError(
+      500,
+      `invalid stored ${KIND_MODEL_TIER_CELL} key ${JSON.stringify(key)}; expected adapter:tier — delete or correct this runtime_overrides row`,
+    );
+  }
+  return { adapter: parts[0], tier: parts[1] };
+}
+
+export function validateModelTierCellPatch(adapter, tier, patch) {
+  if (!MODEL_ADAPTERS.has(adapter)) {
+    throw new OverlayError(
+      422,
+      `unknown model adapter ${JSON.stringify(adapter)} (expected one of ${[...MODEL_ADAPTERS].join(", ")})`,
+    );
+  }
+  if (!REGISTRY_MODEL_TIERS.includes(tier)) {
+    throw new OverlayError(
+      422,
+      `unknown model tier ${JSON.stringify(tier)} (expected ${REGISTRY_MODEL_TIERS.join(", ")})`,
+    );
+  }
+  if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
+    throw new OverlayError(422, "body must be an object");
+  }
+  const keys = Object.keys(patch);
+  if (keys.length !== 1 || keys[0] !== "model") {
+    throw new OverlayError(
+      422,
+      "model-tier cell overlay accepts exactly one field: model",
+    );
+  }
+  if (typeof patch.model !== "string" || patch.model.trim() === "") {
+    throw new OverlayError(422, "model must be a non-empty string");
+  }
+  return { model: patch.model };
+}
+
+/** Read and validate only independently stored policy model cells. */
+function readModelTierCell(row) {
+  const { adapter, tier } = parseModelTierCellKey(row.key);
+  let parsed;
+  try {
+    parsed = JSON.parse(row.patch_json);
+  } catch (err) {
+    throw new OverlayError(
+      500,
+      `invalid stored ${KIND_MODEL_TIER_CELL} row ${JSON.stringify(row.key)}: patch_json is not JSON (${err.message}); delete or correct this runtime_overrides row`,
+    );
+  }
+  let patch;
+  try {
+    patch = validateModelTierCellPatch(adapter, tier, parsed);
+  } catch (err) {
+    if (err instanceof OverlayError) {
+      throw new OverlayError(
+        500,
+        `invalid stored ${KIND_MODEL_TIER_CELL} row ${JSON.stringify(row.key)}: ${err.message}; delete or correct this runtime_overrides row`,
+      );
+    }
+    throw err;
+  }
+  return { adapter, tier, model: patch.model };
+}
+
+function modelTierCellRows(db) {
+  if (!db) return [];
+  return db
+    .query(
+      `SELECT key, patch_json FROM runtime_overrides WHERE kind = ? ORDER BY key`,
+    )
+    .all(KIND_MODEL_TIER_CELL);
+}
+
+function addModelTierCell(runtime, { adapter, tier, model }) {
+  runtime[adapter] = { ...(runtime[adapter] ?? {}), [tier]: model };
+}
+
+export function runtimeModelTierCells(db) {
+  const runtime = {};
+  for (const row of modelTierCellRows(db)) {
+    addModelTierCell(runtime, readModelTierCell(row));
+  }
+  return runtime;
+}
+
+/**
+ * Read the model-tier cells for a read-only overview. Unlike the strict
+ * reader, one malformed persisted row is reported and does not hide valid
+ * cells or the rest of the configuration inventory.
+ */
+export function runtimeModelTierCellsTolerant(db) {
+  const runtime = {};
+  const problems = [];
+  for (const row of modelTierCellRows(db)) {
+    try {
+      addModelTierCell(runtime, readModelTierCell(row));
+    } catch (err) {
+      problems.push({ key: row.key, error: err.message });
+    }
+  }
+  return { cells: runtime, problems };
+}
+
+/** Compose stored cells over tracked policy; used before registry startup. */
+export function applyModelTierCellOverrides(db, tracked) {
+  try {
+    return composeModelTierMap(tracked, runtimeModelTierCells(db));
+  } catch (err) {
+    if (err instanceof RegistryError) {
+      throw new OverlayError(
+        500,
+        `invalid stored ${KIND_MODEL_TIER_CELL} override: ${err.message}; delete or correct the runtime_overrides row`,
+      );
+    }
+    throw err;
+  }
+}
+
+/** Focused, secret-free policy model projection for API and Settings. */
+export function modelTierConfigView(db, tracked) {
+  const runtime = runtimeModelTierCells(db);
+  return modelTierConfigViewFromRuntime(tracked, runtime);
+}
+
+function modelTierConfigViewFromRuntime(tracked, runtime) {
+  const effective = composeModelTierMap(tracked, runtime);
+  const adapters = [...MODEL_ADAPTERS];
+  return {
+    adapters,
+    tiers: [...REGISTRY_MODEL_TIERS],
+    tracked: Object.fromEntries(
+      adapters.map((adapter) => [adapter, { ...(tracked?.[adapter] ?? {}) }]),
+    ),
+    runtime: Object.fromEntries(
+      adapters.map((adapter) => [adapter, { ...(runtime[adapter] ?? {}) }]),
+    ),
+    effective: Object.fromEntries(
+      adapters.map((adapter) => [adapter, { ...(effective[adapter] ?? {}) }]),
+    ),
+  };
+}
+
+/** Read-only configuration view that preserves valid cells alongside problems. */
+export function modelTierConfigViewTolerant(db, tracked) {
+  const { cells: runtime, problems } = runtimeModelTierCellsTolerant(db);
+  return { ...modelTierConfigViewFromRuntime(tracked, runtime), problems };
+}
+
+export function modelTierCellResult(db, tracked, adapter, tier, extra = {}) {
+  const view = modelTierConfigView(db, tracked);
+  const runtimeModel = view.runtime[adapter]?.[tier] ?? null;
+  const trackedModel = view.tracked[adapter]?.[tier] ?? null;
+  return {
+    adapter,
+    tier,
+    trackedModel,
+    runtimeModel,
+    effectiveModel: runtimeModel ?? trackedModel,
+    source: runtimeModel === null ? "tracked" : "runtime",
+    restartRequired: true,
+    ...extra,
+  };
 }
 
 export function listOverrideJournal(db, { limit = 100 } = {}) {
@@ -263,4 +447,414 @@ export function overlayForAgent(overrides, ref) {
 
 export function effectiveAdapter(mapping, overrides, type) {
   return overlayForEventType(overrides, type)?.adapter ?? mapping.adapter;
+}
+
+/*
+ * Overlay promotion (gh-860).
+ *
+ * Operators run a fast machine-local overlay; promotion is the explicit,
+ * reviewable path that turns selected effective overrides into a tracked Git
+ * default. It is deliberately fenced:
+ *   - `buildPromotionPreview` snapshots the live override rows against the
+ *     tracked definitions and returns stable selectable keys plus a digest.
+ *   - `applyPromotion` refuses unless the caller echoes that digest and names a
+ *     non-empty subset of keys, then drives injected tracker/worktree/git/forge
+ *     seams to write the tracked defaults in an ISOLATED checkout and open a PR.
+ * Serve never edits, commits, or checks out the live `FACTORY_ROOT`; the only
+ * live-root access is the read-only drift check before any worktree exists.
+ * First version promotes event-type `adapter` and agent `modelTier`/`model`.
+ */
+
+const EVENT_TYPES_FILE = "event-types.json";
+
+/** Repo-relative path of the built-in pack's event-types map. */
+function eventTypesFile(registry, root) {
+  const pack =
+    registry.packs?.find((p) => p.name === "event-runtime") ??
+    registry.packs?.[0];
+  if (!pack?.root) {
+    throw new OverlayError(500, "no pack root to resolve event-types.json");
+  }
+  const file = path.relative(
+    path.resolve(root),
+    path.join(pack.root, EVENT_TYPES_FILE),
+  );
+  if (file.startsWith("..") || path.isAbsolute(file)) {
+    throw new OverlayError(
+      500,
+      "event-types.json is outside the registry root",
+    );
+  }
+  return file;
+}
+
+/**
+ * Snapshot the current override rows against tracked definitions. Every row is
+ * a selectable promotion candidate with a stable key, the tracked `before` and
+ * overlay `effective` values, the exact target file, and whether it still
+ * diverges (`current`). Only event-type adapter and agent modelTier/model are
+ * supported; unsupported overlay shapes and rows whose target is no longer
+ * registered are skipped rather than offered.
+ *
+ * @returns {{ digest: string, selections: Array<{
+ *   key: string, kind: "eventType"|"agent", ref: string, field: string,
+ *   target: { file: string, path: string }, before: unknown, effective: unknown,
+ *   current: boolean }> }}
+ */
+export function buildPromotionPreview({ db, registry, root = reposRoot() }) {
+  const overrides = listOverrides(db);
+  const selections = [];
+  const etFile = (() => {
+    try {
+      return eventTypesFile(registry, root);
+    } catch {
+      return null;
+    }
+  })();
+
+  for (const [type, patch] of Object.entries(overrides.eventTypes)) {
+    if (!patch || typeof patch.adapter !== "string") continue;
+    const mapping = registry.eventTypes?.[type];
+    if (!mapping || etFile === null) continue;
+    const before = mapping.adapter ?? null;
+    const effective = patch.adapter;
+    selections.push({
+      key: `eventType:${type}:adapter`,
+      kind: KIND_EVENT_TYPE,
+      ref: type,
+      field: "adapter",
+      target: { file: etFile, path: `["${type}"].adapter` },
+      before,
+      effective,
+      current: effective !== before,
+    });
+  }
+
+  for (const [ref, patch] of Object.entries(overrides.agents)) {
+    const def = registry.agents?.get(ref);
+    if (!def || !patch) continue;
+    let file;
+    try {
+      file = agentDefinitionFile(registry, ref, { root }).file;
+    } catch {
+      continue;
+    }
+    if (Object.hasOwn(patch, "modelTier")) {
+      const before = def.model_tier ?? null;
+      const effective = patch.modelTier ?? null;
+      selections.push({
+        key: `agent:${ref}:modelTier`,
+        kind: KIND_AGENT,
+        ref,
+        field: "modelTier",
+        target: { file, path: "model_tier" },
+        before,
+        effective,
+        current: effective !== before,
+      });
+    }
+    if (Object.hasOwn(patch, "model")) {
+      const before = def.model ?? null;
+      const effective = patch.model ?? null;
+      selections.push({
+        key: `agent:${ref}:model`,
+        kind: KIND_AGENT,
+        ref,
+        field: "model",
+        target: { file, path: "model" },
+        before,
+        effective,
+        current: effective !== before,
+      });
+    }
+  }
+
+  selections.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  const digest = hashJson(
+    selections.map((s) => ({
+      key: s.key,
+      before: s.before,
+      effective: s.effective,
+    })),
+  );
+  return { digest, selections };
+}
+
+/** Serialize a tracked definition object deterministically (2-space, LF). */
+function serializeTracked(obj) {
+  return `${JSON.stringify(obj, null, 2)}\n`;
+}
+
+/** Apply one selection's effective value onto a parsed tracked object. */
+function writeSelectionValue(obj, selection) {
+  const { effective } = selection;
+  if (selection.kind === KIND_EVENT_TYPE) {
+    const mapping = obj[selection.ref];
+    if (!mapping || typeof mapping !== "object" || Array.isArray(mapping)) {
+      throw new OverlayError(
+        409,
+        `target drift: ${selection.ref} is not an object in ${selection.target.file}`,
+      );
+    }
+    mapping.adapter = effective;
+    return;
+  }
+  // agent modelTier -> model_tier ; model -> model. null clears the tracked key.
+  const jsonField = selection.field === "modelTier" ? "model_tier" : "model";
+  if (effective === null) delete obj[jsonField];
+  else obj[jsonField] = effective;
+}
+
+/** The tracked value a parsed object currently carries for a selection. */
+function readSelectionValue(obj, selection) {
+  if (selection.kind === KIND_EVENT_TYPE) {
+    const mapping = obj?.[selection.ref];
+    if (!mapping || typeof mapping !== "object" || Array.isArray(mapping)) {
+      throw new OverlayError(
+        409,
+        `target drift: ${selection.ref} is not an object in ${selection.target.file}`,
+      );
+    }
+    return mapping.adapter ?? null;
+  }
+  const jsonField = selection.field === "modelTier" ? "model_tier" : "model";
+  return obj?.[jsonField] ?? null;
+}
+
+function requireSeam(seams, dotted) {
+  let node = seams;
+  for (const part of dotted.split(".")) {
+    node = node?.[part];
+  }
+  if (typeof node !== "function") {
+    throw new OverlayError(501, `promotion seam ${dotted} is not configured`);
+  }
+  return node;
+}
+
+/**
+ * Promote a non-empty subset of preview keys into a PR against the configured
+ * base. Fails closed before touching any seam when the preview digest is stale,
+ * a key is unknown, a selection no longer diverges, tracked JSON is invalid, or
+ * the tracked value drifted from the preview. An empty selection is a typed
+ * no-op that touches nothing.
+ *
+ * All mutation is driven through injected seams so nothing here can reach the
+ * live checkout: `tracker.ensure`, `worktree.up` (checkout-only, from the
+ * configured base), `readWorktree`/`writeWorktree`, `git.commit`, `git.push`,
+ * and `forge.openPr`. There is deliberately no merge or delete seam.
+ *
+ * @param {object} args
+ * @param {import("bun:sqlite").Database} args.db
+ * @param {object} args.registry
+ * @param {{ base: string, github: string, worktreeUp: string, path: string, name: string }} args.target
+ * @param {string} args.digest        preview digest the operator confirmed
+ * @param {string[]} args.keys        selected selection keys (non-empty)
+ * @param {object} args.seams         injected tracker/worktree/git/forge seams
+ * @param {string} [args.root]        live checkout root (never written)
+ */
+export async function applyPromotion({
+  db,
+  registry,
+  target,
+  digest,
+  keys,
+  seams,
+  root = reposRoot(),
+  actor = "operator",
+}) {
+  if (!Array.isArray(keys)) {
+    throw new OverlayError(422, "keys must be an array");
+  }
+  if (keys.length === 0) {
+    // Typed no-op: an empty selection promotes nothing and drives no seam.
+    return { status: "noop", promoted: [], ticket: null, pr: null };
+  }
+  if (new Set(keys).size !== keys.length) {
+    throw new OverlayError(422, "keys must be unique");
+  }
+  if (typeof digest !== "string" || digest === "") {
+    throw new OverlayError(422, "preview digest is required");
+  }
+  if (!target?.base) {
+    throw new OverlayError(422, "promotion target base is not configured");
+  }
+
+  const preview = buildPromotionPreview({ db, registry, root });
+  if (preview.digest !== digest) {
+    throw new OverlayError(
+      409,
+      "promotion preview is stale; refresh the preview and retry",
+    );
+  }
+  const byKey = new Map(preview.selections.map((s) => [s.key, s]));
+  const selected = [];
+  for (const key of keys) {
+    const selection = byKey.get(key);
+    if (!selection) throw new OverlayError(422, `unknown promotion key ${key}`);
+    if (!selection.current) {
+      throw new OverlayError(
+        409,
+        `${key} no longer diverges from its tracked default`,
+      );
+    }
+    selected.push(selection);
+  }
+
+  // Read-only drift check against the LIVE checkout before any worktree exists:
+  // parse each target file and confirm the tracked value still equals the
+  // preview `before`. Invalid JSON or drift fails closed here.
+  const readTracked = requireSeam(seams, "readTracked");
+  const byFile = new Map();
+  for (const selection of selected) {
+    const file = selection.target.file;
+    if (!byFile.has(file)) {
+      let text;
+      try {
+        text = readTracked(file);
+      } catch (err) {
+        throw new OverlayError(
+          409,
+          `cannot read tracked ${file}: ${err.message}`,
+        );
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch (err) {
+        throw new OverlayError(
+          422,
+          `tracked ${file} is not valid JSON: ${err.message}`,
+        );
+      }
+      byFile.set(file, { parsed });
+    }
+    const current = readSelectionValue(byFile.get(file).parsed, selection);
+    if (current !== (selection.before ?? null)) {
+      throw new OverlayError(
+        409,
+        `target drift on ${selection.key}: tracked value changed since preview`,
+      );
+    }
+  }
+
+  // Everything validated. Create the ticket and the ISOLATED checkout.
+  const ticket = await requireSeam(seams, "tracker.ensure")({ actor, keys });
+  if (!ticket?.ticket) {
+    throw new OverlayError(500, "tracker did not return a ticket");
+  }
+  const worktree = await requireSeam(
+    seams,
+    "worktree.up",
+  )({
+    base: target.base,
+    ticket: ticket.ticket,
+    checkoutOnly: true,
+  });
+  const dir = worktree?.dir;
+  const branch = worktree?.branch;
+  if (typeof dir !== "string" || dir === "") {
+    throw new OverlayError(500, "worktree_up did not return a directory");
+  }
+  if (path.resolve(dir) === path.resolve(root)) {
+    throw new OverlayError(
+      500,
+      "refusing to promote: worktree resolved to the live checkout root",
+    );
+  }
+  if (typeof branch !== "string" || branch === "") {
+    throw new OverlayError(500, "worktree_up did not return a branch");
+  }
+
+  try {
+    const readWorktree = requireSeam(seams, "readWorktree");
+    const writeWorktree = requireSeam(seams, "writeWorktree");
+    const written = [];
+    for (const file of byFile.keys()) {
+      const parsed = JSON.parse(readWorktree(dir, file));
+      for (const selection of selected) {
+        if (selection.target.file !== file) continue;
+        writeSelectionValue(parsed, selection);
+      }
+      writeWorktree(dir, file, serializeTracked(parsed));
+      written.push(file);
+    }
+
+    const promoted = selected.map((s) => ({
+      key: s.key,
+      target: s.target,
+      before: s.before ?? null,
+      after: s.effective ?? null,
+    }));
+    const message = promotionCommitMessage(ticket.ticket, promoted);
+    const body = promotionPrBody(ticket.ticket, promoted);
+    await requireSeam(seams, "git.commit")({ dir, message, files: written });
+    await requireSeam(seams, "git.push")({ dir, branch });
+    const pr = await requireSeam(
+      seams,
+      "forge.openPr",
+    )({
+      base: target.base,
+      head: branch,
+      title: `feat(overlay): promote ${promoted.length} runtime override${
+        promoted.length === 1 ? "" : "s"
+      }`,
+      body,
+    });
+    return {
+      status: "opened",
+      ticket: ticket.ticket,
+      worktree: dir,
+      branch,
+      files: written,
+      promoted,
+      pr: pr ?? null,
+    };
+  } catch (err) {
+    // Preserve the worktree/branch for operator cleanup; nothing was merged.
+    const wrapped =
+      err instanceof OverlayError
+        ? err
+        : new OverlayError(
+            500,
+            `promotion failed after checkout: ${err.message}`,
+          );
+    wrapped.evidence = { worktree: dir, branch, ticket: ticket.ticket };
+    throw wrapped;
+  }
+}
+
+function promotionCommitMessage(ticket, promoted) {
+  const lines = promoted.map(
+    (p) =>
+      `- ${p.key}: ${JSON.stringify(p.before)} -> ${JSON.stringify(p.after)}`,
+  );
+  return `feat(overlay): promote runtime overrides to tracked defaults\n\n${lines.join(
+    "\n",
+  )}\n\nFixes ${ticket}`;
+}
+
+function promotionPrBody(ticket, promoted) {
+  const rows = promoted
+    .map(
+      (p) =>
+        `| \`${p.key}\` | \`${p.target.file}\` | ${JSON.stringify(
+          p.before,
+        )} | ${JSON.stringify(p.after)} |`,
+    )
+    .join("\n");
+  return [
+    "## What",
+    "Promote selected machine-local runtime overrides into tracked fleet defaults.",
+    "",
+    "| Override key | Target | Tracked before | Effective after |",
+    "| --- | --- | --- | --- |",
+    rows,
+    "",
+    "## Verification",
+    "Values written from a deterministic preview digest into an isolated worktree; no merge performed.",
+    "Promotion does not clear the runtime overrides — clearing is a separate explicit action after deployment.",
+    "",
+    `Fixes ${ticket}`,
+  ].join("\n");
 }

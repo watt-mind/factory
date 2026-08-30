@@ -18,6 +18,7 @@ import { CustomCell } from "../components/CustomCell";
 import type { FilterFacets } from "../filterQuery";
 import { matchesFilterQuery, parseFilterQuery } from "../filterQuery";
 import {
+  pollingOptions,
   tableTokens,
   useDisplayOptions,
   useListKeys,
@@ -34,8 +35,10 @@ import {
   RepoBadge,
   STATE_HUES,
   SourceIcon,
+  Table,
   TableWindowFooter,
   Th,
+  rowKeyHandler,
   shortId,
 } from "../components/ui";
 
@@ -80,6 +83,19 @@ const STATUS_HUES: Record<ChainStatus, string> = {
 const STATE_ORDER = Object.keys(STATE_HUES);
 
 const NARROW_COLS = new Set(["depth", "events", "runs"]);
+
+/**
+ * The integer cols sit in a `w-12` slot where their full labels clip; render an
+ * abbreviation and keep the full name (and, for Depth, its meaning) in `title`.
+ */
+const NARROW_HEADERS: Record<string, { label: string; title: string }> = {
+  depth: {
+    label: "Dep",
+    title: "Depth — longest path from the root in hops",
+  },
+  events: { label: "Evt", title: "Events in the chain" },
+  runs: { label: "Run", title: "Runs in the chain" },
+};
 
 function chainStateSegments(
   states: ChainListItem["states"],
@@ -239,7 +255,7 @@ const CHAINS_DISPLAY: DisplayConfig<ChainListItem> = {
   ],
   columns: [
     { key: "origin", label: "Origin", always: true },
-    { key: "root", label: "Root event" },
+    { key: "root", label: "Root event", defaultHidden: true },
     { key: "depth", label: "Depth" },
     { key: "events", label: "Events" },
     { key: "runs", label: "Runs" },
@@ -271,7 +287,7 @@ export function Chains({
   const list = useQuery({
     queryKey: ["chains", "24h", 100],
     queryFn: () => api.chains("24h", 100),
-    refetchInterval: 3000,
+    ...pollingOptions(3_000),
   });
   const parsed = useMemo(
     () => parseFilterQuery(filter, CHAIN_FACETS),
@@ -376,7 +392,11 @@ export function Chains({
           </>
         }
       >
-        <table className="w-full table-fixed border-separate border-spacing-0">
+        <Table
+          role="grid"
+          aria-label="Chains"
+          className="w-full table-fixed border-separate border-spacing-0"
+        >
           <colgroup>
             {cols.map((column) => (
               <col
@@ -392,8 +412,11 @@ export function Chains({
               />
             ))}
           </colgroup>
-          <thead>
-            <tr className="text-left text-[11px] text-(--text-faint)">
+          <thead role="rowgroup">
+            <tr
+              role="row"
+              className="text-left text-[11px] text-(--text-faint)"
+            >
               {cols.map((column) => {
                 const sort = CHAINS_DISPLAY.sorts.find(
                   (item) => item.column === column.key,
@@ -404,10 +427,12 @@ export function Chains({
                 const current = isCustom
                   ? display.sortBy === column.key
                   : sort && display.sortBy === sort.key;
+                const narrow = NARROW_HEADERS[column.key];
                 return (
                   <Th
                     key={column.key}
-                    label={column.label}
+                    label={narrow?.label ?? column.label}
+                    title={narrow?.title}
                     dir={current ? display.sortDir : null}
                     naturalDir={sort?.defaultDir ?? "asc"}
                     onSort={
@@ -435,7 +460,7 @@ export function Chains({
               })}
             </tr>
           </thead>
-          <tbody>
+          <tbody role="rowgroup">
             {windowTokens.map((token) => {
               if (token.length === 2) {
                 const [section, sub] = token;
@@ -454,13 +479,17 @@ export function Chains({
               }
               const chain = token[0];
               const selected = chain.correlationId === selectedId;
+              const onActivate = () => onOpenChain(chain.correlationId);
               return (
                 <tr
                   key={chain.correlationId}
+                  role="row"
                   data-chain-id={chain.correlationId}
+                  tabIndex={0}
                   aria-selected={selected}
-                  onClick={() => onOpenChain(chain.correlationId)}
-                  className={`cursor-pointer hover:bg-(--surface-1) ${selected ? "row-selected" : ""}`}
+                  onClick={onActivate}
+                  onKeyDown={rowKeyHandler(onActivate)}
+                  className={`cursor-pointer hover:bg-(--surface-1) focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-(--accent) ${selected ? "row-selected" : ""}`}
                 >
                   <td className="max-w-56 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
                     <div
@@ -564,7 +593,7 @@ export function Chains({
               />
             )}
           </tbody>
-        </table>
+        </Table>
       </ListPane>
     </div>
   );

@@ -67,7 +67,7 @@ factory watchdog --once
 Alternatively, inspect individual components:
 
 - **Stack & Workers**: `curl -sf http://127.0.0.1:7381/health && bun event-runtime/cli.mjs status`
-- **Supply Queue**: `factory linear queue --team WM`
+- **Supply Queue**: `factory ticket queue --team WM`
 - **Open PRs**: `gh pr list --state open`
 - **Git Freshness**: `git status --porcelain && git rev-list --count HEAD..origin/develop`
 
@@ -75,8 +75,8 @@ Alternatively, inspect individual components:
 
 ```bash
 # Check dispatchable queue for target teams (e.g. WM, CLNT, OPS)
-factory linear queue --team WM
-factory linear queue --team CLNT
+factory ticket queue --team WM
+factory ticket queue --team CLNT
 ```
 
 - **Healthy Supply**: 10–20+ tickets in `Todo` + `ai:agent-ready` + unassigned.
@@ -169,7 +169,7 @@ Workers idle if supply dries up. Ensure a continuous pipeline of dispatchable wo
 3. **Idempotency Pin Trap**:
    - A `FAILED` or `BLOCKED` run pins its ticket's idempotency key. A duplicate `dispatch.requested` will be ignored as `noop` (`ticket_dispatch_already_live`).
    - To re-run a pinned run **of the current `policyVersion`**: `bun event-runtime/cli.mjs retry <runId> --force`. A run planned before a stack restart is pinned to the old `policyVersion` and no worker will ever claim it (`registry_stale` spin) — `cancel` it and inject fresh instead.
-   - Every terminal failure strips `ai:agent-ready` from the ticket, even for harness-side causes (WM-682); relabel with `factory linear labels <T> --add ai:agent-ready` before re-injecting.
+   - Every terminal failure strips `ai:agent-ready` from the ticket, even for harness-side causes (WM-682); relabel with `factory ticket labels <T> --add ai:agent-ready` before re-injecting.
 
 ---
 
@@ -361,14 +361,14 @@ bun event-runtime/cli.mjs inspect <runId># Full execution receipt, lifecycle & l
 bun event-runtime/cli.mjs retry <runId> --force # Force retry pinned failed run
 bun event-runtime/cli.mjs update-pins    # Regenerate agent definition hashes
 
-# --- Linear CLI (factory linear) ---
-factory linear queue --team WM           # Query dispatchable tickets
-factory linear get WM-123                # Read ticket, criteria, owned paths
-factory linear claim WM-123 --agent claude # Claim + assign + In Progress
-factory linear comment WM-123 "..."      # Post heartbeat or status
-factory linear state WM-123 "In Review" --add ai:needs-review # Advance state
-factory linear detail WM-123 "..."       # Append criteria / verification block
-factory linear file --team WM --title "..." --body "..." --type bug # File new issue
+# --- Ticket CLI (factory ticket; `linear` is a deprecated alias) ---
+factory ticket queue --team WM           # Query dispatchable tickets
+factory ticket get WM-123                # Read ticket, criteria, owned paths
+factory ticket claim WM-123 --agent claude # Claim + assign + In Progress
+factory ticket comment WM-123 "..."      # Post heartbeat or status
+factory ticket state WM-123 "In Review" --add ai:needs-review # Advance state
+factory ticket detail WM-123 "..."       # Append criteria / verification block
+factory ticket file --team WM --title "..." --body "..." --type bug # File new issue
 
 # --- CI & GitHub Checks ---
 # One-shot reads — fine inline:
@@ -383,19 +383,19 @@ gh run watch <run-id> --exit-status      # blocks until the run ends
 
 ## 5. Catalog of Known Traps & Non-Negotiables
 
-| Trap                                       | Mechanism                                                                                                                                                                                                                        | Hard-Won Rule                                                                                                                                                                                                           |
-| :----------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **CI Rerun Cache**                         | `gh run rerun` on a green run is refused; on a failed run, it reuses the run ID attempt.                                                                                                                                         | Observe the CI run in an active/non-completed state before trusting a green verdict.                                                                                                                                    |
-| **`GET /runs` No `spec`**                  | `GET /runs` lacks the `spec` field (WM-303). Reading `row.spec` yields empty.                                                                                                                                                    | Read run metadata and ticket identity from `eventId` or `cli.mjs inspect <runId>`.                                                                                                                                      |
-| **Idempotency Pinning**                    | `FAILED`/`BLOCKED` runs pin their input hash key; re-injected `dispatch.requested` no-ops.                                                                                                                                       | Always use `cli.mjs retry <runId> --force` to unstick a failed run.                                                                                                                                                     |
-| **`git stash` in Worktrees**               | The stash stack (`.git/refs/stash`) is repo-global, not isolated per worktree.                                                                                                                                                   | **NEVER use `git stash` or `git rebase --autostash`** in agent worktrees. Use temporary patches or WIP commits.                                                                                                         |
-| **macOS Bash 3.2**                         | Default macOS bash lacks `mapfile` / `readarray` and modern expansions.                                                                                                                                                          | Use POSIX `while IFS= read -r line` loops in all shell scripts.                                                                                                                                                         |
-| **Prettier Scope**                         | Running prettier across whole repo reformats hundreds of `.mjs` files unnecessarily.                                                                                                                                             | Prettier is configured ONLY for `shared/**/*.md` (`bun run format:check`).                                                                                                                                              |
-| **Label Replacement**                      | Direct GraphQL label mutations replace the whole array, wiping `type:*` and `area:*`.                                                                                                                                            | Always use `--add` / `--remove` flags via `factory linear state` or `factory linear labels`.                                                                                                                            |
-| **Restart Orphans In-Flight Runs**         | `bin/live-stack.sh down` does not actually wait for in-flight dispatches; their leaseholder dies, the run stays `RUNNING` forever, and the `reaper` loop that would reclaim it is disabled (WM-657).                             | Restart only when no `dispatch@1` run is `RUNNING`/`LEASED`. After any restart, compare `attempts.lease_owner` against `cli.mjs workers` and `cancel` orphans — preserving+pushing any uncommitted worktree work first. |
-| **Stale Rebase Reverts Trunk**             | A fixer that rebases onto an `origin/develop` fetched minutes earlier silently drops PRs merged in between and still passes CI. Nearly reverted #582 via #583.                                                                   | Before merging any rebased PR: `git diff --stat origin/develop origin/<branch>` must show no unexplained deletions of develop-side files. Tell fixers to `git fetch` immediately before `rebase`.                       |
-| **Blocking Waits Inline**                  | A `sleep`-and-recheck loop or `gh run watch` in the session queues the operator's steering behind it for the whole wait.                                                                                                         | Loop 6 hard rule: nothing inline may block >~30s. CI waits, merges-on-green, reruns, test runs, rebases go to a subagent; the session keeps only decisions.                                                             |
-| **A Hold Only In Your Head Is Not A Hold** | The autonomous `merge-scan`/`merge-apply` loop does not read the orchestrator's intentions. A PR held by verdict but left MERGEABLE and non-draft was auto-merged (#552, a known safety regression) while the session "held" it. | Make holds structural the moment a review returns FIX/ESCALATE: convert to draft (`gh pr ready --undo`) or add `ai:escalated` on the ticket. The scan honours drafts and escalation labels; it cannot honour a note.    |
+| Trap                                       | Mechanism                                                                                                                                                                                                                               | Hard-Won Rule                                                                                                                                                                                                                  |
+| :----------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **CI Rerun Cache**                         | `gh run rerun` on a green run is refused; on a failed run, it reuses the run ID attempt.                                                                                                                                                | Observe the CI run in an active/non-completed state before trusting a green verdict.                                                                                                                                           |
+| **`GET /runs` List Has No `spec`**         | The `GET /runs` list response exposes summary fields such as `runId`, `agent`, and `adapter`, but not `spec`; reading `row.spec` yields empty.                                                                                          | Read run metadata and ticket identity from `eventId` or `cli.mjs inspect <runId>`.                                                                                                                                             |
+| **Idempotency Pinning**                    | `FAILED`/`BLOCKED` runs pin their input hash key; re-injected `dispatch.requested` no-ops.                                                                                                                                              | Always use `cli.mjs retry <runId> --force` to unstick a failed run.                                                                                                                                                            |
+| **`git stash` in Worktrees**               | The stash stack (`.git/refs/stash`) is repo-global, not isolated per worktree.                                                                                                                                                          | **NEVER use `git stash` or `git rebase --autostash`** in agent worktrees. Use temporary patches or WIP commits.                                                                                                                |
+| **macOS Bash 3.2**                         | Default macOS bash lacks `mapfile` / `readarray` and modern expansions.                                                                                                                                                                 | Use POSIX `while IFS= read -r line` loops in all shell scripts.                                                                                                                                                                |
+| **Prettier Scope**                         | Running prettier across whole repo reformats hundreds of `.mjs` files unnecessarily.                                                                                                                                                    | Prettier is configured ONLY for `shared/**/*.md` (`bun run format:check`).                                                                                                                                                     |
+| **Label Replacement**                      | Direct GraphQL label mutations replace the whole array, wiping `type:*` and `area:*`.                                                                                                                                                   | Always use `--add` / `--remove` flags via `factory ticket state` or `factory ticket labels`.                                                                                                                                   |
+| **Restart Orphans In-Flight Runs**         | `bin/live-stack.sh down` can end an in-flight leaseholder. Every `serve` tick runs the `reap` step in `event-runtime/cli/serve.mjs`, which reaps expired leases after `LEASE_GRACE_SECONDS`; no reap tick runs while the stack is down. | Restart only when no `dispatch@1` run is `RUNNING`/`LEASED`. After `down`, preserve and push uncommitted worktree work before an expired lease is retried; after restart, let the reap step reclaim it after the grace period. |
+| **Stale Rebase Reverts Trunk**             | A fixer that rebases onto an `origin/develop` fetched minutes earlier silently drops PRs merged in between and still passes CI. Nearly reverted #582 via #583.                                                                          | Before merging any rebased PR: `git diff --stat origin/develop origin/<branch>` must show no unexplained deletions of develop-side files. Tell fixers to `git fetch` immediately before `rebase`.                              |
+| **Blocking Waits Inline**                  | A `sleep`-and-recheck loop or `gh run watch` in the session queues the operator's steering behind it for the whole wait.                                                                                                                | Loop 6 hard rule: nothing inline may block >~30s. CI waits, merges-on-green, reruns, test runs, rebases go to a subagent; the session keeps only decisions.                                                                    |
+| **A Hold Only In Your Head Is Not A Hold** | The autonomous `merge-scan`/`merge-apply` loop does not read the orchestrator's intentions. A PR held by verdict but left MERGEABLE and non-draft was auto-merged (#552, a known safety regression) while the session "held" it.        | Make holds structural the moment a review returns FIX/ESCALATE: convert to draft (`gh pr ready --undo`) or add `ai:escalated` on the ticket. The scan honours drafts and escalation labels; it cannot honour a note.           |
 
 ---
 

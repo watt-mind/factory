@@ -3,17 +3,20 @@ import {
   trackTmpDir,
 } from "../test-support/tmp.mjs?file=event-runtime-lib-api-config-test-mjs";
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { configView, redactSecrets } from "./api-config.mjs";
 import { makeServer as makeApiServer } from "./api-test-helpers.mjs";
 import { RUNTIME_ROOT } from "./config.mjs";
 import {
+  EXTENSION_MANIFEST,
   extensionSecretEnvVar,
   loadExtensions,
   resetExtensionSecretsCache,
 } from "./extensions.mjs";
 import { reposView } from "./repos.mjs";
+import { openDb } from "./db.mjs";
+import { KIND_MODEL_TIER_CELL, putOverride } from "./runtime-overrides.mjs";
 
 const SAMPLE_EXTENSION = path.join(
   RUNTIME_ROOT,
@@ -152,6 +155,7 @@ describe("GET /config view", () => {
     expect(view.sections.map((section) => section.id)).toEqual([
       "repos",
       "policy",
+      "policy-models",
       "nodes",
       "schedule",
       "registry",
@@ -160,6 +164,7 @@ describe("GET /config view", () => {
     expect(view.sections.map((section) => section.reload)).toEqual([
       "hot",
       "hot",
+      "restart",
       "cli-only",
       "cli-only",
       "restart",
@@ -185,13 +190,82 @@ describe("GET /config view", () => {
     expect(policy.entries.find((entry) => entry.key === "workers").reload).toBe(
       "hot",
     );
-    expect(policy.entries.find((entry) => entry.key === "models").reload).toBe(
-      "restart",
+    expect(policy.entries.some((entry) => entry.key === "models")).toBe(false);
+    const models = view.sections.find(
+      (section) => section.id === "policy-models",
     );
+    expect(models.modelTierConfig.tracked.pi.standard).toBe("pi/model");
+    expect(models.modelTierConfig.effective.pi.standard).toBe("pi/model");
     const eventType = view.sections
       .find((section) => section.id === "registry")
       .entries.find((entry) => entry.key.includes("factory.triage.requested"));
     expect(eventType.value).toBe("pi");
+  });
+
+  test("Policy Models exposes only tracked/runtime/effective model cells", () => {
+    const db = openDb(":memory:");
+    putOverride(db, {
+      kind: KIND_MODEL_TIER_CELL,
+      key: "pi:standard",
+      patch: { model: "runtime/model" },
+      actor: "operator",
+    });
+    const view = configView({
+      db,
+      root: fixtureRoot(),
+      registry: registry(),
+      repos: () => new Map(),
+      policyVersion: "git:test",
+      now: 0,
+    });
+    const section = view.sections.find((item) => item.id === "policy-models");
+    expect(section.modelTierConfig.tracked.pi.standard).toBe("pi/model");
+    expect(section.modelTierConfig.runtime.pi.standard).toBe("runtime/model");
+    expect(section.modelTierConfig.effective.pi.standard).toBe("runtime/model");
+    const wire = JSON.stringify(section);
+    expect(wire).not.toContain("workers");
+    expect(wire).not.toContain("never-publish-this");
+    expect(wire).not.toContain("leaked-notify-token");
+    db.close();
+  });
+
+  test("keeps the config inventory available when a model-tier cell is corrupt", async () => {
+    const { server, port, db, close } = await makeServer({
+      configRoot: fixtureRoot(),
+    });
+    putOverride(db, {
+      kind: KIND_MODEL_TIER_CELL,
+      key: "pi:strong",
+      patch: { model: "runtime-strong" },
+      actor: "operator",
+    });
+    db.query(
+      `INSERT INTO runtime_overrides (kind, key, patch_json, updated_at, updated_by)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(
+      KIND_MODEL_TIER_CELL,
+      "pi:standard",
+      JSON.stringify({ model: "" }),
+      new Date(0).toISOString(),
+      "test",
+    );
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/config`);
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      const section = body.sections.find((item) => item.id === "policy-models");
+      expect(section.modelTierConfig.runtime.pi.strong).toBe("runtime-strong");
+      expect(section.modelTierConfig.problems).toEqual([
+        {
+          key: "pi:standard",
+          error: expect.stringContaining("model must be a non-empty string"),
+        },
+      ]);
+      expect(body.sections.map((item) => item.id)).toContain("registry");
+    } finally {
+      close();
+      server.close();
+    }
   });
 
   test("uses explicit allow-lists and publishes node env keys, never values", () => {
@@ -397,6 +471,66 @@ describe("GET /config view", () => {
     expect(JSON.stringify(view)).not.toContain("super-secret-value");
   });
 
+  test("GET /config cannot publish an innocently named secret beneath array items", async () => {
+    const dir = tmpDir("evrt-array-secret-extension-");
+    cpSync(SAMPLE_EXTENSION, dir, { recursive: true });
+    const manifestFile = path.join(dir, EXTENSION_MANIFEST);
+    const manifest = JSON.parse(readFileSync(manifestFile, "utf8"));
+    manifest.name = "factory/array-secret";
+    manifest.contributes.config.namespace = "array-secret";
+    writeFileSync(manifestFile, JSON.stringify(manifest));
+    writeFileSync(
+      path.join(dir, "config.schema.json"),
+      JSON.stringify({
+        type: "object",
+        properties: {
+          destinations: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                label: { type: "string" },
+                value: { type: "string", format: "secret" },
+              },
+            },
+          },
+        },
+      }),
+    );
+    const secret = "plaintext-that-must-not-reach-config";
+    const loaded = await loadExtensions({
+      policy: {
+        extensions: [
+          {
+            path: dir,
+            config: {
+              destinations: [{ label: "prod", value: secret }],
+            },
+          },
+        ],
+      },
+      packRoots: [],
+    });
+    expect(loaded.extensions).toEqual([]);
+    expect(loaded.disabled[0].reason).toMatch(
+      /\$\.destinations\[\]\.value.*dynamic secret locations are unsupported/,
+    );
+
+    const view = configView({
+      root: fixtureRoot(),
+      registry: registry(),
+      repos: () => new Map(),
+      policyVersion: "git:test",
+      now: 0,
+    });
+    const section = view.sections.find((item) => item.id === "extensions");
+    expect(section.extensions[0].values).toBeNull();
+    expect(section.extensions[0].anomaly).toMatch(
+      /dynamic secret locations are unsupported/,
+    );
+    expect(JSON.stringify(view)).not.toContain(secret);
+  });
+
   test("defaults to the extensions the process loaded (lib/extensions.mjs snapshot)", async () => {
     await loadExtensions({
       policy: {
@@ -472,6 +606,49 @@ describe("GET /config view", () => {
       if (prevEnv === undefined) delete process.env[envVar];
       else process.env[envVar] = prevEnv;
       resetExtensionSecretsCache();
+    }
+  });
+
+  test("GET /config serves a disabled malicious schema without prototype pollution", async () => {
+    const marker = "factoryConfigApiPrototypePollution";
+    const extensionDir = tmpDir("evrt-config-malicious-extension-");
+    cpSync(SAMPLE_EXTENSION, extensionDir, { recursive: true });
+    const schemaFile = path.join(extensionDir, "config.schema.json");
+    const schema = JSON.parse(readFileSync(schemaFile, "utf8"));
+    schema.properties = {
+      ["__proto__"]: {
+        type: "object",
+        properties: {
+          [marker]: { type: "string", format: "secret" },
+        },
+      },
+    };
+    writeFileSync(schemaFile, JSON.stringify(schema));
+
+    delete Object.prototype[marker];
+    let apiServer;
+    try {
+      const loaded = await loadExtensions({
+        policy: { extensions: [{ path: extensionDir }] },
+        packRoots: [],
+      });
+      expect(loaded.extensions).toEqual([]);
+      expect(loaded.anomalies[0]).toMatch(
+        /config schema path contains forbidden segment "__proto__"/,
+      );
+
+      apiServer = await makeServer({ configRoot: fixtureRoot() });
+      const response = await fetch(apiServer.url("/config"));
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      const section = body.sections.find((item) => item.id === "extensions");
+      expect(section.extensions[0].anomaly).toMatch(
+        /config schema path contains forbidden segment "__proto__"/,
+      );
+      expect(Object.prototype[marker]).toBeUndefined();
+    } finally {
+      apiServer?.close();
+      delete Object.prototype[marker];
     }
   });
 

@@ -14,7 +14,11 @@
 // rather than becoming a typed verb. What matters is that there is one
 // transport with one credential path, which is what the grep invariant in
 // tools/ticket.test.mjs enforces.
-import { loadControlPlane } from "../lib/control-plane/index.mjs";
+import {
+  controlPlaneKindFromPolicy,
+  controlPlaneKindFromRepo,
+  loadControlPlane,
+} from "../lib/control-plane/index.mjs";
 
 export const AI_BLOCKED = "ai:blocked";
 
@@ -137,6 +141,15 @@ export async function blockedLabelIds() {
 
 /** Identifiers of the repo's held tickets that someone has replied to. */
 export async function answeredHeldTickets(repo) {
+  // Linear-only: both queries below need Linear's label history
+  // (`addedLabelIds`) to know when `ai:blocked` was applied, which no other
+  // adapter models. On GitHub the same GraphQL text is a hard `gh` error, and
+  // it surfaced as a crashed `factory queue` rather than as a missing feature.
+  // Reply detection simply stays off there until a GitHub-native signal exists;
+  // the held ticket is still counted and still shown, just never auto-released.
+  const kind =
+    controlPlaneKindFromRepo(repo.name) ?? controlPlaneKindFromPolicy();
+  if (kind !== "linear") return new Set();
   const ids = await blockedLabelIds();
   if (!ids.size) return new Set();
   const held =

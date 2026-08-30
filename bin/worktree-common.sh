@@ -166,18 +166,41 @@ die() {
 info() { printf '\033[36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33mwarn:\033[0m %s\n' "$*" >&2; }
 
-# Local config is intentionally gitignored, but a delegated checkout needs
-# the active instance's routing, policy, and schedule rather than examples.
-# Skip a checkout without the ignore rule so an agent can never stage it.
+# Resolve a path without requiring its final component to exist. GNU `realpath
+# -m` offers this, but BSD/macOS realpath does not support `-m`. The parent
+# must exist here (as it does for the config paths below); `cd -P` both makes
+# the result absolute and normalizes its existing directory components.
+normalize_path() { # <path>
+  local path="$1" directory basename
+  directory=$(dirname "$path")
+  basename=$(basename "$path")
+  (
+    cd -P "$directory"
+    printf '%s/%s\n' "$PWD" "$basename"
+  )
+}
+
+# Local config is intentionally gitignored, but a delegated checkout needs the
+# active instance's routing and policy rather than examples. Skip a checkout
+# without the ignore rule so an agent can never stage it.
+#
+# schedule.yaml is deliberately NOT provisioned. Unlike repos/policy — pure
+# instance state — the schedule overlay layers on top of the branch's tracked
+# kernel schedules (event-runtime/schedules.json). A worktree branch may have
+# trimmed a loop out of the kernel (e.g. #1028) while the live operator overlay
+# still carries a stale, partial entry for it (`enabled: true`, no cadence);
+# copied in, it loads as a new overlay loop with no `every` and the repo verify
+# gate dies with `unparseable cadence "undefined"` (#1051). Omitting it lets the
+# checkout fall back to the tracked schedule.example.yaml, which always verifies.
 provision_instance_local_configs() { # <checkout> [primary-checkout]
   local checkout="$1" primary="${2:-${FACTORY_ROOT:-$(repo_root)}}"
   local name source destination rel
-  for name in repos policy schedule; do
+  for name in repos policy; do
     source="$primary/config/$name.yaml"
     [[ -f "$source" ]] || continue
     destination="$checkout/config/$name.yaml"
     rel="config/$name.yaml"
-    [[ "$(realpath -m "$source")" == "$(realpath -m "$destination")" ]] && continue
+    [[ "$(normalize_path "$source")" == "$(normalize_path "$destination")" ]] && continue
     if git -C "$checkout" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
       && ! git -C "$checkout" check-ignore -q -- "$rel"; then
       continue
@@ -185,6 +208,31 @@ provision_instance_local_configs() { # <checkout> [primary-checkout]
     mkdir -p "$checkout/config"
     cp -f "$source" "$destination"
   done
+
+  # Seed the graphify knowledge graph (#1228). graphify-out/ is gitignored and
+  # expensive to rebuild, so a fresh worktree borrows the primary checkout's copy.
+  # Best-effort by design: it must never fail provisioning, it copies into a
+  # temp dir and renames so a half-copied tree is never observed, and it
+  # hardlinks (cp -Rl) when the filesystem allows, falling back to a plain copy.
+  # Opt out with FACTORY_PROVISION_GRAPHIFY=0. Only seeds when the target
+  # ignores graphify-out/ so a tracked copy is never shadowed.
+  [[ "${FACTORY_PROVISION_GRAPHIFY:-1}" == "0" ]] && return 0
+  local graph_src="$primary/graphify-out" graph_dst="$checkout/graphify-out"
+  [[ -d "$graph_src" && ! -e "$graph_dst" ]] || return 0
+  [[ "$(normalize_path "$graph_src")" != "$(normalize_path "$graph_dst")" ]] || return 0
+  if git -C "$checkout" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    && ! git -C "$checkout" check-ignore -q -- "graphify-out/"; then
+    return 0
+  fi
+  local graph_tmp="$graph_dst.tmp.$$"
+  rm -rf "$graph_tmp"
+  if { cp -Rl "$graph_src" "$graph_tmp" 2>/dev/null || { rm -rf "$graph_tmp"; cp -R "$graph_src" "$graph_tmp"; }; } \
+    && mv "$graph_tmp" "$graph_dst"; then
+    :
+  else
+    rm -rf "$graph_tmp"
+    warn "graphify-out seed skipped: could not copy $graph_src to $graph_dst"
+  fi
 }
 
 [[ "$PORT_BASE" =~ ^[0-9]+$ ]] || die "FACTORY_PORT_BASE must be numeric (got '$PORT_BASE')"
@@ -197,16 +245,50 @@ repo_root() { git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel;
 #   ABC-123 / ABC-123-scratch   tracker-key form (Linear)
 #   owner/repo#123 / #123       GitHub forms
 #
-# A BARE number is deliberately NOT accepted: `worktree-up.sh 123` is far more
-# likely a typo than an intent, the existing arg-parsing test guards it as
-# such, and the GitHub adapter always emits the `owner/repo#123` contract form
-# anyway (issueIdentifier), so nothing needs it.
+# A BARE number is deliberately NOT accepted here: `worktree-up.sh 123` is far
+# more likely an interactive typo than an intent, and the arg-parsing test
+# guards it as such. A bare number arriving through automated dispatch is a
+# different case — see ticket_normalize below — so it is qualified to
+# `owner/repo#N` before it ever reaches this validator.
 ticket_is_valid() {
   [[ "$1" =~ ^[A-Z]+-[0-9]+(-[A-Za-z0-9][A-Za-z0-9-]*)?$ ]] && return 0
   [[ "$1" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\#[0-9]+$ ]] && return 0
   [[ "$1" =~ ^\#[0-9]+$ ]] && return 0
   [[ "$1" =~ ^gh-[0-9]+$ ]] && return 0
   return 1
+}
+
+# The run's GitHub `owner/repo`, used to qualify a bare issue number (#908).
+# Prefer an explicit override (the run's repo config can export it); otherwise
+# read the checkout's `origin` remote. Prints nothing when origin is not a
+# GitHub remote — there is then no repo to qualify a bare number against.
+github_repo_slug() { # [checkout]
+  local url
+  if [[ -n "${FACTORY_GITHUB_REPO:-}" ]]; then
+    printf '%s' "$FACTORY_GITHUB_REPO"
+    return 0
+  fi
+  url=$(git -C "${1:-$(repo_root)}" remote get-url origin 2>/dev/null) || return 0
+  [[ "$url" =~ github\.com[:/]+([A-Za-z0-9._-]+/[A-Za-z0-9._-]+) ]] || return 0
+  printf '%s' "${BASH_REMATCH[1]%.git}"
+}
+
+# Normalize a dispatched ticket id to a form ticket_is_valid accepts (#908).
+# The dispatch schema (WM-1006, #878) accepts a bare GitHub issue number
+# (`822`) because parseIssueIdentifier() reads it as repo-relative, but the
+# tracker-agnostic worktree scripts key everything off a fully-qualified id, so
+# a dispatched bare `N` used to die at validation. Qualify it to the run's
+# `owner/repo#N`, mirroring parseIssueIdentifier. Anything that is not a bare
+# number — every Linear key, every already-qualified GitHub form — is returned
+# untouched, and a bare number with no resolvable repo is left as-is so it
+# still fails validation (an interactive typo must not be silently invented).
+ticket_normalize() { # <ticket> [owner/repo]
+  local id="$1" repo="${2:-}"
+  if [[ "$id" =~ ^[0-9]+$ && "$repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+    printf '%s#%s' "$repo" "$id"
+  else
+    printf '%s' "$id"
+  fi
 }
 
 ticket_number() {
@@ -243,8 +325,15 @@ ticket_slug() {
 # is a torn allocation waiting to happen (#881). For `ABC-123` the slug is the
 # id, so existing Linear ports are unchanged.
 ticket_api_port() {
-  local hash
-  hash=$(printf '%s' "$(ticket_slug "$1")" | cksum | awk '{print $1}')
+  local checksum hash
+  # Do not parse cksum through awk. The handoff sandbox mounts /usr read-only
+  # but deliberately omits /etc; on Debian /usr/bin/awk is an
+  # /etc/alternatives symlink, so the otherwise-pure helper returned no port
+  # while worker verification ran in that boundary. Bash can read cksum's two
+  # fields without awk or /dev/fd-backed process substitution and keeps port
+  # allocation usable in the minimal guest.
+  checksum=$(printf '%s' "$(ticket_slug "$1")" | cksum)
+  hash=${checksum%% *}
   printf '%s' "$((PORT_BASE + 2 * (hash % PORT_SPAN)))"
 }
 
@@ -255,6 +344,109 @@ run_dir() { printf '%s/.factory/run' "$1"; }
 event_home() { printf '%s/.factory/event-runtime' "$1"; }
 
 pid_alive() { [[ -f "$1" ]] && kill -0 "$(cat "$1")" 2>/dev/null; }
+
+# Emit pid, process-group id, and cwd for processes rooted in a worktree. A
+# handoff gate can be killed after it starts a detached fake serve, leaving no
+# pidfile for normal daemon teardown to find. Linux exposes cwd directly via
+# procfs; lsof provides the equivalent on macOS.
+worktree_cwd_processes() { # <worktree>
+  local wt="$1" target proc pid pgid cwd line
+  target=$(cd "$wt" && pwd -P) || return 1
+
+  if [[ -d /proc ]]; then
+    for proc in /proc/[0-9]*; do
+      pid=${proc##*/}
+      cwd=$(readlink "$proc/cwd" 2>/dev/null || true)
+      [[ "$cwd" == "$target" || "$cwd" == "$target"/* ]] || continue
+      pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+      [[ "$pgid" =~ ^[0-9]+$ ]] || continue
+      printf '%s\t%s\t%s\n' "$pid" "$pgid" "$cwd"
+    done
+    return 0
+  fi
+
+  command -v lsof >/dev/null 2>&1 || return 0
+  pid=""
+  cwd=""
+  while IFS= read -r line; do
+    case "$line" in
+      p*) pid=${line#p} ;;
+      n*)
+        cwd=${line#n}
+        [[ "$cwd" == "$target" || "$cwd" == "$target"/* ]] || continue
+        pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+        [[ "$pid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ ]] || continue
+        printf '%s\t%s\t%s\n' "$pid" "$pgid" "$cwd"
+        ;;
+    esac
+  done < <(lsof -a -d cwd -Fn 2>/dev/null)
+}
+
+# Stop processes that would retain a deleted worktree as their cwd. Detached
+# fake serve fixtures lead their own process group, so signal the full group
+# (including descendants); for a shared group, kill only the matching process
+# rather than risking an unrelated caller's shell.
+kill_worktree_cwd_processes() { # <worktree>
+  local wt="$1" own_pgid pid pgid cwd groups="" pids="" group processes
+  local ancestor_pids="" ancestor_pgids="" ancestor ancestor_pgid
+  own_pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)
+  # Teardown is often invoked from inside the worktree it removes (an agent
+  # session or operator shell whose cwd is the checkout). Its ancestors — and
+  # the process groups they lead or belong to — must never be signalled: an
+  # interactive shell ignores SIGTERM, and the SIGKILL escalation below would
+  # otherwise take the caller's terminal with it. A pid that exits mid-walk
+  # (or mid-scan below) makes `ps` fail; under `set -e` that must read as
+  # "unknown", not abort teardown.
+  ancestor=$$
+  while [[ "$ancestor" =~ ^[0-9]+$ && "$ancestor" -gt 1 ]]; do
+    ancestor_pids+=" $ancestor"
+    ancestor_pgid=$(ps -o pgid= -p "$ancestor" 2>/dev/null | tr -d ' ' || true)
+    [[ "$ancestor_pgid" =~ ^[0-9]+$ ]] && ancestor_pgids+=" $ancestor_pgid"
+    ancestor=$(ps -o ppid= -p "$ancestor" 2>/dev/null | tr -d ' ' || true)
+  done
+  processes=$(worktree_cwd_processes "$wt")
+
+  while IFS=$'\t' read -r pid pgid cwd; do
+    [[ "$pid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ ]] || continue
+    # Never signal the teardown shell, the caller's process group, or any
+    # ancestor of this script; they exit naturally once teardown returns.
+    [[ "$pgid" != "$own_pgid" ]] || continue
+    [[ " $ancestor_pids " != *" $pid "* ]] || continue
+    if [[ "$pid" == "$pgid" ]]; then
+      [[ " $ancestor_pgids " != *" $pgid "* ]] || continue
+      [[ " $groups " == *" $pgid "* ]] && continue
+      groups+=" $pgid"
+      info "stopping cwd-bound process group $pgid ($cwd)"
+      kill -TERM -- "-$pgid" 2>/dev/null || true
+    else
+      [[ " $pids " == *" $pid "* ]] && continue
+      pids+=" $pid"
+      info "stopping cwd-bound process $pid ($cwd)"
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done <<<"$processes"
+
+  for group in $groups; do
+    for _ in {1..30}; do
+      kill -0 -- "-$group" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 -- "-$group" 2>/dev/null; then
+      warn "cwd-bound process group $group ignored SIGTERM — killing"
+      kill -KILL -- "-$group" 2>/dev/null || true
+    fi
+  done
+  for pid in $pids; do
+    for _ in {1..30}; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      warn "cwd-bound process $pid ignored SIGTERM — killing"
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
+}
 
 # Spawn a detached daemon in its own process group (setsid) so it survives the
 # parent shell exiting (OPS-306).
@@ -284,6 +476,82 @@ spawn_daemon() { # <pidfile> <logfile> <workdir> <cmd...>
   else
     die "failed to spawn daemon: $*"
   fi
+}
+
+# The live stack keeps its logs alongside pidfiles.  Rotate a file in place
+# when one of its owners is still alive: a rename would leave that daemon
+# writing to the old inode forever, defeating the point of rotation.
+run_log_has_live_owner() { # <logfile>
+  local logfile="$1" run_dir stem pidfile
+  run_dir="$(dirname "$logfile")"
+  stem="$(basename "${logfile%.log}")"
+  # web.log is shared by web.pid and web-supervisor.pid; the prefix also
+  # covers worker-N.log / worker-N.pid pool slots.
+  for pidfile in "$run_dir/$stem".pid "$run_dir/$stem"-*.pid; do
+    pid_alive "$pidfile" && return 0
+  done
+  return 1
+}
+
+run_log_size_bytes() { # <logfile>
+  [[ -f "$1" ]] || { printf '0'; return; }
+  wc -c <"$1" | tr -d '[:space:]'
+}
+
+rotate_run_log() { # <logfile> <max-bytes> <keep>
+  local logfile="$1" max_bytes="$2" keep="$3" size i mode old suffix
+  [[ -f "$logfile" ]] || return 0
+  size="$(run_log_size_bytes "$logfile")"
+  [[ "$size" =~ ^[0-9]+$ ]] && ((size > max_bytes)) || return 0
+
+  # Keep .1 newest. Prune every generation past <keep>, not just .<keep>: a
+  # lowered FACTORY_LOG_KEEP must not strand .4/.5 archives forever.
+  for old in "$logfile".[0-9]*; do
+    [[ -f "$old" ]] || continue
+    suffix="${old##*.}"
+    [[ "$suffix" =~ ^[0-9]+$ ]] || continue
+    ((suffix >= keep)) && rm -f "$old"
+  done
+  for ((i = keep; i > 1; i--)); do
+    [[ -f "$logfile.$((i - 1))" ]] && mv -f "$logfile.$((i - 1))" "$logfile.$i"
+  done
+
+  if run_log_has_live_owner "$logfile"; then
+    # Copy-truncate: the daemon keeps appending to the same inode. Lines written
+    # between the cp and the truncate are lost — acceptable for a diagnostic log.
+    cp -f "$logfile" "$logfile.1"
+    : >"$logfile"
+    mode="copy-truncated live log"
+  else
+    # Rename is only safe with no live owner (checked above): a process still
+    # holding the old inode would keep writing to <log>.1 and the fresh <log>
+    # would stay empty. Ownership is inferred from pidfiles, so a daemon that
+    # outlived (or never had) its pidfile is invisible here and gets renamed.
+    mv -f "$logfile" "$logfile.1"
+    : >"$logfile"
+    mode="moved stopped log"
+  fi
+  info "rotated $logfile (${size} bytes; $mode -> ${logfile}.1)"
+}
+
+rotate_run_logs() { # <run-dir> <max-bytes> <keep>
+  local run_dir="$1" max_bytes="$2" keep="$3" logfile
+  [[ -d "$run_dir" ]] || return 0
+  for logfile in "$run_dir"/*.log; do
+    [[ -f "$logfile" ]] || continue
+    rotate_run_log "$logfile" "$max_bytes" "$keep"
+  done
+}
+
+run_log_total_bytes() { # <run-dir>
+  local run_dir="$1" logfile total=0 size
+  [[ -d "$run_dir" ]] || { printf '0'; return; }
+  for logfile in "$run_dir"/*.log "$run_dir"/*.log.[0-9]*; do
+    [[ -f "$logfile" ]] || continue
+    size="$(run_log_size_bytes "$logfile")"
+    [[ "$size" =~ ^[0-9]+$ ]] && total=$((total + size))
+  done
+  printf '%s' "$total"
 }
 
 # Persist / restore the ports this checkout actually bound (OPS-460).
@@ -781,6 +1049,17 @@ run_bun_install_trap() { # <trap-definition>
   eval "$1"
 }
 
+# Atomic rename(2) of a directory: succeeds only when <dst> is absent (or an
+# empty directory, which no live holder ever owns). Never nests <src> inside an
+# existing <dst> the way a bare `mv` would.
+rename_dir_atomic() { # <src> <dst>
+  if mv --version >/dev/null 2>&1; then
+    mv -T "$1" "$2" 2>/dev/null
+  else
+    bun -e 'require("node:fs").renameSync(process.argv[1], process.argv[2])' "$1" "$2" 2>/dev/null
+  fi
+}
+
 # File-locked bun install with retry on SQLITE_BUSY (OPS-322).
 # Prevents concurrent worktree bring-ups from racing on bun's global cache DB.
 locked_bun_install() { # <dir>
@@ -795,7 +1074,20 @@ locked_bun_install() { # <dir>
   [[ "$stale_after" =~ ^[0-9]+$ ]] || die "FACTORY_LOCK_STALE_AFTER must be numeric (got '$stale_after')"
   mkdir -p "$(dirname "$lock_dir")"
 
-  while ! mkdir "$lock_dir" 2>/dev/null; do
+  # Ownership is published atomically with the claim: the pid is written into a
+  # private claim directory that is then rename(2)d onto the lock path. There is
+  # no window in which a live holder owns a pid-less lock, so a contender that
+  # reclaims a pid-less directory can never pull the lock out from under a
+  # holder that is still publishing (gh-1373).
+  local claim_dir="${lock_dir}.claim.$$.$RANDOM"
+  rm -rf "$claim_dir"
+  mkdir "$claim_dir"
+  printf '%s\n' "$$" > "$claim_dir/pid"
+
+  while :; do
+    if [[ ! -e "$lock_dir" ]] && rename_dir_atomic "$claim_dir" "$lock_dir"; then
+      break
+    fi
     local holder="" now lock_mtime=0 lock_age=0 reclaim=0
     holder=$(cat "$lock_dir/pid" 2>/dev/null || true)
     now=$(date +%s)
@@ -805,8 +1097,9 @@ locked_bun_install() { # <dir>
         reclaim=1
       fi
     else
-      # A new holder needs a moment between mkdir and publishing its pid. Only
-      # reclaim a pid-less/malformed lock once that grace period has elapsed.
+      # Holders publish their pid atomically with the claim, so a pid-less lock
+      # is stale by construction. The grace period is kept only for holders
+      # running an older helper that still publishes the pid after mkdir.
       if stat -f '%m' "$lock_dir" >/dev/null 2>&1; then
         lock_mtime=$(stat -f '%m' "$lock_dir" 2>/dev/null || printf '0')
       else
@@ -821,11 +1114,11 @@ locked_bun_install() { # <dir>
 
     if [[ "$reclaim" -eq 1 ]]; then
       local stale_candidate="${lock_dir}.stale.$$.$RANDOM"
-      if mv "$lock_dir" "$stale_candidate" 2>/dev/null; then
+      if rename_dir_atomic "$lock_dir" "$stale_candidate"; then
         local stale_holder
         stale_holder=$(cat "$stale_candidate/pid" 2>/dev/null || true)
         if [[ "$stale_holder" =~ ^[0-9]+$ ]] && kill -0 "$stale_holder" 2>/dev/null; then
-          mv "$stale_candidate" "$lock_dir" 2>/dev/null || rm -rf "$stale_candidate"
+          rename_dir_atomic "$stale_candidate" "$lock_dir" || rm -rf "$stale_candidate"
         else
           rm -rf "$stale_candidate"
         fi
@@ -834,16 +1127,14 @@ locked_bun_install() { # <dir>
     fi
 
     if (( now - start_time >= max_wait )); then
+      rm -rf "$claim_dir"
       die "timed out waiting for bun install lock ($lock_dir)"
     fi
     sleep 0.1
   done
 
-  # Publish ownership atomically so contenders never observe a partially
-  # written pid file. Traps are restored before returning to the caller.
-  local pid_tmp="$lock_dir/pid.$$.$RANDOM"
-  printf '%s\n' "$$" > "$pid_tmp"
-  mv "$pid_tmp" "$lock_dir/pid"
+  # The lock directory now carries this process's pid. Traps are restored
+  # before returning to the caller.
   local previous_exit_trap previous_int_trap previous_term_trap
   previous_exit_trap=$(trap -p EXIT || true)
   previous_int_trap=$(trap -p INT || true)

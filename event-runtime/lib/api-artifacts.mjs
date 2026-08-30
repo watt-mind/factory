@@ -3,22 +3,24 @@ import {
   closeSync,
   createReadStream,
   openSync,
-  readFileSync,
   readSync,
   rmSync,
 } from "node:fs";
-import {
-  findArtifact,
-  hashFile,
-  listArtifactPage,
-  pruneArtifacts,
-} from "./artifacts.mjs";
+import { findArtifact, hashFileAsync, pruneArtifacts } from "./artifacts.mjs";
 import { artifactsRoot } from "./config.mjs";
+import { ApiParameterError, parseListLimit } from "./api-params.mjs";
 
 /** Crude but honest content-type: render text in the browser, download the rest. */
 function looksLikeText(file) {
-  const head = readFileSync(file).subarray(0, 512);
-  return !head.includes(0);
+  let fd;
+  try {
+    fd = openSync(file, "r");
+    const head = Buffer.alloc(512);
+    const read = readSync(fd, head, 0, head.length, 0);
+    return !head.subarray(0, read).includes(0);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 export const TRANSCRIPT_MODEL_SCAN_BYTES = 64 * 1024;
@@ -57,6 +59,8 @@ export async function handleArtifactApiRoute({
   env,
   nowMs,
   clearStoreStats,
+  clearArtifactPage,
+  getArtifactPage,
 }) {
   if (route === "GET /artifacts") {
     const orphanParam = url.searchParams.get("orphan");
@@ -67,13 +71,12 @@ export async function handleArtifactApiRoute({
     ) {
       return send(422, { error: "orphan must be true or false" });
     }
-    const limitParam = url.searchParams.get("limit");
-    const limit = limitParam === null ? 100 : Number(limitParam);
-    if (
-      limit !== undefined &&
-      (!Number.isInteger(limit) || limit < 1 || limit > 500)
-    ) {
-      return send(422, { error: "limit must be an integer between 1 and 500" });
+    let limit;
+    try {
+      limit = parseListLimit(url, { defaultLimit: 100, maxLimit: 500 });
+    } catch (err) {
+      if (err instanceof ApiParameterError) return send(422, err.body);
+      throw err;
     }
     const rawBefore = url.searchParams.get("before");
     let before = null;
@@ -94,17 +97,20 @@ export async function handleArtifactApiRoute({
         return send(422, { error: "invalid before cursor" });
       }
     }
-    const page = listArtifactPage(db, artifactsRoot(env.home), {
-      orphan: orphanParam === null ? undefined : orphanParam === "true",
-      kind: url.searchParams.has("kind")
-        ? url.searchParams.get("kind")
-        : undefined,
-      search: url.searchParams.has("search")
-        ? url.searchParams.get("search")
-        : undefined,
-      limit,
-      before,
-    });
+    const page = getArtifactPage(
+      {
+        orphan: orphanParam === null ? undefined : orphanParam === "true",
+        kind: url.searchParams.has("kind")
+          ? url.searchParams.get("kind")
+          : undefined,
+        search: url.searchParams.has("search")
+          ? url.searchParams.get("search")
+          : undefined,
+        limit,
+        before,
+      },
+      nowMs,
+    );
     return send(200, page);
   }
 
@@ -130,7 +136,10 @@ export async function handleArtifactApiRoute({
       now: nowMs,
       dryRun: !apply,
     });
-    if (apply) clearStoreStats();
+    if (apply) {
+      clearStoreStats();
+      clearArtifactPage();
+    }
     return send(200, result);
   }
 
@@ -138,7 +147,7 @@ export async function handleArtifactApiRoute({
   if (req.method === "GET" && artifactGet) {
     const found = findArtifact(artifactsRoot(env.home), artifactGet[1]);
     if (!found) return send(404, { error: `no artifact ${artifactGet[1]}` });
-    if (hashFile(found.file) !== artifactGet[1]) {
+    if ((await hashFileAsync(found.file)) !== artifactGet[1]) {
       rmSync(found.file, { force: true });
       return send(404, { error: `no artifact ${artifactGet[1]}` });
     }

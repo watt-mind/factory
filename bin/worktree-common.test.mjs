@@ -1,5 +1,7 @@
 import {
   chmodSync,
+  cpSync,
+  existsSync,
   mkdtempSync,
   rmSync,
   mkdirSync,
@@ -8,9 +10,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { afterAll, expect, test } from "bun:test";
 
 const COMMON = path.resolve(import.meta.dir, "worktree-common.sh");
+const WORKTREE_UP = path.resolve(import.meta.dir, "worktree-up.sh");
+const WORKTREE_DAEMONS = path.resolve(import.meta.dir, "worktree-daemons.sh");
 
 // Private port band for this test run (WM-113). Fixed in-band ports (7752,
 // 7772, …) collide with real runtimes, leftover servers, and concurrent CI
@@ -53,6 +58,16 @@ const PORT_BASE = pickPortBase();
 const PORT_RESERVATION_ROOT = mkdtempSync(
   path.join(tmpdir(), "factory-port-reservations-"),
 );
+// The handoff verifier exposes read-only /usr but intentionally starts with an
+// empty /etc. On Debian, /usr/bin/awk points through /etc/alternatives, so give
+// shell fixtures a direct wrapper to the real executable they are testing with.
+const TEST_TOOL_BIN = mkdtempSync(path.join(tmpdir(), "factory-test-tools-"));
+writeFileSync(
+  path.join(TEST_TOOL_BIN, "awk"),
+  '#!/bin/bash\nexec /usr/bin/mawk "$@"\n',
+);
+chmodSync(path.join(TEST_TOOL_BIN, "awk"), 0o755);
+const TEST_PATH = `${TEST_TOOL_BIN}:${process.env.PATH}`;
 const P = (offset) => PORT_BASE + offset;
 const BAND_ENV = {
   FACTORY_PORT_BASE: String(PORT_BASE),
@@ -62,6 +77,7 @@ const BAND_ENV = {
 
 afterAll(() => {
   rmSync(PORT_RESERVATION_ROOT, { recursive: true, force: true });
+  rmSync(TEST_TOOL_BIN, { recursive: true, force: true });
 });
 
 function sh(body, extraEnv = {}) {
@@ -69,7 +85,7 @@ function sh(body, extraEnv = {}) {
     cmd: ["bash", "-c", `source "${COMMON}"\n${body}`],
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, ...BAND_ENV, ...extraEnv },
+    env: { ...process.env, PATH: TEST_PATH, ...BAND_ENV, ...extraEnv },
   });
   return {
     status: result.exitCode,
@@ -78,11 +94,98 @@ function sh(body, extraEnv = {}) {
   };
 }
 
+function command(cmd, cwd, extraEnv = {}) {
+  const result = Bun.spawnSync({
+    cmd,
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, PATH: TEST_PATH, ...extraEnv },
+  });
+  return {
+    status: result.exitCode,
+    stdout: result.stdout.toString(),
+    stderr: result.stderr.toString(),
+  };
+}
+
+test("run log rotation retains bounded generations and copy-truncates a live owner", () => {
+  const r = sh(`
+    dir="$(mktemp -d)"
+    trap 'rm -rf "$dir"' EXIT
+    log="$dir/worker.log"
+    printf 'new' > "$log"
+    printf 'one' > "$log.1"
+    printf 'two' > "$log.2"
+    printf 'three' > "$log.3"
+    printf 'stale' > "$log.4"
+    printf 'staler' > "$log.7"
+    rotate_run_log "$log" 1 3 >/dev/null
+    printf 'generations=%s/%s/%s current=%s stale=%s\\n' "$(cat "$log.1")" "$(cat "$log.2")" "$(cat "$log.3")" "$(wc -c < "$log" | tr -d '[:space:]')" "$(ls "$dir" | grep -c 'worker\\.log\\.[4-9]' || true)"
+
+    exec 9>> "$log"
+    printf 'before' >&9
+    printf '%s\\n' $$ > "$dir/worker.pid"
+    rotate_run_log "$log" 1 3 >/dev/null
+    printf 'after' >&9
+    exec 9>&-
+    printf 'live-current=%s archive=%s\\n' "$(cat "$log")" "$(cat "$log.1")"
+  `);
+  expect(r.status).toBe(0);
+  expect(r.stdout).toContain("generations=new/one/two current=0 stale=0");
+  expect(r.stdout).toContain("live-current=after archive=before");
+});
+
+function git(cwd, ...args) {
+  const result = command(["git", ...args], cwd);
+  if (result.status !== 0) {
+    throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+  }
+  return result.stdout.trim();
+}
+
+function worktreeUpFixture() {
+  const root = mkdtempSync(path.join(tmpdir(), "wm-934-worktree-up-"));
+  const remote = path.join(root, "origin.git");
+  const worktrees = mkdtempSync(path.join(tmpdir(), "wm-934-worktrees-"));
+  const mockBin = mkdtempSync(path.join(tmpdir(), "wm-934-gh-"));
+  mkdirSync(path.join(root, "bin"));
+  cpSync(COMMON, path.join(root, "bin", "worktree-common.sh"));
+  cpSync(WORKTREE_DAEMONS, path.join(root, "bin", "worktree-daemons.sh"));
+  cpSync(WORKTREE_UP, path.join(root, "bin", "worktree-up.sh"));
+  chmodSync(path.join(root, "bin", "worktree-up.sh"), 0o755);
+  writeFileSync(
+    path.join(mockBin, "gh"),
+    "#!/usr/bin/env bash\nprintf '0\\n'\n",
+  );
+  chmodSync(path.join(mockBin, "gh"), 0o755);
+  git(root, "init", "-q", "-b", "develop");
+  git(root, "config", "user.name", "Worktree test");
+  git(root, "config", "user.email", "worktree-test@example.test");
+  git(root, "add", "bin");
+  git(root, "commit", "-qm", "base");
+  git(root, "init", "-q", "--bare", remote);
+  git(root, "remote", "add", "origin", remote);
+  git(root, "push", "-qu", "origin", "develop");
+  return { root, remote, worktrees, mockBin };
+}
+
+function runWorktreeUp(fixture, ticket) {
+  return command(
+    ["bash", "bin/worktree-up.sh", ticket, "--checkout-only"],
+    fixture.root,
+    {
+      FACTORY_WT_ROOT: fixture.worktrees,
+      PATH: `${fixture.mockBin}:${TEST_PATH}`,
+    },
+  );
+}
+
 async function shAsync(body, extraEnv = {}) {
   const proc = Bun.spawn(["bash", "-c", `source "${COMMON}"\n${body}`], {
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, ...BAND_ENV, ...extraEnv },
+    env: { ...process.env, PATH: TEST_PATH, ...BAND_ENV, ...extraEnv },
   });
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -175,19 +278,130 @@ test("provision_instance_local_configs copies ignored local config and skips abs
       "config/repos.yaml\nconfig/policy.yaml\nconfig/schedule.yaml\n",
     );
     writeFileSync(path.join(source, "config", "repos.yaml"), "repos: []\n");
+    writeFileSync(path.join(source, "config", "policy.yaml"), "limits: {}\n");
+    const r = sh(
+      [
+        `git -C "${checkout}" init -q`,
+        `provision_instance_local_configs "${checkout}" "${source}"`,
+        `test "$(cat "${checkout}/config/repos.yaml")" = "repos: []"`,
+        `test "$(cat "${checkout}/config/policy.yaml")" = "limits: {}"`,
+        `git -C "${checkout}" check-ignore -q config/repos.yaml`,
+        `git -C "${checkout}" check-ignore -q config/policy.yaml`,
+      ].join("\n"),
+    );
+    expect(r.status).toBe(0);
+  } finally {
+    rmSync(source, { recursive: true, force: true });
+    rmSync(checkout, { recursive: true, force: true });
+  }
+});
+
+function graphifyFixture() {
+  const source = mkdtempSync(path.join(tmpdir(), "graphify-source-"));
+  const checkout = mkdtempSync(path.join(tmpdir(), "graphify-checkout-"));
+  mkdirSync(path.join(source, "graphify-out"), { recursive: true });
+  writeFileSync(
+    path.join(source, "graphify-out", "graph.json"),
+    '{"nodes": []}\n',
+  );
+  mkdirSync(path.join(checkout, "config"), { recursive: true });
+  return {
+    source,
+    checkout,
+    cleanup() {
+      rmSync(source, { recursive: true, force: true });
+      rmSync(checkout, { recursive: true, force: true });
+    },
+  };
+}
+
+test("provision_instance_local_configs seeds graphify-out when the target ignores it (#1228)", () => {
+  const f = graphifyFixture();
+  try {
+    writeFileSync(
+      path.join(f.checkout, ".gitignore"),
+      "config/repos.yaml\nconfig/policy.yaml\ngraphify-out/\n",
+    );
+    const r = sh(
+      [
+        `git -C "${f.checkout}" init -q`,
+        `provision_instance_local_configs "${f.checkout}" "${f.source}"`,
+        `test "$(cat "${f.checkout}/graphify-out/graph.json")" = '{"nodes": []}'`,
+        `test ! -e "${f.checkout}/graphify-out.tmp."*`,
+        `git -C "${f.checkout}" check-ignore -q "graphify-out/"`,
+      ].join("\n"),
+    );
+    expect(r.status).toBe(0);
+    expect(r.stderr).not.toContain("graphify-out seed skipped");
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("provision_instance_local_configs does not seed graphify-out when the target tracks it (#1228)", () => {
+  const f = graphifyFixture();
+  try {
+    writeFileSync(
+      path.join(f.checkout, ".gitignore"),
+      "config/repos.yaml\nconfig/policy.yaml\n",
+    );
+    const r = sh(
+      [
+        `git -C "${f.checkout}" init -q`,
+        `provision_instance_local_configs "${f.checkout}" "${f.source}"`,
+        `test ! -e "${f.checkout}/graphify-out"`,
+      ].join("\n"),
+    );
+    expect(r.status).toBe(0);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("provision_instance_local_configs skips the graphify-out seed under FACTORY_PROVISION_GRAPHIFY=0 (#1228)", () => {
+  const f = graphifyFixture();
+  try {
+    writeFileSync(
+      path.join(f.checkout, ".gitignore"),
+      "config/repos.yaml\nconfig/policy.yaml\ngraphify-out/\n",
+    );
+    const r = sh(
+      [
+        `git -C "${f.checkout}" init -q`,
+        `FACTORY_PROVISION_GRAPHIFY=0 provision_instance_local_configs "${f.checkout}" "${f.source}"`,
+        `test ! -e "${f.checkout}/graphify-out"`,
+      ].join("\n"),
+    );
+    expect(r.status).toBe(0);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("provision_instance_local_configs never materializes the operator schedule overlay (#1051)", () => {
+  const source = mkdtempSync(path.join(tmpdir(), "gh-1051-config-source-"));
+  const checkout = mkdtempSync(path.join(tmpdir(), "gh-1051-config-checkout-"));
+  try {
+    mkdirSync(path.join(source, "config"), { recursive: true });
+    mkdirSync(path.join(checkout, "config"), { recursive: true });
+    writeFileSync(
+      path.join(checkout, ".gitignore"),
+      "config/repos.yaml\nconfig/policy.yaml\nconfig/schedule.yaml\n",
+    );
+    writeFileSync(path.join(source, "config", "repos.yaml"), "repos: []\n");
+    // A stale, partial operator overlay: a loop trimmed out of the branch's
+    // kernel, left with `enabled: true` and no cadence. Copied in, it would
+    // break the repo verify gate with `unparseable cadence "undefined"`.
     writeFileSync(
       path.join(source, "config", "schedule.yaml"),
-      "schedules: []\n",
+      "schedules:\n  work-bj29:\n    enabled: true\n",
     );
     const r = sh(
       [
         `git -C "${checkout}" init -q`,
         `provision_instance_local_configs "${checkout}" "${source}"`,
         `test "$(cat "${checkout}/config/repos.yaml")" = "repos: []"`,
-        `test "$(cat "${checkout}/config/schedule.yaml")" = "schedules: []"`,
-        `test ! -e "${checkout}/config/policy.yaml"`,
-        `git -C "${checkout}" check-ignore -q config/repos.yaml`,
-        `git -C "${checkout}" check-ignore -q config/schedule.yaml`,
+        `test ! -e "${checkout}/config/schedule.yaml"`,
       ].join("\n"),
     );
     expect(r.status).toBe(0);
@@ -211,6 +425,60 @@ test("provision_instance_local_configs silently skips a source without local fil
   }
 });
 
+test("normalize_path is portable and accepts a missing final component", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "gh-937-normalize-"));
+  const mockBin = mkdtempSync(path.join(tmpdir(), "gh-937-realpath-"));
+  try {
+    mkdirSync(path.join(root, "existing"));
+    writeFileSync(
+      path.join(mockBin, "realpath"),
+      "#!/usr/bin/env bash\nprintf '%s\\n' 'realpath: illegal option -- m' >&2\nexit 1\n",
+    );
+    chmodSync(path.join(mockBin, "realpath"), 0o755);
+    const missing = path.join(root, "existing", "missing-leaf");
+    const r = sh(`normalize_path "${root}/existing/../existing/missing-leaf"`, {
+      PATH: `${mockBin}:${TEST_PATH}`,
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe(missing);
+    expect(r.stderr).toBe("");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
+  }
+});
+
+test("provision_instance_local_configs does not invoke GNU-only realpath", () => {
+  const source = mkdtempSync(path.join(tmpdir(), "gh-937-config-source-"));
+  const checkout = mkdtempSync(path.join(tmpdir(), "gh-937-config-checkout-"));
+  const mockBin = mkdtempSync(path.join(tmpdir(), "gh-937-realpath-"));
+  try {
+    mkdirSync(path.join(source, "config"));
+    mkdirSync(path.join(checkout, "config"));
+    writeFileSync(path.join(source, "config", "repos.yaml"), "repos: []\n");
+    writeFileSync(path.join(checkout, ".gitignore"), "config/repos.yaml\n");
+    writeFileSync(
+      path.join(mockBin, "realpath"),
+      "#!/usr/bin/env bash\nprintf '%s\\n' 'realpath: illegal option -- m' >&2\nexit 1\n",
+    );
+    chmodSync(path.join(mockBin, "realpath"), 0o755);
+    const r = sh(
+      [
+        `git -C "${checkout}" init -q`,
+        `provision_instance_local_configs "${checkout}" "${source}"`,
+        `test "$(cat "${checkout}/config/repos.yaml")" = "repos: []"`,
+      ].join("\n"),
+      { PATH: `${mockBin}:${TEST_PATH}` },
+    );
+    expect(r.status).toBe(0);
+    expect(r.stderr).toBe("");
+  } finally {
+    rmSync(source, { recursive: true, force: true });
+    rmSync(checkout, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
+  }
+});
+
 test("listen_tcp_port rejects a dead pid even if lsof returns a listener", () => {
   const dir = mockLsofDir();
   const pidfile = path.join(dir, "dead.pid");
@@ -219,7 +487,7 @@ test("listen_tcp_port rejects a dead pid even if lsof returns a listener", () =>
     // Override the initial guard to reproduce the kill/lsof TOCTOU window on
     // platforms where lsof correctly rejects a dead -p value.
     const r = sh(`pid_alive() { return 0; }\nlisten_tcp_port "${pidfile}"`, {
-      PATH: `${dir}:${process.env.PATH}`,
+      PATH: `${dir}:${TEST_PATH}`,
       MOCK_LSOF_PORT: String(P(352)),
     });
     expect(r.status).not.toBe(0);
@@ -236,7 +504,7 @@ test("listen_tcp_port rejects a recovered port outside the configured band", () 
     const r = sh(
       `printf '%s\\n' $$ > "${pidfile}"\nlisten_tcp_port "${pidfile}"`,
       {
-        PATH: `${dir}:${process.env.PATH}`,
+        PATH: `${dir}:${TEST_PATH}`,
         MOCK_LSOF_PORT: String(PORT_BASE + 2 * PORT_SPAN),
       },
     );
@@ -254,7 +522,7 @@ test("listen_tcp_port accepts the fixed --here web port below the ticket band", 
     const r = sh(
       `printf '%s\\n' $$ > "${pidfile}"\nlisten_tcp_port "${pidfile}"`,
       {
-        PATH: `${dir}:${process.env.PATH}`,
+        PATH: `${dir}:${TEST_PATH}`,
         MOCK_LSOF_PORT: "7392",
       },
     );
@@ -730,6 +998,76 @@ test("port_listening detects active and closed ports", async () => {
   expect(sh(`port_listening ${P(396)}`).status).not.toBe(0);
 });
 
+test("worktree-up pushes a matching local-only ticket branch and resumes it", () => {
+  const fixture = worktreeUpFixture();
+  const ticket = "WM-934";
+  const branch = `feat/${ticket}`;
+  try {
+    git(fixture.root, "switch", "-qc", branch);
+    writeFileSync(path.join(fixture.root, "local-only.txt"), "local work\n");
+    git(fixture.root, "add", "local-only.txt");
+    git(fixture.root, "commit", "-qm", "local-only work");
+    const tip = git(fixture.root, "rev-parse", branch);
+    git(fixture.root, "switch", "-q", "develop");
+
+    const result = runWorktreeUp(fixture, ticket);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(
+      `auto-pushed matching ticket branch ${branch} at ${tip}`,
+    );
+    expect(git(fixture.remote, "rev-parse", `refs/heads/${branch}`)).toBe(tip);
+    expect(
+      git(path.join(fixture.worktrees, ticket), "branch", "--show-current"),
+    ).toBe(branch);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+    rmSync(fixture.worktrees, { recursive: true, force: true });
+    rmSync(fixture.mockBin, { recursive: true, force: true });
+  }
+});
+
+test("worktree-up fails closed when a matching remote branch diverged after a stale fetch", () => {
+  const fixture = worktreeUpFixture();
+  const ticket = "WM-935";
+  const branch = `feat/${ticket}`;
+  const remoteClone = mkdtempSync(path.join(tmpdir(), "wm-935-origin-work-"));
+  try {
+    git(fixture.root, "switch", "-qc", branch);
+    writeFileSync(path.join(fixture.root, "local.txt"), "local work\n");
+    git(fixture.root, "add", "local.txt");
+    git(fixture.root, "commit", "-qm", "local work");
+    const localTip = git(fixture.root, "rev-parse", branch);
+    git(fixture.root, "update-ref", `refs/remotes/origin/${branch}`, localTip);
+
+    git(remoteClone, "clone", "-q", fixture.remote, ".");
+    git(remoteClone, "config", "user.name", "Remote test");
+    git(remoteClone, "config", "user.email", "remote-test@example.test");
+    git(remoteClone, "switch", "-qc", branch, "origin/develop");
+    writeFileSync(path.join(remoteClone, "remote.txt"), "remote work\n");
+    git(remoteClone, "add", "remote.txt");
+    git(remoteClone, "commit", "-qm", "remote work");
+    git(remoteClone, "push", "-q", "origin", branch);
+    const remoteTip = git(remoteClone, "rev-parse", branch);
+
+    const result = runWorktreeUp(fixture, ticket);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("worktree_branch_has_commits");
+    expect(result.stderr).toContain(localTip);
+    expect(result.stderr).toContain(remoteTip);
+    expect(git(fixture.remote, "rev-parse", `refs/heads/${branch}`)).toBe(
+      remoteTip,
+    );
+    expect(existsSync(path.join(fixture.worktrees, ticket))).toBe(false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+    rmSync(fixture.worktrees, { recursive: true, force: true });
+    rmSync(fixture.mockBin, { recursive: true, force: true });
+    rmSync(remoteClone, { recursive: true, force: true });
+  }
+});
+
 test("ticket_number extracts numeric ID from valid ticket strings", () => {
   expect(sh("ticket_number OPS-123").stdout.trim()).toBe("123");
   expect(sh("ticket_number CLNT-456").stdout.trim()).toBe("456");
@@ -744,6 +1082,68 @@ test("ticket_number dies on malformed ticket inputs", () => {
     expect(r.status).not.toBe(0);
     expect(r.stderr).toContain("ticket must look like OPS-123");
   }
+});
+
+test("ticket_normalize qualifies a bare number with the run's repo", () => {
+  // The dispatch schema accepts a bare GitHub issue number (#908); qualify it
+  // to owner/repo#N so ticket_is_valid, ticket_slug, and ticket_number all
+  // treat it exactly like the canonical GitHub contract form.
+  expect(sh("ticket_normalize 822 watt-mind/factory").stdout.trim()).toBe(
+    "watt-mind/factory#822",
+  );
+  const id = sh("ticket_normalize 822 watt-mind/factory").stdout.trim();
+  expect(sh(`ticket_is_valid "${id}"`).status).toBe(0);
+  expect(sh(`ticket_slug "${id}"`).stdout.trim()).toBe("gh-822");
+  expect(sh(`ticket_number "${id}"`).stdout.trim()).toBe("822");
+});
+
+test("ticket_normalize leaves non-bare and unqualifiable ids untouched", () => {
+  // Linear keys and already-qualified GitHub forms pass through verbatim, so
+  // normalization never disturbs the existing id space.
+  expect(sh("ticket_normalize OPS-123 watt-mind/factory").stdout.trim()).toBe(
+    "OPS-123",
+  );
+  expect(
+    sh("ticket_normalize watt-mind/factory#7 watt-mind/factory").stdout.trim(),
+  ).toBe("watt-mind/factory#7");
+  expect(sh("ticket_normalize '#7' watt-mind/factory").stdout.trim()).toBe(
+    "#7",
+  );
+  // A bare number with no repo to qualify against is left as-is, so it still
+  // fails validation rather than being silently invented into a ticket.
+  const bare = sh('ticket_normalize 822 ""').stdout.trim();
+  expect(bare).toBe("822");
+  expect(sh(`ticket_is_valid "${bare}"`).status).not.toBe(0);
+});
+
+test("github_repo_slug prefers FACTORY_GITHUB_REPO and parses github remotes", () => {
+  expect(
+    sh("github_repo_slug", {
+      FACTORY_GITHUB_REPO: "acme/widgets",
+    }).stdout.trim(),
+  ).toBe("acme/widgets");
+
+  const withRemote = (url) => {
+    const repo = mkdtempSync(path.join(tmpdir(), "wm-908-remote-"));
+    try {
+      execFileSync("git", ["init", "-q"], { cwd: repo });
+      execFileSync("git", ["remote", "add", "origin", url], { cwd: repo });
+      // Empty FACTORY_GITHUB_REPO so the override does not shadow the remote.
+      return sh(`github_repo_slug "${repo}"`, {
+        FACTORY_GITHUB_REPO: "",
+      }).stdout.trim();
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  };
+  expect(withRemote("https://github.com/watt-mind/factory.git")).toBe(
+    "watt-mind/factory",
+  );
+  expect(withRemote("git@github.com:watt-mind/factory.git")).toBe(
+    "watt-mind/factory",
+  );
+  // A non-GitHub remote yields nothing — there is no repo to qualify against.
+  expect(withRemote("https://gitlab.com/watt-mind/factory.git")).toBe("");
 });
 
 test("web_build_hash computes deterministic sha1 and changes on file rename or content edit", () => {

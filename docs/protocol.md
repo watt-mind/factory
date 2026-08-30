@@ -122,10 +122,11 @@ them to native labels of the same spelling.
 `type:chore` is invalid. Adapters reject it locally rather than as an opaque
 API error. Every new issue carries exactly one `source:*`.
 
-**Labels are replaced wholesale, never merged.** Always go through `--add` /
-`--remove` (`factory linear state` / `claim`, or `setLabels` on the adapter).
-A mutation that passes only the labels you want added silently drops every
-other label on the ticket.
+**Labels are replaced wholesale, never merged.** Use `--add` / `--remove` on
+`factory ticket state` or `factory ticket labels` (or `setLabels` on the
+adapter). A mutation that passes only the labels you want added silently drops
+every other label on the ticket. `claim` selects the claim labels itself; it
+accepts only `--agent` for label-related behavior.
 
 ## 4. States
 
@@ -193,14 +194,17 @@ ticket; bundles never arrive there.
 
 ## 7. Execution
 
-**Work comes from the tracker, and only when it's ready.** Dispatchable
-means `Todo` + `ai:agent-ready` + unassigned. `Triage` and `Backlog` are
-not queues to pull from.
+**Work comes from the tracker, and only when it's ready.** Dispatchable means
+`Todo` + `ai:agent-ready` + unassigned. `Triage` is not a queue to pull from.
 
 **Claim before you code.** Assign yourself, move to `In Progress`, add
 `ai:in-progress` + `agent:<harness>`, drop `ai:agent-ready`, then **re-read
 the assignee**. If it isn't you, another agent won the race; take the next
-ticket. This read-back is the entire concurrency control.
+ticket. This read-back is advisory: it detects the common case, and every
+adapter must still perform and honour it. The authoritative dispatch lock is
+the per-repository lock at `~/.factory/locks/<repo>.dispatch.lock`, shared by
+the supervisors that serialize the claim window (the mechanism shipped in
+#928 for #877).
 
 **One ticket, one worktree.** Never share a checkout between concurrent
 tickets. If the repo ships `bin/worktree-up.sh` (or equivalent), it is
@@ -214,8 +218,13 @@ open) and at least every 20 minutes, saying what changed. After 45 minutes
 of silence the ticket is reclaimed.
 
 **Verification is a gate.** Run the ticket's exact Verification Command.
-Never advance state, open a PR, or report success on failing output. Never
-weaken a test to get green.
+For a ticket that changes `event-runtime/web/src/**`, run
+`cd event-runtime/web && bun x tsc --noEmit` before the ticket command as
+well (the root `bun run check` runs it too, once `event-runtime/web` has had
+`bun install`; without that install the web check is skipped). Prefer
+`bun x` to `bunx`; the handoff sandbox provides both spellings for existing
+ticket commands. Never advance state, open a PR, or report success on
+failing output. Never weaken a test to get green.
 
 **Mandatory `## Handoff` comment** before moving to `In Review`:
 
@@ -243,7 +252,7 @@ deliverable, or an investigation with an operational finding. Do not file
 an ordinary question, a read-only lookup with no actionable finding, or an
 inconsequential edit.
 
-Search for duplicates first (`factory linear`, or the tracker's search).
+Search for duplicates first (`factory ticket`, or the tracker's search).
 Comment on the existing ticket with new evidence rather than filing a
 second issue.
 
@@ -276,18 +285,18 @@ Every verb returns this object (or a list of them). Labels are a flat array
 
 ### Verbs
 
-| Verb                                               | Contract                                                                                                                                                                                                                                                                                                                                           |
-| :------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `getTicket(id)`                                    | One ticket. Missing → `ControlPlaneError`.                                                                                                                                                                                                                                                                                                         |
-| `listComments(id)`                                 | Comments as `{ id?, body, createdAt?, user }`.                                                                                                                                                                                                                                                                                                     |
-| `listDispatchable({ team, project? })`             | `Todo` + `ai:agent-ready` + unassigned. This **is** the dispatcher's predicate; do not rephrase it at a call site.                                                                                                                                                                                                                                 |
-| `claim(id, { harness? })`                          | Move to `In Progress`, assign the viewer, drop `ai:agent-ready`, add `ai:in-progress` + `agent:<harness>`. Then **read the assignee back**. `{ ok: false }` means another actor won the race — not an exception. Linear has no compare-and-swap; this read-back is the only concurrency control the factory has, and every adapter must honour it. |
-| `comment(id, body)`                                | Create a comment. `FACTORY_RUN_ID` is stamped as `run:<id>` when set.                                                                                                                                                                                                                                                                              |
-| `transition(id, state, { add, remove, unassign })` | Move to a named state and/or change labels. Unknown state → error listing the ones that exist.                                                                                                                                                                                                                                                     |
-| `setLabels(id, { add, remove })`                   | Compute the **complete** resulting label set and write that. Passing only the labels you want added is how every other label on the ticket disappears.                                                                                                                                                                                             |
-| `file({ team, title, body?, labels?, state? })`    | Create a ticket. Default state `Triage`.                                                                                                                                                                                                                                                                                                           |
-| `appendDetail(id, markdown)`                       | Idempotent description append. `{ appended: false }` if the text is already present.                                                                                                                                                                                                                                                               |
-| `raw(query, variables?)`                           | Escape hatch. Linear GraphQL; GitHub GraphQL via `gh api graphql` (REST when `query` starts with `/`). Grows only when a call site cannot be expressed with the verbs above.                                                                                                                                                                       |
+| Verb                                               | Contract                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| :------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `getTicket(id)`                                    | One ticket. Missing → `ControlPlaneError`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `listComments(id)`                                 | Comments as `{ id?, body, createdAt?, user }`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `listDispatchable({ team, project? })`             | `Todo` + `ai:agent-ready` + unassigned. This **is** the dispatcher's predicate; do not rephrase it at a call site.                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `claim(id, { harness? })`                          | Move to `In Progress`, assign the viewer, drop `ai:agent-ready`, add `ai:in-progress` + `agent:<harness>`. Then **read the assignee back**. `{ ok: false }` means another actor won the race — not an exception. Linear has no compare-and-swap; this advisory read-back detects the common case, and every adapter must perform and honour it. The authoritative dispatch lock is the per-repository lock at `~/.factory/locks/<repo>.dispatch.lock`, shared by supervisors to serialize the claim window (the mechanism shipped in #928 for #877). |
+| `comment(id, body)`                                | Create a comment. `FACTORY_RUN_ID` is stamped as `run:<id>` when set.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `transition(id, state, { add, remove, unassign })` | Move to a named state and/or change labels. Unknown state → error listing the ones that exist.                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `setLabels(id, { add, remove })`                   | Compute the **complete** resulting label set and write that. Passing only the labels you want added is how every other label on the ticket disappears.                                                                                                                                                                                                                                                                                                                                                                                               |
+| `file({ team, title, body?, labels?, state? })`    | Create a ticket. Default state `Triage`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `appendDetail(id, markdown)`                       | Idempotent description append. `{ appended: false }` if the text is already present.                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `raw(query, variables?)`                           | Escape hatch. Linear GraphQL; GitHub GraphQL via `gh api graphql` (REST when `query` starts with `/`). Grows only when a call site cannot be expressed with the verbs above.                                                                                                                                                                                                                                                                                                                                                                         |
 
 Every method returns the parsed answer or throws `ControlPlaneError`.
 `claim` returning `{ ok: false }` is the one protocol outcome that is not
@@ -340,18 +349,43 @@ page URL or screenshot path.
 
 ## 13. Tracker access
 
-**Use `factory linear` — not a tracker MCP, and not a standalone tracker
-CLI.** The factory tool is in git, has this protocol's guardrails built in,
-and its `claim` verb performs the read-back that _is_ the concurrency
-control.
+**Use `factory ticket` — not a tracker MCP, and not a standalone tracker
+CLI.** The `linear` command is a deprecated alias. The factory tool is in git, has this protocol's guardrails built in,
+and its `claim` verb performs the advisory read-back. The authoritative
+concurrency control is the per-repository dispatch lock described in §7.
 
 ```bash
-factory linear get CLNT-616
-factory linear claim CLNT-616 --agent claude
-factory linear comment CLNT-616 "..."
-factory linear state CLNT-616 "In Review" --add ai:needs-review
-factory linear file --team CLNT --title "..." --body "..." --type bug
-factory linear queue --team CLNT
+# Read a ticket.
+factory ticket get CLNT-616
+# List its comments.
+factory ticket comments CLNT-616
+# Atomically claim a dispatchable ticket (`--agent` selects the harness).
+factory ticket claim CLNT-616 --agent claude
+# Return a claim to Todo and unassign it.
+factory ticket unclaim CLNT-616
+# Add a comment.
+factory ticket comment CLNT-616 "..."
+# Demote an underspecified ticket to Triage with an explanation.
+factory ticket triage CLNT-616 --comment "..."
+# Record an answer and return a blocked ticket to Todo when applicable.
+factory ticket answer CLNT-616 "..."
+# Append idempotent Markdown detail to a ticket.
+factory ticket detail CLNT-616 -- "..."
+# Read or mutate labels (`label` is an alias for `labels`).
+factory ticket labels CLNT-616 --add ai:needs-review --remove ai:in-progress
+factory ticket label CLNT-616
+# Change state and/or labels, optionally with a comment.
+factory ticket state CLNT-616 "In Review" --add ai:needs-review
+# File a new Triage or Todo ticket.
+factory ticket file --team CLNT --title "..." --body "..." --type bug
+# List In Progress tickets for Owned Paths collision checks.
+factory ticket inflight --team CLNT --project "BJ29 Coaching"
+# List dispatchable tickets for a team or configured repo.
+factory ticket queue --repo bj29
+# Show the tracker request budget captured by the adapter.
+factory ticket budget
+# Run an explicit adapter query with variables for an unsupported operation.
+factory ticket raw '<query>' --var key=value
 ```
 
 `claim` exits non-zero when another agent won the race — that is not a

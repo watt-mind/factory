@@ -29,6 +29,33 @@ function freshRun(db, key = `key-${Math.random()}`) {
 }
 
 describe("lifecycle", () => {
+  test("createRun persists a normalized ticket subject", () => {
+    const db = openDb(":memory:");
+    createRun(db, {
+      runId: "run_ticket_subject",
+      idempotencyKey: "ticket-subject-key",
+      spec: { input: { ticket: " wm-1503 " } },
+      specJson: '{"input":{"ticket":" wm-1503 "}}',
+      specHash: "sha256:ticket-subject",
+      actor: "test",
+    });
+    createRun(db, {
+      runId: "run_fallback_subject",
+      idempotencyKey: "fallback-subject-key",
+      spec: { subject: "ops-42" },
+      specJson: '{"subject":"ops-42"}',
+      specHash: "sha256:fallback-subject",
+      actor: "test",
+    });
+
+    expect(
+      db.query(`SELECT run_id, subject FROM runs ORDER BY run_id`).all(),
+    ).toEqual([
+      { run_id: "run_fallback_subject", subject: "OPS-42" },
+      { run_id: "run_ticket_subject", subject: "WM-1503" },
+    ]);
+  });
+
   test("happy path PROPOSED → … → COMPLETED, journaled with hashes", () => {
     const db = openDb(":memory:");
     const runId = freshRun(db);

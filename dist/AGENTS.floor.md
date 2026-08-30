@@ -34,6 +34,8 @@ Non-negotiable for every agent in this repo, in any harness. Full protocol: `$FA
 
 **Stay inside `Owned Paths`.** That glob set is what makes parallel work safe; the dispatcher refuses to run two tickets whose sets intersect. Work discovered outside it becomes a new `Triage` issue — it never expands the current ticket.
 
+**Author `Owned Paths` as parser-safe bullets.** Use one repo-relative path or glob per bullet; do not use comma-separated lists, because they are silently dropped. Include sibling test files, and close generated or coupled inputs: `shared/** ⇒ dist/** + plugins/core/** + event-runtime/pins.json`; `agents/X.md ⇒ X.json`; `agents/*.json|*.view.json ⇒ event-runtime/lib/registry.test.mjs`.
+
 **Heartbeat** at each phase change (claimed → implemented → verified → PR open) and at least every 20 minutes, saying what changed. After 45 minutes of silence the ticket is reclaimed.
 
 **Verification is a gate, not a formality.** Run the ticket's exact Verification Command. Never advance state, open a PR, or report success on failing output. Never weaken a test or skip a check to get green — if the test is wrong, that's a finding to report, not to edit around.

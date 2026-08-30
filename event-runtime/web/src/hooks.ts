@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { api } from "./api";
 import { notify } from "./components/ui";
 import { goPrefixActive } from "./goSequence";
@@ -22,13 +28,29 @@ import {
 export const modal = { depth: 0 };
 
 const HIDDEN_REFETCH_INTERVAL = 15_000;
+const BUSY_BACKOFF_INTERVAL = 10_000;
 
-function pollingOptions(visibleInterval: number) {
+let apiBusyBackoff = false;
+
+export function setApiBusyBackoff(busy: boolean) {
+  apiBusyBackoff = busy;
+}
+
+export function isApiBusyBackoff(): boolean {
+  return apiBusyBackoff;
+}
+
+export function pollingOptions(visibleInterval: number) {
   return {
-    refetchInterval: () =>
-      typeof document !== "undefined" && document.hidden
-        ? HIDDEN_REFETCH_INTERVAL
-        : visibleInterval,
+    refetchInterval: () => {
+      if (typeof document !== "undefined" && document.hidden) {
+        return HIDDEN_REFETCH_INTERVAL;
+      }
+      if (apiBusyBackoff) {
+        return Math.max(visibleInterval, BUSY_BACKOFF_INTERVAL);
+      }
+      return visibleInterval;
+    },
     // The interval callback backs hidden tabs off explicitly. Keeping the
     // observer active lets it recompute that cadence after the next tick;
     // TanStack Query's visibility listener refetches active queries as soon
@@ -367,14 +389,59 @@ export function useTheme(): [Theme, () => void] {
   return [theme, cycle];
 }
 
-/** Ticks every second — drives TTL countdowns and relative timestamps. */
+/** One clock subscription drives every TTL countdown and relative timestamp. */
+let now = Date.now();
+let nowTimer: ReturnType<typeof setInterval> | null = null;
+const nowListeners = new Set<() => void>();
+
+function tickNow() {
+  now = Date.now();
+  nowListeners.forEach((listener) => listener());
+}
+
+function pauseNowTicker() {
+  if (nowTimer === null) return;
+  clearInterval(nowTimer);
+  nowTimer = null;
+}
+
+function startNowTicker() {
+  if (nowTimer !== null || document.hidden) return;
+  nowTimer = setInterval(tickNow, 1_000);
+}
+
+function onNowVisibilityChange() {
+  if (document.hidden) {
+    pauseNowTicker();
+    return;
+  }
+  tickNow();
+  startNowTicker();
+}
+
+function subscribeToNow(listener: () => void) {
+  nowListeners.add(listener);
+  if (nowListeners.size === 1) {
+    document.addEventListener("visibilitychange", onNowVisibilityChange);
+    tickNow();
+    startNowTicker();
+  }
+  return () => {
+    nowListeners.delete(listener);
+    if (nowListeners.size === 0) {
+      pauseNowTicker();
+      document.removeEventListener("visibilitychange", onNowVisibilityChange);
+    }
+  };
+}
+
+/** Ticks every second while visible — shared across all consumers. */
 export function useNow(): number {
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, []);
-  return now;
+  return useSyncExternalStore(
+    subscribeToNow,
+    () => now,
+    () => now,
+  );
 }
 
 /**

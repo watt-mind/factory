@@ -12,15 +12,68 @@
  *   factory dispatch event <event-type> [--payload '<json>'] [--watch]
  */
 import { parseArgs } from "node:util";
+import { unauthorizedMessage } from "../event-runtime/lib/client.mjs";
 
 export const DEFAULT_PORT = 7381;
+export const DEFAULT_TIMEOUT_MS = 30_000;
+export const DEFAULT_POLL_MS = 500;
+export const DEFAULT_WATCH_TIMEOUT_MS = 10_000;
+export const DEFAULT_WATCH_MAX_MS = 30 * 60_000;
+export const EXIT = {
+  CONTROL_API_ERROR: 1,
+  RUN_NOT_COMPLETED: 2,
+  NO_PROPOSAL: 3,
+};
+const TERMINAL_STATES = new Set([
+  "COMPLETED",
+  "FAILED",
+  "CANCELLED",
+  "REFUSED",
+  "TIMED_OUT",
+]);
 
 export function resolvePort(env = process.env) {
   return env.FACTORY_EVENT_PORT ? Number(env.FACTORY_EVENT_PORT) : DEFAULT_PORT;
 }
 
+export function resolveTimeoutMs(env = process.env) {
+  const timeoutMs = Number(env.FACTORY_DISPATCH_TIMEOUT_MS);
+  return Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? timeoutMs
+    : DEFAULT_TIMEOUT_MS;
+}
+
+function positiveEnv(env, name, fallback) {
+  const value = Number(env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+export function resolvePollMs(env = process.env) {
+  return positiveEnv(env, "FACTORY_DISPATCH_POLL_MS", DEFAULT_POLL_MS);
+}
+
+export function resolveWatchTimeoutMs(env = process.env) {
+  return positiveEnv(
+    env,
+    "FACTORY_DISPATCH_WATCH_TIMEOUT_MS",
+    DEFAULT_WATCH_TIMEOUT_MS,
+  );
+}
+
+export function resolveWatchMaxMs(env = process.env) {
+  return positiveEnv(
+    env,
+    "FACTORY_DISPATCH_WATCH_MAX_MS",
+    DEFAULT_WATCH_MAX_MS,
+  );
+}
+
 const port = resolvePort();
 const BASE_URL = `http://127.0.0.1:${port}`;
+const timeoutMs = resolveTimeoutMs();
+const pollMs = resolvePollMs();
+const watchTimeoutMs = resolveWatchTimeoutMs();
+const watchMaxMs = resolveWatchMaxMs();
 
 const HELP = `factory dispatch — swift event-runtime task dispatcher
 
@@ -34,12 +87,20 @@ Actions:
   event <type>        Dispatch arbitrary registered event type
 
 Options:
-  --repo <name>       Target repository (default: cwd repo or factory)
+  --repo <name>       Target repository (default: factory)
   --apply             For janitor: execute teardown instead of dry scan
   --payload <json>    Custom JSON payload for 'event' action
   --watch, -w         Stream live run trace to stdout until completion
   --json              Output raw JSON response
   --help, -h          Show this help
+
+Exit status:
+  0                  Event run completed
+  1                  Control API or command error
+  2                  Event run settled in a non-COMPLETED state, or --watch
+                     exceeded FACTORY_DISPATCH_WATCH_MAX_MS (default 30 min)
+  3                  Event was admitted but the planner produced no run
+                     (NOOP, or a proposal still AWAITING_APPROVAL)
 `;
 
 function die(msg, code = 1) {
@@ -48,10 +109,17 @@ function die(msg, code = 1) {
 }
 
 async function api(path, options = {}) {
+  const token = process.env.FACTORY_CONTROL_API_TOKEN || null;
+  const timeout = AbortSignal.timeout(timeoutMs);
   try {
     const res = await fetch(`${BASE_URL}${path}`, {
-      headers: { "content-type": "application/json" },
       ...options,
+      headers: {
+        "content-type": "application/json",
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+        ...options.headers,
+      },
+      signal: timeout,
     });
     const text = await res.text();
     let json = null;
@@ -62,28 +130,60 @@ async function api(path, options = {}) {
     }
     if (!res.ok) {
       const err =
-        json?.error ||
-        (Array.isArray(json?.errors)
-          ? json.errors.join("; ")
-          : `HTTP ${res.status}`);
+        res.status === 401 ||
+        (res.status === 503 && json?.error === "control_api_token_unset")
+          ? unauthorizedMessage(Boolean(token))
+          : json?.error ||
+            (Array.isArray(json?.errors)
+              ? json.errors.join("; ")
+              : `HTTP ${res.status}`);
       die(`control API error on ${path}: ${err}`);
     }
     return json;
   } catch (e) {
+    if (timeout.aborted) {
+      die(`control API request to ${path} timed out after ${timeoutMs}ms`);
+    }
     die(
       `failed to reach event runtime on port ${port} — is 'factory serve' running? (${e.message})`,
     );
   }
 }
 
-async function streamTrace(runId) {
-  console.log(
+function progress(message, json) {
+  (json ? console.error : console.log)(message);
+}
+
+function finalWatchResult(
+  { eventId, runId, state, reasonCode, ...extra },
+  json,
+) {
+  const result = {
+    eventId,
+    runId,
+    state,
+    reasonCode: reasonCode ?? null,
+    ...extra,
+  };
+  if (json) console.log(JSON.stringify(result));
+  else {
+    const subject = runId ? `Run ${runId}` : `Event ${eventId}`;
+    console.log(
+      `\n==> ${subject} settled: ${state} (${result.reasonCode || "ok"})`,
+    );
+  }
+  return result;
+}
+
+async function streamTrace(eventId, runId, json) {
+  progress(
     `\n==> Streaming live trace for run ${runId} (Ctrl+C to detach)...\n`,
+    json,
   );
   let since = 0;
-  let finished = false;
+  const startedAt = Date.now();
 
-  while (!finished) {
+  while (true) {
     const trace = await api(
       `/runs/${encodeURIComponent(runId)}/trace?since=${since}&limit=100`,
     );
@@ -101,40 +201,74 @@ async function streamTrace(runId) {
         else if (entry.data?.tool) detail = `[tool: ${entry.data.tool}]`;
         else detail = JSON.stringify(entry.data || {});
 
-        console.log(`[${time}] ${type.padEnd(14)} ${detail}`);
+        progress(`[${time}] ${type.padEnd(14)} ${detail}`, json);
       }
     }
 
-    const run = await api(`/runs/${encodeURIComponent(runId)}`);
-    if (run && ["COMPLETED", "FAILED", "CANCELLED"].includes(run.state)) {
-      // Not `finished = true`: the `break` below exits the loop directly, so
-      // the while(!finished) condition is never re-evaluated after this branch.
-      console.log(
-        `\n==> Run ${runId} settled: ${run.state} (${run.reasonCode || "ok"})`,
+    const view = await api(`/runs/${encodeURIComponent(runId)}`);
+    const state = view?.run?.state;
+    if (TERMINAL_STATES.has(state)) {
+      const latestAttempt = view.attempts?.at(-1);
+      const result = finalWatchResult(
+        { eventId, runId, state, reasonCode: latestAttempt?.reason_code },
+        json,
       );
-      if (run.state !== "COMPLETED") {
-        process.exit(1);
-      }
-      break;
+      return {
+        exitCode: state === "COMPLETED" ? 0 : EXIT.RUN_NOT_COMPLETED,
+        result,
+      };
     }
 
-    await new Promise((r) => setTimeout(r, 1000));
+    if (Date.now() - startedAt >= watchMaxMs) {
+      const result = finalWatchResult(
+        { eventId, runId, state: "WATCH_TIMEOUT", reasonCode: "watch_timeout" },
+        json,
+      );
+      return { exitCode: EXIT.RUN_NOT_COMPLETED, result };
+    }
+
+    await new Promise((r) => setTimeout(r, pollMs));
   }
 }
 
-async function findRunForEvent(source, eventId, maxWaitMs = 10000) {
+async function findRunForEvent(source, eventId, maxWaitMs = watchTimeoutMs) {
   const start = Date.now();
+  let proposal = null;
   while (Date.now() - start < maxWaitMs) {
-    const res = await api(`/proposals`);
-    const proposal = (res.proposals || []).find(
+    const res = await api(`/proposals?status=all`);
+    proposal = (res.proposals || []).find(
       (p) => p.eventSource === source && p.eventId === eventId,
     );
     if (proposal?.runId) {
-      return proposal.runId;
+      return { runId: proposal.runId };
     }
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, pollMs));
   }
-  return null;
+  // A live proposal without a run is waiting on approval (or approved but
+  // not yet started); noop/rejected/superseded/expired ones are a planner NOOP.
+  if (
+    proposal &&
+    proposal.decision !== "noop" &&
+    !proposal.expired &&
+    (proposal.status === "open" || proposal.status === "approved")
+  ) {
+    return {
+      runId: null,
+      state: "AWAITING_APPROVAL",
+      reasonCode: "awaiting_approval",
+      proposalId: proposal.id ?? null,
+      proposalStatus: proposal.status,
+    };
+  }
+  const events = await api(`/events`);
+  const event = (events.events || []).find(
+    (entry) => entry.source === source && entry.eventId === eventId,
+  );
+  return {
+    runId: null,
+    state: "NOOP",
+    reasonCode: event?.lastPlanError || proposal?.reason || "no_proposal",
+  };
 }
 
 async function main() {
@@ -212,28 +346,38 @@ async function main() {
     body: JSON.stringify(envelope),
   });
 
-  if (values.json) {
+  if (values.json && !values.watch) {
     console.log(JSON.stringify(res, null, 2));
     return;
   }
 
-  console.log(`✓ Admitted event ${res.eventId} (type: ${eventType})`);
-  console.log(`  Source:  ${envelope.source}`);
-  console.log(`  Subject: ${envelope.subject}`);
-  console.log(`  Payload: ${JSON.stringify(payload)}`);
+  progress(`✓ Admitted event ${res.eventId} (type: ${eventType})`, values.json);
+  progress(`  Source:  ${envelope.source}`, values.json);
+  progress(`  Subject: ${envelope.subject}`, values.json);
+  progress(`  Payload: ${JSON.stringify(payload)}`, values.json);
 
   if (values.watch) {
-    console.log(`\nWaiting for planner to assign proposal and run...`);
-    const runId = await findRunForEvent(envelope.source, envelope.eventId);
-    if (runId) {
-      await streamTrace(runId);
-    } else {
-      console.log(
-        `Event admitted. Check status via: factory events ps or web UI http://127.0.0.1:${port}`,
+    progress(
+      `\nWaiting for planner to assign proposal and run...`,
+      values.json,
+    );
+    const planned = await findRunForEvent(envelope.source, envelope.eventId);
+    if (planned.runId) {
+      const watched = await streamTrace(
+        envelope.eventId,
+        planned.runId,
+        values.json,
       );
+      process.exitCode = watched.exitCode;
+    } else {
+      finalWatchResult({ eventId: envelope.eventId, ...planned }, values.json);
+      process.exitCode = EXIT.NO_PROPOSAL;
     }
   } else {
-    console.log(`\nView live status: http://127.0.0.1:${port}/#/events`);
+    progress(
+      `\nView live status: http://127.0.0.1:${process.env.FACTORY_EVENT_WEB_PORT || 7382}/#/events`,
+      values.json,
+    );
   }
 }
 

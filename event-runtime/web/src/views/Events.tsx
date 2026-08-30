@@ -1,4 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { retriggerEnvelope } from "../templates";
@@ -452,11 +457,17 @@ export function Events({
     focusEvent?.type ? `type:${focusEvent.type}` : "",
   );
   const [confirmReplay, setConfirmReplay] = useState(false);
+  const [replayedEventKey, setReplayedEventKey] = useState<string | null>(null);
 
   const fetchAll = context.kind === "repo";
-  const list = useQuery({
+  const list = useInfiniteQuery({
     queryKey: ["events", fetchAll ? "all" : tab],
-    queryFn: () => api.events(fetchAll || tab === "all" ? undefined : tab),
+    queryFn: ({ pageParam }) =>
+      api.events(fetchAll || tab === "all" ? undefined : tab, {
+        before: pageParam,
+      }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.nextBefore ?? undefined,
     ...refetchIntervals.primary,
   });
   const statusQ = useQuery({
@@ -521,15 +532,17 @@ export function Events({
     decisionOf(e, decisions.byId, decisions.byEvent, decisions.runsById);
   const rows: EventFilterRow[] = useMemo(
     () =>
-      (list.data?.events ?? []).map((e) => {
-        const d = decisionOf(
-          e,
-          decisions.byId,
-          decisions.byEvent,
-          decisions.runsById,
-        );
-        return d?.reason ? { ...e, decisionReason: d.reason } : e;
-      }),
+      (list.data?.pages ?? [])
+        .flatMap((page) => page?.events ?? [])
+        .map((e) => {
+          const d = decisionOf(
+            e,
+            decisions.byId,
+            decisions.byEvent,
+            decisions.runsById,
+          );
+          return d?.reason ? { ...e, decisionReason: d.reason } : e;
+        }),
     [list.data, decisions],
   );
   const scoped = useMemo(() => {
@@ -687,6 +700,14 @@ export function Events({
         : null,
     [visible, selectedKey],
   );
+  const replayed = selectedKey === replayedEventKey;
+
+  // A replay is a one-shot action for the current detail selection. Closing
+  // the pane or selecting another event restores the action for that detail.
+  useEffect(() => {
+    setReplayedEventKey(null);
+  }, [selectedKey]);
+
   // The detail pane leaves a compact triage list. Keep the columns needed to
   // identify and compare events; the complete row remains in Display when the
   // pane closes, and every field remains available in the pane itself.
@@ -840,10 +861,11 @@ export function Events({
   });
 
   const replay = useMutation({
-    mutationFn: (envelope: unknown) => api.replay(envelope),
-    onSuccess: (data) => {
+    mutationFn: (event: AdmittedEvent) => api.replay(event.envelope),
+    onSuccess: (data, event) => {
       queryClient.invalidateQueries();
       setConfirmReplay(false);
+      setReplayedEventKey(keyOf(event));
       notify(
         data.duplicate
           ? `Duplicate event ${data.eventId}`
@@ -978,10 +1000,14 @@ export function Events({
               },
             ]
           : []),
-        {
-          label: `Replay ${sel.eventId} through intake…`,
-          run: () => setConfirmReplay(true),
-        },
+        ...(replayed
+          ? []
+          : [
+              {
+                label: `Replay ${sel.eventId} through intake…`,
+                run: () => setConfirmReplay(true),
+              },
+            ]),
         {
           label: `Trigger ${sel.type} again (new event id)…`,
           run: () =>
@@ -1001,6 +1027,7 @@ export function Events({
     sel ? keyOf(sel) : null,
     canRequeue,
     connected,
+    replayed,
     onJumpChain,
     onJumpRun,
     onJumpProposal,
@@ -1042,6 +1069,14 @@ export function Events({
                 rows naming this repo.
               </p>
             )}
+            <p className="mb-3 text-[11px] text-(--text-faint)">
+              {rows.length} loaded {rows.length === 1 ? "row" : "rows"}
+              {list.hasNextPage && " · more events available"}. Facet counts
+              reflect loaded rows.
+              {fetchAll
+                ? " Status-tab counts reflect loaded rows."
+                : " Status-tab counts reflect all available events."}
+            </p>
 
             {(types.length > 1 || sources.length > 1) && (
               <div className="mb-2 flex min-w-0 items-center gap-x-4 whitespace-nowrap text-[11px]">
@@ -1412,6 +1447,20 @@ export function Events({
               range={[windowStart, windowEnd, tokens.length]}
               move={moveWindow}
             />
+            {list.hasNextPage && (
+              <tr>
+                <td colSpan={listCols.length}>
+                  <Button
+                    onClick={() => list.fetchNextPage()}
+                    disabled={list.isFetchingNextPage}
+                  >
+                    {list.isFetchingNextPage
+                      ? "Loading older events…"
+                      : "Older events"}
+                  </Button>
+                </td>
+              </tr>
+            )}
             {visible.length === 0 && (
               <ListEmpty
                 colSpan={listCols.length}
@@ -1513,10 +1562,19 @@ export function Events({
                   </Button>
                 )}
                 <Button
-                  disabled={!connected || replay.isPending}
+                  disabled={!connected || replay.isPending || replayed}
+                  title={
+                    replayed
+                      ? "Already replayed — select another event to replay again"
+                      : undefined
+                  }
                   onClick={() => setConfirmReplay(true)}
                 >
-                  Replay…
+                  {replay.isPending
+                    ? "Replaying…"
+                    : replayed
+                      ? "Replayed"
+                      : "Replay…"}
                 </Button>
                 <Button
                   disabled={!connected}
@@ -1706,10 +1764,14 @@ export function Events({
             <Button onClick={() => setConfirmReplay(false)}>Cancel</Button>
             <Button
               variant="primary"
-              disabled={!connected || replay.isPending}
-              onClick={() => replay.mutate(sel.envelope)}
+              disabled={!connected || replay.isPending || replayed}
+              onClick={() => replay.mutate(sel)}
             >
-              Replay
+              {replay.isPending
+                ? "Replaying…"
+                : replayed
+                  ? "Replayed"
+                  : "Replay"}
             </Button>
           </div>
         </Dialog>

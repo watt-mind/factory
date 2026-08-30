@@ -5,13 +5,23 @@ import path from "node:path";
 import { openDb } from "./db.mjs";
 import {
   DEFAULT_NOTIFY_CMD,
+  ensureNotifyLog,
   notifyCommand,
   notifyEnabled,
   notifyPending,
   pendingNotifications,
   sendNotification,
+  sweepNotifyLog,
 } from "./notify.mjs";
 import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
+import { fileURLToPath } from "node:url";
+
+// Repo root: this file is event-runtime/lib/notify.test.mjs, so two dirs up.
+const FACTORY_ROOT_DIR = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+);
 
 const tmp = (p) => tmpDir(p);
 
@@ -102,14 +112,39 @@ function insertProposal(
 }
 
 describe("notify (WM-65)", () => {
-  test("config: off by default, FACTORY_EVENT_NOTIFY=1 enables, CMD overrides the notify.py default", () => {
+  test("config: off by default, FACTORY_EVENT_NOTIFY=1 enables, CMD overrides the resolved default", () => {
     expect(notifyEnabled({})).toBe(false);
     expect(notifyEnabled({ FACTORY_EVENT_NOTIFY: "0" })).toBe(false);
     expect(notifyEnabled({ FACTORY_EVENT_NOTIFY: "1" })).toBe(true);
     expect(notifyEnabled({ FACTORY_EVENT_NOTIFY: "true" })).toBe(true);
     expect(notifyCommand({})).toBe(DEFAULT_NOTIFY_CMD);
-    expect(DEFAULT_NOTIFY_CMD).toContain("python3 ");
-    expect(DEFAULT_NOTIFY_CMD).toContain("scripts/notify.py");
+    // WM-879: no in-tree default. Whatever config/policy.yaml resolves to, or
+    // null in a clone that configured nothing — never a hardcoded private path.
+    expect(
+      DEFAULT_NOTIFY_CMD === null || typeof DEFAULT_NOTIFY_CMD === "string",
+    ).toBe(true);
+    // The "no hardcoded private path" guarantee is about the TRACKED tree, not
+    // the operator's gitignored instance config. DEFAULT_NOTIFY_CMD resolves
+    // from config/policy.yaml, which on the operator's own machine (and the
+    // self-hosted CI runner, same box, user `hdkiller`) legitimately points at
+    // a personal notify script — asserting on that resolved value tests the
+    // instance, not the tree, and fails wherever an instance config is present.
+    // Assert the guarantee where it belongs: the committed example config and
+    // this module's source carry no personal path.
+    const trackedSources = [
+      readFileSync(
+        path.join(FACTORY_ROOT_DIR, "config/policy.example.yaml"),
+        "utf8",
+      ),
+      readFileSync(
+        path.join(FACTORY_ROOT_DIR, "event-runtime/lib/notify.mjs"),
+        "utf8",
+      ),
+    ].join("\n");
+    // No personal home path (e.g. ~/Develop/hdkiller/… or /home/hdkiller/…) may
+    // ship in the tracked tree. A doc comment naming "notify.py" as a concept
+    // is fine; a hardcoded operator directory is not.
+    expect(trackedSources).not.toMatch(/[/~]hdkiller[/"']|\/home\/[a-z]+\//i);
     expect(notifyCommand({ FACTORY_EVENT_NOTIFY_CMD: "/x/stub" })).toBe(
       "/x/stub",
     );
@@ -242,6 +277,7 @@ describe("notify (WM-65)", () => {
       notifyPending(db, {
         now: at,
         enabled: true,
+        command: "/x/stub",
         send: () => Promise.resolve({ ok: true, exitCode: 0, error: null }),
       }).sent;
 
@@ -358,6 +394,101 @@ describe("notify (WM-65)", () => {
       createdAt: new Date(now - 60 * 60_000).toISOString(),
     });
     expect(pendingNotifications(db, { now })).toEqual([]);
+  });
+
+  test("sweeps stale markers for resolved referents but preserves parked-event dedup", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const old = new Date(now - 15 * 24 * 60 * 60 * 1000).toISOString();
+    ensureNotifyLog(db);
+    insertEvent(db, { eventId: "evt-resolved", status: "completed" });
+    insertEvent(db, { eventId: "evt-parked", status: "human_needed" });
+    insertProposal(db, {
+      id: "prop-decided",
+      eventId: "evt-resolved",
+      status: "approved",
+    });
+    insertProposal(db, { id: "prop-open", eventId: "evt-parked" });
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES (?, ?, 'old marker', ?)`,
+    ).run("human_needed", "test/evt-resolved", old);
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES (?, ?, 'old marker', ?)`,
+    ).run("human_needed", "test/evt-parked", old);
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES (?, ?, 'old marker', ?)`,
+    ).run("proposal_ttl", "prop-decided", old);
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES (?, ?, 'old marker', ?)`,
+    ).run("proposal_ttl", "prop-open", old);
+
+    expect(sweepNotifyLog(db, { now })).toBe(2);
+    expect(
+      db.query("SELECT kind, target FROM notify_log ORDER BY target").all(),
+    ).toEqual([
+      { kind: "proposal_ttl", target: "prop-open" },
+      { kind: "human_needed", target: "test/evt-parked" },
+    ]);
+
+    // A sweep must not remove the marker for an eligible park: no duplicate.
+    expect(
+      notifyPending(db, { now, enabled: true, command: "/x/stub" }).sent,
+    ).toEqual([]);
+  });
+
+  test("a recent marker for an already-resolved referent survives the sweep", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const recent = new Date(now - 2 * 24 * 60 * 60 * 1000).toISOString();
+    ensureNotifyLog(db);
+    insertEvent(db, { eventId: "evt-done", status: "completed" });
+    insertProposal(db, {
+      id: "prop-done",
+      eventId: "evt-done",
+      status: "rejected",
+    });
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES (?, ?, 'recent marker', ?)`,
+    ).run("human_needed", "test/evt-done", recent);
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES (?, ?, 'recent marker', ?)`,
+    ).run("proposal_ttl", "prop-done", recent);
+
+    expect(sweepNotifyLog(db, { now })).toBe(0);
+    expect(db.query("SELECT count(*) AS n FROM notify_log").get().n).toBe(2);
+  });
+
+  test("an event id containing '/' still matches its parked event", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const old = new Date(now - 15 * 24 * 60 * 60 * 1000).toISOString();
+    ensureNotifyLog(db);
+    insertEvent(db, {
+      source: "github",
+      eventId: "issue/42/comment",
+      status: "human_needed",
+    });
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES (?, ?, 'old marker', ?)`,
+    ).run("human_needed", "github/issue/42/comment", old);
+
+    expect(sweepNotifyLog(db, { now })).toBe(0);
+  });
+
+  test("sweepNotifyLog rejects a non-positive retention", () => {
+    const db = openDb(":memory:");
+    for (const retentionDays of [0, -1, NaN, Infinity]) {
+      expect(() => sweepNotifyLog(db, { retentionDays })).toThrow(
+        /retentionDays must be a positive number of days/,
+      );
+    }
   });
 
   test("a notifier that exits non-zero is recorded on notify_log and logged, not thrown", async () => {

@@ -14,10 +14,26 @@
  *
  * Deliberately dependency-free: this runs from launchd with the system node and
  * must not require an install step to work.
+ *
+ * Glob expansion supports `**`, `*`, `?`, and recursive `{a,b}` brace
+ * alternation. Wildcards remain glob syntax inside each brace branch; malformed
+ * brace expressions are refused rather than being passed through to RegExp.
  */
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
+
+/** Inputs whose changes alter the zero-pack merged registry digest. */
+export const REGISTRY_INPUT_GLOBS = [
+  "event-runtime/agents/**",
+  "event-runtime/event-types.json",
+  "event-runtime/edges.json",
+  "event-runtime/schedules.json",
+];
+
+/** The tracked zero-pack registry digest baseline. */
+export const REGISTRY_DIGEST_BASELINE_PATH =
+  "event-runtime/lib/registry.test.mjs";
 
 /**
  * Extract the Owned Paths bullet list (levels 2-4) from a Linear issue description.
@@ -26,10 +42,15 @@ import path from "node:path";
  * everything" rather than "not dispatchable".
  */
 export function parseOwnedPaths(description = "") {
-  const section = description.split(/^#{2,4}\s+/m).find((s) => {
-    const heading = s.split("\n")[0];
-    return /\bOwned Paths\b/i.test(heading);
-  });
+  // `split` retains the pre-heading prose as index 0. It cannot be a section,
+  // even when it mentions "Owned Paths", so only inspect heading-led chunks.
+  const section = description
+    .split(/^#{2,4}\s+/m)
+    .slice(1)
+    .find((s) => {
+      const heading = s.split("\n")[0];
+      return /\bOwned Paths\b/i.test(heading);
+    });
   if (!section) return [];
 
   // Real tickets write this section three different ways — bullet lists, fenced
@@ -181,6 +202,85 @@ function escapeLiteral(s) {
   return s.replace(/[.+^${}()|[\]\\]/g, "\\$&");
 }
 
+/** An Owned Paths glob is structurally invalid and must be refused. */
+export class OwnedPathsPatternError extends Error {
+  constructor(pattern, reason) {
+    super(`invalid Owned Paths glob ${JSON.stringify(pattern)}: ${reason}`);
+    this.name = "OwnedPathsPatternError";
+    this.code = "invalid_owned_paths_glob";
+    this.pattern = pattern;
+  }
+}
+
+/** A closure policy was supplied by a caller but does not have a safe shape. */
+export class OwnedPathsPolicyError extends Error {
+  constructor(reason) {
+    super(`invalid Owned Paths policy registryDigest: ${reason}`);
+    this.name = "OwnedPathsPolicyError";
+    this.code = "invalid_owned_paths_policy";
+  }
+}
+
+function compileBraceAlternation(glob, start) {
+  const alternatives = [];
+  let index = start;
+
+  while (true) {
+    const branch = compileGlob(glob, index, new Set([",", "}"]));
+    alternatives.push(branch.source);
+    index = branch.index;
+
+    if (index === glob.length) {
+      throw new OwnedPathsPatternError(glob, "unclosed brace alternation");
+    }
+    if (glob[index] === "}") {
+      return { source: `(?:${alternatives.join("|")})`, index: index + 1 };
+    }
+    index += 1; // comma: begin the next alternative
+  }
+}
+
+/** Compile glob syntax until the end or one of the caller's delimiters. */
+function compileGlob(glob, start = 0, delimiters = new Set()) {
+  let source = "";
+  let index = start;
+
+  while (index < glob.length) {
+    const c = glob[index];
+    if (delimiters.has(c)) break;
+
+    if (c === "*") {
+      if (glob[index + 1] === "*") {
+        // `**/` should also match zero segments, so `a/**/b.ts` matches `a/b.ts`.
+        if (glob[index + 2] === "/") {
+          source += "(?:.*/)?";
+          index += 3;
+        } else {
+          source += ".*";
+          index += 2;
+        }
+      } else {
+        source += "[^/]*";
+        index += 1;
+      }
+    } else if (c === "?") {
+      source += "[^/]";
+      index += 1;
+    } else if (c === "{") {
+      const brace = compileBraceAlternation(glob, index + 1);
+      source += brace.source;
+      index = brace.index;
+    } else if (c === "}") {
+      throw new OwnedPathsPatternError(glob, "unmatched closing brace");
+    } else {
+      source += escapeLiteral(c);
+      index += 1;
+    }
+  }
+
+  return { source, index };
+}
+
 /**
  * Compile a glob to a RegExp.
  *
@@ -189,6 +289,9 @@ function escapeLiteral(s) {
  * `/` or a bare directory means "everything under it".
  */
 export function globToRegExp(glob) {
+  if (typeof glob !== "string") {
+    throw new OwnedPathsPatternError(glob, "pattern must be a string");
+  }
   let g = glob.trim().replace(/^\.\//, "");
   // A path with no glob metacharacters and no extension is treated as a prefix:
   // `app/services` owns everything beneath it. It also names a real, concrete
@@ -201,37 +304,7 @@ export function globToRegExp(glob) {
   if (g.endsWith("/")) g += "**";
   else if (matchSelf) g += "/**";
 
-  let re = "";
-  for (let i = 0; i < g.length; i++) {
-    const c = g[i];
-    if (c === "*") {
-      if (g[i + 1] === "*") {
-        // `**/` should also match zero segments, so `a/**/b.ts` matches `a/b.ts`.
-        if (g[i + 2] === "/") {
-          re += "(?:.*/)?";
-          i += 2;
-        } else {
-          re += ".*";
-          i += 1;
-        }
-      } else {
-        re += "[^/]*";
-      }
-    } else if (c === "?") re += "[^/]";
-    else if (c === "{") {
-      const close = g.indexOf("}", i);
-      if (close === -1) {
-        re += "\\{";
-        continue;
-      }
-      const alts = g
-        .slice(i + 1, close)
-        .split(",")
-        .map((a) => escapeLiteral(a.trim()));
-      re += `(?:${alts.join("|")})`;
-      i = close;
-    } else re += escapeLiteral(c);
-  }
+  let re = compileGlob(g).source;
   // The "/**" appended above compiles to a trailing literal "/.*"; make the
   // "/" + anything optional so the bare path matches itself as well.
   if (matchSelf) re = re.replace(/\/\.\*$/, "(?:/.*)?");
@@ -250,33 +323,162 @@ export function globToRegExp(glob) {
  */
 export function globsOverlap(a, b) {
   if (a === b) return true;
+  try {
+    const ra = globToRegExp(a);
+    const rb = globToRegExp(b);
+    const isConcrete = (g) => !/[*?{]/.test(g);
 
-  const ra = globToRegExp(a);
-  const rb = globToRegExp(b);
-  const isConcrete = (g) => !/[*?{]/.test(g);
+    // At least one side names an actual path: decide by matching, which is exact.
+    if (isConcrete(a) && isConcrete(b)) return ra.test(b) || rb.test(a);
+    if (isConcrete(a)) return rb.test(a);
+    if (isConcrete(b)) return ra.test(b);
 
-  // At least one side names an actual path: decide by matching, which is exact.
-  if (isConcrete(a) && isConcrete(b)) return ra.test(b) || rb.test(a);
-  if (isConcrete(a)) return rb.test(a);
-  if (isConcrete(b)) return ra.test(b);
+    // Both wildcarded: compare literal directory prefixes. A prefix of "" means
+    // the glob starts with a wildcard and can reach anywhere, so it overlaps
+    // everything -- which is why this is computed only for wildcarded globs.
+    // (Reducing a concrete root-level file like `AGENTS.md` to "" here would make
+    // it collide with every ticket in the repo.)
+    const literalPrefix = (g) => {
+      const i = g.search(/[*?{]/);
+      return (i === -1 ? g : g.slice(0, i)).replace(/[^/]*$/, "");
+    };
+    const la = literalPrefix(a);
+    const lb = literalPrefix(b);
+    return la.startsWith(lb) || lb.startsWith(la);
+  } catch (error) {
+    // A malformed Owned Paths glob must serialize work, never crash dispatch.
+    if (error instanceof OwnedPathsPatternError) return true;
+    throw error;
+  }
+}
 
-  // Both wildcarded: compare literal directory prefixes. A prefix of "" means
-  // the glob starts with a wildcard and can reach anywhere, so it overlaps
-  // everything -- which is why this is computed only for wildcarded globs.
-  // (Reducing a concrete root-level file like `AGENTS.md` to "" here would make
-  // it collide with every ticket in the repo.)
-  const literalPrefix = (g) => {
-    const i = g.search(/[*?{]/);
-    return (i === -1 ? g : g.slice(0, i)).replace(/[^/]*$/, "");
+const hasGlobSyntax = (segment) => /[*?{]/.test(segment);
+
+/**
+ * Whether two one-segment globs could name the same segment. This is
+ * deliberately conservative for two wildcarded segments, but preserves their
+ * literal prefixes/suffixes so `foo*` and `bar*` do not become an anchor.
+ */
+function segmentsMayOverlap(a, b) {
+  if (a === b) return true;
+  if (!hasGlobSyntax(a)) return globToRegExp(b).test(a);
+  if (!hasGlobSyntax(b)) return globToRegExp(a).test(b);
+  if (a.includes("{") || b.includes("{")) return true;
+
+  const literalPrefix = (segment) => segment.slice(0, segment.search(/[*?]/));
+  const literalSuffix = (segment) => {
+    const index = Math.max(segment.lastIndexOf("*"), segment.lastIndexOf("?"));
+    return segment.slice(index + 1);
   };
-  const la = literalPrefix(a);
-  const lb = literalPrefix(b);
-  return la.startsWith(lb) || lb.startsWith(la);
+  const prefixA = literalPrefix(a);
+  const prefixB = literalPrefix(b);
+  const suffixA = literalSuffix(a);
+  const suffixB = literalSuffix(b);
+  return (
+    (!prefixA ||
+      !prefixB ||
+      prefixA.startsWith(prefixB) ||
+      prefixB.startsWith(prefixA)) &&
+    (!suffixA ||
+      !suffixB ||
+      suffixA.endsWith(suffixB) ||
+      suffixB.endsWith(suffixA))
+  );
+}
+
+/**
+ * Segment-aware intersection for registry inputs. Unlike generic Owned Paths
+ * collision detection, this must not let a leading `**` make unrelated input
+ * directories look like anchors.
+ */
+function registryGlobOverlaps(owned, input) {
+  // Validate the whole patterns first so malformed Owned Paths retain the
+  // generic fail-closed behavior below.
+  globToRegExp(owned);
+  globToRegExp(input);
+  const a = owned.replace(/^\.\//, "").split("/");
+  const b = input.replace(/^\.\//, "").split("/");
+  const memo = new Map();
+
+  const intersects = (i, j) => {
+    const key = `${i}:${j}`;
+    if (memo.has(key)) return memo.get(key);
+    let result;
+    if (i === a.length || j === b.length) {
+      result =
+        (i === a.length && b.slice(j).every((segment) => segment === "**")) ||
+        (j === b.length && a.slice(i).every((segment) => segment === "**"));
+    } else if (a[i] === "**") {
+      result = intersects(i + 1, j) || intersects(i, j + 1);
+    } else if (b[j] === "**") {
+      result = intersects(i, j + 1) || intersects(i + 1, j);
+    } else {
+      result = segmentsMayOverlap(a[i], b[j]) && intersects(i + 1, j + 1);
+    }
+    memo.set(key, result);
+    return result;
+  };
+
+  return intersects(0, 0);
+}
+
+/**
+ * Registry inputs are deliberately stricter than generic Owned Paths overlap.
+ * A leading wildcard can reach every directory, but must retain a literal
+ * segment anchor before it can opt a ticket into the registry-digest closure.
+ */
+function registryInputOverlaps(owned, input) {
+  try {
+    const ownedSegments = owned.replace(/^\.\//, "").split("/");
+    const inputSegments = input.replace(/^\.\//, "").split("/");
+    // A leading wildcard alone is too broad to opt into a non-root registry
+    // input (for example, `**/*.json`). It must carry at least one literal
+    // path segment as an anchor; root-level files are their own anchor.
+    if (
+      hasGlobSyntax(ownedSegments[0] ?? "") &&
+      (ownedSegments[0] === "**" || inputSegments.length > 1) &&
+      !ownedSegments
+        .slice(1)
+        .some((segment) => segment !== "**" && !hasGlobSyntax(segment))
+    ) {
+      return false;
+    }
+    return registryGlobOverlaps(owned, input);
+  } catch (error) {
+    if (error instanceof OwnedPathsPatternError) return true;
+    throw error;
+  }
 }
 
 /** Do two tickets' Owned Paths sets intersect? */
 export function pathsCollide(setA = [], setB = []) {
   return setA.some((a) => setB.some((b) => globsOverlap(a, b)));
+}
+
+/**
+ * Whether an Owned Paths glob is equivalent to the fail-closed whole-repo
+ * sentinel. A trailing single-segment wildcard and repeated `/**` segments
+ * reach every path just like `**`; treating only the literal spelling as
+ * unknown scope opens a dispatch collision bypass.
+ */
+export function isMatchEverythingGlob(value) {
+  const glob = String(value ?? "")
+    .trim()
+    .replace(/^\.\//, "")
+    .replace(/\/+$/, "");
+  if (!glob) return false;
+
+  const segments = glob.split("/");
+  return (
+    segments[0] === "**" &&
+    segments
+      .slice(1)
+      .every(
+        (segment, index) =>
+          segment === "**" ||
+          (segment === "*" && index === segments.length - 2),
+      )
+  );
 }
 
 /**
@@ -293,25 +495,20 @@ export function pathOverlaps(setA = [], setB = []) {
 
 /**
  * The set of overlaps that still refuse dispatch under advisory mode (WM-677):
- * a `**` claim on either side, and nothing else. `**` is the fail-closed
- * sentinel for "this ticket's scope is unknown, it must run alone" — the one
- * claim a rebase cannot reason about. Everything else, including two tickets
- * naming the SAME concrete file, is textual overlap: same file is not same
- * lines (tickets qualify claims like `App.tsx (interval constants only)` for
- * exactly this), and rebase/merge-fix resolve it far more often than not. So
- * it is recorded on the proposal and dispatch proceeds. The identical-file
- * rule was tried first and refused App.tsx/hooks.ts/api.mjs across four
- * tickets in one batch on 2026-08-18 — precisely the starvation advisory mode
- * exists to end.
+ * a whole-repo claim on either side, and nothing else. `**` and equivalent
+ * globs are the fail-closed sentinel for "this ticket's scope is unknown, it
+ * must run alone" — the one claim a rebase cannot reason about. Everything
+ * else, including two tickets naming the SAME concrete file, is textual
+ * overlap: same file is not same lines (tickets qualify claims like `App.tsx
+ * (interval constants only)` for exactly this), and rebase/merge-fix resolve
+ * it far more often than not. So it is recorded on the proposal and dispatch
+ * proceeds. The identical-file rule was tried first and refused
+ * App.tsx/hooks.ts/api.mjs across four tickets in one batch on 2026-08-18 —
+ * precisely the starvation advisory mode exists to end.
  */
 export function hardPathConflicts(setA = [], setB = []) {
-  const norm = (g) =>
-    String(g ?? "")
-      .trim()
-      .replace(/^\.\//, "")
-      .replace(/\/$/, "");
   return pathOverlaps(setA, setB).filter(
-    ({ a, b }) => norm(a) === "**" || norm(b) === "**",
+    ({ a, b }) => isMatchEverythingGlob(a) || isMatchEverythingGlob(b),
   );
 }
 
@@ -346,6 +543,55 @@ function matchingManifestPaths(repoPath, manifestGlobs = []) {
     }
   }
   return [...matched].sort();
+}
+
+/**
+ * Normalize a raw pin key into a repository-root-relative path.
+ *
+ * Shipped manifests record their pins relative to the pack root — a manifest at
+ * `event-runtime/agents/triage-scan.json` pins `agents/triage-scan.md`, meaning
+ * `event-runtime/agents/triage-scan.md`. Owned Paths and the manifest path used
+ * for closure are both repo-root-relative, so the raw pack-relative key never
+ * matches and the closure guard silently misses the required manifest. Resolve
+ * the key against the pack root — derived from the manifest's own location
+ * (`<packRoot>/agents/<id>.json`), not a hard-coded `event-runtime` prefix — so
+ * any pack layout normalizes correctly.
+ *
+ * Keys that are already repo-root-relative (they begin with the pack root) are
+ * left untouched, so existing root-relative manifests are not double-prefixed.
+ * A key that normalizes outside the repository (via `..` or an absolute path) is
+ * a manifest/config error and throws — closure is fail-closed around it rather
+ * than silently resolving to a path beyond the repo.
+ */
+function normalizePinPath(pinKey, manifestPath) {
+  const key = String(pinKey ?? "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "");
+  if (!key) return null;
+
+  const manifestRel = String(manifestPath ?? "")
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "");
+  const packRoot = path.posix.dirname(path.posix.dirname(manifestRel));
+  const rootPrefix = packRoot && packRoot !== "." ? `${packRoot}/` : "";
+
+  const joined =
+    rootPrefix && (key === packRoot || key.startsWith(rootPrefix))
+      ? key
+      : path.posix.join(packRoot, key);
+  const normalized = path.posix.normalize(joined);
+
+  if (
+    normalized === ".." ||
+    normalized.startsWith("../") ||
+    path.posix.isAbsolute(normalized)
+  ) {
+    throw new Error(
+      `owned-path closure check failed: pin path ${JSON.stringify(pinKey)} in manifest ${manifestPath} normalizes outside the repository (${normalized})`,
+    );
+  }
+  return normalized;
 }
 
 function parsePinnedPaths(manifestPath) {
@@ -384,7 +630,11 @@ export function readPinManifestRequirements(repoPath, manifestGlobs = []) {
 
   for (const manifest of manifests) {
     const manifestPath = path.join(absoluteRepo, manifest);
-    const pinnedPaths = parsePinnedPaths(manifestPath);
+    // Raw pin keys are pack-root-relative; normalize them against the manifest's
+    // repo-root-relative location so closure compares like-for-like namespaces.
+    const pinnedPaths = parsePinnedPaths(manifestPath)
+      .map((pinKey) => normalizePinPath(pinKey, manifest))
+      .filter(Boolean);
     out.push({ manifestPath: manifest, pinnedPaths });
   }
 
@@ -403,6 +653,29 @@ export function ownedPathsClosureGaps({
   pinManifestRequirements = [],
 } = {}) {
   const own = Array.isArray(ownedPaths) ? ownedPaths : [];
+  const rawRegistryDigest = ownedPathsPolicy?.registryDigest;
+  let registryDigest = null;
+  if (rawRegistryDigest !== undefined && rawRegistryDigest !== null) {
+    if (
+      typeof rawRegistryDigest !== "object" ||
+      Array.isArray(rawRegistryDigest) ||
+      !Array.isArray(rawRegistryDigest.inputs) ||
+      rawRegistryDigest.inputs.length === 0 ||
+      !rawRegistryDigest.inputs.every(
+        (input) => typeof input === "string" && input.trim(),
+      ) ||
+      typeof rawRegistryDigest.baseline !== "string" ||
+      !rawRegistryDigest.baseline.trim()
+    ) {
+      throw new OwnedPathsPolicyError(
+        "registryDigest must be { inputs: non-empty string[], baseline: non-empty string }",
+      );
+    }
+    registryDigest = {
+      inputs: rawRegistryDigest.inputs.map((input) => input.trim()),
+      baseline: rawRegistryDigest.baseline.trim(),
+    };
+  }
   const policy = {
     direct: Array.isArray(ownedPathsPolicy?.direct)
       ? ownedPathsPolicy.direct
@@ -410,6 +683,7 @@ export function ownedPathsClosureGaps({
     pinManifests: Array.isArray(ownedPathsPolicy?.pinManifests)
       ? ownedPathsPolicy.pinManifests
       : [],
+    registryDigest,
   };
 
   const gaps = [];
@@ -461,6 +735,24 @@ export function ownedPathsClosureGaps({
     }
   }
 
+  const registryInput = policy.registryDigest
+    ? own.find((owned) =>
+        policy.registryDigest.inputs.some((input) =>
+          registryInputOverlaps(owned, input),
+        ),
+      )
+    : null;
+  if (
+    registryInput &&
+    !own.some((owned) => globsOverlap(owned, policy.registryDigest.baseline))
+  ) {
+    addGap({
+      rule: "registry-digest",
+      requiredPath: policy.registryDigest.baseline,
+      requiredBy: registryInput,
+    });
+  }
+
   return gaps;
 }
 
@@ -469,6 +761,9 @@ export function formatOwnedPathClosureGaps(gaps = []) {
   return gaps.map((gap) => {
     if (gap.rule === "direct") {
       return `Missing required Owned Paths entry: ${gap.requiredPath} (required by ${gap.requiredBy})`;
+    }
+    if (gap.rule === "registry-digest") {
+      return `own ${gap.requiredPath}: registry input ${gap.requiredBy} changes the zero-pack digest baseline`;
     }
     return `Missing required Owned Paths entry: ${gap.requiredPath} (required by ${gap.requiredBy} from ${gap.manifestPath})`;
   });

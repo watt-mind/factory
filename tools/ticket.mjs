@@ -10,13 +10,14 @@
  *   bun tools/ticket.mjs get CLNT-616
  *   bun tools/ticket.mjs comments CLNT-616
  *   bun tools/ticket.mjs claim CLNT-616 --agent claude
+ *   bun tools/ticket.mjs unclaim CLNT-616
  *   bun tools/ticket.mjs comment CLNT-616 "verified: 42 tests pass"
  *   bun tools/ticket.mjs triage CLNT-616 --comment "Owned Paths need revision"
  *   bun tools/ticket.mjs answer CLNT-616 "Use the existing token cache"
- *   bun tools/ticket.mjs detail CLNT-616 "## Acceptance criteria\n- [ ] ..."
+ *   bun tools/ticket.mjs detail CLNT-616 -- "## Acceptance criteria\n- [ ] ..."
  *   bun tools/ticket.mjs labels CLNT-616 --add ai:needs-review --remove ai:in-progress
  *   bun tools/ticket.mjs state CLNT-616 "In Review" --add ai:needs-review
- *   bun tools/ticket.mjs file --team CLNT --title "..." --body "..." --type bug
+ *   bun tools/ticket.mjs file --team CLNT --title "..." --body "..." --type bug --dedupe-key "..."
  *   bun tools/ticket.mjs queue --repo bj29
  *   bun tools/ticket.mjs budget
  *   bun tools/ticket.mjs raw '<graphql>' --var key=value
@@ -51,7 +52,7 @@
  * `loadControlPlane()` (WM-894); retries, backoff and key loading stay in
  * `orchestrator/reaper.mjs` as the Linear transport behind the adapter.
  */
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { loadRepos } from "../event-runtime/lib/repos.mjs";
@@ -65,6 +66,7 @@ import {
   claimLabels,
   appendIssueDetail,
 } from "../lib/control-plane/index.mjs";
+import { releaseLabels } from "../lib/control-plane/labels.mjs";
 import {
   parseOwnedPaths,
   ownedPathsClosureGaps,
@@ -81,6 +83,54 @@ export {
   claimLabels,
   appendIssueDetail,
 };
+
+/** Transition first, so a promotion rationale is never posted for a failed move. */
+export async function transitionThenComment(cp, key, state, options, comment) {
+  await cp.transition(key, state, options);
+  if (comment?.trim()) await cp.comment(key, comment);
+}
+
+/**
+ * File one ticket through the control plane and report the outcome.
+ *
+ * `dedupeKey` (opt-in) makes an immediate retry reuse the issue the first
+ * attempt created; the key is scoped to this exact finding by also matching
+ * the title (`matchTitle: true`), never any historical use of the same key.
+ * Without a key neither field is sent, so plain filing keeps its behaviour.
+ *
+ * The control plane may return `warnings` (a follow-up board write failed, or
+ * the key matched a closed issue) and `reused` (no new issue was created).
+ * Warnings flip the structured result to `ok: false` and set a non-zero exit
+ * code: the issue exists, but callers must not mistake it for a complete
+ * filing. The result stays available for recovery either way.
+ */
+export async function fileTicket(
+  cp,
+  { team, title, body, labels, state, projectId, dedupeKey },
+  { emit = out, setExitCode = (code) => (process.exitCode = code) } = {},
+) {
+  const key = typeof dedupeKey === "string" ? dedupeKey.trim() : "";
+  const created = await cp.file({
+    team,
+    title,
+    body,
+    labels,
+    state,
+    projectId,
+    ...(key ? { dedupeKey: key, matchTitle: true } : {}),
+  });
+  const warnings = Array.isArray(created.warnings)
+    ? created.warnings.filter(Boolean)
+    : [];
+  const verb = created.reused ? "reused" : "filed";
+  const line = `${verb} ${created.identifier} in ${state}  ${created.url}`;
+  emit(
+    { ok: warnings.length === 0, ...created },
+    warnings.length ? `${line}\nwarning: ${warnings.join("; ")}` : line,
+  );
+  if (warnings.length) setExitCode(1);
+  return created;
+}
 
 // Budget capture lives on disk so `doctor` / `linear budget` can read it
 // across process boundaries. The verbs themselves go through the ControlPlane
@@ -260,6 +310,42 @@ export function installLinearBudgetCapture() {
 }
 
 /**
+ * Raised instead of falling through to the tracked example configuration.
+ *
+ * `config/repos.yaml` is instance-local routing state: examples name a
+ * different control plane by design. A runner checkout without that file must
+ * therefore not turn a GitHub ticket into a Linear lookup merely because the
+ * fallback is syntactically valid (GH-975).
+ */
+export class InstanceConfigMissingError extends Error {
+  constructor(root) {
+    super(
+      `instance_config_missing: ${path.join(root, "config", "repos.yaml")} is required for this checkout (${root})`,
+    );
+    this.code = "instance_config_missing";
+  }
+}
+
+/**
+ * Resolve the operator checkout which owns the instance-local control-plane
+ * configuration. `FACTORY_REPOS_ROOT` remains the explicit test/operator
+ * override; dispatched agents otherwise receive `FACTORY_ROOT` from their
+ * launching worker. Never use the executing agent's cwd for this decision.
+ */
+export function instanceConfigRoot({
+  env = process.env,
+  checkoutRoot = path.resolve(import.meta.dir, ".."),
+} = {}) {
+  const root = path.resolve(
+    env.FACTORY_REPOS_ROOT || env.FACTORY_ROOT || checkoutRoot,
+  );
+  if (!existsSync(path.join(root, "config", "repos.yaml"))) {
+    throw new InstanceConfigMissingError(root);
+  }
+  return root;
+}
+
+/**
  * Which `config/repos.yaml` entry this invocation is about (WM-1007), or null
  * when nothing identifies one.
  *
@@ -302,17 +388,51 @@ export function resolveRepoName({
   return best?.name ?? null;
 }
 
-function controlPlane() {
+/**
+ * When cwd identifies no repo (dispatched agents run from ephemeral runtime
+ * workspaces under ~/.factory, matching neither `path` nor `worktree_root` —
+ * GH-975), the ticket identifier itself still can: `owner/repo#N` names the
+ * GitHub repo, and a registry entry whose `github:` matches decides the
+ * plane. Without this, a workspace-run claim silently falls back to the
+ * workspace-wide default plane and misreads or misses the ticket entirely.
+ */
+export function resolveRepoNameFromTicket(ticketArg, repos) {
+  const registry = repos ?? getRepos();
+  const m =
+    typeof ticketArg === "string" &&
+    ticketArg.match(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#[0-9]+/);
+  if (!m) return null;
+  const github = m[1].toLowerCase();
+  for (const repo of registry.values()) {
+    if (typeof repo.github === "string" && repo.github.toLowerCase() === github)
+      return repo.name;
+  }
+  return null;
+}
+
+function controlPlane(ticketArg = positional[0]) {
+  // All ticket verbs act on instance-local state. Resolve this before looking
+  // at cwd or the identifier so a missing runner config is an explicit refusal
+  // rather than a silent default-plane lookup.
+  const root = instanceConfigRoot();
+  const repos = getRepos(root);
   // Absent a resolvable repo, fall back to the workspace default exactly as
   // before — a CLI run from /tmp must still work.
   let repoName = null;
   try {
-    repoName = resolveRepoName();
+    repoName = resolveRepoName({ repos });
   } catch (err) {
     // An explicit bad --repo is the operator's mistake; surface it.
     if (flag("repo")) throw err;
   }
-  return loadControlPlane(repoName ? { repoName } : {});
+  if (!repoName) {
+    try {
+      repoName = resolveRepoNameFromTicket(ticketArg, repos);
+    } catch {
+      // registry unreadable — same fallback as before
+    }
+  }
+  return loadControlPlane(repoName ? { root, repoName } : { root });
 }
 
 /** Compact ticket rendering — the fields the protocol actually acts on. */
@@ -350,8 +470,8 @@ export function formatComments(nodesOrIssue) {
 let REPOS;
 const PATH_REQUIREMENTS_CACHE = new Map();
 
-function getRepos() {
-  if (!REPOS) REPOS = loadRepos();
+function getRepos(root = instanceConfigRoot()) {
+  if (!REPOS) REPOS = loadRepos({ root });
   return REPOS;
 }
 
@@ -401,6 +521,7 @@ const VALUE_FLAGS = new Set([
   "area",
   "body",
   "comment",
+  "dedupe-key",
   "label",
   "project",
   "remove",
@@ -412,12 +533,38 @@ const VALUE_FLAGS = new Set([
   "var",
 ]);
 
-/** Return command arguments that are not flags or values consumed by flags. */
+const BODY_VERBS = new Set(["answer", "comment", "detail"]);
+
+/**
+ * Return command arguments that are not flags or values consumed by flags.
+ *
+ * `--` is the conventional end-of-options marker. A leading markdown rule is
+ * also accepted directly for the verbs whose second positional argument is
+ * markdown; arbitrary leading `--` text must use the marker so unknown flags
+ * remain flags rather than silently becoming bodies.
+ */
 export function parsePositionalArgs(argv) {
   const positional = [];
+  let optionsEnded = false;
   for (let i = 1; i < argv.length; i += 1) {
     const arg = argv[i];
+    if (optionsEnded) {
+      positional.push(arg);
+      continue;
+    }
+    if (arg === "--") {
+      optionsEnded = true;
+      continue;
+    }
     if (arg.startsWith("--")) {
+      if (
+        BODY_VERBS.has(argv[0]) &&
+        positional.length === 1 &&
+        arg.startsWith("---")
+      ) {
+        positional.push(arg);
+        continue;
+      }
       if (VALUE_FLAGS.has(arg.slice(2))) i += 1;
       continue;
     }
@@ -470,10 +617,24 @@ const VERBS = {
     if (!result.ok) process.exit(1);
   },
 
+  async unclaim() {
+    const key = positional[0];
+    if (!key) throw new Error(`usage: unclaim <ISSUE-ID>`);
+    const cp = controlPlane();
+    const issue = await cp.getTicket(key);
+    const currentNames = (issue.labels ?? []).map((label) => label.name);
+    const { add, remove } = releaseLabels(currentNames, { to: "Todo" });
+    await cp.transition(key, "Todo", { add, remove, unassign: true });
+    out(
+      { ok: true, identifier: key, state: "Todo" },
+      `unclaimed ${key} -> Todo`,
+    );
+  },
+
   async comment() {
     const key = positional[0];
     const body = positional[1];
-    if (!body) throw new Error(`usage: comment <ISSUE-ID> "<text>"`);
+    if (!body) throw new Error(`usage: comment <ISSUE-ID> [--] "<text>"`);
     await controlPlane().comment(key, body);
     out({ ok: true, identifier: key }, `commented on ${key}`);
   },
@@ -492,7 +653,8 @@ const VERBS = {
   async answer() {
     const key = positional[0];
     const text = positional[1];
-    if (!key || !text) throw new Error(`usage: answer <ISSUE-ID> "<text>"`);
+    if (!key || !text)
+      throw new Error(`usage: answer <ISSUE-ID> [--] "<text>"`);
     const cp = controlPlane();
     const issue = await cp.getTicket(key);
     if (issue.state?.name?.toLowerCase() === "blocked")
@@ -505,7 +667,7 @@ const VERBS = {
     const key = positional[0];
     const rawDetail = positional[1];
     if (!key || !rawDetail)
-      throw new Error(`usage: detail <ISSUE-ID> "<markdown>"`);
+      throw new Error(`usage: detail <ISSUE-ID> [--] "<markdown>"`);
     const { appended } = await controlPlane().appendDetail(key, rawDetail);
     if (!appended) {
       out(
@@ -551,13 +713,14 @@ const VERBS = {
     const wanted = positional[1];
     const add = flagAll("add"),
       remove = flagAll("remove");
+    const comment = flag("comment");
     if (!key)
       throw new Error(
-        `usage: state <ISSUE-ID> ["<State Name>"] [--add label] [--remove label]`,
+        `usage: state <ISSUE-ID> ["<State Name>"] [--add label] [--remove label] [--comment "<text>"]`,
       );
     if (!wanted && !add.length && !remove.length && !has("unassign")) {
       throw new Error(
-        `usage: state <ISSUE-ID> "<State Name>" [--add label] [--remove label]`,
+        `usage: state <ISSUE-ID> "<State Name>" [--add label] [--remove label] [--comment "<text>"]`,
       );
     }
     const cp = controlPlane();
@@ -572,11 +735,13 @@ const VERBS = {
       }
     }
 
-    await cp.transition(key, wanted ?? "", {
-      add,
-      remove,
-      unassign: has("unassign"),
-    });
+    await transitionThenComment(
+      cp,
+      key,
+      wanted ?? "",
+      { add, remove, unassign: has("unassign") },
+      comment,
+    );
     const msg = wanted ? `${key} -> ${wanted}` : `${key} labels updated`;
     out(
       { ok: true, identifier: key, ...(wanted ? { state: wanted } : {}) },
@@ -587,9 +752,10 @@ const VERBS = {
   async file() {
     const team = flag("team");
     const title = flag("title");
+    const dedupeKey = flag("dedupe-key")?.trim() || undefined;
     if (!team || !title)
       throw new Error(
-        `usage: file --team CLNT --title "..." [--body "..."] [--type bug] [--area x] [--source agent] [--todo]`,
+        `usage: file --team CLNT --title "..." [--body "..."] [--type bug] [--area x] [--source agent] [--todo] [--dedupe-key "..."]`,
       );
 
     // New findings land in Triage unless they already meet the agent-ready bar.
@@ -601,18 +767,15 @@ const VERBS = {
       ...(has("todo") ? ["ai:agent-ready"] : []),
       ...flagAll("label"),
     ];
-    const created = await controlPlane().file({
+    await fileTicket(controlPlane(), {
       team,
       title,
       body: flag("body", ""),
       labels: wanted,
       state: stateName,
       projectId: flag("project") || undefined,
+      dedupeKey,
     });
-    out(
-      { ok: true, ...created },
-      `filed ${created.identifier} in ${stateName}  ${created.url}`,
-    );
   },
 
   async inflight() {
@@ -638,11 +801,31 @@ const VERBS = {
   },
 
   async queue() {
-    const team = flag("team") ?? teamOf(positional[0] ?? "");
-    if (!team) throw new Error(`usage: queue --team CLNT`);
+    let team = flag("team") ?? teamOf(positional[0] ?? "");
+    let project = flag("project") ?? null;
+    if (!team) {
+      // Repo-scoped read (work-scan calls `queue --repo <name>`): derive the
+      // team from the repo's config. GitHub-plane repos have no meaningful
+      // team of their own — listDispatchable maps it back to the repo — but
+      // the verb still needs *a* team, and requiring the caller to pass it for
+      // a --repo read is exactly the mismatch that made work-scan refuse.
+      const repoName = flag("repo");
+      if (repoName) {
+        const cfg = getRepos().get(repoName);
+        team = cfg?.team ?? null;
+        // ...and its project. Several repos share one Linear team (CLNT covers
+        // BJ29 Coaching, CashMap, RiccoMoto, ...); without the project filter
+        // `queue --repo bj29` returns every CLNT ticket and dispatch runs a
+        // CashMap ticket in the bj29 worktree.
+        if (project === null) project = cfg?.project ?? null;
+      }
+    }
+    if (!team) throw new Error(`usage: queue --team CLNT (or --repo <name>)`);
     // Dispatchable == Todo + ai:agent-ready + unassigned. The same predicate
     // the dispatcher uses; agents must not invent their own.
-    const ready = await controlPlane().listDispatchable({ team });
+    const ready = await controlPlane().listDispatchable(
+      project ? { team, project } : { team },
+    );
     out(
       ready,
       ready.length

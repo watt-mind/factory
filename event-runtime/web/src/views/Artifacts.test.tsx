@@ -1,5 +1,5 @@
 import "../test-dom";
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, jest, mock, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
@@ -13,9 +13,15 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { useState } from "react";
 import type { ArtifactInventoryItem } from "../types";
-import { Artifacts, formatBytes, type ArtifactFilters } from "./Artifacts";
+import {
+  Artifacts,
+  formatBytes,
+  formattedContent,
+  type ArtifactFilters,
+} from "./Artifacts";
 import { ARTIFACT_RAW_KEY } from "../components/ArtifactView";
 import { handleRunArtifactClick } from "./Runs";
+import { createHashWriter, setActiveHashWriter } from "../hash";
 
 const originalFetch = globalThis.fetch;
 const originalClipboard = navigator.clipboard;
@@ -76,15 +82,33 @@ afterEach(() => {
 function renderArtifacts(
   onJumpRun = mock(() => {}),
   initialFilters: ArtifactFilters = { kind: null, orphan: null, search: "" },
-  seed: { items?: ArtifactInventoryItem[]; agents?: unknown[] } = {},
-  onOpenFull = mock(() => {}),
+  seed: {
+    items?: ArtifactInventoryItem[];
+    agents?: unknown[];
+    nextBefore?: string | null;
+    formatContent?: typeof formattedContent;
+  } = {},
+  onOpenFull: ((sha256: string, backHash?: string) => void) | null = mock(
+    () => {},
+  ),
 ) {
   const client = new QueryClient({
     defaultOptions: {
       queries: { retry: false, refetchInterval: false, staleTime: Infinity },
     },
   });
-  client.setQueryData(["artifacts"], { artifacts: seed.items ?? ITEMS });
+  client.setQueryData(
+    [
+      "artifacts",
+      initialFilters.kind,
+      initialFilters.orphan,
+      initialFilters.search,
+    ],
+    {
+      artifacts: seed.items ?? ITEMS,
+      nextBefore: seed.nextBefore,
+    },
+  );
   if (seed.agents)
     client.setQueryData(["agents"], {
       agents: seed.agents,
@@ -128,7 +152,8 @@ function renderArtifacts(
           filters={filters}
           onFiltersChange={setFilters}
           onJumpRun={onJumpRun}
-          onOpenFull={onOpenFull}
+          onOpenFull={onOpenFull ?? undefined}
+          formatContent={seed.formatContent}
         />
       </QueryClientProvider>
     );
@@ -246,6 +271,140 @@ describe("Artifacts inventory (WM-207)", () => {
     expect(within(grid).queryByText("cccccccccccc")).toBeNull();
   });
 
+  test("requests the active kind, orphan, and search filters", async () => {
+    const requests: string[] = [];
+    globalThis.fetch = mock(async (input: string | URL | Request) => {
+      requests.push(String(input));
+      return new Response(JSON.stringify({ artifacts: ITEMS }), {
+        status: 200,
+      });
+    }) as unknown as typeof fetch;
+    const view = renderArtifacts();
+    await waitFor(() => expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy());
+
+    fireEvent.change(view.getByRole("combobox", { name: "Artifact kind" }), {
+      target: { value: "report" },
+    });
+    fireEvent.click(view.getByRole("tab", { name: "Orphans 28" }));
+    changeControlledInput(
+      view.getByRole("combobox", {
+        name: "Search artifacts",
+      }) as HTMLInputElement,
+      "reporter@1",
+    );
+
+    await waitFor(() =>
+      expect(requests).toContain(
+        "/api/artifacts?kind=report&orphan=true&search=reporter%401",
+      ),
+    );
+  });
+
+  test("trims the search term before querying the server", async () => {
+    const requests: string[] = [];
+    globalThis.fetch = mock(async (input: string | URL | Request) => {
+      requests.push(String(input));
+      return new Response(JSON.stringify({ artifacts: ITEMS }), {
+        status: 200,
+      });
+    }) as unknown as typeof fetch;
+    const view = renderArtifacts();
+    await waitFor(() => expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy());
+
+    changeControlledInput(
+      view.getByRole("combobox", {
+        name: "Search artifacts",
+      }) as HTMLInputElement,
+      "  reporter@1  ",
+    );
+
+    await waitFor(() =>
+      expect(requests).toContain("/api/artifacts?search=reporter%401"),
+    );
+  });
+
+  test("resolves a deep-linked artifact outside the filtered page", async () => {
+    const requests: string[] = [];
+    const orphanOnly = ITEMS.filter((item) => !item.referenced);
+    globalThis.fetch = mock(async (input: string | URL | Request) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.startsWith("/api/artifacts?")) {
+        const params = new URL(url, "http://localhost").searchParams;
+        const search = params.get("search");
+        const hit = ITEMS.filter((item) => !search || item.sha256 === search);
+        return new Response(JSON.stringify({ artifacts: hit }), {
+          status: 200,
+        });
+      }
+      return new Response(JSON.stringify({ message: "deep" }), {
+        status: 200,
+      });
+    }) as unknown as typeof fetch;
+
+    window.location.hash = `#/artifacts/${"a".repeat(64)}`;
+    const view = renderArtifacts(
+      undefined,
+      { kind: null, orphan: true, search: "" },
+      { items: orphanOnly },
+    );
+
+    const references = await view.findByRole("region", {
+      name: "Artifact run references",
+    });
+    expect(within(references).getByText(/run_12345678/)).toBeTruthy();
+    expect(requests).toContain(
+      `/api/artifacts?search=${"a".repeat(64)}&limit=1`,
+    );
+    expect(view.queryByText(/metadata is unavailable/i)).toBeNull();
+  });
+
+  test("ignores a fallback row whose digest differs from the deep link", async () => {
+    globalThis.fetch = mock(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.startsWith("/api/artifacts?")) {
+        return new Response(JSON.stringify({ artifacts: [ITEMS[1]] }), {
+          status: 200,
+        });
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    window.location.hash = `#/artifacts/${"a".repeat(64)}`;
+    const view = renderArtifacts(
+      undefined,
+      { kind: null, orphan: true, search: "" },
+      { items: [ITEMS[2]] },
+    );
+
+    await view.findByText(/metadata is unavailable/i);
+    expect(view.queryByText(/run_trace/)).toBeNull();
+  });
+
+  test("warns when the server has more artifacts than this page", async () => {
+    const view = renderArtifacts(undefined, undefined, {
+      nextBefore: "older-artifacts",
+    });
+    await waitFor(() => expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy());
+
+    expect(view.getByRole("status").textContent).toMatch(
+      /showing 3 artifacts.*more.*narrow the filter/i,
+    );
+  });
+
+  test("the more-available notice counts the visible rows", async () => {
+    const view = renderArtifacts(
+      undefined,
+      { kind: "report", orphan: null, search: "" },
+      { nextBefore: "older-artifacts" },
+    );
+    await waitFor(() => expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy());
+
+    expect(view.getByRole("status").textContent).toMatch(
+      /showing 1 artifacts?.*more/i,
+    );
+  });
+
   test("opens a deep-linked inspector with formatted preview, actions, search, and bidirectional references", async () => {
     const raw = JSON.stringify({ message: "hello artifact", count: 2 });
     globalThis.fetch = mock(
@@ -294,6 +453,35 @@ describe("Artifacts inventory (WM-207)", () => {
     fireEvent.click(view.getByRole("button", { name: "Copy SHA-256" }));
     expect(writeText).toHaveBeenNthCalledWith(1, raw);
     expect(writeText).toHaveBeenNthCalledWith(2, "a".repeat(64));
+  });
+
+  test("formats a large artifact once across a useNow tick", async () => {
+    const raw = JSON.stringify({
+      entries: Array.from({ length: 10_000 }, (_, index) => ({
+        index,
+        message: `artifact line ${index}`,
+      })),
+    });
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date("2026-08-30T00:00:00.000Z"));
+    const formatContent = mock(formattedContent);
+    globalThis.fetch = mock(
+      async () => new Response(raw, { status: 200 }),
+    ) as unknown as typeof fetch;
+    window.location.hash = `#/artifacts/${"a".repeat(64)}`;
+
+    try {
+      const view = renderArtifacts(undefined, undefined, { formatContent });
+      await view.findByRole("region", { name: "Artifact content" });
+      expect(formatContent).toHaveBeenCalledTimes(1);
+
+      act(() => jest.advanceTimersByTime(1_000));
+
+      expect(formatContent).toHaveBeenCalledTimes(1);
+    } finally {
+      cleanup();
+      jest.useRealTimers();
+    }
   });
 
   test("selects a row into the inspector and routes run artifact links to the same deep link", async () => {
@@ -719,7 +907,7 @@ describe("Full-page artifact reader view navigation & 'o' shortcut (WM-828)", ()
     await view.findByRole("region", { name: "Artifact content" });
 
     fireEvent.keyDown(document.body, { key: "o" });
-    expect(view.onOpenFull).toHaveBeenCalledWith(SHA_A);
+    expect(view.onOpenFull).toHaveBeenCalledWith(SHA_A, `#/artifacts/${SHA_A}`);
   });
 
   test("detail pane includes Open in full page action with 'o' shortcut hint", async () => {
@@ -742,7 +930,101 @@ describe("Full-page artifact reader view navigation & 'o' shortcut (WM-828)", ()
     expect(openBtns[0].getAttribute("title")).toBe("Open in full page (o)");
 
     fireEvent.click(openBtns[0]);
-    expect(view.onOpenFull).toHaveBeenCalledWith(SHA_A);
+    expect(view.onOpenFull).toHaveBeenCalledWith(SHA_A, `#/artifacts/${SHA_A}`);
+  });
+
+  test("passes filtered catalogue context when opening the full-page reader", async () => {
+    globalThis.fetch = mock(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.endsWith("/api/artifacts") || u.includes("/api/artifacts?")) {
+        return new Response(JSON.stringify({ artifacts: ITEMS }), {
+          status: 200,
+        });
+      }
+      return new Response("line one\nline two", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    window.location.hash = `#/artifacts/${SHA_A}`;
+    const view = renderArtifacts();
+    await view.findByRole("region", { name: "Artifact content" });
+
+    const query = "kind=transcript&search=f99e8b&project=demo";
+    window.location.hash = `#/artifacts/${SHA_A}?${query}`;
+    fireEvent.click(
+      view.getAllByRole("button", { name: "Open in full page" })[0]!,
+    );
+    expect(view.onOpenFull).toHaveBeenCalledWith(
+      SHA_A,
+      `#/artifacts/${SHA_A}?${query}`,
+    );
+  });
+
+  test("flushes a buffered filter change before capturing the return context", async () => {
+    globalThis.fetch = mock(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.endsWith("/api/artifacts") || u.includes("/api/artifacts?")) {
+        return new Response(JSON.stringify({ artifacts: ITEMS }), {
+          status: 200,
+        });
+      }
+      return new Response("line one\nline two", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    // Stand in for App's coalescing writer: the first write lands, the second
+    // (inside the interval) stays buffered, so the URL trails the filters.
+    let now = 1_000;
+    const writer = createHashWriter(
+      (hash) => {
+        window.location.hash = hash;
+      },
+      { now: () => now, after: () => () => {} },
+    );
+    setActiveHashWriter(writer);
+    try {
+      writer.replace(`#/artifacts/${SHA_A}?kind=report`);
+      const view = renderArtifacts();
+      await view.findByRole("region", { name: "Artifact content" });
+
+      now += 100;
+      const query = "kind=transcript&search=f99e8b&project=demo";
+      writer.replace(`#/artifacts/${SHA_A}?${query}`);
+      expect(window.location.hash).toBe(`#/artifacts/${SHA_A}?kind=report`);
+
+      fireEvent.click(
+        view.getAllByRole("button", { name: "Open in full page" })[0]!,
+      );
+      expect(view.onOpenFull).toHaveBeenCalledWith(
+        SHA_A,
+        `#/artifacts/${SHA_A}?${query}`,
+      );
+    } finally {
+      setActiveHashWriter(null);
+    }
+  });
+
+  test("fallback reader route keeps ?project= alongside back=", async () => {
+    globalThis.fetch = mock(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.endsWith("/api/artifacts") || u.includes("/api/artifacts?")) {
+        return new Response(JSON.stringify({ artifacts: ITEMS }), {
+          status: 200,
+        });
+      }
+      return new Response("line one\nline two", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    window.location.hash = `#/artifacts/${SHA_A}`;
+    const view = renderArtifacts(undefined, undefined, {}, null);
+    await view.findByRole("region", { name: "Artifact content" });
+
+    const back = `artifacts/${SHA_A}?kind=transcript&project=demo`;
+    window.location.hash = `#/${back}`;
+    fireEvent.click(
+      view.getAllByRole("button", { name: "Open in full page" })[0]!,
+    );
+    expect(window.location.hash).toBe(
+      `#/artifact/${SHA_A}?back=${encodeURIComponent(back)}&project=demo`,
+    );
   });
 });
 

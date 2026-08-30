@@ -14,6 +14,7 @@ import {
   BASE_INHERITED_ENV,
   buildClaudeArgv,
   buildClaudeSettings,
+  osSandboxUsable,
   deriveAllowedTools,
   execute,
   isHarnessDenial,
@@ -40,6 +41,7 @@ describe("sandbox decision (WM-313): deferred, so refused — never ignored", ()
   const sandboxedDef = (promptPath) => ({
     ref: "sandboxed-claude@1",
     promptPath,
+    promptText: "hello",
     mutating: false,
     sandbox: { provider: "gondolin", allowedHosts: ["api.anthropic.com"] },
   });
@@ -397,6 +399,7 @@ describe("buildClaudeArgv (OPS-407, WM-62, WM-137)", () => {
       spec: { workspace: { type: "repository", checkoutDir: "repo" } },
       def: { mutating: false },
       workspaceDir: "/private/tmp/run-a1",
+      env: { FACTORY_CLAUDE_OS_SANDBOX: "1" },
     });
     expect(settings.permissions.allow).toEqual(READ_ONLY_TOOLS);
     expect(settings.permissions.deny).toEqual([
@@ -408,6 +411,33 @@ describe("buildClaudeArgv (OPS-407, WM-62, WM-137)", () => {
       allowUnsandboxedCommands: false,
       filesystem: { denyWrite: ["/private/tmp/run-a1/repo"] },
     });
+  });
+
+  test("a host whose OS sandbox cannot start keeps the deny policy and turns the sandbox off, rather than denying every command", () => {
+    // Nested user namespaces are refused on some hosts. Claude's sandbox then
+    // fails on `apply-seccomp` before its policy applies and, with
+    // allowUnsandboxedCommands: false, a read-only agent cannot run `echo`.
+    const settings = buildClaudeSettings({
+      spec: { workspace: { type: "repository", checkoutDir: "repo" } },
+      def: { mutating: false },
+      workspaceDir: "/private/tmp/run-a1",
+      env: { FACTORY_CLAUDE_OS_SANDBOX: "0" },
+    });
+    expect(settings.sandbox).toEqual({ enabled: false });
+    // The write boundary is unchanged: it never depended on the OS sandbox.
+    expect(settings.permissions.deny).toEqual([
+      "Edit(//private/tmp/run-a1/repo/**)",
+    ]);
+    expect(settings.permissions.allow).toEqual(READ_ONLY_TOOLS);
+  });
+
+  test("osSandboxUsable honours an explicit override in either env, and probes otherwise", () => {
+    expect(osSandboxUsable({ FACTORY_CLAUDE_OS_SANDBOX: "1" })).toBe(true);
+    expect(osSandboxUsable({ FACTORY_CLAUDE_OS_SANDBOX: "true" })).toBe(true);
+    expect(osSandboxUsable({ FACTORY_CLAUDE_OS_SANDBOX: "0" })).toBe(false);
+    expect(osSandboxUsable({ FACTORY_CLAUDE_OS_SANDBOX: "false" })).toBe(false);
+    // No override: a boolean answer for this host, never a throw.
+    expect(typeof osSandboxUsable({})).toBe("boolean");
   });
 
   test("mutating runs include --dangerously-skip-permissions and omit --settings (WM-137)", () => {
@@ -563,6 +593,16 @@ if (behavior === "normal") {
   process.exit(0);
 }
 
+if (behavior === "large_transcript") {
+  process.stdout.write(
+    JSON.stringify({
+      type: "assistant",
+      message: { role: "assistant", content: [{ type: "text", text: "x".repeat(1024 * 1024) }] },
+    }) + "\\n",
+    () => process.exit(0),
+  );
+}
+
 if (behavior === "exit_code") {
   const code = parseInt(process.env.FACTORY_TEST_EXIT_CODE || "1", 10);
   process.exit(code);
@@ -691,6 +731,7 @@ if (behavior === "emit_denial_then_recovery") {
   const defaultDef = {
     ref: "test-agent@1",
     promptPath: promptFile,
+    promptText: "You are a test agent.",
     mutating: false,
     capabilities: { tools: ["Read", "Grep"] },
   };
@@ -738,14 +779,39 @@ if (behavior === "emit_denial_then_recovery") {
     }
   }
 
-  test("executes stub binary in workspaceDir, strips ANTHROPIC_API_KEY, captures .transcript.json and trace", async () => {
+  test("refuses a definition without verified promptText before launching Claude", async () => {
     const workspaceDir = ws();
     const recordFile = path.join(workspaceDir, "record.json");
+    const { promptText, ...unverifiedDef } = defaultDef;
+
+    await expect(
+      execute({
+        spec: defaultSpec,
+        def: unverifiedDef,
+        workspaceDir,
+        timeoutMs: 5000,
+        env: {
+          PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
+          FACTORY_TEST_BEHAVIOR: "normal",
+          FACTORY_TEST_RECORD_FILE: recordFile,
+        },
+      }),
+    ).rejects.toThrow(
+      "claude: definition test-agent@1 has no verified promptText (registry-loaded definitions only)",
+    );
+    expect(existsSync(recordFile)).toBe(false);
+  });
+
+  test("executes the verified prompt snapshot after its path changes and captures trace", async () => {
+    const workspaceDir = ws();
+    const recordFile = path.join(workspaceDir, "record.json");
+    const replacedPrompt = path.join(workspaceDir, "replaced-prompt.md");
+    writeFileSync(replacedPrompt, "mutable replacement", "utf8");
     const traceEvents = [];
 
     const outcome = await execute({
       spec: defaultSpec,
-      def: defaultDef,
+      def: { ...defaultDef, promptPath: replacedPrompt },
       workspaceDir,
       timeoutMs: 5000,
       env: {
@@ -756,6 +822,10 @@ if (behavior === "emit_denial_then_recovery") {
         CUSTOM_VAR: "custom_value",
         FACTORY_TEST_BEHAVIOR: "normal",
         FACTORY_TEST_RECORD_FILE: recordFile,
+        // Assert the sandboxed policy shape regardless of whether this
+        // particular host can start Claude's OS sandbox; the host-dependent
+        // branch has its own test above.
+        FACTORY_CLAUDE_OS_SANDBOX: "1",
       },
       onTrace: (kind, payload) => traceEvents.push({ kind, payload }),
     });
@@ -808,6 +878,67 @@ if (behavior === "emit_denial_then_recovery") {
     expect(traceEvents[0].payload.text).toBe("Working...");
     expect(traceEvents[1].kind).toBe("usage");
     expect(traceEvents[1].payload.usage.input_tokens).toBe(15);
+  });
+
+  test("waits for a large transcript to flush before resolving", async () => {
+    const workspaceDir = ws();
+
+    await execute({
+      spec: defaultSpec,
+      def: defaultDef,
+      workspaceDir,
+      timeoutMs: 5000,
+      env: {
+        PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
+        FACTORY_TEST_BEHAVIOR: "large_transcript",
+      },
+    });
+
+    const transcript = readFileSync(
+      path.join(workspaceDir, ".transcript.json"),
+      "utf8",
+    );
+    expect(transcript.length).toBeGreaterThan(1024 * 1024);
+    expect(transcript.endsWith("\n")).toBe(true);
+    expect(transcript.split("\n").filter(Boolean).map(JSON.parse)).toHaveLength(
+      1,
+    );
+  });
+
+  test("caps the transcript and reports truncation without blocking child exit", async () => {
+    const workspaceDir = ws();
+    const traceEvents = [];
+
+    const outcome = await execute({
+      spec: defaultSpec,
+      def: defaultDef,
+      workspaceDir,
+      timeoutMs: 5000,
+      transcriptMaxBytes: 64,
+      env: {
+        PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
+        FACTORY_TEST_BEHAVIOR: "large_transcript",
+      },
+      onTrace: (kind, payload) => traceEvents.push({ kind, payload }),
+    });
+
+    expect(outcome.transcriptTruncated).toBe(true);
+    expect(
+      traceEvents.some(
+        (event) =>
+          event.kind === "lifecycle" &&
+          event.payload.note === "transcript_truncated" &&
+          event.payload.bytes === 64,
+      ),
+    ).toBe(true);
+    expect(
+      readFileSync(path.join(workspaceDir, ".transcript.json")).byteLength,
+    ).toBeLessThanOrEqual(
+      64 +
+        Buffer.byteLength(
+          '\n{"type":"factory","subtype":"transcript_truncated","bytes":64}\n',
+        ),
+    );
   });
 
   test("nonzero exit code propagates and timedOut is false", async () => {
@@ -1103,6 +1234,7 @@ if (behavior === "emit_denial_then_recovery") {
     const mutatingDef = {
       ref: "dispatch@1",
       promptPath: promptFile,
+      promptText: "You are a test agent.",
       mutating: true,
       capabilities: { tools: ["Bash", "Read", "Write", "Edit"] },
     };
@@ -1144,6 +1276,7 @@ if (behavior === "emit_denial_then_recovery") {
     const readOnlyDef = {
       ref: "status-report@1",
       promptPath: promptFile,
+      promptText: "You are a test agent.",
       mutating: false,
       capabilities: { tools: ["Read", "Grep"] },
     };

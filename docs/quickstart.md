@@ -123,3 +123,8 @@ See [SETUP.md](../SETUP.md) for the complete clean-room operator install,
 including `gh auth login` and the harness login, and
 [architecture.md](architecture.md) for dispatch, Owned Paths, and CI as the
 reward signal.
+
+To adopt factory for an organization instead of cloning the kernel, pin the
+published `@watt-mind/factory` npm package from a `templates/starter/`-based
+instance repository — see [docs/instances.md](instances.md) for the
+kernel/instance split and the upgrade contract.

@@ -4,10 +4,12 @@
  *
  * Static bundle + /api/* proxy to the loopback control API, so the browser
  * has one origin. Deliberately imports nothing from ../lib/ — it is a client
- * of the runtime, not part of it (spec §9). Loopback only: no auth by
- * decision (spec §1); binding beyond 127.0.0.1 is the moment auth becomes a
- * precondition, so no --host flag exists here.
+ * of the runtime, not part of it (spec §9). Loopback only; binding beyond
+ * 127.0.0.1 is the moment auth becomes a precondition, so no --host flag
+ * exists here. The proxy always presents its own control-API bearer upstream;
+ * non-loopback browsers must first prove they possess that bearer for writes.
  */
+import { timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,12 +39,38 @@ function hostOf(value) {
   return value.replace(/:\d+$/, "").toLowerCase();
 }
 
+// The bearer this proxy presents to the control API. It is also the credential
+// a non-loopback browser must present for mutating proxy requests. Never logged.
+const CONTROL_API_TOKEN = process.env.FACTORY_CONTROL_API_TOKEN || "";
+
+const PROXY_TIMEOUT_MS = Number(
+  process.env.FACTORY_WEB_PROXY_TIMEOUT_MS || 10_000,
+);
+
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
 
 function hostAllowed(value) {
   const host = hostOf(value);
   if (host === null) return false;
   return LOOPBACK_HOSTS.has(host) || ALLOWED_HOSTS.has(host);
+}
+
+function bearerAuthorized(authHeader) {
+  if (!CONTROL_API_TOKEN || typeof authHeader !== "string") return false;
+  const prefix = "Bearer ";
+  if (!authHeader.startsWith(prefix)) return false;
+  const presented = Buffer.from(authHeader.slice(prefix.length), "utf8");
+  const expected = Buffer.from(CONTROL_API_TOKEN, "utf8");
+  return (
+    presented.length === expected.length && timingSafeEqual(presented, expected)
+  );
+}
+
+function jsonError(status, error) {
+  return new Response(JSON.stringify({ error }), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
 }
 
 if (!existsSync(path.join(DIST, "index.html"))) {
@@ -75,11 +103,9 @@ Bun.serve({
     // WM-973: answer only for loopback and explicitly allowed Hosts, and
     // reject cross-site Origins at this layer — the API's own loopback guard
     // stays untouched because the proxy below rewrites Host/Origin.
+    const requestHost = hostOf(req.headers.get("host"));
     if (!hostAllowed(req.headers.get("host")))
-      return new Response(JSON.stringify({ error: "invalid_host" }), {
-        status: 403,
-        headers: { "content-type": "application/json; charset=utf-8" },
-      });
+      return jsonError(403, "invalid_host");
     const origin = req.headers.get("origin");
     if (origin) {
       let originHost;
@@ -89,16 +115,21 @@ Bun.serve({
         originHost = null;
       }
       if (originHost === null || !hostAllowed(originHost))
-        return new Response(
-          JSON.stringify({ error: "cross_origin_rejected" }),
-          {
-            status: 403,
-            headers: { "content-type": "application/json; charset=utf-8" },
-          },
-        );
+        return jsonError(403, "cross_origin_rejected");
     }
 
     if (url.pathname === "/api" || url.pathname.startsWith("/api/")) {
+      const mutating = !["GET", "HEAD", "OPTIONS"].includes(req.method);
+      if (mutating && ALLOWED_HOSTS.size > 0 && !CONTROL_API_TOKEN) {
+        return jsonError(503, "control_api_token_unset");
+      }
+      if (
+        mutating &&
+        !LOOPBACK_HOSTS.has(requestHost) &&
+        !bearerAuthorized(req.headers.get("authorization"))
+      ) {
+        return jsonError(401, "unauthorized");
+      }
       const target = `http://127.0.0.1:${API_PORT}${url.pathname.slice(4) || "/"}${url.search}`;
       // Pass-through, nothing added: the proxy exists only for same-origin.
       // WHATWG fetch rejects GET/HEAD when a body option is present, even when
@@ -109,7 +140,14 @@ Bun.serve({
       // proxy IS the same-origin boundary, so present as loopback upstream.
       headers.set("host", `127.0.0.1:${API_PORT}`);
       headers.delete("origin");
-      const init = { method: req.method, headers };
+      // Authenticate upstream. Overwrite the browser's proof with the proxy's
+      // own credential and never echo either value.
+      if (CONTROL_API_TOKEN)
+        headers.set("authorization", `Bearer ${CONTROL_API_TOKEN}`);
+      else headers.delete("authorization");
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
+      const init = { method: req.method, headers, signal: controller.signal };
       try {
         if (bodyless) {
           // Drain any non-standard incoming payload so a keep-alive connection
@@ -123,6 +161,28 @@ Bun.serve({
         }
         return await fetch(target, init);
       } catch (error) {
+        if (
+          controller.signal.aborted ||
+          error?.name === "AbortError" ||
+          error?.name === "TimeoutError"
+        ) {
+          console.error(
+            `[web] ${req.method} ${url.pathname} upstream timed out after ${PROXY_TIMEOUT_MS}ms`,
+          );
+          return new Response(
+            JSON.stringify({
+              error: "api_busy",
+              message: "event runtime is busy",
+            }),
+            {
+              status: 504,
+              headers: {
+                "content-type": "application/json; charset=utf-8",
+                "retry-after": "5",
+              },
+            },
+          );
+        }
         // Backend restarts are expected during deploys and watch-mode reloads.
         // Keep the static server alive and give clients an explicit retryable
         // response instead of allowing Bun's rejected fetch to escape.
@@ -140,6 +200,8 @@ Bun.serve({
             },
           },
         );
+      } finally {
+        clearTimeout(timeoutId);
       }
     }
 

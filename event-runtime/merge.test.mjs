@@ -1,4 +1,7 @@
 import { tmpDir } from "./test-support/tmp.mjs?file=event-runtime-merge-test-mjs";
+// Side effect: pins FACTORY_EVENT_HOME to a temp dir before any spawned CLI
+// (merge-apply.mjs) can resolve the operator's live runtime home.
+import "./test-helpers.mjs";
 import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import {
@@ -385,12 +388,12 @@ function seedPlanPredecessor(db, runId = "parent-run") {
 }
 
 describe("merge-fix result contract (WM-447)", () => {
-  test("UPDATED and BLOCKED prompt artifacts exactly match the registered schema", () => {
+  test("UPDATED and BLOCKED prompt envelope artifacts exactly match the registered schema", () => {
     const def = registry.agents.get("merge-fix@1");
     const schema = def.outputSchema;
     const prompt = readFileSync(def.promptPath, "utf8");
     const declaration = prompt.match(
-      /Both artifacts must\s+contain exactly these properties, in this order:([\s\S]*?)\. Do not add/,
+      /Both artifacts[\s\S]*?must\s+contain exactly these properties, in this order:([\s\S]*?)\. Do not (?:put|add)/,
     );
 
     expect(declaration).not.toBeNull();
@@ -398,15 +401,19 @@ describe("merge-fix result contract (WM-447)", () => {
       [...declaration[1].matchAll(/`([^`]+)`/g)].map((match) => match[1]),
     ).toEqual(schema.required);
 
+    // #1521: the prompt documents only the wrapped result envelope — a bare
+    // artifact twin is exactly the shape that produced contract_violation.
+    expect(prompt).not.toMatch(/### (UPDATED|BLOCKED) artifact\n/);
     for (const outcome of ["UPDATED", "BLOCKED"]) {
       const example = prompt.match(
         new RegExp(
-          `### ${outcome} artifact[\\s\\S]*?` + "```json\\n([\\s\\S]*?)\\n```",
+          `### ${outcome} result envelope[\\s\\S]*?` +
+            "```json\\n([\\s\\S]*?)\\n```",
         ),
       );
 
       expect(example).not.toBeNull();
-      const artifact = JSON.parse(example[1]);
+      const { artifact } = JSON.parse(example[1]);
       expect(Object.keys(artifact)).toEqual(schema.required);
       expect(artifact.outcome).toBe(outcome);
       expect(validate(schema, artifact)).toEqual({ valid: true, errors: [] });
@@ -420,7 +427,7 @@ describe("merge-fix result contract (WM-447)", () => {
     );
 
     expect(prompt).toMatch(
-      /Use the pinned `input\.json` `headSha` as the required `headSha`, including when\s+the live PR head moved/,
+      /Use the\s+pinned `input\.json` `headSha` as the required `artifact\.headSha`, including when\s+the live PR head moved/,
     );
   });
 });
@@ -973,8 +980,16 @@ describe("executable merge command safety (WM-412)", () => {
       );
       expect(result.status, `${mode}: ${result.stderr}`).toBe(0);
       const log = readFileSync(fixture.log, "utf8");
+      expect(log).toContain("--required --json name,bucket,state");
+      if (mode === "green") {
+        expect(log).toContain("gh run list");
+        expect(log).toContain("--event pull_request");
+        expect(log).toContain("gh run view 81");
+      } else {
+        expect(log).not.toContain("gh run list");
+        expect(log).not.toContain("gh run view");
+      }
       expect(log.includes("gh pr merge")).toBe(shouldMerge);
-      expect(log).not.toContain("--event pull_request");
     }
   });
 
@@ -1525,10 +1540,13 @@ describe("merge transition chains", () => {
     ]);
 
     // A process interruption after one admission must not suppress the other
-    // three actions when the same accepted result is resolved again.
+    // three actions when the same accepted result is resolved again. The
+    // chain terminal marker is only written after every sibling exists, so an
+    // interrupted pass leaves chain_resolved_at NULL alongside the lone child.
     db.query(
       `DELETE FROM events WHERE source='chain' AND event_id != 'chain-scan-mixed-escalate'`,
     ).run();
+    db.query(`UPDATE runs SET chain_resolved_at = NULL`).run();
     expect(resolveChains(db, registry)).toEqual({
       emitted: 3,
       skipped: 0,

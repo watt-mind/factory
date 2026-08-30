@@ -10,6 +10,10 @@ Factory CI uses a hybrid runner strategy designed for public open-source operati
 
 Treat self-hosted runner names as parallel executors, not independent machines. CPU, memory, `/tmp`, and process scheduling are shared across all eight shadow services.
 
+### Runner host dependencies
+
+Runner images must provide `unzip`, `curl`, `sha256sum` (from coreutils), and `tar` for the checksum-pinned tool installer. The `Pinned tools forced-install smoke` job on `ubuntu-latest` forces fresh bun, gitleaks, uv, and actionlint installs and verifies these dependencies whenever `.github/**` changes (and on manual dispatch).
+
 ## Fork PR sandboxing & dual routing
 
 In `ci.yml`, a lightweight initial `route` job runs on `ubuntu-latest` to determine the execution lane based on the event context:
@@ -38,6 +42,24 @@ The event-runtime merge lane is being split into parallel per-PR review with a l
 ## Run coalescing
 
 CI and Security use `concurrency.group` keyed by PR number for pull requests and by ref for pushes, with `cancel-in-progress` for both. A newer push to `develop` cancels the older develop run — only the latest develop head is verified — and a newer PR push cancels that PR's older run. Runs never wait in a concurrency group for a _different_ PR, so nothing is dropped across PRs; queueing across PRs happens in GitHub's runner queue for the `verify-lane` label.
+
+### Required Verify umbrella
+
+`Verify` is the required umbrella for the CI test lanes. It uses `if: always()`
+so GitHub evaluates it after every dependency result rather than silently
+skipping it behind the default success gate. Except for `Shadow runner fleet
+available`, which is intentionally `skipped` on the cloud lane, every gating
+dependency (`Route CI lane`, shadow health on self-hosted, `Fast unit tests`,
+and `Full verification`) must conclude `success`. A `cancelled`, `skipped`,
+or `failure` result makes `Verify` fail.
+
+This matters because concurrency cancellation can leave a historical
+`Verify=success` check-run visible for a superseded workflow. The
+merge apply selects the sole non-cancelled configured workflow run for the
+reviewed head SHA; two live runs fail closed rather than trusting list order. When a
+repo configures `merge_ci`, both the branch's required contexts and that run's
+configured required jobs must be green; a stale check from a cancelled run is
+never sufficient merge proof.
 
 ## Dependabot dependency policy
 

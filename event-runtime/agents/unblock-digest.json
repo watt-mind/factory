@@ -29,6 +29,6 @@
   "pins": {
     "agents/unblock-digest.md": "sha256:551dc3472350c0f40b7ce445b7d1b9b101d6a08473ab3c5afd3bd38c42036bc5",
     "schemas/repo-loop.input.json": "sha256:8a67a773285d276f50f8b595d43d980f5ce286b74d2b4ad5852f07ee42e517a9",
-    "schemas/command-result.output.json": "sha256:56ef20577453f0162f1a0a22e8214e8c734fc0fbab4f65d1e1dcae9614acc272"
+    "schemas/command-result.output.json": "sha256:f158c1c76dd848407237c45a12c521b5d8e103cefd6fafdfdd51070a2b7e2585"
   }
 }

@@ -7,9 +7,19 @@
     "command": {
       "type": "array",
       "minItems": 1,
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      }
     },
-    "exitCode": { "const": 0 },
-    "outputTail": { "type": "string" }
+    "exitCode": {
+      "const": 0
+    },
+    "outputTail": {
+      "type": "string"
+    },
+    "captured": {
+      "type": "string",
+      "description": "Relative path of the captured stdout log artifact (set when the agent def declares captureStdout)."
+    }
   }
 }

@@ -1,5 +1,6 @@
 import { tmpDir } from "../../test-support/tmp.mjs?file=event-runtime-lib-adapters-acp-test-mjs";
 import { afterAll, describe, expect, test } from "bun:test";
+import { EventEmitter } from "node:events";
 import {
   existsSync,
   readFileSync,
@@ -8,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import * as acp from "./acp.mjs";
 import {
   AcpProtocolError,
@@ -30,6 +32,7 @@ import {
   usageFromUpdate,
 } from "./acp.mjs";
 import { createAdapterRegistry, validateAdapterContract } from "./index.mjs";
+import { PROMPT_SUFFIX } from "./claude.mjs";
 import { SandboxUnsupportedError } from "./sandboxed.mjs";
 import {
   processOwnerWatchdogSource,
@@ -267,6 +270,12 @@ rl.on("line", (line) => {
     return;
   }
   if (msg.method === "session/prompt") {
+    if (process.env.ACP_FAKE_PROMPT_RECORD) {
+      writeFileSync(
+        process.env.ACP_FAKE_PROMPT_RECORD,
+        msg.params?.prompt?.[0]?.text ?? "",
+      );
+    }
     currentPromptId = msg.id;
     handlePrompt(msg.params.sessionId).catch((err) => {
       send({
@@ -311,6 +320,7 @@ const ws = () => realpathSync(tmpDir("ws-", tmpBase));
 const defaultDef = {
   ref: "test-acp@1",
   promptPath,
+  promptText: "You are a test agent.",
   mutating: false,
 };
 const mutatingDef = { ...defaultDef, mutating: true };
@@ -336,8 +346,65 @@ function run(workspaceDir, extra = {}) {
     onUsage: extra.onUsage,
     onPermissionRequest: extra.onPermissionRequest,
     abortSignal: extra.abortSignal,
+    ...(extra.transcriptMaxBytes !== undefined
+      ? { transcriptMaxBytes: extra.transcriptMaxBytes }
+      : {}),
   });
 }
+
+describe("transcript cap (GH-1420)", () => {
+  test("caps the transcript, flags truncation, and still exits cleanly", async () => {
+    const workspaceDir = ws();
+    const traceEvents = [];
+    const outcome = await run(workspaceDir, {
+      transcriptMaxBytes: 64,
+      onTrace: (kind, payload) => traceEvents.push({ kind, payload }),
+    });
+
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.timedOut).toBe(false);
+    expect(outcome.transcriptTruncated).toBe(true);
+    expect(
+      traceEvents.some(
+        (event) =>
+          event.kind === "lifecycle" &&
+          event.payload.note === "transcript_truncated" &&
+          event.payload.bytes === 64,
+      ),
+    ).toBe(true);
+    const transcript = readFileSync(
+      path.join(workspaceDir, ".transcript.json"),
+      "utf8",
+    );
+    expect(Buffer.byteLength(transcript)).toBeLessThanOrEqual(
+      64 +
+        Buffer.byteLength(
+          '\n{"type":"factory","subtype":"transcript_truncated","bytes":64}\n',
+        ),
+    );
+    expect(
+      transcript.endsWith(
+        '\n{"type":"factory","subtype":"transcript_truncated","bytes":64}\n',
+      ),
+    ).toBe(true);
+  });
+
+  test("a transcript under the cap is stored whole with no truncation flag", async () => {
+    const workspaceDir = ws();
+    const outcome = await run(workspaceDir);
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.transcriptTruncated).toBeUndefined();
+    const transcript = readFileSync(
+      path.join(workspaceDir, ".transcript.json"),
+      "utf8",
+    );
+    const lines = transcript.split("\n");
+    expect(lines.at(-1)).toBe("");
+    const parsed = lines.slice(0, -1).map(JSON.parse);
+    expect(parsed.length).toBeGreaterThan(1);
+    expect(parsed.some((msg) => msg.type === "factory")).toBe(false);
+  });
+});
 
 describe("adapter contract", () => {
   test("satisfies WM-837: execute + SANDBOX_SUPPORT unsupported", () => {
@@ -599,14 +666,95 @@ describe("permission policy", () => {
 });
 
 describe("execute against a fake ACP agent", () => {
-  test("session lifecycle, update folding, usage, result.json, subscription env stripped", async () => {
+  test("spawn errors destroy the transcript before rejecting", async () => {
+    const workspaceDir = ws();
+    let transcript;
+    const child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = null;
+    child.stderr = null;
+
+    const pending = execute({
+      spec: defaultSpec,
+      def: defaultDef,
+      workspaceDir,
+      timeoutMs: 1000,
+      config: fakeConfig,
+      spawnProcess: () => {
+        queueMicrotask(() =>
+          child.emit(
+            "error",
+            Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
+          ),
+        );
+        return child;
+      },
+      transcriptFactory: () => {
+        transcript = new PassThrough();
+        return transcript;
+      },
+    });
+
+    await expect(pending).rejects.toMatchObject({ code: "ENOENT" });
+    expect(transcript.destroyed).toBe(true);
+  });
+
+  test("a child without stdout still settles when it closes", async () => {
+    const workspaceDir = ws();
+    const child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = null;
+    child.stderr = null;
+
+    const outcome = await execute({
+      spec: defaultSpec,
+      def: defaultDef,
+      workspaceDir,
+      timeoutMs: 1000,
+      config: fakeConfig,
+      spawnProcess: () => {
+        queueMicrotask(() => child.emit("close", 0));
+        return child;
+      },
+      transcriptFactory: () => new PassThrough(),
+    });
+
+    expect(outcome).toEqual({
+      exitCode: 0,
+      timedOut: false,
+      policyDenials: [],
+    });
+  });
+
+  test("refuses a definition without verified promptText before launching the ACP agent", async () => {
     const workspaceDir = ws();
     const recordFile = path.join(workspaceDir, "record.json");
+    const { promptText, ...unverifiedDef } = defaultDef;
+
+    await expect(
+      run(workspaceDir, {
+        def: unverifiedDef,
+        env: { ACP_FAKE_RECORD: recordFile },
+      }),
+    ).rejects.toThrow(
+      "acp: definition test-acp@1 has no verified promptText (registry-loaded definitions only)",
+    );
+    expect(existsSync(recordFile)).toBe(false);
+  });
+
+  test("session lifecycle uses the verified prompt snapshot after its path changes", async () => {
+    const workspaceDir = ws();
+    const recordFile = path.join(workspaceDir, "record.json");
+    const promptRecord = path.join(workspaceDir, "prompt.txt");
+    const replacedPrompt = path.join(workspaceDir, "replaced-prompt.md");
+    writeFileSync(replacedPrompt, "mutable replacement", "utf8");
     const traceEvents = [];
     const usageSeen = [];
     const outcome = await run(workspaceDir, {
+      def: { ...defaultDef, promptPath: replacedPrompt },
       env: {
         ACP_FAKE_RECORD: recordFile,
+        ACP_FAKE_PROMPT_RECORD: promptRecord,
         ANTHROPIC_API_KEY: "sk-must-strip",
         CLAUDECODE: "1",
       },
@@ -620,6 +768,9 @@ describe("execute against a fake ACP agent", () => {
     expect(record.cwd).toBe(workspaceDir);
     expect(record.env.ANTHROPIC_API_KEY).toBeUndefined();
     expect(record.env.CLAUDECODE).toBeUndefined();
+    expect(readFileSync(promptRecord, "utf8")).toBe(
+      `You are a test agent.${PROMPT_SUFFIX}`,
+    );
     expect(existsSync(path.join(workspaceDir, "result.json"))).toBe(true);
     expect(
       readFileSync(path.join(workspaceDir, ".transcript.json"), "utf8"),
@@ -758,6 +909,22 @@ describe("execute against a fake ACP agent", () => {
     const outcome = await pending;
     expect(outcome.timedOut).toBe(false);
     expect(outcome.exitCode).toBeNull();
+  });
+
+  test("a child that ignores SIGTERM is SIGKILLed after the grace", async () => {
+    const workspaceDir = ws();
+    const started = Date.now();
+    const outcome = await run(workspaceDir, {
+      behavior: "ignore_sigterm",
+      timeoutMs: 200,
+      killGraceMs: 150,
+    });
+    const elapsed = Date.now() - started;
+    expect(outcome.timedOut).toBe(true);
+    expect(outcome.exitCode).toBeNull();
+    // TERM at 200 ms is ignored; only the KILL escalation settles the run.
+    expect(elapsed).toBeGreaterThanOrEqual(300);
+    expect(elapsed).toBeLessThan(4000);
   });
 
   const testProcessGroup = process.platform === "win32" ? test.skip : test;

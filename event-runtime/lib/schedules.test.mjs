@@ -4,11 +4,12 @@ import { describe, expect, test } from "bun:test";
 import path from "node:path";
 import * as fake from "./adapters/fake.mjs";
 import { openDb } from "./db.mjs";
-import { admitEvent } from "./intake.mjs";
+import { admitEvent, admitExternalEvent, admitSignedEvent } from "./intake.mjs";
 import { planAdmittedEvents, planEvent } from "./planner.mjs";
 import { approveProposal, openProposals } from "./proposals.mjs";
 import { loadRegistry } from "./registry.mjs";
 import {
+  SCHEDULE_SOURCE,
   autoApproveScheduled,
   dueSlots,
   emitDueTicks,
@@ -21,7 +22,16 @@ import {
 import { runOnce } from "./worker.mjs";
 
 const PV = "git:test-pv";
-const base = loadRegistry();
+// Assertions about shipped kernel defaults (reaper disabled, source "kernel")
+// must not inherit the operator's local config/schedule.yaml overlay (#1053).
+// Point the overlay at an absent file so `base` reflects only tracked kernel
+// schedules, deterministic regardless of instance config.
+const base = loadRegistry({
+  scheduleConfigPath: path.join(
+    tmpDir("evrt-sched-no-overlay-"),
+    "schedule.yaml",
+  ),
+});
 const db = () => openDb(path.join(tmpDir("evrt-sched-"), "runtime.db"));
 
 /** The real registry with one loop overridden — schedules are just data. */
@@ -138,7 +148,24 @@ describe("dueSlots — catch-up policy (§4)", () => {
       cadenceSeconds: hour,
       catchUp: "last",
     });
-    expect(outcome.slots).toEqual(["2026-08-14T04:00:00.000Z"]);
+    expect(outcome).toEqual({
+      slots: ["2026-08-14T03:00:00.000Z"],
+      skipped: 4,
+    });
+  });
+
+  test("last: with no missed slots, fires the current slot like none", () => {
+    expect(
+      dueSlots({
+        lastSlot: "2026-08-14T03:00:00.000Z",
+        nowMs: now,
+        cadenceSeconds: hour,
+        catchUp: "last",
+      }),
+    ).toEqual({
+      slots: ["2026-08-14T04:00:00.000Z"],
+      skipped: 0,
+    });
   });
 
   test("all: every missed slot fires, in order, nothing skipped", () => {
@@ -233,6 +260,32 @@ describe("emitDueTicks (§3)", () => {
       tickEventId("reaper", "2026-08-14T04:00:00.000Z"),
     );
     expect(envelope.source).toBe("schedule");
+  });
+
+  test("a last catch-up tick binds its payload slot to its event ID and auto-approves", () => {
+    const d = db();
+    const registry = withLoop({ catchUp: "last", approval: "auto" });
+    emitDueTicks(d, registry, { now: at("2026-08-13T22:00:00Z") });
+    emitDueTicks(d, registry, { now: at("2026-08-14T04:00:00Z") });
+
+    const row = d
+      .query(
+        `SELECT event_id, envelope_json FROM events ORDER BY event_id DESC LIMIT 1`,
+      )
+      .get();
+    const envelope = JSON.parse(row.envelope_json);
+    expect(envelope.payload).toMatchObject({
+      loop: "reaper",
+      slot: "2026-08-14T03:00:00.000Z",
+      skippedSlots: 4,
+    });
+    expect(row.event_id).toBe(tickEventId("reaper", envelope.payload.slot));
+
+    planAdmittedEvents(d, registry, { policyVersion: PV });
+    expect(
+      autoApproveScheduled(d, registry, approveProposal, { policyVersion: PV })
+        .approved,
+    ).toHaveLength(2);
   });
 
   test("a static payload rides on the tick and the planner proposes the routed run (WM-72)", () => {
@@ -449,6 +502,86 @@ describe("planning a tick (§5, §6)", () => {
       .get(runId);
     expect(approval.actor).toBe("schedule");
     expect(approval.actor).not.toBe("operator");
+  });
+
+  test("reserved schedule provenance is refused at the external boundary but the tick loop still admits (#960)", () => {
+    const d = db();
+    const registry = withLoop({ approval: "auto" });
+    const forged = {
+      schemaVersion: "factory.event/v1",
+      eventId: tickEventId("reaper", "2026-08-13T21:00:00.000Z"),
+      type: "clock.tick.reaper",
+      source: SCHEDULE_SOURCE,
+      subject: "reaper",
+      occurredAt: "2026-08-13T21:00:00.000Z",
+      correlationId: "forged",
+      causationId: null,
+      payload: { loop: "reaper", slot: "2026-08-13T21:00:00.000Z" },
+    };
+    const now = at("2026-08-13T21:00:05Z");
+    for (const admit of [admitExternalEvent, admitSignedEvent]) {
+      expect(admit(d, registry, forged, { now })).toEqual({
+        admitted: false,
+        duplicate: false,
+        errors: ['source: reserved internal provenance "schedule"'],
+      });
+    }
+    expect(d.query(`SELECT COUNT(*) AS n FROM events`).get().n).toBe(0);
+
+    // The internal scheduler is unaffected: it emits, plans and auto-approves.
+    expect(emitDueTicks(d, registry, { now }).emitted).toHaveLength(1);
+    planAdmittedEvents(d, registry, { policyVersion: PV });
+    expect(
+      autoApproveScheduled(d, registry, approveProposal, { policyVersion: PV })
+        .approved,
+    ).toHaveLength(1);
+  });
+
+  test("auto-approval binds to the configured event type and static payload (#960)", () => {
+    const d = db();
+    const registry = withLoop({
+      eventType: "factory.merge.requested",
+      payload: { repo: "factory" },
+      approval: "auto",
+    });
+    // A schedule-sourced event that is not the tick this loop is configured to
+    // emit: same loop, different repo binding and a non-tick identity.
+    const now = at("2026-08-17T10:30:45Z");
+    const admitted = admitEvent(
+      d,
+      registry,
+      {
+        schemaVersion: "factory.event/v1",
+        eventId: "manual:reaper:2026-08-17T10:30:00.000Z",
+        type: "factory.merge.requested",
+        source: SCHEDULE_SOURCE,
+        subject: "reaper",
+        occurredAt: "2026-08-17T10:30:00.000Z",
+        correlationId: "smuggled",
+        causationId: null,
+        payload: {
+          loop: "reaper",
+          slot: "2026-08-17T10:30:00.000Z",
+          repo: "other-repo",
+        },
+      },
+      { now },
+    );
+    expect(admitted.admitted).toBe(true);
+    planAdmittedEvents(d, registry, { policyVersion: PV, now });
+
+    const outcome = autoApproveScheduled(d, registry, approveProposal, {
+      now,
+      policyVersion: PV,
+    });
+    expect(outcome.approved).toEqual([]);
+    // It stays an ordinary open proposal for a human, not a queued run.
+    expect(
+      openProposals(d, {}).filter((p) => p.status === "open").length,
+    ).toBeGreaterThan(0);
+    expect(
+      d.query(`SELECT COUNT(*) AS n FROM runs WHERE state = 'QUEUED'`).get().n,
+    ).toBe(0);
   });
 
   test("singleton: a loop whose previous run is in flight plans a NOOP, not a queue", async () => {

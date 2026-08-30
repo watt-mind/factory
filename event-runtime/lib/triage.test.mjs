@@ -530,7 +530,7 @@ describe("model-tier sizing on promotion (WM-696)", () => {
           argv: [
             "sh",
             "-c",
-            `echo {issueId} ai:agent-ready tier:{tier} >> ${dir}/applied.txt`,
+            `echo {issueId} ai:agent-ready tier:{tier} comment:{tierReason} >> ${dir}/applied.txt`,
           ],
         },
       },
@@ -543,6 +543,15 @@ describe("model-tier sizing on promotion (WM-696)", () => {
         .argv;
     expect(argv).toContain("ai:agent-ready");
     expect(argv).toContain("tier:{tier}");
+  });
+
+  test("label-agent-ready passes tierReason as a distinct state comment argument", () => {
+    const argv =
+      registry.agents.get("triage-apply@1").actionRegistry["label-agent-ready"]
+        .argv;
+    const commentIndex = argv.indexOf("--comment");
+    expect(commentIndex).toBeGreaterThan(-1);
+    expect(argv[commentIndex + 1]).toBe("{tierReason}");
   });
 
   test("the real triage-apply@1 definition removes all three tier:* values before adding one — a ticket can never end up with two", () => {
@@ -566,7 +575,7 @@ describe("model-tier sizing on promotion (WM-696)", () => {
     expect(addTierIndex).toBeGreaterThan(Math.max(...removeIndices));
   });
 
-  test("label-agent-ready substitutes the approved tier into the applied label", async () => {
+  test("label-agent-ready substitutes the approved tier and rationale as separate argv elements", async () => {
     const dir = tmpDir("evrt-apply-");
     const workspaceDir = tmpDir("evrt-apply-ws-");
     const outcome = await actions.execute({
@@ -589,7 +598,7 @@ describe("model-tier sizing on promotion (WM-696)", () => {
     });
     expect(outcome).toEqual({ exitCode: 0, timedOut: false });
     expect(readFileSync(path.join(dir, "applied.txt"), "utf8").trim()).toBe(
-      "CLNT-1 ai:agent-ready tier:light",
+      "CLNT-1 ai:agent-ready tier:light comment:single-file config change",
     );
   });
 
@@ -601,8 +610,17 @@ describe("model-tier sizing on promotion (WM-696)", () => {
         input: {
           repo: "bj29",
           plan: [
-            { issueId: "CLNT-1", action: "label-agent-ready", tier: "light" },
-            { issueId: "CLNT-2", action: "label-agent-ready" }, // no tier
+            {
+              issueId: "CLNT-1",
+              action: "label-agent-ready",
+              tier: "light",
+              tierReason: "single-file config change",
+            },
+            {
+              issueId: "CLNT-2",
+              action: "label-agent-ready",
+              tierReason: "missing tier must refuse the plan",
+            }, // no tier
           ],
         },
       },

@@ -105,17 +105,52 @@ describe("openPrHold", () => {
   });
 });
 
+/**
+ * A `gh` fake speaking the forge's REST dialect (#1422): `repo view` names
+ * the repo and the paged `api repos/o/r/pulls?state=open&...` list slices
+ * `open` by page, the way GitHub does.
+ */
+function ghRest({ open = [] } = {}) {
+  return (_cmd, args) => {
+    const ok = (body) => ({
+      status: 0,
+      stdout: JSON.stringify(body),
+      stderr: "",
+    });
+    if (args[0] === "repo" && args[1] === "view")
+      return ok({ nameWithOwner: "o/r" });
+    const list =
+      /^repos\/o\/r\/pulls\?state=open&per_page=(\d+)&page=(\d+)$/.exec(
+        args[0] === "api" ? args[1] : "",
+      );
+    if (list) {
+      const perPage = Number(list[1]);
+      const page = Number(list[2]);
+      return ok(open.slice((page - 1) * perPage, page * perPage));
+    }
+    return { status: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" };
+  };
+}
+
 describe("listOpenPrs", () => {
   test("returns the parsed PR list", () => {
-    const run = recorder(() => ({
-      status: 0,
-      stdout: JSON.stringify([{ number: 261, headRefName: "feat/CLNT-520" }]),
-    }));
+    const run = recorder(
+      ghRest({ open: [{ number: 261, head: { ref: "feat/CLNT-520" } }] }),
+    );
     expect(listOpenPrs("/repo", run)).toEqual([
       { number: 261, headRefName: "feat/CLNT-520" },
     ]);
-    expect(run.calls[0].args).toContain("--state");
-    expect(run.calls[0].args).toContain("open");
+    expect(run.calls[0].args).toEqual([
+      "repo",
+      "view",
+      "--json",
+      "nameWithOwner",
+    ]);
+    expect(run.calls[1].args).toEqual([
+      "api",
+      "repos/o/r/pulls?state=open&per_page=100&page=1",
+    ]);
+    expect(run.calls.every((call) => call.opts.cwd === "/repo")).toBe(true);
   });
 
   test("a failed or unparseable `gh` is null, not an empty list", () => {
@@ -138,24 +173,18 @@ describe("listOpenPrs", () => {
   test("fails closed (returns null) when hitting the fetch limit (WM-56)", () => {
     const atLimit = Array.from({ length: 200 }, (_, i) => ({
       number: i + 1,
-      headRefName: `branch-${i + 1}`,
+      head: { ref: `branch-${i + 1}` },
     }));
-    const run = recorder(() => ({
-      status: 0,
-      stdout: JSON.stringify(atLimit),
-    }));
+    const run = recorder(ghRest({ open: atLimit }));
     expect(listOpenPrs("/repo", run, 200)).toBeNull();
   });
 
   test("returns PRs when below the fetch limit (WM-56)", () => {
     const belowLimit = Array.from({ length: 199 }, (_, i) => ({
       number: i + 1,
-      headRefName: `branch-${i + 1}`,
+      head: { ref: `branch-${i + 1}` },
     }));
-    const run = recorder(() => ({
-      status: 0,
-      stdout: JSON.stringify(belowLimit),
-    }));
+    const run = recorder(ghRest({ open: belowLimit }));
     expect(listOpenPrs("/repo", run, 200)).toHaveLength(199);
   });
 });

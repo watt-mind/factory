@@ -71,6 +71,7 @@ case "$cmd" in
     echo "factory linear is deprecated — use 'factory ticket'" >&2
     run_bun tools/ticket.mjs "$@"
     ;;
+  ask)          run_bun orchestrator/ask.mjs "$@" ;;
   queue)        run_bun orchestrator/queue.mjs "$@" ;;
   next)         run_bun orchestrator/next.mjs "$@" ;;
   state)        run_bun orchestrator/state.mjs "$@" ;;
@@ -94,6 +95,7 @@ case "$cmd" in
   warm)         run_bun orchestrator/warm.mjs "$@" ;;
   tick)         run_bun orchestrator/tick.mjs "$@" ;;
   dispatch)     run_bun tools/dispatch.mjs "$@" ;;
+  handoff)      run_bun tools/handoff.mjs "$@" ;;
   events)       run_bun event-runtime/cli.mjs "$@" ;;
   pack)         run_bun event-runtime/cli.mjs pack "$@" ;;
   inbox)        run_bun event-runtime/cli.mjs inbox "$@" ;;
@@ -110,8 +112,30 @@ case "$cmd" in
       for _a in "$@"; do
         [[ "$_a" != "--web" && "$_a" != "--all" ]] && _args+=("$_a")
       done
+      _web_pid=""
+      _runtime_pid=""
+      _cleanup_serve() {
+        local _status=$?
+        trap - EXIT INT TERM
+        for _pid in "$_runtime_pid" "$_web_pid"; do
+          [[ -n "$_pid" ]] && kill -TERM "$_pid" 2>/dev/null || true
+        done
+        for _pid in "$_runtime_pid" "$_web_pid"; do
+          [[ -n "$_pid" ]] && wait "$_pid" 2>/dev/null || true
+        done
+        exit "$_status"
+      }
+      trap _cleanup_serve EXIT
+      trap 'exit 130' INT
+      trap 'exit 143' TERM
       bun "$ROOT/event-runtime/web/serve.mjs" &
-      exec bun "$ROOT/event-runtime/cli.mjs" serve "${_args[@]}"
+      _web_pid=$!
+      bun "$ROOT/event-runtime/cli.mjs" serve "${_args[@]}" &
+      _runtime_pid=$!
+      _runtime_status=0
+      wait "$_runtime_pid" || _runtime_status=$?
+      _runtime_pid=""
+      exit "$_runtime_status"
     else
       run_bun event-runtime/cli.mjs serve "$@"
     fi
@@ -132,6 +156,7 @@ case "$cmd" in
   up)           exec bash "$ROOT/bin/live-stack.sh" up "$@" ;;
   down)         exec bash "$ROOT/bin/live-stack.sh" down "$@" ;;
   tail)         exec bash "$ROOT/bin/live-stack.sh" tail "$@" ;;
+  logs)         exec bash "$ROOT/bin/live-stack.sh" logs "$@" ;;
   init)
     # Preserve the existing GitHub control-plane initializer while making the
     # no-argument command scaffold all operator-local config from templates.
@@ -183,6 +208,7 @@ case "$cmd" in
     if [[ -n "$_notify_kind" ]]; then
       export FACTORY_INBOX_KIND="$_notify_kind"
       export FACTORY_INBOX_MESSAGE="$_notify_message"
+      export FACTORY_NOTIFY_REFS="$ROOT/lib/notify-refs.mjs"
       if [[ -n "${FACTORY_RUN_ID:-}" ]]; then
         export FACTORY_INBOX_SOURCE="agent:${FACTORY_RUN_ID}"
       else
@@ -193,21 +219,19 @@ case "$cmd" in
         const message = process.env.FACTORY_INBOX_MESSAGE;
         const kind = process.env.FACTORY_INBOX_KIND;
         const prefix = message.slice(kind.length).trimStart().split(":", 1)[0].trim();
-        const refs = {};
-        const issue = prefix.match(/\b[A-Z][A-Z0-9]+-\d+\b/);
-        const pr = prefix.match(/\bPR#?\d+\b/i);
-        const run = prefix.match(/\brun\s+([^\s:]+)/i);
-        if (issue) refs.issue = issue[0];
-        if (pr) refs.pr = pr[0].toUpperCase();
-        if (run) refs.runId = run[1];
-        const repo = prefix.match(/^merge\s+(\S+)/i)
-          || prefix.match(/^(\S+)\s+run\s+/i)
-          || (!issue && !pr ? prefix.match(/^(\S+)/) : null);
-        if (repo) refs.repo = repo[1];
+        const { parseNotifyRefs } = await import(process.env.FACTORY_NOTIFY_REFS);
+        const refs = parseNotifyRefs(prefix);
         try {
+          // The control API requires the operator bearer. An unset token sends
+          // no header and the server fails closed with an actionable 503. The
+          // value is only ever placed in the header — never printed.
+          const token = process.env.FACTORY_CONTROL_API_TOKEN;
           const response = await fetch(`http://127.0.0.1:${process.env.FACTORY_EVENT_PORT || "7381"}/inbox`, {
             method: "POST",
-            headers: { "content-type": "application/json" },
+            headers: {
+              "content-type": "application/json",
+              ...(token ? { authorization: `Bearer ${token}` } : {}),
+            },
             body: JSON.stringify({
               kind,
               title: message,
@@ -215,8 +239,15 @@ case "$cmd" in
               source: process.env.FACTORY_INBOX_SOURCE,
             }),
           });
+          const responseBody = await response.clone().json().catch(() => null);
+          if (response.status === 401 || (response.status === 503 && responseBody?.error === "control_api_token_unset")) {
+            console.error(token
+              ? "notify: control API rejected FACTORY_CONTROL_API_TOKEN"
+              : "notify: control API requires FACTORY_CONTROL_API_TOKEN; set it in ~/.factory/secrets.env");
+            process.exit(10);
+          }
           if (!response.ok) process.exit(10);
-          const body = await response.json();
+          const body = responseBody;
           // Durable record succeeded; the serve-side notify.py projection did
           // not. Exit 12 so the shell falls through to the CLI transport
           // rather than treating this as delivered (WM-759). WM-825 exited 0
@@ -240,15 +271,20 @@ case "$cmd" in
     fi
 
     # Unreachable runtime (or an unstructured legacy message): preserve the
-    # old argv/stdin transport exactly. WM-795 gave `factory notify`'s callers
-    # (runners/run-agent.sh) a policy-configurable command via lib/notify.mjs,
-    # but this direct fallback still hardcodes the operator's private
-    # notify.py path; WM-879 owns dropping it in favour of the same
-    # config/policy.yaml resolution.
+    # old argv/stdin transport, but resolve the command the same way every
+    # other caller does (lib/notify.mjs — WM-795), rather than hardcoding the
+    # operator's private notify.py path. A clone that has configured no
+    # transport is silent on this channel instead of crashing on a path that
+    # only exists on one machine; the durable record above is unaffected.
+    _notify_argv="$(FACTORY_ROOT="$ROOT" bun "$ROOT/lib/notify.mjs" 2>/dev/null || true)"
+    if [[ -z "$_notify_argv" ]]; then
+      echo "notify: no transport configured — set notify.command in config/policy.yaml or FACTORY_NOTIFY_CMD" >&2
+      exit 0
+    fi
     if [[ "$_notify_stdin" -eq 1 ]]; then
-      printf '%s' "$_notify_message" | exec python3 "${FACTORY_NOTIFY_SCRIPT:-$HOME/Develop/hdkiller/scripts/notify.py}" -
+      printf '%s' "$_notify_message" | exec $_notify_argv -
     else
-      exec python3 "${FACTORY_NOTIFY_SCRIPT:-$HOME/Develop/hdkiller/scripts/notify.py}" "$@"
+      exec $_notify_argv "$@"
     fi
     ;;
   security)
@@ -277,6 +313,8 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   init          scaffold config/*.yaml from tracked examples (never overwrites)
   ticket        tools/ticket.mjs
   linear        tools/ticket.mjs (deprecated alias for 'ticket')
+  ask           orchestrator/ask.mjs (read-only factory state: queue, in-flight,
+                held, recent runs, planner declines, spend; --json --section --repo)
   queue         orchestrator/queue.mjs
   next          orchestrator/next.mjs
   state         orchestrator/state.mjs
@@ -300,6 +338,7 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   warm          orchestrator/warm.mjs
   tick          orchestrator/tick.mjs
   dispatch      tools/dispatch.mjs (swift event task runner: triage, status, janitor)
+  handoff       tools/handoff.mjs (remote handoff broker)
   events        event-runtime/cli.mjs (status, ps, runs, proposals, approve, reject, inject, requeue)
   pack          scaffold or validate a data-only filesystem pack
   inbox         list open human inbox items
@@ -311,6 +350,7 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   up            start live event-runtime stack (API 7381, live worker, and Web UI 7382)
   down          stop live event-runtime stack
   tail          tail live daemon logs (~/.factory/run/{serve,worker,web}.log)
+  logs          manage live daemon logs (factory logs rotate)
   init --control-plane github [--root DIR] [--repo owner/name]
                 scaffold GitHub Issues control-plane defaults
   onboard       print the prompt that connects a repo to factory (#938);

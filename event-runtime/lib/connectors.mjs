@@ -57,6 +57,11 @@ export const CONNECTOR_ID_PATTERN =
 export const CONNECTOR_START_TIMEOUT_MS = 10_000;
 
 const SECRET_KEY_HEURISTIC = /nsec|token|secret|key|password/i;
+const FORBIDDEN_CONFIG_PATH_SEGMENTS = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
 
 /** Typed error for a module that fails the connector contract. */
 export class ConnectorError extends Error {
@@ -240,9 +245,11 @@ export function createConnectorClient({ db, registry, extension, name }) {
       get(id) {
         return getInboxItem(db, id);
       },
-      decide(id, response, { actor } = {}) {
+      // Async since factory#1434: the decision effect (e.g. the Linear CLI)
+      // runs outside the SQLite write lock, so callers must await the result.
+      async decide(id, response, { actor } = {}) {
         const decidedBy = connectorActor(extension, name, actor);
-        const result = decideInboxItem(db, id, response, { decidedBy });
+        const result = await decideInboxItem(db, id, response, { decidedBy });
         emitInboxChange({
           type: "changed",
           item: result?.item ?? null,
@@ -296,6 +303,8 @@ export function createConnectorClient({ db, registry, extension, name }) {
  * fields come first; remaining keys matching the heuristic are moved too
  * so a schema that predates WM-920 still does not leak credentials into
  * `ctx.config`.
+ * Paths containing forbidden segments are deleted from `config` and are
+ * never copied to `secrets`.
  *
  * @param {object|null|undefined} values
  * @param {Array<{ path: string[] }>} secretFields
@@ -304,6 +313,10 @@ export function splitConfigSecrets(values, secretFields = []) {
   const config = cloneJson(values) ?? {};
   const secrets = {};
   const move = (keyPath) => {
+    if (keyPath.some((key) => FORBIDDEN_CONFIG_PATH_SEGMENTS.has(key))) {
+      deleteConfigPath(config, keyPath);
+      return;
+    }
     let node = values;
     for (const key of keyPath) {
       if (
@@ -323,9 +336,20 @@ export function splitConfigSecrets(values, secretFields = []) {
 }
 
 function moveHeuristic(from, secrets, path) {
-  if (!from || typeof from !== "object" || Array.isArray(from)) return;
+  if (!from || typeof from !== "object") return;
+  if (Array.isArray(from)) {
+    // Arrays are opaque to the secret heuristic (an index is never a
+    // secret key) but forbidden own-keys must still be stripped from any
+    // object or nested array inside them.
+    for (const element of from) stripForbiddenSegments(element);
+    return;
+  }
   for (const [key, inner] of Object.entries(from)) {
     const next = [...path, key];
+    if (next.some((segment) => FORBIDDEN_CONFIG_PATH_SEGMENTS.has(segment))) {
+      delete from[key];
+      continue;
+    }
     if (SECRET_KEY_HEURISTIC.test(key) && !isPlainObject(inner)) {
       setAt(secrets, next, inner);
       delete from[key];
@@ -335,28 +359,88 @@ function moveHeuristic(from, secrets, path) {
   }
 }
 
+/** Recursively delete forbidden own-keys from objects and arrays; scalars are untouched. */
+function stripForbiddenSegments(node) {
+  if (!node || typeof node !== "object") return;
+  if (Array.isArray(node)) {
+    for (const element of node) stripForbiddenSegments(element);
+    return;
+  }
+  for (const key of Object.keys(node)) {
+    if (FORBIDDEN_CONFIG_PATH_SEGMENTS.has(key)) {
+      delete node[key];
+      continue;
+    }
+    stripForbiddenSegments(node[key]);
+  }
+}
+
+function deleteConfigPath(config, keyPath) {
+  let node = config;
+  for (let i = 0; i < keyPath.length; i++) {
+    const key = keyPath[i];
+    if (!isContainer(node) || !Object.hasOwn(node, key)) return;
+    if (FORBIDDEN_CONFIG_PATH_SEGMENTS.has(key)) {
+      delete node[key];
+      return;
+    }
+    node = node[key];
+  }
+}
+
 function isPlainObject(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Plain object or array — anything a config path may traverse through. */
+function isContainer(value) {
+  return typeof value === "object" && value !== null;
+}
+
 function setAt(obj, keyPath, value) {
+  if (
+    keyPath.length === 0 ||
+    keyPath.some((key) => FORBIDDEN_CONFIG_PATH_SEGMENTS.has(key))
+  )
+    return;
   let node = obj;
   for (let i = 0; i < keyPath.length - 1; i++) {
     const key = keyPath[i];
-    if (!isPlainObject(node[key])) node[key] = {};
+    if (!isPlainObject(node)) return;
+    if (!Object.hasOwn(node, key) || !isPlainObject(node[key])) {
+      Object.defineProperty(node, key, {
+        value: {},
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+    }
     node = node[key];
   }
-  node[keyPath[keyPath.length - 1]] = value;
+  if (!isPlainObject(node)) return;
+  Object.defineProperty(node, keyPath[keyPath.length - 1], {
+    value,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
 }
 
 function deleteAt(obj, keyPath) {
+  if (
+    keyPath.length === 0 ||
+    keyPath.some((key) => FORBIDDEN_CONFIG_PATH_SEGMENTS.has(key))
+  )
+    return;
   let node = obj;
   for (let i = 0; i < keyPath.length - 1; i++) {
     const key = keyPath[i];
-    if (!isPlainObject(node[key])) return;
+    if (!isContainer(node) || !Object.hasOwn(node, key)) return;
+    if (!isContainer(node[key])) return;
     node = node[key];
   }
-  delete node[keyPath[keyPath.length - 1]];
+  const key = keyPath[keyPath.length - 1];
+  if (isContainer(node) && Object.hasOwn(node, key)) delete node[key];
 }
 
 function connectorLog(log, extension, name) {

@@ -1,5 +1,22 @@
 import type { AgentsView } from "./types";
 
+type JsonSchema = Record<string, unknown> & {
+  type?: string | string[];
+  enum?: unknown[];
+  const?: unknown;
+  minimum?: number;
+  minItems?: number;
+  items?: JsonSchema;
+  required?: string[];
+  properties?: Record<string, JsonSchema>;
+  pattern?: string;
+  format?: string;
+};
+
+function isJsonSchema(value: unknown): value is JsonSchema {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 // Trigger templates (OPS-214): one per registered event type, with the
 // payload skeleton derived from that event's agent input schema. Deriving
 // beats hand-maintaining — a template can never drift from the registry,
@@ -44,10 +61,10 @@ export function groupTemplates(
 /** A plausible starting value for one schema property — never a lie, just a seed. */
 function seedFor(
   name: string,
-  schema: any,
+  schema: unknown,
   nowMs: number = Date.now(),
 ): unknown {
-  if (!schema || typeof schema !== "object") return "";
+  if (!isJsonSchema(schema)) return "";
   if (Array.isArray(schema.enum) && schema.enum.length > 0)
     return schema.enum[0];
   if (schema.const !== undefined) return schema.const;
@@ -106,12 +123,13 @@ function seedFor(
 
 /** Required properties only: the smallest envelope that can pass validation. */
 export function buildSkeleton(
-  schema: any,
+  schema: unknown,
   nowMs: number = Date.now(),
 ): Record<string, unknown> {
+  if (!isJsonSchema(schema)) return {};
   const out: Record<string, unknown> = {};
-  const required: string[] = schema?.required ?? [];
-  const props = schema?.properties ?? {};
+  const required = Array.isArray(schema.required) ? schema.required : [];
+  const props = isJsonSchema(schema.properties) ? schema.properties : {};
   for (const name of required) {
     out[name] = seedFor(name, props[name], nowMs);
   }
@@ -119,8 +137,11 @@ export function buildSkeleton(
 }
 
 /** One-line description of the payload shape, for the template list. */
-export function summarize(schema: any): string {
-  const required: string[] = schema?.required ?? [];
+export function summarize(schema: unknown): string {
+  const required =
+    isJsonSchema(schema) && Array.isArray(schema.required)
+      ? schema.required
+      : [];
   if (required.length === 0) return "no required payload fields";
   return required.join(", ");
 }

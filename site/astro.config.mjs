@@ -31,9 +31,16 @@ export default defineConfig({
       ],
       customCss: ["./src/styles/tokens.css", "./src/styles/custom.css"],
       components: {
+        Footer: "./src/components/Footer.astro",
         Hero: "./src/components/HomeHero.astro",
+        SiteTitle: "./src/components/SiteTitle.astro",
       },
       head: [
+        {
+          tag: "script",
+          content:
+            'try { if (localStorage.getItem("starlight-theme") === null) localStorage.setItem("starlight-theme", "dark"); } catch {}',
+        },
         {
           tag: "script",
           attrs: {

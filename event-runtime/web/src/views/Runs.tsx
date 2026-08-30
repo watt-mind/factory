@@ -88,6 +88,7 @@ import {
   VerbError,
   copyText,
   copyLink,
+  rowKeyHandler,
   shortId,
 } from "../components/ui";
 import { Button as PrimitiveButton } from "../components/ui";
@@ -177,6 +178,24 @@ export function tabForRunState(state: string): RunTab {
   if (state === "COMPLETED") return "COMPLETED";
   if (state === "CANCELLED") return "CANCELLED";
   return "ALL";
+}
+
+export function countRunsByTab(
+  runs: readonly Pick<RunListItem, "state">[],
+): Record<RunTab, number> {
+  const counts: Record<RunTab, number> = {
+    ALL: 0,
+    ACTIVE: 0,
+    COMPLETED: 0,
+    FAILED: 0,
+    CANCELLED: 0,
+  };
+  for (const run of runs) {
+    counts.ALL += 1;
+    const stateTab = tabForRunState(run.state);
+    if (stateTab !== "ALL") counts[stateTab] += 1;
+  }
+  return counts;
 }
 
 const RUN_DRILLDOWN_POPULATIONS = new Set<RunListFilters["population"]>([
@@ -390,6 +409,20 @@ function leasePart(
     title: remainingTitle(`reaped in ${formatDuration(c.leftMs / 1000)}`, iso),
     hue: budget?.kind === "spent" ? "var(--hue-warn)" : undefined,
   };
+}
+
+/** The compact lease label shared by the list and the full run view. */
+export function leaseRemaining(
+  leaseExpiresAt: string | null | undefined,
+  now: number,
+) {
+  if (!leaseExpiresAt) return null;
+  const lease = leasePart(
+    clockTo(leaseExpiresAt, 0, now),
+    null,
+    leaseExpiresAt,
+  );
+  return lease?.text ?? null;
 }
 
 /**
@@ -935,37 +968,31 @@ export function Runs({
     },
   });
 
-  const byState = statusQ.data?.runs?.byState ?? {};
-  const tabCount = (t: RunTab) => {
+  const byState = statusQ.data?.runs?.byState;
+  const tabCounts = useMemo((): Record<RunTab, number> => {
     if (filter.trim()) {
-      return t === "ALL"
-        ? filteredScoped.length
-        : filteredScoped.filter((r) => matchesRunTab(r.state, t)).length;
+      return countRunsByTab(filteredScoped);
     }
     if (fetchAll) {
-      return t === "ALL"
-        ? scoped.length
-        : scoped.filter((r) => matchesRunTab(r.state, t)).length;
+      return countRunsByTab(scoped);
     }
-    if (t === "ALL")
-      return Object.values(byState).reduce((n, v) => n + (v ?? 0), 0);
-    if (t === "ACTIVE")
-      return (
-        (byState.QUEUED ?? 0) +
-        (byState.LEASED ?? 0) +
-        (byState.RUNNING ?? 0) +
-        (byState.VERIFYING ?? 0)
-      );
-    if (t === "FAILED")
-      return (
-        (byState.FAILED ?? 0) +
-        (byState.TIMED_OUT ?? 0) +
-        (byState.REFUSED ?? 0)
-      );
-    if (t === "COMPLETED") return byState.COMPLETED ?? 0;
-    if (t === "CANCELLED") return byState.CANCELLED ?? 0;
-    return 0;
-  };
+    const counts: Record<RunTab, number> = {
+      ALL: 0,
+      ACTIVE: 0,
+      COMPLETED: 0,
+      FAILED: 0,
+      CANCELLED: 0,
+    };
+    for (const [state, count] of Object.entries(byState ?? {})) {
+      const value = count ?? 0;
+      counts.ALL += value;
+      const stateTab = tabForRunState(state);
+      if (stateTab !== "ALL") counts[stateTab] += value;
+    }
+    return counts;
+  }, [byState, fetchAll, filter, filteredScoped, scoped]);
+
+  const tabCount = (t: RunTab) => tabCounts[t];
 
   const selectTab = (t: RunTab) => {
     setTab(t);
@@ -1276,6 +1303,8 @@ export function Runs({
         }
       >
         <Table
+          role="grid"
+          aria-label="Runs"
           className="w-full table-fixed border-separate border-spacing-0"
           style={{
             minWidth: `${listCols.reduce(
@@ -1292,8 +1321,8 @@ export function Runs({
               />
             ))}
           </colgroup>
-          <thead>
-            <tr className="text-left">
+          <thead role="rowgroup">
+            <tr role="row" className="text-left">
               {listCols.map((c) => {
                 const sort = displayConfig.sorts.find(
                   (s) => s.column === c.key,
@@ -1328,14 +1357,17 @@ export function Runs({
               })}
             </tr>
           </thead>
-          <tbody>
+          <tbody role="rowgroup">
             {(() => {
               const renderRow = (r: RunListItem) => (
                 <tr
                   key={r.runId}
+                  role="row"
+                  tabIndex={0}
                   onClick={() => onSelectRun(r.runId)}
+                  onKeyDown={rowKeyHandler(() => onSelectRun(r.runId))}
                   aria-selected={r.runId === selectedId}
-                  className={`cursor-pointer hover:bg-(--surface-1) ${rowWash(r.state)} ${r.runId === selectedId ? "row-selected" : ""}`}
+                  className={`cursor-pointer hover:bg-(--surface-1) focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-(--accent) ${rowWash(r.state)} ${r.runId === selectedId ? "row-selected" : ""}`}
                 >
                   <td
                     className="mono max-w-28 overflow-hidden border-b border-(--border) px-3 py-1.5 whitespace-nowrap"

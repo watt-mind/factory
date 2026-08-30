@@ -2,14 +2,27 @@ import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-chain-tes
 import { describe, expect, test } from "bun:test";
 import { cpSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { memoryForge } from "../../lib/forge/memory.mjs";
 import * as fake from "./adapters/fake.mjs";
-import { admitChainEvent, buildChainInput, resolveChains } from "./chain.mjs";
+import {
+  admitChainEvent,
+  buildChainInput,
+  chainResolution,
+  resolveChains,
+} from "./chain.mjs";
 import { openDb } from "./db.mjs";
 import { admitEvent } from "./intake.mjs";
+import { createRun, transition } from "./lifecycle.mjs";
+import { enumerateMergeScan } from "./merge-reviews.mjs";
 import { planAdmittedEvents } from "./planner.mjs";
 import { approveProposal, openProposals } from "./proposals.mjs";
 import { loadRegistry, RegistryError } from "./registry.mjs";
 import { runOnce } from "./worker.mjs";
+import { tick } from "../cli/serve.mjs";
+// Importing test-helpers pins FACTORY_EVENT_HOME/FACTORY_HOME to an isolated
+// temp home for this whole file, so default-home lookups (artifactsRoot(),
+// dbPath()) never reach the operator's real ~/.factory (OPS-425).
+import { realFactorySnapshot } from "../test-helpers.mjs";
 
 const registry = loadRegistry();
 const PV = "git:test-pv";
@@ -416,6 +429,14 @@ describe("multi-emit chain resolution (WM-119)", () => {
     ).run(runId, JSON.stringify({ artifact }), now);
   }
 
+  function seedChainChild(db, runId, eventId) {
+    const now = new Date().toISOString();
+    db.query(
+      `INSERT INTO events (source, event_id, type, subject, occurred_at, received_at, correlation_id, causation_id, envelope_json, payload_hash, status, admitted_at)
+       VALUES ('chain', ?, 'factory.work.requested', 'perf-edge@1', ?, ?, ?, ?, '{}', 'hash', 'admitted', ?)`,
+    ).run(eventId, now, now, `corr-${runId}`, runId, now);
+  }
+
   test("fans out N planned items into N admitted chain events with chain-<runId>-<itemKey> IDs", () => {
     const dir = tmpDir("evrt-chain-multi-");
     const db = openDb(path.join(dir, "runtime.db"));
@@ -457,6 +478,161 @@ describe("multi-emit chain resolution (WM-119)", () => {
       skipped: 0,
       errors: [],
     });
+  });
+
+  test("partially emitted fan-out resumes missing siblings before marking the run resolved", () => {
+    const db = openDb(":memory:");
+    seedCompletedRun(db, {
+      runId: "run-partial-fanout",
+      agent: "work-scan@1",
+      input: { repo: "wm/partial" },
+      artifact: {
+        recommendation: "DISPATCH",
+        repo: "wm/partial",
+        plan: [
+          { ticket: "WM-301" },
+          { ticket: "WM-302" },
+          { ticket: "WM-303" },
+        ],
+      },
+    });
+    seedChainChild(db, "run-partial-fanout", "chain-run-partial-fanout-WM-301");
+
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 2,
+      skipped: 0,
+      errors: [],
+    });
+    expect(
+      db
+        .query(
+          `SELECT chain_resolved_at FROM runs WHERE run_id = 'run-partial-fanout'`,
+        )
+        .get().chain_resolved_at,
+    ).not.toBeNull();
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 0,
+      skipped: 0,
+      errors: [],
+    });
+  });
+
+  test("production-shaped resolved history keeps a no-planning tick and health responsive", async () => {
+    const realHomeBefore = realFactorySnapshot();
+    expect(process.env.FACTORY_EVENT_HOME).toBeDefined();
+    const db = openDb(":memory:");
+    const perfRegistry = {
+      ...registry,
+      edges: {
+        "perf-edge@1": {
+          recommendationField: "recommendation",
+          edges: {
+            NEXT: {
+              eventType: "factory.work.requested",
+              input: { repo: "$.input.repo" },
+            },
+          },
+        },
+      },
+    };
+
+    // Production had ~1,300 completed edge runs and ~6,000 chain events. Use
+    // 2,000/6,000 so this guards both that shape and future history growth.
+    db.transaction(() => {
+      for (let i = 0; i < 2_000; i += 1) {
+        const runId = `run-perf-${i}`;
+        seedCompletedRun(db, {
+          runId,
+          agent: "perf-edge@1",
+          input: { repo: "factory" },
+          artifact: { recommendation: "NEXT" },
+        });
+        seedChainChild(db, runId, `chain-${runId}`);
+        seedChainChild(db, runId, `chain-${runId}-legacy-a`);
+        seedChainChild(db, runId, `chain-${runId}-legacy-b`);
+      }
+    })();
+
+    let childEventLookups = 0;
+    const instrumented = new Proxy(db, {
+      get(target, property) {
+        if (property === "query") {
+          return (sql) => {
+            if (/JOIN events child\s+ON child\.causation_id/s.test(sql)) {
+              childEventLookups += 1;
+            }
+            return target.query(sql);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const noPlanning = Object.fromEntries(
+      [
+        "tick emit",
+        "plan",
+        "auto-approve",
+        "auto-approve-chains",
+        "announce",
+        "inbox",
+        "notify",
+        "reap",
+        "announce-after",
+        "outbox",
+        "GC",
+      ].map((name) => [name, () => {}]),
+    );
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        return Response.json({ ok: true });
+      },
+    });
+
+    try {
+      const healthRequests = Array.from({ length: 20 }, async () => {
+        const started = performance.now();
+        const response = await fetch(`http://127.0.0.1:${server.port}/health`);
+        expect(response.status).toBe(200);
+        return performance.now() - started;
+      });
+      const tickStarted = performance.now();
+      await tick({
+        db: instrumented,
+        registry: perfRegistry,
+        policyVersion: PV,
+        subsystems: noPlanning,
+        log: () => {},
+      });
+      const tickMs = performance.now() - tickStarted;
+      const healthMs = (await Promise.all(healthRequests)).sort(
+        (a, b) => a - b,
+      );
+      const healthP95 = healthMs[Math.ceil(healthMs.length * 0.95) - 1];
+
+      console.info(
+        `chain benchmark: tick=${tickMs.toFixed(1)}ms health_p95=${healthP95.toFixed(1)}ms child_event_lookups=${childEventLookups}`,
+      );
+      expect(childEventLookups).toBe(1); // one bulk lookup, never 2,000
+      expect(tickMs).toBeLessThan(200);
+      // /health p95 is measured against the stub Bun.serve above: it proves the tick does not block the event loop, not real API latency.
+      expect(healthP95).toBeLessThan(500);
+      // The production-shaped benchmark must never touch the operator's real
+      // ~/.factory/event-runtime/runtime.db (no default-home openDb/migration).
+      expect(realFactorySnapshot().dbMtime).toBe(realHomeBefore.dbMtime);
+
+      childEventLookups = 0;
+      expect(resolveChains(instrumented, perfRegistry)).toEqual({
+        emitted: 0,
+        skipped: 0,
+        errors: [],
+      });
+      expect(childEventLookups).toBe(0); // resolved history is not re-examined
+    } finally {
+      server.stop(true);
+      db.close();
+    }
   });
 
   test("empty plan skips cleanly without error", () => {
@@ -546,6 +722,313 @@ describe("multi-emit chain resolution (WM-119)", () => {
     expect(outcome.emitted).toBe(0);
     expect(outcome.errors).toHaveLength(1);
     expect(outcome.errors[0]).toContain('missing key "ticket"');
+    expect(
+      db
+        .query(`SELECT chain_resolved_at FROM runs WHERE run_id = 'run-err-1'`)
+        .get().chain_resolved_at,
+    ).not.toBeNull();
+    expect(chainResolution(db, "run-err-1")).toMatchObject({
+      note: "chain_resolved",
+      reason: "invalid_chain_data",
+    });
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 0,
+      skipped: 0,
+      errors: [],
+    });
+  });
+
+  test("foreign chain-event duplicates resolve and report their collision once", () => {
+    const db = openDb(":memory:");
+    const collisionRegistry = {
+      ...registry,
+      edges: {
+        "collision-edge@1": {
+          recommendationField: "recommendation",
+          edges: {
+            NEXT: {
+              eventType: "factory.work.requested",
+              input: { repo: "$.input.repo" },
+            },
+          },
+        },
+      },
+    };
+    const now = Date.parse("2026-08-30T00:00:00.000Z");
+    seedCompletedRun(db, {
+      runId: "run-foreign-duplicate",
+      agent: "collision-edge@1",
+      input: { repo: "wm/collision" },
+      artifact: { recommendation: "NEXT" },
+    });
+    expect(
+      admitChainEvent(
+        db,
+        collisionRegistry,
+        {
+          schemaVersion: "factory.event/v1",
+          eventId: "chain-run-foreign-duplicate",
+          type: "factory.work.requested",
+          subject: "collision-edge@1",
+          occurredAt: new Date(now).toISOString(),
+          correlationId: "corr-run-foreign-duplicate",
+          causationId: "run-other",
+          payload: { repo: "wm/collision" },
+        },
+        { now },
+      ).admitted,
+    ).toBe(true);
+
+    const outcome = resolveChains(db, collisionRegistry, { now });
+    expect(outcome.emitted).toBe(0);
+    expect(outcome.skipped).toBe(0);
+    expect(outcome.errors).toEqual([
+      "chain-run-foreign-duplicate: duplicate chain event belongs to run-other",
+    ]);
+    expect(
+      db
+        .query(
+          `SELECT chain_resolved_at FROM runs WHERE run_id = 'run-foreign-duplicate'`,
+        )
+        .get().chain_resolved_at,
+    ).not.toBeNull();
+    expect(resolveChains(db, collisionRegistry, { now })).toEqual({
+      emitted: 0,
+      skipped: 0,
+      errors: [],
+    });
+  });
+
+  test("intake conflicts resolve and report their refusal once", () => {
+    const db = openDb(":memory:");
+    const conflictRegistry = {
+      ...registry,
+      edges: {
+        "conflict-edge@1": {
+          recommendationField: "recommendation",
+          edges: {
+            NEXT: {
+              eventType: "factory.work.requested",
+              input: { repo: "$.input.repo" },
+            },
+          },
+        },
+      },
+    };
+    const now = Date.parse("2026-08-30T00:00:00.000Z");
+    seedCompletedRun(db, {
+      runId: "run-intake-conflict",
+      agent: "conflict-edge@1",
+      input: { repo: "wm/expected" },
+      artifact: { recommendation: "NEXT" },
+    });
+    expect(
+      admitChainEvent(
+        db,
+        conflictRegistry,
+        {
+          schemaVersion: "factory.event/v1",
+          eventId: "chain-run-intake-conflict",
+          type: "factory.work.requested",
+          subject: "conflict-edge@1",
+          occurredAt: new Date(now).toISOString(),
+          correlationId: "corr-run-intake-conflict",
+          causationId: "run-other",
+          payload: { repo: "wm/conflicting" },
+        },
+        { now },
+      ).admitted,
+    ).toBe(true);
+
+    const outcome = resolveChains(db, conflictRegistry, { now });
+    expect(outcome.emitted).toBe(0);
+    expect(outcome.skipped).toBe(0);
+    expect(outcome.errors).toEqual([
+      "chain-run-intake-conflict: eventId: already admitted with a different payload",
+    ]);
+    expect(
+      db
+        .query(
+          `SELECT chain_resolved_at FROM runs WHERE run_id = 'run-intake-conflict'`,
+        )
+        .get().chain_resolved_at,
+    ).not.toBeNull();
+    expect(chainResolution(db, "run-intake-conflict")).toMatchObject({
+      reason: "intake_refused",
+      errors: [
+        "chain-run-intake-conflict: eventId: already admitted with a different payload",
+      ],
+    });
+    expect(resolveChains(db, conflictRegistry, { now })).toEqual({
+      emitted: 0,
+      skipped: 0,
+      errors: [],
+    });
+  });
+
+  /** Make intake of one chain child fail like a busy/corrupt database would. */
+  function failInsertOf(db, eventId) {
+    db.exec(
+      `CREATE TRIGGER IF NOT EXISTS fail_${eventId.replace(/[^a-z0-9]/gi, "_")}
+         BEFORE INSERT ON events
+         WHEN NEW.event_id = '${eventId}'
+       BEGIN SELECT RAISE(ABORT, 'database is locked'); END;`,
+    );
+    return () =>
+      db.exec(
+        `DROP TRIGGER IF EXISTS fail_${eventId.replace(/[^a-z0-9]/gi, "_")}`,
+      );
+  }
+
+  function resolvedAtOf(db, runId) {
+    return db
+      .query(`SELECT chain_resolved_at FROM runs WHERE run_id = ?`)
+      .get(runId).chain_resolved_at;
+  }
+
+  test("a transient intake throw leaves the chain step open and lands on a later pass (#1458)", () => {
+    const db = openDb(":memory:");
+    seedCompletedRun(db, {
+      runId: "run-transient",
+      agent: "work-scan@1",
+      input: { repo: "wm/transient" },
+      artifact: {
+        recommendation: "DISPATCH",
+        repo: "wm/transient",
+        plan: [{ ticket: "WM-401" }],
+      },
+    });
+    const heal = failInsertOf(db, "chain-run-transient-WM-401");
+
+    const first = resolveChains(db, registry);
+    expect(first.emitted).toBe(0);
+    expect(first.errors).toHaveLength(1);
+    expect(first.errors[0]).toContain("database is locked");
+    expect(resolvedAtOf(db, "run-transient")).toBeNull();
+    expect(chainResolution(db, "run-transient")).toBeNull();
+
+    heal();
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 1,
+      skipped: 0,
+      errors: [],
+    });
+    expect(resolvedAtOf(db, "run-transient")).not.toBeNull();
+    expect(chainResolution(db, "run-transient")).toMatchObject({
+      reason: "emitted",
+      events: ["chain-run-transient-WM-401"],
+    });
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 0,
+      skipped: 0,
+      errors: [],
+    });
+  });
+
+  test("persistent transient failures give up after the bounded pass count with a recorded reason (#1458)", () => {
+    const db = openDb(":memory:");
+    seedCompletedRun(db, {
+      runId: "run-stuck",
+      agent: "work-scan@1",
+      input: { repo: "wm/stuck" },
+      artifact: {
+        recommendation: "DISPATCH",
+        repo: "wm/stuck",
+        plan: [{ ticket: "WM-402" }],
+      },
+    });
+    failInsertOf(db, "chain-run-stuck-WM-402");
+
+    for (let pass = 1; pass < 3; pass += 1) {
+      const outcome = resolveChains(db, registry, { maxTransientPasses: 3 });
+      expect(outcome.emitted).toBe(0);
+      expect(outcome.errors).toHaveLength(1);
+      expect(resolvedAtOf(db, "run-stuck")).toBeNull();
+    }
+    const last = resolveChains(db, registry, { maxTransientPasses: 3 });
+    expect(last.emitted).toBe(0);
+    expect(last.errors).toHaveLength(2);
+    expect(last.errors[1]).toBe(
+      "chain-run-stuck: gave up after 3 transient failure(s)",
+    );
+    expect(resolvedAtOf(db, "run-stuck")).not.toBeNull();
+    expect(chainResolution(db, "run-stuck")).toMatchObject({
+      reason: "chain_gave_up",
+      passes: 3,
+    });
+    expect(
+      db
+        .query(
+          `SELECT COUNT(*) AS n FROM attempt_trace
+            WHERE run_id = 'run-stuck'
+              AND json_extract(payload_json, '$.note') = 'chain_transient_error'`,
+        )
+        .get().n,
+    ).toBe(3);
+    expect(resolveChains(db, registry, { maxTransientPasses: 3 })).toEqual({
+      emitted: 0,
+      skipped: 0,
+      errors: [],
+    });
+  });
+
+  test("a transient failure on one sibling keeps the fan-out open and retries only that sibling (#1458)", () => {
+    const db = openDb(":memory:");
+    seedCompletedRun(db, {
+      runId: "run-partial-transient",
+      agent: "work-scan@1",
+      input: { repo: "wm/partial-transient" },
+      artifact: {
+        recommendation: "DISPATCH",
+        repo: "wm/partial-transient",
+        plan: [
+          { ticket: "WM-501" },
+          { ticket: "WM-502" },
+          { ticket: "WM-503" },
+        ],
+      },
+    });
+    const heal = failInsertOf(db, "chain-run-partial-transient-WM-502");
+
+    const first = resolveChains(db, registry);
+    expect(first.emitted).toBe(2);
+    expect(first.skipped).toBe(0);
+    expect(first.errors).toEqual([
+      expect.stringContaining(
+        "chain-run-partial-transient-WM-502: database is locked",
+      ),
+    ]);
+    expect(resolvedAtOf(db, "run-partial-transient")).toBeNull();
+    expect(
+      db
+        .query(
+          `SELECT event_id FROM events
+            WHERE causation_id = 'run-partial-transient' ORDER BY event_id`,
+        )
+        .all()
+        .map((row) => row.event_id),
+    ).toEqual([
+      "chain-run-partial-transient-WM-501",
+      "chain-run-partial-transient-WM-503",
+    ]);
+
+    heal();
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 1,
+      skipped: 0,
+      errors: [],
+    });
+    expect(resolvedAtOf(db, "run-partial-transient")).not.toBeNull();
+    expect(chainResolution(db, "run-partial-transient")).toMatchObject({
+      reason: "emitted",
+    });
+    expect(
+      db
+        .query(
+          `SELECT COUNT(*) AS n FROM events WHERE causation_id = 'run-partial-transient'`,
+        )
+        .get().n,
+    ).toBe(3);
   });
 
   test("triage-apply outcome edges route to the correct follow-up", () => {
@@ -709,6 +1192,185 @@ describe("multi-emit chain resolution (WM-119)", () => {
         baseSha: base,
       });
     }
+  });
+
+  test("a refused review with no verdict is proposed again on the next scan cycle", () => {
+    const dir = tmpDir("evrt-chain-merge-review-refused-");
+    const db = openDb(path.join(dir, "runtime.db"));
+    const github = "watt-mind/factory";
+    const head = "a".repeat(40);
+    const base = "b".repeat(40);
+    const now = "2026-08-24T10:00:00.000Z";
+    const reviewInput = {
+      repo: "factory",
+      github,
+      base: "develop",
+      pr: 12,
+      headSha: head,
+      baseSha: base,
+    };
+    const reviewSpec = {
+      agent: "merge-review@1",
+      input: reviewInput,
+    };
+
+    db.query(
+      `INSERT INTO events
+         (source, event_id, type, subject, occurred_at, received_at,
+          correlation_id, causation_id, envelope_json, payload_hash, status, admitted_at)
+       VALUES ('chain', 'chain-first-scan-12', 'factory.merge-review.requested',
+               'merge-scan@2', ?, ?, 'merge-cycle', 'run-first-scan', ?,
+               'sha256:event', 'planned', ?)`,
+    ).run(
+      now,
+      now,
+      JSON.stringify({
+        schemaVersion: "factory.event/v1",
+        eventId: "chain-first-scan-12",
+        type: "factory.merge-review.requested",
+        source: "chain",
+        subject: "merge-scan@2",
+        occurredAt: now,
+        correlationId: "merge-cycle",
+        causationId: "run-first-scan",
+        payload: reviewInput,
+      }),
+      now,
+    );
+    createRun(db, {
+      runId: "run-refused-review",
+      idempotencyKey: "merge-review-family",
+      spec: reviewSpec,
+      specJson: JSON.stringify(reviewSpec),
+      specHash: "sha256:spec",
+      actor: "planner",
+      correlationId: "merge-cycle",
+      causationId: "run-first-scan",
+      policyVersion: PV,
+      now: Date.parse(now),
+    });
+    // This is the persisted suppression seam: an open proposal linked to a
+    // terminal run is not actionable, but older data can retain one.
+    db.query(
+      `INSERT INTO proposals
+         (id, event_source, event_id, run_id, decision, spec_json, spec_hash,
+          idempotency_key, status, created_at, ttl_seconds)
+       VALUES ('prop-refused-review', 'chain', 'chain-first-scan-12',
+               'run-refused-review', 'run', ?, 'sha256:spec',
+               'merge-review-family', 'open', ?, 1800)`,
+    ).run(JSON.stringify(reviewSpec), now);
+    for (const [from, to] of [
+      ["PROPOSED", "APPROVED"],
+      ["APPROVED", "QUEUED"],
+      ["QUEUED", "LEASED"],
+      ["LEASED", "RUNNING"],
+      ["RUNNING", "VERIFYING"],
+      ["VERIFYING", "REFUSED"],
+    ]) {
+      transition(db, {
+        runId: "run-refused-review",
+        to,
+        expectFrom: from,
+        actor: "test-worker",
+        reason: to === "REFUSED" ? "needs_human" : "test lifecycle",
+        policyVersion: PV,
+        now: Date.parse(now),
+      });
+    }
+    db.query(
+      `INSERT INTO results
+         (run_id, attempt, result_json, artifact_hash, verification_json,
+          receipt_json, accepted_at)
+       VALUES ('run-refused-review', 1, ?, 'none', '{}', '{}', ?)`,
+    ).run(
+      JSON.stringify({
+        schemaVersion: "factory.agent-result/v1",
+        terminalState: "refused",
+        reasonCode: "needs_human",
+      }),
+      now,
+    );
+    expect(db.query(`SELECT COUNT(*) AS n FROM merge_reviews`).get().n).toBe(0);
+
+    const forge = memoryForge({
+      repos: {
+        [github]: {
+          prs: [
+            {
+              number: 12,
+              state: "OPEN",
+              isDraft: false,
+              headRefOid: head,
+              headRefName: "feat/gh-1034",
+              baseRefName: "develop",
+              title: "Fix retry starvation",
+              body: "Fixes watt-mind/factory#1034",
+              mergeable: "MERGEABLE",
+              mergeStateStatus: "CLEAN",
+            },
+          ],
+        },
+      },
+      api: { [`repos/${github}/git/ref/heads/develop`]: base },
+    });
+    const scan = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge,
+      repos: new Map([
+        [
+          "factory",
+          {
+            name: "factory",
+            github,
+            base: "develop",
+            deployBranch: "main",
+          },
+        ],
+      ]),
+    });
+    expect(scan.artifact.reviews.map((item) => item.pr)).toEqual([12]);
+
+    seedCompletedRun(db, {
+      runId: "run-second-scan",
+      agent: "merge-scan@2",
+      input: { repo: "factory" },
+      artifact: scan.artifact,
+      correlationId: "merge-cycle",
+    });
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 1,
+      skipped: 0,
+      errors: [],
+    });
+    db.query(
+      `UPDATE events SET status = 'planned'
+        WHERE source = 'operator' AND event_id = 'evt-run-second-scan'`,
+    ).run();
+
+    const synthetic = { ...registry, agents: new Map(registry.agents) };
+    synthetic.agents.set("merge-review@1", {
+      ...synthetic.agents.get("merge-review@1"),
+      workspace: { type: "none" },
+    });
+    expect(
+      planAdmittedEvents(db, synthetic, {
+        policyVersion: PV,
+        now: Date.parse("2026-08-24T10:01:00.000Z"),
+      }),
+    ).toMatchObject({ planned: 1, failed: 0 });
+    const fresh = db
+      .query(
+        `SELECT p.run_id AS runId, p.status, r.state
+           FROM proposals p
+           JOIN runs r ON r.run_id = p.run_id
+          WHERE p.event_source = 'chain'
+            AND p.event_id = 'chain-run-second-scan-12'`,
+      )
+      .get();
+    expect(fresh).toMatchObject({ status: "approved", state: "QUEUED" });
+    expect(fresh.runId).not.toBe("run-refused-review");
+    expect(db.query(`SELECT COUNT(*) AS n FROM merge_reviews`).get().n).toBe(0);
   });
 
   test("merge-fix UPDATED targets merge-review.requested for the new head (WM-907)", () => {

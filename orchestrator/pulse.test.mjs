@@ -83,3 +83,74 @@ test("gatherPulse handles unreachable API gracefully", async () => {
   expect(pulse.stack.workers.total).toBe(0);
   expect(pulse.runs.active.length).toBe(0);
 });
+
+test("gatherPulse sends the control API bearer on protected reads", async () => {
+  const token = "pulse-control-token";
+  const authorization = [];
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname !== "/")
+        authorization.push(req.headers.get("authorization"));
+      if (url.pathname === "/health") return Response.json({ ok: true });
+      if (url.pathname === "/status")
+        return Response.json({ runs: { byState: {} } });
+      if (url.pathname === "/workers") return Response.json({ workers: [] });
+      if (url.pathname === "/runs") return Response.json({ runs: [] });
+      return new Response("not found", { status: 404 });
+    },
+  });
+  const previous = process.env.FACTORY_CONTROL_API_TOKEN;
+  process.env.FACTORY_CONTROL_API_TOKEN = token;
+
+  try {
+    const pulse = await gatherPulse({
+      port: server.port,
+      webPort: server.port,
+      fetchLinear: false,
+      fetchGitHub: false,
+    });
+    expect(pulse.stack.api.ok).toBe(true);
+    expect(authorization.length).toBeGreaterThanOrEqual(4);
+    expect(authorization).toEqual(
+      Array(authorization.length).fill(`Bearer ${token}`),
+    );
+  } finally {
+    if (previous === undefined) delete process.env.FACTORY_CONTROL_API_TOKEN;
+    else process.env.FACTORY_CONTROL_API_TOKEN = previous;
+    server.stop(true);
+  }
+});
+
+test("gatherPulse surfaces a failed protected read even when /health is fine", async () => {
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === "/health")
+        return Response.json({ ok: true, policyVersion: "pv-1" });
+      if (url.pathname === "/workers")
+        return new Response("boom", { status: 500 });
+      if (url.pathname === "/status")
+        return Response.json({ runs: { byState: {} } });
+      if (url.pathname === "/runs") return Response.json({ runs: [] });
+      return new Response("not found", { status: 404 });
+    },
+  });
+
+  try {
+    const pulse = await gatherPulse({
+      port: server.port,
+      webPort: server.port,
+      fetchLinear: false,
+      fetchGitHub: false,
+    });
+    expect(pulse.stack.api.ok).toBe(false);
+    expect(pulse.stack.api.code).toBe("API_ERROR");
+    expect(pulse.stack.api.error).toContain("API_ERROR");
+    expect(pulse.stack.api.policyVersion).toBe("pv-1");
+  } finally {
+    server.stop(true);
+  }
+});

@@ -44,6 +44,7 @@ function pr({
   isDraft = false,
   state = "OPEN",
   title = `Fixes WM-${number}`,
+  body = "",
   mergeable = "MERGEABLE",
   mergeStateStatus = "CLEAN",
   files = OWNED,
@@ -60,6 +61,7 @@ function pr({
     headRefName,
     baseRefName,
     title,
+    body,
     mergeable,
     mergeStateStatus,
     files,
@@ -101,16 +103,21 @@ function insertRun(db, { runId, agent, pr, headSha, state, github = GITHUB }) {
 
 function insertOpenProposal(db, { id, agent, pr, headSha, github = GITHUB }) {
   const now = "2026-08-19T16:45:00.000Z";
+  const runId = `run-${id}`;
   const spec = JSON.stringify({
     agent,
     input: { github, pr, headSha, baseSha: BASE },
   });
   db.query(
+    `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+     VALUES (?, ?, ?, 'sha256:test', 'PROPOSED', 0, ?, ?)`,
+  ).run(runId, `idem-${id}`, spec, now, now);
+  db.query(
     `INSERT INTO proposals (
        id, event_source, event_id, run_id, decision, spec_json, spec_hash,
        idempotency_key, status, created_at, ttl_seconds
-     ) VALUES (?, 'chain', ?, NULL, 'run', ?, 'sha256:test', ?, 'open', ?, 3600)`,
-  ).run(id, `evt-${id}`, spec, `idem-${id}`, now);
+     ) VALUES (?, 'chain', ?, ?, 'run', ?, 'sha256:test', ?, 'open', ?, 3600)`,
+  ).run(id, `evt-${id}`, runId, spec, `idem-${id}`, now);
 }
 
 function forgeWith(prs, { baseSha = BASE } = {}) {
@@ -390,6 +397,33 @@ describe("merge_reviews ledger keying (WM-907 / WM-936)", () => {
 });
 
 describe("merge-scan enumerator (WM-907)", () => {
+  test("canonicalizes GitHub ref slugs and falls back to a Fixes body reference", () => {
+    const result = enumerateMergeScan({
+      input: { repo: "factory" },
+      db: openDb(":memory:"),
+      forge: forgeWith([
+        pr({ number: 877, headRefName: "feat/gh-877" }),
+        pr({ number: 878, headRefName: "gh-878" }),
+        pr({ number: 879, headRefName: "879" }),
+        pr({
+          number: 880,
+          headRefName: "feat/no-ticket",
+          body: "Fixes watt-mind/factory#880",
+        }),
+        pr({ number: 123, headRefName: "feat/WM-123" }),
+      ]),
+      repos,
+    });
+
+    expect(result.artifact.reviews.map((row) => row.ticket)).toEqual([
+      "watt-mind/factory#877",
+      "watt-mind/factory#878",
+      "watt-mind/factory#879",
+      "watt-mind/factory#880",
+      "WM-123",
+    ]);
+  });
+
   test("emits reviews only for ledger misses", () => {
     const db = openDb(":memory:");
     upsertMergeReview(db, {
@@ -553,6 +587,33 @@ describe("merge-scan enumerator (WM-907)", () => {
 });
 
 describe("merge-scan enumerator (WM-936)", () => {
+  test("uses the canonical GitHub ticket in merge-fix input", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 877,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(877),
+    });
+    const result = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith([
+        pr({
+          number: 877,
+          headRefName: "feat/gh-877",
+          mergeStateStatus: "BEHIND",
+        }),
+      ]),
+      repos,
+    });
+
+    expect(result.artifact.fix).toHaveLength(1);
+    expect(result.artifact.fix[0].ticket).toBe("watt-mind/factory#877");
+  });
+
   test("base moved with head unchanged is a hit and emits no review", () => {
     const db = openDb(":memory:");
     upsertMergeReview(db, {
@@ -724,6 +785,31 @@ describe("merge-scan enumerator (WM-936)", () => {
       repos,
     });
     expect(result.artifact.reviews).toEqual([]);
+  });
+
+  test("stale open proposal linked to a refused review does not suppress a retry", () => {
+    const db = openDb(":memory:");
+    insertOpenProposal(db, {
+      id: "prop_review_refused",
+      agent: "merge-review@1",
+      pr: 11,
+      headSha: HEAD2,
+    });
+    db.query(`UPDATE runs SET state = 'REFUSED' WHERE run_id = ?`).run(
+      "run-prop_review_refused",
+    );
+
+    const result = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith([
+        pr({ number: 11, headRefOid: HEAD2, headRefName: "feat/WM-11" }),
+      ]),
+      repos,
+    });
+
+    expect(result.artifact.reviews.map((row) => row.pr)).toEqual([11]);
+    expect(result.artifact.recommendation).toBe("REVIEW");
   });
 
   test("in-flight merge-fix at the same head does not emit a second rebase", () => {

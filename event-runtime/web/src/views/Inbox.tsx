@@ -32,13 +32,14 @@ import {
 import { DisplayOptions, exportJson } from "../components/DisplayOptions";
 import { CustomCell } from "../components/CustomCell";
 import { DecisionCard } from "../components/DecisionCard";
+import { ErrorBoundary } from "../components/ErrorBoundary";
 import { hasInboxPlainActions, InboxActions } from "../components/InboxActions";
 import {
   INBOX_FACETS,
   matchesFilterQuery,
   parseFilterQuery,
 } from "../filterQuery";
-import type { InboxItem } from "../types";
+import type { InboxItem, Proposal } from "../types";
 import {
   Ago,
   BulkActionBar,
@@ -242,6 +243,54 @@ const DELIVERY_HUES: Record<DeliveryState, string> = {
   none: "var(--hue-idle)",
 };
 
+function rawInboxItem(item: InboxItem): string {
+  try {
+    return JSON.stringify(item, null, 2);
+  } catch {
+    return "Raw item payload could not be serialized.";
+  }
+}
+
+function InboxDetailFallback({
+  item,
+  onRetry,
+  onClose,
+}: {
+  item: InboxItem;
+  onRetry: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <DetailPane
+      widthClass="w-full sm:w-[460px]"
+      title={<span className="mono truncate">{shortId(item.id)}</span>}
+      close={<Button onClick={onClose}>Close</Button>}
+    >
+      <section
+        role="alert"
+        className="rounded-md border border-(--hue-warn) bg-(--surface-0) p-4"
+      >
+        <h2 className="text-[14px] font-semibold text-(--text)">
+          This item could not render
+        </h2>
+        <p className="mt-2 text-sm text-(--text-dim)">{item.title}</p>
+        <p className="mono mt-1 text-[12px] text-(--text-faint)">{item.id}</p>
+        <Button className="mt-4" variant="primary" onClick={onRetry}>
+          Retry
+        </Button>
+        <details className="mt-4">
+          <summary className="cursor-pointer text-sm text-(--accent)">
+            Open raw item
+          </summary>
+          <pre className="mt-2 overflow-auto whitespace-pre-wrap break-words rounded-md bg-(--surface-2) p-3 text-[11px] text-(--text-dim)">
+            {rawInboxItem(item)}
+          </pre>
+        </details>
+      </section>
+    </DetailPane>
+  );
+}
+
 /** Group in triage order, oldest first inside a group; empty groups are dropped. */
 export function groupItems(
   items: InboxItem[],
@@ -405,6 +454,30 @@ export function proposalTtlLabel(
   const minutes = Math.max(1, Math.ceil(leftMs / 60_000));
   if (minutes >= 60) return `${Math.ceil(minutes / 60)}h left`;
   return `${minutes}m left`;
+}
+
+/**
+ * Expired items stay available in the Open tab, but are not actionable by default.
+ * The server's `expired` flag comes from the shared predicate in
+ * event-runtime/lib/inbox.mjs, so the sidebar badge and Open tab count match.
+ */
+export function isExpiredInboxItem(
+  item: InboxItem,
+  proposalsById: Map<string, Proposal>,
+  now: number,
+): boolean {
+  // The server uses the shared inbox SQL predicate. Older servers omit this
+  // field, so retain the proposal lookup only as a backwards-compatible fallback.
+  if (item.expired !== undefined) return item.expired;
+  if (item.kind === "proposal_expired") return true;
+  const proposal = item.refs.proposalId
+    ? proposalsById.get(item.refs.proposalId)
+    : undefined;
+  return (
+    proposal?.status === "open" &&
+    proposalTtlLabel(proposal.created_at, proposal.ttl_seconds, now) ===
+      "expired"
+  );
 }
 
 /** WM-559 will move this precision into shared `Ago`; keep the Inbox local until then. */
@@ -735,7 +808,7 @@ export function Inbox({
     ...refetchIntervals.primary,
   });
   const proposalsById = useMemo(() => {
-    const map = new Map<string, { created_at: string; ttl_seconds: number }>();
+    const map = new Map<string, Proposal>();
     for (const proposal of proposalsQuery.data?.proposals ?? []) {
       map.set(proposal.id, proposal);
     }
@@ -743,21 +816,48 @@ export function Inbox({
   }, [proposalsQuery.data]);
 
   const [tab, setTab] = useState<InboxTab>("open");
+  const [expiredOnly, setExpiredOnly] = useState(false);
   const [filter, setFilter] = useState("");
+  const expiredOpenItems = useMemo(
+    () =>
+      items.filter(
+        (item) =>
+          itemStatus(item) === "open" &&
+          isExpiredInboxItem(item, proposalsById, now),
+      ),
+    [items, now, proposalsById],
+  );
   const counts = useMemo(() => {
     const c: Record<InboxTab, number> = {
       open: 0,
       acked: 0,
       resolved: 0,
-      all: items.length,
+      all: 0,
     };
-    for (const it of items) c[itemStatus(it)] += 1;
+    // Expired open items live behind the Expired chip, so every tab count
+    // excludes them and open + acked + resolved === all.
+    for (const it of items) {
+      if (
+        itemStatus(it) === "open" &&
+        isExpiredInboxItem(it, proposalsById, now)
+      ) {
+        continue;
+      }
+      c[itemStatus(it)] += 1;
+      c.all += 1;
+    }
     return c;
-  }, [items]);
+  }, [items, now, proposalsById]);
 
   const byTab = useMemo(
-    () => items.filter((item) => matchesTab(item, tab)),
-    [items, tab],
+    () =>
+      items.filter((item) => {
+        if (!matchesTab(item, tab)) return false;
+        if (itemStatus(item) !== "open") return true;
+        const expired = isExpiredInboxItem(item, proposalsById, now);
+        return tab === "open" ? expired === expiredOnly : !expired;
+      }),
+    [expiredOnly, items, now, proposalsById, tab],
   );
   const parsed = useMemo(
     () => parseFilterQuery(filter, INBOX_FACETS),
@@ -793,7 +893,17 @@ export function Inbox({
   const actionableVisible = selectionEnabled ? visible : [];
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkAcking, setBulkAcking] = useState(false);
+  const [bulkAckProgress, setBulkAckProgress] = useState<{
+    completed: number;
+    total: number;
+  } | null>(null);
+  const [bulkAckError, setBulkAckError] = useState<unknown>(null);
   const [bulkResolving, setBulkResolving] = useState(false);
+  const [bulkResolveProgress, setBulkResolveProgress] = useState<{
+    completed: number;
+    total: number;
+  } | null>(null);
+  const [bulkResolveError, setBulkResolveError] = useState<unknown>(null);
   const [bulkResolveOpen, setBulkResolveOpen] = useState(false);
   const [bulkResolveReason, setBulkResolveReason] = useState("");
   const bulkResolveReasonRef = useRef<HTMLTextAreaElement>(null);
@@ -957,27 +1067,71 @@ export function Inbox({
   };
 
   const openBulkResolve = () => {
+    setBulkResolveError(null);
     setBulkResolveReason("");
     setBulkResolveOpen(true);
   };
 
+  const runBulk = async (
+    items: InboxItem[],
+    operation: (item: InboxItem) => Promise<unknown>,
+    onProgress: (completed: number) => void,
+  ) => {
+    const succeeded = new Set<string>();
+    let failed = 0;
+    let firstError: unknown = undefined;
+    let nextIndex = 0;
+    let completed = 0;
+    const workerCount = Math.min(4, items.length);
+
+    await Promise.all(
+      Array.from({ length: workerCount }, async () => {
+        while (nextIndex < items.length) {
+          const item = items[nextIndex++];
+          try {
+            await operation(item);
+            succeeded.add(item.id);
+          } catch (error) {
+            failed++;
+            if (firstError === undefined) {
+              firstError =
+                error instanceof Error ? error : new Error(String(error));
+            }
+          } finally {
+            completed++;
+            onProgress(completed);
+          }
+        }
+      }),
+    );
+
+    return { succeeded, failed, firstError };
+  };
+
   const handleBulkAck = async () => {
     if (!connected || bulkAcking || ackableSelected.length === 0) return;
+    const items = ackableSelected;
     setBulkAcking(true);
-    let done = 0;
-    let failed = 0;
-    for (const item of ackableSelected) {
-      try {
-        await api.ackInbox(item.id);
-        done++;
-      } catch {
-        failed++;
-      }
-    }
+    setBulkAckError(null);
+    setBulkAckProgress({ completed: 0, total: items.length });
+    const { succeeded, failed, firstError } = await runBulk(
+      items,
+      (item) => api.ackInbox(item.id),
+      (completed) => setBulkAckProgress({ completed, total: items.length }),
+    );
     invalidate();
-    setSelectedIds(new Set());
+    setSelectedIds((previous) => {
+      const next = new Set(previous);
+      for (const id of succeeded) next.delete(id);
+      return next;
+    });
+    setBulkAckError(firstError);
     setBulkAcking(false);
-    notify(`Ack: ${done} done / ${failed} failed`, failed ? "err" : "ok");
+    setBulkAckProgress(null);
+    notify(
+      `Ack: ${succeeded.size} done / ${failed} failed`,
+      failed ? "err" : "ok",
+    );
   };
 
   const handleBulkResolve = async () => {
@@ -989,23 +1143,32 @@ export function Inbox({
       !reason
     )
       return;
+    const items = resolvableSelected;
     setBulkResolving(true);
-    let done = 0;
-    let failed = 0;
-    for (const item of resolvableSelected) {
-      try {
-        await api.resolveInbox(item.id, reason);
-        done++;
-      } catch {
-        failed++;
-      }
-    }
+    setBulkResolveError(null);
+    setBulkResolveProgress({ completed: 0, total: items.length });
+    const { succeeded, failed, firstError } = await runBulk(
+      items,
+      (item) => api.resolveInbox(item.id, reason),
+      (completed) => setBulkResolveProgress({ completed, total: items.length }),
+    );
     invalidate();
-    setSelectedIds(new Set());
+    setSelectedIds((previous) => {
+      const next = new Set(previous);
+      for (const id of succeeded) next.delete(id);
+      return next;
+    });
+    setBulkResolveError(firstError);
     setBulkResolving(false);
-    setBulkResolveOpen(false);
-    setBulkResolveReason("");
-    notify(`Resolve: ${done} done / ${failed} failed`, failed ? "err" : "ok");
+    setBulkResolveProgress(null);
+    if (failed === 0) {
+      setBulkResolveOpen(false);
+      setBulkResolveReason("");
+    }
+    notify(
+      `Resolve: ${succeeded.size} done / ${failed} failed`,
+      failed ? "err" : "ok",
+    );
   };
 
   // Enter confirms either resolve dialog. Dialog focus parks on its root, so a
@@ -1046,6 +1209,7 @@ export function Inbox({
   const selectTab = (t: InboxTab) => {
     lastInteractedId.current = null;
     setTab(t);
+    setExpiredOnly(false);
     onSelectItem(null);
     setSelectedIds(new Set());
   };
@@ -1216,6 +1380,25 @@ export function Inbox({
                     </PrimitiveButton>
                   ))}
                 </div>
+                {tab === "open" && expiredOpenItems.length > 0 && (
+                  <PrimitiveButton
+                    bare
+                    type="button"
+                    aria-pressed={expiredOnly}
+                    onClick={() => {
+                      setExpiredOnly((current) => !current);
+                      onSelectItem(null);
+                      setSelectedIds(new Set());
+                    }}
+                    className={`rounded-md px-2.5 py-1 text-[12px] font-medium ${
+                      expiredOnly
+                        ? "bg-(--surface-3) text-(--text)"
+                        : "text-(--text-faint) hover:bg-(--surface-1)"
+                    }`}
+                  >
+                    Expired ({expiredOpenItems.length})
+                  </PrimitiveButton>
+                )}
                 <span className="ml-auto">
                   <DisplayOptions
                     config={INBOX_DISPLAY}
@@ -1509,246 +1692,263 @@ export function Inbox({
       </div>
 
       {sel && (
-        <DetailPane
-          widthClass="w-full sm:w-[460px]"
-          title={
-            <nav
-              aria-label="Breadcrumb"
-              className="flex min-w-0 items-center gap-1.5 text-[13px] font-normal"
-            >
-              <PrimitiveButton
-                bare
-                type="button"
-                onClick={() => onSelectItem(null)}
-                className="cursor-pointer text-(--text-dim) hover:text-(--accent)"
-                title="Back to inbox list"
+        <ErrorBoundary
+          resetKey={sel.id}
+          fallback={(_error, retry) => (
+            <InboxDetailFallback
+              item={sel}
+              onRetry={retry}
+              onClose={() => onSelectItem(null)}
+            />
+          )}
+        >
+          <DetailPane
+            widthClass="w-full sm:w-[460px]"
+            title={
+              <nav
+                aria-label="Breadcrumb"
+                className="flex min-w-0 items-center gap-1.5 text-[13px] font-normal"
               >
-                Inbox
-              </PrimitiveButton>
-              <span className="text-(--text-faint)" aria-hidden="true">
-                /
-              </span>
-              <span
-                className="flex min-w-0 items-center gap-2 truncate font-semibold text-(--text)"
-                aria-current="page"
-              >
-                {groupOf(sel.kind).id === "other" && (
+                <PrimitiveButton
+                  bare
+                  type="button"
+                  onClick={() => onSelectItem(null)}
+                  className="cursor-pointer text-(--text-dim) hover:text-(--accent)"
+                  title="Back to inbox list"
+                >
+                  Inbox
+                </PrimitiveButton>
+                <span className="text-(--text-faint)" aria-hidden="true">
+                  /
+                </span>
+                <span
+                  className="flex min-w-0 items-center gap-2 truncate font-semibold text-(--text)"
+                  aria-current="page"
+                >
+                  {groupOf(sel.kind).id === "other" && (
+                    <StateBadge
+                      state={sel.kind}
+                      hues={INBOX_KIND_HUES}
+                      dot={false}
+                    />
+                  )}
+                  <span className="mono truncate" title={sel.id}>
+                    {shortId(sel.id)}
+                  </span>
+                </span>
+              </nav>
+            }
+            actions={
+              !sel.decision &&
+              !hasInboxPlainActions(sel.kind) &&
+              itemStatus(sel) !== "resolved" ? (
+                <div className="flex items-center gap-1.5">
+                  <Button disabled={!canResolve} onClick={openResolve}>
+                    Resolve…{" "}
+                    <span
+                      className="mono ml-1 text-(--text-faint)"
+                      aria-hidden="true"
+                    >
+                      x
+                    </span>
+                  </Button>
+                  {itemStatus(sel) === "open" && (
+                    <Button
+                      variant="primary"
+                      disabled={!canAck}
+                      onClick={() => ack.mutate(sel.id)}
+                    >
+                      Ack{" "}
+                      <span className="mono ml-1 opacity-80" aria-hidden="true">
+                        a
+                      </span>
+                    </Button>
+                  )}
+                </div>
+              ) : null
+            }
+            utility={<CopyActions id={sel.id} idLabel="inbox item id" />}
+            close={<Button onClick={() => onSelectItem(null)}>Close</Button>}
+          >
+            {hasInboxPlainActions(sel.kind) &&
+              itemStatus(sel) !== "resolved" && (
+                <Section title="Actions" card={false}>
+                  <InboxActions
+                    // Per-item state: a failed verb on one item must not follow
+                    // the operator to the next.
+                    key={sel.id}
+                    item={sel}
+                    connected={connected}
+                    prUrl={inboxActionPrHref(sel)}
+                    onResolve={() => setConfirmResolve(true)}
+                    onItemChange={invalidate}
+                  />
+                </Section>
+              )}
+
+            <Section title="Item" icons>
+              <KV
+                k="kind"
+                v={
                   <StateBadge
                     state={sel.kind}
                     hues={INBOX_KIND_HUES}
                     dot={false}
                   />
-                )}
-                <span className="mono truncate" title={sel.id}>
-                  {shortId(sel.id)}
-                </span>
-              </span>
-            </nav>
-          }
-          actions={
-            !sel.decision &&
-            !hasInboxPlainActions(sel.kind) &&
-            itemStatus(sel) !== "resolved" ? (
-              <div className="flex items-center gap-1.5">
-                <Button disabled={!canResolve} onClick={openResolve}>
-                  Resolve…{" "}
-                  <span
-                    className="mono ml-1 text-(--text-faint)"
-                    aria-hidden="true"
-                  >
-                    x
-                  </span>
-                </Button>
-                {itemStatus(sel) === "open" && (
-                  <Button
-                    variant="primary"
-                    disabled={!canAck}
-                    onClick={() => ack.mutate(sel.id)}
-                  >
-                    Ack{" "}
-                    <span className="mono ml-1 opacity-80" aria-hidden="true">
-                      a
+                }
+              />
+              <KV k="status" v={itemStatus(sel)} />
+              {waitingLabel(waitingCount(sel)) && (
+                <KV k="waiting" v={waitingLabel(waitingCount(sel))} />
+              )}
+              {sel.severity !== "normal" && (
+                <KV k="severity" v={sel.severity} />
+              )}
+              <KV k="created" v={<Ago iso={sel.createdAt} now={now} />} />
+              {sel.ackedAt && (
+                <KV k="acked" v={<Ago iso={sel.ackedAt} now={now} />} />
+              )}
+              {sel.resolvedAt && (
+                <KV
+                  k="resolved"
+                  v={
+                    <span>
+                      <Ago iso={sel.resolvedAt} now={now} />
+                      {sel.resolvedReason && <> · {sel.resolvedReason}</>}
                     </span>
-                  </Button>
-                )}
-              </div>
-            ) : null
-          }
-          utility={<CopyActions id={sel.id} idLabel="inbox item id" />}
-          close={<Button onClick={() => onSelectItem(null)}>Close</Button>}
-        >
-          {hasInboxPlainActions(sel.kind) && itemStatus(sel) !== "resolved" && (
-            <Section title="Actions" card={false}>
-              <InboxActions
-                // Per-item state: a failed verb on one item must not follow
-                // the operator to the next.
-                key={sel.id}
-                item={sel}
-                connected={connected}
-                prUrl={inboxActionPrHref(sel)}
-                onResolve={() => setConfirmResolve(true)}
-                onItemChange={invalidate}
+                  }
+                />
+              )}
+              {sel.resolvedBy && <KV k="resolved by" v={sel.resolvedBy} />}
+              <KV
+                k="source"
+                v={
+                  sourceRunId(sel.source) ? (
+                    <JumpLink
+                      onClick={() => onJumpRun(sourceRunId(sel.source)!)}
+                      title={`Open run ${sourceRunId(sel.source)}`}
+                    >
+                      {sel.source}
+                    </JumpLink>
+                  ) : (
+                    sel.source
+                  )
+                }
               />
             </Section>
-          )}
 
-          <Section title="Item" icons>
-            <KV
-              k="kind"
-              v={
-                <StateBadge
-                  state={sel.kind}
-                  hues={INBOX_KIND_HUES}
-                  dot={false}
+            <Section title="Message" card={false}>
+              <div className="rounded-md border border-(--border) bg-(--surface-0) px-3 py-2 text-[12px] leading-relaxed">
+                <div className="font-medium text-(--text)">{sel.title}</div>
+                {sel.body && (
+                  <div className="mt-1.5 whitespace-pre-wrap break-words text-(--text-dim)">
+                    {sel.body}
+                  </div>
+                )}
+              </div>
+            </Section>
+
+            {sel.decision && (
+              <Section title="Decision" card={false}>
+                <DecisionCard
+                  itemId={sel.id}
+                  request={sel.decision}
+                  response={sel.response}
+                  refs={sel.refs}
+                  onJumpProposal={onJumpProposal}
+                  connected={connected}
+                  onItemChange={invalidate}
                 />
-              }
-            />
-            <KV k="status" v={itemStatus(sel)} />
-            {waitingLabel(waitingCount(sel)) && (
-              <KV k="waiting" v={waitingLabel(waitingCount(sel))} />
+              </Section>
             )}
-            {sel.severity !== "normal" && <KV k="severity" v={sel.severity} />}
-            <KV k="created" v={<Ago iso={sel.createdAt} now={now} />} />
-            {sel.ackedAt && (
-              <KV k="acked" v={<Ago iso={sel.ackedAt} now={now} />} />
+
+            {Object.keys(sel.refs).length > 0 && (
+              <Section title="References" icons>
+                {sel.refs.runId && (
+                  <KV
+                    k="run"
+                    v={
+                      <JumpLink
+                        onClick={() => onJumpRun(sel.refs.runId!)}
+                        title={`Open run ${sel.refs.runId}`}
+                      >
+                        {shortId(sel.refs.runId)}
+                      </JumpLink>
+                    }
+                  />
+                )}
+                {sel.refs.proposalId && (
+                  <KV
+                    k="proposal"
+                    v={
+                      <JumpLink
+                        onClick={() => onJumpProposal(sel.refs.proposalId!)}
+                        title={`Open proposal ${sel.refs.proposalId}`}
+                      >
+                        {shortId(sel.refs.proposalId)}
+                      </JumpLink>
+                    }
+                  />
+                )}
+                {sel.refs.eventId && (
+                  <KV
+                    k="event"
+                    v={
+                      sel.refs.eventSource ? (
+                        <JumpLink
+                          onClick={() =>
+                            onJumpEvent(
+                              sel.refs.eventSource!,
+                              sel.refs.eventId!,
+                            )
+                          }
+                          title={`Open event ${sel.refs.eventId}`}
+                        >
+                          {shortId(sel.refs.eventId)}
+                        </JumpLink>
+                      ) : (
+                        shortId(sel.refs.eventId)
+                      )
+                    }
+                  />
+                )}
+                {sel.refs.issue && (
+                  <KV
+                    k="issue"
+                    v={
+                      <JumpLink
+                        href={`${LINEAR_ISSUE_URL}${encodeURIComponent(sel.refs.issue)}`}
+                        title="Open in Linear"
+                      >
+                        {sel.refs.issue}
+                      </JumpLink>
+                    }
+                  />
+                )}
+                {sel.refs.pr && <KV k="pr" v={<PrRef item={sel} />} />}
+                {sel.refs.repo && <KV k="repo" v={sel.refs.repo} />}
+              </Section>
             )}
-            {sel.resolvedAt && (
+
+            <Section title="Delivery" icons>
               <KV
-                k="resolved"
+                k="telegram"
                 v={
-                  <span>
-                    <Ago iso={sel.resolvedAt} now={now} />
-                    {sel.resolvedReason && <> · {sel.resolvedReason}</>}
+                  <span
+                    style={{ color: DELIVERY_HUES[deliveryState(sel)] }}
+                    title={deliveryText(sel)}
+                  >
+                    {deliveryText(sel).replace(/^Telegram: /, "")}
                   </span>
                 }
               />
+            </Section>
+
+            {(ack.isError || resolve.isError) && (
+              <VerbError error={ack.error ?? resolve.error} />
             )}
-            {sel.resolvedBy && <KV k="resolved by" v={sel.resolvedBy} />}
-            <KV
-              k="source"
-              v={
-                sourceRunId(sel.source) ? (
-                  <JumpLink
-                    onClick={() => onJumpRun(sourceRunId(sel.source)!)}
-                    title={`Open run ${sourceRunId(sel.source)}`}
-                  >
-                    {sel.source}
-                  </JumpLink>
-                ) : (
-                  sel.source
-                )
-              }
-            />
-          </Section>
-
-          <Section title="Message" card={false}>
-            <div className="rounded-md border border-(--border) bg-(--surface-0) px-3 py-2 text-[12px] leading-relaxed">
-              <div className="font-medium text-(--text)">{sel.title}</div>
-              {sel.body && (
-                <div className="mt-1.5 whitespace-pre-wrap break-words text-(--text-dim)">
-                  {sel.body}
-                </div>
-              )}
-            </div>
-          </Section>
-
-          {sel.decision && (
-            <Section title="Decision" card={false}>
-              <DecisionCard
-                itemId={sel.id}
-                request={sel.decision}
-                response={sel.response}
-                refs={sel.refs}
-                onJumpProposal={onJumpProposal}
-                connected={connected}
-                onItemChange={invalidate}
-              />
-            </Section>
-          )}
-
-          {Object.keys(sel.refs).length > 0 && (
-            <Section title="References" icons>
-              {sel.refs.runId && (
-                <KV
-                  k="run"
-                  v={
-                    <JumpLink
-                      onClick={() => onJumpRun(sel.refs.runId!)}
-                      title={`Open run ${sel.refs.runId}`}
-                    >
-                      {shortId(sel.refs.runId)}
-                    </JumpLink>
-                  }
-                />
-              )}
-              {sel.refs.proposalId && (
-                <KV
-                  k="proposal"
-                  v={
-                    <JumpLink
-                      onClick={() => onJumpProposal(sel.refs.proposalId!)}
-                      title={`Open proposal ${sel.refs.proposalId}`}
-                    >
-                      {shortId(sel.refs.proposalId)}
-                    </JumpLink>
-                  }
-                />
-              )}
-              {sel.refs.eventId && (
-                <KV
-                  k="event"
-                  v={
-                    sel.refs.eventSource ? (
-                      <JumpLink
-                        onClick={() =>
-                          onJumpEvent(sel.refs.eventSource!, sel.refs.eventId!)
-                        }
-                        title={`Open event ${sel.refs.eventId}`}
-                      >
-                        {shortId(sel.refs.eventId)}
-                      </JumpLink>
-                    ) : (
-                      shortId(sel.refs.eventId)
-                    )
-                  }
-                />
-              )}
-              {sel.refs.issue && (
-                <KV
-                  k="issue"
-                  v={
-                    <JumpLink
-                      href={`${LINEAR_ISSUE_URL}${encodeURIComponent(sel.refs.issue)}`}
-                      title="Open in Linear"
-                    >
-                      {sel.refs.issue}
-                    </JumpLink>
-                  }
-                />
-              )}
-              {sel.refs.pr && <KV k="pr" v={<PrRef item={sel} />} />}
-              {sel.refs.repo && <KV k="repo" v={sel.refs.repo} />}
-            </Section>
-          )}
-
-          <Section title="Delivery" icons>
-            <KV
-              k="telegram"
-              v={
-                <span
-                  style={{ color: DELIVERY_HUES[deliveryState(sel)] }}
-                  title={deliveryText(sel)}
-                >
-                  {deliveryText(sel).replace(/^Telegram: /, "")}
-                </span>
-              }
-            />
-          </Section>
-
-          {(ack.isError || resolve.isError) && (
-            <VerbError error={ack.error ?? resolve.error} />
-          )}
-        </DetailPane>
+          </DetailPane>
+        </ErrorBoundary>
       )}
 
       {selectedIds.size > 0 && selectionEnabled && (
@@ -1761,7 +1961,9 @@ export function Inbox({
             disabled={!connected || bulkAcking || ackableSelected.length === 0}
             onClick={() => void handleBulkAck()}
           >
-            {bulkAcking ? "Acking…" : "Ack"}
+            {bulkAcking && bulkAckProgress
+              ? `Acking ${bulkAckProgress.completed}/${bulkAckProgress.total}…`
+              : "Ack"}
             <span
               className="mono ml-1 text-xs text-(--text-faint)"
               aria-hidden="true"
@@ -1783,6 +1985,7 @@ export function Inbox({
               X
             </span>
           </Button>
+          <VerbError error={bulkAckError} />
         </BulkActionBar>
       )}
 
@@ -1801,6 +2004,7 @@ export function Inbox({
             onChange={setBulkResolveReason}
             inputRef={bulkResolveReasonRef}
           />
+          <VerbError error={bulkResolveError} />
           <div className="flex justify-end gap-2">
             <Button onClick={() => setBulkResolveOpen(false)}>Cancel</Button>
             <Button
@@ -1810,8 +2014,8 @@ export function Inbox({
               }
               onClick={() => void handleBulkResolve()}
             >
-              {bulkResolving
-                ? "Resolving…"
+              {bulkResolving && bulkResolveProgress
+                ? `Resolving ${bulkResolveProgress.completed}/${bulkResolveProgress.total}…`
                 : `Resolve ${resolvableSelected.length} items`}
             </Button>
           </div>

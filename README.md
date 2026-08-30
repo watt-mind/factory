@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/watt-mind/factory/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/watt-mind/factory/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![npm](https://img.shields.io/npm/v/%40watt-mind%2Ffactory)](https://www.npmjs.com/package/@watt-mind/factory)
+[![Docs](https://img.shields.io/badge/docs-watt--mind.github.io%2Ffactory-blue.svg)](https://watt-mind.github.io/factory/)
 
 <!-- factory-dogfood-badge -->
 
@@ -224,7 +226,10 @@ Fork an instance, not the kernel. The
 [`factory-starter`](templates/starter/) scaffold keeps your repository
 routing, local policy, schedules, and optional packs in a repository that pins
 the factory as a dependency, so your organization can improve its own factory
-and still track the shared runtime.
+and still track the shared runtime. The kernel itself publishes to npm as
+[`@watt-mind/factory`](https://www.npmjs.com/package/@watt-mind/factory)
+(Apache-2.0), so an instance pins an exact released version rather than
+forking the runtime.
 
 [docs/instances.md](docs/instances.md) has the kernel/instance boundary, the
 upgrade path, and how to send reusable kernel improvements back upstream.
@@ -272,20 +277,15 @@ is added there in the future, it must carry explicit terms; placement under
 
 ## Docs
 
-| Doc                                                | What it is                                                     |
-| :------------------------------------------------- | :------------------------------------------------------------- |
-| [docs/quickstart.md](docs/quickstart.md)           | Connecting a repository, then verifying a clone offline        |
-| [docs/thesis.md](docs/thesis.md)                   | Positioning: an unattended software factory first              |
-| [docs/model.md](docs/model.md)                     | Public primitives in this repository's vocabulary              |
-| [docs/architecture.md](docs/architecture.md)       | Why the factory is shaped this way                             |
-| [docs/orchestrator.md](docs/orchestrator.md)       | Master orchestrator guide and operating loops                  |
-| [SETUP.md](SETUP.md)                               | First-time setup, harness links, event-runtime daemon          |
-| [ROADMAP.md](ROADMAP.md)                           | Now / Next / Later across harnesses, packs, and control planes |
-| [PACKS.md](PACKS.md)                               | Directory of reusable factory packs                            |
-| [ADOPTERS.md](ADOPTERS.md)                         | Organizations and teams using the factory                      |
-| [SECURITY.md](SECURITY.md)                         | Vulnerability reporting and the autonomous-agent threat model  |
-| [ee/README.md](ee/README.md)                       | Open-core / enterprise seam                                    |
-| [event-runtime/README.md](event-runtime/README.md) | How to run the event-runtime sidecar                           |
+Complete guides, concepts, and API references are hosted at **[watt-mind.github.io/factory](https://watt-mind.github.io/factory/)**.
+
+| Guide                                                                              | What it covers                                                    |
+| :--------------------------------------------------------------------------------- | :---------------------------------------------------------------- |
+| [Getting Started](https://watt-mind.github.io/factory/getting-started/quickstart/) | Connect a repository, run the onboarding prompt, offline demo     |
+| [Core Concepts](https://watt-mind.github.io/factory/concepts/the-loop/)            | The loop, owned paths, verification model, and control planes     |
+| [Harnesses & Agents](https://watt-mind.github.io/factory/harnesses/overview/)      | Claude Code, Codex, Gemini, Cursor, Pi, and specialist agents     |
+| [Operator Guide](https://watt-mind.github.io/factory/operator/event-runtime/)      | Running the event-runtime sidecar, multi-repo fleets, web console |
+| [Reference & Protocol](https://watt-mind.github.io/factory/reference/protocol/)    | The non-negotiable agent operating contract and CLI reference     |
 
 ## Contributing
 

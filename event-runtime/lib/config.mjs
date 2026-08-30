@@ -4,12 +4,13 @@
  * so stopping — or deleting — the runtime never touches the repo checkout or
  * the existing orchestrator's state (docs/event-runtime.md §3).
  */
-import { execFileSync } from "node:child_process";
 import {
   constants as fsConstants,
   copyFileSync,
   existsSync,
   mkdirSync,
+  readFileSync,
+  statSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -91,11 +92,32 @@ export function initializeLocalConfig({ root = FACTORY_ROOT } = {}) {
   });
 }
 
-export function runtimeHome() {
+/**
+ * True when this process is a test or CI run: `bun test` sets NODE_ENV=test
+ * for the test process (inherited by CLIs it spawns), and CI runners export
+ * CI=true. Such a process must never resolve the operator's real runtime home.
+ */
+export function isTestOrCiProcess(env = process.env) {
   return (
-    process.env.FACTORY_EVENT_HOME ||
-    path.join(homedir(), ".factory", "event-runtime")
+    env.NODE_ENV === "test" ||
+    env.BUN_ENV === "test" ||
+    (env.CI !== undefined && env.CI !== "" && env.CI !== "false")
   );
+}
+
+export function runtimeHome(env = process.env) {
+  if (env.FACTORY_EVENT_HOME) return env.FACTORY_EVENT_HOME;
+  if (isTestOrCiProcess(env)) {
+    // Fail closed: CI runs on the operator's own machine, and a test that
+    // reached the default home once migrated the live runtime.db to a schema
+    // newer than the running workers (2026-08-29).
+    throw new Error(
+      "refusing to use the default runtime home (~/.factory/event-runtime) " +
+        "from a test or CI process: set FACTORY_EVENT_HOME to an isolated " +
+        "directory (event-runtime/test-helpers.mjs does this on import)",
+    );
+  }
+  return path.join(homedir(), ".factory", "event-runtime");
 }
 
 export function dbPath(home = runtimeHome()) {
@@ -155,6 +177,16 @@ export const DEAD_LETTER_AFTER = 3;
 /** Default cap when neither repo nor policy config supplies one. */
 export const DEFAULT_MAX_IN_FLIGHT = 3;
 
+/** Bound each raw CLI transcript before artifact storage can amplify it. */
+export const DEFAULT_TRANSCRIPT_MAX_BYTES = 64 * 1024 * 1024;
+
+export function transcriptMaxBytes(env = process.env) {
+  const configured = Number(env.FACTORY_EVENT_TRANSCRIPT_MAX_BYTES);
+  return Number.isSafeInteger(configured) && configured > 0
+    ? configured
+    : DEFAULT_TRANSCRIPT_MAX_BYTES;
+}
+
 export const DEFAULT_PROPOSAL_TTL_SECONDS = 30 * 60;
 
 let cachedPolicyVersion;
@@ -162,14 +194,66 @@ let cachedPolicyVersion;
 /** Factory git SHA, recorded on run specs and lifecycle events as provenance. */
 export function policyVersion() {
   if (!cachedPolicyVersion) {
+    if (process.env.FACTORY_POLICY_VERSION) {
+      cachedPolicyVersion = process.env.FACTORY_POLICY_VERSION;
+      return cachedPolicyVersion;
+    }
     try {
-      const sha = execFileSync("git", ["rev-parse", "--short", "HEAD"], {
-        cwd: RUNTIME_ROOT,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim();
-      cachedPolicyVersion = `git:${sha}`;
+      const gitDir = path.join(FACTORY_ROOT, ".git");
+      if (existsSync(gitDir)) {
+        let actualGitDir = gitDir;
+        if (statSync(gitDir).isFile()) {
+          const gitFile = readFileSync(gitDir, "utf8").trim();
+          if (gitFile.startsWith("gitdir:")) {
+            actualGitDir = gitFile.slice(7).trim();
+            if (!path.isAbsolute(actualGitDir)) {
+              actualGitDir = path.resolve(FACTORY_ROOT, actualGitDir);
+            }
+          }
+        }
+        let commonGitDir = actualGitDir;
+        const commondirFile = path.join(actualGitDir, "commondir");
+        if (existsSync(commondirFile)) {
+          const cRel = readFileSync(commondirFile, "utf8").trim();
+          commonGitDir = path.isAbsolute(cRel)
+            ? cRel
+            : path.resolve(actualGitDir, cRel);
+        }
+
+        const headPath = path.join(actualGitDir, "HEAD");
+        if (existsSync(headPath)) {
+          const headContent = readFileSync(headPath, "utf8").trim();
+          if (headContent.startsWith("ref:")) {
+            const refRel = headContent.slice(4).trim();
+            const refPath = path.join(actualGitDir, refRel);
+            const commonRefPath = path.join(commonGitDir, refRel);
+            if (existsSync(refPath)) {
+              const sha = readFileSync(refPath, "utf8").trim().slice(0, 8);
+              cachedPolicyVersion = `git:${sha}`;
+            } else if (existsSync(commonRefPath)) {
+              const sha = readFileSync(commonRefPath, "utf8")
+                .trim()
+                .slice(0, 8);
+              cachedPolicyVersion = `git:${sha}`;
+            } else {
+              const packedPath = path.join(commonGitDir, "packed-refs");
+              if (existsSync(packedPath)) {
+                const packed = readFileSync(packedPath, "utf8");
+                const match = packed.match(
+                  new RegExp(`^([0-9a-f]{7,40})\\s+${refRel}`, "m"),
+                );
+                if (match) cachedPolicyVersion = `git:${match[1].slice(0, 8)}`;
+              }
+            }
+          } else if (/^[0-9a-f]{7,40}$/i.test(headContent)) {
+            cachedPolicyVersion = `git:${headContent.slice(0, 8)}`;
+          }
+        }
+      }
     } catch {
+      /* fallback below */
+    }
+    if (!cachedPolicyVersion) {
       cachedPolicyVersion = "unknown";
     }
   }

@@ -16,14 +16,11 @@
  * Owned Paths. Tests register the module through `createAdapterRegistry`.
  */
 import { spawn } from "node:child_process";
-import {
-  createWriteStream,
-  existsSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
+import { Readable } from "node:stream";
+import { transcriptMaxBytes } from "../config.mjs";
 import {
   HARNESS_LAYOUT as CLAUDE_HARNESS_LAYOUT,
   KILL_GRACE_MS as CLAUDE_KILL_GRACE_MS,
@@ -31,7 +28,9 @@ import {
   PUSH_CREDENTIAL_ENV,
   killProcessGroup,
   safeChildEnvironment,
+  verifiedPrompt,
 } from "./claude.mjs";
+import { boundedTranscriptStream } from "./child-process.mjs";
 import { refuseSandbox } from "./sandboxed.mjs";
 
 export { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV, killProcessGroup };
@@ -159,7 +158,9 @@ function writeRpc(stream, obj) {
 export function createAcpRpc({ stdin, stdout, onRequest, onNotification }) {
   let nextId = 1;
   const pending = new Map();
-  const rl = createInterface({ input: stdout });
+  // A child can fail before stdio pipes are created. Keep the RPC transport
+  // inert in that case so the close/error path can settle the run normally.
+  const rl = createInterface({ input: stdout ?? Readable.from([]) });
 
   rl.on("line", (line) => {
     let msg;
@@ -475,10 +476,13 @@ export async function execute({
   resume = null,
   abortSignal,
   signal,
+  spawnProcess = spawn,
+  transcriptFactory = boundedTranscriptStream,
+  transcriptMaxBytes: maxTranscriptBytes = transcriptMaxBytes(),
 }) {
   refuseSandbox("acp", def, SANDBOX_DEFERRAL_REASON);
 
-  const prompt = readFileSync(def.promptPath, "utf8") + PROMPT_SUFFIX;
+  const prompt = verifiedPrompt(def, "acp");
   const acpConfig = resolveAcpConfig({ spec, def, config });
   const childEnv = safeChildEnvironment({ ...acpConfig.env, ...env }, def);
   const resolved = resolveAcpCommand(acpConfig, {
@@ -496,20 +500,61 @@ export async function execute({
   const argv = [...resolved.args];
 
   return new Promise((resolve, reject) => {
-    const child = spawn(resolved.command, argv, {
-      cwd: workspaceDir,
-      env: childEnv,
-      stdio: ["pipe", "pipe", "pipe"],
-      detached: true,
+    // Open the transcript before spawning so a spawn error cannot race past
+    // cleanup, and so every failed launch has the same lifecycle as a run
+    // whose child reached the protocol handshake.
+    const transcript = transcriptFactory(
+      path.join(workspaceDir, ".transcript.json"),
+      {
+        maxBytes: maxTranscriptBytes,
+        onTruncated: ({ bytes }) =>
+          emitTrace(onTrace, {
+            kind: "lifecycle",
+            payload: { note: "transcript_truncated", bytes },
+          }),
+      },
+    );
+    transcript.on("error", () => {});
+    // Child close only says its stdio handles are closed; the file stream may
+    // still have buffered bytes. Register before piping so a fast child cannot
+    // finish before we can observe the output flush.
+    let resolveTranscriptClosed;
+    const transcriptClosed = new Promise((done) => {
+      resolveTranscriptClosed = done;
+      const doneOnce = () => {
+        resolveTranscriptClosed = null;
+        done();
+      };
+      transcript.once("finish", doneOnce);
+      transcript.once("close", doneOnce);
+      transcript.once("error", doneOnce);
     });
+    const closeTranscript = () => {
+      if (!transcript.destroyed && !transcript.writableEnded) {
+        transcript.end();
+      }
+    };
+
+    let child;
+    try {
+      child = spawnProcess(resolved.command, argv, {
+        cwd: workspaceDir,
+        env: childEnv,
+        stdio: ["pipe", "pipe", "pipe"],
+        detached: true,
+      });
+    } catch (err) {
+      closeTranscript();
+      transcript.destroy();
+      resolveTranscriptClosed?.();
+      reject(err);
+      return;
+    }
 
     child.stdin?.on("error", () => {});
 
-    const transcript = createWriteStream(
-      path.join(workspaceDir, ".transcript.json"),
-    );
-    transcript.on("error", () => {});
     if (child.stdout) child.stdout.pipe(transcript);
+    else transcript.end();
 
     let stderrBuf = "";
     if (child.stderr) {
@@ -528,7 +573,7 @@ export async function execute({
     let settled = false;
     let timedOut = false;
     let aborted = false;
-    let killTimer = null;
+    let cancelTermination = null;
     let cancelledPermissions = false;
 
     const finishHandshakeError = (err) => {
@@ -560,14 +605,7 @@ export async function execute({
         }
       }
       cancelPendingPermissions();
-      killProcessGroup(child, "SIGTERM");
-      if (!killTimer) {
-        killTimer = setTimeout(
-          () => killProcessGroup(child, "SIGKILL"),
-          killGraceMs,
-        );
-        killTimer.unref?.();
-      }
+      cancelTermination ??= killProcessGroup(child, { killGraceMs });
     };
 
     const rpc = createAcpRpc({
@@ -727,13 +765,8 @@ export async function execute({
         } catch {
           // already closed
         }
-        if (!timedOut && !killTimer) {
-          killProcessGroup(child, "SIGTERM");
-          killTimer = setTimeout(
-            () => killProcessGroup(child, "SIGKILL"),
-            killGraceMs,
-          );
-          killTimer.unref?.();
+        if (!timedOut) {
+          cancelTermination ??= killProcessGroup(child, { killGraceMs });
         }
       })
       .catch((err) => {
@@ -744,14 +777,7 @@ export async function execute({
         } catch {
           // ignore
         }
-        killProcessGroup(child, "SIGTERM");
-        if (!killTimer) {
-          killTimer = setTimeout(
-            () => killProcessGroup(child, "SIGKILL"),
-            killGraceMs,
-          );
-          killTimer.unref?.();
-        }
+        cancelTermination ??= killProcessGroup(child, { killGraceMs });
       });
 
     const termTimer = setTimeout(() => onAbortOrTimeout(true), timeoutMs);
@@ -767,19 +793,25 @@ export async function execute({
       if (settled) return;
       settled = true;
       clearTimeout(termTimer);
-      if (killTimer) clearTimeout(killTimer);
+      cancelTermination?.();
       if (abortSig) abortSig.removeEventListener?.("abort", onAbort);
       cancelPendingPermissions();
       rpc.rejectAll(new Error("ACP child closed"));
       rpc.close();
+      // end() before destroy() is intentional: it lets an already-flushed
+      // stream emit "finish" (resolving transcriptClosed through the normal
+      // path) rather than only "close"; destroy() then guarantees the fd is
+      // released even when buffered bytes are abandoned.
+      closeTranscript();
       transcript.destroy();
+      resolveTranscriptClosed?.();
       fn(value);
     };
 
     child.on("error", (err) => {
       settle(reject, err);
     });
-    child.on("close", (exitCode) => {
+    child.on("close", async (exitCode) => {
       if (handshakeError && !timedOut && !aborted) {
         settle(reject, handshakeError);
         return;
@@ -806,11 +838,13 @@ export async function execute({
       } catch {
         // observability
       }
+      await transcriptClosed;
       settle(resolve, {
         exitCode: finalExit,
         timedOut,
         policyDenials: finalExit === 0 ? [] : policyDenials,
         ...(usage ? { usage } : {}),
+        ...(transcript.truncated ? { transcriptTruncated: true } : {}),
       });
     });
   });

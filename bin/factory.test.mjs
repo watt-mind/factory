@@ -1,7 +1,9 @@
 import { test, expect } from "bun:test";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -11,6 +13,123 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 const FACTORY = path.resolve(import.meta.dir, "factory");
+
+function makeServeFixture() {
+  const root = mkdtempSync(path.join(tmpdir(), "factory-serve-"));
+  const webDir = path.join(root, "event-runtime", "web");
+  mkdirSync(path.join(root, "bin"), { recursive: true });
+  mkdirSync(webDir, { recursive: true });
+  copyFileSync(FACTORY, path.join(root, "bin", "factory"));
+  writeFileSync(
+    path.join(webDir, "serve.mjs"),
+    `import { writeFileSync } from "node:fs";
+writeFileSync(process.env.WEB_STARTED, String(process.pid));
+process.on("SIGTERM", () => {
+  writeFileSync(process.env.WEB_STOPPED, "stopped");
+  process.exit(0);
+});
+setInterval(() => {}, 1_000);
+`,
+  );
+  writeFileSync(
+    path.join(root, "event-runtime", "cli.mjs"),
+    `if (process.env.RUNTIME_EXIT_CODE)
+  process.exit(Number(process.env.RUNTIME_EXIT_CODE));
+process.on("SIGTERM", () => process.exit(0));
+setInterval(() => {}, 1_000);
+`,
+  );
+  return {
+    root,
+    cleanup: () => rmSync(root, { recursive: true, force: true }),
+  };
+}
+
+async function waitForFile(file) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (existsSync(file)) return true;
+    await Bun.sleep(25);
+  }
+  return false;
+}
+
+test("factory help documents every dispatcher verb", () => {
+  const source = readFileSync(FACTORY, "utf8");
+  const dispatcher = source.match(/case "\$cmd" in([\s\S]*?)\nesac/);
+  expect(dispatcher).not.toBeNull();
+
+  const verbs = [...dispatcher[1].matchAll(/^ {2}([a-z][a-z-]*)\)/gm)].map(
+    ([, verb]) => verb,
+  );
+  const result = Bun.spawnSync({
+    cmd: ["bash", FACTORY, "help"],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  expect(result.exitCode).toBe(0);
+  const help = result.stdout.toString();
+  for (const verb of verbs) {
+    expect(help).toMatch(new RegExp(`^  ${verb}\\s`, "m"));
+  }
+});
+
+test("factory serve --web stops the web server when the runtime receives SIGTERM", async () => {
+  const fixture = makeServeFixture();
+  const webStarted = path.join(fixture.root, "web-started");
+  const webStopped = path.join(fixture.root, "web-stopped");
+  let webPid = null;
+  const proc = Bun.spawn({
+    cmd: ["bash", path.join(fixture.root, "bin", "factory"), "serve", "--web"],
+    stdout: "pipe",
+    stderr: "pipe",
+    env: {
+      ...process.env,
+      WEB_STARTED: webStarted,
+      WEB_STOPPED: webStopped,
+    },
+  });
+  try {
+    expect(await waitForFile(webStarted)).toBe(true);
+    webPid = Number(readFileSync(webStarted, "utf8"));
+
+    proc.kill("SIGTERM");
+    await proc.exited;
+
+    expect(existsSync(webStopped)).toBe(true);
+    expect(
+      Bun.spawnSync({ cmd: ["kill", "-0", String(webPid)] }).exitCode,
+    ).not.toBe(0);
+  } finally {
+    proc.kill("SIGTERM");
+    await proc.exited;
+    if (Number.isInteger(webPid) && webPid > 0)
+      Bun.spawnSync({ cmd: ["kill", "-TERM", String(webPid)] });
+    fixture.cleanup();
+  }
+}, 10_000);
+
+test("factory serve --web propagates the runtime exit code", () => {
+  const fixture = makeServeFixture();
+  try {
+    const result = Bun.spawnSync({
+      cmd: [
+        "bash",
+        path.join(fixture.root, "bin", "factory"),
+        "serve",
+        "--web",
+      ],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, RUNTIME_EXIT_CODE: "23" },
+    });
+
+    expect(result.exitCode).toBe(23);
+  } finally {
+    fixture.cleanup();
+  }
+});
 
 function makeNotifier(dir) {
   const notifier = path.join(dir, "notify_stub.py");
@@ -61,6 +180,7 @@ function runNotify({ args, stdin = "", exitCode = "0", env = {} }) {
 async function withInboxStub(response, fn) {
   const dir = mkdtempSync(path.join(tmpdir(), "factory-inbox-server-"));
   const requestFile = path.join(dir, "request.json");
+  const headersFile = path.join(dir, "headers.json");
   const serverScript = path.join(dir, "server.py");
   writeFileSync(
     serverScript,
@@ -72,6 +192,8 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("content-length", "0"))
         with open(${JSON.stringify(requestFile)}, "w") as f:
             f.write(self.rfile.read(length).decode())
+        with open(${JSON.stringify(headersFile)}, "w") as f:
+            f.write(json.dumps({k.lower(): v for k, v in self.headers.items()}))
         body = json.dumps(json.loads(${JSON.stringify(JSON.stringify(response))})).encode()
         self.send_response(201)
         self.send_header("content-type", "application/json")
@@ -93,7 +215,7 @@ server.handle_request()
   const { value } = await reader.read();
   const port = Number(new TextDecoder().decode(value).trim());
   try {
-    return await fn({ port, requestFile });
+    return await fn({ port, requestFile, headersFile });
   } finally {
     server.kill();
     await server.exited;
@@ -145,6 +267,56 @@ test("factory notify posts a structured inbox item when serve is reachable", asy
           refs: { issue: "WM-1" },
           source: "agent:run_test",
         });
+      } finally {
+        result.cleanup();
+      }
+    },
+  );
+});
+
+// #1132: the durable /inbox POST must present the operator credential when
+// FACTORY_CONTROL_API_TOKEN is configured (#1152), and stay header-free when
+// it is not. Note that runNotify spreads process.env, so the unset case has to
+// override any token the operator's shell carries.
+test("factory notify sends the bearer on /inbox when FACTORY_CONTROL_API_TOKEN is set", async () => {
+  const token = "notify-test-token-1132";
+  await withInboxStub(
+    { delivery: { ok: true } },
+    async ({ port, headersFile }) => {
+      const result = runNotify({
+        args: ["BLOCKED", "WM-1:", "choose policy"],
+        env: {
+          FACTORY_EVENT_PORT: String(port),
+          FACTORY_CONTROL_API_TOKEN: token,
+        },
+      });
+      try {
+        expect(result.status).toBe(0);
+        const headers = JSON.parse(readFileSync(headersFile, "utf8"));
+        expect(headers.authorization).toBe(`Bearer ${token}`);
+        expect(result.stderr).not.toContain(token);
+      } finally {
+        result.cleanup();
+      }
+    },
+  );
+});
+
+test("factory notify sends no authorization header when FACTORY_CONTROL_API_TOKEN is unset", async () => {
+  await withInboxStub(
+    { delivery: { ok: true } },
+    async ({ port, headersFile }) => {
+      const result = runNotify({
+        args: ["BLOCKED", "WM-1:", "choose policy"],
+        env: {
+          FACTORY_EVENT_PORT: String(port),
+          FACTORY_CONTROL_API_TOKEN: "",
+        },
+      });
+      try {
+        expect(result.status).toBe(0);
+        const headers = JSON.parse(readFileSync(headersFile, "utf8"));
+        expect(headers.authorization).toBeUndefined();
       } finally {
         result.cleanup();
       }
@@ -222,6 +394,35 @@ test("factory workers executes orchestrator/workers.mjs via CLI", () => {
   });
   expect(result.exitCode).toBe(0);
   expect(result.stdout.toString()).toContain("factory workers");
+});
+
+test("factory logs rotate delegates to live-stack with logs rotate", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "factory-logs-"));
+  const argsFile = path.join(root, "args");
+  const factory = path.join(root, "bin", "factory");
+  const liveStack = path.join(root, "bin", "live-stack.sh");
+  mkdirSync(path.join(root, "bin"), { recursive: true });
+  copyFileSync(FACTORY, factory);
+  writeFileSync(
+    liveStack,
+    `#!/usr/bin/env bash
+printf '%s\\n' "$@" >"$FACTORY_LOGS_TEST_ARGS"
+`,
+  );
+  chmodSync(liveStack, 0o755);
+
+  try {
+    const result = Bun.spawnSync({
+      cmd: ["bash", factory, "logs", "rotate"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, FACTORY_LOGS_TEST_ARGS: argsFile },
+    });
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(argsFile, "utf8")).toBe("logs\nrotate\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("factory approve delegates to event-runtime/cli.mjs", () => {

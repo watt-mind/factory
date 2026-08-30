@@ -1,6 +1,8 @@
 import type {
   AdmittedEvent,
   AgentsView,
+  PromotionPreview,
+  PromotionResult,
   ArtifactInventoryItem,
   ArtifactView,
   ChainListItem,
@@ -16,6 +18,8 @@ import type {
   MetricsBreakdownView,
   MetricsView,
   MetricsWindow,
+  ModelTierCellResult,
+  ModelTierConfig,
   OutboxRow,
   JanitorResult,
   Proposal,
@@ -65,6 +69,8 @@ export interface ConfigSection {
   entries: ConfigEntry[];
   /** Only on the `extensions` section. */
   extensions?: ConfigExtension[];
+  /** Only on the focused, editable Policy Models section. */
+  modelTierConfig?: ModelTierConfig;
 }
 export interface ConfigView {
   generatedAt: string;
@@ -128,6 +134,90 @@ export interface RepoItem extends BaseRepoItem {
 
 type CachedResponse = { etag: string; body: unknown };
 const responseCache = new Map<string, CachedResponse>();
+const CONTROL_TOKEN_KEY = "factory.controlApiToken";
+
+// sessionStorage throws when site data is blocked (private mode, storage
+// policies); a token that cannot be remembered must not break every API call.
+function readStoredControlToken(): string | null {
+  try {
+    return sessionStorage.getItem(CONTROL_TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredControlToken(token: string): void {
+  try {
+    if (token) sessionStorage.setItem(CONTROL_TOKEN_KEY, token);
+    else sessionStorage.removeItem(CONTROL_TOKEN_KEY);
+  } catch {
+    /* storage unavailable: the token still applies for this page load */
+  }
+}
+
+function safeDecode(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+/**
+ * Splits a fragment query without URLSearchParams' form decoding: a `+` in a
+ * token is a literal `+`, not a space. Returns the token (if present) and the
+ * remaining query with the token pair removed.
+ */
+function extractFragmentToken(query: string): {
+  token: string | null;
+  rest: string;
+} {
+  let token: string | null = null;
+  const kept: string[] = [];
+  for (const pair of query.split("&")) {
+    if (pair === "") continue;
+    const eq = pair.indexOf("=");
+    const key = eq >= 0 ? pair.slice(0, eq) : pair;
+    if (safeDecode(key) === "token") {
+      token ??= eq >= 0 ? safeDecode(pair.slice(eq + 1)) : "";
+      continue;
+    }
+    kept.push(pair);
+  }
+  return { token, rest: kept.join("&") };
+}
+
+function suppliedControlToken(): string | null {
+  if (typeof window === "undefined") return null;
+
+  const url = new URL(window.location.href);
+  let token = url.searchParams.get("token");
+  let changed = false;
+  if (token !== null) {
+    url.searchParams.delete("token");
+    changed = true;
+  }
+
+  const hash = url.hash.startsWith("#") ? url.hash.slice(1) : url.hash;
+  const queryAt = hash.indexOf("?");
+  if (queryAt >= 0) {
+    const route = hash.slice(0, queryAt);
+    const fragment = extractFragmentToken(hash.slice(queryAt + 1));
+    if (fragment.token !== null) {
+      token ??= fragment.token;
+      url.hash = `#${route}${fragment.rest ? `?${fragment.rest}` : ""}`;
+      changed = true;
+    }
+  }
+
+  let supplied: string | null = null;
+  if (token !== null) {
+    supplied = token.trim();
+    writeStoredControlToken(supplied);
+  }
+  if (changed) window.history.replaceState(null, "", url);
+  return readStoredControlToken() ?? (supplied || null);
+}
 
 export type RunListFilters = {
   state?: string;
@@ -144,6 +234,8 @@ export type RunListFilters = {
   agent?: string;
   /** Opaque cursor returned by the preceding GET /runs page. */
   before?: string;
+  /** Maximum number of newest-first summaries to return. */
+  limit?: number;
 };
 
 export type RunListResponse = {
@@ -174,7 +266,18 @@ function withQuery(path: string, values: Record<string, string | undefined>) {
 }
 
 export function fetchRuns(filters: RunListFilters = {}) {
-  return call<RunListResponse>("GET", withQuery("/runs", filters));
+  return call<RunListResponse>(
+    "GET",
+    withQuery("/runs", {
+      state: filters.state,
+      from: filters.from,
+      to: filters.to,
+      population: filters.population,
+      agent: filters.agent,
+      before: filters.before,
+      limit: filters.limit == null ? undefined : String(filters.limit),
+    }),
+  );
 }
 
 export function fetchProposalHistory(
@@ -237,6 +340,10 @@ async function call<T>(
   const headers: Record<string, string> = {
     "content-type": "application/json",
   };
+  const mutating = !["GET", "HEAD", "OPTIONS"].includes(method);
+  const suppliedToken = suppliedControlToken();
+  const controlToken = mutating ? suppliedToken : null;
+  if (controlToken) headers.authorization = `Bearer ${controlToken}`;
   if (cached) headers["if-none-match"] = cached.etag;
   const res = await fetch(url, {
     method,
@@ -259,10 +366,12 @@ async function call<T>(
   }
   if (!res.ok) {
     const message =
-      json?.error ??
-      (Array.isArray(json?.errors)
-        ? json.errors.join("; ")
-        : `HTTP ${res.status}`);
+      res.status === 401 && mutating
+        ? "control API token required — reopen this dashboard with a credentialed link"
+        : (json?.error ??
+          (Array.isArray(json?.errors)
+            ? json.errors.join("; ")
+            : `HTTP ${res.status}`));
     throw new ApiError(message, res.status);
   }
   if (cacheKey) {
@@ -275,6 +384,26 @@ async function call<T>(
 
 /** Every published config source, read-only and allow-listed by the server. */
 export const fetchConfig = () => call<ConfigView>("GET", "/config");
+
+export const fetchModelTierConfig = () =>
+  call<ModelTierConfig>("GET", "/overrides/config");
+
+export const putModelTierCell = (
+  adapter: string,
+  tier: string,
+  model: string,
+) =>
+  call<ModelTierCellResult>(
+    "PUT",
+    `/overrides/config/models/${encodeURIComponent(adapter)}/${encodeURIComponent(tier)}`,
+    { model },
+  );
+
+export const deleteModelTierCell = (adapter: string, tier: string) =>
+  call<ModelTierCellResult>(
+    "DELETE",
+    `/overrides/config/models/${encodeURIComponent(adapter)}/${encodeURIComponent(tier)}`,
+  );
 
 export function fetchArtifacts(filters?: {
   kind?: string;
@@ -312,10 +441,12 @@ export function fetchTickets(
 
 export const api = {
   health: () =>
-    call<{ ok: boolean; policyVersion: string; env: EnvIdentity }>(
-      "GET",
-      "/health",
-    ),
+    call<{
+      ok: boolean;
+      policyVersion: string;
+      env: EnvIdentity;
+      tick?: { lastMs: number; overruns: number };
+    }>("GET", "/health"),
   status: () => call<StatusView>("GET", "/status"),
   events: (status?: string, page: { limit?: number; before?: string } = {}) =>
     call<CursorPage<AdmittedEvent, "events">>(
@@ -437,6 +568,16 @@ export const api = {
       "DELETE",
       `/overrides/agents/${encodeURIComponent(ref)}`,
     ),
+  modelTierConfig: fetchModelTierConfig,
+  putModelTierCell,
+  deleteModelTierCell,
+  // Overlay promotion (gh-860): a read-only preview of which runtime overrides
+  // can become tracked Git defaults, and the digest an apply must echo back.
+  promotionPreview: () => call<PromotionPreview>("GET", "/promotion/preview"),
+  // Promote a non-empty subset of preview keys into a PR against the repo's
+  // configured base. Never clears the runtime overrides — that is separate.
+  promotionApply: (body: { repo: string; digest: string; keys: string[] }) =>
+    call<PromotionResult>("POST", "/promotion/apply", body),
   // Declarative Overview panels (WM-840) and the data behind one of them:
   // `panelSource` only ever GETs an endpoint the runtime already
   // allow-listed for the panel; the query is the panel's own `source.query`.
@@ -510,6 +651,12 @@ export const api = {
 export const getInboxItem = (id: string) =>
   call<{ item: InboxItem }>("GET", `/inbox/${encodeURIComponent(id)}`);
 
+/**
+ * The effect runs outside the ledger's write lock (#1434): while it is in
+ * flight `item.response.effect.outcome` is `"pending"`, and rows decided before
+ * that window existed carry no `effect` at all. Readers must not assume
+ * `applied`/`failed`; a retry during the window is refused with `effect_pending`.
+ */
 export const decideInboxItem = (id: string, response: DecisionResponseInput) =>
   call<{ item: InboxItem; effect: DecisionEffect }>(
     "POST",

@@ -536,24 +536,70 @@ if (import.meta.main) {
         : "fine for triage (read-only), but specs are written against what's on disk",
     );
 
-    // Does the Linear project actually resolve? A typo here fails at dispatch
-    // time, after a worktree and a database already exist.
+    // Does this repo's tracker actually resolve? A typo here fails at dispatch
+    // time, after a worktree and a database already exist. The query has to be
+    // per-adapter: asking GitHub a Linear question fails as a `gh` error that
+    // reads like broken auth rather than like a misconfigured board.
+    const repoKind = repo.control_plane ?? controlPlaneKind;
+    const trackerLabel =
+      repoKind === "github"
+        ? "GitHub team/project resolves"
+        : repoKind === "memory"
+          ? "memory tracker"
+          : "Linear team/project resolves";
     try {
-      const q = `query($t:String!,$p:String!){ issues(first:1, filter:{ team:{key:{eq:$t}}, project:{name:{eq:$p}} }){ nodes{ identifier } } }`;
-      const nodes =
-        (await loadControlPlane().raw(q, { t: repo.team, p: repo.project }))
-          ?.issues?.nodes ?? [];
-      check(
-        true,
-        "Linear team/project resolves",
-        `${repo.team} / ${repo.project}${nodes[0] ? ` (e.g. ${nodes[0].identifier})` : " (no open issues)"}`,
-      );
+      if (repoKind === "memory") {
+        check("warn", trackerLabel, "in-process tracker — demo/tests only");
+      } else if (repoKind === "github") {
+        // Repository-scoped, so the same query works whether the board's owner
+        // is a user or an organization — asking `organization(login:)` about a
+        // user login is a hard NOT_FOUND, not an empty result. The board must
+        // be linked to the repo anyway for the adapter to reach it.
+        const [owner, name] = String(repo.github ?? "").split("/");
+        const q = `query($owner:String!,$name:String!){
+          repository(owner:$owner,name:$name){
+            projectsV2(first:20){ nodes{ title number } }
+          }
+        }`;
+        const d = await loadControlPlane({ repoName: repo.name }).raw(q, {
+          owner,
+          name,
+        });
+        const nodes = d?.repository?.projectsV2?.nodes ?? [];
+        const hit = nodes.find((n) => n?.title === repo.project);
+        check(
+          Boolean(hit),
+          trackerLabel,
+          hit
+            ? `${repo.github} / ${repo.project} (project #${hit.number})`
+            : `no Projects v2 board titled ${JSON.stringify(repo.project)} linked to ${repo.github}`,
+          hit
+            ? null
+            : `create and link the board, then re-run: factory init --control-plane github --repo ${repo.github}`,
+        );
+      } else {
+        const q = `query($t:String!,$p:String!){ issues(first:1, filter:{ team:{key:{eq:$t}}, project:{name:{eq:$p}} }){ nodes{ identifier } } }`;
+        const nodes =
+          (
+            await loadControlPlane({ repoName: repo.name }).raw(q, {
+              t: repo.team,
+              p: repo.project,
+            })
+          )?.issues?.nodes ?? [];
+        check(
+          true,
+          trackerLabel,
+          `${repo.team} / ${repo.project}${nodes[0] ? ` (e.g. ${nodes[0].identifier})` : " (no open issues)"}`,
+        );
+      }
     } catch (e) {
       check(
         false,
-        "Linear team/project resolves",
+        trackerLabel,
         String(e.message).slice(0, 60),
-        "check team key and project name against linear.md §1–2 (CW projects carry a 'Coach Watts - ' prefix)",
+        repoKind === "github"
+          ? `check controlPlane.github in config/policy.yaml and the board's Status field: factory init --control-plane github --repo ${repo.github}`
+          : "check team key and project name against linear.md §1–2 (CW projects carry a 'Coach Watts - ' prefix)",
       );
     }
 

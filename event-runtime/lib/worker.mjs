@@ -10,7 +10,7 @@
  * mid-flight surfaces here as IllegalTransition; the worker stops quietly,
  * publishing nothing.
  */
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   cpSync,
@@ -39,13 +39,26 @@ import { canonicalJson, hashBytes, hashJson, sha256Hex } from "./canonical.mjs";
 import { artifactsRoot, FACTORY_ROOT, resolveConfigPath } from "./config.mjs";
 import { nextCounter, recordRunUsage, tx, txImmediate } from "./db.mjs";
 import { getAgent } from "./registry.mjs";
-import { IllegalTransition, transition } from "./lifecycle.mjs";
 import {
+  definitionAgentName,
+  filesystemConfinementRefusal,
+  MODEL_BACKED_ADAPTERS,
+  normalizeWorkspaceOnlyFallback,
+  sandboxUnavailableCapability,
+  workspaceOnlyHostFallback,
+} from "./adapters/sandboxed.mjs";
+import { isSandboxGuarded } from "./adapters/index.mjs";
+import { preflight as sandboxPreflight } from "./sandbox/gondolin.mjs";
+import { createRun, IllegalTransition, transition } from "./lifecycle.mjs";
+import {
+  buildEscalatedContinuationSpec,
   HARNESS_KINDS,
   HARNESS_NAME_PATTERN,
   worktreeDispatchAutoEligibility,
   worktreeMergeFixEligibility,
 } from "./planner.mjs";
+import { newRunId } from "./ids.mjs";
+import { isTrustedAssociation } from "./triage.mjs";
 import { closeOpenProposalForRun } from "./proposals.mjs";
 import { computeDefHash, createReceipt, verifyDefHash } from "./receipts.mjs";
 import { traceRecorder } from "./trace.mjs";
@@ -53,6 +66,7 @@ import {
   ContractViolation,
   composeHandoffVerification,
   HANDOFF_REASON_CODES,
+  HANDOFF_SANDBOX_UNAVAILABLE,
   verifyResult,
 } from "./verify.mjs";
 import {
@@ -63,6 +77,7 @@ import {
 import { HEARTBEAT_STALE_MS, satisfiesPlacement } from "./workers.mjs";
 import {
   assertSandboxWorkspaceSupported,
+  confinedRegularFile,
   createWorkspace,
   destroyWorkspace,
   PathViolation,
@@ -71,6 +86,10 @@ import {
 import { createInboxItem } from "./inbox.mjs";
 import { persistMergeReviewFromResult } from "./merge-reviews.mjs";
 import { templateFor } from "./decision-templates.mjs";
+import {
+  DETACHED_SPAWN_OPTIONS,
+  killProcessGroup,
+} from "./adapters/child-process.mjs";
 
 const HARNESS_UNKNOWN_CODES = Object.freeze({
   skills: "harness_unknown_skill",
@@ -78,20 +97,139 @@ const HARNESS_UNKNOWN_CODES = Object.freeze({
   subagents: "harness_unknown_subagent",
 });
 
+// schedule.yaml is deliberately absent. Unlike repos/policy — pure instance
+// state a delegated checkout needs verbatim — the schedule overlay layers on
+// top of the branch's tracked kernel schedules (event-runtime/schedules.json).
+// A worktree's branch may have trimmed a loop out of the kernel (e.g. #1028),
+// yet the live operator overlay can still carry a stale, partial entry for it
+// (`enabled: true` with no cadence). Copied in, that entry loads as a brand-new
+// overlay loop with no `every`, and the repo verify gate dies with
+// `unparseable cadence "undefined"` (#1051). Omitting it lets the checkout fall
+// back to the tracked schedule.example.yaml, which always verifies.
 const INSTANCE_LOCAL_CONFIG_FILES = Object.freeze([
   "repos.yaml",
   "policy.yaml",
-  "schedule.yaml",
 ]);
+
+/**
+ * Ensure `rel` is git-ignored in `checkoutPath`, adding it to the checkout's
+ * local `info/exclude` if the repo does not already ignore it. Returns true
+ * when the path is (or becomes) ignored. A client repo does not gitignore the
+ * factory's instance config, so this is how that config can be copied in for a
+ * run while staying un-stageable — a copied-but-committable instance config
+ * would leak the operator's routing/policy into the repo.
+ */
+/**
+ * Run one bounded `git` probe on the claim path. Always settles: on normal
+ * exit (`close`), on a spawn failure (`error`, e.g. ENOENT — Node need not
+ * emit `close` after that), and on the subprocess-timeout ceiling. stderr is
+ * discarded rather than piped so a chatty git can never stall the probe on an
+ * undrained pipe. `command` exists only so tests can point the probe at a
+ * non-existent binary.
+ */
+export async function runClaimPathGitProbe({
+  checkoutPath,
+  args,
+  name,
+  onTimeout,
+  command = "git",
+}) {
+  const timeoutMs = workerSubprocessTimeoutMs();
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(command, args, {
+        ...DETACHED_SPAWN_OPTIONS,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+    } catch (error) {
+      resolve({ status: null, stdout: "", error });
+      return;
+    }
+
+    let stdout = "";
+    let error = null;
+    let settled = false;
+    const settle = (status) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ status, stdout, error });
+    };
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.once("error", (spawnError) => {
+      error = spawnError;
+      // A failed spawn (ENOENT, EACCES) may never reach `close`; settle now so
+      // the claim path cannot hang on a missing or broken git binary.
+      settle(null);
+    });
+    const timer = setTimeout(() => {
+      error = Object.assign(
+        new Error(`git ${name} timed out after ${timeoutMs}ms`),
+        { code: "ETIMEDOUT" },
+      );
+      console.warn(
+        `[worker] claim-path git probe timed out: repo=${checkoutPath} probe=${name} ceiling=${timeoutMs}ms`,
+      );
+      try {
+        onTimeout?.({ repo: checkoutPath, name, ceilingMs: timeoutMs });
+      } catch {
+        // Trace observability cannot interfere with config provisioning.
+      }
+      killProcessGroup(child, { signal: "SIGKILL" });
+    }, timeoutMs);
+    timer.unref?.();
+    child.once("close", (status) => settle(status));
+  });
+}
+
+async function ensureLocallyIgnored(checkoutPath, rel, { onTimeout } = {}) {
+  const isIgnored = async () =>
+    (
+      await runClaimPathGitProbe({
+        checkoutPath,
+        args: ["-C", checkoutPath, "check-ignore", "-q", "--", rel],
+        name: "check-ignore",
+        onTimeout,
+      })
+    ).status === 0;
+  if (await isIgnored()) return true;
+  const resolved = await runClaimPathGitProbe({
+    checkoutPath,
+    args: ["-C", checkoutPath, "rev-parse", "--git-path", "info/exclude"],
+    name: "rev-parse",
+    onTimeout,
+  });
+  if (resolved.status !== 0) return false;
+  const excludeFile = path.resolve(checkoutPath, resolved.stdout.trim());
+  try {
+    mkdirSync(path.dirname(excludeFile), { recursive: true });
+    const existing = existsSync(excludeFile)
+      ? readFileSync(excludeFile, "utf8")
+      : "";
+    if (!existing.split(/\r?\n/).includes(`/${rel}`)) {
+      const sep = existing === "" || existing.endsWith("\n") ? "" : "\n";
+      writeFileSync(excludeFile, `${existing}${sep}/${rel}\n`);
+    }
+  } catch {
+    return false;
+  }
+  return isIgnored();
+}
 
 /**
  * Bring the operator-owned config files into a delegated checkout. These
  * files are intentionally untracked, so a fresh worktree otherwise falls
  * back to examples and cannot use this factory instance's routing or policy.
+ * The schedule overlay is excluded on purpose (see INSTANCE_LOCAL_CONFIG_FILES).
  */
-export function provisionInstanceLocalConfigs({
+export async function provisionInstanceLocalConfigs({
   checkoutPath,
   factoryRoot = process.env.FACTORY_ROOT || FACTORY_ROOT,
+  onProbeTimeout,
 } = {}) {
   if (!checkoutPath) return [];
   const sourceConfig = path.join(factoryRoot, "config");
@@ -102,6 +240,8 @@ export function provisionInstanceLocalConfigs({
       ["-C", checkoutPath, "rev-parse", "--is-inside-work-tree"],
       {
         encoding: "utf8",
+        timeout: workerSubprocessTimeoutMs(),
+        killSignal: "SIGKILL",
       },
     ).status === 0;
   const copied = [];
@@ -113,14 +253,22 @@ export function provisionInstanceLocalConfigs({
     const destination = path.join(destinationConfig, filename);
     if (path.resolve(source) === path.resolve(destination)) continue;
 
-    // Never introduce an instance config into a checkout where an agent could
-    // stage it. Non-factory repository fixtures and repositories without this
-    // local-config contract continue using their tracked examples.
+    // The instance config must never be stageable in the checkout — an agent
+    // could otherwise commit the operator's routing/policy (with client names)
+    // into a repo. The factory repo already gitignores these paths; a client
+    // repo (bj29, cashsaas, …) has no such entry, so make the path locally
+    // ignored (`.git/info/exclude`) first. Either way the copied config is
+    // present for the run — merge-review resolves the repo's control plane and
+    // merge_ci gate from it — but can never be `git add`-ed. Before this,
+    // client-repo merge-review failed closed on the missing config (the guard
+    // silently skipped the copy, leaving only the tracked example, which the
+    // client repo does not ship). Only fall back to the example if the path
+    // cannot be made ignore-protected.
     if (
       isGitCheckout &&
-      spawnSync("git", ["-C", checkoutPath, "check-ignore", "-q", "--", rel], {
-        encoding: "utf8",
-      }).status !== 0
+      !(await ensureLocallyIgnored(checkoutPath, rel, {
+        onTimeout: onProbeTimeout,
+      }))
     ) {
       continue;
     }
@@ -351,6 +499,43 @@ export function policyMaxRunMinutes(root = FACTORY_ROOT) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Explicit operator opt-out for workspace-only model confinement, normalized
+ * to `{ mode: "host", agents: string[]|null }` or `null`. Unknown, malformed,
+ * and absent values all fail closed.
+ */
+export function policyWorkspaceOnlyFallback(root = FACTORY_ROOT) {
+  try {
+    const policy = Bun.YAML.parse(
+      readFileSync(resolveConfigPath("policy", { root }), "utf8"),
+    );
+    return normalizeWorkspaceOnlyFallback(
+      policy?.sandbox?.workspace_only_fallback,
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Gondolin's preflight shells out to QEMU and Node, so it must not run per
+ * claim: a host's virtualization capability does not change inside a worker
+ * process. Memoized here (rather than in the sandbox module) because this is
+ * the hot caller.
+ */
+let SANDBOX_PREFLIGHT_CACHE;
+export function cachedSandboxPreflight() {
+  if (SANDBOX_PREFLIGHT_CACHE === undefined) {
+    SANDBOX_PREFLIGHT_CACHE = sandboxPreflight();
+  }
+  return SANDBOX_PREFLIGHT_CACHE;
+}
+
+/** Test seam: forget the memoized host capability report. */
+export function resetSandboxPreflightCache() {
+  SANDBOX_PREFLIGHT_CACHE = undefined;
 }
 
 /**
@@ -658,7 +843,26 @@ export function expireRunDeadline(
 export const DEFAULT_MAX_ENVIRONMENT_RETRIES = 3;
 
 /** Claim-lock contention is deferred independently from execution attempts. */
-export const DEFAULT_MAX_CLAIM_LOCK_REQUEUES = 8;
+// Requeue budget for the per-repo dispatch lock. Contended runs re-queue with
+// exponential backoff without spending an execution attempt.
+//
+// WM-1124: the default is now unbounded (Infinity → never terminally REFUSE
+// with claim_lock_starvation). acquireClaimLock() only ever returns false for a
+// *live* lock owner — a dead owner's lock is reclaimed in place (see the
+// isAlive branch there), so a deferred run is, by construction, only ever
+// contending against an owner that WILL release. A live owner's hold is bounded
+// (claim + gate control-plane reads under the worker subprocess timeout, not
+// the agent run), so the contender reliably wins a later cycle. A fixed ceiling
+// turned that transient, self-healing contention into a terminal refusal: an
+// N-wide same-repo dispatch burst (observed 14–16 per scan) starved most of
+// itself — 11 of 14 terminally REFUSED in one 2026-08-29 cycle — wasting a full
+// scan and the agents' budget on tickets that were never actually un-claimable.
+// Durable defer-and-retry is strictly safer here than a terminal refusal, and
+// the atomic claim is untouched: the lock, gate read, and claim keep their
+// exact ordering. An explicit finite `maxClaimLockContentionRequeues` option
+// still caps the requeues (used by the starvation-ceiling test and available to
+// operators); only the production default stops being terminal.
+export const DEFAULT_MAX_CLAIM_LOCK_REQUEUES = Infinity;
 export const DEFAULT_MAX_TRANSIENT_GATE_REQUEUES = 3;
 export const CLAIM_LOCK_BACKOFF_BASE_MS = 25;
 export const CLAIM_LOCK_BACKOFF_MAX_MS = 1_000;
@@ -678,6 +882,10 @@ const ENVIRONMENT_FAILURES = new Set([
   "lease_expired",
   "linear_unconfigured",
   "registry_stale",
+  // GH-967: the host could not build the handoff sandbox. Nothing about the
+  // agent's work is implicated, so this must never burn an agent attempt or
+  // draft the PR — it is the worker host that needs attention.
+  HANDOFF_SANDBOX_UNAVAILABLE,
 ]);
 // The handoff gate (WM-718) catching the agent's own red is an agent error:
 // bounded by maxAttempts like any contract violation, never an environment
@@ -685,6 +893,7 @@ const ENVIRONMENT_FAILURES = new Set([
 const AGENT_FAILURES = new Set(["contract_violation", ...HANDOFF_REASON_CODES]);
 const FATAL_FAILURES = new Set([
   "cli_not_found",
+  "filesystem_confinement_unavailable",
   "sandbox_unsupported",
   "worktree_sandbox_unsupported",
   "unknown_adapter",
@@ -711,6 +920,51 @@ export function classifyFailureCause(reasonCode) {
   return "fatal";
 }
 
+/** Closed eligibility predicate; a continuation can never escalate again. */
+export function tierEscalationEligibility(spec, reasonCode) {
+  const rootRunId = spec?.rootRunId ?? spec?.runId ?? null;
+  // The ticket's acceptance criteria name `verification_failed`; the code the
+  // runtime actually emits for that condition is `handoff_verification_failed`
+  // (verify.mjs HANDOFF_REASON_CODES). Match the emitted codes only — a
+  // reason code no producer writes is dead weight that reads as coverage.
+  const eligibleReason =
+    HANDOFF_REASON_CODES.has(reasonCode) ||
+    reasonCode === "contract_violation" ||
+    String(reasonCode).startsWith("agent_exit_");
+  const eligible = Boolean(
+    spec?.agent === "dispatch@1" &&
+    spec?.workspace?.type === "worktree" &&
+    ["light", "standard"].includes(spec?.modelTier) &&
+    !spec?.escalatedFromRunId &&
+    eligibleReason,
+  );
+  return { eligible, rootRunId };
+}
+
+/**
+ * Layer the RunSpec-derived dispatch identity onto the adapter environment.
+ *
+ * Any `dispatch@<version>` agent qualifies. Identity keys are only emitted when
+ * the spec actually carries the value, so a spec without a ticket or repo never
+ * exports the literal string "null". Non-dispatch agents get `env` unchanged.
+ */
+export function dispatchIdentityEnv({
+  spec,
+  env = {},
+  runId = null,
+  ticketId = null,
+  repoName = null,
+}) {
+  if (!String(spec?.agent ?? "").startsWith("dispatch@")) return env;
+  const identity = {};
+  if (runId != null && runId !== "") identity.FACTORY_RUN_ID = String(runId);
+  if (ticketId != null && ticketId !== "")
+    identity.FACTORY_TICKET = String(ticketId);
+  if (repoName != null && repoName !== "")
+    identity.FACTORY_REPO = String(repoName);
+  return { ...env, ...identity };
+}
+
 function maxEnvironmentRetries(spec) {
   return Number.isInteger(spec.maxEnvironmentRetries) &&
     spec.maxEnvironmentRetries >= 0
@@ -728,22 +982,42 @@ function failureCount(db, runId, cause) {
 }
 
 /** Called after the current attempt is finalized, so counts include this failure. */
-function retryDecision(db, runId, spec, reasonCode) {
+function retryDecision(
+  db,
+  runId,
+  spec,
+  reasonCode,
+  { includeCurrentFailure = false } = {},
+) {
   const cause = classifyFailureCause(reasonCode);
   if (cause === "environment") {
+    const failures =
+      failureCount(db, runId, cause) + (includeCurrentFailure ? 1 : 0);
     return {
       cause,
-      retry: failureCount(db, runId, cause) <= maxEnvironmentRetries(spec),
+      retry: failures <= maxEnvironmentRetries(spec),
     };
   }
   if (cause === "agent_error") {
-    return { cause, retry: failureCount(db, runId, cause) < spec.maxAttempts };
+    const failures =
+      failureCount(db, runId, cause) + (includeCurrentFailure ? 1 : 0);
+    return { cause, retry: failures < spec.maxAttempts };
   }
   return { cause, retry: false };
 }
 
 function typedFailureReason(reasonCode, detail = reasonCode) {
   return `failure:${classifyFailureCause(reasonCode)}:${detail}`;
+}
+
+function terminalFailureReason(decision, reasonCode, detail = reasonCode) {
+  if (decision.cause === "environment" && !decision.retry) {
+    return typedFailureReason(
+      reasonCode,
+      `${detail}; environment_retry_budget_exhausted`,
+    );
+  }
+  return typedFailureReason(reasonCode, detail);
 }
 
 function resolveNow(now) {
@@ -914,7 +1188,7 @@ function originatingEvent(db, runId) {
   return (
     db
       .query(
-        `SELECT e.type, e.correlation_id, e.causation_id
+        `SELECT e.type, e.event_id, e.correlation_id, e.causation_id, p.event_source AS source
        FROM proposals p
        JOIN events e ON e.source = p.event_source AND e.event_id = p.event_id
        WHERE p.run_id = ?
@@ -922,6 +1196,380 @@ function originatingEvent(db, runId) {
       )
       .get(runId) ?? null
   );
+}
+
+function resultArtifactForRun(db, runId) {
+  const row = db
+    .query(
+      `SELECT result_json FROM results WHERE run_id = ? ORDER BY attempt DESC LIMIT 1`,
+    )
+    .get(runId);
+  if (!row?.result_json) return null;
+  try {
+    return JSON.parse(row.result_json)?.artifact ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function tierEscalationForContinuation(db, runId) {
+  const row = db
+    .query(`SELECT * FROM tier_escalations WHERE continuation_run_id = ?`)
+    .get(runId);
+  if (!row) return null;
+  return {
+    rootRunId: row.root_run_id,
+    failedRunId: row.failed_run_id,
+    continuationRunId: row.continuation_run_id,
+    repo: row.repo,
+    ticket: row.ticket,
+    workspacePath: row.workspace_path,
+    sourceWorkspacePath: row.source_workspace_path,
+    projectionState: row.projection_state,
+    failedRunArtifact: resultArtifactForRun(db, row.failed_run_id),
+  };
+}
+
+/**
+ * Only diagnostics the next dispatch can act on belong in its continuation.
+ * Each violation is matched on its own, anchored at its start: a
+ * `repo_verify_failed:` reason that merely quotes a `web_build_failed:` line
+ * inside its output is not a handoff failure, and a pre-joined
+ * `ContractViolation.message` is split back into its lines first.
+ */
+export function continuationHandoffFailure(violations) {
+  const lines = Array.isArray(violations)
+    ? violations
+    : typeof violations === "string"
+      ? violations.split(/;\s+(?=[a-z_]+:)/)
+      : [];
+  const failure = lines.find(
+    (line) =>
+      typeof line === "string" &&
+      /^(?:web_build_failed|ticket_verify_failed):/.test(line),
+  );
+  return failure ?? null;
+}
+
+/** Add worker-observed handoff context without mutating the validated spec. */
+export function continuationExecutionInput(input, handoffFailure) {
+  return typeof handoffFailure === "string" && handoffFailure
+    ? { ...input, handoffFailure }
+    : input;
+}
+
+/** Leave a foreign-owned escalation in an explicit terminal projection state. */
+function refuseTierEscalationClaim(db, handoff, reasonCode) {
+  if (
+    !handoff?.rootRunId ||
+    !handoff?.failedRunId ||
+    !handoff?.continuationRunId
+  )
+    return false;
+  const changed = db
+    .query(
+      `UPDATE tier_escalations
+          SET projection_state = 'refused', projection_error = ?
+        WHERE root_run_id = ?
+          AND failed_run_id = ?
+          AND continuation_run_id = ?
+          AND projection_state <> 'refused'`,
+    )
+    .run(
+      reasonCode,
+      handoff.rootRunId,
+      handoff.failedRunId,
+      handoff.continuationRunId,
+    );
+  return changed.changes === 1;
+}
+
+/** Create exactly one auto-approved continuation and durable workspace transfer. */
+export function scheduleTierEscalation(
+  db,
+  registry,
+  failedSpec,
+  {
+    workspacePath,
+    sourceWorkspacePath,
+    actor = "worker",
+    policyVersion = failedSpec.policyVersion,
+    now = Date.now(),
+    continuationRunId = newRunId(),
+    reasonCode,
+    handoffFailure = null,
+  } = {},
+) {
+  const rootRunId = failedSpec.rootRunId ?? failedSpec.runId;
+  const existing = db
+    .query(`SELECT * FROM tier_escalations WHERE root_run_id = ?`)
+    .get(rootRunId);
+  if (existing) return existing;
+  if (!tierEscalationEligibility(failedSpec, reasonCode).eligible) return null;
+  if (!workspacePath || !sourceWorkspacePath)
+    throw new Error("tier escalation requires the retained workspace paths");
+
+  const origin = originatingEvent(db, failedSpec.runId);
+  const spec = buildEscalatedContinuationSpec(registry, failedSpec, {
+    runId: continuationRunId,
+    operatorAuthorized: origin?.source === "operator",
+    handoffFailure,
+  });
+  const at = iso(now);
+  const eventId = `tier-escalation:${rootRunId}`;
+  const envelope = {
+    schemaVersion: "factory.event/v1",
+    eventId,
+    type: origin?.type ?? "factory.dispatch.requested",
+    source: "handoff",
+    subject: failedSpec.agent,
+    occurredAt: at,
+    correlationId: origin?.correlation_id ?? rootRunId,
+    causationId: failedSpec.runId,
+    payload: spec.input,
+  };
+  db.query(
+    `INSERT OR IGNORE INTO events
+       (source, event_id, type, subject, occurred_at, received_at,
+        correlation_id, causation_id, envelope_json, payload_hash, status,
+        admitted_at)
+     VALUES ('handoff', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?)`,
+  ).run(
+    eventId,
+    envelope.type,
+    failedSpec.agent,
+    at,
+    at,
+    envelope.correlationId,
+    failedSpec.runId,
+    canonicalJson(envelope),
+    hashJson(spec.input),
+    at,
+  );
+  createRun(db, {
+    runId: continuationRunId,
+    idempotencyKey: spec.idempotencyKey,
+    spec,
+    specJson: canonicalJson(spec),
+    specHash: hashJson(spec),
+    actor,
+    correlationId: envelope.correlationId,
+    causationId: failedSpec.runId,
+    policyVersion,
+    now,
+  });
+  transition(db, {
+    runId: continuationRunId,
+    to: "APPROVED",
+    expectFrom: "PROPOSED",
+    actor,
+    reason: `auto_approved:tier-escalation:${failedSpec.runId}`,
+    correlationId: envelope.correlationId,
+    causationId: failedSpec.runId,
+    policyVersion,
+    now,
+  });
+  db.query(
+    `INSERT INTO proposals
+       (id, event_source, event_id, run_id, decision, spec_json, spec_hash,
+        idempotency_key, status, reason, created_at, ttl_seconds, decided_at,
+        decided_by)
+     VALUES (?, 'handoff', ?, ?, 'run', ?, ?, ?, 'approved', ?, ?, 0, ?, ?)`,
+  ).run(
+    `tier-escalation:${rootRunId}`,
+    eventId,
+    continuationRunId,
+    canonicalJson(spec),
+    hashJson(spec),
+    spec.idempotencyKey,
+    `escalated_from:${failedSpec.runId}`,
+    at,
+    at,
+    actor,
+  );
+  db.query(
+    `INSERT INTO tier_escalations
+       (root_run_id, failed_run_id, continuation_run_id, repo, ticket,
+        workspace_path, source_workspace_path, projection_state, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+  ).run(
+    rootRunId,
+    failedSpec.runId,
+    continuationRunId,
+    failedSpec.input.repo,
+    String(failedSpec.input.ticket),
+    workspacePath,
+    sourceWorkspacePath,
+    at,
+  );
+  return db
+    .query(`SELECT * FROM tier_escalations WHERE root_run_id = ?`)
+    .get(rootRunId);
+}
+
+const TIER_ESCALATION_COMMENT_MARKER = "factory:tier-escalation:";
+
+function defaultFindWorkspacePullRequest({ workspacePath }) {
+  if (!workspacePath) return null;
+  const branch = execFileSync(
+    "git",
+    ["-C", workspacePath, "branch", "--show-current"],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  ).trim();
+  if (!branch) return null;
+  return (
+    loadForge()
+      .prList(null, {
+        cwd: workspacePath,
+        state: "open",
+        fields: ["number", "url", "headRefName"],
+        timeout: workerSubprocessTimeoutMs(),
+      })
+      .find((pr) => pr?.headRefName === branch && pr?.url) ?? null
+  );
+}
+
+export function defaultProjectTierEscalation({
+  repo,
+  ticket,
+  failedRunId,
+  continuationRunId,
+  workspacePath,
+  fetchTicket,
+  runCli = runLinearCli,
+  findPullRequest = defaultFindWorkspacePullRequest,
+}) {
+  const current =
+    typeof fetchTicket === "function"
+      ? fetchTicket(ticket, repo)
+      : JSON.parse(runCli(["get", ticket, "--json"], { repo }));
+  const names = (
+    Array.isArray(current?.labels)
+      ? current.labels
+      : (current?.labels?.nodes ?? [])
+  )
+    .map((label) => label?.name)
+    .filter(Boolean);
+  const tierLabels = names.filter(
+    (name) => name.startsWith("tier:") && name !== "tier:strong",
+  );
+  runCli(
+    [
+      "labels",
+      ticket,
+      "--add",
+      "tier:strong",
+      ...tierLabels.flatMap((name) => ["--remove", name]),
+    ],
+    { repo },
+  );
+  const marker = `${TIER_ESCALATION_COMMENT_MARKER}${failedRunId}:${continuationRunId}`;
+  let alreadyCommented = false;
+  try {
+    const comments = JSON.parse(
+      runCli(["comments", ticket, "--json"], { repo }),
+    );
+    alreadyCommented = comments.some((entry) =>
+      String(entry?.body ?? "").includes(marker),
+    );
+  } catch {
+    // A comment read is an idempotency optimization. Posting remains required.
+  }
+  let existingPullRequest = null;
+  if (workspacePath) {
+    try {
+      existingPullRequest = findPullRequest({ workspacePath });
+    } catch {
+      // PR discovery enriches the escalation notice. The durable run ids are
+      // still sufficient to project the continuation when the forge is down.
+    }
+  }
+  if (!alreadyCommented) {
+    const prLine = existingPullRequest?.url
+      ? `\n\nRetained worktree PR: ${existingPullRequest.url}`
+      : "";
+    runCli(
+      [
+        "comment",
+        ticket,
+        `Tier escalation scheduled: failed run \`${failedRunId}\` continues as strong run \`${continuationRunId}\` in the same retained worktree.${prLine}\n\n<!-- ${marker} -->`,
+      ],
+      { repo },
+    );
+  }
+  return true;
+}
+
+/** Retry pending tracker projections before a continuation can become runnable. */
+export function reconcileTierEscalations(
+  db,
+  {
+    projectTierEscalation = defaultProjectTierEscalation,
+    fetchTicket,
+    now = Date.now(),
+    policyVersion = "unknown",
+  } = {},
+) {
+  const row = db
+    .query(
+      `SELECT * FROM tier_escalations WHERE projection_state = 'pending' ORDER BY created_at LIMIT 1`,
+    )
+    .get();
+  if (!row) return { ok: true, projected: 0 };
+  try {
+    const projected = projectTierEscalation({
+      repo: row.repo,
+      ticket: row.ticket,
+      failedRunId: row.failed_run_id,
+      continuationRunId: row.continuation_run_id,
+      workspacePath: row.workspace_path,
+      fetchTicket,
+    });
+    if (projected === false)
+      throw new Error("tracker projection returned false");
+  } catch (err) {
+    db.query(
+      `UPDATE tier_escalations
+          SET projection_attempts = projection_attempts + 1,
+              projection_error = ?
+        WHERE root_run_id = ?`,
+    ).run(String(err?.message ?? err), row.root_run_id);
+    return {
+      ok: false,
+      reasonCode: "tier_escalation_writeback_failed",
+      continuationRunId: row.continuation_run_id,
+      error: String(err?.message ?? err),
+    };
+  }
+  txImmediate(db, () => {
+    const at = iso(now);
+    db.query(
+      `UPDATE tier_escalations
+          SET projection_state = 'applied', projection_attempts = projection_attempts + 1,
+              projection_error = NULL, projected_at = ?
+        WHERE root_run_id = ? AND projection_state = 'pending'`,
+    ).run(at, row.root_run_id);
+    const state = db
+      .query(`SELECT state FROM runs WHERE run_id = ?`)
+      .get(row.continuation_run_id)?.state;
+    if (state === "APPROVED") {
+      transition(db, {
+        runId: row.continuation_run_id,
+        to: "QUEUED",
+        expectFrom: "APPROVED",
+        actor: "tier-escalation",
+        reason: `tracker_projection_applied:${row.failed_run_id}`,
+        causationId: row.failed_run_id,
+        policyVersion,
+        now,
+      });
+    }
+  });
+  return {
+    ok: true,
+    projected: 1,
+    continuationRunId: row.continuation_run_id,
+  };
 }
 
 /**
@@ -941,8 +1589,25 @@ export function claimNext(
     labels = {},
     adapters = null,
     adapterOverride,
+    projectTierEscalation = defaultProjectTierEscalation,
+    fetchTicket,
+    onTierEscalationProjectionError = (entry) =>
+      console.error(
+        `[worker] ${entry.reasonCode} for ${entry.continuationRunId}: ${entry.error}`,
+      ),
   } = {},
 ) {
+  // Production workers call claimNext() directly rather than runOnce(). Do
+  // this before looking for QUEUED work so a restart cannot strand a durable
+  // escalation in APPROVED after the scheduling transaction committed but
+  // before its tracker projection completed.
+  const pendingEscalation = reconcileTierEscalations(db, {
+    projectTierEscalation,
+    fetchTicket,
+    now,
+    policyVersion,
+  });
+  if (!pendingEscalation.ok) onTierEscalationProjectionError(pendingEscalation);
   // BEGIN IMMEDIATE, not the default deferred transaction: two workers must
   // not both read the same QUEUED row before either writes (OPS-233).
   return txImmediate(db, () => {
@@ -1266,7 +1931,7 @@ function hasPlanTimeDispatchEvidence(spec) {
  * ledger that this new attempt belongs to the same run and immediately follows
  * a lease-expired claim before relaxing the Todo/unassigned dispatch gate.
  */
-function claimedRetryFor(db, runId, attempt) {
+export function claimedRetryFor(db, runId, attempt) {
   if (!Number.isInteger(attempt) || attempt <= 1) return null;
   const priorAttempt = attempt - 1;
   const prior = db
@@ -1506,9 +2171,16 @@ export function resolveLinearApiKey({
 /** Execute one bounded Linear CLI operation; exported for timeout regression tests. */
 export function runLinearCli(
   args,
-  { command = "bun", timeoutMs = workerSubprocessTimeoutMs() } = {},
+  { command = "bun", timeoutMs = workerSubprocessTimeoutMs(), repo } = {},
 ) {
-  return execFileSync(command, [linearCli(), ...args], {
+  // --repo so ticket.mjs resolves the ticket's OWN control plane. Without it a
+  // Linear-repo claim/read runs against the worker cwd's plane (github) and
+  // silently no-ops — the claim read-back then reports ticket_claim_lost,
+  // blocking all dispatch for control_plane: linear repos (bj29, cashsaas).
+  const full = repo
+    ? [linearCli(), ...args, "--repo", repo]
+    : [linearCli(), ...args];
+  return execFileSync(command, full, {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     timeout: timeoutMs,
@@ -1517,7 +2189,7 @@ export function runLinearCli(
 
 function defaultClaimTicket({ repo, ticket, harness = "claude" }) {
   try {
-    runLinearCli(["claim", ticket, "--agent", harness]);
+    runLinearCli(["claim", ticket, "--agent", harness], { repo });
     return { ok: true };
   } catch (err) {
     const stderr = String(err?.stderr ?? "");
@@ -1541,7 +2213,7 @@ export function defaultUnclaimTicket({
     if (typeof fetchTicket === "function") {
       cur = fetchTicket(ticket);
     } else {
-      const out = runCli(["get", ticket, "--json"]);
+      const out = runCli(["get", ticket, "--json"], { repo });
       cur = JSON.parse(out);
     }
     if (!cur || cur.state?.name !== "In Progress") return false;
@@ -1570,47 +2242,87 @@ export function defaultUnclaimTicket({
       ...remove.flatMap((n) => ["--remove", n]),
     ]);
     const body = `Dispatch run failed, claim released back to Todo + ai:agent-ready.\n\n**Why:** ${why}${log ? `\n**Log:** \`${log.replace(homedir(), "~")}\`` : ""}`;
-    runCli(["comment", ticket, body]);
+    runCli(["comment", ticket, body], { repo });
     return true;
   } catch {
     return false;
   }
 }
 
-function defaultFetchTicket(ticket) {
-  return JSON.parse(runLinearCli(["get", ticket, "--json"]));
+function defaultFetchTicket(ticket, repo) {
+  return JSON.parse(runLinearCli(["get", ticket, "--json"], { repo }));
 }
 
 /**
  * The claim-time facts the handoff gate (WM-718) needs and the run spec does
  * not carry: the ticket's Verification Command and Owned Paths. Read once
- * here, persisted on the worktree record, so verify.mjs runs exactly what the
- * agent was told to run. A read failure degrades to "no ticket command" (the
- * repo `verify:` still gates) rather than killing a run before it started.
+ * here, revalidate that same read against admission (and GitHub's trust/pin),
+ * then persist it on the worker-owned worktree record. Read, hash, trust and
+ * pin failures all fail closed before an agent or ticket command can run.
  */
-function ticketHandoffContext(ticket, fetchTicket) {
+export function ticketHandoffContext(
+  ticket,
+  fetchTicket,
+  repo,
+  admittedTicket = null,
+) {
   try {
-    const cur = fetchTicket(ticket);
+    const cur = fetchTicket(ticket, repo);
     const description = cur?.description ?? "";
+    const descriptionHash = hashJson(description);
+    if (
+      !admittedTicket?.descriptionHash ||
+      admittedTicket.descriptionHash !== descriptionHash
+    ) {
+      return {
+        ok: false,
+        reasonCode: "ticket_body_changed_post_claim",
+        detail:
+          "ticket description changed between dispatch admission and post-claim command capture; review the new body and re-apply ai:agent-ready",
+      };
+    }
+    if (cur?.controlPlaneKind === "github") {
+      const trustedEditor =
+        isTrustedAssociation(cur.authorAssociation) &&
+        isTrustedAssociation(cur.lastEditorAssociation);
+      if (!trustedEditor) {
+        return {
+          ok: false,
+          reasonCode: "ticket_untrusted_post_claim_editor",
+          detail:
+            "GitHub author/editor trust could not be revalidated on the post-claim ticket read",
+        };
+      }
+      if (!cur.readyPinHash || cur.readyPinHash !== descriptionHash) {
+        return {
+          ok: false,
+          reasonCode: "ticket_ready_pin_invalid_post_claim",
+          detail:
+            "GitHub ready-body pin was absent or mismatched on the post-claim ticket read; review the body and re-apply ai:agent-ready",
+        };
+      }
+    }
     const parsed = parseOwnedPaths(description);
     return {
-      verificationCommand: parseVerificationCommand(description),
-      ownedPaths: effectiveOwnedPaths(description),
-      ownedPathsParsed: parsed.length > 0,
-      descriptionHash: hashJson(description),
+      ok: true,
+      handoff: {
+        verificationCommand: parseVerificationCommand(description),
+        ownedPaths: effectiveOwnedPaths(description),
+        ownedPathsParsed: parsed.length > 0,
+        descriptionHash,
+      },
     };
   } catch (err) {
     return {
-      verificationCommand: null,
-      ownedPaths: ["**"],
-      ownedPathsParsed: false,
-      unavailable: String(err?.message ?? err),
+      ok: false,
+      reasonCode: "ticket_post_claim_read_failed",
+      detail: `post-claim ticket read failed closed: ${String(err?.message ?? err)}`,
     };
   }
 }
 
-function defaultCommentTicket({ ticket, body }) {
-  runLinearCli(["comment", ticket, body]);
+function defaultCommentTicket({ ticket, body, repo }) {
+  runLinearCli(["comment", ticket, body], { repo });
   return true;
 }
 
@@ -1627,6 +2339,7 @@ function defaultCommentTicket({ ticket, body }) {
 export function defaultReturnHandoffTicket({
   ticket,
   body,
+  repo,
   fetchTicket,
   runCli = runLinearCli,
 }) {
@@ -1664,7 +2377,7 @@ export function defaultReturnHandoffTicket({
         args.filter((a, i) => !(a === "--add" || args[i - 1] === "--add")),
       );
       try {
-        runCli(["labels", ticket, "--add", "ai:agent-ready"]);
+        runCli(["labels", ticket, "--add", "ai:agent-ready"], { repo });
       } catch (err) {
         agentReadyRestored = false;
         labelWarning = String(err?.stderr ?? err?.message ?? err)
@@ -1687,9 +2400,66 @@ export function defaultReturnHandoffTicket({
         ]
           .filter(Boolean)
           .join("\n\n");
-    if (finalBody) runCli(["comment", ticket, finalBody]);
+    if (finalBody) runCli(["comment", ticket, finalBody], { repo });
     return { ok: true, agentReadyRestored, warning: labelWarning };
   } catch {
+    return false;
+  }
+}
+
+/**
+ * A verified PR_OPEN must not remain dispatchable when its agent omitted the
+ * final ticket projection. This is deliberately a small, best-effort repair:
+ * the caller owns the claim/fencing guard, while this helper re-reads the
+ * ticket so an agent that already put it In Review receives no duplicate
+ * mutation. Like defaultUnclaimTicket / defaultBlockBaselineTicket it only
+ * touches a ticket still in the dispatch states (Todo, In Progress): a human
+ * who moved it to Blocked / Done / Canceled mid-run keeps that decision, and
+ * a closed GitHub issue is never reopened by the worker.
+ */
+const RECONCILABLE_HANDOFF_STATES = new Set(["Todo", "In Progress"]);
+
+export function defaultReconcileVerifiedHandoffTicket({
+  ticket,
+  repo,
+  fetchTicket,
+  runCli = runLinearCli,
+  mayMutate = () => true,
+}) {
+  try {
+    if (!mayMutate()) return false;
+    const cur =
+      typeof fetchTicket === "function"
+        ? fetchTicket(ticket, repo)
+        : defaultFetchTicket(ticket, repo);
+    if (!cur) return false;
+    const stateName = cur.state?.name;
+    if (stateName === "In Review") return false;
+    if (!RECONCILABLE_HANDOFF_STATES.has(stateName)) {
+      console.error(
+        `[worker] not reconciling verified handoff ticket ${ticket}: state is ${JSON.stringify(stateName ?? null)}, left as-is`,
+      );
+      return false;
+    }
+    runCli(
+      [
+        "state",
+        ticket,
+        "In Review",
+        "--add",
+        "ai:needs-review",
+        "--remove",
+        "ai:in-progress",
+        "--remove",
+        "ai:agent-ready",
+      ],
+      { repo },
+    );
+    return true;
+  } catch (err) {
+    console.error(
+      `[worker] failed to reconcile verified handoff ticket ${ticket}: ${String(err?.message ?? err)}`,
+    );
     return false;
   }
 }
@@ -1715,13 +2485,13 @@ function defaultHoldPullRequest({ github, prNumber, body }) {
   return held;
 }
 
-/** Read the live PR base at handoff; dispatch must never rely on GitHub's default branch. */
+/** Read the live PR form at handoff; dispatch must never rely on GitHub's default branch. */
 function defaultFetchHandoffPullRequest({ github, prNumber }) {
   if (!github || !Number.isInteger(prNumber)) {
     throw new Error("handoff PR requires github and a numeric PR number");
   }
   return loadForge().prView(github, prNumber, {
-    fields: ["baseRefName"],
+    fields: ["baseRefName", "body", "isDraft"],
     timeout: workerSubprocessTimeoutMs(),
   });
 }
@@ -1732,12 +2502,47 @@ function handoffPrNumber(handoff) {
   return null;
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * True when some body line is a `Fixes <ticket>` line (case-insensitive,
+ * tolerant of surrounding whitespace and one trailing punctuation mark).
+ * Accepts the full `owner/repo#n` form, the short `#n` form when the PR
+ * lives in that repository, and Linear ids verbatim. Returns null when the
+ * handoff carries no usable ticket, so the caller reports "unknown" rather
+ * than probing the body for `Fixes null`.
+ */
+function handoffFixesLinePresent({ lines, ticket, github }) {
+  const ref = typeof ticket === "string" ? ticket.trim() : "";
+  if (!ref) return null;
+  const alternatives = [escapeRegExp(ref)];
+  const repoMatch = /^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#([0-9]+)$/.exec(ref);
+  if (
+    repoMatch &&
+    typeof github === "string" &&
+    github.trim().toLowerCase() === repoMatch[1].toLowerCase()
+  ) {
+    alternatives.push(`#${repoMatch[2]}`);
+  }
+  const pattern = new RegExp(
+    `^\\s*fixes\\s+(?:${alternatives.join("|")})\\s*[.,;:]?\\s*$`,
+    "i",
+  );
+  return lines.some((line) => pattern.test(line));
+}
+
 /**
  * Fail the handoff closed if GitHub cannot prove that the PR targets the
  * configured repository base. Kept here, beside the worker's other external
  * handoff effects, so tests can inject the PR read without a live forge.
  */
-function assertHandoffPullRequestBase({ handoff, base, fetchPullRequest }) {
+export function assertHandoffPullRequestBase({
+  handoff,
+  base,
+  fetchPullRequest,
+}) {
   const expected = typeof base === "string" ? base.trim() : "";
   const prNumber = handoffPrNumber(handoff);
   if (!expected || !handoff?.github || !prNumber) {
@@ -1762,6 +2567,26 @@ function assertHandoffPullRequestBase({ handoff, base, fetchPullRequest }) {
   const actual =
     typeof pr?.baseRefName === "string" ? pr.baseRefName.trim() : "";
   handoff.prBase = { expected, actual: actual || null };
+  // GitHub returns `body: null` for an empty description; treat it as "".
+  const bodyLines = (typeof pr?.body === "string" ? pr.body : "").split(
+    /\r?\n/,
+  );
+  const hasFixesLine = handoffFixesLinePresent({
+    lines: bodyLines,
+    ticket: handoff.ticket,
+    github: handoff.github,
+  });
+  const hasRunTrailer =
+    typeof handoff.runId === "string" && handoff.runId.trim()
+      ? bodyLines.some((line) => line.trim() === `run:${handoff.runId.trim()}`)
+      : null;
+  handoff.pr = {
+    number: prNumber,
+    draft: pr?.isDraft === true,
+    hasFixesLine,
+    hasRunTrailer,
+  };
+  handoff.prDraft = handoff.pr.draft;
   if (!actual) {
     throw new ContractViolation(
       [`pr_base_unreadable: PR #${prNumber} has no baseRefName`],
@@ -1774,6 +2599,14 @@ function assertHandoffPullRequestBase({ handoff, base, fetchPullRequest }) {
         `pr_base_mismatch: PR #${prNumber} targets ${actual}, expected configured base ${expected}`,
       ],
       { reasonCode: "handoff_verification_failed", handoff },
+    );
+  }
+  if (hasFixesLine === false) {
+    throw new ContractViolation(
+      [
+        `handoff_pr_form_invalid: PR #${prNumber} is missing Fixes ${handoff.ticket}`,
+      ],
+      { reasonCode: "handoff_pr_form_invalid", handoff },
     );
   }
 }
@@ -1799,10 +2632,10 @@ function baselineFailureSignature({ why, log = null, baseline = null }) {
     .digest("hex");
 }
 
-function hasRecordedBaselineFailureComment(ticket, signature) {
+function hasRecordedBaselineFailureComment(ticket, signature, repo) {
   const marker = `${BASELINE_COMMENT_MARKER}${signature}`;
   try {
-    const out = runLinearCli(["comments", ticket, "--json"]);
+    const out = runLinearCli(["comments", ticket, "--json"], { repo });
     const comments = JSON.parse(out);
     return (comments ?? []).some((row) =>
       String(row.body ?? "").includes(marker),
@@ -1825,7 +2658,7 @@ function defaultBlockBaselineTicket({
     if (typeof fetchTicket === "function") {
       cur = fetchTicket(ticket);
     } else {
-      const out = runLinearCli(["get", ticket, "--json"]);
+      const out = runLinearCli(["get", ticket, "--json"], { repo });
       cur = JSON.parse(out);
     }
     if (!cur || cur.state?.name !== "In Progress") return false;
@@ -1847,11 +2680,11 @@ function defaultBlockBaselineTicket({
       "ai:in-progress",
     ]);
 
-    if (!hasRecordedBaselineFailureComment(ticket, signature)) {
+    if (!hasRecordedBaselineFailureComment(ticket, signature, repo)) {
       const marker = `${BASELINE_COMMENT_MARKER}${signature}`;
       const body = `Dispatch run blocked due pre-existing baseline red.\n\n**Why:** ${why}${log ? `\n**Log:** \`${log.replace(homedir(), "~")}\`` : ""}\n\n
 <!-- ${marker} -->`;
-      runLinearCli(["comment", ticket, body]);
+      runLinearCli(["comment", ticket, body], { repo });
     }
     return true;
   } catch {
@@ -1883,6 +2716,7 @@ export async function executeClaimed(
     dispatch,
     resolveLinearKey = resolveLinearApiKey,
     policyRoot = FACTORY_ROOT,
+    sandboxAvailability,
   } = {},
 ) {
   const { runId, attempt, fencingToken, spec } = claim;
@@ -1895,6 +2729,7 @@ export async function executeClaimed(
   const retain = spec.workspace?.retainOnFailure === true;
   let workspaceDir = null;
   let checkoutPath = null;
+  let worktreePath = null;
   let checkoutBaseline;
   let worktreeRecord;
   const cleanupWorkspace = ({ retainWorkspace = false } = {}) => {
@@ -1919,6 +2754,12 @@ export async function executeClaimed(
   const repoName = spec.input?.repoPin?.repo ?? spec.input?.repo ?? null;
   const ticketId = spec.input?.ticket ?? null;
   const isWorktree = spec.workspace?.type === "worktree";
+  const tierHandoff = tierEscalationForContinuation(db, runId);
+  const handoffFailure = spec.approvalPolicy?.escalation?.handoffFailure;
+  const worktreeHandoff =
+    tierHandoff && typeof handoffFailure === "string"
+      ? { ...tierHandoff, handoffFailure }
+      : tierHandoff;
 
   let leaseHeartbeat = null;
   let ticketClaimed = false;
@@ -1929,11 +2770,13 @@ export async function executeClaimed(
   let materializedHarnessPins = null;
 
   let dispatchOpts = dispatch;
-  const explicitDispatchStub =
-    !dispatchOpts &&
-    (process.env.FACTORY_DISPATCH_STUB === "1" ||
-      adapterOverride === "fake" ||
-      spec.adapter === "fake");
+  // The demo dispatch stub is only ever activated explicitly (WM-533): a
+  // missing credential must never be read as permission to fake a claim.
+  const dispatchStubSelected =
+    process.env.FACTORY_DISPATCH_STUB === "1" ||
+    adapterOverride === "fake" ||
+    spec.adapter === "fake";
+  const explicitDispatchStub = !dispatchOpts && dispatchStubSelected;
   if (explicitDispatchStub) {
     dispatchOpts = {
       fetchTicket: () => ({
@@ -1941,11 +2784,10 @@ export async function executeClaimed(
         state: { name: "Todo" },
         assignee: null,
         labels: { nodes: [{ name: "ai:agent-ready" }] },
-        // The claim gate fails closed on tickets whose Owned Paths do not
-        // parse (owned_paths_unknown, WM-575); a stub ticket must carry a
-        // parseable section or the demo stub refuses every dispatch. `**`
-        // also lets the stubbed merge-fix gate (WM-582) accept any fix path.
-        description: "## Owned Paths\n- **\n",
+        // The claim gate fails closed on unknown or match-everything scopes
+        // (owned_paths_unknown, WM-575/#952), so the demo dispatch fixture
+        // must model a bounded, parseable scope.
+        description: "## Owned Paths\n- event-runtime/lib/**\n",
       }),
       fetchInFlight: () => [],
       countLeases: () => 0,
@@ -1955,7 +2797,22 @@ export async function executeClaimed(
       // handoff comment, PR hold, and ticket return.
       commentTicket: () => true,
       returnHandoffTicket: () => true,
+      reconcileVerifiedHandoffTicket: () => false,
       holdPullRequest: () => false,
+    };
+  } else if (dispatchStubSelected) {
+    // A caller that supplies only some dispatch seams (locks, ticket reads,
+    // claim accounting) must not silently fall through to the real tracker
+    // for the ones it left out. These three are best-effort, non-asserted
+    // mutations, so the "a fake run never reaches Linear or GitHub"
+    // guarantee above has to hold for a partial override too — otherwise a
+    // fake dispatch posts real handoff comments and blocks on the network.
+    dispatchOpts = {
+      commentTicket: () => true,
+      returnHandoffTicket: () => true,
+      reconcileVerifiedHandoffTicket: () => false,
+      holdPullRequest: () => false,
+      ...dispatchOpts,
     };
   }
   const linearConfigured =
@@ -1993,13 +2850,38 @@ export async function executeClaimed(
         ...args,
         fetchTicket: dispatchOpts?.fetchTicket,
       }));
+  const reconcileVerifiedHandoffTicketFn =
+    dispatchOpts?.reconcileVerifiedHandoffTicket ??
+    ((args) =>
+      defaultReconcileVerifiedHandoffTicket({
+        ...args,
+        fetchTicket: dispatchOpts?.fetchTicket,
+      }));
   const holdPullRequestFn =
     dispatchOpts?.holdPullRequest ?? defaultHoldPullRequest;
   const fetchHandoffPullRequestFn =
     dispatchOpts?.fetchHandoffPullRequest ?? defaultFetchHandoffPullRequest;
+  const projectTierEscalationFn =
+    dispatchOpts?.projectTierEscalation ?? defaultProjectTierEscalation;
   let handoffContext = null;
 
   const nowFn = typeof now === "function" ? now : () => now ?? Date.now();
+
+  const tierEscalationDue = (reasonCode) => {
+    const eligibility = tierEscalationEligibility(spec, reasonCode);
+    if (!eligibility.eligible) return false;
+    return failureCount(db, runId, "agent_error") + 1 >= spec.maxAttempts;
+  };
+
+  const projectScheduledEscalation = (scheduled) =>
+    scheduled
+      ? reconcileTierEscalations(db, {
+          projectTierEscalation: projectTierEscalationFn,
+          fetchTicket: fetchTicketFn,
+          now: nowFn,
+          policyVersion,
+        })
+      : null;
 
   const abortController = new AbortController();
   ACTIVE_EXECUTIONS.set(runId, {
@@ -2044,12 +2926,15 @@ export async function executeClaimed(
       const expectFrom = db
         .query(`SELECT state FROM runs WHERE run_id = ?`)
         .get(runId)?.state;
+      const decision = retryDecision(db, runId, spec, reasonCode, {
+        includeCurrentFailure: true,
+      });
       transition(db, {
         runId,
         to,
         expectFrom,
         actor: owner,
-        reason: typedFailureReason(reasonCode, journalReason),
+        reason: terminalFailureReason(decision, reasonCode, journalReason),
         attempt,
         policyVersion,
         now: currentNow,
@@ -2063,7 +2948,7 @@ export async function executeClaimed(
         currentNow,
         attemptUsage,
       );
-      const decision = retryDecision(db, runId, spec, reasonCode);
+      let escalation = null;
       if (decision.retry) {
         transition(db, {
           runId,
@@ -2075,8 +2960,22 @@ export async function executeClaimed(
           policyVersion,
           now: nowFn(),
         });
+      } else if (tierEscalationEligibility(spec, reasonCode).eligible) {
+        escalation = scheduleTierEscalation(db, registry, spec, {
+          workspacePath: worktreePath ?? checkoutPath,
+          sourceWorkspacePath: workspaceDir,
+          actor: owner,
+          policyVersion,
+          now: currentNow,
+          reasonCode,
+        });
       }
-      return { ok: true, cause: decision.cause, requeued: decision.retry };
+      return {
+        ok: true,
+        cause: decision.cause,
+        requeued: decision.retry,
+        escalation,
+      };
     });
 
   let def = null;
@@ -2086,10 +2985,52 @@ export async function executeClaimed(
     /* intentionally ignored */
   }
 
+  // The `unconfined` attestation, once admission has decided. Declared here so
+  // that EVERY terminal receipt this execution writes carries it — a refusal
+  // or a failure after an unconfined admission is exactly the record an
+  // auditor needs, so it must not be attached to the success path alone.
+  // Null until admission runs, and null for every confined run.
+  let filesystemConfinementReceipt = null;
+  // The recorder is built before the main `try` so terminal-error reporting
+  // can use it; its construction prepares a statement and must therefore
+  // never throw out of executeClaimed (§14: trace failures stay invisible to
+  // the attempt). Fall back to a no-op recorder with the same call surface.
+  const recorder = (() => {
+    try {
+      return traceRecorder(db, { runId, attempt });
+    } catch (err) {
+      console.error(
+        `[worker] trace recorder unavailable for run ${runId} attempt ${attempt}: ${err?.message ?? String(err)}`,
+      );
+      const noop = () => {};
+      noop.stats = () => ({ recorded: 0, dropped: 0 });
+      return noop;
+    }
+  })();
+  const recordTerminalError = (operation, err) => {
+    const message = err?.message ?? String(err);
+    console.error(
+      `[worker] terminal ${operation} failed for run ${runId} attempt ${attempt}: ${message}`,
+    );
+    // `lifecycle` is the nearest supported trace kind to a terminal error.
+    try {
+      recorder("lifecycle", {
+        terminalError: true,
+        operation,
+        runId,
+        attempt,
+        message,
+      });
+    } catch {
+      // A terminal error must still be reported when trace storage is down.
+    }
+    return message;
+  };
+
   const refuseTerminal = (
     reasonCode,
     checks = ["dispatch_gate"],
-    { causeTyped = false, detail = null } = {},
+    { causeTyped = false, detail = null, receiptEvidence = null } = {},
   ) =>
     txImmediate(db, () => {
       const currentNow = nowFn();
@@ -2126,6 +3067,11 @@ export async function executeClaimed(
         policyVersion,
         now: currentNow,
       });
+      closeOpenProposalForRun(db, runId, {
+        actor: owner,
+        reason: "run_refused",
+        now: currentNow,
+      });
       const receipt = receiptWithDeadlineExtensions(db, runId, {
         runId,
         spec,
@@ -2134,6 +3080,12 @@ export async function executeClaimed(
         evidenceSetHash: null,
         journalHead: latestJournalHash(db, runId),
         verificationStatus: "passed",
+        extraReceipt: receiptEvidence
+          ? {
+              ...(filesystemConfinementReceipt ?? {}),
+              dispatchGateEvidence: receiptEvidence,
+            }
+          : filesystemConfinementReceipt,
         harnessPins: materializedHarnessPins,
       });
       const result = {
@@ -2202,6 +3154,90 @@ export async function executeClaimed(
     if (started?.fenced) {
       return { fenced: true };
     }
+
+    const adapterKey = adapterOverride ?? spec.adapter;
+    const selectedAdapter = adapters[adapterKey];
+    // Production entry points supply only registry-wrapped adapters. Unit and
+    // integration tests may inject a raw non-model contract stub under a model
+    // route; that stub spawns no model and is outside this boundary.
+    const modelRuntimeSelected =
+      MODEL_BACKED_ADAPTERS.includes(adapterKey) &&
+      isSandboxGuarded(selectedAdapter);
+    const missingModelDefinitionPin =
+      def?.mutating === false && modelRuntimeSelected && !spec.defHash;
+    if (missingModelDefinitionPin || (def && !verifyDefHash(spec, def))) {
+      const refusedRes = refuseTerminal(
+        "agent_definition_mismatch",
+        [missingModelDefinitionPin ? "def_hash_missing" : "def_hash_mismatch"],
+        { causeTyped: true },
+      );
+      stopCancellationMonitor();
+      if (refusedRes?.fenced) return { fenced: true };
+      return {
+        runId,
+        attempt,
+        terminalState: "REFUSED",
+        reasonCode: "agent_definition_mismatch",
+        receipt: refusedRes.receipt,
+      };
+    }
+    const filesystemIntent =
+      spec.filesystem ?? def?.capabilities?.filesystem ?? null;
+    const confinementDef =
+      filesystemIntent === def?.capabilities?.filesystem
+        ? def
+        : {
+            ...def,
+            capabilities: {
+              ...(def?.capabilities ?? {}),
+              filesystem: filesystemIntent,
+            },
+          };
+    const workspaceOnlyFallback = policyWorkspaceOnlyFallback(policyRoot);
+    const hostSandbox = modelRuntimeSelected
+      ? (sandboxAvailability ?? cachedSandboxPreflight())
+      : null;
+    // The fallback is a *host-capability* escape hatch, never a way to opt an
+    // agent out of a sandbox this machine can actually provide.
+    const unconfinedWorkspaceOnly =
+      modelRuntimeSelected &&
+      hostSandbox?.available === false &&
+      workspaceOnlyHostFallback(confinementDef, { workspaceOnlyFallback });
+    const confinementRefusal = modelRuntimeSelected
+      ? filesystemConfinementRefusal(adapterKey, confinementDef, {
+          sandboxSupport: selectedAdapter?.SANDBOX_SUPPORT ?? null,
+          sandboxAvailability: hostSandbox,
+          workspaceOnlyFallback,
+        })
+      : null;
+    if (confinementRefusal) {
+      const res = refuseTerminal(
+        confinementRefusal.code,
+        ["filesystem_confinement"],
+        { detail: confinementRefusal.detail },
+      );
+      stopCancellationMonitor();
+      if (res?.fenced) return { fenced: true };
+      return {
+        runId,
+        attempt,
+        terminalState: "REFUSED",
+        reasonCode: confinementRefusal.code,
+        receipt: res?.receipt,
+      };
+    }
+    filesystemConfinementReceipt = unconfinedWorkspaceOnly
+      ? {
+          filesystemConfinement: {
+            status: "unconfined",
+            declared: "workspace-only",
+            fallback: "host",
+            source: "policy:sandbox.workspace_only_fallback",
+            agent: definitionAgentName(confinementDef),
+            hostCapability: sandboxUnavailableCapability(hostSandbox),
+          },
+        }
+      : null;
 
     if (isWorktree && repoName && ticketId) {
       if (!linearConfigured) {
@@ -2360,9 +3396,46 @@ export async function executeClaimed(
             now: nowFn,
           });
         } else {
+          // A continuation whose tracker projection has not been applied yet
+          // is not runnable: the planner would refuse it terminally as
+          // ticket_assigned (tier_escalation_check_failed:
+          // ticket_escalation_projection_applied) and the row would stay
+          // pending forever (#1290). Requeue and let reconcileTierEscalations
+          // finish the projection first.
+          if (worktreeHandoff?.projectionState === "pending") {
+            return deferTransientGate("tier_escalation_projection_pending");
+          }
           gateResult = worktreeDispatchAutoEligibility(spec.input, {
             ...(dispatchOpts ?? {}),
             claimedRetry: claimedRetryFor(db, runId, attempt),
+            escalatedContinuation: worktreeHandoff,
+            hasTicketLease:
+              dispatchOpts?.hasTicketLease ??
+              ((repo, ticket) =>
+                liveWorkerLeases(repo, { dir: leasesDir }).some(
+                  (lease) => String(lease.ticket) === String(ticket),
+                )),
+            // Match the planner's operator-only bypass from the immutable
+            // proposal that admitted this run. Never trust caller options here:
+            // chain and schedule runs must keep the security/escalation gate.
+            //
+            // A spec field alone can never carry this authorisation: chain and
+            // schedule runs inherit approvalPolicy (dispatchEvidence included,
+            // via stableChainApprovalPolicyForHash) from the dispatch they
+            // descend from, so trusting `dispatchEvidence.checks
+            // .operator_authorized` would hand every descendant of one operator
+            // dispatch a permanent ai:escalated/security bypass. The escalation
+            // claim is only believed when the durable tier_escalations row read
+            // for THIS run authenticates it as the continuation of the exact
+            // failed run the spec names.
+            operatorAuthorized:
+              originatingEvent(db, runId)?.source === "operator" ||
+              (worktreeHandoff?.projectionState === "applied" &&
+                spec.approvalPolicy?.escalation?.operatorAuthorized === true &&
+                spec.approvalPolicy.escalation.failedRunId ===
+                  worktreeHandoff.failedRunId &&
+                spec.approvalPolicy.escalation.rootRunId ===
+                  worktreeHandoff.rootRunId),
           });
         }
       } catch (err) {
@@ -2386,9 +3459,38 @@ export async function executeClaimed(
         ) {
           return deferTransientGate("owned_paths_unknown");
         }
+        // A forge read failure while checking the failed run's PR is as
+        // transient as a Linear read failure: requeue with backoff instead
+        // of permanently killing the escalation continuation. Only when the
+        // retries are exhausted does the continuation refuse terminally, and
+        // then the tier_escalations row must leave 'applied' with it.
+        if (
+          gate === "dispatch" &&
+          gateRefusal.reason === "ticket_escalation_pr_read_failed" &&
+          worktreeHandoff
+        ) {
+          const deferred = deferTransientGate(gateRefusal.reason);
+          if (deferred?.terminalState === "REFUSED") {
+            refuseTierEscalationClaim(db, worktreeHandoff, gateRefusal.reason);
+          }
+          return deferred;
+        }
         releaseClaimLock(lockFile);
+        if (
+          gate === "dispatch" &&
+          [
+            "ticket_claimed_by_other",
+            "ticket_escalation_pr_closed",
+            "ticket_escalation_pr_read_failed",
+          ].includes(gateRefusal.reason) &&
+          worktreeHandoff
+        ) {
+          refuseTierEscalationClaim(db, worktreeHandoff, gateRefusal.reason);
+        }
         const res = refuseTerminal(gateRefusal.reason, [`${gate}_gate`], {
           detail: gateRefusal.detail,
+          receiptEvidence:
+            gate === "dispatch" && worktreeHandoff ? gateResult.evidence : null,
         });
         if (res?.fenced) return { fenced: true };
         return {
@@ -2411,7 +3513,8 @@ export async function executeClaimed(
         // redundant, that could steal the ticket if ownership changed in the
         // narrow interval after the gate read.
         const resumedClaim =
-          gateResult.evidence?.checks?.ticket_claim_retry === true;
+          gateResult.evidence?.checks?.ticket_claim_retry === true ||
+          gateResult.evidence?.checks?.ticket_claim_escalation === true;
         if (!resumedClaim) {
           let claimRes;
           try {
@@ -2441,7 +3544,47 @@ export async function executeClaimed(
         }
 
         ticketClaimed = true;
-        handoffContext = ticketHandoffContext(ticketId, fetchTicketFn);
+        const capture = ticketHandoffContext(
+          ticketId,
+          fetchTicketFn,
+          repoName,
+          gateResult.evidence?.ticket,
+        );
+        if (!capture.ok) {
+          // Never re-queue and thereby bless a body that changed in the
+          // admission-to-capture window. This needs a fresh human/triage read
+          // and a new ready pin, not an automatic retry of executable text.
+          if (mayMutateClaimedTicket()) {
+            try {
+              blockTicketFn({
+                repo: repoName,
+                ticket: ticketId,
+                why: capture.detail,
+                baseline: {
+                  check: "post_claim_ticket_capture",
+                  exitCode: null,
+                  output: capture.reasonCode,
+                },
+              });
+            } catch {
+              /* intentionally ignored */
+            }
+          }
+          const res = refuseTerminal(
+            capture.reasonCode,
+            ["post_claim_ticket_capture"],
+            { detail: capture.detail },
+          );
+          if (res?.fenced) return { fenced: true };
+          return {
+            runId,
+            attempt,
+            terminalState: "REFUSED",
+            reasonCode: capture.reasonCode,
+            receipt: res?.receipt,
+          };
+        }
+        handoffContext = capture.handoff;
         writeWorkerLease({
           repo: repoName,
           ticket: ticketId,
@@ -2467,22 +3610,71 @@ export async function executeClaimed(
       }
     }
 
-    const adapterKey = adapterOverride ?? spec.adapter;
-    const created = createWorkspace({
-      root: workspacesRoot,
-      runId,
-      attempt,
-      input: spec.input,
-      workspace: spec.workspace,
-      artifactStore,
-      adapter: adapterKey,
-      ticketLeaseOwner,
-      workerLeasesDir: leasesDir,
-    });
+    let created;
+    try {
+      created = createWorkspace({
+        root: workspacesRoot,
+        runId,
+        attempt,
+        input: spec.input,
+        workspace: spec.workspace,
+        artifactStore,
+        adapter: adapterKey,
+        ticketLeaseOwner,
+        workerLeasesDir: leasesDir,
+        worktreeHandoff,
+      });
+    } catch (err) {
+      // Missing declared inputs are permanent: re-queuing cannot repopulate an
+      // artifact store entry that the run has already pinned by hash. This
+      // boundary is deliberately narrow so a similarly worded later error is
+      // not mistaken for an input-materialization failure.
+      if (/^artifact [a-f0-9]{64} is not in the store$/.test(err?.message)) {
+        err.code = "input_artifact_missing";
+      }
+      throw err;
+    }
     workspaceDir = created.dir;
+    // A continuation receives the original schema-validated input, plus this
+    // workspace-local diagnostic. It is deliberately not written into the
+    // RunSpec input: the original ticket event remains immutable and the
+    // closed dispatch input schema need not admit worker-owned context.
+    if (worktreeHandoff?.handoffFailure) {
+      const inputPath = path.join(workspaceDir, "input.json");
+      const executionInput = JSON.parse(readFileSync(inputPath, "utf8"));
+      writeFileSync(
+        inputPath,
+        `${canonicalJson(
+          continuationExecutionInput(
+            executionInput,
+            worktreeHandoff.handoffFailure,
+          ),
+        )}\n`,
+        "utf8",
+      );
+    }
     assertSandboxWorkspaceSupported(workspaceDir, def);
+    // Repository checkouts receive instance-local config and integrity
+    // baselining. Delegated worktrees already provision their own instance and
+    // must not be mutated by that repository-only setup; retain their path
+    // separately for an escalation ownership transfer.
     checkoutPath = created.checkout?.path ?? null;
-    provisionInstanceLocalConfigs({ checkoutPath });
+    worktreePath = created.worktree?.path ?? null;
+    // The guard is load-bearing, not redundant: provisioning is async, and
+    // awaiting it for a checkout-less run would yield before the adapter
+    // starts, letting a cancel issued right after the claim short-circuit the
+    // attempt instead of aborting a started adapter (OPS-417).
+    if (checkoutPath) {
+      await provisionInstanceLocalConfigs({
+        checkoutPath,
+        onProbeTimeout: ({ repo, name, ceilingMs }) =>
+          recorder("lifecycle", {
+            note: `probe_timeout:${name}`,
+            repo,
+            ceilingMs,
+          }),
+      });
+    }
     checkoutBaseline = checkoutPath ? repositoryStatus(checkoutPath) : null;
     worktreeRecord = created.worktree
       ? {
@@ -2507,23 +3699,6 @@ export async function executeClaimed(
       };
     }
     if (!def) def = getAgent(registry, spec.agent);
-
-    if (!verifyDefHash(spec, def)) {
-      const refusedRes = refuseTerminal(
-        "agent_definition_mismatch",
-        ["def_hash_mismatch"],
-        { causeTyped: true },
-      );
-      cleanupWorkspace();
-      if (refusedRes?.fenced) return { fenced: true };
-      return {
-        runId,
-        attempt,
-        terminalState: "REFUSED",
-        reasonCode: "agent_definition_mismatch",
-        receipt: refusedRes.receipt,
-      };
-    }
 
     try {
       const writtenHarness = materializeRunHarness({
@@ -2563,7 +3738,6 @@ export async function executeClaimed(
     // Real wall-clock per event — NOT the claim-time `now`. Trace timestamps
     // are the one place frozen time defeats the feature: "what is the agent
     // doing right now" needs to say when each step actually happened.
-    const recorder = traceRecorder(db, { runId, attempt });
     const onTrace = (kind, payload) => {
       try {
         recorder(kind, payload);
@@ -2571,6 +3745,14 @@ export async function executeClaimed(
         // swallow: trace is observability, not correctness
       }
     };
+
+    // FAILED / TIMED_OUT / CANCELLED write no results receipt, so the
+    // unconfined attestation would otherwise exist only for runs that reached
+    // COMPLETED or REFUSED. Recording it on the attempt trace makes the
+    // audit line survive every terminal path.
+    if (filesystemConfinementReceipt) {
+      onTrace("lifecycle", filesystemConfinementReceipt);
+    }
 
     const onUsage = (usage) => {
       attemptUsage = { adapter: adapterKey, ...(usage ?? {}) };
@@ -2638,6 +3820,16 @@ export async function executeClaimed(
 
     let outcome;
     try {
+      // Dispatch identity comes from the immutable RunSpec, never the ambient
+      // worker environment. The adapter's child-environment builder preserves
+      // these values while continuing to strip credentials it does not need.
+      const adapterEnv = dispatchIdentityEnv({
+        spec,
+        env,
+        runId,
+        ticketId,
+        repoName,
+      });
       outcome = await adapter.execute({
         spec,
         def,
@@ -2647,7 +3839,7 @@ export async function executeClaimed(
           spec,
           maxRunMinutes: policyMaxRunMinutes(policyRoot),
         }),
-        env,
+        env: adapterEnv,
         onTrace,
         onUsage,
         resume: created.resume ?? null,
@@ -2664,16 +3856,20 @@ export async function executeClaimed(
     if (deadlineExpired) outcome = { ...(outcome ?? {}), timedOut: true };
 
     if (abortController.signal.aborted && !deadlineExpired) {
+      const terminalState = db
+        .query(`SELECT state FROM runs WHERE run_id = ?`)
+        .get(runId)?.state;
+      let unclaimError;
       if (mayMutateClaimedTicket()) {
         try {
           unclaimTicketFn({
             repo: repoName,
             ticket: ticketId,
-            why: "cancelled",
+            why: terminalState === "FAILED" ? "force_failed" : "cancelled",
             log: null,
           });
-        } catch {
-          /* intentionally ignored */
+        } catch (err) {
+          unclaimError = recordTerminalError("unclaimTicket", err);
         }
       }
       cleanupWorkspace();
@@ -2689,23 +3885,34 @@ export async function executeClaimed(
           });
           return { fenced: true };
         }
-        try {
-          finishAttempt(
-            db,
-            runId,
-            attempt,
-            "CANCELLED",
-            "cancelled",
-            currentNow,
-            attemptUsage,
-          );
-        } catch {
-          // ignore
+        const state = db
+          .query(`SELECT state FROM runs WHERE run_id = ?`)
+          .get(runId)?.state;
+        if (state === "CANCELLED") {
+          try {
+            finishAttempt(
+              db,
+              runId,
+              attempt,
+              "CANCELLED",
+              "cancelled",
+              currentNow,
+              attemptUsage,
+            );
+          } catch (err) {
+            return {
+              finishError: recordTerminalError("finishAttempt", err),
+            };
+          }
         }
         return { ok: true };
       });
       if (res?.fenced) return { fenced: true };
-      return { cancelled: true };
+      return {
+        cancelled: true,
+        ...(unclaimError ? { unclaimError } : {}),
+        ...(res?.finishError ? { finishError: res.finishError } : {}),
+      };
     }
 
     const { exitCode, timedOut, policyDenials = [] } = outcome ?? {};
@@ -2776,23 +3983,36 @@ export async function executeClaimed(
       return { runId, attempt, terminalState: "FAILED", reasonCode };
     }
     if (!lateCompletion && exitCode !== 0) {
-      if (mayMutateClaimedTicket()) {
+      const reasonCode = `agent_exit_${exitCode}`;
+      const escalating = tierEscalationDue(reasonCode);
+      if (mayMutateClaimedTicket() && !escalating) {
         try {
           unclaimTicketFn({
             repo: repoName,
             ticket: ticketId,
-            why: `agent_exit_${exitCode}`,
+            why: reasonCode,
             log: null,
           });
         } catch {
           /* intentionally ignored */
         }
       }
-      const reasonCode = `agent_exit_${exitCode}`;
       const res = failTerminal("FAILED", reasonCode, reasonCode);
-      cleanupWorkspace({ retainWorkspace: retain });
+      const projection = projectScheduledEscalation(res?.escalation);
+      if (!res?.escalation) cleanupWorkspace({ retainWorkspace: retain });
       if (res?.fenced) return { fenced: true };
-      return { runId, attempt, terminalState: "FAILED", reasonCode };
+      return {
+        runId,
+        attempt,
+        terminalState: "FAILED",
+        reasonCode,
+        ...(res?.escalation
+          ? {
+              escalatedRunId: res.escalation.continuation_run_id,
+              escalationProjection: projection,
+            }
+          : {}),
+      };
     }
 
     // The settings policy is preventative; this is the independent, durable
@@ -2866,6 +4086,7 @@ export async function executeClaimed(
       if (!(err instanceof ContractViolation)) throw err;
       const reasonCode =
         err.reasonCode === "baseline_red" ||
+        err.reasonCode === HANDOFF_SANDBOX_UNAVAILABLE ||
         HANDOFF_REASON_CODES.has(err.reasonCode)
           ? err.reasonCode
           : "contract_violation";
@@ -2874,6 +4095,7 @@ export async function executeClaimed(
       const handoffBody = handoff
         ? `${composeHandoffVerification(handoff)}\n\n**Result:** run ${runId} FAILED \`${reasonCode}\` — ${err.violations.join("; ")}`
         : null;
+      const escalating = tierEscalationDue(reasonCode);
       // WM-718: the PR is the agent's, already opened; the structural hold is
       // to draft it and quote the observed failure where the reviewer looks.
       if (
@@ -2893,7 +4115,7 @@ export async function executeClaimed(
           /* intentionally ignored */
         }
       }
-      if (mayMutateClaimedTicket()) {
+      if (mayMutateClaimedTicket() && !escalating) {
         if (HANDOFF_REASON_CODES.has(reasonCode)) {
           try {
             const returned = returnHandoffTicketFn({
@@ -2953,12 +4175,15 @@ export async function executeClaimed(
           });
           return { fenced: true };
         }
+        const decision = retryDecision(db, runId, spec, reasonCode, {
+          includeCurrentFailure: true,
+        });
         transition(db, {
           runId,
           to: "FAILED",
           expectFrom: "VERIFYING",
           actor: owner,
-          reason: typedFailureReason(reasonCode, failureReason),
+          reason: terminalFailureReason(decision, reasonCode, failureReason),
           attempt,
           policyVersion,
           now: currentNow,
@@ -2972,7 +4197,7 @@ export async function executeClaimed(
           currentNow,
           attemptUsage,
         );
-        const decision = retryDecision(db, runId, spec, reasonCode);
+        let escalation = null;
         if (decision.retry) {
           transition(db, {
             runId,
@@ -2984,10 +4209,21 @@ export async function executeClaimed(
             policyVersion,
             now: nowFn(),
           });
+        } else if (tierEscalationEligibility(spec, reasonCode).eligible) {
+          escalation = scheduleTierEscalation(db, registry, spec, {
+            workspacePath: worktreePath ?? checkoutPath,
+            sourceWorkspacePath: workspaceDir,
+            actor: owner,
+            policyVersion,
+            now: currentNow,
+            reasonCode,
+            handoffFailure: continuationHandoffFailure(err.violations),
+          });
         }
-        return { ok: true };
+        return { ok: true, escalation };
       });
-      cleanupWorkspace({ retainWorkspace: retain });
+      const projection = projectScheduledEscalation(res?.escalation);
+      if (!res?.escalation) cleanupWorkspace({ retainWorkspace: retain });
       if (res?.fenced) return { fenced: true };
       return {
         runId,
@@ -2996,6 +4232,12 @@ export async function executeClaimed(
         reasonCode,
         detail: failureReason,
         ...(handoff ? { handoff } : {}),
+        ...(res?.escalation
+          ? {
+              escalatedRunId: res.escalation.continuation_run_id,
+              escalationProjection: projection,
+            }
+          : {}),
       };
     }
 
@@ -3016,17 +4258,33 @@ export async function executeClaimed(
       for (const entry of RUNTIME_ARTIFACTS) {
         let abs;
         try {
-          abs = safeJoin(workspaceDir, entry.path);
+          // Refusal artifacts bypass verifyCompleted's collection path, so
+          // repeat the shared canonical/regular-file preflight before the
+          // first host-side read or hash. Missing and guest-supplied links are
+          // best-effort omissions, just like absent runtime artifacts.
+          abs = confinedRegularFile(workspaceDir, entry.path);
         } catch (err) {
+          if (err?.code === "ENOENT") continue;
           if (!(err instanceof PathViolation)) throw err;
           continue;
         }
-        if (existsSync(abs)) {
-          collected.push({
+        try {
+          const collectedEntry = {
             kind: entry.kind,
             uri: `file://${abs}`,
             sha256: sha256Hex(readFileSync(abs)),
+          };
+          // The fixed runtime files live at the workspace root. The helper
+          // returned their canonical path, so dirname is canonical provenance
+          // for storeCollected's independent pre-copy confinement check.
+          Object.defineProperty(collectedEntry, "workspaceRoot", {
+            value: path.dirname(abs),
           });
+          collected.push(collectedEntry);
+        } catch (err) {
+          // The guest may unlink the artifact between the preflight and the
+          // read; that is the same best-effort omission as never writing it.
+          if (err?.code !== "ENOENT") throw err;
         }
       }
       const artifacts = storeCollected({
@@ -3062,6 +4320,11 @@ export async function executeClaimed(
           policyVersion,
           now: currentNow,
         });
+        closeOpenProposalForRun(db, runId, {
+          actor: owner,
+          reason: "run_refused",
+          now: currentNow,
+        });
         const receipt = receiptWithDeadlineExtensions(db, runId, {
           runId,
           spec,
@@ -3070,6 +4333,7 @@ export async function executeClaimed(
           evidenceSetHash: null,
           journalHead: latestJournalHash(db, runId),
           verificationStatus: "passed",
+          extraReceipt: filesystemConfinementReceipt,
           harnessPins: materializedHarnessPins,
         });
         db.query(
@@ -3121,11 +4385,27 @@ export async function executeClaimed(
     // agent-reported. Best effort — a comment failure never fails a verified
     // run.
     if (verified.handoff && mayMutateClaimedTicket()) {
+      let stateReconciled = false;
+      try {
+        stateReconciled =
+          reconcileVerifiedHandoffTicketFn({
+            repo: repoName,
+            ticket: ticketId,
+            mayMutate: mayMutateClaimedTicket,
+          }) === true;
+      } catch (err) {
+        console.error(
+          `[worker] failed to reconcile verified handoff ticket ${ticketId}: ${String(err?.message ?? err)}`,
+        );
+      }
       try {
         commentTicketFn({
           repo: repoName,
           ticket: ticketId,
-          body: composeHandoffVerification(verified.handoff),
+          body: [
+            composeHandoffVerification(verified.handoff),
+            ...(stateReconciled ? ["- state reconciled by worker"] : []),
+          ].join("\n"),
           handoff: verified.handoff,
         });
       } catch {
@@ -3169,7 +4449,12 @@ export async function executeClaimed(
         evidenceSetHash: verified.result.evidenceSetHash,
         journalHead: latestJournalHash(db, runId),
         verificationStatus: "passed",
-        extraReceipt: verified.receipt,
+        extraReceipt: filesystemConfinementReceipt
+          ? {
+              ...(verified.receipt ?? {}),
+              ...filesystemConfinementReceipt,
+            }
+          : verified.receipt,
         harnessPins: materializedHarnessPins,
       });
       const { result } = verified;
@@ -3299,6 +4584,7 @@ export async function executeClaimed(
       err?.code === "worktree_sandbox_unsupported";
     const isWorkspaceProvisioning =
       err?.code === "workspace_provisioning_error";
+    const isInputArtifactMissing = err?.code === "input_artifact_missing";
     const reasonCode = isCliNotFound
       ? "cli_not_found"
       : isSandboxUnsupported
@@ -3307,13 +4593,16 @@ export async function executeClaimed(
           ? "worktree_sandbox_unsupported"
           : isWorkspaceProvisioning
             ? "workspace_provisioning_error"
-            : "adapter_error";
+            : isInputArtifactMissing
+              ? "input_artifact_missing"
+              : "adapter_error";
     const journalReason = `${reasonCode}: ${err?.message ?? String(err)}`;
     let res;
+    let terminalError;
     try {
       res = failTerminal("FAILED", journalReason, reasonCode);
-    } catch {
-      // if failTerminal could not transition, continue
+    } catch (err) {
+      terminalError = recordTerminalError("failTerminal", err);
     }
     cleanupWorkspace({ retainWorkspace: retain });
     if (res?.fenced) return { fenced: true };
@@ -3323,6 +4612,7 @@ export async function executeClaimed(
       terminalState: "FAILED",
       reasonCode,
       error: err?.message,
+      ...(terminalError ? { terminalError } : {}),
     };
   } finally {
     stopCancellationMonitor();
@@ -3345,7 +4635,10 @@ export async function executeClaimed(
 /**
  * Explicit operator recovery for a worker that stopped heartbeating while it
  * still owned a run. This mirrors the lease reaper's retry/exhaustion rules,
- * but targets exactly the selected worker/run and records an operator reason.
+ * but targets exactly the selected worker/run. When the run is retried it is
+ * re-queued with the retry cause derived from the same decision as the reaper;
+ * operator provenance is carried by `actor` (default "operator") on the
+ * recorded transitions, not by the reason string.
  */
 export function releaseStalledWorkerLease(
   db,
@@ -3397,70 +4690,65 @@ export function releaseStalledWorkerLease(
     }
 
     const spec = JSON.parse(run.spec_json);
-    const reason = "operator_release_stalled_worker";
     db.query(
       `UPDATE attempts SET lease_expires_at = ? WHERE run_id = ? AND attempt = ?`,
     ).run(iso(currentNow - 1), heldRunId, run.attempts);
-    if (run.attempts < spec.maxAttempts) {
-      if (run.state === "VERIFYING") {
-        transition(db, {
-          runId: heldRunId,
-          to: "FAILED",
-          actor,
-          reason,
-          attempt: run.attempts,
-          policyVersion,
-          now: currentNow,
-        });
-        transition(db, {
-          runId: heldRunId,
-          to: "QUEUED",
-          actor,
-          reason: "retry_after_stalled_worker_release",
-          attempt: run.attempts,
-          policyVersion,
-          now: currentNow,
-        });
-      } else {
-        transition(db, {
-          runId: heldRunId,
-          to: "QUEUED",
-          actor,
-          reason,
-          attempt: run.attempts,
-          policyVersion,
-          now: currentNow,
-        });
-      }
+    const decision = retryDecision(db, heldRunId, spec, "lease_expired", {
+      includeCurrentFailure: true,
+    });
+    const failureReason = terminalFailureReason(decision, "lease_expired");
+    if (run.state === "VERIFYING") {
+      transition(db, {
+        runId: heldRunId,
+        to: "FAILED",
+        actor,
+        reason: failureReason,
+        attempt: run.attempts,
+        policyVersion,
+        now: currentNow,
+      });
+    }
+    finishAttempt(
+      db,
+      heldRunId,
+      run.attempts,
+      "FAILED",
+      "lease_expired",
+      currentNow,
+    );
+    if (decision.retry) {
+      transition(db, {
+        runId: heldRunId,
+        to: "QUEUED",
+        actor,
+        reason: `retry:${decision.cause}`,
+        attempt: run.attempts,
+        policyVersion,
+        now: currentNow,
+      });
     } else {
       if (run.state === "LEASED") {
         transition(db, {
           runId: heldRunId,
           to: "RUNNING",
           actor,
-          reason,
+          reason: failureReason,
           attempt: run.attempts,
           policyVersion,
           now: currentNow,
         });
       }
-      transition(db, {
-        runId: heldRunId,
-        to: "FAILED",
-        actor,
-        reason,
-        attempt: run.attempts,
-        policyVersion,
-        now: currentNow,
-      });
-      finishAttempt(
-        db,
-        heldRunId,
-        run.attempts,
-        "FAILED",
-        "stalled_worker_released",
-        currentNow,
-      );
+      if (run.state !== "VERIFYING") {
+        transition(db, {
+          runId: heldRunId,
+          to: "FAILED",
+          actor,
+          reason: failureReason,
+          attempt: run.attempts,
+          policyVersion,
+          now: currentNow,
+        });
+      }
     }
     db.query(
       `UPDATE workers SET state = 'stopped', current_run = NULL, stopped_at = ? WHERE worker_id = ?`,
@@ -3476,88 +4764,124 @@ export function releaseStalledWorkerLease(
  */
 export function reapExpiredLeases(
   db,
-  { now = () => Date.now(), policyVersion = "unknown" } = {},
+  {
+    now = () => Date.now(),
+    policyVersion = "unknown",
+    onError = ({ runId, error }) =>
+      console.error(
+        `[worker] expired lease ${runId}: ${error?.message ?? String(error)}`,
+      ),
+  } = {},
 ) {
   const currentNow = resolveNow(now);
-  return txImmediate(db, () => {
-    const rows = db
-      .query(
-        `SELECT r.run_id, r.attempts, r.spec_json, r.state FROM runs r
-         JOIN attempts a ON a.run_id = r.run_id AND a.attempt = r.attempts
-         WHERE r.state IN ('LEASED', 'RUNNING', 'VERIFYING') AND a.lease_expires_at < ?`,
-      )
-      .all(iso(currentNow));
-    for (const row of rows) {
-      const spec = JSON.parse(row.spec_json);
-      const failureReason = typedFailureReason("lease_expired");
+  const nowIso = iso(currentNow);
+  const candidateSql = `SELECT r.run_id, r.attempts, r.spec_json, r.state FROM runs r
+       JOIN attempts a ON a.run_id = r.run_id AND a.attempt = r.attempts
+       WHERE r.state IN ('LEASED', 'RUNNING', 'VERIFYING') AND a.lease_expires_at < ?`;
+  const candidates = db.query(candidateSql).all(nowIso);
+  let reaped = 0;
 
-      // VERIFYING cannot transition directly to QUEUED; record its failure first.
-      if (row.state === "VERIFYING") {
-        transition(db, {
-          runId: row.run_id,
-          to: "FAILED",
-          actor: "reaper",
-          reason: failureReason,
-          attempt: row.attempts,
-          policyVersion,
-          now: currentNow,
+  for (const candidate of candidates) {
+    try {
+      const outcome = txImmediate(db, () => {
+        // The candidate list is a snapshot taken outside this transaction. A
+        // worker may have renewed the lease (or the run may have moved on)
+        // since; re-read under the write lock and only act when the row is
+        // still exactly the expired attempt we selected.
+        const row = db
+          .query(
+            `${candidateSql} AND r.run_id = ? AND r.attempts = ? AND r.state = ?`,
+          )
+          .get(nowIso, candidate.run_id, candidate.attempts, candidate.state);
+        if (!row) return "skipped";
+        const spec = JSON.parse(row.spec_json);
+        const decision = retryDecision(db, row.run_id, spec, "lease_expired", {
+          includeCurrentFailure: true,
         });
-      }
-      finishAttempt(
-        db,
-        row.run_id,
-        row.attempts,
-        "FAILED",
-        "lease_expired",
-        currentNow,
-      );
-      const decision = retryDecision(db, row.run_id, spec, "lease_expired");
+        const failureReason = terminalFailureReason(decision, "lease_expired");
 
-      if (decision.retry) {
-        transition(db, {
-          runId: row.run_id,
-          to: "QUEUED",
-          actor: "reaper",
-          reason: `retry:${decision.cause}`,
-          attempt: row.attempts,
-          policyVersion,
-          now: currentNow,
-        });
-        continue;
-      }
+        // VERIFYING cannot transition directly to QUEUED; record its failure first.
+        if (row.state === "VERIFYING") {
+          transition(db, {
+            runId: row.run_id,
+            to: "FAILED",
+            actor: "reaper",
+            reason: failureReason,
+            attempt: row.attempts,
+            policyVersion,
+            now: currentNow,
+          });
+        }
+        finishAttempt(
+          db,
+          row.run_id,
+          row.attempts,
+          "FAILED",
+          "lease_expired",
+          currentNow,
+        );
+        if (decision.retry) {
+          transition(db, {
+            runId: row.run_id,
+            to: "QUEUED",
+            actor: "reaper",
+            reason: `retry:${decision.cause}`,
+            attempt: row.attempts,
+            policyVersion,
+            now: currentNow,
+          });
+          return "reaped";
+        }
 
-      // LEASED has no direct FAILED edge; advance through RUNNING only when
-      // the environment retry ceiling is exhausted and the run must terminate.
-      if (row.state === "LEASED") {
-        transition(db, {
-          runId: row.run_id,
-          to: "RUNNING",
-          actor: "reaper",
-          reason: failureReason,
-          attempt: row.attempts,
-          policyVersion,
-          now: currentNow,
-        });
-      }
-      if (row.state !== "VERIFYING") {
-        transition(db, {
-          runId: row.run_id,
-          to: "FAILED",
-          actor: "reaper",
-          reason: failureReason,
-          attempt: row.attempts,
-          policyVersion,
-          now: currentNow,
-        });
-      }
+        // LEASED has no direct FAILED edge; advance through RUNNING only when
+        // the environment retry ceiling is exhausted and the run must terminate.
+        if (row.state === "LEASED") {
+          transition(db, {
+            runId: row.run_id,
+            to: "RUNNING",
+            actor: "reaper",
+            reason: failureReason,
+            attempt: row.attempts,
+            policyVersion,
+            now: currentNow,
+          });
+        }
+        if (row.state !== "VERIFYING") {
+          transition(db, {
+            runId: row.run_id,
+            to: "FAILED",
+            actor: "reaper",
+            reason: failureReason,
+            attempt: row.attempts,
+            policyVersion,
+            now: currentNow,
+          });
+        }
+        return "reaped";
+      });
+      if (outcome === "reaped") reaped += 1;
+    } catch (error) {
+      onError({ runId: candidate.run_id, error });
     }
-    return rows.length;
-  });
+  }
+
+  return reaped;
 }
 
 /** Claim and execute one run, or return a typed refusal/null without execution. */
 export async function runOnce(db, registry, adapters, opts = {}) {
-  const claim = claimNext(db, opts);
+  // claimNext already reconciles pending escalation projections and logs a
+  // failed one without abandoning the claim: a tracker outage on one
+  // escalation must never stall claiming of every other queued run. Forward
+  // the dispatch-scoped tracker hooks so it uses the same ones this call does.
+  const claim = claimNext(db, {
+    ...opts,
+    projectTierEscalation:
+      opts.projectTierEscalation ??
+      opts.dispatch?.projectTierEscalation ??
+      defaultProjectTierEscalation,
+    fetchTicket: opts.fetchTicket ?? opts.dispatch?.fetchTicket,
+  });
   if (!claim || claim.refused) return claim;
   return executeClaimed(db, registry, adapters, claim, opts);
 }
@@ -3692,6 +5016,10 @@ export function forceFailRun(
       throw new Error(`cannot force-fail run in terminal state ${run.state}`);
     }
     closeOpenProposalForRun(db, runId, { actor, now: currentNow });
+    if (run.state === "RUNNING" || run.state === "VERIFYING") {
+      const active = ACTIVE_EXECUTIONS.get(runId);
+      if (active) active.abort(reason);
+    }
     return result;
   });
 }

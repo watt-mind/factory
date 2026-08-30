@@ -11,6 +11,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
   copyFileSync,
+  createReadStream,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -25,9 +26,15 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalJson, hashJson } from "./canonical.mjs";
+import { confinedRegularFile } from "./workspace.mjs";
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const SHA256 = /^sha256:([0-9a-f]{64})$/;
+const TRUSTED_ROOTLESS_SOURCES = new Map([
+  ["memo", null],
+  ["transcript", ".transcript.json"],
+  ["sandbox-console", ".sandbox-console.log"],
+]);
 
 function resultDigest(artifactHash) {
   return SHA256.exec(artifactHash ?? "")?.[1] ?? null;
@@ -64,6 +71,17 @@ export function hashFile(filePath) {
   return createHash("sha256").update(readFileSync(filePath)).digest("hex");
 }
 
+/** Compute sha256 without buffering the file in the event loop. */
+export function hashFileAsync(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(filePath);
+    stream.on("error", reject);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
 /** Resolve a store path from a content hash; malformed hashes fail closed. */
 export function artifactPath(storeRoot, sha256hex) {
   if (!HEX64.test(sha256hex ?? ""))
@@ -82,18 +100,46 @@ export function artifactPath(storeRoot, sha256hex) {
  * rename, and source/destination hashes are verified to prevent corrupted or
  * truncated artifacts from landing in the store (OPS-439).
  */
-export function storeCollected({ entries, storeRoot }) {
+export function storeCollected({ entries, storeRoot, workspaceDir = null }) {
   if (!entries?.length) return entries ?? [];
   mkdirSync(storeRoot, { recursive: true });
   return entries.map((entry) => {
     const dest = artifactPath(storeRoot, entry.sha256);
-    const src = fileURLToPath(entry.uri);
+    const declaredSrc = fileURLToPath(entry.uri);
+    const sourceRoot = entry.workspaceRoot ?? workspaceDir;
+    let src;
+    try {
+      // Verified entries carry their workspace root as non-enumerable internal
+      // provenance. Other workspace producers must pass workspaceDir. The only
+      // rootless sources are host-authored memos and the runtime's fixed,
+      // top-level transcript files; for those, dirname is the complete set of
+      // possible components beneath the source root.
+      const trustedBasename = TRUSTED_ROOTLESS_SOURCES.get(entry.kind);
+      const trustedRootless =
+        TRUSTED_ROOTLESS_SOURCES.has(entry.kind) &&
+        (trustedBasename === null ||
+          path.basename(declaredSrc) === trustedBasename);
+      if (!sourceRoot && !trustedRootless) {
+        throw new Error(
+          `artifact source lacks workspace provenance: ${declaredSrc}`,
+        );
+      }
+      const root = sourceRoot ?? path.dirname(declaredSrc);
+      src = confinedRegularFile(root, path.relative(root, declaredSrc));
+    } catch (err) {
+      if (err?.code === "ENOENT") {
+        throw new Error(`artifact source does not exist: ${declaredSrc}`, {
+          cause: err,
+        });
+      }
+      throw err;
+    }
     if (!existsSync(src)) {
       throw new Error(`artifact source does not exist: ${src}`);
     }
     const stat = lstatSync(src);
-    if (stat.isSymbolicLink()) {
-      throw new Error(`cannot store symlinked artifact: ${src}`);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new Error(`artifact source is not a regular file: ${src}`);
     }
     const srcHash = hashFile(src);
     if (srcHash !== entry.sha256) {
@@ -310,14 +356,8 @@ export function listArtifacts(
   }).artifacts;
 }
 
-/** Newest-first cursor page for the artifact catalogue HTTP projection. */
-export function listArtifactPage(
-  db,
-  storeRoot,
-  { orphan, kind, search, limit = 100, before = null } = {},
-) {
-  if (!existsSync(storeRoot)) return { artifacts: [], nextBefore: null };
-
+/** Build the result-to-artifact reference index used by catalogue pages. */
+export function artifactReferenceIndex(db) {
   const references = new Map();
   const rows = db
     .query(
@@ -363,22 +403,55 @@ export function listArtifactPage(
       }
     }
   }
+  return references;
+}
 
-  const term = typeof search === "string" ? search.toLowerCase() : null;
+/** Snapshot the artifact files that are currently present in the store. */
+export function artifactInventory(storeRoot) {
+  if (!existsSync(storeRoot)) return [];
   const inventory = [];
   for (const sha256 of readdirSync(storeRoot).filter((name) =>
     HEX64.test(name),
   )) {
     const stat = statSync(path.join(storeRoot, sha256));
     if (!stat.isFile()) continue;
-    const refs = references.get(sha256) ?? [];
+    inventory.push({
+      sha256,
+      sizeBytes: stat.size,
+      mtime: stat.mtime.toISOString(),
+    });
+  }
+  return inventory;
+}
+
+/** Newest-first cursor page for the artifact catalogue HTTP projection. */
+export function listArtifactPage(
+  db,
+  storeRoot,
+  {
+    orphan,
+    kind,
+    search,
+    limit = 100,
+    before = null,
+    references = null,
+    inventory = null,
+  } = {},
+) {
+  const index = references ?? artifactReferenceIndex(db);
+  const files = inventory ?? artifactInventory(storeRoot);
+
+  const term = typeof search === "string" ? search.toLowerCase() : null;
+  const catalogue = [];
+  for (const file of files) {
+    const refs = index.get(file.sha256) ?? [];
     const referenced = refs.length > 0;
     if (orphan !== undefined && orphan === referenced) continue;
     if (kind !== undefined && !refs.some((ref) => ref.kind === kind)) continue;
     if (
       term &&
       ![
-        sha256,
+        file.sha256,
         ...refs.flatMap((ref) => [ref.runId, ref.kind, ref.agent, ref.state]),
       ].some((value) =>
         String(value ?? "")
@@ -387,25 +460,23 @@ export function listArtifactPage(
       )
     )
       continue;
-    inventory.push({
-      sha256,
-      sizeBytes: stat.size,
-      mtime: stat.mtime.toISOString(),
+    catalogue.push({
+      ...file,
       referenced,
       references: refs,
     });
   }
-  inventory.sort(
+  catalogue.sort(
     (a, b) =>
       b.mtime.localeCompare(a.mtime) || a.sha256.localeCompare(b.sha256),
   );
   const afterCursor = before
-    ? inventory.filter(
+    ? catalogue.filter(
         (item) =>
           item.mtime < before.mtime ||
           (item.mtime === before.mtime && item.sha256 > before.sha256),
       )
-    : inventory;
+    : catalogue;
   const page = afterCursor.slice(0, limit + 1);
   const hasNextPage = page.length > limit;
   const artifacts = hasNextPage ? page.slice(0, -1) : page;

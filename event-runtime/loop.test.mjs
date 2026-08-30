@@ -317,8 +317,10 @@ describe("dispatch-completion edge: a finished dispatch re-fires the work-scan (
 // merge discovery to Factory while the new merge loop proves itself live.
 // ---------------------------------------------------------------------------
 
-/** Product repos that remain configured for watched/manual loops. Factory is
- *  the sole autonomous merge target during the bootstrap period (WM-417). */
+/** Product repos configured for watched/manual loops. WM-1028 moved these
+ *  per-client loops out of the tracked public kernel and into the instance
+ *  overlay (config/schedule.yaml), so they no longer appear in the kernel
+ *  registry — they are enabled here only through explicit fixtures. */
 const DISPATCHABLE = ["bj29", "wm-home", "legalease", "cashsaas"];
 
 const loopEntry = (
@@ -336,18 +338,15 @@ const loopEntry = (
   enabled,
 });
 
-describe("loop schedule autonomy scope (WM-112/WM-417)", () => {
-  test("Factory alone has autonomous merge discovery while every other loop remains watched and disabled", () => {
+describe("loop schedule autonomy scope (WM-112/WM-417/WM-1028)", () => {
+  test("the kernel tracks only its own loops; client loops moved to the instance overlay", () => {
+    // WM-1028: per-client loops were removed from the tracked public kernel
+    // schedules.json and now live in the instance overlay (config/schedule.yaml).
+    // None of them may remain in the loaded kernel registry.
     for (const repo of DISPATCHABLE) {
-      expect(registry.schedules[`work-${repo}`]).toEqual(
-        loopEntry("factory.work.requested", repo, "30m"),
-      );
-      expect(registry.schedules[`merge-${repo}`]).toEqual(
-        loopEntry("factory.merge.requested", repo, "30m"),
-      );
-      expect(registry.schedules[`ship-${repo}`]).toEqual(
-        loopEntry("factory.ship.requested", repo, "7d"),
-      );
+      expect(registry.schedules[`work-${repo}`]).toBeUndefined();
+      expect(registry.schedules[`merge-${repo}`]).toBeUndefined();
+      expect(registry.schedules[`ship-${repo}`]).toBeUndefined();
     }
     // WM-576: the Factory full-set merge sweep runs every 4h as the fallback behind per-PR scoped scans.
     expect(registry.schedules["merge-factory"]).toEqual(
@@ -368,7 +367,7 @@ describe("loop schedule autonomy scope (WM-112/WM-417)", () => {
     );
   });
 
-  test("the exact enabled autonomous set is merge-factory and triage-factory", () => {
+  test("the exact enabled autonomous set is work-factory, merge-factory and triage-factory", () => {
     for (const repo of [
       "coach-wattz",
       "watts-mobile",
@@ -380,20 +379,20 @@ describe("loop schedule autonomy scope (WM-112/WM-417)", () => {
       expect(registry.schedules[`merge-${repo}`]).toBeUndefined();
       expect(registry.schedules[`ship-${repo}`]).toBeUndefined();
     }
-    expect(registry.schedules["work-factory"]).toBeUndefined();
     expect(registry.schedules["ship-factory"]).toBeUndefined();
 
+    // work-factory (#996) joins merge/triage as an enabled autonomous loop so
+    // agent-ready supply self-dispatches without a manual work.requested seed.
+    const AUTONOMOUS = ["work-factory", "merge-factory", "triage-factory"];
     const enabledAutonomous = Object.entries(registry.schedules)
       .filter(
         ([, schedule]) => schedule.enabled && schedule.approval === "auto",
       )
       .map(([loop]) => loop);
-    expect(enabledAutonomous.sort()).toEqual(
-      ["merge-factory", "triage-factory"].sort(),
-    );
+    expect(enabledAutonomous.sort()).toEqual([...AUTONOMOUS].sort());
 
     for (const [loop, schedule] of Object.entries(registry.schedules)) {
-      if (loop !== "merge-factory" && loop !== "triage-factory") {
+      if (!AUTONOMOUS.includes(loop)) {
         expect({
           approval: schedule.approval,
           enabled: schedule.enabled,
@@ -403,16 +402,20 @@ describe("loop schedule autonomy scope (WM-112/WM-417)", () => {
   });
 
   test("enabling a loop in a fixture registry fires exactly its event type with its repo payload", () => {
+    // WM-1028: these client loops live in the instance overlay, not the kernel,
+    // so build them as explicit fixtures rather than reading the registry.
     const cases = [
-      ["work-bj29", "factory.work.requested", "bj29"],
-      ["merge-wm-home", "factory.merge.requested", "wm-home"],
-      ["ship-legalease", "factory.ship.requested", "legalease"],
+      ["work-bj29", "factory.work.requested", "bj29", "30m"],
+      ["merge-wm-home", "factory.merge.requested", "wm-home", "30m"],
+      ["ship-legalease", "factory.ship.requested", "legalease", "7d"],
     ];
-    for (const [loop, eventType, repo] of cases) {
+    for (const [loop, eventType, repo, every] of cases) {
       const db = openDb(":memory:");
       const fixture = {
         ...registry,
-        schedules: { [loop]: { ...registry.schedules[loop], enabled: true } },
+        schedules: {
+          [loop]: loopEntry(eventType, repo, every, { enabled: true }),
+        },
       };
       const outcome = emitDueTicks(db, fixture, {
         now: Date.parse("2026-08-14T10:05:00Z"),
@@ -434,16 +437,16 @@ describe("loop schedule autonomy scope (WM-112/WM-417)", () => {
     // below proves each tick now plans a real run.
   });
 
-  test("the shipped clock fires only Factory merge discovery and triage discovery", () => {
-    // triage-factory's 8h cadence and merge-factory's 4h cadence both have
-    // a due slot at their first tick (no prior admitted slot yet), so a
-    // clock started fresh fires both once.
+  test("the shipped clock fires Factory work, merge, and triage discovery", () => {
+    // work-factory's 30m, merge-factory's 4h, and triage-factory's 8h cadences
+    // all have a due slot at their first tick (no prior admitted slot yet), so
+    // a clock started fresh fires all three once.
     const db = openDb(":memory:");
     const emitted = emitDueTicks(db, registry, { now: Date.now() }).emitted;
     expect(emitted.map((row) => row.loop).sort()).toEqual(
-      ["merge-factory", "triage-factory"].sort(),
+      ["merge-factory", "triage-factory", "work-factory"].sort(),
     );
-    expect(db.query(`SELECT COUNT(*) AS n FROM events`).get().n).toBe(2);
+    expect(db.query(`SELECT COUNT(*) AS n FROM events`).get().n).toBe(3);
     db.close();
   });
 });

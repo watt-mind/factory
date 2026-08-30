@@ -201,6 +201,16 @@ if [[ -n "$(git -C "$WT" status --porcelain)" && "$FORCE" -ne 1 ]]; then
   die "$WT has uncommitted changes — commit/stash them, or re-run with --force"
 fi
 
+# Backstop for daemons the pidfiles no longer describe (#1379): a killed
+# handoff gate or an aborted bring-up leaves a detached `serve
+# --adapter-override fake` with no pidfile, still holding this worktree as its
+# cwd, a loopback port and a SQLite handle. Sweep every cwd-bound process
+# group immediately before the checkout is deleted, and log what was stopped.
+# Only the committed removal path runs this — `--here` keeps the checkout, a
+# refused dirty teardown keeps it too, and the operator's own shells live
+# there; nothing may be signalled unless the worktree is actually going away.
+kill_worktree_cwd_processes "$WT"
+
 info "removing worktree $WT"
 # macOS bash 3.2: an empty array under `set -u` is an unbound variable, so
 # branch instead of expanding a maybe-empty args array.

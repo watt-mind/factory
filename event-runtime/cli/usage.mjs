@@ -5,6 +5,8 @@ export const USAGE = `event-runtime — watched event → agent runtime (docs/ev
 
 usage: bun event-runtime/cli.mjs <command>
 
+  help | -h | --help             print this usage
+
   serve [--port N] [--adapter-override fake] [--watch] [--with-worker]
                                  start the control API (loopback) and planner
                                  in the foreground. Runs NO worker unless
@@ -21,12 +23,19 @@ usage: bun event-runtime/cli.mjs <command>
                                  only between claims (dev; see factory up --dev)
                                  --drain-file exits 0 once that file appears, at
                                  an idle poll boundary — never mid-run (WM-226)
-  supervise [--workers min:max] [--interval-ms N] [--once]
+  plan [--adapter-override fake] [--poll-ms N] [--once]
+                                 planner daemon: plan admitted events off the
+                                 HTTP event loop into proposals
+  supervise [--workers min:max] [--interval-ms N] [--drain-timeout N]
+            [--spawn-grace-ms N] [--once]
                                  worker pool supervisor (WM-226): scales \`work\`
                                  processes between workers.min and workers.max
                                  from config/policy.yaml on observed queue depth.
                                  Scales down by draining, never by signalling a
                                  worker that holds a lease.
+                                 --adapter-override, --poll-ms, --drain-timeout,
+                                 --reload-on-change, and --label worker-shaping
+                                 flags pass through to every worker.
   status                         events, proposals, runs, anomalies
   doctor                         system health check: anomaly report (exits non-zero on anomalies)
   events [status]                admitted events, optionally filtered by status
@@ -59,5 +68,5 @@ usage: bun event-runtime/cli.mjs <command>
                                  re-pin built-in definitions, or one explicitly named pack;
                                  --check exits non-zero when pins are stale without writing
 
-All commands except serve, work, supervise, and update-pins are clients of the control
+All commands except serve, work, plan, supervise, and update-pins are clients of the control
 API and need serve running on ${API_HOST}:${DEFAULT_PORT} (FACTORY_EVENT_PORT to change).`;

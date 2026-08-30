@@ -1,9 +1,64 @@
 {
-  "name": "factory",
-  "private": true,
+  "name": "@watt-mind/factory",
+  "version": "0.1.0",
+  "description": "A runtime for self-improving agentic loops: dispatches coding agents against tracked tickets, verifies with CI, and merges through review.",
   "license": "Apache-2.0",
   "type": "module",
+  "homepage": "https://github.com/watt-mind/factory#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/watt-mind/factory.git"
+  },
+  "bugs": {
+    "url": "https://github.com/watt-mind/factory/issues"
+  },
+  "keywords": [
+    "agent",
+    "agentic",
+    "ai",
+    "automation",
+    "ci",
+    "coding-agent",
+    "orchestration",
+    "dispatch"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "factory": "bin/factory"
+  },
+  "files": [
+    "bin/",
+    "build/",
+    "orchestrator/",
+    "tools/",
+    "event-runtime/",
+    "lib/",
+    "runners/",
+    "shared/",
+    "packs/",
+    "plugins/",
+    "dist/",
+    "demo/",
+    "config/*.example.yaml",
+    "config/mcp/",
+    ".claude-plugin/",
+    "AGENTS.md",
+    "PACKS.md",
+    "ROADMAP.md",
+    "SETUP.md",
+    "LICENSE",
+    "NOTICE",
+    "!**/*.test.mjs",
+    "!**/*.test.ts",
+    "!**/*.test.tsx",
+    "!**/test-support/**",
+    "!event-runtime/web/e2e/**",
+    "!event-runtime/web/node_modules/**"
+  ],
   "scripts": {
+    "prepublishOnly": "bun tools/publish.mjs --dry-run",
     "supervise": "bun orchestrator/run.mjs",
     "watch": "bun orchestrator/watch.jsx --repo",
     "linear-reaper": "bun orchestrator/run.mjs --only linear-reaper --once --apply --repo",
@@ -17,7 +72,8 @@
     "merge": "bun orchestrator/run.mjs --only merge --once --apply --repo",
     "janitor": "bun orchestrator/run.mjs --only janitor --once --apply --repo",
     "emit": "bun build/emit.mjs",
-    "check": "bun build/emit.mjs --check",
+    "check": "bun build/emit.mjs --check && bun run check:web",
+    "check:web": "cd event-runtime/web && if [ -d node_modules ]; then bun run typecheck; else echo \"check:web: skipped (run 'bun install' in event-runtime/web to enable the TypeScript check)\"; fi",
     "link": "bun build/emit.mjs --link",
     "link-bin": "bun build/emit.mjs --link-bin",
     "link-repos": "bun build/emit.mjs --link-repos",

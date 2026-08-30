@@ -306,6 +306,10 @@ export interface OutboxRow {
   event: Record<string, unknown>;
   created_at: string;
   published_at: string | null;
+  /** Present on runtimes that expose delivery state. */
+  deliveryAttempts?: number;
+  deliveryError?: string | null;
+  parked?: boolean;
 }
 
 export interface LifecycleEvent {
@@ -439,6 +443,8 @@ export interface RunDetail {
     terminalState: string;
     reasonCode: string | null;
     artifact?: unknown;
+    presentation?: Presentation;
+    presentationErrors?: string[];
     artifactHash?: string;
     artifacts?: ArtifactRef[];
     evidence?: unknown;
@@ -498,6 +504,59 @@ export type ArtifactFormat =
   | "count";
 export type ArtifactSectionKind =
   "table" | "keyvalue" | "list" | "badge" | "code" | "prose";
+
+/** `factory.presentation/v1` — the optional, agent-authored Layer B document. */
+export type PresentationValue =
+  string | number | boolean | null | { $ref: string };
+export type ResolvedPresentationValue =
+  | Exclude<PresentationValue, { $ref: string }>
+  | { value: unknown; ref: string };
+export type PresentationBlock =
+  | { type: "heading" | "markdown"; text: string }
+  | {
+      type: "keyvalue";
+      items: Array<{
+        label: string;
+        value: PresentationValue;
+        format?: ArtifactFormat;
+        tone?: ArtifactTone;
+      }>;
+    }
+  | {
+      type: "table";
+      label?: string;
+      columns: string[];
+      rows: PresentationValue[][];
+      formats?: ArtifactFormat[];
+      tone?: ArtifactTone | Record<string, unknown>;
+    }
+  | {
+      type: "list";
+      label?: string;
+      items: Array<{ text: string; ref?: string; tone?: ArtifactTone }>;
+    }
+  | { type: "badge"; text: string; tone: ArtifactTone }
+  | { type: "code"; text: string; language?: string }
+  | {
+      type: "section";
+      label: string;
+      collapsed?: boolean;
+      blocks: Exclude<PresentationBlock, { type: "section" }>[];
+    }
+  | {
+      type: "links";
+      items: Array<{
+        label: string;
+        issue?: PresentationValue;
+        pr?: PresentationValue;
+        run?: PresentationValue;
+        url?: PresentationValue;
+      }>;
+    };
+export interface Presentation {
+  schemaVersion: "factory.presentation/v1";
+  blocks: PresentationBlock[];
+}
 export interface ArtifactViewSection {
   /** RFC 6901 pointer into the artifact; `""` is the whole document. */
   path: string;
@@ -594,6 +653,61 @@ export interface AgentsView {
   contracts: Record<string, unknown>;
   /** Adapters the overlay may name (WM-887). */
   adapters?: string[];
+}
+
+/** Focused policy-model projection shared by GET /config and /overrides/config. */
+export interface ModelTierConfig {
+  adapters: string[];
+  tiers: string[];
+  tracked: Record<string, Record<string, string>>;
+  runtime: Record<string, Record<string, string>>;
+  effective: Record<string, Record<string, string>>;
+}
+
+export interface ModelTierCellResult {
+  adapter: string;
+  tier: string;
+  trackedModel: string | null;
+  runtimeModel: string | null;
+  effectiveModel: string | null;
+  source: "tracked" | "runtime";
+  restartRequired: true;
+  deleted?: boolean;
+}
+
+/** One promotable runtime override row in a promotion preview (gh-860). */
+export interface PromotionSelection {
+  key: string;
+  kind: "eventType" | "agent";
+  ref: string;
+  field: "adapter" | "modelTier" | "model";
+  target: { file: string; path: string };
+  before: unknown;
+  effective: unknown;
+  /** Whether the override still diverges from the tracked default. */
+  current: boolean;
+}
+
+/** Preview of the overrides that can be promoted, plus the digest apply echoes. */
+export interface PromotionPreview {
+  digest: string;
+  selections: PromotionSelection[];
+}
+
+export interface PromotionResult {
+  status: "noop" | "opened";
+  repo?: string;
+  ticket: string | null;
+  worktree?: string;
+  branch?: string;
+  files?: string[];
+  promoted?: Array<{
+    key: string;
+    target: { file: string; path: string };
+    before: unknown;
+    after: unknown;
+  }>;
+  pr: { url: string; number: number } | null;
 }
 
 /** A worker's own report of what it is doing; "stopped" is a clean exit. */
@@ -719,6 +833,8 @@ export interface StatusView {
     expiredOpenProposals: string[];
     staleLeases: number;
     unpublishedOutbox: number;
+    /** Present on runtimes that report terminal outbox delivery failures. */
+    parkedOutbox?: number;
     deadLettered: {
       source: string;
       eventId: string;
@@ -943,6 +1059,12 @@ export interface InboxItem {
   decidedAt?: string | null;
   decidedBy?: string | null;
   dedupeKey?: string | null;
+  /**
+   * Server-authoritative expiry projection from the shared predicate in
+   * event-runtime/lib/inbox.mjs. Current servers always set it; it stays
+   * optional for pre-#1223 servers and hand-built fixtures.
+   */
+  expired?: boolean;
 }
 
 /** One recent ticket summary (GET /tickets). */

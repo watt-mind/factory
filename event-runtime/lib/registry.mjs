@@ -8,8 +8,15 @@
  * promptVersion is provenance recorded at planning time, not a second
  * identity.
  */
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
+import { format as prettierFormat, resolveConfig } from "prettier";
 import { hashBytes } from "./canonical.mjs";
 import { APPROVAL_MODES, CATCH_UP_MODES, parseCadence } from "./schedules.mjs";
 import { RUNTIME_ROOT, resolveConfigPath } from "./config.mjs";
@@ -51,7 +58,39 @@ function nullDict() {
   return Object.create(null);
 }
 
+function isStrictDescendant(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return (
+    relative !== "" &&
+    relative !== ".." &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
+}
+
+/** Resolve a pack-owned resource without allowing lexical or symlink escape. */
+function resolvePackResource(root, canonicalRoot, relative) {
+  if (typeof relative !== "string" || relative === "") {
+    throw new RegistryError("pinned resource path must be a non-empty string");
+  }
+  const resolved = path.resolve(root, relative);
+  if (!isStrictDescendant(root, resolved)) {
+    throw new RegistryError(
+      `${relative}: resource resolves outside pack root ${root}`,
+    );
+  }
+  if (!existsSync(resolved)) return resolved;
+  const canonical = realpathSync(resolved);
+  if (!isStrictDescendant(canonicalRoot, canonical)) {
+    throw new RegistryError(
+      `${relative}: resource resolves outside canonical pack root ${canonicalRoot}`,
+    );
+  }
+  return canonical;
+}
+
 const SCHEDULE_OVERLAY_FIELDS = new Set(["enabled", "every", "payload"]);
+const OPERATOR_AUTHORIZED_AUTO_SOURCE = "operator-authorized-auto";
 
 function isPlainObject(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -60,10 +99,14 @@ function isPlainObject(value) {
 /**
  * Instance schedule settings intentionally sit outside the pinned registry.
  * They may turn a kernel loop on, change its cadence, or add static payload
- * keys, but cannot change its event routing or approval policy.
+ * keys, but cannot change its event routing. Unattended approval is the one
+ * exception: it requires both `approval: auto` on the loop and the same loop
+ * named in the top-level `overlay_auto_approve` allowlist.
  */
 function loadScheduleOverlay(file) {
-  if (!existsSync(file)) return nullDict();
+  if (!existsSync(file)) {
+    return { schedules: nullDict(), autoApprove: new Set() };
+  }
   let parsed;
   try {
     parsed = Bun.YAML.parse(readFileSync(file, "utf8"));
@@ -75,12 +118,28 @@ function loadScheduleOverlay(file) {
   if (parsed !== null && parsed !== undefined && !isPlainObject(parsed)) {
     throw new RegistryError(`${file}: schedule.yaml must be an object`);
   }
-  if (parsed?.schedules === undefined || parsed.schedules === null)
-    return nullDict();
-  if (!isPlainObject(parsed.schedules)) {
+  const allowedLoops = parsed?.overlay_auto_approve;
+  if (
+    allowedLoops !== undefined &&
+    (!Array.isArray(allowedLoops) ||
+      allowedLoops.some((loop) => typeof loop !== "string" || !loop) ||
+      new Set(allowedLoops).size !== allowedLoops.length)
+  ) {
+    throw new RegistryError(
+      `${file}: "overlay_auto_approve" must be an array of unique, non-empty loop names`,
+    );
+  }
+  if (
+    parsed?.schedules !== undefined &&
+    parsed.schedules !== null &&
+    !isPlainObject(parsed.schedules)
+  ) {
     throw new RegistryError(`${file}: "schedules" must be an object`);
   }
-  return parsed.schedules;
+  return {
+    schedules: parsed?.schedules ?? nullDict(),
+    autoApprove: new Set(allowedLoops ?? []),
+  };
 }
 
 function cloneSchedules(schedules) {
@@ -98,7 +157,12 @@ function cloneSchedules(schedules) {
   return clone;
 }
 
-function applyScheduleOverlay(kernelSchedules, overlay, file) {
+function isOverlayScheduleSource(source) {
+  return source === "overlay" || source === OPERATOR_AUTHORIZED_AUTO_SOURCE;
+}
+
+function applyScheduleOverlay(kernelSchedules, overlayConfig, file) {
+  const { schedules: overlay, autoApprove } = overlayConfig;
   const schedules = cloneSchedules(kernelSchedules);
   const sources = nullDict();
   for (const loop of Object.keys(schedules)) sources[loop] = "kernel";
@@ -115,15 +179,25 @@ function applyScheduleOverlay(kernelSchedules, overlay, file) {
     }
     if (Object.hasOwn(schedules, loop)) {
       for (const field of Object.keys(override)) {
-        if (!SCHEDULE_OVERLAY_FIELDS.has(field)) {
+        if (
+          !SCHEDULE_OVERLAY_FIELDS.has(field) &&
+          !(field === "approval" && override.approval === "auto")
+        ) {
           throw new RegistryError(
-            `${file}: schedules.${loop}.${field} cannot override a kernel schedule (allowed: enabled, every, payload)`,
+            `${file}: schedules.${loop}.${field} cannot override a kernel schedule (allowed: enabled, every, payload, and approval: auto with overlay_auto_approve)`,
           );
         }
       }
       if (override.payload !== undefined && !isPlainObject(override.payload)) {
         throw new RegistryError(
           `${file}: schedules.${loop}.payload must be a plain object`,
+        );
+      }
+      const requestedAuto = override.approval === "auto";
+      const authorizedAuto = requestedAuto && autoApprove.has(loop);
+      if (requestedAuto && !authorizedAuto) {
+        console.warn(
+          `${file}: schedules.${loop}.approval "auto" ignored — ${loop} is not named in overlay_auto_approve, so the loop remains "watched"`,
         );
       }
       schedules[loop] = {
@@ -137,8 +211,14 @@ function applyScheduleOverlay(kernelSchedules, overlay, file) {
               },
             }
           : {}),
+        ...(requestedAuto
+          ? { approval: authorizedAuto ? "auto" : "watched" }
+          : {}),
       };
       overlayFields[loop] = new Set(Object.keys(override));
+      sources[loop] = authorizedAuto
+        ? OPERATOR_AUTHORIZED_AUTO_SOURCE
+        : "overlay";
     } else {
       // A brand-new loop the overlay is introducing has no kernel-reviewed
       // approval policy behind it. It always queues for human approval: an
@@ -161,7 +241,7 @@ function applyScheduleOverlay(kernelSchedules, overlay, file) {
       };
       overlayFields[loop] = new Set(Object.keys(override));
     }
-    sources[loop] = "overlay";
+    if (!Object.hasOwn(sources, loop)) sources[loop] = "overlay";
   }
   return { schedules, sources, overlayFields };
 }
@@ -210,13 +290,16 @@ export function loadPackRoots({ root = reposRoot() } = {}) {
     if (typeof entry.path !== "string" || entry.path.trim() === "") {
       throw new RegistryError(`${at}.path must be a non-empty string`);
     }
+    if (!path.isAbsolute(entry.path)) {
+      throw new RegistryError(`${at}.path must be an absolute path`);
+    }
     if (entry.namespace !== undefined && typeof entry.namespace !== "string") {
       throw new RegistryError(`${at}.namespace must be a string when present`);
     }
     return {
       kind: "fs",
       name: entry.name,
-      path: path.resolve(root, entry.path),
+      path: path.resolve(entry.path),
       ...(entry.namespace !== undefined ? { namespace: entry.namespace } : {}),
     };
   });
@@ -232,6 +315,14 @@ export function createFsPackLoader(
   { builtIn = false, ignorePins = false } = {},
 ) {
   const root = path.resolve(pack.path);
+  let canonicalRoot;
+  try {
+    canonicalRoot = realpathSync(root);
+  } catch (err) {
+    throw new RegistryError(
+      `pack "${pack.name}": root ${root} is not accessible — ${err.message}`,
+    );
+  }
   let pins;
   return {
     listAgentDefs() {
@@ -249,7 +340,7 @@ export function createFsPackLoader(
     // notion, so only the fs loader offers them. loadRegistry treats an
     // absent method as "this pack has no views".
     readArtifactView(entry, def) {
-      return loadArtifactView(root, entry.source, def);
+      return loadArtifactView(root, canonicalRoot, entry.source, def);
     },
     // Optional seam member (WM-840): `panels/*.panel.json` under the pack
     // root, validated by lib/panel-view.mjs; a pack without the directory
@@ -266,7 +357,7 @@ export function createFsPackLoader(
           throw new RegistryError(`${file}: pins must be a path-to-hash map`);
         }
       }
-      const file = path.join(root, relative);
+      const file = resolvePackResource(root, canonicalRoot, relative);
       return {
         expected: builtIn
           ? Object.hasOwn(def.pins ?? nullDict(), relative)
@@ -441,14 +532,14 @@ function readViewFile(abs, rel, def, source) {
   return { file: rel, view, source, anomaly: null };
 }
 
-function loadArtifactView(root, defFile, def) {
+function loadArtifactView(root, canonicalRoot, defFile, def) {
   const agentRel = path.relative(root, defFile).replace(/\.json$/, VIEW_SUFFIX);
-  const agentAbs = path.join(root, agentRel);
+  const agentAbs = resolvePackResource(root, canonicalRoot, agentRel);
   if (existsSync(agentAbs))
     return readViewFile(agentAbs, agentRel, def, "agent");
   const contractRel = contractViewRel(def.output_contract);
   if (contractRel) {
-    const contractAbs = path.join(root, contractRel);
+    const contractAbs = resolvePackResource(root, canonicalRoot, contractRel);
     if (existsSync(contractAbs))
       return readViewFile(contractAbs, contractRel, def, "contract");
   }
@@ -475,6 +566,44 @@ export const DEFAULT_MODEL = "default";
 /** Adapters that accept a model at all. command/actions/fake take none: a
  * declared tier there resolves to null (not applicable), never an error. */
 export const MODEL_ADAPTERS = new Set(["claude", "pi", "agy", "cursor"]);
+
+/**
+ * Compose independently persisted runtime tier cells over the tracked policy
+ * map. Both inputs are validated against the same closed adapter/tier
+ * vocabularies as loadModelTierMap so a corrupt stored row cannot silently
+ * add policy surface at startup.
+ */
+export function composeModelTierMap(tracked = {}, runtime = {}) {
+  const effective = Object.fromEntries(
+    Object.entries(tracked).map(([adapter, tiers]) => [adapter, { ...tiers }]),
+  );
+  for (const [adapter, tiers] of Object.entries(runtime)) {
+    if (!MODEL_ADAPTERS.has(adapter)) {
+      throw new RegistryError(
+        `runtime model-tier override has unknown adapter ${JSON.stringify(adapter)} (expected one of ${[...MODEL_ADAPTERS].join(", ")})`,
+      );
+    }
+    if (typeof tiers !== "object" || tiers === null || Array.isArray(tiers)) {
+      throw new RegistryError(
+        `runtime model-tier override for ${adapter} must map tiers to model values`,
+      );
+    }
+    for (const [tier, model] of Object.entries(tiers)) {
+      if (!MODEL_TIERS.includes(tier)) {
+        throw new RegistryError(
+          `runtime model-tier override ${adapter}.${tier} has unknown tier (expected ${MODEL_TIERS.join(", ")})`,
+        );
+      }
+      if (typeof model !== "string" || model.trim() === "") {
+        throw new RegistryError(
+          `runtime model-tier override ${adapter}.${tier} must be a non-empty model value`,
+        );
+      }
+      effective[adapter] = { ...(effective[adapter] ?? {}), [tier]: model };
+    }
+  }
+  return effective;
+}
 
 /**
  * Read the `models:` tier map from config/policy.yaml (same root rule as
@@ -750,6 +879,23 @@ function loadAgentDef(pack, loader, entry, { builtIn = false } = {}) {
     writable: true,
     configurable: true,
   });
+  // Prompt execution and publication must use the exact immutable bytes whose
+  // digest was accepted above, never a later read through the mutable path.
+  // Keep this runtime snapshot non-enumerable for receipt/registry identity.
+  Object.defineProperty(loaded, "promptText", {
+    value: Buffer.from(resources.prompt.bytes).toString("utf8"),
+    enumerable: false,
+  });
+  // The definition's own JSON file, kept non-enumerably for the same reason as
+  // `pack`: it is loader-injected filesystem provenance, not definition content
+  // hashed into the defHash. Overlay promotion (gh-860) needs the owning file to
+  // write a tracked model_tier/model default; `agentDefinitionFile` reads it.
+  Object.defineProperty(loaded, "defSource", {
+    value: entry?.source ?? null,
+    enumerable: false,
+    writable: true,
+    configurable: true,
+  });
   if (def.memos !== undefined) {
     validateMemosDeclaration(def.memos, {
       source,
@@ -880,6 +1026,7 @@ export function loadRegistry({
   panelRoots = [],
   harnessRoots = [],
   modelTiers = loadModelTierMap(),
+  trackedModelTiers = modelTiers,
   loaderFor = defaultLoaderFor,
   scheduleConfigPath = resolveConfigPath("schedule", {
     root: path.dirname(root),
@@ -1191,10 +1338,9 @@ export function loadRegistry({
   // cadence or an unregistered event type must be a startup error, not a
   // surprise at 03:00 when nothing fires.
   for (const [loop, schedule] of Object.entries(effectiveSchedules)) {
-    const scheduleFile =
-      effectiveScheduleSources[loop] === "overlay"
-        ? scheduleConfigPath
-        : "schedules.json";
+    const scheduleFile = isOverlayScheduleSource(effectiveScheduleSources[loop])
+      ? scheduleConfigPath
+      : "schedules.json";
     if (!/^[a-z][a-z0-9-]*$/.test(loop))
       throw new RegistryError(`${scheduleFile}: bad loop name "${loop}"`);
     if (
@@ -1238,7 +1384,7 @@ export function loadRegistry({
     // of an already-disabled kernel loop does not touch the approval
     // boundary and must still fail closed (WM-998 review).
     const overlayDisabledThisLoop =
-      effectiveScheduleSources[loop] === "overlay" &&
+      isOverlayScheduleSource(effectiveScheduleSources[loop]) &&
       Boolean(effectiveScheduleOverlayFields[loop]?.has("enabled"));
     if (approval === "auto" && !schedule.enabled && !overlayDisabledThisLoop) {
       throw new RegistryError(
@@ -1305,6 +1451,7 @@ export function loadRegistry({
     kernelSchedules,
     scheduleSources: effectiveScheduleSources,
     modelTiers,
+    trackedModelTiers,
     harnessRoots,
   };
 }
@@ -1320,6 +1467,42 @@ export function getAgent(registry, ref) {
   return def;
 }
 
+/**
+ * The repo-relative JSON file that owns an agent's tracked defaults (gh-860).
+ * Overlay promotion writes model_tier/model into this file inside an isolated
+ * worktree; it never resolves against the live checkout. `root` defaults to the
+ * registry root the definition was loaded from, so the returned `file` is the
+ * path a `worktree_up` checkout of the same repo would carry.
+ *
+ * @returns {{ ref: string, file: string, absSource: string }}
+ */
+export function agentDefinitionFile(
+  registry,
+  ref,
+  { root = registry.root } = {},
+) {
+  const def = registry.agents.get(ref);
+  if (!def) throw new RegistryError(`unregistered agent ${ref}`);
+  const absSource = def.defSource;
+  if (typeof absSource !== "string" || absSource.trim() === "") {
+    throw new RegistryError(
+      `agent ${JSON.stringify(ref)} has no owning definition file (not a filesystem pack)`,
+    );
+  }
+  if (!path.isAbsolute(absSource)) {
+    throw new RegistryError(
+      `agent ${JSON.stringify(ref)} definition source ${JSON.stringify(absSource)} is not an absolute path`,
+    );
+  }
+  const file = path.relative(path.resolve(root), absSource);
+  if (file.startsWith("..") || path.isAbsolute(file)) {
+    throw new RegistryError(
+      `agent ${JSON.stringify(ref)} definition ${JSON.stringify(absSource)} is outside root ${JSON.stringify(root)}`,
+    );
+  }
+  return { ref: def.ref, file, absSource };
+}
+
 export function getEventType(registry, type) {
   return Object.hasOwn(registry.eventTypes, type)
     ? registry.eventTypes[type]
@@ -1327,16 +1510,48 @@ export function getEventType(registry, type) {
 }
 
 /**
+ * Serialize `value` as JSON exactly as Prettier 3 would under the repository
+ * configuration for `file`, so a re-pin write leaves the definition canonical
+ * (WM-1119). Prettier's formatter is async; `updatePins` awaits it. `file` is
+ * only used to select the parser and resolve `.prettierrc`, not read or written.
+ */
+async function formatJsonCanonical(file, value) {
+  const options = await resolveConfig(file);
+  return prettierFormat(`${JSON.stringify(value)}\n`, {
+    ...options,
+    filepath: file,
+  });
+}
+
+/**
  * Recompute pins deliberately. With no `pack`, this is byte-for-byte the
  * built-in behavior: inline pins in built-in definitions only. A configured
  * pack must be named explicitly and receives one root-level pins.json.
  * `check: true` reports the same changed names without writing (WM-811).
+ * Changed built-in definitions are re-emitted in Prettier-canonical form so a
+ * re-pin does not redden `format:check` (WM-1119); this makes `updatePins`
+ * async — callers must await it.
  */
-export function updatePins({ root = RUNTIME_ROOT, pack, check = false } = {}) {
+export async function updatePins({
+  root = RUNTIME_ROOT,
+  pack,
+  check = false,
+} = {}) {
   if (pack !== undefined) {
     let descriptor = pack;
     if (typeof pack === "string") {
-      descriptor = loadPackRoots().find((candidate) => candidate.name === pack);
+      const policyPacks = loadPackRoots();
+      descriptor = policyPacks.find((candidate) => candidate.name === pack);
+      if (!descriptor) {
+        // Extension-contributed packs (gh-857): metadata-only discovery so a
+        // stale extension pins.json can be repaired without importing the
+        // extension. Imported lazily — extensions.mjs depends on this module.
+        const { discoverExtensionPackRoots } = await import("./extensions.mjs");
+        [descriptor] = discoverExtensionPackRoots({
+          packRoots: policyPacks,
+          name: pack,
+        });
+      }
       if (!descriptor)
         throw new RegistryError(`unknown configured pack "${pack}"`);
     }
@@ -1366,20 +1581,26 @@ export function updatePins({ root = RUNTIME_ROOT, pack, check = false } = {}) {
   }
 
   const changed = [];
-  const agentsDir = path.join(root, "agents");
+  const resolvedRoot = path.resolve(root);
+  const canonicalRoot = realpathSync(resolvedRoot);
+  const agentsDir = path.join(resolvedRoot, "agents");
   for (const name of readdirSync(agentsDir).filter(isDefinitionFile).sort()) {
     const file = path.join(agentsDir, name);
     const def = readJson(file);
     const pins = {};
     for (const field of PINNED_FIELDS) {
       if (!def[field]) continue;
-      pins[def[field]] = hashBytes(readFileSync(path.join(root, def[field])));
+      pins[def[field]] = hashBytes(
+        readFileSync(
+          resolvePackResource(resolvedRoot, canonicalRoot, def[field]),
+        ),
+      );
     }
     if (JSON.stringify(def.pins) !== JSON.stringify(pins)) {
       if (!check) {
         writeFileSync(
           file,
-          `${JSON.stringify({ ...def, pins }, null, 2)}\n`,
+          await formatJsonCanonical(file, { ...def, pins }),
           "utf8",
         );
       }

@@ -9,10 +9,28 @@
 import { reapExpiredLeases as reapLeases } from "./worker.mjs";
 import { pruneWorkers } from "./workers.mjs";
 
+/**
+ * Reap expired leases, then prune stale workers.
+ *
+ * Every per-row failure is logged (so a poisoned row skipped tick after tick
+ * is visible in the serve log, whose caller discards the return value) AND
+ * collected as `{ runId, error }` with the original Error intact, so callers
+ * that do inspect the result keep stack and cause.
+ */
 export function reapExpiredLeases(db, opts = {}) {
-  const reaped = reapLeases(db, opts);
+  const errors = [];
+  const log = opts.log ?? ((line) => console.error(line));
+  const reaped = reapLeases(db, {
+    ...opts,
+    onError: ({ runId, error }) => {
+      errors.push({ runId, error });
+      log(
+        `[reaper] expired lease ${runId} skipped: ${error?.message ?? String(error)}`,
+      );
+    },
+  });
   pruneWorkers(db, opts);
-  return reaped;
+  return { reaped, errors };
 }
 
 export { pruneWorkers };

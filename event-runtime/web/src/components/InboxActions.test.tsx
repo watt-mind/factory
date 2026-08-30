@@ -208,6 +208,115 @@ test("Replay, Rerun CI, and Ship use their existing API request shapes and refet
   expect(changed).toHaveBeenCalledTimes(3);
 });
 
+test("Replay finds a referenced human-needed event beyond the first 200 events", async () => {
+  const replay = mock(async (_envelope: unknown) => ({
+    admitted: true,
+    duplicate: false,
+    eventId: "new",
+  }));
+  const newerEvents = Array.from({ length: 200 }, (_, index) => ({
+    ...event,
+    eventId: `newer-${index}`,
+    envelope: { ...event.envelope, eventId: `newer-${index}` },
+  }));
+  const olderEvents = Array.from({ length: 49 }, (_, index) => ({
+    ...event,
+    eventId: `older-${index}`,
+    envelope: { ...event.envelope, eventId: `older-${index}` },
+  }));
+  const apiCalls = {
+    events: mock(
+      async (
+        _status?: string,
+        page: { limit?: number; before?: string } = {},
+      ) =>
+        page.before === "cursor-1"
+          ? { events: [...olderEvents, event], nextBefore: null }
+          : { events: newerEvents, nextBefore: "cursor-1" },
+    ),
+    replay,
+    triggerSchedule: mock(async (_loop: string) => ({}) as never),
+    repos: mock(async () => ({ repos: [] }) as never),
+    schedules: mock(async () => ({ schedules: [] }) as never),
+  };
+  const view = render(
+    <InboxActions
+      item={item({
+        kind: "human_needed",
+        refs: { eventSource: "github", eventId: "failed-1" },
+      })}
+      connected
+      onResolve={() => {}}
+      onItemChange={() => {}}
+      apiCalls={apiCalls}
+    />,
+  );
+
+  fireEvent.click(view.getByRole("button", { name: "Replay" }));
+  await waitFor(() => expect(replay).toHaveBeenCalledTimes(1));
+  expect(apiCalls.events).toHaveBeenNthCalledWith(1, "human_needed", {
+    limit: 200,
+    before: undefined,
+  });
+  expect(apiCalls.events).toHaveBeenNthCalledWith(2, "human_needed", {
+    limit: 200,
+    before: "cursor-1",
+  });
+});
+
+test("a successful Replay stays completed and cannot be submitted twice", async () => {
+  const replay = mock(async (_envelope: unknown) => ({
+    admitted: true,
+    duplicate: false,
+    eventId: "new",
+  }));
+  const apiCalls = {
+    events: mock(async () => ({ events: [event] })),
+    replay,
+    triggerSchedule: mock(async (_loop: string) => ({}) as never),
+    repos: mock(async () => ({ repos: [] }) as never),
+    schedules: mock(async () => ({ schedules: [] }) as never),
+  };
+  const view = render(
+    <InboxActions
+      item={item({
+        kind: "human_needed",
+        refs: { eventSource: "github", eventId: "failed-1" },
+      })}
+      connected
+      onResolve={() => {}}
+      onItemChange={() => {}}
+      apiCalls={apiCalls}
+    />,
+  );
+
+  fireEvent.click(view.getByRole("button", { name: "Replay" }));
+  await waitFor(() => expect(replay).toHaveBeenCalledTimes(1));
+  const button = view.getByRole("button", { name: "Replayed" });
+  expect(button.hasAttribute("disabled")).toBe(true);
+  fireEvent.click(button);
+  expect(replay).toHaveBeenCalledTimes(1);
+
+  view.rerender(
+    <InboxActions
+      item={item({
+        kind: "human_needed",
+        title: "Changed action",
+        refs: { eventSource: "github", eventId: "failed-1" },
+      })}
+      connected
+      onResolve={() => {}}
+      onItemChange={() => {}}
+      apiCalls={apiCalls}
+    />,
+  );
+  await waitFor(() =>
+    expect(
+      view.getByRole("button", { name: "Replay" }).hasAttribute("disabled"),
+    ).toBe(false),
+  );
+});
+
 test("an item already correlated to a proposal replaces its mutating action", () => {
   const apiCalls = {
     events: mock(async () => ({ events: [] })),

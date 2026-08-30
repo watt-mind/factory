@@ -277,6 +277,15 @@ function applyGraphOverlay(
  * the capability map overlaid with live run states, admitted/planned event counts,
  * causation invocation counts on recommendation edges, and open proposal ghost nodes.
  */
+/**
+ * Loader for the async layout chunk. Kept as a mutable seam so tests can make
+ * the dynamic import itself reject (a stale chunk after a deploy) without
+ * poisoning bun's process-wide module registry via `mock.module`.
+ */
+export const graphLayoutChunk = {
+  load: () => import("../graph/layout"),
+};
+
 export function Graph({
   context,
   focusNodeId,
@@ -443,7 +452,7 @@ export function Graph({
     // async chunk (OPS-255) — fetched the first time there is a graph to lay
     // out, never by the list views. Overlay polls reuse positions when
     // node/edge identity is unchanged (WM-154).
-    import("../graph/layout").then(
+    graphLayoutChunk.load().then(
       ({ layoutGraphIfIdentityChanged, NODE_HEIGHT, NODE_WIDTH }) => {
         const prevIdentity =
           layoutEpoch !== epochLaidOutRef.current

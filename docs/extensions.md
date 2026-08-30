@@ -365,6 +365,34 @@ directory):
 }
 ```
 
+### Where secrets may live
+
+`format: "secret"` is accepted only on fixed object properties declared in
+`properties`, at any nesting depth. A secret under `items`, under
+`additionalProperties`, or at the schema root is rejected when the extension
+loads: the extension is disabled, its `values` are `null`, and an anomaly
+records `config schema ... declares format "secret" beneath ...`.
+
+Rejected (dynamic location):
+
+```json
+{
+  "type": "array",
+  "items": { "type": "string", "format": "secret" }
+}
+```
+
+Accepted (fixed property):
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "apiToken": { "type": "string", "format": "secret" }
+  }
+}
+```
+
 Values (`config/policy.yaml`) — non-secret settings only:
 
 ```yaml
@@ -677,7 +705,7 @@ The connector never holds the database. `client` is the only runtime surface:
 | `inject(envelope)`                      | Same intake as `cli inject` (`admitExternalEvent`). Overwrites `source` to `connector:<ext>/<name>`. The event follows the normal planner/approval path — a connector cannot approve a proposal it injected.                                                                              |
 | `inbox.list({ status })`                | Open/acked/resolved/all inbox items.                                                                                                                                                                                                                                                      |
 | `inbox.get(id)`                         | One inbox item, or `null`.                                                                                                                                                                                                                                                                |
-| `inbox.decide(id, response, { actor })` | Records `decidedBy: "connector:<ext>/<name>:<actor>"` (`unknown` when actor is omitted).                                                                                                                                                                                                  |
+| `inbox.decide(id, response, { actor })` | Async (returns a promise). Records `decidedBy: "connector:<ext>/<name>:<actor>"` (`unknown` when actor is omitted).                                                                                                                                                                       |
 | `inbox.markDelivered(id, delivery)`     | Shallow-merges `delivery` onto the inbox row's `delivery_json` (e.g. `{ buzz: { eventId, postedAt } }`) without deciding the item. Survives process restart. Does not clobber `responseHistory`.                                                                                          |
 | `inbox.subscribe(cb)`                   | `cb({ type, item, at })` on new-item / changed. Returns an unsubscribe function.                                                                                                                                                                                                          |
 | `proposals.get(id)`                     | One proposal, or `null`.                                                                                                                                                                                                                                                                  |

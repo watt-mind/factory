@@ -11,23 +11,125 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import {
   CURRENT_SCHEMA_VERSION,
   MIGRATIONS,
   assertSchema,
+  DB_BUSY_ATTEMPT_TIMEOUT_MS,
+  DB_BUSY_TIMEOUT_MS,
   getSchemaVersion,
   migrateDb,
   openDb,
   recordRunUsage,
+  retryBusy,
   runUsage,
+  runSubject,
   setSchemaVersion,
   txImmediate,
   usageSpend,
 } from "./db.mjs";
+import { dbPath, isTestOrCiProcess, runtimeHome } from "./config.mjs";
 import { createIsolatedHome, realFactorySnapshot } from "../test-helpers.mjs";
 
 const freshFile = () => path.join(tmpDir("evrt-db-"), "runtime.db");
+
+describe("retryBusy (#1349)", () => {
+  const busyError = () =>
+    Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+
+  test("retries busy attempts asynchronously and restores the connection timeout", async () => {
+    const db = openDb(":memory:");
+    expect(db.query("PRAGMA busy_timeout").get().timeout).toBe(
+      DB_BUSY_TIMEOUT_MS,
+    );
+    let attempts = 0;
+    const busy = busyError();
+    await expect(
+      retryBusy(
+        db,
+        () => {
+          attempts += 1;
+          expect(db.query("PRAGMA busy_timeout").get().timeout).toBe(
+            DB_BUSY_ATTEMPT_TIMEOUT_MS,
+          );
+          throw busy;
+        },
+        { timeoutMs: 5, minDelayMs: 1, maxDelayMs: 1 },
+      ),
+    ).rejects.toBe(busy);
+    expect(attempts).toBeGreaterThan(1);
+    // Other users of the connection get the plain 5 s timeout back.
+    expect(db.query("PRAGMA busy_timeout").get().timeout).toBe(
+      DB_BUSY_TIMEOUT_MS,
+    );
+    db.close();
+  });
+
+  test("returns the first successful attempt's result", async () => {
+    const db = openDb(":memory:");
+    let attempts = 0;
+    const value = await retryBusy(
+      db,
+      () => {
+        attempts += 1;
+        if (attempts < 3) throw busyError();
+        return { attempts };
+      },
+      { minDelayMs: 1, maxDelayMs: 1 },
+    );
+    expect(value).toEqual({ attempts: 3 });
+    db.close();
+  });
+
+  test("non-busy errors propagate immediately", async () => {
+    const db = openDb(":memory:");
+    let attempts = 0;
+    await expect(
+      retryBusy(db, () => {
+        attempts += 1;
+        throw new Error("boom");
+      }),
+    ).rejects.toThrow("boom");
+    expect(attempts).toBe(1);
+    expect(db.query("PRAGMA busy_timeout").get().timeout).toBe(
+      DB_BUSY_TIMEOUT_MS,
+    );
+    db.close();
+  });
+
+  test("a connection tuned below one attempt keeps its fail-fast contract", async () => {
+    const db = openDb(":memory:");
+    db.exec("PRAGMA busy_timeout = 10;");
+    let attempts = 0;
+    const busy = busyError();
+    const startedAt = Date.now();
+    await expect(
+      retryBusy(db, () => {
+        attempts += 1;
+        expect(db.query("PRAGMA busy_timeout").get().timeout).toBe(10);
+        throw busy;
+      }),
+    ).rejects.toBe(busy);
+    // The lowered timeout bounds the whole budget, not just one attempt.
+    expect(attempts).toBe(1);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(db.query("PRAGMA busy_timeout").get().timeout).toBe(10);
+    db.close();
+  });
+
+  test("rejects an asynchronous attempt instead of restoring the timeout under it", async () => {
+    const db = openDb(":memory:");
+    await expect(retryBusy(db, async () => "never")).rejects.toThrow(
+      /must be synchronous/,
+    );
+    expect(db.query("PRAGMA busy_timeout").get().timeout).toBe(
+      DB_BUSY_TIMEOUT_MS,
+    );
+    db.close();
+  });
+});
 
 describe("cold start (OPS-376, OPS-424)", () => {
   test("a second connection to a brand-new database does not fight for the WAL switch", () => {
@@ -130,7 +232,296 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     const db = openDb(file);
     expect(getSchemaVersion(db)).toBe(CURRENT_SCHEMA_VERSION);
     assertSchema(db);
+    expect(
+      db
+        .query(
+          `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_causation'`,
+        )
+        .get()?.sql,
+    ).toContain("events (causation_id, source)");
     db.close();
+  });
+
+  test("chain lookup indexes migrate idempotently onto an existing v13 database", () => {
+    const file = freshFile();
+    const db = new Database(file);
+    migrateDb(db, { targetVersion: 13 });
+    expect(getSchemaVersion(db)).toBe(13);
+    expect(
+      db
+        .query(
+          `SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_causation'`,
+        )
+        .get(),
+    ).toBeNull();
+    db.close();
+
+    const migrated = openDb(file);
+    expect(getSchemaVersion(migrated)).toBe(CURRENT_SCHEMA_VERSION);
+    expect(
+      migrated
+        .query(
+          `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_causation'`,
+        )
+        .get()?.sql,
+    ).toContain("events (causation_id, source)");
+    expect(
+      migrated
+        .query(`PRAGMA table_info(runs)`)
+        .all()
+        .map((row) => row.name),
+    ).toContain("chain_resolved_at");
+
+    // Re-running the idempotent DDL is safe and preserves the index.
+    MIGRATIONS.find((entry) => entry.version === 14).up(migrated);
+    expect(
+      migrated
+        .query(
+          `SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_causation'`,
+        )
+        .get().n,
+    ).toBe(1);
+    migrated.close();
+  });
+
+  test("tier escalation handoffs, inbox proposal IDs and lookup indexes reach schema 19 from a fresh and from a v14 database", () => {
+    expect(CURRENT_SCHEMA_VERSION).toBe(19);
+    const fresh = openDb(freshFile());
+    expect(getSchemaVersion(fresh)).toBe(19);
+    expect(
+      fresh
+        .query(`PRAGMA table_info(outbox)`)
+        .all()
+        .map((row) => row.name),
+    ).toEqual(expect.arrayContaining(["delivery_attempts", "delivery_error"]));
+    expect(
+      fresh
+        .query(`PRAGMA table_info(runs)`)
+        .all()
+        .map((row) => row.name),
+    ).toContain("subject");
+    fresh.close();
+
+    // #1230 (#1197) owns migration 14 and lands first; a database already at
+    // 14 must pick up later migrations, and the guarded DDL must survive
+    // re-running.
+    const file = freshFile();
+    const at14 = new Database(file);
+    migrateDb(at14, { targetVersion: 13 });
+    at14.exec("PRAGMA user_version = 14;");
+    migrateDb(at14);
+    expect(getSchemaVersion(at14)).toBe(19);
+    expect(
+      at14
+        .query(`PRAGMA table_info(outbox)`)
+        .all()
+        .map((row) => row.name),
+    ).toEqual(expect.arrayContaining(["delivery_attempts", "delivery_error"]));
+    expect(
+      at14
+        .query(`PRAGMA table_info(runs)`)
+        .all()
+        .map((row) => row.name),
+    ).toContain("subject");
+    migrateDb(at14);
+    expect(getSchemaVersion(at14)).toBe(19);
+    expect(
+      at14
+        .query(
+          `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tier_escalations'`,
+        )
+        .get()?.name,
+    ).toBe("tier_escalations");
+    at14.close();
+  });
+
+  test("inbox proposal ID migration backfills populated v15 rows and indexes the column", () => {
+    const db = new Database(freshFile());
+    migrateDb(db, { targetVersion: 15 });
+    db.query(
+      `INSERT INTO inbox_items (id, kind, title, refs_json, source, created_at)
+       VALUES (?, 'decision_needed', ?, ?, 'cli', '2026-08-30T00:00:00.000Z')`,
+    ).run("with-proposal", "with proposal", '{"proposalId":"proposal-1"}');
+    db.query(
+      `INSERT INTO inbox_items (id, kind, title, refs_json, source, created_at)
+       VALUES (?, 'BLOCKED', ?, ?, 'cli', '2026-08-30T00:00:00.000Z')`,
+    ).run("without-proposal", "without proposal", '{"repo":"factory"}');
+
+    migrateDb(db);
+
+    expect(CURRENT_SCHEMA_VERSION).toBe(19);
+    expect(getSchemaVersion(db)).toBe(19);
+    expect(
+      db
+        .query(
+          `SELECT id, proposal_id FROM inbox_items
+           WHERE id IN ('with-proposal', 'without-proposal') ORDER BY id`,
+        )
+        .all(),
+    ).toEqual([
+      { id: "with-proposal", proposal_id: "proposal-1" },
+      { id: "without-proposal", proposal_id: null },
+    ]);
+    expect(
+      db
+        .query(
+          `SELECT sql FROM sqlite_master
+           WHERE type = 'index' AND name = 'idx_inbox_items_proposal_id'`,
+        )
+        .get()?.sql,
+    ).toContain("inbox_items (proposal_id)");
+    db.close();
+  });
+
+  test("tier escalation handoffs migrate with unique root and continuation ownership", () => {
+    const db = openDb(freshFile());
+    const columns = db
+      .query(`PRAGMA table_info(tier_escalations)`)
+      .all()
+      .map((row) => row.name);
+    expect(columns).toEqual(
+      expect.arrayContaining([
+        "root_run_id",
+        "failed_run_id",
+        "continuation_run_id",
+        "workspace_path",
+        "source_workspace_path",
+        "projection_state",
+      ]),
+    );
+    db.close();
+  });
+
+  test("runs subject migration retains ticket identifiers and indexes the column", () => {
+    const db = new Database(freshFile());
+    migrateDb(db, { targetVersion: 18 });
+    db.query(
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+       VALUES (?, ?, ?, 'hash', 'COMPLETED', 1, ?, ?)`,
+    ).run(
+      "with-ticket",
+      "with-ticket-key",
+      JSON.stringify({ input: { ticket: " wm-1503 " } }),
+      "2026-08-30T00:00:00.000Z",
+      "2026-08-30T00:00:00.000Z",
+    );
+    db.query(
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+       VALUES (?, ?, ?, 'hash', 'COMPLETED', 1, ?, ?)`,
+    ).run(
+      "with-subject",
+      "with-subject-key",
+      JSON.stringify({ subject: "watt-mind/factory#873" }),
+      "2026-08-30T00:00:00.000Z",
+      "2026-08-30T00:00:00.000Z",
+    );
+    db.query(
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+       VALUES (?, ?, ?, 'hash', 'COMPLETED', 1, ?, ?)`,
+    ).run(
+      "with-ambiguous-subject",
+      "with-ambiguous-subject-key",
+      JSON.stringify({ subject: "#865" }),
+      "2026-08-30T00:00:00.000Z",
+      "2026-08-30T00:00:00.000Z",
+    );
+    db.query(
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+       VALUES (?, ?, ?, 'hash', 'COMPLETED', 1, ?, ?)`,
+    ).run(
+      "without-ticket",
+      "without-ticket-key",
+      JSON.stringify({ input: { repo: "factory" } }),
+      "2026-08-30T00:00:00.000Z",
+      "2026-08-30T00:00:00.000Z",
+    );
+
+    migrateDb(db);
+
+    expect(getSchemaVersion(db)).toBe(19);
+    expect(
+      db.query(`SELECT run_id, subject FROM runs ORDER BY run_id`).all(),
+    ).toEqual([
+      { run_id: "with-ambiguous-subject", subject: null },
+      { run_id: "with-subject", subject: "watt-mind/factory#873" },
+      { run_id: "with-ticket", subject: "WM-1503" },
+      { run_id: "without-ticket", subject: null },
+    ]);
+    expect(
+      db
+        .query(
+          `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_runs_subject'`,
+        )
+        .get()?.sql,
+    ).toContain("runs (subject)");
+    db.close();
+  });
+
+  test("runSubject normalizes Linear IDs and retains GitHub refs verbatim", () => {
+    expect(runSubject({ input: { ticket: " wm-1503 " } })).toBe("WM-1503");
+    expect(runSubject({ subject: "watt-mind/factory#873" })).toBe(
+      "watt-mind/factory#873",
+    );
+    expect(runSubject({ subject: "873" })).toBeNull();
+  });
+
+  test("hot proposal, inbox and runs subject lookup indexes upgrade an existing database", () => {
+    const file = freshFile();
+    const db = new Database(file);
+    // #1325 owns migration 16 (inbox_proposal_id); a database already at 16
+    // must pick up later migrations, and the guarded DDL must survive
+    // re-running.
+    migrateDb(db, { targetVersion: 16 });
+    expect(getSchemaVersion(db)).toBe(16);
+    db.close();
+
+    const migrated = openDb(file);
+    expect(getSchemaVersion(migrated)).toBe(19);
+    migrateDb(migrated);
+    expect(getSchemaVersion(migrated)).toBe(19);
+    const plans = [
+      [
+        "metrics latest proposal",
+        `SELECT p2.rowid FROM proposals p2
+         WHERE p2.run_id = 'run-1'
+         ORDER BY p2.created_at DESC, p2.rowid DESC LIMIT 1`,
+        "idx_proposals_run_id",
+      ],
+      [
+        "event proposal",
+        `SELECT p2.rowid FROM proposals p2
+         WHERE p2.event_source = 'github' AND p2.event_id = 'event-1'
+         ORDER BY p2.created_at DESC, p2.rowid DESC LIMIT 1`,
+        "idx_proposals_event",
+      ],
+      [
+        "inbox correlation",
+        `SELECT p.id FROM events e
+         JOIN proposals p
+           ON p.event_source = e.source AND p.event_id = e.event_id
+         WHERE e.correlation_id = 'inbox-1'
+         ORDER BY p.created_at DESC, p.rowid DESC LIMIT 1`,
+        "idx_events_correlation",
+      ],
+      [
+        "runs subject",
+        `SELECT run_id FROM runs WHERE subject = 'WM-1503'`,
+        "idx_runs_subject",
+      ],
+    ];
+
+    for (const [name, sql, index] of plans) {
+      const detail = migrated
+        .query(`EXPLAIN QUERY PLAN ${sql}`)
+        .all()
+        .map((row) => row.detail)
+        .join("\n");
+      expect(detail, name).toMatch(
+        new RegExp(`USING (?:COVERING )?INDEX ${index}`),
+      );
+      expect(detail, name).not.toMatch(/SCAN (?:p2|p|e)\b/);
+    }
+    migrated.close();
   });
 
   test("metrics indexes migrate onto an existing v2 database (WM-281)", () => {
@@ -216,6 +607,7 @@ describe("schema migration runner and assertions (OPS-415)", () => {
       "dedupe_key",
       "resolved_reason",
       "waiters_json",
+      "proposal_id",
     ]);
     upgraded.close();
   });
@@ -238,7 +630,7 @@ describe("schema migration runner and assertions (OPS-415)", () => {
       .query("PRAGMA table_info(inbox_items)")
       .all()
       .map((row) => row.name);
-    expect(columns.slice(-7)).toEqual([
+    expect(columns.slice(-8)).toEqual([
       "decision_json",
       "response_json",
       "decided_at",
@@ -246,6 +638,7 @@ describe("schema migration runner and assertions (OPS-415)", () => {
       "dedupe_key",
       "resolved_reason",
       "waiters_json",
+      "proposal_id",
     ]);
     expect(
       upgraded.query("SELECT title FROM inbox_items WHERE id = 'legacy'").get()
@@ -577,6 +970,63 @@ describe("hermetic execution guard (OPS-425)", () => {
       expect(() => expectRealDbUnchanged(before, after)).toThrow();
     } finally {
       rmSync(factoryHome, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("default runtime home guard (fail closed in tests/CI)", () => {
+  const liveDefault = path.join(homedir(), ".factory", "event-runtime");
+
+  test("bun test runs with NODE_ENV=test, so the guard is armed here", () => {
+    expect(process.env.NODE_ENV).toBe("test");
+    expect(isTestOrCiProcess(process.env)).toBe(true);
+  });
+
+  test("refuses the default home when FACTORY_EVENT_HOME is unset in a test or CI process", () => {
+    for (const env of [
+      { NODE_ENV: "test" },
+      { BUN_ENV: "test" },
+      { CI: "true" },
+      { CI: "1" },
+    ]) {
+      expect(() => runtimeHome(env)).toThrow(
+        /refusing to use the default runtime home/,
+      );
+      expect(() => dbPath(runtimeHome(env))).toThrow();
+    }
+  });
+
+  test("honours FACTORY_EVENT_HOME in a test or CI process", () => {
+    const isolated = trackTmpDir(createIsolatedHome("evrt-guard-home-"));
+    expect(
+      runtimeHome({ NODE_ENV: "test", FACTORY_EVENT_HOME: isolated }),
+    ).toBe(isolated);
+    expect(runtimeHome({ CI: "true", FACTORY_EVENT_HOME: isolated })).toBe(
+      isolated,
+    );
+  });
+
+  test("plain operator processes still resolve ~/.factory/event-runtime", () => {
+    for (const env of [
+      {},
+      { CI: "" },
+      { CI: "false" },
+      { NODE_ENV: "production" },
+    ]) {
+      expect(isTestOrCiProcess(env)).toBe(false);
+      expect(runtimeHome(env)).toBe(liveDefault);
+    }
+  });
+
+  test("openDb() with no path cannot reach the live database from this test process", () => {
+    const saved = process.env.FACTORY_EVENT_HOME;
+    delete process.env.FACTORY_EVENT_HOME;
+    try {
+      expect(() => openDb()).toThrow(
+        /refusing to use the default runtime home/,
+      );
+    } finally {
+      process.env.FACTORY_EVENT_HOME = saved;
     }
   });
 });

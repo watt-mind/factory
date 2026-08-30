@@ -1,5 +1,6 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-worker-test-mjs";
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import "../test-helpers.mjs";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
 
 /**
@@ -17,6 +18,7 @@ import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
  * state, so a real hang still fails, just not a slow host.
  */
 const EXECUTE_SPAWN_TIMEOUT_MS = loadAdjustedTimeout(5_000);
+import { composeHandoffVerification, insideHandoffSandbox } from "./verify.mjs";
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
@@ -27,8 +29,11 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
+import * as nodeFs from "node:fs";
+const realReadFileSync = nodeFs.readFileSync;
 import { homedir } from "node:os";
 import path from "node:path";
 import {
@@ -37,6 +42,7 @@ import {
 } from "./adapters/claude.mjs";
 import * as fake from "./adapters/fake.mjs";
 import { buildPiArgv, execute as executePi } from "./adapters/pi.mjs";
+import { createAdapterRegistry } from "./adapters/index.mjs";
 import { SandboxUnsupportedError } from "./adapters/sandboxed.mjs";
 import { pinRunArtifact } from "./artifacts.mjs";
 import { admitEvent } from "./intake.mjs";
@@ -55,36 +61,53 @@ import { computeDefHash } from "./receipts.mjs";
 import { getAgent, loadRegistry } from "./registry.mjs";
 import { transcriptSessionId } from "./transcripts.mjs";
 import {
+  dispatchIdentityEnv,
   acquireClaimLock,
   adapterExecuteTimeoutMs,
+  assertHandoffPullRequestBase,
   cancelRun,
+  CLAIM_LOCK_BACKOFF_MAX_MS,
   claimNext,
+  claimedRetryFor,
   CODE_RELOAD_EXIT,
   codeStamp,
   codeStampFiles,
   codeStampRoot,
+  continuationExecutionInput,
+  continuationHandoffFailure,
   createReloadWatcher,
   DEFAULT_MAX_ENVIRONMENT_RETRIES,
   defaultLocksDir,
+  defaultReconcileVerifiedHandoffTicket,
+  defaultProjectTierEscalation,
   defaultReturnHandoffTicket,
+  defaultUnclaimTicket,
   dispatchLockPath,
   DYNAMIC_DEADLINE_ADAPTERS,
   executeClaimed,
   classifyFailureCause,
   expireRunDeadline,
   extendRunDeadline,
+  forceFailRun,
   LEASE_GRACE_SECONDS,
   policyMaxRunMinutes,
+  policyWorkspaceOnlyFallback,
   materializeRunHarness,
   reapExpiredLeases,
+  releaseStalledWorkerLease,
   releaseClaimLock,
   repositoryIsClean,
   repositoryStatus,
   provisionInstanceLocalConfigs,
+  runClaimPathGitProbe,
   resolveLinearApiKey,
+  reconcileTierEscalations,
+  scheduleTierEscalation,
+  tierEscalationEligibility,
   retryRun,
   runLinearCli,
   runOnce,
+  ticketHandoffContext,
 } from "./worker.mjs";
 import {
   liveWorkerLeases,
@@ -99,95 +122,22 @@ import {
   trackProcessGroupsMatching,
 } from "./test-helpers-process.mjs";
 
+import {
+  EMPTY_POLICY_ROOT,
+  adapters,
+  freshRoot,
+  insertStalledWorker,
+  linkEvent,
+  makeSpec,
+  opts,
+  queueRun,
+  registry,
+  T0,
+} from "./worker-test-helpers.mjs";
+
 registerTestProcessCleanup(import.meta.url);
 
-const registry = loadRegistry();
-const adapters = { fake };
-const T0 = Date.parse("2026-08-12T10:00:00Z");
-
 let seq = 0;
-function makeSpec(overrides = {}) {
-  const runId =
-    overrides.runId ??
-    `run_worker_${++seq}_${Math.random().toString(36).slice(2)}`;
-  const input = overrides.input ?? { repos: ["ok"] };
-  return {
-    schemaVersion: "factory.run-spec/v1",
-    runId,
-    agent: "factory-status-report@1",
-    input,
-    inputHash: hashJson(input),
-    workspace: { type: "ephemeral", retainOnFailure: true },
-    adapter: "fake",
-    promptVersion: "git:test",
-    policyVersion: "git:test",
-    outputContract: "factory.status-report/v1",
-    capabilities: ["tracker:read"],
-    timeoutSeconds: 5,
-    maxAttempts: 1,
-    idempotencyKey: `idem-${runId}`,
-    ...overrides,
-  };
-}
-
-function queueRun(db, spec, now = T0) {
-  createRun(db, {
-    runId: spec.runId,
-    idempotencyKey: spec.idempotencyKey,
-    spec,
-    specJson: canonicalJson(spec),
-    specHash: hashJson(spec),
-    actor: "test",
-    policyVersion: "test",
-    now,
-  });
-  transition(db, { runId: spec.runId, to: "APPROVED", actor: "test", now });
-  transition(db, { runId: spec.runId, to: "QUEUED", actor: "test", now });
-  return spec;
-}
-
-/** Link the run to an admitted event via a proposal, like the planner would. */
-function linkEvent(
-  db,
-  runId,
-  { type = "factory.status-report.requested", correlationId = "corr-1" } = {},
-) {
-  const at = new Date(T0).toISOString();
-  db.query(
-    `INSERT INTO events (source, event_id, type, subject, occurred_at, received_at, correlation_id, causation_id, envelope_json, payload_hash, admitted_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    "test",
-    `evt-${runId}`,
-    type,
-    "factory",
-    at,
-    at,
-    correlationId,
-    null,
-    "{}",
-    "sha256:x",
-    at,
-  );
-  db.query(
-    `INSERT INTO proposals (id, event_source, event_id, run_id, decision, created_at, ttl_seconds)
-     VALUES (?, ?, ?, ?, 'RUN_SPEC', ?, 1800)`,
-  ).run(`prop-${runId}`, "test", `evt-${runId}`, runId, at);
-}
-
-function freshRoot() {
-  return tmpDir("evrt-worker-");
-}
-
-function opts(extra = {}) {
-  return {
-    owner: "w1",
-    workspacesRoot: freshRoot(),
-    now: T0,
-    policyVersion: "test",
-    ...extra,
-  };
-}
 
 describe("worker", () => {
   test("materialized harness entries record hashes for every copied file", () => {
@@ -266,7 +216,7 @@ describe("worker", () => {
     });
   });
 
-  test("provisions present instance configs into an ignored checkout and skips absent files", () => {
+  test("provisions present instance configs into an ignored checkout and skips absent files", async () => {
     const factoryRoot = tmpDir("evrt-instance-config-source-");
     const checkout = tmpDir("evrt-instance-config-checkout-");
     try {
@@ -289,7 +239,10 @@ describe("worker", () => {
       );
 
       expect(
-        provisionInstanceLocalConfigs({ factoryRoot, checkoutPath: checkout }),
+        await provisionInstanceLocalConfigs({
+          factoryRoot,
+          checkoutPath: checkout,
+        }),
       ).toEqual(["config/repos.yaml", "config/policy.yaml"]);
       expect(
         readFileSync(path.join(checkout, "config", "repos.yaml"), "utf8"),
@@ -309,12 +262,76 @@ describe("worker", () => {
     }
   });
 
-  test("silently skips instance config provisioning when no local files exist", () => {
+  test("does not materialize a stale operator schedule overlay, so a worktree stays verifiable after client schedules leave the kernel (#1051)", async () => {
+    const factoryRoot = tmpDir("evrt-schedule-overlay-source-");
+    const checkout = tmpDir("evrt-schedule-overlay-checkout-");
+    try {
+      mkdirSync(path.join(factoryRoot, "config"), { recursive: true });
+      mkdirSync(path.join(checkout, "config"), { recursive: true });
+      writeFileSync(
+        path.join(checkout, ".gitignore"),
+        "config/repos.yaml\nconfig/policy.yaml\nconfig/schedule.yaml\n",
+      );
+      expect(spawnSync("git", ["init", "-q"], { cwd: checkout }).status).toBe(
+        0,
+      );
+      writeFileSync(
+        path.join(factoryRoot, "config", "repos.yaml"),
+        "repos: []\n",
+      );
+      // A checkout tracks only the example overlay; the branch has trimmed the
+      // client loop out of the kernel, so the tracked example carries no
+      // `work-bj29`.
+      writeFileSync(
+        path.join(checkout, "config", "schedule.example.yaml"),
+        "jobs: []\n",
+      );
+      // The live operator overlay still carries a stale, partial entry for the
+      // now-kernel-less loop: `enabled: true` with no cadence. Copied into the
+      // checkout it would load as a brand-new overlay loop with no `every` and
+      // detonate the repo verify gate with `unparseable cadence "undefined"`.
+      writeFileSync(
+        path.join(factoryRoot, "config", "schedule.yaml"),
+        "schedules:\n  work-bj29:\n    enabled: true\n",
+      );
+
+      expect(
+        await provisionInstanceLocalConfigs({
+          factoryRoot,
+          checkoutPath: checkout,
+        }),
+      ).toEqual(["config/repos.yaml"]);
+
+      // The stale overlay never lands in the checkout ...
+      expect(existsSync(path.join(checkout, "config", "schedule.yaml"))).toBe(
+        false,
+      );
+      // ... so schedule resolution falls back to the tracked example, which
+      // parses cleanly and has no cadence-less loop to break verify.
+      const resolved = resolveConfigPath("schedule", {
+        root: checkout,
+        warn: false,
+      });
+      expect(resolved).toBe(
+        path.join(checkout, "config", "schedule.example.yaml"),
+      );
+      const parsed = Bun.YAML.parse(readFileSync(resolved, "utf8"));
+      expect(parsed?.schedules?.["work-bj29"]).toBeUndefined();
+    } finally {
+      rmSync(factoryRoot, { recursive: true, force: true });
+      rmSync(checkout, { recursive: true, force: true });
+    }
+  });
+
+  test("silently skips instance config provisioning when no local files exist", async () => {
     const factoryRoot = tmpDir("evrt-instance-config-empty-source-");
     const checkout = tmpDir("evrt-instance-config-empty-checkout-");
     try {
       expect(
-        provisionInstanceLocalConfigs({ factoryRoot, checkoutPath: checkout }),
+        await provisionInstanceLocalConfigs({
+          factoryRoot,
+          checkoutPath: checkout,
+        }),
       ).toEqual([]);
     } finally {
       rmSync(factoryRoot, { recursive: true, force: true });
@@ -322,7 +339,12 @@ describe("worker", () => {
     }
   });
 
-  test("does not provision instance config into a checkout that could stage it", () => {
+  test("provisions instance config into a client checkout but makes it un-stageable", async () => {
+    // A client repo (bj29, cashsaas, …) does not gitignore config/repos.yaml,
+    // so the old guard skipped the copy and left the review with no config —
+    // failing it closed. Now the path is added to the checkout's local exclude
+    // and the config IS copied, so merge-review can resolve the repo's control
+    // plane and merge_ci gate, while an agent still cannot `git add` it.
     const factoryRoot = tmpDir("evrt-instance-config-protected-source-");
     const checkout = tmpDir("evrt-instance-config-protected-checkout-");
     try {
@@ -336,15 +358,113 @@ describe("worker", () => {
       );
 
       expect(
-        provisionInstanceLocalConfigs({ factoryRoot, checkoutPath: checkout }),
-      ).toEqual([]);
+        await provisionInstanceLocalConfigs({
+          factoryRoot,
+          checkoutPath: checkout,
+        }),
+      ).toEqual(["config/repos.yaml"]);
+      // Copied in, so the run can read it.
       expect(existsSync(path.join(checkout, "config", "repos.yaml"))).toBe(
-        false,
+        true,
       );
+      // But un-stageable: git now ignores it (via .git/info/exclude).
+      expect(
+        spawnSync(
+          "git",
+          ["-C", checkout, "check-ignore", "-q", "--", "config/repos.yaml"],
+          { encoding: "utf8" },
+        ).status,
+      ).toBe(0);
     } finally {
       rmSync(factoryRoot, { recursive: true, force: true });
       rmSync(checkout, { recursive: true, force: true });
     }
+  });
+
+  test("kills timed-out claim-path probe groups and traces both probes", async () => {
+    const factoryRoot = tmpDir("evrt-instance-config-timeout-source-");
+    const checkout = tmpDir("evrt-instance-config-timeout-checkout-");
+    const bin = tmpDir("evrt-instance-config-timeout-bin-");
+    const previousPath = process.env.PATH;
+    const previousTimeout = process.env.FACTORY_WORKER_SUBPROCESS_TIMEOUT_MS;
+    try {
+      mkdirSync(path.join(factoryRoot, "config"), { recursive: true });
+      writeFileSync(
+        path.join(factoryRoot, "config", "repos.yaml"),
+        "repos: []\n",
+      );
+      expect(spawnSync("git", ["init", "-q"], { cwd: checkout }).status).toBe(
+        0,
+      );
+      writeFileSync(
+        path.join(bin, "git"),
+        `#!/bin/sh
+case "$3" in
+  rev-parse)
+    if [ "$4" = "--is-inside-work-tree" ]; then
+      printf 'true\\n'
+      exit 0
+    fi
+    ;;
+esac
+sh -c 'sleep 5 & wait'
+`,
+        { mode: 0o755 },
+      );
+      process.env.PATH = `${bin}${path.delimiter}${previousPath}`;
+      process.env.FACTORY_WORKER_SUBPROCESS_TIMEOUT_MS = "25";
+
+      const timeouts = [];
+      const started = Date.now();
+      expect(
+        await provisionInstanceLocalConfigs({
+          factoryRoot,
+          checkoutPath: checkout,
+          onProbeTimeout: (timeout) => timeouts.push(timeout),
+        }),
+      ).toEqual([]);
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(timeouts).toEqual([
+        expect.objectContaining({ name: "check-ignore", ceilingMs: 25 }),
+        expect.objectContaining({ name: "rev-parse", ceilingMs: 25 }),
+      ]);
+    } finally {
+      process.env.PATH = previousPath;
+      if (previousTimeout === undefined)
+        delete process.env.FACTORY_WORKER_SUBPROCESS_TIMEOUT_MS;
+      else process.env.FACTORY_WORKER_SUBPROCESS_TIMEOUT_MS = previousTimeout;
+      rmSync(factoryRoot, { recursive: true, force: true });
+      rmSync(checkout, { recursive: true, force: true });
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  test("claim-path git probe settles as a failed probe when the binary does not exist", async () => {
+    const missing = path.join(
+      tmpDir("evrt-claim-probe-missing-bin-"),
+      "definitely-not-git",
+    );
+    const timeouts = [];
+    const started = Date.now();
+    const probe = await runClaimPathGitProbe({
+      checkoutPath: "/nonexistent/checkout",
+      args: ["rev-parse", "--git-path", "info/exclude"],
+      name: "rev-parse",
+      command: missing,
+      onTimeout: (timeout) => timeouts.push(timeout),
+    });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(probe.status).not.toBe(0);
+    expect(probe.stdout).toBe("");
+    expect(probe.error?.code).toBe("ENOENT");
+    expect(timeouts).toEqual([]);
+    rmSync(path.dirname(missing), { recursive: true, force: true });
+  });
+
+  test("provisioning always returns a promise, even without a checkout path", async () => {
+    const result = provisionInstanceLocalConfigs({});
+    expect(result).toBeInstanceOf(Promise);
+    expect(await result).toEqual([]);
   });
 
   test("repository integrity gate rejects any checkout dirt before output acceptance", () => {
@@ -697,12 +817,31 @@ describe("worker", () => {
   test("refuse: REFUSED, results row stored, no outbox row, workspace destroyed", async () => {
     const db = openDb(":memory:");
     const spec = queueRun(db, makeSpec({ input: { repos: ["refuse"] } }));
+    db.query(
+      `INSERT INTO proposals
+         (id, event_source, event_id, run_id, decision, spec_json, spec_hash,
+          idempotency_key, status, created_at, ttl_seconds)
+       VALUES ('prop-stale-open', 'chain', 'evt-stale-open', ?, 'run', ?,
+               'sha256:test', ?, 'open', ?, 1800)`,
+    ).run(
+      spec.runId,
+      JSON.stringify(spec),
+      spec.idempotencyKey,
+      new Date(T0).toISOString(),
+    );
     const o = opts();
 
     const summary = await runOnce(db, registry, adapters, o);
     expect(summary.terminalState).toBe("REFUSED");
     expect(summary.reasonCode).toBe("needs_human");
     expect(runState(db, spec.runId)).toBe("REFUSED");
+    expect(
+      db
+        .query(
+          `SELECT status, reason FROM proposals WHERE id = 'prop-stale-open'`,
+        )
+        .get(),
+    ).toEqual({ status: "rejected", reason: "run_refused" });
 
     const result = db
       .query(`SELECT * FROM results WHERE run_id = ?`)
@@ -771,6 +910,99 @@ describe("worker", () => {
     ]);
     expect(parsed.artifacts[1].sha256).toMatch(/^[0-9a-f]{64}$/);
   });
+
+  test("refusal omits a runtime artifact unlinked between preflight and read", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({ input: { repos: ["refuse"] } }));
+    // Simulate the guest deleting .transcript.json after confinement passed
+    // but before the host read it: the read itself reports ENOENT.
+    const readSpy = spyOn(nodeFs, "readFileSync").mockImplementation(
+      (file, ...rest) => {
+        if (String(file).endsWith(".transcript.json")) {
+          rmSync(file, { force: true });
+        }
+        return realReadFileSync(file, ...rest);
+      },
+    );
+    try {
+      const summary = await runOnce(db, registry, adapters, opts());
+      expect(summary).toMatchObject({
+        terminalState: "REFUSED",
+        reasonCode: "needs_human",
+      });
+      const parsed = JSON.parse(
+        db
+          .query(`SELECT result_json FROM results WHERE run_id = ?`)
+          .get(spec.runId).result_json,
+      );
+      expect(parsed.artifacts).toEqual([]);
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
+  for (const artifact of [
+    { kind: "transcript", path: ".transcript.json" },
+    { kind: "sandbox-console", path: ".sandbox-console.log" },
+  ]) {
+    for (const linkType of ["absolute", "relative"]) {
+      test(`refusal omits ${artifact.kind} replaced by a ${linkType} final symlink before reading or storing it`, async () => {
+        const db = openDb(":memory:");
+        const spec = queueRun(db, makeSpec({ input: { repos: ["refuse"] } }));
+        const artifactStore = freshRoot();
+        const outsideDir = freshRoot();
+        const secretBytes = `host bytes for ${artifact.kind} ${linkType}\n`;
+        const outsideFile = path.join(outsideDir, "host-secret.txt");
+        writeFileSync(outsideFile, secretBytes, "utf8");
+        // A non-privileged worker cannot open this target. The refusal must
+        // still complete because confinement rejects the link before read.
+        chmodSync(outsideFile, 0);
+        const secretHash = createHash("sha256")
+          .update(secretBytes)
+          .digest("hex");
+        const symlinkedArtifactAdapter = {
+          async execute(args) {
+            const outcome = await fake.execute(args);
+            const runtimePath = path.join(args.workspaceDir, artifact.path);
+            rmSync(runtimePath, { force: true });
+            const target =
+              linkType === "absolute"
+                ? outsideFile
+                : path.relative(args.workspaceDir, outsideFile);
+            symlinkSync(target, runtimePath);
+            return outcome;
+          },
+        };
+
+        const summary = await runOnce(
+          db,
+          registry,
+          { fake: symlinkedArtifactAdapter },
+          opts({ artifactStore }),
+        );
+
+        expect(summary).toMatchObject({
+          terminalState: "REFUSED",
+          reasonCode: "needs_human",
+        });
+        const parsed = JSON.parse(
+          db
+            .query(`SELECT result_json FROM results WHERE run_id = ?`)
+            .get(spec.runId).result_json,
+        );
+        expect(parsed.artifacts.map((entry) => entry.kind)).not.toContain(
+          artifact.kind,
+        );
+        if (artifact.kind === "sandbox-console") {
+          expect(parsed.artifacts.map((entry) => entry.kind)).toEqual([
+            "transcript",
+          ]);
+          expect(existsSync(new URL(parsed.artifacts[0].uri))).toBe(true);
+        }
+        expect(existsSync(path.join(artifactStore, secretHash))).toBe(false);
+      });
+    }
+  }
 
   test("needs_human preserves a valid authored ask, while an invalid ask falls back with its errors", async () => {
     const authored = {
@@ -962,6 +1194,31 @@ describe("worker", () => {
     expect(summary.reasonCode).toBe("contract_violation");
   });
 
+  test("a trace recorder that cannot be prepared degrades to a no-op instead of throwing out of executeClaimed (#1330)", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec());
+    linkEvent(db, spec.runId);
+    db.exec(`DROP TABLE attempt_trace`);
+    const err = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const summary = await runOnce(
+        db,
+        registry,
+        adapters,
+        opts({ artifactStore: freshRoot() }),
+      );
+      expect(summary.terminalState).toBe("COMPLETED");
+      expect(runState(db, spec.runId)).toBe("COMPLETED");
+      expect(
+        err.mock.calls.some((c) =>
+          String(c[0]).includes("trace recorder unavailable"),
+        ),
+      ).toBe(true);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
   test("no-result: FAILED/contract_violation", async () => {
     const db = openDb(":memory:");
     const spec = queueRun(db, makeSpec({ input: { repos: ["no-result"] } }));
@@ -1082,10 +1339,25 @@ describe("worker", () => {
     };
     const spec = queueRun(db, makeSpec({ adapter: "fake", timeoutSeconds: 5 }));
     expect(DYNAMIC_DEADLINE_ADAPTERS.has(spec.adapter)).toBe(true);
-    const liveMaxMinutes = policyMaxRunMinutes();
-    expect(liveMaxMinutes).toBeGreaterThan(0);
+    // The ceiling comes from the policy root runOnce is given. Reading the
+    // live one instead only agreed because both happened to reach the
+    // checkout's own config/policy.yaml, which a provisioned worktree carries
+    // and a clean checkout does not (#1285).
+    const policyRoot = freshRoot();
+    mkdirSync(path.join(policyRoot, "config"), { recursive: true });
+    writeFileSync(
+      path.join(policyRoot, "config", "policy.yaml"),
+      "limits:\n  max_run_minutes: 7\n",
+    );
+    const liveMaxMinutes = policyMaxRunMinutes(policyRoot);
+    expect(liveMaxMinutes).toBe(7);
 
-    const summary = await runOnce(db, registry, { fake: recording }, opts());
+    const summary = await runOnce(
+      db,
+      registry,
+      { fake: recording },
+      opts({ policyRoot }),
+    );
     expect(summary.terminalState).toBe("COMPLETED");
     expect(seen).toHaveLength(1);
     // The ceiling every policy-bounded extension can reach, and nothing beyond it.
@@ -1382,7 +1654,25 @@ describe("worker", () => {
 
   test("attempt 2 resumes the prior harness session and stale attempt 1 remains fenced", async () => {
     const db = openDb(":memory:");
-    const spec = queueRun(db, makeSpec({ adapter: "claude", maxAttempts: 2 }));
+    const resumeRegistry = {
+      ...registry,
+      agents: new Map(registry.agents),
+    };
+    resumeRegistry.agents.set("factory-status-report@1", {
+      ...getAgent(registry, "factory-status-report@1"),
+      // This test owns resume/fencing, not workspace-only admission.
+      capabilities: { filesystem: "read-only", services: ["tracker:read"] },
+    });
+    const spec = queueRun(
+      db,
+      makeSpec({
+        adapter: "claude",
+        maxAttempts: 2,
+        defHash: computeDefHash(
+          resumeRegistry.agents.get("factory-status-report@1"),
+        ),
+      }),
+    );
     const o = opts();
     const stale = claimNext(db, o);
     const priorWorkspace = path.join(o.workspacesRoot, `${spec.runId}-a1`);
@@ -1414,7 +1704,7 @@ describe("worker", () => {
     };
     const done = await executeClaimed(
       db,
-      registry,
+      resumeRegistry,
       { claude: resumeAdapter },
       fresh,
       { ...o, now: afterExpiry },
@@ -1428,7 +1718,7 @@ describe("worker", () => {
 
     const zombie = await executeClaimed(
       db,
-      registry,
+      resumeRegistry,
       { claude: resumeAdapter },
       stale,
       { ...o, now: afterExpiry },
@@ -1444,7 +1734,25 @@ describe("worker", () => {
 
   test("attempt 2 cold-starts cleanly when the prior transcript has no resumable session", async () => {
     const db = openDb(":memory:");
-    const spec = queueRun(db, makeSpec({ adapter: "claude", maxAttempts: 2 }));
+    const resumeRegistry = {
+      ...registry,
+      agents: new Map(registry.agents),
+    };
+    resumeRegistry.agents.set("factory-status-report@1", {
+      ...getAgent(registry, "factory-status-report@1"),
+      // This test owns resume extraction, not workspace-only admission.
+      capabilities: { filesystem: "read-only", services: ["tracker:read"] },
+    });
+    const spec = queueRun(
+      db,
+      makeSpec({
+        adapter: "claude",
+        maxAttempts: 2,
+        defHash: computeDefHash(
+          resumeRegistry.agents.get("factory-status-report@1"),
+        ),
+      }),
+    );
     const o = opts();
     claimNext(db, o);
     const priorWorkspace = path.join(o.workspacesRoot, `${spec.runId}-a1`);
@@ -1482,7 +1790,7 @@ describe("worker", () => {
     };
     const done = await executeClaimed(
       db,
-      registry,
+      resumeRegistry,
       { claude: coldAdapter },
       fresh,
       { ...o, now: afterExpiry },
@@ -1555,8 +1863,16 @@ describe("worker", () => {
       chmodSync(executable, 0o755);
     }
     const promptPath = path.join(root, "prompt.md");
-    writeFileSync(promptPath, "Continue the run.\n");
-    const def = { promptPath, mutating: true, capabilities: { tools: [] } };
+    const promptText = "Continue the run.\n";
+    writeFileSync(promptPath, promptText);
+    // Adapters execute only registry-verified promptText (#1218); promptPath
+    // stays on the def for provenance.
+    const def = {
+      promptPath,
+      promptText,
+      mutating: true,
+      capabilities: { tools: [] },
+    };
     const spec = { model: null, input: {} };
 
     const claudeWorkspace = path.join(root, "claude-workspace");
@@ -1683,6 +1999,29 @@ describe("worker", () => {
     expect(db.query(`SELECT * FROM outbox`).all()).toHaveLength(0);
   });
 
+  test("the suite's policy root is pinned, so a provisioned worktree's instance policy cannot decide a test (#1285)", () => {
+    // Seed a worktree-like checkout the way bin/worktree-up.sh does: a real,
+    // non-default config/policy.yaml beside the code under test.
+    const worktreeLike = tmpDir("evrt-worktree-like-");
+    mkdirSync(path.join(worktreeLike, "config"), { recursive: true });
+    writeFileSync(
+      path.join(worktreeLike, "config", "policy.yaml"),
+      "sandbox:\n  workspace_only_fallback:\n    mode: host\n    agents:\n      - factory-status-report\n",
+    );
+    // The fixture is genuinely non-default...
+    expect(policyWorkspaceOnlyFallback(worktreeLike)).toEqual({
+      mode: "host",
+      agents: ["factory-status-report"],
+    });
+    // ...and every runOnce in this file still reads the fail-closed default,
+    // whatever config/policy.yaml the checkout it runs from happens to hold.
+    expect(opts().policyRoot).toBe(EMPTY_POLICY_ROOT);
+    expect(
+      existsSync(path.join(EMPTY_POLICY_ROOT, "config", "policy.yaml")),
+    ).toBe(false);
+    expect(policyWorkspaceOnlyFallback(EMPTY_POLICY_ROOT)).toBeNull();
+  });
+
   test("unknown adapter fails terminal", async () => {
     const db = openDb(":memory:");
     const spec = queueRun(db, makeSpec({ adapter: "nonexistent" }));
@@ -1690,6 +2029,275 @@ describe("worker", () => {
     const summary = await runOnce(db, registry, adapters, opts());
     expect(summary.terminalState).toBe("FAILED");
     expect(summary.reasonCode).toBe("unknown_adapter");
+  });
+
+  test("workspace-only model execution is refused before workspace creation or adapter spawn (#962)", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(
+      db,
+      makeSpec({
+        adapter: "claude",
+        defHash: computeDefHash(getAgent(registry, "factory-status-report@1")),
+      }),
+    );
+    const workspacesRoot = freshRoot();
+    let executed = false;
+    const guardedAdapters = createAdapterRegistry({
+      builtins: {
+        claude: {
+          SANDBOX_SUPPORT: "unsupported",
+          async execute() {
+            executed = true;
+            throw new Error("model adapter must not spawn");
+          },
+        },
+      },
+    }).toMap();
+
+    const summary = await runOnce(
+      db,
+      registry,
+      guardedAdapters,
+      opts({
+        workspacesRoot,
+        sandboxAvailability: {
+          available: false,
+          qemu: null,
+          node: null,
+          nodeVersion: null,
+          sdk: false,
+          reason: "qemu-system-x86_64 is not on PATH",
+        },
+      }),
+    );
+
+    expect(summary).toMatchObject({
+      terminalState: "REFUSED",
+      reasonCode: "filesystem_confinement_unavailable",
+    });
+    expect(executed).toBe(false);
+    expect(readdirSync(workspacesRoot)).toEqual([]);
+    expect(runState(db, spec.runId)).toBe("REFUSED");
+    expect(lifecycleOf(db, spec.runId).at(-1).reason).toContain(
+      "sandbox_unavailable:qemu",
+    );
+    expect(
+      JSON.parse(
+        db
+          .query(`SELECT result_json FROM results WHERE run_id = ?`)
+          .get(spec.runId).result_json,
+      ).verification,
+    ).toEqual({ status: "passed", checks: ["filesystem_confinement"] });
+  });
+
+  test("explicit host fallback runs workspace-only models and attests the unconfined receipt (#1250)", async () => {
+    const db = openDb(":memory:");
+    const def = getAgent(registry, "factory-status-report@1");
+    const spec = queueRun(
+      db,
+      makeSpec({ adapter: "claude", defHash: computeDefHash(def) }),
+    );
+    const policyRoot = freshRoot();
+    mkdirSync(path.join(policyRoot, "config"), { recursive: true });
+    writeFileSync(
+      path.join(policyRoot, "config", "policy.yaml"),
+      "sandbox:\n  workspace_only_fallback:\n    mode: host\n    agents:\n      - factory-status-report\n",
+    );
+    expect(policyWorkspaceOnlyFallback(policyRoot)).toEqual({
+      mode: "host",
+      agents: ["factory-status-report"],
+    });
+
+    const guardedAdapters = createAdapterRegistry({
+      builtins: {
+        claude: { ...fake, SANDBOX_SUPPORT: "unsupported" },
+      },
+    }).toMap();
+    const summary = await runOnce(
+      db,
+      registry,
+      guardedAdapters,
+      opts({
+        policyRoot,
+        sandboxAvailability: {
+          available: false,
+          qemu: null,
+          node: null,
+          nodeVersion: null,
+          sdk: false,
+          reason: "qemu-system-x86_64 is not on PATH",
+        },
+      }),
+    );
+
+    const expected = {
+      status: "unconfined",
+      declared: "workspace-only",
+      fallback: "host",
+      source: "policy:sandbox.workspace_only_fallback",
+      agent: "factory-status-report",
+      hostCapability: "qemu",
+    };
+    expect(summary).toMatchObject({
+      terminalState: "COMPLETED",
+      receipt: { filesystemConfinement: expected },
+    });
+    expect(
+      JSON.parse(
+        db
+          .query(`SELECT receipt_json FROM results WHERE run_id = ?`)
+          .get(spec.runId).receipt_json,
+      ).filesystemConfinement,
+    ).toEqual(expected);
+  });
+
+  test("an agent the fallback allow-list omits is still refused for the missing host capability (#1250)", async () => {
+    const db = openDb(":memory:");
+    const def = getAgent(registry, "factory-status-report@1");
+    const spec = queueRun(
+      db,
+      makeSpec({ adapter: "claude", defHash: computeDefHash(def) }),
+    );
+    const policyRoot = freshRoot();
+    mkdirSync(path.join(policyRoot, "config"), { recursive: true });
+    // The stanza exists, but it names a different agent.
+    writeFileSync(
+      path.join(policyRoot, "config", "policy.yaml"),
+      "sandbox:\n  workspace_only_fallback:\n    mode: host\n    agents:\n      - work-scan\n",
+    );
+
+    const guardedAdapters = createAdapterRegistry({
+      builtins: { claude: { ...fake, SANDBOX_SUPPORT: "unsupported" } },
+    }).toMap();
+    const summary = await runOnce(
+      db,
+      registry,
+      guardedAdapters,
+      opts({
+        policyRoot,
+        sandboxAvailability: {
+          available: false,
+          qemu: null,
+          node: null,
+          nodeVersion: null,
+          sdk: false,
+          reason: "qemu-system-x86_64 is not on PATH",
+        },
+      }),
+    );
+
+    expect(summary).toMatchObject({ terminalState: "REFUSED" });
+    expect(runState(db, spec.runId)).toBe("REFUSED");
+    expect(lifecycleOf(db, spec.runId).at(-1).reason).toContain(
+      "sandbox_unavailable:qemu",
+    );
+    expect(
+      JSON.parse(
+        db
+          .query(`SELECT receipt_json FROM results WHERE run_id = ?`)
+          .get(spec.runId).receipt_json,
+      ).filesystemConfinement,
+    ).toBeUndefined();
+  });
+
+  test("an unconfined admission is attested on non-receipt terminal paths too (#1250)", async () => {
+    const db = openDb(":memory:");
+    const def = getAgent(registry, "factory-status-report@1");
+    const spec = queueRun(
+      db,
+      makeSpec({
+        adapter: "claude",
+        defHash: computeDefHash(def),
+        maxAttempts: 1,
+      }),
+    );
+    const policyRoot = freshRoot();
+    mkdirSync(path.join(policyRoot, "config"), { recursive: true });
+    writeFileSync(
+      path.join(policyRoot, "config", "policy.yaml"),
+      "sandbox:\n  workspace_only_fallback:\n    mode: host\n    agents:\n      - factory-status-report\n",
+    );
+
+    // FAILED writes no results receipt, so the attestation has to survive on
+    // the attempt trace or it would exist only for runs that completed.
+    const guardedAdapters = createAdapterRegistry({
+      builtins: {
+        claude: {
+          ...fake,
+          SANDBOX_SUPPORT: "unsupported",
+          execute: async () => {
+            throw new Error("adapter blew up");
+          },
+        },
+      },
+    }).toMap();
+    const summary = await runOnce(
+      db,
+      registry,
+      guardedAdapters,
+      opts({
+        policyRoot,
+        sandboxAvailability: {
+          available: false,
+          qemu: null,
+          node: null,
+          nodeVersion: null,
+          sdk: false,
+          reason: "qemu-system-x86_64 is not on PATH",
+        },
+      }),
+    );
+
+    expect(summary.terminalState).toBe("FAILED");
+    const attested = db
+      .query(`SELECT payload_json FROM attempt_trace WHERE run_id = ?`)
+      .all(spec.runId)
+      .map((row) => JSON.parse(row.payload_json))
+      .filter((payload) => payload?.filesystemConfinement);
+    expect(attested).toHaveLength(1);
+    expect(attested[0].filesystemConfinement).toMatchObject({
+      status: "unconfined",
+      agent: "factory-status-report",
+      hostCapability: "qemu",
+    });
+  });
+
+  test("legacy non-mutating model specs without a definition pin fail closed before using the live definition (#962)", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({ adapter: "hermes" }));
+    const workspacesRoot = freshRoot();
+    let executed = false;
+    const guardedAdapters = createAdapterRegistry({
+      builtins: {
+        hermes: {
+          SANDBOX_SUPPORT: "unsupported",
+          async execute() {
+            executed = true;
+          },
+        },
+      },
+    }).toMap();
+
+    const summary = await runOnce(
+      db,
+      registry,
+      guardedAdapters,
+      opts({ workspacesRoot }),
+    );
+
+    expect(summary).toMatchObject({
+      terminalState: "REFUSED",
+      reasonCode: "agent_definition_mismatch",
+    });
+    expect(executed).toBe(false);
+    expect(readdirSync(workspacesRoot)).toEqual([]);
+    expect(
+      JSON.parse(
+        db
+          .query(`SELECT result_json FROM results WHERE run_id = ?`)
+          .get(spec.runId).result_json,
+      ).verification.checks,
+    ).toEqual(["def_hash_missing"]);
   });
 
   test("cancelRun on a QUEUED run → CANCELLED; on a terminal run → IllegalTransition", () => {
@@ -1851,6 +2459,7 @@ describe("worker", () => {
       "cli_not_found",
       "sandbox_unsupported",
       "worktree_sandbox_unsupported",
+      "input_artifact_missing",
       "unknown_adapter",
       "agent_definition_mismatch",
       "policy_denied:Bash",
@@ -1859,6 +2468,499 @@ describe("worker", () => {
       expect(classifyFailureCause(reason)).toBe("fatal");
     }
     expect(DEFAULT_MAX_ENVIRONMENT_RETRIES).toBe(3);
+  });
+
+  test("tier escalation eligibility is closed to exhausted agent-caused light and standard dispatch failures", () => {
+    const light = makeSpec({
+      agent: "dispatch@1",
+      input: { repo: "factory", ticket: "WM-845" },
+      workspace: {
+        type: "worktree",
+        checkoutDir: "repo",
+        retainOnFailure: true,
+      },
+      modelTier: "light",
+      maxAttempts: 1,
+    });
+    for (const reasonCode of [
+      "handoff_verification_failed",
+      "handoff_owned_paths_violation",
+      "contract_violation",
+      "agent_exit_1",
+    ]) {
+      expect(tierEscalationEligibility(light, reasonCode)).toEqual({
+        eligible: true,
+        rootRunId: light.runId,
+      });
+    }
+    for (const reasonCode of [
+      "timeout",
+      "lease_expired",
+      "adapter_error",
+      "needs_human",
+      "policy_denied:Bash",
+      "cancelled",
+      // The acceptance criteria name `verification_failed`; nothing emits it.
+      // The real code is `handoff_verification_failed` (verify.mjs), so the
+      // invented spelling must not silently widen the predicate.
+      "verification_failed",
+    ]) {
+      expect(tierEscalationEligibility(light, reasonCode).eligible).toBe(false);
+    }
+    expect(
+      tierEscalationEligibility(
+        { ...light, modelTier: "strong" },
+        "agent_exit_1",
+      ).eligible,
+    ).toBe(false);
+    expect(
+      tierEscalationEligibility(
+        { ...light, rootRunId: "run_root", escalatedFromRunId: "run_prior" },
+        "agent_exit_1",
+      ).eligible,
+    ).toBe(false);
+  });
+
+  test("continuation handoff failures are matched per violation, anchored at its start", () => {
+    const quoted =
+      "repo_verify_failed: (fail) x\nweb_build_failed: quoted inside output";
+    expect(continuationHandoffFailure([quoted])).toBeNull();
+    expect(
+      continuationHandoffFailure([
+        quoted,
+        "ticket_verify_failed: bunx: command not found; sandbox_limits: tmpfs=1024MiB",
+      ]),
+    ).toBe(
+      "ticket_verify_failed: bunx: command not found; sandbox_limits: tmpfs=1024MiB",
+    );
+    expect(
+      continuationHandoffFailure(
+        "owned_paths_violation: a; web_build_failed: error TS7053",
+      ),
+    ).toBe("web_build_failed: error TS7053");
+    expect(continuationHandoffFailure(undefined)).toBeNull();
+    expect(continuationHandoffFailure([42, null])).toBeNull();
+  });
+
+  test("tier continuation input carries the worker-observed handoff failure verbatim", () => {
+    const handoffFailure = `web_build_failed: ${"TS7053\n".repeat(200)}`.slice(
+      0,
+      2 * 1024,
+    );
+    expect(
+      continuationExecutionInput(
+        { repo: "factory", ticket: "WM-1529" },
+        handoffFailure,
+      ),
+    ).toEqual({
+      repo: "factory",
+      ticket: "WM-1529",
+      handoffFailure,
+    });
+  });
+
+  test("tier escalation schedules exactly once and retries projection before the continuation is runnable", () => {
+    const databaseFile = path.join(
+      tmpDir("tier-escalation-restart-"),
+      "runtime.db",
+    );
+    let db = openDb(databaseFile);
+    const spec = queueRun(
+      db,
+      makeSpec({
+        runId: "run_tier_root",
+        agent: "dispatch@1",
+        input: { repo: "factory", ticket: "WM-845", modelTier: "light" },
+        workspace: {
+          type: "worktree",
+          checkoutDir: "repo",
+          retainOnFailure: true,
+        },
+        modelTier: "light",
+        model: null,
+        maxAttempts: 1,
+      }),
+    );
+    linkEvent(db, spec.runId, {
+      type: "factory.dispatch.requested",
+      correlationId: "root-correlation",
+    });
+    const checkout = tmpDir("tier-escalation-checkout-");
+    const wrapper = tmpDir("tier-escalation-wrapper-");
+    const first = scheduleTierEscalation(db, registry, spec, {
+      workspacePath: checkout,
+      sourceWorkspacePath: wrapper,
+      continuationRunId: "run_tier_strong",
+      now: T0,
+      reasonCode: "contract_violation",
+      handoffFailure: "web_build_failed: src/views/Ticket.tsx: error TS7053",
+    });
+    db.close();
+    db = openDb(databaseFile);
+    const again = scheduleTierEscalation(db, registry, spec, {
+      workspacePath: checkout,
+      sourceWorkspacePath: wrapper,
+      continuationRunId: "run_tier_duplicate",
+      now: T0,
+      reasonCode: "contract_violation",
+    });
+    expect(first.continuation_run_id).toBe("run_tier_strong");
+    expect(again.continuation_run_id).toBe("run_tier_strong");
+    expect(db.query(`SELECT COUNT(*) AS n FROM tier_escalations`).get().n).toBe(
+      1,
+    );
+    expect(runState(db, "run_tier_strong")).toBe("APPROVED");
+    expect(
+      db.query(`SELECT * FROM runs WHERE run_id = 'run_tier_duplicate'`).get(),
+    ).toBeNull();
+    const continuation = JSON.parse(
+      db
+        .query(`SELECT spec_json FROM runs WHERE run_id = 'run_tier_strong'`)
+        .get().spec_json,
+    );
+    expect(continuation).toMatchObject({
+      rootRunId: spec.runId,
+      escalatedFromRunId: spec.runId,
+      modelTier: "strong",
+      approvalPolicy: {
+        escalation: {
+          handoffFailure:
+            "web_build_failed: src/views/Ticket.tsx: error TS7053",
+        },
+      },
+    });
+    const event = db
+      .query(`SELECT * FROM events WHERE source = 'handoff'`)
+      .get();
+    expect(event.correlation_id).toBe("root-correlation");
+    expect(event.causation_id).toBe(spec.runId);
+
+    const projectionErrors = [];
+    expect(
+      claimNext(db, {
+        owner: "restart-worker",
+        adapters: [],
+        projectTierEscalation: () => {
+          throw new Error("tracker unavailable");
+        },
+        now: T0,
+        policyVersion: "test",
+        onTierEscalationProjectionError: (entry) =>
+          projectionErrors.push(entry),
+      }),
+    ).toBeNull();
+    expect(projectionErrors[0]).toMatchObject({
+      reasonCode: "tier_escalation_writeback_failed",
+      continuationRunId: "run_tier_strong",
+      error: "tracker unavailable",
+    });
+    expect(runState(db, "run_tier_strong")).toBe("APPROVED");
+
+    const writes = [];
+    expect(
+      claimNext(db, {
+        owner: "restart-worker",
+        adapters: [],
+        projectTierEscalation: (entry) => (writes.push(entry), true),
+        now: T0,
+        policyVersion: "test",
+      }),
+    ).toBeNull();
+    expect(writes[0]).toMatchObject({
+      failedRunId: spec.runId,
+      continuationRunId: "run_tier_strong",
+      workspacePath: checkout,
+    });
+    expect(runState(db, "run_tier_strong")).toBe("QUEUED");
+
+    const noPendingProjection = reconcileTierEscalations(db, {
+      projectTierEscalation: () => {
+        throw new Error("tracker unavailable");
+      },
+      now: T0,
+      policyVersion: "test",
+    });
+    expect(noPendingProjection).toEqual({ ok: true, projected: 0 });
+    expect(
+      lifecycleOf(db, "run_tier_strong").map((entry) => entry.reason),
+    ).toEqual(
+      expect.arrayContaining([
+        `auto_approved:tier-escalation:${spec.runId}`,
+        `tracker_projection_applied:${spec.runId}`,
+      ]),
+    );
+    db.close();
+  });
+
+  test("tier escalation refuses a continuation when its failed run PR is closed", async () => {
+    const db = openDb(":memory:");
+    const failedRunId = "run_tier_closed_failed";
+    const continuationRunId = "run_tier_closed_continuation";
+    queueRun(
+      db,
+      makeSpec({
+        runId: continuationRunId,
+        agent: "dispatch@1",
+        input: {
+          repo: "factory",
+          ticket: "watt-mind/factory#1499",
+          modelTier: "strong",
+        },
+        workspace: { type: "worktree", checkoutDir: "repo" },
+        outputContract: "factory.dispatch-result/v1",
+        modelTier: "strong",
+      }),
+    );
+    db.query(
+      `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+       VALUES (?, 1, ?, 'sha256:test', '{}', '{}', ?)`,
+    ).run(
+      failedRunId,
+      JSON.stringify({ artifact: { prNumber: 1499 } }),
+      new Date(T0).toISOString(),
+    );
+    db.query(
+      `INSERT INTO tier_escalations
+         (root_run_id, failed_run_id, continuation_run_id, repo, ticket,
+          workspace_path, source_workspace_path, projection_state, created_at)
+       VALUES (?, ?, ?, 'factory', 'watt-mind/factory#1499', '/tmp/checkout', '/tmp/wrapper', 'applied', ?)`,
+    ).run(
+      failedRunId,
+      failedRunId,
+      continuationRunId,
+      new Date(T0).toISOString(),
+    );
+
+    const locksDir = tmpDir("tier-closed-locks-");
+    const leasesDir = tmpDir("tier-closed-leases-");
+    let claims = 0;
+    const summary = await runOnce(
+      db,
+      registry,
+      adapters,
+      opts({
+        dispatch: {
+          locksDir,
+          leasesDir,
+          fetchTicket: () => ({
+            identifier: "watt-mind/factory#1499",
+            state: { name: "In Progress" },
+            assignee: { id: "factory-owner", name: "Factory" },
+            labels: {
+              nodes: [{ name: "ai:in-progress" }, { name: "tier:strong" }],
+            },
+            description: "## Owned Paths\n- event-runtime/lib/worker.mjs\n",
+          }),
+          fetchViewer: () => ({ id: "factory-owner", name: "Factory" }),
+          fetchPullRequest: ({ github, pr }) => {
+            expect(github).toBe("watt-mind/factory");
+            expect(pr).toBe(1499);
+            return { state: "MERGED" };
+          },
+          fetchInFlight: () => [],
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          claimTicket: () => ((claims += 1), { ok: true }),
+        },
+      }),
+    );
+
+    expect(summary).toMatchObject({
+      runId: continuationRunId,
+      terminalState: "REFUSED",
+      reasonCode: "ticket_escalation_pr_closed",
+    });
+    expect(claims).toBe(0);
+    expect(existsSync(dispatchLockPath("factory", locksDir))).toBe(false);
+    expect(
+      db
+        .query(
+          `SELECT projection_state, projection_error FROM tier_escalations WHERE continuation_run_id = ?`,
+        )
+        .get(continuationRunId),
+    ).toEqual({
+      projection_state: "refused",
+      projection_error: "ticket_escalation_pr_closed",
+    });
+    db.close();
+  });
+
+  test("tier escalation requeues a continuation when its failed run PR read fails transiently", async () => {
+    const seedEscalation = (db, failedRunId, continuationRunId) => {
+      queueRun(
+        db,
+        makeSpec({
+          runId: continuationRunId,
+          agent: "dispatch@1",
+          input: {
+            repo: "factory",
+            ticket: "watt-mind/factory#1499",
+            modelTier: "strong",
+          },
+          workspace: { type: "worktree", checkoutDir: "repo" },
+          outputContract: "factory.dispatch-result/v1",
+          modelTier: "strong",
+        }),
+      );
+      db.query(
+        `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+         VALUES (?, 1, ?, 'sha256:test', '{}', '{}', ?)`,
+      ).run(
+        failedRunId,
+        JSON.stringify({ artifact: { prNumber: 1499 } }),
+        new Date(T0).toISOString(),
+      );
+      db.query(
+        `INSERT INTO tier_escalations
+           (root_run_id, failed_run_id, continuation_run_id, repo, ticket,
+            workspace_path, source_workspace_path, projection_state, created_at)
+         VALUES (?, ?, ?, 'factory', 'watt-mind/factory#1499', '/tmp/checkout', '/tmp/wrapper', 'applied', ?)`,
+      ).run(
+        failedRunId,
+        failedRunId,
+        continuationRunId,
+        new Date(T0).toISOString(),
+      );
+    };
+    const escalationRow = (db, continuationRunId) =>
+      db
+        .query(
+          `SELECT projection_state, projection_error FROM tier_escalations WHERE continuation_run_id = ?`,
+        )
+        .get(continuationRunId);
+    const dispatchOpts = (locksDir, leasesDir, claims) => ({
+      locksDir,
+      leasesDir,
+      fetchTicket: () => ({
+        identifier: "watt-mind/factory#1499",
+        state: { name: "In Progress" },
+        assignee: { id: "factory-owner", name: "Factory" },
+        labels: {
+          nodes: [{ name: "ai:in-progress" }, { name: "tier:strong" }],
+        },
+        description: "## Owned Paths\n- event-runtime/lib/worker.mjs\n",
+      }),
+      fetchViewer: () => ({ id: "factory-owner", name: "Factory" }),
+      fetchPullRequest: () => {
+        throw new Error("github_read_failed: rate limited");
+      },
+      fetchInFlight: () => [],
+      countLeases: () => 0,
+      budgetRefusal: () => null,
+      claimTicket: () => ((claims.count += 1), { ok: true }),
+    });
+
+    {
+      const db = openDb(":memory:");
+      const continuationRunId = "run_tier_unreadable_continuation";
+      seedEscalation(db, "run_tier_unreadable_failed", continuationRunId);
+      const locksDir = tmpDir("tier-unreadable-locks-");
+      const leasesDir = tmpDir("tier-unreadable-leases-");
+      const claims = { count: 0 };
+      const summary = await runOnce(
+        db,
+        registry,
+        adapters,
+        opts({ dispatch: dispatchOpts(locksDir, leasesDir, claims) }),
+      );
+      expect(summary).toMatchObject({
+        runId: continuationRunId,
+        terminalState: "QUEUED",
+        reasonCode: "ticket_escalation_pr_read_failed",
+      });
+      expect(summary.requeueAfterMs).toBeGreaterThan(0);
+      expect(claims.count).toBe(0);
+      expect(existsSync(dispatchLockPath("factory", locksDir))).toBe(false);
+      expect(runState(db, continuationRunId)).toBe("QUEUED");
+      expect(escalationRow(db, continuationRunId)).toEqual({
+        projection_state: "applied",
+        projection_error: null,
+      });
+      db.close();
+    }
+
+    {
+      const db = openDb(":memory:");
+      const continuationRunId = "run_tier_exhausted_continuation";
+      seedEscalation(db, "run_tier_exhausted_failed", continuationRunId);
+      const locksDir = tmpDir("tier-exhausted-locks-");
+      const leasesDir = tmpDir("tier-exhausted-leases-");
+      const claims = { count: 0 };
+      const summary = await runOnce(
+        db,
+        registry,
+        adapters,
+        opts({
+          dispatch: {
+            ...dispatchOpts(locksDir, leasesDir, claims),
+            maxTransientGateRequeues: 0,
+          },
+        }),
+      );
+      expect(summary).toMatchObject({
+        runId: continuationRunId,
+        terminalState: "REFUSED",
+        reasonCode: "ticket_escalation_pr_read_failed",
+      });
+      expect(claims.count).toBe(0);
+      expect(existsSync(dispatchLockPath("factory", locksDir))).toBe(false);
+      expect(escalationRow(db, continuationRunId)).toEqual({
+        projection_state: "refused",
+        projection_error: "ticket_escalation_pr_read_failed",
+      });
+      db.close();
+    }
+  });
+
+  test("tier escalation projection replaces every tier label and comments both run ids idempotently", () => {
+    const calls = [];
+    const runCli = (args) => {
+      calls.push(args);
+      if (args[0] === "comments") return "[]";
+      return "{}";
+    };
+    expect(
+      defaultProjectTierEscalation({
+        repo: "factory",
+        ticket: "WM-845",
+        failedRunId: "run_light",
+        continuationRunId: "run_strong",
+        workspacePath: "/retained/WM-845",
+        fetchTicket: () => ({
+          labels: [
+            { name: "tier:light" },
+            { name: "tier:standard" },
+            { name: "tier:strong" },
+            { name: "type:feature" },
+          ],
+        }),
+        findPullRequest: ({ workspacePath }) => {
+          expect(workspacePath).toBe("/retained/WM-845");
+          return {
+            number: 1281,
+            url: "https://github.com/watt-mind/factory/pull/1281",
+            headRefName: "feat/gh-1239",
+          };
+        },
+        runCli,
+      }),
+    ).toBe(true);
+    expect(calls[0]).toEqual([
+      "labels",
+      "WM-845",
+      "--add",
+      "tier:strong",
+      "--remove",
+      "tier:light",
+      "--remove",
+      "tier:standard",
+    ]);
+    expect(calls.at(-1)[0]).toBe("comment");
+    expect(calls.at(-1)[2]).toContain("run_light");
+    expect(calls.at(-1)[2]).toContain("run_strong");
+    expect(calls.at(-1)[2]).toContain(
+      "https://github.com/watt-mind/factory/pull/1281",
+    );
   });
 
   test("adapter_error with maxAttempts 1 requeues and succeeds without consuming the agent budget", async () => {
@@ -1902,6 +3004,70 @@ describe("worker", () => {
     ).toEqual([{ reason_code: "adapter_error" }, { reason_code: "ok" }]);
   });
 
+  test("adapter failure logs and traces a failTerminal failure", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({ adapter: "throwing" }));
+    const originalQuery = db.query.bind(db);
+    const failingDb = new Proxy(db, {
+      get(target, property) {
+        if (property === "query") {
+          return (sql) => {
+            if (String(sql).includes("UPDATE attempts SET terminal_state")) {
+              throw new Error("finish attempt write failed");
+            }
+            return originalQuery(sql);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const loud = [];
+    const originalConsoleError = console.error;
+    console.error = (...args) => loud.push(args.join(" "));
+    let summary;
+    try {
+      summary = await runOnce(
+        failingDb,
+        registry,
+        {
+          throwing: {
+            async execute() {
+              throw new Error("adapter exploded");
+            },
+          },
+        },
+        opts(),
+      );
+    } finally {
+      console.error = originalConsoleError;
+    }
+
+    expect(summary).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "adapter_error",
+      terminalError: "finish attempt write failed",
+    });
+    expect(loud.join("\n")).toContain(
+      `terminal failTerminal failed for run ${spec.runId} attempt 1: finish attempt write failed`,
+    );
+    expect(
+      db
+        .query(
+          `SELECT kind, payload_json FROM attempt_trace WHERE run_id = ? ORDER BY seq`,
+        )
+        .all(spec.runId)
+        .map((row) => ({ kind: row.kind, ...JSON.parse(row.payload_json) })),
+    ).toContainEqual({
+      kind: "lifecycle",
+      terminalError: true,
+      operation: "failTerminal",
+      runId: spec.runId,
+      attempt: 1,
+      message: "finish attempt write failed",
+    });
+  });
+
   test("SandboxUnsupportedError is fatal and never requeues", async () => {
     const db = openDb(":memory:");
     const unsupportedAdapter = {
@@ -1937,7 +3103,7 @@ describe("worker", () => {
     ).toBe(false);
   });
 
-  test("repeated environment failures dead-letter after the dedicated retry ceiling", async () => {
+  test("repeated environment failures stop at the dedicated retry ceiling", async () => {
     const db = openDb(":memory:");
     const throwingAdapter = {
       execute: async () => {
@@ -1980,6 +3146,53 @@ describe("worker", () => {
         (event) => event.reason === "retry:environment",
       ),
     ).toHaveLength(2);
+    expect(lifecycleOf(db, spec.runId).at(-1).reason).toContain(
+      "environment_retry_budget_exhausted",
+    );
+  });
+
+  test("a missing declared input artifact is fatal and never reaches the adapter", async () => {
+    const db = openDb(":memory:");
+    const missingSha = "a".repeat(64);
+    let executed = false;
+    const observingAdapter = {
+      async execute() {
+        executed = true;
+        return { exitCode: 0, timedOut: false };
+      },
+    };
+    const spec = queueRun(
+      db,
+      makeSpec({
+        workspace: {
+          type: "artifacts",
+          inputs: [{ from: missingSha, as: "input.json" }],
+        },
+        maxEnvironmentRetries: 5,
+      }),
+    );
+
+    const summary = await runOnce(
+      db,
+      registry,
+      { fake: observingAdapter },
+      opts({ artifactStore: freshRoot() }),
+    );
+
+    expect(executed).toBe(false);
+    expect(summary).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "input_artifact_missing",
+    });
+    expect(runState(db, spec.runId)).toBe("FAILED");
+    expect(
+      db
+        .query(`SELECT reason_code FROM attempts WHERE run_id = ?`)
+        .get(spec.runId).reason_code,
+    ).toBe("input_artifact_missing");
+    expect(lifecycleOf(db, spec.runId).at(-1).reason).toContain(
+      "failure:fatal:input_artifact_missing",
+    );
   });
 
   test("environment failures do not consume agent_exit retry attempts", async () => {
@@ -2143,6 +3356,237 @@ describe("worker", () => {
     expect(claimNext(db, opts())).toBeNull();
   });
 
+  test("releasing a stalled worker finalizes and marks a retry as a lease expiry", () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({ maxAttempts: 2 }));
+    const claim = claimNext(db, opts());
+    const staleAt = T0 - 90_001;
+    db.query(
+      `INSERT INTO workers (worker_id, host, pid, labels_json, adapters, started_at, last_seen, state, current_run)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "w1",
+      "test-host",
+      1,
+      "{}",
+      "fake",
+      new Date(T0).toISOString(),
+      new Date(staleAt).toISOString(),
+      "busy",
+      spec.runId,
+    );
+
+    expect(
+      releaseStalledWorkerLease(
+        db,
+        { workerId: "w1", runId: spec.runId },
+        { now: T0, policyVersion: "test" },
+      ),
+    ).toEqual({ released: true, runId: spec.runId });
+    expect(runState(db, spec.runId)).toBe("QUEUED");
+    expect(
+      db
+        .query(
+          `SELECT terminal_state, reason_code, finished_at FROM attempts WHERE run_id = ? AND attempt = ?`,
+        )
+        .get(spec.runId, claim.attempt),
+    ).toEqual({
+      terminal_state: "FAILED",
+      reason_code: "lease_expired",
+      finished_at: new Date(T0).toISOString(),
+    });
+    expect(claimedRetryFor(db, spec.runId, claim.attempt + 1)).toEqual({
+      runId: spec.runId,
+      priorAttempt: claim.attempt,
+      reasonCode: "lease_expired",
+    });
+  });
+
+  test("releasing a stalled worker honors the environment retry ceiling", () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(
+      db,
+      makeSpec({ maxAttempts: 5, maxEnvironmentRetries: 0 }),
+    );
+    db.query(`UPDATE runs SET attempts = 1 WHERE run_id = ?`).run(spec.runId);
+    db.query(
+      `INSERT INTO attempts (run_id, attempt, fencing_token, finished_at, terminal_state, reason_code)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(
+      spec.runId,
+      1,
+      1,
+      new Date(T0 - 1).toISOString(),
+      "FAILED",
+      "lease_expired",
+    );
+    db.query(`INSERT INTO counters (name, value) VALUES (?, ?)`).run(
+      "fencing",
+      1,
+    );
+    const claim = claimNext(db, opts());
+    const staleAt = T0 - 90_001;
+    db.query(
+      `INSERT INTO workers (worker_id, host, pid, labels_json, adapters, started_at, last_seen, state, current_run)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "w1",
+      "test-host",
+      1,
+      "{}",
+      "fake",
+      new Date(T0).toISOString(),
+      new Date(staleAt).toISOString(),
+      "busy",
+      spec.runId,
+    );
+
+    expect(
+      releaseStalledWorkerLease(
+        db,
+        { workerId: "w1", runId: spec.runId },
+        { now: T0, policyVersion: "test" },
+      ),
+    ).toEqual({ released: true, runId: spec.runId });
+    expect(runState(db, spec.runId)).toBe("FAILED");
+    expect(claim.attempt).toBe(2);
+    expect(
+      db
+        .query(
+          `SELECT terminal_state, reason_code FROM attempts WHERE run_id = ? AND attempt = ?`,
+        )
+        .get(spec.runId, claim.attempt),
+    ).toEqual({ terminal_state: "FAILED", reason_code: "lease_expired" });
+  });
+
+  test("stalled-worker release matches reaper at the environment retry ceiling", () => {
+    const releasedDb = openDb(":memory:");
+    const reapedDb = openDb(":memory:");
+    const releasedSpec = queueRun(
+      releasedDb,
+      makeSpec({
+        runId: "run_stalled_release_ceiling",
+        maxAttempts: 5,
+        maxEnvironmentRetries: 0,
+      }),
+    );
+    const reapedSpec = queueRun(
+      reapedDb,
+      makeSpec({
+        runId: "run_stalled_reap_ceiling",
+        maxAttempts: 5,
+        maxEnvironmentRetries: 0,
+      }),
+    );
+
+    for (const [db, spec] of [
+      [releasedDb, releasedSpec],
+      [reapedDb, reapedSpec],
+    ]) {
+      db.query(`UPDATE runs SET attempts = 1 WHERE run_id = ?`).run(spec.runId);
+      db.query(
+        `INSERT INTO attempts (run_id, attempt, fencing_token, finished_at, terminal_state, reason_code)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(
+        spec.runId,
+        1,
+        1,
+        new Date(T0 - 1).toISOString(),
+        "FAILED",
+        "lease_expired",
+      );
+      db.query(`INSERT INTO counters (name, value) VALUES (?, ?)`).run(
+        "fencing",
+        1,
+      );
+    }
+
+    const releasedClaim = claimNext(releasedDb, opts({ owner: "w-release" }));
+    const reapedClaim = claimNext(reapedDb, opts({ owner: "reaper" }));
+    expect(releasedClaim.attempt).toBe(2);
+    expect(reapedClaim.attempt).toBe(2);
+    const afterExpiry = T0 + (releasedSpec.timeoutSeconds + 120) * 1000 + 1;
+    insertStalledWorker(
+      releasedDb,
+      "w-release",
+      releasedSpec.runId,
+      afterExpiry,
+    );
+
+    expect(
+      releaseStalledWorkerLease(
+        releasedDb,
+        { workerId: "w-release", runId: releasedSpec.runId },
+        { now: afterExpiry, policyVersion: "test" },
+      ),
+    ).toEqual({ released: true, runId: releasedSpec.runId });
+    expect(
+      reapExpiredLeases(reapedDb, { now: afterExpiry, policyVersion: "test" }),
+    ).toBe(1);
+
+    expect(runState(releasedDb, releasedSpec.runId)).toBe("FAILED");
+    expect(runState(reapedDb, reapedSpec.runId)).toBe("FAILED");
+    expect(
+      lifecycleOf(releasedDb, releasedSpec.runId)
+        .slice(-2)
+        .map(({ to_state, reason }) => ({ to_state, reason })),
+    ).toEqual(
+      lifecycleOf(reapedDb, reapedSpec.runId)
+        .slice(-2)
+        .map(({ to_state, reason }) => ({ to_state, reason })),
+    );
+    expect(lifecycleOf(releasedDb, releasedSpec.runId).at(-1).reason).toBe(
+      "failure:environment:lease_expired; environment_retry_budget_exhausted",
+    );
+  });
+
+  test("stalled-worker release matches reaper below the environment retry ceiling", () => {
+    const releasedDb = openDb(":memory:");
+    const reapedDb = openDb(":memory:");
+    const releasedSpec = queueRun(
+      releasedDb,
+      makeSpec({
+        runId: "run_stalled_release_retry",
+        maxEnvironmentRetries: 1,
+      }),
+    );
+    const reapedSpec = queueRun(
+      reapedDb,
+      makeSpec({ runId: "run_stalled_reap_retry", maxEnvironmentRetries: 1 }),
+    );
+    const releasedClaim = claimNext(releasedDb, opts({ owner: "w-release" }));
+    const reapedClaim = claimNext(reapedDb, opts({ owner: "reaper" }));
+    expect(releasedClaim.attempt).toBe(1);
+    expect(reapedClaim.attempt).toBe(1);
+    const afterExpiry = T0 + (releasedSpec.timeoutSeconds + 120) * 1000 + 1;
+    insertStalledWorker(
+      releasedDb,
+      "w-release",
+      releasedSpec.runId,
+      afterExpiry,
+    );
+
+    expect(
+      releaseStalledWorkerLease(
+        releasedDb,
+        { workerId: "w-release", runId: releasedSpec.runId },
+        { now: afterExpiry, policyVersion: "test" },
+      ),
+    ).toEqual({ released: true, runId: releasedSpec.runId });
+    expect(
+      reapExpiredLeases(reapedDb, { now: afterExpiry, policyVersion: "test" }),
+    ).toBe(1);
+
+    expect(runState(releasedDb, releasedSpec.runId)).toBe("QUEUED");
+    expect(runState(reapedDb, reapedSpec.runId)).toBe("QUEUED");
+    expect(lifecycleOf(releasedDb, releasedSpec.runId).at(-1).reason).toBe(
+      "retry:environment",
+    );
+    expect(lifecycleOf(reapedDb, reapedSpec.runId).at(-1).reason).toBe(
+      "retry:environment",
+    );
+  });
+
   test("cancelRun on a RUNNING attempt aborts adapter immediately and records attempt (OPS-417)", async () => {
     const db = openDb(":memory:");
     let aborted = false;
@@ -2209,6 +3653,109 @@ describe("worker", () => {
         totalTokens: 11,
       }),
     );
+  });
+
+  test("cancelled attempt reports and traces a finishAttempt failure", async () => {
+    const db = openDb(":memory:");
+    let signalAdapterStarted;
+    const adapterStarted = new Promise((resolve) => {
+      signalAdapterStarted = resolve;
+    });
+    const longRunningAdapter = {
+      execute: ({ abortSignal }) =>
+        new Promise((resolve) => {
+          abortSignal?.addEventListener("abort", () =>
+            resolve({ exitCode: null, timedOut: false }),
+          );
+          signalAdapterStarted();
+        }),
+    };
+    const spec = queueRun(
+      db,
+      makeSpec({ adapter: "long", timeoutSeconds: 30 }),
+    );
+    const originalQuery = db.query.bind(db);
+    const failingDb = new Proxy(db, {
+      get(target, property) {
+        if (property === "query") {
+          return (sql) => {
+            if (String(sql).includes("UPDATE attempts SET terminal_state")) {
+              throw new Error("cancel finish write failed");
+            }
+            return originalQuery(sql);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const loud = [];
+    const originalConsoleError = console.error;
+    console.error = (...args) => loud.push(args.join(" "));
+    let summary;
+    try {
+      const claim = claimNext(db, opts());
+      const execution = executeClaimed(
+        failingDb,
+        registry,
+        { long: longRunningAdapter },
+        claim,
+        opts(),
+      );
+      await adapterStarted;
+      cancelRun(db, spec.runId, {
+        actor: "operator",
+        policyVersion: "test",
+        now: T0,
+      });
+      summary = await execution;
+    } finally {
+      console.error = originalConsoleError;
+    }
+
+    expect(summary).toEqual({
+      cancelled: true,
+      finishError: "cancel finish write failed",
+    });
+    expect(loud.join("\n")).toContain(
+      `terminal finishAttempt failed for run ${spec.runId} attempt 1: cancel finish write failed`,
+    );
+    expect(
+      db
+        .query(
+          `SELECT kind, payload_json FROM attempt_trace WHERE run_id = ? ORDER BY seq`,
+        )
+        .all(spec.runId)
+        .map((row) => ({ kind: row.kind, ...JSON.parse(row.payload_json) })),
+    ).toContainEqual({
+      kind: "lifecycle",
+      terminalError: true,
+      operation: "finishAttempt",
+      runId: spec.runId,
+      attempt: 1,
+      message: "cancel finish write failed",
+    });
+  });
+
+  test("forceFailRun preserves the LEASED → RUNNING → FAILED journal path", () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec());
+    claimNext(db, opts());
+
+    const result = forceFailRun(db, spec.runId, {
+      actor: "operator",
+      reason: "operator_force_fail",
+      policyVersion: "test",
+      now: T0,
+    });
+
+    expect(result.to).toBe("FAILED");
+    expect(runState(db, spec.runId)).toBe("FAILED");
+    expect(
+      lifecycleOf(db, spec.runId)
+        .slice(-2)
+        .map((entry) => entry.to_state),
+    ).toEqual(["RUNNING", "FAILED"]);
   });
 
   test("runOnce returns null when nothing is QUEUED", async () => {
@@ -2640,6 +4187,213 @@ describe("worker", () => {
     expect(w1Result.fenced).toBe(true);
   });
 
+  test("dispatchIdentityEnv omits unset identity keys and gates on the dispatch@ prefix (#1497)", () => {
+    const env = { PATH: "/bin" };
+    const full = dispatchIdentityEnv({
+      spec: { agent: "dispatch@2" },
+      env,
+      runId: "run-1",
+      ticketId: 1497,
+      repoName: "factory",
+    });
+    expect(full).toEqual({
+      PATH: "/bin",
+      FACTORY_RUN_ID: "run-1",
+      FACTORY_TICKET: "1497",
+      FACTORY_REPO: "factory",
+    });
+
+    const partial = dispatchIdentityEnv({
+      spec: { agent: "dispatch@1" },
+      env,
+      runId: "run-2",
+      ticketId: null,
+      repoName: undefined,
+    });
+    expect(partial).toEqual({ PATH: "/bin", FACTORY_RUN_ID: "run-2" });
+    expect("FACTORY_TICKET" in partial).toBe(false);
+    expect("FACTORY_REPO" in partial).toBe(false);
+
+    for (const agent of [
+      "factory-status-report@1",
+      "dispatcher@1",
+      undefined,
+    ]) {
+      const untouched = dispatchIdentityEnv({
+        spec: { agent },
+        env,
+        runId: "run-3",
+        ticketId: "T-1",
+        repoName: "r",
+      });
+      expect(untouched).toBe(env);
+    }
+  });
+
+  test("handoff PR form records draft and body markers, refusing only a missing Fixes line", () => {
+    const base = {
+      github: "watt-mind/factory",
+      prNumber: 77,
+      ticket: "watt-mind/factory#1504",
+      runId: "run-1504",
+    };
+    const valid = { ...base };
+    assertHandoffPullRequestBase({
+      handoff: valid,
+      base: "develop",
+      fetchPullRequest: () => ({
+        baseRefName: "develop",
+        isDraft: false,
+        body: "Fixes watt-mind/factory#1504\n\nImplemented\n\nrun:run-1504",
+      }),
+    });
+    expect(valid.pr).toEqual({
+      number: 77,
+      draft: false,
+      hasFixesLine: true,
+      hasRunTrailer: true,
+    });
+
+    const warningOnly = { ...base };
+    assertHandoffPullRequestBase({
+      handoff: warningOnly,
+      base: "develop",
+      fetchPullRequest: () => ({
+        baseRefName: "develop",
+        isDraft: true,
+        body: "Fixes watt-mind/factory#1504",
+      }),
+    });
+    expect(warningOnly.pr).toMatchObject({
+      draft: true,
+      hasFixesLine: true,
+      hasRunTrailer: false,
+    });
+
+    const missingFixes = { ...base };
+    expect(() =>
+      assertHandoffPullRequestBase({
+        handoff: missingFixes,
+        base: "develop",
+        fetchPullRequest: () => ({
+          baseRefName: "develop",
+          isDraft: false,
+          body: "run:run-1504",
+        }),
+      }),
+    ).toThrow("handoff_pr_form_invalid");
+    expect(missingFixes.pr).toMatchObject({
+      hasFixesLine: false,
+      hasRunTrailer: true,
+    });
+  });
+
+  test("handoff PR Fixes line tolerates the short #n form, case, and trailing punctuation", () => {
+    const base = {
+      github: "watt-mind/factory",
+      prNumber: 77,
+      ticket: "watt-mind/factory#1504",
+      runId: "run-1504",
+    };
+    for (const body of [
+      "Fixes #1504\n\nrun:run-1504",
+      "fixes watt-mind/factory#1504.\n\nrun:run-1504",
+      "  Fixes watt-mind/factory#1504  \r\nrun:run-1504",
+    ]) {
+      const handoff = { ...base };
+      assertHandoffPullRequestBase({
+        handoff,
+        base: "develop",
+        fetchPullRequest: () => ({
+          baseRefName: "develop",
+          isDraft: false,
+          body,
+        }),
+      });
+      expect(handoff.pr).toMatchObject({
+        hasFixesLine: true,
+        hasRunTrailer: true,
+      });
+    }
+
+    // The short form only counts when the PR lives in the ticket's repo, and
+    // a different issue number or a mid-line mention never matches.
+    for (const [github, body] of [
+      ["watt-mind/other", "Fixes #1504"],
+      ["watt-mind/factory", "Fixes #15040"],
+      ["watt-mind/factory", "This Fixes #1504 for real"],
+    ]) {
+      const handoff = { ...base, github };
+      expect(() =>
+        assertHandoffPullRequestBase({
+          handoff,
+          base: "develop",
+          fetchPullRequest: () => ({
+            baseRefName: "develop",
+            isDraft: false,
+            body,
+          }),
+        }),
+      ).toThrow("handoff_pr_form_invalid");
+      expect(handoff.pr.hasFixesLine).toBe(false);
+    }
+
+    const linear = { ...base, ticket: "WM-1234" };
+    assertHandoffPullRequestBase({
+      handoff: linear,
+      base: "develop",
+      fetchPullRequest: () => ({
+        baseRefName: "develop",
+        isDraft: false,
+        body: "Fixes WM-1234",
+      }),
+    });
+    expect(linear.pr.hasFixesLine).toBe(true);
+  });
+
+  test("handoff PR form refuses a null body and reports unknown for a missing ticket or run id", () => {
+    const base = {
+      github: "watt-mind/factory",
+      prNumber: 77,
+      ticket: "watt-mind/factory#1504",
+      runId: "run-1504",
+    };
+    const nullBody = { ...base };
+    expect(() =>
+      assertHandoffPullRequestBase({
+        handoff: nullBody,
+        base: "develop",
+        fetchPullRequest: () => ({
+          baseRefName: "develop",
+          isDraft: false,
+          body: null,
+        }),
+      }),
+    ).toThrow("handoff_pr_form_invalid");
+    expect(nullBody.pr).toMatchObject({
+      hasFixesLine: false,
+      hasRunTrailer: false,
+    });
+
+    const noTicket = { ...base, ticket: null, runId: undefined };
+    assertHandoffPullRequestBase({
+      handoff: noTicket,
+      base: "develop",
+      fetchPullRequest: () => ({
+        baseRefName: "develop",
+        isDraft: false,
+        body: "Fixes null\nrun:undefined",
+      }),
+    });
+    expect(noTicket.pr).toMatchObject({
+      hasFixesLine: null,
+      hasRunTrailer: null,
+    });
+    expect(composeHandoffVerification(noTicket)).toContain(
+      "Fixes: unknown · run trailer: unknown",
+    );
+  });
+
   test("worker preserves push credentials for mutating runs and strips them for non-mutating runs (WM-128)", async () => {
     const db = openDb(":memory:");
     let capturedMutatingEnv = null;
@@ -2723,6 +4477,9 @@ describe("worker", () => {
     expect(capturedMutatingEnv.SSH_AUTH_SOCK).toBe("/tmp/worker-dispatch.sock");
     expect(capturedMutatingEnv.GITHUB_TOKEN).toBe("ghp_worker_dispatch_token");
     expect(capturedMutatingEnv.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(capturedMutatingEnv.FACTORY_RUN_ID).toBe(mutatingSpec.runId);
+    expect(capturedMutatingEnv.FACTORY_TICKET).toBe("WM-128");
+    expect(capturedMutatingEnv.FACTORY_REPO).toBe("bj29");
 
     // 2. Non-mutating run (factory-status-report@1 has mutating: false)
     const readOnlySpec = queueRun(
@@ -2752,2999 +4509,93 @@ describe("worker", () => {
     expect(capturedReadOnlyEnv.GITHUB_TOKEN).toBeUndefined();
     expect(capturedReadOnlyEnv.ANTHROPIC_API_KEY).toBeUndefined();
   });
-});
 
-describe("execute-side dispatch hardening (WM-115)", () => {
-  let factoryRoot;
-  let repoDir;
-  let wtRoot;
-  let callsLog;
-  let previousReposRoot;
-
-  beforeAll(() => {
-    factoryRoot = tmpDir("evrt-worker-hard-factory-");
-    repoDir = tmpDir("evrt-worker-hard-repo-");
-    wtRoot = tmpDir("evrt-worker-hard-trees-");
-    callsLog = path.join(repoDir, "calls.log");
-
-    mkdirSync(path.join(repoDir, "bin"), { recursive: true });
-    writeFileSync(
-      path.join(repoDir, "bin", "worktree-up.sh"),
-      `#!/bin/bash\nset -e\necho "up $1" >> "${callsLog}"\nmkdir -p "${wtRoot}/$1"\n`,
-    );
-    writeFileSync(
-      path.join(repoDir, "bin", "worktree-down.sh"),
-      `#!/bin/bash\nset -e\necho "down $1" >> "${callsLog}"\nrm -rf "${wtRoot}/$1"\n`,
-    );
-    writeFileSync(
-      path.join(repoDir, "bin", "worktree-up-red-baseline.sh"),
-      `#!/bin/bash\nset -e\necho "up-red $1" >> "${callsLog}"\nmkdir -p "${wtRoot}/$1"\nprintf '%s\\n' '{"status":"red","check":"web_build","command":"bun run build:fast","exitCode":1,"output":"entry chunk exceeds budget"}' > "$FACTORY_WORKTREE_REPORT"\n`,
-    );
-    writeFileSync(
-      path.join(repoDir, "bin", "worktree-up-broken.sh"),
-      `#!/bin/bash\necho "dependency install failed" >&2\nexit 12\n`,
-    );
-    writeFileSync(
-      path.join(repoDir, "bin", "worktree-up-link-collision.sh"),
-      `#!/bin/bash\nset -e\nmkdir -p "${wtRoot}/$1"\nmkdir -p "$(dirname "$FACTORY_WORKTREE_REPORT")/repo"\n`,
-    );
-    writeFileSync(
-      path.join(repoDir, "bin", "worktree-up-startup-crash.sh"),
-      `#!/bin/bash\n` +
-        `mkdir -p "${wtRoot}/$1/.factory/run"\n` +
-        `echo "RegistryError: event type test: model_tier strong has no mapping" > "${wtRoot}/$1/.factory/run/serve.log"\n` +
-        `echo "warn: event runtime log (${wtRoot}/$1/.factory/run/serve.log):" >&2\n` +
-        `cat "${wtRoot}/$1/.factory/run/serve.log" >&2\n` +
-        `echo "error: event runtime died during startup on 7400 — see ${wtRoot}/$1/.factory/run/serve.log" >&2\n` +
-        `exit 1\n`,
-    );
-
-    mkdirSync(path.join(factoryRoot, "config"), { recursive: true });
-    writeFileSync(path.join(factoryRoot, "config", "policy.yaml"), "{}\n");
-    writeFileSync(
-      path.join(factoryRoot, "config", "repos.yaml"),
-      `repos:\n` +
-        `  - name: wt-worker\n    path: ${repoDir}\n    github: watt-mind/wt-worker\n    base: develop\n` +
-        `    team: WM\n    project: Factory\n    max_in_flight: 2\n` +
-        `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down.sh\n` +
-        `    worktree_root: ${wtRoot}\n    verify: echo repo_verified\n    escalate_paths: []\n` +
-        `  - name: wt-failing-verify\n    path: ${repoDir}\n    github: watt-mind/wt-failing-verify\n    base: develop\n` +
-        `    team: WM\n    project: Factory\n    max_in_flight: 2\n` +
-        `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down.sh\n` +
-        `    worktree_root: ${wtRoot}\n    verify: exit 42\n    escalate_paths: []\n` +
-        `  - name: wt-baseline-red\n    path: ${repoDir}\n    github: watt-mind/wt-baseline-red\n    base: develop\n` +
-        `    team: WM\n    project: Factory\n    max_in_flight: 2\n` +
-        `    worktree_up: bin/worktree-up-red-baseline.sh\n    worktree_down: bin/worktree-down.sh\n` +
-        `    worktree_root: ${wtRoot}\n    verify: printf 'entry chunk exceeds budget\\n' >&2; exit 9\n    escalate_paths: []\n` +
-        `  - name: wm-baseline-real\n    path: ${repoDir}\n    github: watt-mind/wm-baseline-real\n    base: develop\n` +
-        `    team: WM\n    project: Factory\n    max_in_flight: 2\n` +
-        `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down.sh\n` +
-        `    worktree_root: ${wtRoot}\n    verify: echo repo_verified\n    escalate_paths: []\n` +
-        `  - name: wt-broken-up\n    path: ${repoDir}\n    github: watt-mind/wt-broken-up\n    base: develop\n` +
-        `    team: WM\n    project: Factory\n    max_in_flight: 2\n` +
-        `    worktree_up: bin/worktree-up-broken.sh\n    worktree_down: bin/worktree-down.sh\n` +
-        `    worktree_root: ${wtRoot}\n    verify: echo never\n    escalate_paths: []\n` +
-        `  - name: wt-startup-crash\n    path: ${repoDir}\n    github: watt-mind/wt-startup-crash\n    base: develop\n` +
-        `    team: WM\n    project: Factory\n    max_in_flight: 2\n` +
-        `    worktree_up: bin/worktree-up-startup-crash.sh\n    worktree_down: bin/worktree-down.sh\n` +
-        `    worktree_root: ${wtRoot}\n    verify: echo never\n    escalate_paths: []\n` +
-        `  - name: wt-link-collision\n    path: ${repoDir}\n    github: watt-mind/wt-link-collision\n    base: develop\n` +
-        `    team: WM\n    project: Factory\n    max_in_flight: 2\n` +
-        `    worktree_up: bin/worktree-up-link-collision.sh\n    worktree_down: bin/worktree-down.sh\n` +
-        `    worktree_root: ${wtRoot}\n    verify: echo never\n    escalate_paths: []\n`,
-    );
-    previousReposRoot = process.env.FACTORY_REPOS_ROOT;
-    process.env.FACTORY_REPOS_ROOT = factoryRoot;
-  });
-
-  afterAll(() => {
-    if (previousReposRoot === undefined) delete process.env.FACTORY_REPOS_ROOT;
-    else process.env.FACTORY_REPOS_ROOT = previousReposRoot;
-  });
-
-  function makeDispatchSpec(overrides = {}) {
-    const runId =
-      overrides.runId ??
-      `run_dispatch_${++seq}_${Math.random().toString(36).slice(2)}`;
-    const input = overrides.input ?? { repo: "wt-worker", ticket: "WM-701" };
-    return {
-      schemaVersion: "factory.run-spec/v1",
-      runId,
-      agent: "dispatch@1",
-      input,
-      inputHash: hashJson(input),
-      workspace: {
-        type: "worktree",
-        checkoutDir: "repo",
-        retainOnFailure: true,
-      },
-      adapter: "fake",
-      promptVersion: "git:test",
-      policyVersion: "git:test",
-      outputContract: "factory.dispatch-result/v1",
-      capabilities: ["tracker:write", "repo:write", "github:write"],
-      timeoutSeconds: 5,
-      maxAttempts: 1,
-      idempotencyKey: `idem-${runId}`,
-      ...overrides,
-    };
-  }
-
-  function makeMergeFixSpec(overrides = {}) {
-    const runId =
-      overrides.runId ??
-      `run_merge_fix_${++seq}_${Math.random().toString(36).slice(2)}`;
-    const input = overrides.input ?? {
-      repo: "wt-worker",
-      github: "watt-mind/wt-worker",
-      base: "develop",
-      pr: 42,
-      headSha: "a".repeat(40),
-      baseSha: "b".repeat(40),
-      headRef: "feat/WM-720",
-      ticket: "WM-720",
-      finding: "mechanical correction",
-      findingHash: "c".repeat(64),
-      round: 1,
-      mechanical: true,
-      withinOwnedPaths: true,
-      ownedPaths: ["src/feature/fix.mjs"],
-    };
-    return {
-      schemaVersion: "factory.run-spec/v1",
-      runId,
-      agent: "merge-fix@1",
-      input,
-      inputHash: hashJson(input),
-      workspace: {
-        type: "worktree",
-        checkoutDir: "repo",
-        retainOnFailure: true,
-      },
-      adapter: "merge-fake",
-      promptVersion: "git:test",
-      policyVersion: "git:test",
-      outputContract: "factory.merge-fix-result/v1",
-      capabilities: ["tracker:write", "repo:write", "github:write"],
-      timeoutSeconds: 5,
-      maxAttempts: 1,
-      idempotencyKey: `idem-${runId}`,
-      ...overrides,
-    };
-  }
-
-  const mergeFixFakeAdapter = {
-    async execute({ spec, workspaceDir }) {
-      writeFileSync(
-        path.join(workspaceDir, ".transcript.json"),
-        `{"fake":"merge-fix transcript"}\n`,
-        "utf8",
-      );
-      writeFileSync(
-        path.join(workspaceDir, "result.json"),
-        `${JSON.stringify(
-          {
-            schemaVersion: "factory.agent-result/v1",
-            terminalState: "completed",
-            reasonCode: "ok",
-            artifact: {
-              outcome: "UPDATED",
-              repo: spec.input.repo,
-              ticket: spec.input.ticket,
-              pr: spec.input.pr,
-              headSha: spec.input.headSha,
-              round: spec.input.round,
-              summary: "applied mechanical correction",
-            },
-            evidence: { commands: ["echo repo_verified"] },
-          },
-          null,
-          2,
-        )}\n`,
-        "utf8",
-      );
-      return { exitCode: 0, timedOut: false };
-    },
-  };
-
-  const readyDispatchTicket = (identifier, overrides = {}) => ({
-    identifier,
-    state: { name: "Todo" },
-    assignee: null,
-    labels: { nodes: [{ name: "ai:agent-ready" }] },
-    description: "## Owned Paths\n- src/feature/**\n",
-    ...overrides,
-  });
-
-  const planTimeDispatchEvidence = (
-    description = "## Owned Paths\n- src/feature/**\n",
-  ) => ({
-    source: "chain",
-    mode: "auto",
-    eventType: "factory.dispatch.requested",
-    dispatchEvidence: {
-      ticket: {
-        descriptionHash: hashJson(description),
-        ownedPathsParsed: true,
-      },
-    },
-  });
-
-  const dispatchFakeAdapter = {
-    async execute({ spec, workspaceDir }) {
-      writeFileSync(
-        path.join(workspaceDir, ".transcript.json"),
-        `{"fake":"dispatch transcript"}\n`,
-        "utf8",
-      );
-      const repoPath = path.join(workspaceDir, "repo");
-      if (existsSync(repoPath)) {
-        writeFileSync(
-          path.join(repoPath, "mutated.txt"),
-          "some dirty edit\n",
-          "utf8",
-        );
-      }
-      writeFileSync(
-        path.join(workspaceDir, "result.json"),
-        `${JSON.stringify(
-          {
-            schemaVersion: "factory.agent-result/v1",
-            terminalState: "completed",
-            reasonCode: "ok",
-            artifact: {
-              outcome: "PR_OPEN",
-              repo: spec.input.repo,
-              ticket: spec.input.ticket,
-              prUrl: `https://github.com/watt-mind/${spec.input.repo}/pull/10`,
-              verification: {
-                command: "echo repo_verified",
-                passed: true,
-                output: "repo_verified",
-              },
-              summary: `implemented ${spec.input.ticket}`,
-            },
-            evidence: { commands: ["echo repo_verified"] },
-          },
-          null,
-          2,
-        )}\n`,
-        "utf8",
-      );
-      return { exitCode: 0, timedOut: false };
-    },
-  };
-
-  test("resolves Linear credentials from env first, then the shared env file", () => {
-    const dir = tmpDir("evrt-linear-key-");
-    const envFile = path.join(dir, ".env");
-    writeFileSync(envFile, "OTHER=value\nLINEAR_API_KEY='file-key'\n", "utf8");
-
-    const fromEnv = { LINEAR_API_KEY: "process-key" };
-    expect(resolveLinearApiKey({ env: fromEnv, envFile })).toBe("process-key");
-
-    const fromFile = {};
-    expect(resolveLinearApiKey({ env: fromFile, envFile })).toBe("file-key");
-    expect(fromFile.LINEAR_API_KEY).toBe("file-key");
-  });
-
-  test("missing process credentials never activate the dispatch stub implicitly (WM-533)", async () => {
-    const previousHome = process.env.FACTORY_EVENT_HOME;
-    const previousKey = process.env.LINEAR_API_KEY;
-    const previousStub = process.env.FACTORY_DISPATCH_STUB;
-    process.env.FACTORY_EVENT_HOME = tmpDir("evrt-linear-unconfigured-");
-    delete process.env.LINEAR_API_KEY;
-    delete process.env.FACTORY_DISPATCH_STUB;
-
-    try {
-      const db = openDb(":memory:");
-      const spec = queueRun(
-        db,
-        makeDispatchSpec({ adapter: "pi", maxEnvironmentRetries: 1 }),
-      );
-      const runOpts = opts({ resolveLinearKey: () => null });
-      const first = await runOnce(
-        db,
-        registry,
-        { pi: dispatchFakeAdapter },
-        runOpts,
-      );
-
-      expect(first).toMatchObject({
-        terminalState: "FAILED",
-        reasonCode: "linear_unconfigured",
-      });
-      expect(runState(db, spec.runId)).toBe("QUEUED");
-
-      const exhausted = await runOnce(
-        db,
-        registry,
-        { pi: dispatchFakeAdapter },
-        runOpts,
-      );
-      expect(exhausted).toMatchObject({
-        terminalState: "FAILED",
-        reasonCode: "linear_unconfigured",
-      });
-      expect(runState(db, spec.runId)).toBe("FAILED");
-      expect(
-        db
-          .query(
-            `SELECT reason_code FROM attempts WHERE run_id = ? ORDER BY attempt`,
-          )
-          .all(spec.runId),
-      ).toEqual([
-        { reason_code: "linear_unconfigured" },
-        { reason_code: "linear_unconfigured" },
-      ]);
-    } finally {
-      if (previousHome === undefined) delete process.env.FACTORY_EVENT_HOME;
-      else process.env.FACTORY_EVENT_HOME = previousHome;
-      if (previousKey === undefined) delete process.env.LINEAR_API_KEY;
-      else process.env.LINEAR_API_KEY = previousKey;
-      if (previousStub === undefined) delete process.env.FACTORY_DISPATCH_STUB;
-      else process.env.FACTORY_DISPATCH_STUB = previousStub;
-    }
-  });
-
-  test("FACTORY_DISPATCH_STUB explicitly enables the demo dispatch stub", async () => {
-    const previousStub = process.env.FACTORY_DISPATCH_STUB;
-    process.env.FACTORY_DISPATCH_STUB = "1";
-    try {
-      const db = openDb(":memory:");
-      queueRun(db, makeDispatchSpec({ adapter: "pi" }));
-      const summary = await runOnce(
-        db,
-        registry,
-        { pi: dispatchFakeAdapter },
-        opts({
-          resolveLinearKey: () => null,
-        }),
-      );
-      expect(summary).toMatchObject({
-        terminalState: "COMPLETED",
-        reasonCode: "ok",
-      });
-    } finally {
-      if (previousStub === undefined) delete process.env.FACTORY_DISPATCH_STUB;
-      else process.env.FACTORY_DISPATCH_STUB = previousStub;
-    }
-  });
-
-  test("the fake adapter override explicitly enables the demo dispatch stub", async () => {
-    const db = openDb(":memory:");
-    queueRun(db, makeDispatchSpec({ adapter: "pi" }));
-    const summary = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      opts({
-        adapterOverride: "fake",
-        resolveLinearKey: () => null,
-      }),
-    );
-    expect(summary).toMatchObject({
-      terminalState: "COMPLETED",
-      reasonCode: "ok",
-    });
-  });
-
-  test("acquireClaimLock acquires lock file and prevents concurrent acquire, release unlocks", () => {
-    const lockDir = tmpDir("evrt-lock-");
-    const lockFile = dispatchLockPath("wt-worker", lockDir);
-    expect(acquireClaimLock(lockFile, { pid: process.pid, now: 1000 })).toBe(
-      true,
-    );
-    // Second acquire by live PID fails
-    expect(acquireClaimLock(lockFile, { pid: process.pid, now: 2000 })).toBe(
-      false,
-    );
-    releaseClaimLock(lockFile);
-    expect(existsSync(lockFile)).toBe(false);
-    expect(acquireClaimLock(lockFile, { pid: process.pid, now: 3000 })).toBe(
-      true,
-    );
-    releaseClaimLock(lockFile);
-  });
-
-  test("acquireClaimLock preserves old locks from live owners and reclaims dead owners", () => {
-    const lockDir = tmpDir("evrt-lock-stale-");
-    const lockFile = dispatchLockPath("wt-worker", lockDir);
-    // Age alone cannot make a live owner's lock safe to steal.
-    writeFileSync(lockFile, `${process.pid} 1000\n`, "utf8");
-    expect(
-      acquireClaimLock(lockFile, {
-        pid: process.pid,
-        now: 201_000,
-        isAlive: () => true,
-      }),
-    ).toBe(false);
-    releaseClaimLock(lockFile);
-
-    // A dead owner's lock is stale and is reclaimed immediately.
-    writeFileSync(lockFile, `999999 1000\n`, "utf8");
-    expect(
-      acquireClaimLock(lockFile, {
-        pid: process.pid,
-        now: 2000,
-        isAlive: () => false,
-      }),
-    ).toBe(true);
-    releaseClaimLock(lockFile);
-  });
-
-  test("same-identity dispatch claims share the supervisor lock when event home is isolated", async () => {
-    const previousEventHome = process.env.FACTORY_EVENT_HOME;
-    const previousLocksDir = process.env.FACTORY_LOCKS_DIR;
-    const repoName = "wt-worker";
-    const supervisorLock = dispatchLockPath(
-      repoName,
-      path.join(homedir(), ".factory", "locks"),
-    );
-    process.env.FACTORY_EVENT_HOME = tmpDir("evrt-isolated-event-home-");
-    delete process.env.FACTORY_LOCKS_DIR;
-    let claimCalls = 0;
-
-    try {
-      expect(acquireClaimLock(supervisorLock)).toBe(true);
-      const db = openDb(":memory:");
-      queueRun(
-        db,
-        makeDispatchSpec({
-          input: { repo: repoName, ticket: "WM-877" },
-        }),
-      );
-
-      const summary = await runOnce(
-        db,
-        registry,
-        { fake: dispatchFakeAdapter },
-        opts({
-          dispatch: {
-            random: () => 0,
-            fetchTicket: () => readyDispatchTicket("WM-877"),
-            fetchInFlight: () => [],
-            countLeases: () => 0,
-            claimTicket: () => {
-              claimCalls += 1;
-              return { ok: true, assignee: "shared-bot" };
-            },
-          },
-        }),
-      );
-
-      expect(summary.reasonCode).toBe("claim_lock_contention");
-      expect(claimCalls).toBe(0);
-    } finally {
-      releaseClaimLock(supervisorLock);
-      if (previousEventHome === undefined)
-        delete process.env.FACTORY_EVENT_HOME;
-      else process.env.FACTORY_EVENT_HOME = previousEventHome;
-      if (previousLocksDir === undefined) delete process.env.FACTORY_LOCKS_DIR;
-      else process.env.FACTORY_LOCKS_DIR = previousLocksDir;
-    }
-  });
-
-  test("contended claim lock requeues with jittered backoff without consuming an attempt, then runs", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-lock-busy-");
-    const lockFile = dispatchLockPath("wt-worker", lockDir);
-    acquireClaimLock(lockFile, { pid: process.pid, now: T0 });
-
-    const spec = queueRun(db, makeDispatchSpec());
-    let now = T0;
-    const o = opts({
-      now: () => now,
-      dispatch: {
-        locksDir: lockDir,
-        random: () => 0,
-        fetchTicket: () => readyDispatchTicket("WM-701"),
-        fetchInFlight: () => [],
-        countLeases: () => 0,
-        claimTicket: () => ({ ok: true }),
-      },
-    });
-
-    const deferred = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      o,
-    );
-    expect(deferred).toMatchObject({
-      terminalState: "QUEUED",
-      reasonCode: "claim_lock_contention",
-    });
-    expect(runState(db, spec.runId)).toBe("QUEUED");
-    expect(
-      db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId)
-        .attempts,
-    ).toBe(0);
-    expect(
-      db.query(`SELECT * FROM attempts WHERE run_id = ?`).all(spec.runId),
-    ).toHaveLength(0);
-    expect(
-      db.query(`SELECT * FROM results WHERE run_id = ?`).all(spec.runId),
-    ).toHaveLength(0);
-    expect(claimNext(db, o)).toBeNull();
-
-    releaseClaimLock(lockFile);
-    now += deferred.requeueAfterMs;
-    const completed = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      o,
-    );
-    expect(completed).toMatchObject({
-      terminalState: "COMPLETED",
-      reasonCode: "ok",
-      attempt: 1,
-    });
-    expect(runState(db, spec.runId)).toBe("COMPLETED");
-    expect(
-      db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId)
-        .attempts,
-    ).toBe(1);
-  });
-
-  test("claim lock starvation refuses with a distinct reason after the requeue ceiling", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-lock-starved-");
-    const lockFile = dispatchLockPath("wt-worker", lockDir);
-    acquireClaimLock(lockFile, { pid: process.pid, now: T0 });
-
-    const spec = queueRun(db, makeDispatchSpec());
-    let now = T0;
-    const o = opts({
-      now: () => now,
-      dispatch: {
-        locksDir: lockDir,
-        random: () => 0,
-        maxClaimLockContentionRequeues: 1,
-        fetchTicket: () => readyDispatchTicket("WM-701"),
-        fetchInFlight: () => [],
-        countLeases: () => 0,
-        claimTicket: () => ({ ok: true }),
-      },
-    });
-
-    const deferred = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      o,
-    );
-    now += deferred.requeueAfterMs;
-    const refused = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      o,
-    );
-    expect(refused).toMatchObject({
-      terminalState: "REFUSED",
-      reasonCode: "claim_lock_starvation",
-    });
-    expect(runState(db, spec.runId)).toBe("REFUSED");
-    releaseClaimLock(lockFile);
-  });
-
-  test("concurrent disjoint dispatches drain through the claim lock with mutually exclusive claims", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-lock-burst-");
-    const specs = ["WM-710", "WM-711", "WM-712"].map((ticket, index) =>
-      queueRun(
-        db,
-        makeDispatchSpec({
-          runId: `run_lock_burst_${index + 1}`,
-          input: { repo: "wt-worker", ticket },
-        }),
-      ),
-    );
-    let now = T0;
-    let releaseFirst;
-    let markFirstStarted;
-    const firstStarted = new Promise((resolve) => {
-      markFirstStarted = resolve;
-    });
-    const firstRelease = new Promise((resolve) => {
-      releaseFirst = resolve;
-    });
-    let activeClaims = 0;
-    let maxActiveClaims = 0;
-    const claimedTickets = [];
-    const o = opts({
-      now: () => now,
-      dispatch: {
-        locksDir: lockDir,
-        random: () => 1,
-        fetchTicket: (ticket) => readyDispatchTicket(ticket),
-        fetchInFlight: () => [],
-        countLeases: () => 0,
-        claimTicket: async ({ ticket }) => {
-          activeClaims += 1;
-          maxActiveClaims = Math.max(maxActiveClaims, activeClaims);
-          claimedTickets.push(ticket);
-          if (ticket === "WM-710") {
-            markFirstStarted();
-            await firstRelease;
-          }
-          activeClaims -= 1;
-          return { ok: true };
-        },
-      },
-    });
-
-    const first = runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
-    await firstStarted;
-    const second = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      o,
-    );
-    const third = await runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
-    expect([second.reasonCode, third.reasonCode]).toEqual([
-      "claim_lock_contention",
-      "claim_lock_contention",
-    ]);
-    releaseFirst();
-    expect((await first).terminalState).toBe("COMPLETED");
-
-    now += Math.max(second.requeueAfterMs, third.requeueAfterMs);
-    const drained = [
-      await runOnce(db, registry, { fake: dispatchFakeAdapter }, o),
-      await runOnce(db, registry, { fake: dispatchFakeAdapter }, o),
+  describe("defaultReconcileVerifiedHandoffTicket (#1498)", () => {
+    const STATE_ARGS = [
+      "state",
+      "WM-1498",
+      "In Review",
+      "--add",
+      "ai:needs-review",
+      "--remove",
+      "ai:in-progress",
+      "--remove",
+      "ai:agent-ready",
     ];
-    expect(drained.map((summary) => summary.terminalState)).toEqual([
-      "COMPLETED",
-      "COMPLETED",
-    ]);
-    expect(specs.map((spec) => runState(db, spec.runId))).toEqual([
-      "COMPLETED",
-      "COMPLETED",
-      "COMPLETED",
-    ]);
-    expect(
-      specs.map(
-        (spec) =>
-          db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId)
-            .attempts,
-      ),
-    ).toEqual([1, 1, 1]);
-    expect(claimedTickets.sort()).toEqual(["WM-710", "WM-711", "WM-712"]);
-    expect(maxActiveClaims).toBe(1);
-  });
 
-  test("merge-fix gate accepts an assigned In Review ticket without invoking the dispatch claim", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-merge-fix-gate-");
-    const spec = queueRun(db, makeMergeFixSpec());
-    let claimCalled = false;
-
-    const summary = await runOnce(
-      db,
-      registry,
-      { "merge-fake": mergeFixFakeAdapter },
-      opts({
-        dispatch: {
-          locksDir: lockDir,
-          fetchTicket: () => ({
-            identifier: spec.input.ticket,
-            state: { name: "In Review" },
-            assignee: { id: "reviewer" },
-            labels: { nodes: [{ name: "ai:needs-review" }] },
-            description: "## Owned Paths\n- src/feature/**\n",
-          }),
-          fetchPullRequest: () => ({
-            state: "OPEN",
-            headRefOid: spec.input.headSha,
-          }),
-          claimTicket: () => {
-            claimCalled = true;
-            return { ok: false, reasonCode: "ticket_assigned" };
-          },
-        },
-      }),
-    );
-
-    expect(summary).toMatchObject({
-      terminalState: "COMPLETED",
-      reasonCode: "ok",
-    });
-    expect(claimCalled).toBe(false);
-    expect(runState(db, spec.runId)).toBe("COMPLETED");
-  });
-
-  test("merge-fix claim refusals use role-specific reason codes", async () => {
-    for (const [suffix, ticketOverrides, pr, reasonCode] of [
-      [
-        "escalated",
-        { labels: { nodes: [{ name: "ai:escalated" }] } },
-        { state: "OPEN", headRefOid: "a".repeat(40) },
-        "merge_fix_ticket_escalated",
-      ],
-      [
-        "moved",
-        {},
-        { state: "OPEN", headRefOid: "d".repeat(40) },
-        "merge_fix_pr_moved",
-      ],
-    ]) {
-      const db = openDb(":memory:");
-      const spec = queueRun(
-        db,
-        makeMergeFixSpec({ runId: `run_merge_fix_${suffix}` }),
-      );
-      const summary = await runOnce(
-        db,
-        registry,
-        { "merge-fake": mergeFixFakeAdapter },
-        opts({
-          dispatch: {
-            locksDir: tmpDir(`evrt-merge-fix-${suffix}-`),
-            fetchTicket: () => ({
-              identifier: spec.input.ticket,
-              state: { name: "In Review" },
-              assignee: { id: "reviewer" },
-              labels: { nodes: [{ name: "ai:needs-review" }] },
-              description: "## Owned Paths\n- src/feature/**\n",
-              ...ticketOverrides,
-            }),
-            fetchPullRequest: () => pr,
-          },
-        }),
-      );
-      expect(summary).toMatchObject({ terminalState: "REFUSED", reasonCode });
-      expect(["ticket_assigned", "ticket_not_todo"]).not.toContain(
-        summary.reasonCode,
-      );
-    }
-  });
-
-  test("execute-time re-checks refuse on ticket_not_todo, ticket_assigned, capacity_full, owned_paths_overlap, ticket_claim_lost", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-rechecks-");
-
-    // 1. ticket_not_todo
-    const spec1 = queueRun(
-      db,
-      makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-702" } }),
-    );
-    const sum1 = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      opts({
-        dispatch: {
-          locksDir: lockDir,
-          fetchTicket: () =>
-            readyDispatchTicket("WM-702", { state: { name: "In Review" } }),
-          fetchInFlight: () => [],
-          countLeases: () => 0,
-        },
-      }),
-    );
-    expect(sum1.terminalState).toBe("REFUSED");
-    expect(sum1.reasonCode).toBe("ticket_not_todo");
-
-    // 2. ticket_assigned
-    const spec2 = queueRun(
-      db,
-      makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-703" } }),
-    );
-    const sum2 = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      opts({
-        dispatch: {
-          locksDir: lockDir,
-          fetchTicket: () =>
-            readyDispatchTicket("WM-703", { assignee: { id: "other" } }),
-          fetchInFlight: () => [],
-          countLeases: () => 0,
-        },
-      }),
-    );
-    expect(sum2.terminalState).toBe("REFUSED");
-    expect(sum2.reasonCode).toBe("ticket_assigned");
-
-    // 3. capacity_full
-    const spec3 = queueRun(
-      db,
-      makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-704" } }),
-    );
-    const sum3 = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      opts({
-        dispatch: {
-          locksDir: lockDir,
-          fetchTicket: () => readyDispatchTicket("WM-704"),
-          fetchInFlight: () => [],
-          countLeases: () => 2, // cap is 2
-        },
-      }),
-    );
-    expect(sum3.terminalState).toBe("REFUSED");
-    expect(sum3.reasonCode).toBe("capacity_full");
-
-    // 4. owned_paths_overlap
-    const spec4 = queueRun(
-      db,
-      makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-705" } }),
-    );
-    const sum4 = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      opts({
-        dispatch: {
-          locksDir: lockDir,
-          fetchTicket: () =>
-            readyDispatchTicket("WM-705", {
-              description: "## Owned Paths\n- src/api/**\n",
-            }),
-          fetchInFlight: () => [
-            {
-              identifier: "WM-800",
-              description: "## Owned Paths\n- src/api/routes.ts\n",
-            },
-          ],
-          countLeases: () => 0,
-        },
-      }),
-    );
-    expect(sum4.terminalState).toBe("REFUSED");
-    expect(sum4.reasonCode).toBe("owned_paths_overlap");
-
-    // 5. ticket_claim_lost
-    const spec5 = queueRun(
-      db,
-      makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-706" } }),
-    );
-    const sum5 = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      opts({
-        dispatch: {
-          locksDir: lockDir,
-          fetchTicket: () => readyDispatchTicket("WM-706"),
-          fetchInFlight: () => [],
-          countLeases: () => 0,
-          claimTicket: () => ({ ok: false, reasonCode: "ticket_claim_lost" }),
-        },
-      }),
-    );
-    expect(sum5.terminalState).toBe("REFUSED");
-    expect(sum5.reasonCode).toBe("ticket_claim_lost");
-  });
-
-  // WM-677: under `dispatch.owned_paths_collision: advisory` a textual overlap
-  // is evidence, not a refusal — the run is claimed and executes. Only the
-  // narrow hard-conflict set (identical concrete file, or `**`) still refuses.
-  // The worker consumes the same gate as the planner, so this is the
-  // execute-time half of the contract; the fixture policy.yaml is `{}` for
-  // every other test here, which is why they still see strict.
-  test("advisory owned-paths mode dispatches across overlap and refuses only hard conflicts (WM-677)", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-advisory-");
-    const policyPath = path.join(factoryRoot, "config", "policy.yaml");
-    const priorPolicy = readFileSync(policyPath, "utf8");
-    writeFileSync(policyPath, "dispatch:\n  owned_paths_collision: advisory\n");
-    try {
-      // Containment overlap (src/api/** vs src/api/routes.ts): strict refuses this
-      // exact pair in the test above; advisory lets it run.
-      const specA = queueRun(
-        db,
-        makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-707" } }),
-      );
-      const sumA = await runOnce(
-        db,
-        registry,
-        { fake: dispatchFakeAdapter },
-        opts({
-          dispatch: {
-            locksDir: lockDir,
-            fetchTicket: () =>
-              readyDispatchTicket("WM-707", {
-                description: "## Owned Paths\n- src/api/**\n",
-              }),
-            fetchInFlight: () => [
-              {
-                identifier: "WM-800",
-                description: "## Owned Paths\n- src/api/routes.ts\n",
-              },
-            ],
-            countLeases: () => 0,
-          },
-        }),
-      );
-      expect(sumA.terminalState).not.toBe("REFUSED");
-      expect(sumA.reasonCode).not.toBe("owned_paths_overlap");
-
-      // Identical concrete file on both sides: same file is not same lines —
-      // advisory lets it run too (evidence carries the pair).
-      queueRun(
-        db,
-        makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-708" } }),
-      );
-      const sumB = await runOnce(
-        db,
-        registry,
-        { fake: dispatchFakeAdapter },
-        opts({
-          dispatch: {
-            locksDir: lockDir,
-            fetchTicket: () =>
-              readyDispatchTicket("WM-708", {
-                description: "## Owned Paths\n- src/api/routes.ts\n",
-              }),
-            fetchInFlight: () => [
-              {
-                identifier: "WM-801",
-                description: "## Owned Paths\n- src/api/routes.ts\n",
-              },
-            ],
-            countLeases: () => 0,
-          },
-        }),
-      );
-      expect(sumB.terminalState).not.toBe("REFUSED");
-      expect(sumB.reasonCode).not.toBe("owned_paths_conflict_hard");
-
-      // A `**` claim on the in-flight side: still a hard conflict.
-      queueRun(
-        db,
-        makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-709" } }),
-      );
-      const sumC = await runOnce(
-        db,
-        registry,
-        { fake: dispatchFakeAdapter },
-        opts({
-          dispatch: {
-            locksDir: lockDir,
-            fetchTicket: () =>
-              readyDispatchTicket("WM-709", {
-                description: "## Owned Paths\n- docs/readme.md\n",
-              }),
-            fetchInFlight: () => [
-              { identifier: "WM-802", description: "## Owned Paths\n- **\n" },
-            ],
-            countLeases: () => 0,
-          },
-        }),
-      );
-      expect(sumC.terminalState).toBe("REFUSED");
-      expect(sumC.reasonCode).toBe("owned_paths_conflict_hard");
-    } finally {
-      writeFileSync(policyPath, priorPolicy);
-    }
-  });
-
-  test("lease-loss attempt 2 resumes its own claim while stale attempt 1 cannot unclaim it (WM-621)", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-claim-retry-locks-");
-    const leaseDir = tmpDir("evrt-claim-retry-leases-");
-    const spec = queueRun(
-      db,
-      makeDispatchSpec({
-        input: { repo: "wt-worker", ticket: "WM-621" },
-      }),
-    );
-    let now = T0;
-    let ticket = readyDispatchTicket("WM-621");
-    let claimCalls = 0;
-    let unclaimCalls = 0;
-    let adapterCalls = 0;
-    let releaseFirst;
-    let releaseSecond;
-    let markFirstStarted;
-    let markSecondStarted;
-    const firstStarted = new Promise((resolve) => {
-      markFirstStarted = resolve;
-    });
-    const secondStarted = new Promise((resolve) => {
-      markSecondStarted = resolve;
-    });
-    const firstRelease = new Promise((resolve) => {
-      releaseFirst = resolve;
-    });
-    const secondRelease = new Promise((resolve) => {
-      releaseSecond = resolve;
-    });
-    const retryAdapter = {
-      async execute(args) {
-        adapterCalls += 1;
-        if (adapterCalls === 1) {
-          markFirstStarted();
-          await firstRelease;
-          return { exitCode: 1, timedOut: false };
-        }
-        markSecondStarted();
-        await secondRelease;
-        return dispatchFakeAdapter.execute(args);
-      },
-    };
-    const o = opts({
-      now: () => now,
-      workspacesRoot: freshRoot(),
-      dispatch: {
-        locksDir: lockDir,
-        leasesDir: leaseDir,
-        fetchTicket: () => ticket,
-        fetchViewer: () => ({ id: "factory-user", name: "Factory" }),
-        fetchInFlight: () => [],
-        countLeases: () => 0,
-        claimTicket: () => {
-          claimCalls += 1;
-          ticket = readyDispatchTicket("WM-621", {
-            state: { name: "In Progress" },
-            assignee: { id: "factory-user", name: "Factory" },
-            labels: {
-              nodes: [
-                { name: "ai:in-progress" },
-                { name: "agent:claude-code" },
-              ],
-            },
-          });
-          return { ok: true };
-        },
-        unclaimTicket: () => {
-          unclaimCalls += 1;
-          ticket = readyDispatchTicket("WM-621");
-          return true;
-        },
-      },
-    });
-
-    const firstClaim = claimNext(db, o);
-    const firstExecution = executeClaimed(
-      db,
-      registry,
-      { fake: retryAdapter },
-      firstClaim,
-      o,
-    );
-    let retryExecution;
-    try {
-      await firstStarted;
-      expect(claimCalls).toBe(1);
-      expect(ticket.state.name).toBe("In Progress");
-
-      now = T0 + (spec.timeoutSeconds + 120) * 1000 + 1;
-      expect(reapExpiredLeases(db, { now, policyVersion: "test" })).toBe(1);
-      expect(runState(db, spec.runId)).toBe("QUEUED");
-
-      retryExecution = runOnce(db, registry, { fake: retryAdapter }, o);
-      await secondStarted;
-      expect(claimCalls).toBe(1);
-      expect(
-        readFileSync(callsLog, "utf8")
-          .trim()
-          .split("\n")
-          .filter((call) => call === "up WM-621"),
-      ).toHaveLength(2);
-      expect(lifecycleOf(db, spec.runId)).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ to_state: "RUNNING", attempt: 2 }),
-        ]),
-      );
-
-      releaseFirst();
-      expect(await firstExecution).toEqual({ fenced: true });
-      expect(unclaimCalls).toBe(0);
-      expect(ticket.state.name).toBe("In Progress");
-      expect(
-        liveWorkerLeases("wt-worker", { dir: leaseDir, now }),
-      ).toHaveLength(1);
-
-      releaseSecond();
-      const retried = await retryExecution;
-      expect(retried).toMatchObject({ attempt: 2, terminalState: "COMPLETED" });
-    } finally {
-      releaseFirst();
-      releaseSecond();
-      await Promise.allSettled(
-        [firstExecution, retryExecution].filter(Boolean),
-      );
-    }
-  });
-
-  test("claim-time Linear read failure contradicting plan evidence requeues with backoff", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-transient-linear-");
-    const description = "## Owned Paths\n- src/feature/**\n";
-    const spec = queueRun(
-      db,
-      makeDispatchSpec({
-        input: { repo: "wt-worker", ticket: "WM-707" },
-        approvalPolicy: planTimeDispatchEvidence(description),
-      }),
-    );
-    let now = T0;
-    let reads = 0;
-    const o = opts({
-      now: () => now,
-      dispatch: {
-        locksDir: lockDir,
-        random: () => 0,
-        fetchTicket: () => {
-          reads += 1;
-          if (reads === 1) throw new Error("linear_read_failed: HTTP 503");
-          return readyDispatchTicket("WM-707", { description });
-        },
-        fetchInFlight: () => [],
-        countLeases: () => 0,
-        claimTicket: () => ({ ok: true }),
-      },
-    });
-
-    const deferred = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      o,
-    );
-    expect(deferred).toMatchObject({
-      terminalState: "QUEUED",
-      reasonCode: "linear_read_failed",
-    });
-    expect(deferred.requeueAfterMs).toBeGreaterThan(0);
-    expect(runState(db, spec.runId)).toBe("QUEUED");
-    expect(
-      db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId)
-        .attempts,
-    ).toBe(0);
-    expect(claimNext(db, o)).toBeNull();
-
-    now += deferred.requeueAfterMs;
-    const completed = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      o,
-    );
-    expect(completed).toMatchObject({
-      terminalState: "COMPLETED",
-      reasonCode: "ok",
-      attempt: 1,
-    });
-  });
-
-  test("empty claim-time description retries only when its hash contradicts plan evidence, then explains recovery", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-transient-owned-paths-");
-    const spec = queueRun(
-      db,
-      makeDispatchSpec({
-        input: { repo: "wt-worker", ticket: "WM-708" },
-        approvalPolicy: planTimeDispatchEvidence(),
-      }),
-    );
-    let now = T0;
-    const o = opts({
-      now: () => now,
-      dispatch: {
-        locksDir: lockDir,
-        random: () => 0,
-        maxTransientGateRequeues: 1,
-        fetchTicket: () => readyDispatchTicket("WM-708", { description: "" }),
-        fetchInFlight: () => [],
-        countLeases: () => 0,
-      },
-    });
-
-    const deferred = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      o,
-    );
-    expect(deferred).toMatchObject({
-      terminalState: "QUEUED",
-      reasonCode: "owned_paths_unknown",
-    });
-    expect(runState(db, spec.runId)).toBe("QUEUED");
-
-    now += deferred.requeueAfterMs;
-    const exhausted = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      o,
-    );
-    expect(exhausted).toMatchObject({
-      terminalState: "REFUSED",
-      reasonCode: "owned_paths_unknown",
-    });
-    expect(runState(db, spec.runId)).toBe("REFUSED");
-    expect(() =>
-      retryRun(db, spec.runId, {
-        actor: "operator",
-        force: true,
-        policyVersion: "test",
-        now,
-      }),
-    ).toThrow(
-      `factory dispatch event factory.dispatch.requested --payload '{"repo":"wt-worker","ticket":"WM-708"}' --watch`,
-    );
-  });
-
-  test("worker lease is acquired during execution and released on completion", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-lease-locks-");
-    const leaseDir = tmpDir("evrt-lease-dir-");
-
-    let sawActiveLease = false;
-    const leaseCheckAdapter = {
-      async execute({ spec, workspaceDir }) {
-        const active = liveWorkerLeases("wt-worker", {
-          dir: leaseDir,
-          now: T0,
-        });
-        sawActiveLease = active.some((l) => l.ticket === spec.input.ticket);
-        return dispatchFakeAdapter.execute({ spec, workspaceDir });
-      },
-    };
-
-    const spec = queueRun(
-      db,
-      makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-710" } }),
-    );
-    const summary = await runOnce(
-      db,
-      registry,
-      { fake: leaseCheckAdapter },
-      opts({
-        dispatch: {
-          locksDir: lockDir,
-          leasesDir: leaseDir,
-          fetchTicket: () => readyDispatchTicket("WM-710"),
-          fetchInFlight: () => [],
-          countLeases: () => 0,
-          claimTicket: () => ({ ok: true }),
-        },
-      }),
-    );
-
-    expect(sawActiveLease).toBe(true);
-    expect(summary.terminalState).toBe("COMPLETED");
-    // After execution, the lease must be released
-    expect(
-      liveWorkerLeases("wt-worker", { dir: leaseDir, now: T0 }),
-    ).toHaveLength(0);
-  });
-
-  test("mutating worktree is exempt from read-only clean check and runs repo verify command", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-verify-locks-");
-    const leaseDir = tmpDir("evrt-verify-leases-");
-
-    const spec = queueRun(
-      db,
-      makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-720" } }),
-    );
-    const summary = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      opts({
-        dispatch: {
-          locksDir: lockDir,
-          leasesDir: leaseDir,
-          fetchTicket: () => readyDispatchTicket("WM-720"),
-          fetchInFlight: () => [],
-          countLeases: () => 0,
-          claimTicket: () => ({ ok: true }),
-        },
-      }),
-    );
-
-    expect(summary.terminalState).toBe("COMPLETED");
-    expect(summary.reasonCode).toBe("ok");
-    const resRow = db
-      .query(`SELECT result_json FROM results WHERE run_id = ?`)
-      .get(spec.runId);
-    const result = JSON.parse(resRow.result_json);
-    expect(result.verification.checks).toContain("repo_verify_passed");
-  });
-
-  // WM-718: at handoff (PR_OPEN) a red repo verify is the handoff gate
-  // refusing — named `handoff_verification_failed` so the ticket returns to
-  // Todo + ai:agent-ready and the PR is held; still FAILED, still no result row.
-  test("failing repo verify command at handoff fails handoff_verification_failed", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-fverify-locks-");
-    const leaseDir = tmpDir("evrt-fverify-leases-");
-
-    const spec = queueRun(
-      db,
-      makeDispatchSpec({
-        input: { repo: "wt-failing-verify", ticket: "WM-730" },
-      }),
-    );
-    const summary = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      opts({
-        dispatch: {
-          locksDir: lockDir,
-          leasesDir: leaseDir,
-          fetchTicket: () => readyDispatchTicket("WM-730"),
-          fetchInFlight: () => [],
-          countLeases: () => 0,
-          claimTicket: () => ({ ok: true }),
-        },
-      }),
-    );
-
-    expect(summary.terminalState).toBe("FAILED");
-    expect(summary.reasonCode).toBe("handoff_verification_failed");
-    expect(summary.detail).toContain("repo_verify_failed");
-    expect(summary.handoff.repoVerify.exitCode).toBe(42);
-  });
-
-  test("a deliberately red baseline still reaches the agent with failure context, then terminates baseline_red", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-baseline-locks-");
-    const leaseDir = tmpDir("evrt-baseline-leases-");
-    let executionInput = null;
-    const unclaimCalls = [];
-    const blockCalls = [];
-    const observingAdapter = {
-      async execute({ spec, workspaceDir }) {
-        executionInput = JSON.parse(
-          readFileSync(path.join(workspaceDir, "input.json"), "utf8"),
-        );
-        return dispatchFakeAdapter.execute({ spec, workspaceDir });
-      },
-    };
-
-    const spec = queueRun(
-      db,
-      makeDispatchSpec({
-        input: { repo: "wt-baseline-red", ticket: "WM-731" },
-      }),
-    );
-    const summary = await runOnce(
-      db,
-      registry,
-      { fake: observingAdapter },
-      opts({
-        dispatch: {
-          locksDir: lockDir,
-          leasesDir: leaseDir,
-          fetchTicket: () => readyDispatchTicket("WM-731"),
-          fetchInFlight: () => [],
-          countLeases: () => 0,
-          claimTicket: () => ({ ok: true }),
-          unclaimTicket: (payload) => {
-            unclaimCalls.push(payload);
-            return false;
-          },
-          blockBaselineTicket: (payload) => {
-            blockCalls.push(payload);
-            return true;
-          },
-        },
-      }),
-    );
-
-    expect(executionInput).toMatchObject({
-      repo: "wt-baseline-red",
-      ticket: "WM-731",
-      baseline: {
-        status: "red",
-        check: "web_build",
-        output: "entry chunk exceeds budget",
-      },
-    });
-    expect(summary.terminalState).toBe("FAILED");
-    expect(summary.reasonCode).toBe("baseline_red");
-    expect(blockCalls).toHaveLength(1);
-    expect(unclaimCalls).toHaveLength(0);
-    expect(
-      db
-        .query(`SELECT reason_code FROM attempts WHERE run_id = ?`)
-        .get(spec.runId).reason_code,
-    ).toBe("baseline_red");
-  });
-
-  test(
-    "worktree-up handles an actual baseline-red repo verification and deduplicates baseline blocker comments",
-    { timeout: 45_000 },
-    async () => {
-      const repoRoot = process.cwd();
-      const repoName = "wm-baseline-real";
-      const ticket = `WM-${732000000 + Math.floor(Math.random() * 1_000_000)}`;
-      const apiPort = "7408";
-      const apiPortNumber = Number(apiPort);
-      const tmpRoot = tmpDir("wm334-real-");
-      const stubDir = path.join(tmpRoot, "stub");
-      const linearStateDir = path.join(tmpRoot, "linear-state");
-      const worktreeRoot = path.join(tmpRoot, "worktrees");
-      const reposFile = path.join(tmpRoot, "config", "repos.yaml");
-
-      const write = (p, c) => {
-        mkdirSync(path.dirname(p), { recursive: true });
-        writeFileSync(p, c, "utf8");
-      };
-
-      const baselineFailureSignature = ({ why, log = null, baseline }) =>
-        createHash("sha256")
-          .update(
-            JSON.stringify({
-              why,
-              log,
-              baseline:
-                baseline && typeof baseline === "object"
-                  ? {
-                      check: baseline.check,
-                      exitCode: baseline.exitCode,
-                      output: baseline.output,
-                    }
-                  : null,
-            }),
-          )
-          .digest("hex");
-
-      const baselineFailureMarker = (payload) =>
-        `wm:baseline:red:${baselineFailureSignature(payload)}`;
-      const keepAliveProcesses = [];
-
-      const expectedHome = path.join(
-        worktreeRoot,
-        ticket,
-        ".factory",
-        "event-runtime",
-      );
-      const seedRuntimeState = () => {};
-
-      const currentBranch = (
-        spawnSync(
-          "git",
-          ["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"],
-          { encoding: "utf8" },
-        ).stdout || ""
-      ).trim();
-      // GitHub Actions checks out a PR merge ref detached from its source branch.
-      // Give worktree-up a verified origin ref to that checked-out commit, rather
-      // than accidentally constructing the invalid origin/HEAD ref.
-      const detachedBaseBranch =
-        currentBranch === "HEAD" ? `wm334-test-${ticket}-${process.pid}` : null;
-      if (detachedBaseBranch) {
-        const head = (
-          spawnSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], {
-            encoding: "utf8",
-          }).stdout || ""
-        ).trim();
-        execFileSync("git", [
-          "-C",
-          repoRoot,
-          "update-ref",
-          `refs/remotes/origin/${detachedBaseBranch}`,
-          head,
-        ]);
-      }
-      const hasRemoteBranch = (branch) =>
-        branch &&
-        branch !== "HEAD" &&
-        spawnSync("git", [
-          "-C",
-          repoRoot,
-          "show-ref",
-          "--verify",
-          "--quiet",
-          `refs/remotes/origin/${branch}`,
-        ]).status === 0;
-      const baseBranch = [
-        currentBranch,
-        detachedBaseBranch,
-        process.env.GITHUB_BASE_REF,
-        "develop",
-      ].find(hasRemoteBranch);
-      expect(baseBranch).toBeDefined();
-      expect(baseBranch).not.toBe("HEAD");
-      expect(hasRemoteBranch(baseBranch)).toBe(true);
-      const realBun =
-        (
-          spawnSync("bash", ["-c", "command -v bun"], {
-            encoding: "utf8",
-            env: { ...process.env },
-          }).stdout || ""
-        ).trim() || "bun";
-
-      mkdirSync(stubDir, { recursive: true });
-      mkdirSync(linearStateDir, { recursive: true });
-
-      const worktreeUp = path.join(stubDir, "worktree-up-no-seed.sh");
-      write(
-        worktreeUp,
-        `#!/usr/bin/env bash\nexec ${JSON.stringify(path.join(repoRoot, "bin", "worktree-up.sh"))} "$@" --no-seed\n`,
-      );
-
-      const testPortBase = 18400 + Math.floor(Math.random() * 1000) * 2;
-      const testProcessMarker = `wm334-${process.pid}-${ticket}`;
-
-      const bunStubLines = [
-        "#!/usr/bin/env node",
-        'const fs = require("fs");',
-        'const path = require("path");',
-        'const { spawn } = require("child_process");',
-        ...processOwnerWatchdogSource().split("\n"),
-        `const stateDir = process.env.WM334_LINEAR_STATE_DIR || ${JSON.stringify(linearStateDir)}`,
-        `const realBun = process.env.WM334_REAL_BUN || ${JSON.stringify(realBun)}`,
-        "const args = process.argv.slice(2);",
-        "const logPath = process.env.WM334_BUN_LOG || null;",
-        "if (logPath) {\n  try {\n    fs.appendFileSync(logPath, `CALL ${args.join(' ')}\\n`);\n  } catch {}\n}",
-        "",
-        "function commentsPath(ticket) {",
-        '  return path.join(stateDir, ticket + ".comments.json");',
-        "}",
-        "function readComments(ticket) {",
-        "  try {",
-        '    return JSON.parse(fs.readFileSync(commentsPath(ticket), "utf8"));',
-        "  } catch {",
-        "    return [];",
-        "  }",
-        "}",
-        "function writeComments(ticket, rows) {",
-        '  fs.writeFileSync(commentsPath(ticket), JSON.stringify(rows), "utf8");',
-        "}",
-        "",
-        'if (args[0]?.endsWith("tools/ticket.mjs")) {',
-        "  const verb = args[1];",
-        '  if (verb === "comments") {',
-        "    const ticket = args[2];",
-        "    console.log(JSON.stringify(readComments(ticket)));",
-        "    process.exit(0);",
-        "  }",
-        '  if (verb === "comment") {',
-        "    const ticket = args[2];",
-        '    const body = args.slice(3).join(" ");',
-        "    const rows = readComments(ticket);",
-        "    rows.push({ body });",
-        "    writeComments(ticket, rows);",
-        "    process.exit(0);",
-        "  }",
-        '  if (verb === "state") {',
-        '    console.log("ok");',
-        "    process.exit(0);",
-        "  }",
-        '  if (verb === "claim") {',
-        '    console.log("ok");',
-        "    process.exit(0);",
-        "  }",
-        '  if (verb === "get") {',
-        '    console.log(JSON.stringify({ identifier: args[2], state: { name: "In Progress" }, assignee: { name: "agent" }, labels: { nodes: [{ name: "ai:in-progress" }] } }));',
-        "    process.exit(0);",
-        "  }",
-        '  console.log("[]");',
-        "  process.exit(0);",
-        "}",
-        'if (args.includes("install")) {',
-        "  process.exit(0);",
-        "}",
-        'if (args[0] === "run" && args[1] === "build:fast") {',
-        '  console.log("entry chunk exceeds budget");',
-        "  process.exit(1);",
-        "}",
-        "const child = spawn(realBun, args, {",
-        '  stdio: "inherit",',
-        `  argv0: ${JSON.stringify(`factory-test-${testProcessMarker}`)},`,
-        `  env: { ...process.env, FACTORY_TEST_TRACKED_PROCESS: ${JSON.stringify(testProcessMarker)} },`,
-        "});",
-        'process.on("SIGTERM", () => child.kill("SIGTERM"));',
-        'process.on("SIGINT", () => child.kill("SIGINT"));',
-        'process.on("SIGHUP", () => child.kill("SIGHUP"));',
-        'child.on("exit", (code, signal) => {',
-        "  if (signal) {",
-        "    try { process.kill(process.pid, signal); } catch {}",
-        "  }",
-        "  process.exit(code ?? 0);",
-        "});",
-      ];
-      write(path.join(stubDir, "bun"), bunStubLines.join("\n") + "\n");
-
-      for (const filePath of [path.join(stubDir, "bun"), worktreeUp]) {
-        execFileSync("chmod", ["+x", filePath]);
-      }
-
-      write(
-        reposFile,
-        `repos:\n` +
-          `  - name: ${repoName}\n` +
-          `    path: ${repoRoot}\n` +
-          `    github: watt-mind/${repoName}\n` +
-          `    base: ${baseBranch}\n` +
-          `    team: WM\n` +
-          `    project: Factory\n` +
-          `    max_in_flight: 1\n` +
-          `    worktree_up: ${worktreeUp}\n` +
-          `    worktree_down: bin/worktree-down.sh\n` +
-          `    worktree_root: ${worktreeRoot}\n` +
-          `    verify: printf 'entry chunk exceeds budget\\n' \\n  >&2; exit 1\n` +
-          `    escalate_paths: []\n`,
-      );
-      const basePolicy = readFileSync(
-        resolveConfigPath("policy", { root: repoRoot, warn: false }),
-        "utf8",
-      );
-      const testPolicy = basePolicy.includes("  fake:")
-        ? basePolicy
-        : basePolicy.replace(
-            /^models:\n/m,
-            "models:\n  fake:\n    strong: default\n    standard: default\n    light: default\n",
-          );
-      write(path.join(tmpRoot, "config", "policy.yaml"), testPolicy);
-
-      const originalEnv = {
-        FACTORY_REPOS_ROOT: process.env.FACTORY_REPOS_ROOT,
-        FACTORY_SKIP_FETCH: process.env.FACTORY_SKIP_FETCH,
-        FACTORY_BASE_BRANCH: process.env.FACTORY_BASE_BRANCH,
-        FACTORY_WT_ROOT: process.env.FACTORY_WT_ROOT,
-        FACTORY_PORT_BASE: process.env.FACTORY_PORT_BASE,
-        FACTORY_PORT_SPAN: process.env.FACTORY_PORT_SPAN,
-        PATH: process.env.PATH,
-        WM334_LINEAR_STATE_DIR: process.env.WM334_LINEAR_STATE_DIR,
-        WM334_REAL_BUN: process.env.WM334_REAL_BUN,
-        WM334_BUN_LOG: process.env.WM334_BUN_LOG,
-        FACTORY_TEST_TRACKED_PROCESS: process.env.FACTORY_TEST_TRACKED_PROCESS,
-      };
-      try {
-        process.env.FACTORY_REPOS_ROOT = tmpRoot;
-        process.env.FACTORY_SKIP_FETCH = "1";
-        process.env.FACTORY_BASE_BRANCH = baseBranch;
-        process.env.FACTORY_WT_ROOT = worktreeRoot;
-        process.env.FACTORY_PORT_BASE = String(testPortBase);
-        process.env.FACTORY_PORT_SPAN = "50";
-        process.env.PATH = `${path.join(stubDir)}:${process.env.PATH}`;
-        process.env.WM334_LINEAR_STATE_DIR = linearStateDir;
-        process.env.WM334_REAL_BUN = realBun;
-        process.env.WM334_BUN_LOG = path.join(tmpRoot, "bun-calls.log");
-        process.env.FACTORY_TEST_TRACKED_PROCESS = testProcessMarker;
-
-        const db = openDb(":memory:");
-        const lockDir = tmpDir("wm334-real-locks-");
-        const leaseDir = tmpDir("wm334-real-leases-");
-        const executionInputs = [];
-        const blockCalls = [];
-        const observedAdapter = {
-          async execute({ spec, workspaceDir }) {
-            executionInputs.push(
-              JSON.parse(
-                readFileSync(path.join(workspaceDir, "input.json"), "utf8"),
-              ),
-            );
-            const result = {
-              schemaVersion: "factory.agent-result/v1",
-              terminalState: "completed",
-              reasonCode: "ok",
-              artifact: {
-                outcome: "PR_OPEN",
-                repo: spec.input.repo,
-                ticket: spec.input.ticket,
-                prUrl: `https://github.com/watt-mind/${spec.input.repo}/pull/10`,
-                verification: {
-                  command:
-                    "printf 'entry chunk exceeds budget\\n' > /dev/null; exit 1",
-                  passed: true,
-                  output: "agent verification passed",
-                },
-                summary: `implemented ${spec.input.ticket}`,
-              },
-              evidence: {
-                commands: ["cd event-runtime/web && bun run build:fast"],
-              },
-            };
-            writeFileSync(
-              path.join(workspaceDir, "result.json"),
-              `${JSON.stringify(result, null, 2)}\n`,
-              "utf8",
-            );
-            return { exitCode: 0, timedOut: false };
-          },
-        };
-
-        const blockTicket = ({ ticket, why, baseline, log = null }) => {
-          blockCalls.push({ ticket, why, baseline, log });
-          const marker = baselineFailureMarker({ why, baseline, log });
-          const commentsPath = path.join(
-            linearStateDir,
-            `${ticket}.comments.json`,
-          );
-          const existing = existsSync(commentsPath)
-            ? JSON.parse(readFileSync(commentsPath, "utf8"))
-            : [];
-          if (
-            !existing.some((row) => String(row.body ?? "").includes(marker))
-          ) {
-            existing.push({
-              body: `Dispatch run blocked due pre-existing baseline red.\n\n**Why:** ${why}\n\n<!-- ${marker} -->`,
-            });
-            writeFileSync(commentsPath, JSON.stringify(existing), "utf8");
-          }
-          return true;
-        };
-
-        const run = async () => {
-          seedRuntimeState();
-          const spec = queueRun(
-            db,
-            makeDispatchSpec({
-              input: { repo: repoName, ticket },
-              workspace: {
-                type: "worktree",
-                checkoutDir: "repo",
-                retainOnFailure: false,
-              },
-            }),
-          );
-          try {
-            return await runOnce(
-              db,
-              registry,
-              { fake: observedAdapter },
-              opts({
-                workspacesRoot: tmpDir(`${repoName}-run-`),
-                dispatch: {
-                  locksDir: lockDir,
-                  leasesDir: leaseDir,
-                  fetchTicket: () => readyDispatchTicket(ticket),
-                  fetchInFlight: () => [],
-                  countLeases: () => 0,
-                  claimTicket: () => ({ ok: true }),
-                  blockBaselineTicket: blockTicket,
-                },
-              }),
-            );
-          } finally {
-            trackProcessGroupsMatching(tmpRoot);
-            trackMarkedFakeRuntimeGroups(testProcessMarker);
-            const runDir = path.join(worktreeRoot, ticket, ".factory", "run");
-            if (existsSync(runDir)) {
-              for (const name of readdirSync(runDir).filter((entry) =>
-                entry.endsWith(".pid"),
-              )) {
-                const pid = Number(
-                  readFileSync(path.join(runDir, name), "utf8").trim(),
-                );
-                if (Number.isInteger(pid) && pid > 0) trackProcess(pid);
-              }
-            }
-          }
-        };
-
-        const first = await run();
-        const second = await run();
-        if (first.reasonCode !== "baseline_red") {
-          console.log("first summary", first);
-        }
-
-        expect(first.terminalState).toBe("FAILED");
-        expect(first.reasonCode).toBe("baseline_red");
-        expect(second.terminalState).toBe("FAILED");
-        expect(second.reasonCode).toBe("baseline_red");
-        expect(executionInputs).toHaveLength(2);
-        expect(blockCalls).toHaveLength(2);
-        expect(executionInputs[0]).toMatchObject({
-          repo: repoName,
-          ticket,
-          baseline: { status: "red", check: "web_build", exitCode: 1 },
-        });
-        expect(String(executionInputs[0].baseline.output ?? "")).toContain(
-          "entry chunk exceeds budget",
-        );
-
-        const comments = JSON.parse(
-          readFileSync(
-            path.join(linearStateDir, `${ticket}.comments.json`),
-            "utf8",
-          ),
-        );
-        expect(comments).toHaveLength(1);
-
-        const marker = baselineFailureMarker({
-          why: blockCalls[0].why,
-          baseline: blockCalls[0].baseline,
-          log: blockCalls[0].log,
-        });
-        expect(comments[0].body).toContain(`<!-- ${marker} -->`);
-      } finally {
-        trackProcessGroupsMatching(tmpRoot);
-        trackMarkedFakeRuntimeGroups(testProcessMarker);
-        await cleanupTrackedProcesses();
-        if (detachedBaseBranch) {
-          spawnSync("git", [
-            "-C",
-            repoRoot,
-            "update-ref",
-            "-d",
-            `refs/remotes/origin/${detachedBaseBranch}`,
-          ]);
-        }
-        for (const child of keepAliveProcesses) {
-          try {
-            child.kill();
-          } catch {
-            /* intentionally ignored */
-          }
-        }
-        for (const [key, value] of Object.entries(originalEnv)) {
-          if (value === undefined) {
-            delete process.env[key];
-          } else {
-            process.env[key] = value;
-          }
-        }
-        if (!process.env.WM334_KEEP_TMP_ROOT) {
-          rmSync(tmpRoot, { recursive: true, force: true });
-        }
-      }
-    },
-  );
-
-  test("worktree provisioning failure is not misclassified as adapter_error and never reaches execution", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-provision-locks-");
-    let executed = false;
-    const observingAdapter = {
-      async execute() {
-        executed = true;
-        return { exitCode: 0, timedOut: false };
-      },
-    };
-
-    const spec = queueRun(
-      db,
-      makeDispatchSpec({ input: { repo: "wt-broken-up", ticket: "WM-732" } }),
-    );
-    const summary = await runOnce(
-      db,
-      registry,
-      { fake: observingAdapter },
-      opts({
-        dispatch: {
-          locksDir: lockDir,
-          fetchTicket: () => readyDispatchTicket("WM-732"),
-          fetchInFlight: () => [],
-          countLeases: () => 0,
-          claimTicket: () => ({ ok: true }),
-        },
-      }),
-    );
-
-    expect(executed).toBe(false);
-    expect(summary.terminalState).toBe("FAILED");
-    expect(summary.reasonCode).toBe("workspace_provisioning_error");
-    expect(summary.error).toContain("dependency install failed");
-    expect(
-      db
-        .query(`SELECT reason_code FROM attempts WHERE run_id = ?`)
-        .get(spec.runId).reason_code,
-    ).toBe("workspace_provisioning_error");
-  });
-
-  test("sandboxed execution against a worktree workspace is refused typed before the adapter runs", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-sandbox-wt-locks-");
-    let executed = false;
-    const observingAdapter = {
-      async execute() {
-        executed = true;
-        return { exitCode: 0, timedOut: false };
-      },
-    };
-    const sandboxRegistry = {
-      ...registry,
-      agents: new Map(registry.agents),
-    };
-    sandboxRegistry.agents.set("dispatch@1", {
-      ...getAgent(registry, "dispatch@1"),
-      sandbox: { provider: "gondolin", allowedHosts: [] },
-    });
-    const spec = queueRun(
-      db,
-      makeDispatchSpec({
-        input: { repo: "wt-worker", ticket: "WM-733" },
-        maxEnvironmentRetries: 5,
-      }),
-    );
-
-    const summary = await runOnce(
-      db,
-      sandboxRegistry,
-      { fake: observingAdapter },
-      opts({
-        dispatch: {
-          locksDir: lockDir,
-          fetchTicket: () => readyDispatchTicket("WM-733"),
-          fetchInFlight: () => [],
-          countLeases: () => 0,
-          claimTicket: () => ({ ok: true }),
-        },
-      }),
-    );
-
-    expect(executed).toBe(false);
-    expect(summary).toMatchObject({
-      terminalState: "FAILED",
-      reasonCode: "worktree_sandbox_unsupported",
-    });
-    expect(runState(db, spec.runId)).toBe("FAILED");
-    expect(
-      lifecycleOf(db, spec.runId).some((event) =>
-        event.reason?.startsWith("retry:"),
-      ),
-    ).toBe(false);
-  });
-
-  test("filesystem failures after worktree_up remain typed workspace provisioning errors", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-link-collision-locks-");
-    let executed = false;
-    const observingAdapter = {
-      async execute() {
-        executed = true;
-        return { exitCode: 0, timedOut: false };
-      },
-    };
-
-    const spec = queueRun(
-      db,
-      makeDispatchSpec({
-        input: { repo: "wt-link-collision", ticket: "WM-734" },
-      }),
-    );
-    const summary = await runOnce(
-      db,
-      registry,
-      { fake: observingAdapter },
-      opts({
-        dispatch: {
-          locksDir: lockDir,
-          fetchTicket: () => readyDispatchTicket("WM-734"),
-          fetchInFlight: () => [],
-          countLeases: () => 0,
-          claimTicket: () => ({ ok: true }),
-        },
-      }),
-    );
-
-    expect(executed).toBe(false);
-    expect(summary.terminalState).toBe("FAILED");
-    expect(summary.reasonCode).toBe("workspace_provisioning_error");
-    expect(summary.error).toContain(
-      "worktree provisioning failed for wt-link-collision/WM-734",
-    );
-    expect(summary.error).toContain("EEXIST");
-    expect(
-      db
-        .query(`SELECT reason_code FROM attempts WHERE run_id = ?`)
-        .get(spec.runId).reason_code,
-    ).toBe("workspace_provisioning_error");
-  });
-
-  test("worktree_up daemon startup failure surfaces serve.log in provisioning error message", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-crash-locks-");
-    const observingAdapter = {
-      async execute() {
-        return { exitCode: 0, timedOut: false };
-      },
-    };
-
-    const spec = queueRun(
-      db,
-      makeDispatchSpec({
-        input: { repo: "wt-startup-crash", ticket: "WM-733" },
-      }),
-    );
-    const summary = await runOnce(
-      db,
-      registry,
-      { fake: observingAdapter },
-      opts({
-        dispatch: {
-          locksDir: lockDir,
-          fetchTicket: () => readyDispatchTicket("WM-733"),
-          fetchInFlight: () => [],
-          countLeases: () => 0,
-          claimTicket: () => ({ ok: true }),
-        },
-      }),
-    );
-
-    expect(summary.terminalState).toBe("FAILED");
-    expect(summary.reasonCode).toBe("workspace_provisioning_error");
-    expect(summary.error).toContain(
-      "RegistryError: event type test: model_tier strong has no mapping",
-    );
-    expect(summary.error).toContain(
-      "event runtime died during startup on 7400",
-    );
-  });
-
-  test("rollback Linear ticket state to Todo on crash, timeout, and contract violation", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-rollback-locks-");
-    const leaseDir = tmpDir("evrt-rollback-leases-");
-
-    const rollbacks = [];
-    const mockUnclaim = ({ repo, ticket, why }) => {
-      rollbacks.push({ repo, ticket, why });
-      return true;
-    };
-
-    // 1. Crash (exit code 1)
-    const crashingAdapter = {
-      async execute() {
-        return { exitCode: 1, timedOut: false };
-      },
-    };
-    const spec1 = queueRun(
-      db,
-      makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-740" } }),
-    );
-    const sum1 = await runOnce(
-      db,
-      registry,
-      { fake: crashingAdapter },
-      opts({
-        dispatch: {
-          locksDir: lockDir,
-          leasesDir: leaseDir,
-          fetchTicket: () => readyDispatchTicket("WM-740"),
-          fetchInFlight: () => [],
-          countLeases: () => 0,
-          claimTicket: () => ({ ok: true }),
-          unclaimTicket: mockUnclaim,
-        },
-      }),
-    );
-    expect(sum1.terminalState).toBe("FAILED");
-    expect(rollbacks).toContainEqual(
-      expect.objectContaining({ ticket: "WM-740", why: "agent_exit_1" }),
-    );
-
-    // 2. Timeout
-    const timingOutAdapter = {
-      async execute() {
-        return { exitCode: 0, timedOut: true };
-      },
-    };
-    const spec2 = queueRun(
-      db,
-      makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-741" } }),
-    );
-    const sum2 = await runOnce(
-      db,
-      registry,
-      { fake: timingOutAdapter },
-      opts({
-        dispatch: {
-          locksDir: lockDir,
-          leasesDir: leaseDir,
-          fetchTicket: () => readyDispatchTicket("WM-741"),
-          fetchInFlight: () => [],
-          countLeases: () => 0,
-          claimTicket: () => ({ ok: true }),
-          unclaimTicket: mockUnclaim,
-        },
-      }),
-    );
-    expect(sum2.terminalState).toBe("TIMED_OUT");
-    expect(rollbacks).toContainEqual(
-      expect.objectContaining({ ticket: "WM-741", why: "timeout" }),
-    );
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Dev live-reload: code stamp + drain-aware reload watcher (WM-213)
-// ---------------------------------------------------------------------------
-
-function stampRepo() {
-  const root = tmpDir("evrt-stamp-");
-  mkdirSync(path.join(root, "event-runtime", "lib", "adapters"), {
-    recursive: true,
-  });
-  writeFileSync(
-    path.join(root, "event-runtime", "cli.mjs"),
-    "// cli\n",
-    "utf8",
-  );
-  writeFileSync(
-    path.join(root, "event-runtime", "lib", "worker.mjs"),
-    "// worker\n",
-    "utf8",
-  );
-  writeFileSync(
-    path.join(root, "event-runtime", "lib", "adapters", "fake.mjs"),
-    "// fake\n",
-    "utf8",
-  );
-  writeFileSync(path.join(root, "README.md"), "# outside the stamp\n", "utf8");
-  return root;
-}
-
-describe("code stamp (WM-213)", () => {
-  test("covers event-runtime/lib/** and cli.mjs, and nothing else", () => {
-    const root = stampRepo();
-    try {
-      expect(codeStampFiles(root)).toEqual([
-        "event-runtime/cli.mjs",
-        "event-runtime/lib/adapters/fake.mjs",
-        "event-runtime/lib/worker.mjs",
+    test("moves a Todo handoff to In Review and fixes its dispatch labels", () => {
+      const calls = [];
+      const result = defaultReconcileVerifiedHandoffTicket({
+        repo: "factory",
+        ticket: "WM-1498",
+        fetchTicket: () => ({ state: { name: "Todo" } }),
+        runCli: (args, options) => (calls.push({ args, options }), ""),
+      });
+
+      expect(result).toBe(true);
+      expect(calls).toEqual([
+        { args: STATE_ARGS, options: { repo: "factory" } },
       ]);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  test("is stable across calls and changes on an uncommitted edit", () => {
-    const root = stampRepo();
-    try {
-      const before = codeStamp(root);
-      expect(codeStamp(root)).toBe(before);
-
-      // No commit, no git at all — the stamp must still notice a working-tree edit.
-      writeFileSync(
-        path.join(root, "event-runtime", "lib", "worker.mjs"),
-        "// worker v2\n",
-        "utf8",
-      );
-      const after = codeStamp(root);
-      expect(after).not.toBe(before);
-
-      // A new file under lib/ counts too, and a file outside the paths does not.
-      writeFileSync(
-        path.join(root, "event-runtime", "lib", "new.mjs"),
-        "// new\n",
-        "utf8",
-      );
-      expect(codeStamp(root)).not.toBe(after);
-      const withNew = codeStamp(root);
-      writeFileSync(path.join(root, "README.md"), "# edited\n", "utf8");
-      expect(codeStamp(root)).toBe(withNew);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  test("a tree with no git still stamps (nogit), rather than throwing", () => {
-    const root = stampRepo();
-    try {
-      expect(codeStamp(root).startsWith("nogit:")).toBe(true);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  test("FACTORY_CODE_STAMP_ROOT overrides the watched checkout", () => {
-    const root = stampRepo();
-    const previous = process.env.FACTORY_CODE_STAMP_ROOT;
-    try {
-      process.env.FACTORY_CODE_STAMP_ROOT = root;
-      expect(codeStampRoot()).toBe(root);
-      expect(codeStamp()).toBe(codeStamp(root));
-    } finally {
-      if (previous === undefined) delete process.env.FACTORY_CODE_STAMP_ROOT;
-      else process.env.FACTORY_CODE_STAMP_ROOT = previous;
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-});
-
-describe("reload watcher (WM-213)", () => {
-  /** Watcher over a stamp and clock the test drives by hand. */
-  function harness(intervalMs = 1000) {
-    let stamp = "a";
-    let clock = 0;
-    const watcher = createReloadWatcher({
-      intervalMs,
-      stamp: () => stamp,
-      now: () => clock,
-    });
-    return {
-      watcher,
-      change: (to) => {
-        stamp = to;
-      },
-      advance: (ms) => {
-        clock += ms;
-      },
-    };
-  }
-
-  test("unchanged code never reloads", () => {
-    const h = harness();
-    h.advance(5000);
-    expect(h.watcher.check(null).action).toBe("none");
-    expect(h.watcher.check("run_1").action).toBe("none");
-  });
-
-  test("re-stamps at most once per interval", () => {
-    let calls = 0;
-    const watcher = createReloadWatcher({
-      intervalMs: 1000,
-      stamp: () => {
-        calls += 1;
-        return "a";
-      },
-      now: () => 0,
-    });
-    expect(calls).toBe(1); // the startup stamp
-    for (let i = 0; i < 20; i += 1) watcher.check(null);
-    expect(calls).toBe(1); // the clock never moved, so nothing re-hashed
-  });
-
-  test("idle worker reloads, reporting old → new", () => {
-    const h = harness();
-    h.change("b");
-    h.advance(1000);
-    const r = h.watcher.check(null);
-    expect(r.action).toBe("reload");
-    expect(r.from).toBe("a");
-    expect(r.to).toBe("b");
-  });
-
-  test("forced between-runs check detects a change before the normal interval (WM-613)", () => {
-    const h = harness();
-    h.change("b");
-    h.advance(1);
-
-    expect(h.watcher.check(null).action).toBe("none");
-    expect(h.watcher.check(null, { force: true })).toMatchObject({
-      action: "reload",
-      from: "a",
-      to: "b",
-    });
-  });
-
-  test("in-flight run defers the reload, then reloads at the next idle check", () => {
-    const h = harness();
-    h.change("b");
-    h.advance(1000);
-
-    // Busy: deferred, and flagged `first` exactly once so the log says it once.
-    const first = h.watcher.check("run_busy");
-    expect(first).toMatchObject({
-      action: "deferred",
-      from: "a",
-      to: "b",
-      runId: "run_busy",
-      first: true,
-    });
-    h.advance(1000);
-    expect(h.watcher.check("run_busy")).toMatchObject({
-      action: "deferred",
-      first: false,
     });
 
-    // The run finishes. The very next check reloads — no extra interval of wait,
-    // because the pending change was latched rather than re-detected.
-    expect(h.watcher.check(null)).toMatchObject({
-      action: "reload",
-      from: "a",
-      to: "b",
-    });
-  });
-
-  test("a change that reverts before the next check is never seen", () => {
-    const h = harness();
-    h.change("b");
-    h.change("a");
-    h.advance(1000);
-    expect(h.watcher.check(null).action).toBe("none");
-  });
-
-  test("once latched, the pending stamp is not re-read", () => {
-    let stamp = "a";
-    let reads = 0;
-    let clock = 0;
-    const watcher = createReloadWatcher({
-      intervalMs: 1000,
-      stamp: () => {
-        reads += 1;
-        return stamp;
-      },
-      now: () => clock,
-    });
-    stamp = "b";
-    clock += 1000;
-    expect(watcher.check("run_busy").action).toBe("deferred");
-    const afterLatch = reads;
-    stamp = "c"; // a second edit while busy must not un-latch the reload
-    clock += 5000;
-    expect(watcher.check("run_busy").action).toBe("deferred");
-    expect(watcher.check(null)).toMatchObject({ action: "reload", to: "b" });
-    expect(reads).toBe(afterLatch);
-  });
-
-  test("CODE_RELOAD_EXIT is a code no ordinary worker exit uses", () => {
-    expect(CODE_RELOAD_EXIT).toBe(75);
-  });
-});
-
-describe("handoff verification gate (WM-718)", () => {
-  let factoryRoot;
-  let repoDir;
-  let wtRoot;
-  let previousReposRoot;
-
-  const OWNED = "## Owned Paths\n- src/feature/**\n- event-runtime/web/**\n\n";
-  const withCommand = (cmd) =>
-    `${OWNED}## Verification Command\n\n\`\`\`\n${cmd}\n\`\`\`\n`;
-
-  beforeAll(() => {
-    factoryRoot = tmpDir("evrt-handoff-factory-");
-    repoDir = tmpDir("evrt-handoff-repo-");
-    wtRoot = tmpDir("evrt-handoff-trees-");
-    mkdirSync(path.join(repoDir, "bin"), { recursive: true });
-    // A real git worktree with an `origin/develop` ref, so the gate can diff
-    // merge-base..HEAD exactly as it does for a repo-owned worktree_up.
-    writeFileSync(
-      path.join(repoDir, "bin", "worktree-up.sh"),
-      [
-        "#!/bin/bash",
-        "set -e",
-        `WT="${wtRoot}/$1"`,
-        'mkdir -p "$WT" && cd "$WT"',
-        "git init -q -b develop",
-        "git config user.email factory@test && git config user.name factory",
-        "mkdir -p src/feature event-runtime/web/src",
-        "echo base > src/feature/base.txt",
-        `printf '%s\\n' '{"name":"web","private":true,"scripts":{"build":"echo web_built:$PWD >> ${repoDir}/web-builds.log"}}' > event-runtime/web/package.json`,
-        "echo 'export const x = 1;' > event-runtime/web/src/index.ts",
-        "git add -A && git commit -qm base",
-        "git update-ref refs/remotes/origin/develop HEAD",
-        'git checkout -qb "feat/$1"',
-        "",
-      ].join("\n"),
-    );
-    writeFileSync(
-      path.join(repoDir, "bin", "worktree-down.sh"),
-      `#!/bin/bash\nrm -rf "${wtRoot}/$1"\n`,
-    );
-    mkdirSync(path.join(factoryRoot, "config"), { recursive: true });
-    writeFileSync(path.join(factoryRoot, "config", "policy.yaml"), "{}\n");
-    writeFileSync(
-      path.join(factoryRoot, "config", "repos.yaml"),
-      `repos:\n` +
-        `  - name: wt-handoff\n    path: ${repoDir}\n    github: watt-mind/wt-handoff\n    base: develop\n` +
-        `    team: WM\n    project: Factory\n    max_in_flight: 2\n` +
-        `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down.sh\n` +
-        `    worktree_root: ${wtRoot}\n    verify: echo repo_verified\n    escalate_paths: []\n` +
-        `  - name: wt-handoff-noverify\n    path: ${repoDir}\n    github: watt-mind/wt-handoff-noverify\n    base: develop\n` +
-        `    team: WM\n    project: Factory\n    max_in_flight: 2\n` +
-        `    worktree_up: bin/worktree-up.sh\n    worktree_down: bin/worktree-down.sh\n` +
-        `    worktree_root: ${wtRoot}\n    escalate_paths: []\n`,
-    );
-    previousReposRoot = process.env.FACTORY_REPOS_ROOT;
-    process.env.FACTORY_REPOS_ROOT = factoryRoot;
-  });
-
-  afterAll(() => {
-    if (previousReposRoot === undefined) delete process.env.FACTORY_REPOS_ROOT;
-    else process.env.FACTORY_REPOS_ROOT = previousReposRoot;
-  });
-
-  const setPolicy = (yaml) =>
-    writeFileSync(path.join(factoryRoot, "config", "policy.yaml"), yaml);
-
-  function handoffSpec({ repo = "wt-handoff", ticket }) {
-    const runId = `run_handoff_${++seq}_${Math.random().toString(36).slice(2)}`;
-    const input = { repo, ticket };
-    return {
-      schemaVersion: "factory.run-spec/v1",
-      runId,
-      agent: "dispatch@1",
-      input,
-      inputHash: hashJson(input),
-      workspace: {
-        type: "worktree",
-        checkoutDir: "repo",
-        retainOnFailure: true,
-      },
-      adapter: "fake",
-      promptVersion: "git:test",
-      policyVersion: "git:test",
-      outputContract: "factory.dispatch-result/v1",
-      capabilities: ["tracker:write", "repo:write", "github:write"],
-      timeoutSeconds: 5,
-      maxAttempts: 1,
-      idempotencyKey: `idem-${runId}`,
-    };
-  }
-
-  /** A fake dispatch agent: writes files, commits, claims whatever it likes. */
-  function agent({ files = {}, claim = {}, prNumber = 77 }) {
-    return {
-      async execute({ spec, workspaceDir }) {
-        writeFileSync(
-          path.join(workspaceDir, ".transcript.json"),
-          `{"fake":"handoff transcript"}\n`,
-        );
-        const repo = path.join(workspaceDir, "repo");
-        for (const [rel, content] of Object.entries(files)) {
-          mkdirSync(path.dirname(path.join(repo, rel)), { recursive: true });
-          writeFileSync(path.join(repo, rel), content);
-        }
-        execFileSync("git", ["add", "-A"], { cwd: repo });
-        execFileSync(
-          "git",
-          ["commit", "-qm", `implement ${spec.input.ticket}`],
-          {
-            cwd: repo,
-          },
-        );
-        writeFileSync(
-          path.join(workspaceDir, "result.json"),
-          `${JSON.stringify({
-            schemaVersion: "factory.agent-result/v1",
-            terminalState: "completed",
-            reasonCode: "ok",
-            artifact: {
-              outcome: "PR_OPEN",
-              repo: spec.input.repo,
-              ticket: spec.input.ticket,
-              prUrl: `https://github.com/watt-mind/${spec.input.repo}/pull/${prNumber}`,
-              prNumber,
-              verification: {
-                command: "bash run-tests.sh",
-                passed: true,
-                output: "all green",
-                ...claim,
-              },
-              summary: `implemented ${spec.input.ticket}`,
-              uxCritique: {
-                status: "skipped",
-                verdict: null,
-                evidence: [],
-                rounds: 0,
-                prReady: true,
-              },
-            },
-            evidence: { commands: ["bash run-tests.sh"] },
-          })}\n`,
-        );
-        return { exitCode: 0, timedOut: false };
-      },
-    };
-  }
-
-  async function dispatch({ spec, adapter, description, hooks = {} }) {
-    const db = openDb(":memory:");
-    queueRun(db, spec);
-    const calls = { unclaim: [], returned: [], held: [], comments: [] };
-    const summary = await runOnce(
-      db,
-      registry,
-      { fake: adapter },
-      opts({
-        dispatch: {
-          locksDir: tmpDir("evrt-handoff-locks-"),
-          leasesDir: tmpDir("evrt-handoff-leases-"),
-          fetchTicket: () => ({
-            identifier: spec.input.ticket,
-            state: { name: "Todo" },
-            assignee: null,
-            labels: { nodes: [{ name: "ai:agent-ready" }] },
-            description,
-          }),
-          fetchInFlight: () => [],
-          countLeases: () => 0,
-          claimTicket: () => ({ ok: true }),
-          unclaimTicket: (p) => (calls.unclaim.push(p), false),
-          returnHandoffTicket: (p) => (calls.returned.push(p), true),
-          holdPullRequest: (p) => (calls.held.push(p), true),
-          commentTicket: (p) => (calls.comments.push(p), true),
-          fetchHandoffPullRequest: () => ({ baseRefName: "develop" }),
-          ...hooks,
-        },
-      }),
-    );
-    return { db, summary, calls };
-  }
-
-  test("a fake agent that leaves a failing test is refused handoff_verification_failed: no result row, ticket back to Todo + agent-ready, PR held, tail in the receipt", async () => {
-    const spec = handoffSpec({ ticket: "WM-7181" });
-    const { db, summary, calls } = await dispatch({
-      spec,
-      description: withCommand("bash run-tests.sh"),
-      adapter: agent({
-        files: {
-          "src/feature/impl.txt": "done\n",
-          "run-tests.sh":
-            'echo "suite start"\necho "(fail) totals > rejects an invalid total"\necho "1 fail" >&2\nexit 1\n',
-        },
-      }),
-    });
-
-    expect(summary.terminalState).toBe("FAILED");
-    expect(summary.reasonCode).toBe("handoff_verification_failed");
-    expect(summary.detail).toContain("ticket_verify_failed");
-    expect(summary.handoff.verification.command).toBe("bash run-tests.sh");
-    expect(summary.handoff.verification.exitCode).toBe(1);
-    expect(summary.handoff.verification.tail).toContain(
-      "(fail) totals > rejects an invalid total",
-    );
-    // The repo verify passed; the ticket's own command is what caught it.
-    expect(summary.handoff.repoVerify.passed).toBe(true);
-
-    // No PR_OPEN result was published — nothing downstream chains a review.
-    expect(
-      db
-        .query(`SELECT COUNT(*) AS n FROM results WHERE run_id = ?`)
-        .get(spec.runId).n,
-    ).toBe(0);
-    expect(
-      db
-        .query(`SELECT reason_code FROM attempts WHERE run_id = ?`)
-        .get(spec.runId).reason_code,
-    ).toBe("handoff_verification_failed");
-    const journal = lifecycleOf(db, spec.runId)
-      .map((row) => row.reason)
-      .join("\n");
-    expect(journal).toContain("(fail) totals > rejects an invalid total");
-    expect(classifyFailureCause("handoff_verification_failed")).toBe(
-      "agent_error",
-    );
-
-    // Ticket returned (Todo + agent-ready), never Blocked, never the plain unclaim.
-    expect(calls.returned).toHaveLength(1);
-    expect(calls.returned[0].ticket).toBe("WM-7181");
-    expect(calls.returned[0].body).toContain(
-      "## Handoff verification (worker-observed)",
-    );
-    expect(calls.returned[0].body).toContain(
-      "(fail) totals > rejects an invalid total",
-    );
-    expect(calls.returned[0].body).toContain("Todo + ai:agent-ready");
-    expect(calls.unclaim).toHaveLength(0);
-    // The agent's PR is converted to draft with the observed failure quoted.
-    expect(calls.held).toHaveLength(1);
-    expect(calls.held[0]).toMatchObject({
-      prNumber: 77,
-      github: "watt-mind/wt-handoff",
-    });
-    expect(calls.held[0].body).toContain("exit 1 (FAIL)");
-    expect(calls.comments).toHaveLength(0);
-  });
-
-  test("no Verification Command and no repo verify: refused handoff_verification_unspecified (fail-closed)", async () => {
-    const spec = handoffSpec({
-      repo: "wt-handoff-noverify",
-      ticket: "WM-7182",
-    });
-    const { summary, calls } = await dispatch({
-      spec,
-      description: OWNED,
-      adapter: agent({ files: { "src/feature/impl.txt": "done\n" } }),
-    });
-    expect(summary.terminalState).toBe("FAILED");
-    expect(summary.reasonCode).toBe("handoff_verification_unspecified");
-    expect(calls.returned).toHaveLength(1);
-    expect(calls.held).toHaveLength(1);
-    expect(calls.returned[0].body).toContain("Verification: NONE");
-  });
-
-  test("without a Verification Command the repo verify stands in and the run completes with a worker-observed line", async () => {
-    const spec = handoffSpec({ ticket: "WM-7183" });
-    const { db, summary, calls } = await dispatch({
-      spec,
-      description: OWNED,
-      adapter: agent({ files: { "src/feature/impl.txt": "done\n" } }),
-    });
-    expect(summary.terminalState).toBe("COMPLETED");
-    const result = JSON.parse(
-      db
-        .query(`SELECT result_json FROM results WHERE run_id = ?`)
-        .get(spec.runId).result_json,
-    );
-    expect(result.verification.checks).toContain("repo_verify_passed");
-    expect(result.verification.checks).not.toContain("ticket_verify_passed");
-    expect(calls.comments).toHaveLength(1);
-    expect(calls.comments[0].body).toContain(
-      "- Verification: `echo repo_verified` — exit 0 (pass)",
-    );
-    expect(calls.comments[0].body).toContain("repo `verify:` command stood in");
-  });
-
-  test("a PR targeting the wrong base fails handoff verification and is returned", async () => {
-    const spec = handoffSpec({ ticket: "WM-9381" });
-    const { summary, calls } = await dispatch({
-      spec,
-      description: OWNED,
-      adapter: agent({ files: { "src/feature/impl.txt": "done\n" } }),
-      hooks: {
-        fetchHandoffPullRequest: () => ({ baseRefName: "main" }),
-      },
-    });
-
-    expect(summary.terminalState).toBe("FAILED");
-    expect(summary.reasonCode).toBe("handoff_verification_failed");
-    expect(summary.detail).toContain(
-      "PR #77 targets main, expected configured base develop",
-    );
-    expect(calls.held).toHaveLength(1);
-    expect(calls.returned).toHaveLength(1);
-  });
-
-  test("a change under event-runtime/web/src/** runs the web build and a red build refuses the handoff", async () => {
-    const description = withCommand("bash run-tests.sh");
-    const files = {
-      "run-tests.sh": "echo ok\n",
-      "event-runtime/web/src/index.ts": "export const x: number = 2;\n",
-    };
-    // Green build: gate runs it (marker written) and records the check.
-    const green = handoffSpec({ ticket: "WM-7184" });
-    const g = await dispatch({
-      spec: green,
-      description,
-      adapter: agent({ files }),
-    });
-    expect(g.summary.terminalState).toBe("COMPLETED");
-    const builds = () =>
-      existsSync(path.join(repoDir, "web-builds.log"))
-        ? readFileSync(path.join(repoDir, "web-builds.log"), "utf8")
-        : "";
-    expect(builds()).toContain(
-      "web_built:" +
-        path.join(realpathSync(wtRoot), "WM-7184", "event-runtime/web"),
-    );
-    const result = JSON.parse(
-      g.db
-        .query(`SELECT result_json FROM results WHERE run_id = ?`)
-        .get(green.runId).result_json,
-    );
-    expect(result.verification.checks).toEqual(
-      expect.arrayContaining(["ticket_verify_passed", "web_build_passed"]),
-    );
-    expect(g.calls.comments[0].body).toContain(
-      "- Web build (event-runtime/web/src/** changed): `cd event-runtime/web && bun run build` — exit 0 (pass)",
-    );
-
-    // Red build (tsc-style error) even though the ticket's command is green.
-    const red = handoffSpec({ ticket: "WM-7185" });
-    const r = await dispatch({
-      spec: red,
-      description,
-      adapter: agent({
-        files: {
-          ...files,
-          "event-runtime/web/package.json":
-            '{"name":"web","private":true,"scripts":{"build":"echo \'src/index.ts(1,14): error TS6133: unused local\' >&2; exit 2"}}\n',
-        },
-      }),
-    });
-    expect(r.summary.terminalState).toBe("FAILED");
-    expect(r.summary.reasonCode).toBe("handoff_verification_failed");
-    expect(r.summary.detail).toContain("web_build_failed");
-    expect(r.summary.detail).toContain("error TS6133");
-    expect(r.summary.handoff.webBuild.exitCode).toBe(2);
-    expect(r.calls.held).toHaveLength(1);
-    expect(r.calls.returned).toHaveLength(1);
-
-    // No web/src change: the build is not run at all.
-    const skip = handoffSpec({ ticket: "WM-7186" });
-    const s = await dispatch({
-      spec: skip,
-      description,
-      adapter: agent({
-        files: { "run-tests.sh": "echo ok\n", "src/feature/x.txt": "x\n" },
-      }),
-    });
-    expect(s.summary.terminalState).toBe("COMPLETED");
-    expect(builds()).not.toContain("WM-7186");
-    expect(s.calls.comments[0].body).toContain("- Web build: skipped");
-  });
-
-  test("the Handoff Verification line is worker-authored: the agent's 'pass' claim cannot override an observed red, and rides below labelled agent-reported", async () => {
-    const description = withCommand("bash run-tests.sh");
-    const failing = handoffSpec({ ticket: "WM-7187" });
-    const f = await dispatch({
-      spec: failing,
-      description,
-      adapter: agent({
-        files: { "run-tests.sh": 'echo "regression in totals"; exit 3\n' },
-        claim: {
-          command: "bash run-tests.sh",
-          passed: true,
-          output: "pass, 2045 tests green",
-        },
-      }),
-    });
-    expect(f.summary.terminalState).toBe("FAILED");
-    const body = f.calls.returned[0].body;
-    const verificationLine = body
-      .split("\n")
-      .find((l) => l.startsWith("- Verification:"));
-    expect(verificationLine).toBe(
-      "- Verification: `bash run-tests.sh` — exit 3 (FAIL)",
-    );
-    expect(body).toContain("regression in totals");
-    expect(body).toContain(
-      "- agent-reported: `bash run-tests.sh` — pass, pass, 2045 tests green",
-    );
-    expect(body).not.toContain("- Verification: `bash run-tests.sh` — pass");
-
-    // Green run: the line still comes from the worker's observation, and a
-    // claim naming a different command is quoted only as agent-reported.
-    const passing = handoffSpec({ ticket: "WM-7188" });
-    const p = await dispatch({
-      spec: passing,
-      description,
-      adapter: agent({
-        files: { "run-tests.sh": 'echo "42 tests, 0 failures"\n' },
-        claim: {
-          command: "bun test --only-my-file",
-          passed: true,
-          output: "green",
-        },
-      }),
-    });
-    expect(p.summary.terminalState).toBe("COMPLETED");
-    const okBody = p.calls.comments[0].body;
-    expect(
-      okBody.split("\n").find((l) => l.startsWith("- Verification:")),
-    ).toBe("- Verification: `bash run-tests.sh` — exit 0 (pass)");
-    expect(okBody).toContain("42 tests, 0 failures");
-    expect(okBody).toContain(
-      "- agent-reported: `bun test --only-my-file` — pass, green",
-    );
-  });
-
-  test("Owned Paths deviations are computed from the diff: listed under advisory (default), refused under strict", async () => {
-    const description = withCommand("bash run-tests.sh");
-    const files = {
-      "run-tests.sh": "echo ok\n",
-      "src/feature/impl.txt": "done\n",
-      "docs/stray.md": "out of scope reflow\n",
-      "orchestrator/tick.mjs": "// out of scope\n",
-    };
-    setPolicy("{}\n"); // key absent → advisory
-    const adv = handoffSpec({ ticket: "WM-7189" });
-    const a = await dispatch({
-      spec: adv,
-      description,
-      adapter: agent({ files }),
-    });
-    expect(a.summary.terminalState).toBe("COMPLETED");
-    expect(a.summary.handoff.ownedPathsDeviations).toEqual([
-      "docs/stray.md",
-      "orchestrator/tick.mjs",
-      "run-tests.sh",
-    ]);
-    const result = JSON.parse(
-      a.db
-        .query(`SELECT result_json FROM results WHERE run_id = ?`)
-        .get(adv.runId).result_json,
-    );
-    expect(result.verification.checks).toContain(
-      "owned_paths_deviations_advisory",
-    );
-    const body = a.calls.comments[0].body;
-    expect(body).toContain("- Files: 4 changed vs origin/develop");
-    expect(body).toContain("- Owned Paths deviations (advisory): 3 file(s)");
-    expect(body).toContain("  - `docs/stray.md`");
-    expect(body).toContain("  - `orchestrator/tick.mjs`");
-    expect(body).toContain("  - `run-tests.sh`");
-    expect(body).not.toContain("  - `src/feature/impl.txt`");
-
-    setPolicy("dispatch:\n  owned_paths_conformance: strict\n");
-    try {
-      const strict = handoffSpec({ ticket: "WM-7190" });
-      const s = await dispatch({
-        spec: strict,
-        description,
-        adapter: agent({ files }),
+    test("does not mutate a ticket the agent already put In Review", () => {
+      const calls = [];
+      const result = defaultReconcileVerifiedHandoffTicket({
+        repo: "factory",
+        ticket: "WM-1498",
+        fetchTicket: () => ({ state: { name: "In Review" } }),
+        runCli: (args) => (calls.push(args), ""),
       });
-      expect(s.summary.terminalState).toBe("FAILED");
-      expect(s.summary.reasonCode).toBe("handoff_owned_paths_violation");
-      expect(s.summary.detail).toContain("docs/stray.md");
-      expect(s.calls.returned).toHaveLength(1);
-      expect(s.calls.held).toHaveLength(1);
-      expect(s.calls.returned[0].body).toContain(
-        "Owned Paths deviations (strict): 3 file(s)",
-      );
-    } finally {
-      setPolicy("{}\n");
-    }
 
-    // Conformant diff: no deviations, the check is recorded.
-    const clean = handoffSpec({ ticket: "WM-7191" });
-    const c = await dispatch({
-      spec: clean,
-      description: `## Owned Paths\n- src/feature/**\n- run-tests.sh\n\n## Verification Command\n\n\`\`\`\nbash run-tests.sh\n\`\`\`\n`,
-      adapter: agent({
-        files: { "run-tests.sh": "echo ok\n", "src/feature/y.txt": "y\n" },
-      }),
+      expect(result).toBe(false);
+      expect(calls).toHaveLength(0);
     });
-    expect(c.summary.terminalState).toBe("COMPLETED");
-    expect(c.calls.comments[0].body).toContain(
-      "- Owned Paths deviations: none",
-    );
-  });
-});
 
-// The describe block above only exercises the handoff gate through mocked
-// hooks (claimTicket/returnHandoffTicket/etc all stubbed by `dispatch()`).
-// `defaultReturnHandoffTicket` is the one production path none of that
-// touches, and it has a real bug shape: the combined
-// state+unassign+removes+add-label Linear call can fail on the label half
-// alone (WM-718 F2). These tests drive the real function with a `runCli`
-// stub that fails on cue, never mocking the function itself.
-describe("defaultReturnHandoffTicket (WM-718 F2)", () => {
-  const COMBINED_ARGS = [
-    "state",
-    "WM-9001",
-    "Todo",
-    "--unassign",
-    "--add",
-    "ai:agent-ready",
-    "--remove",
-    "ai:in-progress",
-    "--remove",
-    "ai:needs-review",
-  ];
-  const BASE_ARGS = [
-    "state",
-    "WM-9001",
-    "Todo",
-    "--unassign",
-    "--remove",
-    "ai:in-progress",
-    "--remove",
-    "ai:needs-review",
-  ];
-
-  test("retries as two separate calls and restores ai:agent-ready when the combined call fails", () => {
-    const calls = [];
-    const runCli = (args) => {
-      calls.push(args);
-      if (calls.length === 1) throw new Error("linear: rate limited");
-      return "";
-    };
-    const result = defaultReturnHandoffTicket({
-      ticket: "WM-9001",
-      body: "handoff refused",
-      fetchTicket: () => ({ state: { name: "In Review" } }),
-      runCli,
-    });
-    expect(result).toEqual({
-      ok: true,
-      agentReadyRestored: true,
-      warning: null,
-    });
-    // The first (failed) combined attempt, then the state move split from
-    // the label add, then the comment — never a silent drop of the label.
-    expect(calls).toEqual([
-      COMBINED_ARGS,
-      BASE_ARGS,
-      ["labels", "WM-9001", "--add", "ai:agent-ready"],
-      ["comment", "WM-9001", "handoff refused"],
-    ]);
-  });
-
-  test("surfaces the failure loudly when the label restore also fails", () => {
-    const calls = [];
-    const runCli = (args) => {
-      calls.push([...args]);
-      if (args[0] === "state" && args.includes("--add")) {
-        throw new Error("combined call failed");
-      }
-      if (args[0] === "labels") {
-        throw new Error("labels endpoint down");
-      }
-      return "";
-    };
-    const loud = [];
-    const originalConsoleError = console.error;
-    console.error = (...args) => loud.push(args.join(" "));
-    let result;
-    try {
-      result = defaultReturnHandoffTicket({
-        ticket: "WM-9001",
-        body: "handoff refused",
+    test("moves an In Progress handoff to In Review", () => {
+      const calls = [];
+      const result = defaultReconcileVerifiedHandoffTicket({
+        repo: "factory",
+        ticket: "WM-1498",
         fetchTicket: () => ({ state: { name: "In Progress" } }),
-        runCli,
+        runCli: (args, options) => (calls.push({ args, options }), ""),
       });
-    } finally {
-      console.error = originalConsoleError;
-    }
-    // Never silent: the run's own return value says so...
-    expect(result.ok).toBe(true);
-    expect(result.agentReadyRestored).toBe(false);
-    expect(result.warning).toContain("labels endpoint down");
-    // ...the worker's own log says so...
-    expect(
-      loud.some((line) => line.includes("ai:agent-ready NOT restored")),
-    ).toBe(true);
-    // ...and the ticket itself still moved to Todo (unassigned, un-labeled)
-    // rather than being stranded In Progress/In Review.
-    expect(calls).toContainEqual(BASE_ARGS);
-    const commentCall = calls.find((c) => c[0] === "comment");
-    expect(commentCall).toBeDefined();
-    expect(commentCall[2]).toContain("ai:agent-ready NOT restored");
-  });
 
-  test("is a no-op when the ticket already left In Progress/In Review", () => {
-    const calls = [];
-    const result = defaultReturnHandoffTicket({
-      ticket: "WM-9001",
-      body: "handoff refused",
-      fetchTicket: () => ({ state: { name: "Done" } }),
-      runCli: (args) => (calls.push(args), ""),
+      expect(result).toBe(true);
+      expect(calls).toEqual([
+        { args: STATE_ARGS, options: { repo: "factory" } },
+      ]);
     });
-    expect(result).toBe(false);
-    expect(calls).toHaveLength(0);
-  });
-});
 
-// ------------------------------------------ liveness-ceiling invariant ---
-// WM-1025. Same shape as the GQL_IMPORT_ALLOWED grep invariant in
-// tools/linear.test.mjs: the bug was not that 5s is the wrong number, it was
-// that these call sites bypassed the load-adjustment mechanism the repo
-// already had. A number typed inline cannot scale, and the next one typed
-// inline will not either — so guard the pattern, not the value.
-describe("subprocess liveness ceilings scale with host load (WM-1025)", () => {
-  const SOURCES = [
-    "event-runtime/lib/worker.test.mjs",
-    "event-runtime/work.test.mjs",
-    "event-runtime/cli/process-cleanup.test.mjs",
-  ];
-
-  test("no raw sub-30s timeoutMs literal bypasses loadAdjustedTimeout", () => {
-    const root = path.resolve(import.meta.dir, "..", "..");
-    const offenders = [];
-    for (const rel of SOURCES) {
-      const file = path.join(root, rel);
-      if (!existsSync(file)) continue;
-      readFileSync(file, "utf8")
-        .split("\n")
-        .forEach((line, i) => {
-          // `timeoutMs: 25` style intentional-hang probes are far below the
-          // range that host contention affects; only flag plausible liveness
-          // ceilings (1s..30s) written as bare literals.
-          const m = line.match(/timeoutMs:\s*([0-9][0-9_]*)\s*,/);
-          if (!m) return;
-          const ms = Number(m[1].replace(/_/g, ""));
-          if (ms < 1_000 || ms > 30_000) return;
-          if (line.includes("loadAdjustedTimeout")) return;
-          offenders.push(`${rel}:${i + 1}: ${line.trim()}`);
+    for (const state of ["Blocked", "Done", "Canceled"]) {
+      test(`leaves a ticket a human moved to ${state} mid-run untouched`, () => {
+        const calls = [];
+        const result = defaultReconcileVerifiedHandoffTicket({
+          repo: "factory",
+          ticket: "WM-1498",
+          fetchTicket: () => ({ state: { name: state } }),
+          runCli: (args) => (calls.push(args), ""),
         });
-    }
-    expect(offenders).toEqual([]);
-  });
 
-  test("the execute-side ceiling actually scales", () => {
-    // Guards the wiring itself: a constant that ignores CI_LOAD_FACTOR would
-    // satisfy the grep above while still pinning the timeout at 5s.
-    expect(EXECUTE_SPAWN_TIMEOUT_MS).toBe(loadAdjustedTimeout(5_000));
-    expect(EXECUTE_SPAWN_TIMEOUT_MS).toBeGreaterThanOrEqual(5_000);
-  });
-
-  test("process-cleanup polling waits scale their caller-provided ceilings", () => {
-    const root = path.resolve(import.meta.dir, "..", "..");
-    const source = readFileSync(
-      path.join(root, "event-runtime/cli/process-cleanup.test.mjs"),
-      "utf8",
-    );
-    for (const name of ["waitForFile", "waitForExit"]) {
-      expect(source).toMatch(
-        new RegExp(
-          `async function ${name}\\([^)]*timeoutMs[^)]*\\)\\s*\\{\\s*timeoutMs = loadAdjustedTimeout\\(timeoutMs\\);`,
-        ),
-      );
+        expect(result).toBe(false);
+        expect(calls).toHaveLength(0);
+      });
     }
+
+    test("a false mayMutateClaimedTicket guard makes no reconciliation calls", () => {
+      const calls = [];
+      const result = defaultReconcileVerifiedHandoffTicket({
+        repo: "factory",
+        ticket: "WM-1498",
+        mayMutate: () => false,
+        fetchTicket: () => {
+          calls.push("fetch");
+          return { state: { name: "Todo" } };
+        },
+        runCli: (args) => (calls.push(args), ""),
+      });
+
+      expect(result).toBe(false);
+      expect(calls).toHaveLength(0);
+    });
   });
 });

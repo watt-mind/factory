@@ -10,6 +10,7 @@
  * flat event + run lists; the client builds the graph.
  */
 import { repoNamesFromInput } from "./api-runs.mjs";
+import { ApiParameterError, parseListLimit } from "./api-params.mjs";
 
 const DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_LIMIT = 100;
@@ -256,27 +257,24 @@ function windowMs(value) {
   return Number.isSafeInteger(result) && result > 0 ? result : null;
 }
 
-function rowLimit(value) {
-  if (value == null || value === "") return DEFAULT_LIMIT;
-  if (!/^\d+$/.test(value)) return null;
-  const result = Number(value);
-  return Number.isSafeInteger(result) && result >= 1 && result <= MAX_LIMIT
-    ? result
-    : null;
-}
-
 export function handleChainApiRoute({ route, url, send, db, nowMs }) {
   if (route === "GET /chains") {
     const parsedWindow = windowMs(url.searchParams.get("window"));
-    const parsedLimit = rowLimit(url.searchParams.get("limit"));
     if (parsedWindow == null)
-      return send(400, {
-        error: "window must be a positive duration such as 24h",
+      return send(422, {
+        error: "invalid_window",
+        message: "window must be a positive duration such as 24h",
       });
-    if (parsedLimit == null)
-      return send(400, {
-        error: `limit must be an integer from 1 to ${MAX_LIMIT}`,
+    let parsedLimit;
+    try {
+      parsedLimit = parseListLimit(url, {
+        defaultLimit: DEFAULT_LIMIT,
+        maxLimit: MAX_LIMIT,
       });
+    } catch (err) {
+      if (err instanceof ApiParameterError) return send(422, err.body);
+      throw err;
+    }
     return send(200, {
       chains: chainsView(db, {
         windowMs: parsedWindow,
