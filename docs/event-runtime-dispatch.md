@@ -241,9 +241,10 @@ single rule.
 wastes an approval, the same reason the planner refuses on a missing artifact
 before the operator decides rather than after. And re-checked at execute:
 an approval may sit for its whole TTL, and within the TTL it executes as-is
-(event-runtime.md §12) — the world the operator approved against has had
-minutes to fill the cap. The plan-time check keeps the inbox honest; the
-execute-time check is the one that holds.
+(event-runtime.md §12) unless its prompt or policy registry version is stale,
+in which case approval re-plans it first — the world the operator approved
+against has had minutes to fill the cap. The plan-time check keeps the inbox
+honest; the execute-time check is the one that holds.
 
 **The usage window: a static split, not dynamic observation.** Every
 claude-adapter run draws on the same subscription usage window as interactive

@@ -83,7 +83,7 @@ function loadEnvelope(db, proposal) {
 
 /**
  * Plan-time-only values are not recoverable from the event envelope. Keep the
- * values recorded in the approved proposal when TTL expiry rebuilds its spec.
+ * values recorded in the approved proposal when a replan rebuilds its spec.
  */
 function ttlReplanOptions(spec) {
   return {
@@ -96,6 +96,22 @@ function ttlReplanOptions(spec) {
       ? { configSnapshot: spec.configSnapshot }
       : {}),
   };
+}
+
+/**
+ * A registry-version refresh changes the full spec hash even when the runnable
+ * intent is unchanged. Compare that intent after replacing only the two
+ * version pins — no authorization, routing, or other plan-time value may be
+ * normalized away.
+ */
+function matchesAfterRegistryVersionRefresh(storedSpec, freshSpec) {
+  return (
+    hashJson({
+      ...storedSpec,
+      promptVersion: freshSpec.promptVersion,
+      policyVersion: freshSpec.policyVersion,
+    }) === hashJson(freshSpec)
+  );
 }
 
 function approveRun(
@@ -124,10 +140,11 @@ function approveRun(
 
 /**
  * Approve an open 'run' proposal. Within TTL the recorded spec executes
- * as-is. After expiry the spec is rebuilt against current state under the
- * same runId: identical → approved (reason 'approved_after_ttl_replan');
- * different → the stale proposal is superseded, the still-PROPOSED run gets
- * the fresh spec, and a new open proposal is returned instead (§12).
+ * as-is only while its registry-version pins still match. After expiry or a
+ * stale registry pin, the spec is rebuilt against current state under the
+ * same runId: equivalent → approved; different → the stale proposal is
+ * superseded, the still-PROPOSED run gets the fresh spec, and a new open
+ * proposal is returned instead (§12).
  *
  * @returns {{ approved: true, runId: string }
  *         | { approved: false, replanned: true, proposal: object }}
@@ -176,6 +193,11 @@ export function approveProposal(
     const recordedSpec = proposal.spec_json
       ? JSON.parse(proposal.spec_json)
       : null;
+    const registryVersionMismatch =
+      recordedSpec !== null &&
+      policyVersion !== "unknown" &&
+      (recordedSpec.promptVersion !== policyVersion ||
+        recordedSpec.policyVersion !== policyVersion);
     let registryReloadMismatch = false;
     if (recordedSpec?.defHash) {
       try {
@@ -186,7 +208,11 @@ export function approveProposal(
         registryReloadMismatch = true;
       }
     }
-    if (!registryReloadMismatch && !isExpired(proposal, now)) {
+    if (
+      !registryReloadMismatch &&
+      !registryVersionMismatch &&
+      !isExpired(proposal, now)
+    ) {
       return approveRun(db, proposal, envelope, {
         actor,
         now,
@@ -195,12 +221,13 @@ export function approveProposal(
       });
     }
 
-    // Expired or definition-stale: re-plan against current registry state,
-    // reusing the runId.  A defHash mismatch is checked even inside the TTL:
-    // approval names an immutable definition, not merely an unexpired row.
+    // Expired, version-stale, or definition-stale: re-plan against current
+    // registry state, reusing the runId. A defHash mismatch is checked even
+    // inside the TTL: approval names an immutable definition, not merely an
+    // unexpired row.
     if (!mapping)
       throw new Error(
-        `proposal ${id} expired and event type ${envelope.type} is no longer registered`,
+        `proposal ${id} requires re-planning but event type ${envelope.type} is no longer registered`,
       );
     const storedSpec = recordedSpec ?? JSON.parse(proposal.spec_json);
     const built = {
@@ -232,12 +259,35 @@ export function approveProposal(
         }
       : built;
     const freshHash = hashJson(fresh);
-    if (!registryReloadMismatch && freshHash === proposal.spec_hash) {
+    const versionRefreshMatches =
+      registryVersionMismatch &&
+      !registryReloadMismatch &&
+      matchesAfterRegistryVersionRefresh(storedSpec, fresh);
+    if (
+      !registryReloadMismatch &&
+      (freshHash === proposal.spec_hash || versionRefreshMatches)
+    ) {
+      if (versionRefreshMatches) {
+        const freshJson = canonicalJson(fresh);
+        db.query(
+          `UPDATE runs SET spec_json = ?, spec_hash = ?, updated_at = ? WHERE run_id = ?`,
+        ).run(
+          freshJson,
+          freshHash,
+          new Date(now).toISOString(),
+          proposal.run_id,
+        );
+        db.query(
+          `UPDATE proposals SET spec_json = ?, spec_hash = ? WHERE id = ?`,
+        ).run(freshJson, freshHash, proposal.id);
+      }
       return approveRun(db, proposal, envelope, {
         actor,
         now,
         policyVersion,
-        reason: "approved_after_ttl_replan",
+        reason: versionRefreshMatches
+          ? "approved_after_registry_replan"
+          : "approved_after_ttl_replan",
       });
     }
 
@@ -254,7 +304,9 @@ export function approveProposal(
       actor,
       registryReloadMismatch
         ? "superseded_by_registry_reload"
-        : "superseded_by_ttl_replan",
+        : registryVersionMismatch
+          ? "superseded_by_registry_replan"
+          : "superseded_by_ttl_replan",
       id,
     );
     const freshJson = canonicalJson(fresh);
@@ -277,7 +329,9 @@ export function approveProposal(
       fresh.idempotencyKey,
       registryReloadMismatch
         ? "replanned_after_registry_reload"
-        : "replanned_after_ttl",
+        : registryVersionMismatch
+          ? "replanned_after_registry_replan"
+          : "replanned_after_ttl",
       at,
       mapping.proposalTtlSeconds ?? DEFAULT_PROPOSAL_TTL_SECONDS,
     );
