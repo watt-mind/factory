@@ -90,6 +90,48 @@ export async function transitionThenComment(cp, key, state, options, comment) {
   if (comment?.trim()) await cp.comment(key, comment);
 }
 
+/**
+ * File one ticket through the control plane and report the outcome.
+ *
+ * `dedupeKey` (opt-in) makes an immediate retry reuse the issue the first
+ * attempt created; the key is scoped to this exact finding by also matching
+ * the title (`matchTitle: true`), never any historical use of the same key.
+ * Without a key neither field is sent, so plain filing keeps its behaviour.
+ *
+ * The control plane may return `warnings` (a follow-up board write failed, or
+ * the key matched a closed issue) and `reused` (no new issue was created).
+ * Warnings flip the structured result to `ok: false` and set a non-zero exit
+ * code: the issue exists, but callers must not mistake it for a complete
+ * filing. The result stays available for recovery either way.
+ */
+export async function fileTicket(
+  cp,
+  { team, title, body, labels, state, projectId, dedupeKey },
+  { emit = out, setExitCode = (code) => (process.exitCode = code) } = {},
+) {
+  const key = typeof dedupeKey === "string" ? dedupeKey.trim() : "";
+  const created = await cp.file({
+    team,
+    title,
+    body,
+    labels,
+    state,
+    projectId,
+    ...(key ? { dedupeKey: key, matchTitle: true } : {}),
+  });
+  const warnings = Array.isArray(created.warnings)
+    ? created.warnings.filter(Boolean)
+    : [];
+  const verb = created.reused ? "reused" : "filed";
+  const line = `${verb} ${created.identifier} in ${state}  ${created.url}`;
+  emit(
+    { ok: warnings.length === 0, ...created },
+    warnings.length ? `${line}\nwarning: ${warnings.join("; ")}` : line,
+  );
+  if (warnings.length) setExitCode(1);
+  return created;
+}
+
 // Budget capture lives on disk so `doctor` / `linear budget` can read it
 // across process boundaries. The verbs themselves go through the ControlPlane
 // adapter (team states and workspace labels are fetched there).
@@ -713,7 +755,7 @@ const VERBS = {
     const dedupeKey = flag("dedupe-key")?.trim() || undefined;
     if (!team || !title)
       throw new Error(
-        `usage: file --team CLNT --title "..." [--body "..."] [--type bug] [--area x] [--source agent] [--todo]`,
+        `usage: file --team CLNT --title "..." [--body "..."] [--type bug] [--area x] [--source agent] [--todo] [--dedupe-key "..."]`,
       );
 
     // New findings land in Triage unless they already meet the agent-ready bar.
@@ -725,7 +767,7 @@ const VERBS = {
       ...(has("todo") ? ["ai:agent-ready"] : []),
       ...flagAll("label"),
     ];
-    const created = await controlPlane().file({
+    await fileTicket(controlPlane(), {
       team,
       title,
       body: flag("body", ""),
@@ -733,24 +775,7 @@ const VERBS = {
       state: stateName,
       projectId: flag("project") || undefined,
       dedupeKey,
-      // A caller-provided dedupe key is scoped to this exact finding, not just
-      // any historical use of the same key. The control plane then checks the
-      // exact title again after its marker probe.
-      matchTitle: Boolean(dedupeKey),
     });
-    const warnings = Array.isArray(created.warnings)
-      ? created.warnings.filter(Boolean)
-      : [];
-    out(
-      { ok: warnings.length === 0, ...created },
-      warnings.length
-        ? `filed ${created.identifier} in ${stateName}  ${created.url}\nwarning: ${warnings.join("; ")}`
-        : `filed ${created.identifier} in ${stateName}  ${created.url}`,
-    );
-    // The issue exists, but callers must not mistake an unboarded issue for a
-    // complete filing. Keep the structured result for recovery while making
-    // the partial write visible to shell callers as well.
-    if (warnings.length) process.exitCode = 1;
   },
 
   async inflight() {
