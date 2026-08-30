@@ -722,6 +722,30 @@ describe("validateDecisionResponse", () => {
     });
   });
 
+  test("rejects whitespace-only required text without trimming its stored value", () => {
+    for (const value of ["   ", "\n\t"]) {
+      const response = validResponse();
+      response.fields.note = value;
+      expect(validateDecisionResponse(response, RESPONSE_REQUEST)).toEqual({
+        valid: false,
+        errors: ["$.fields.note: required text must not be empty"],
+      });
+    }
+
+    const optionalRequest = dismissRequest({
+      fields: [{ id: "note", kind: "text", label: "Note" }],
+    });
+    const optionalResponse = {
+      ...validResponse(),
+      requestHash: decisionRequestHash(optionalRequest),
+      optionId: "dismiss",
+      fields: { note: "   " },
+    };
+    expect(validateDecisionResponse(optionalResponse, optionalRequest)).toEqual(
+      { valid: true, errors: [] },
+    );
+  });
+
   test("validates text type and maxLength", () => {
     expectInvalidResponse((response) => {
       response.fields.note = 3;
