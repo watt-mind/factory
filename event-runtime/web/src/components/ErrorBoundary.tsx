@@ -87,7 +87,11 @@ export class ErrorBoundary extends Component<Props, State> {
     return { error };
   }
 
-  componentDidCatch(error: Error, _info: ErrorInfo) {
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error(error, info.componentStack);
+    // A pane-level boundary recovers locally; it must neither reload the whole
+    // page nor consume the route's single automatic chunk reload.
+    if (this.props.fallback) return;
     const storage = this.props.storage ?? window.sessionStorage;
     const route = this.props.route ?? currentRoute();
     if (claimChunkReload(error, storage, route, this.props.now?.())) {

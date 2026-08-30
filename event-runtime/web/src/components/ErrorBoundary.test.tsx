@@ -96,6 +96,66 @@ describe("chunk-load recovery", () => {
 });
 
 describe("local recovery", () => {
+  test("a pane-level chunk failure neither reloads nor claims the route's reload", async () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+    };
+    let reloads = 0;
+    const view = render(
+      <ErrorBoundary
+        storage={storage}
+        route="/#/inbox"
+        now={() => 1_000}
+        reload={() => {
+          reloads += 1;
+        }}
+        fallback={(_error, retry) => (
+          <section role="alert">
+            Pane unavailable
+            <button type="button" onClick={retry}>
+              Retry
+            </button>
+          </section>
+        )}
+      >
+        <BrokenRoute />
+      </ErrorBoundary>,
+    );
+    await waitFor(() => view.getByRole("alert"));
+    expect(view.getByRole("alert").textContent).toContain("Pane unavailable");
+    expect(reloads).toBe(0);
+    expect(values.has(CHUNK_RELOAD_STORAGE_KEY)).toBe(false);
+    // The route-level reload is still available afterwards.
+    expect(claimChunkReload(chunkFailure(), storage, "/#/inbox", 1_001)).toBe(
+      true,
+    );
+  });
+
+  test("logs the caught error with its component stack", async () => {
+    const original = console.error;
+    const calls: unknown[][] = [];
+    console.error = (...args: unknown[]) => {
+      calls.push(args);
+    };
+    try {
+      const error = new Error("detail failed");
+      const view = render(
+        <ErrorBoundary fallback={() => <section role="alert">Down</section>}>
+          <BrokenRoute error={error} />
+        </ErrorBoundary>,
+      );
+      await waitFor(() => view.getByRole("alert"));
+      const logged = calls.find((args) => args[0] === error);
+      expect(logged).toBeTruthy();
+      expect(typeof logged?.[1]).toBe("string");
+      expect(logged?.[1] as string).toContain("BrokenRoute");
+    } finally {
+      console.error = original;
+    }
+  });
+
   test("retries without reloading and resets when its key changes", async () => {
     let failDetail = true;
     let reloads = 0;

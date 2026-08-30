@@ -254,14 +254,17 @@ function rawInboxItem(item: InboxItem): string {
 function InboxDetailFallback({
   item,
   onRetry,
+  onClose,
 }: {
   item: InboxItem;
   onRetry: () => void;
+  onClose: () => void;
 }) {
   return (
     <DetailPane
       widthClass="w-full sm:w-[460px]"
       title={<span className="mono truncate">{shortId(item.id)}</span>}
+      close={<Button onClick={onClose}>Close</Button>}
     >
       <section
         role="alert"
@@ -1692,7 +1695,11 @@ export function Inbox({
         <ErrorBoundary
           resetKey={sel.id}
           fallback={(_error, retry) => (
-            <InboxDetailFallback item={sel} onRetry={retry} />
+            <InboxDetailFallback
+              item={sel}
+              onRetry={retry}
+              onClose={() => onSelectItem(null)}
+            />
           )}
         >
           <DetailPane
