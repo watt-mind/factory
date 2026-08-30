@@ -8,6 +8,7 @@ import { usageSpend } from "./db.mjs";
 import { hookDecisionCounts } from "./hooks.mjs";
 import { inboxCounts } from "./inbox.mjs";
 import { githubIntakeView } from "./intake.mjs";
+import { policyDispatchPaused } from "./planner.mjs";
 import { ambiguousOpenProposalRuns, openProposals } from "./proposals.mjs";
 import { proposalsPilingUp, scheduleView } from "./schedules.mjs";
 import {
@@ -188,6 +189,7 @@ export function statusView(
     getStoreStats,
     workerPolicy,
     workerRunDir,
+    dispatchPaused = policyDispatchPaused,
   } = {},
 ) {
   const open = openProposals(db, { now: nowMs });
@@ -249,6 +251,7 @@ export function statusView(
     : storeStats(db, artifactsRoot(env?.home), { now: nowMs });
   const stalled = stalledWorkers(db, { now: nowMs });
   const runs = { ...runCounts(db), spend: usageSpend(db, { now: nowMs }) };
+  const policy = { dispatchPaused: dispatchPaused() };
 
   const configAnomalies = [];
   const githubIntake = githubIntakeView(db, {
@@ -283,6 +286,7 @@ export function statusView(
   return {
     events: eventCounts(db),
     githubIntake,
+    policy,
     proposals: { open: open.length, expired: expiredOpen.length },
     inbox: inboxCounts(db),
     runs,

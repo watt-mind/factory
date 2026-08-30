@@ -226,6 +226,7 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
       const expectedStatusKeys =
         extractDirectProperties(statusViewBlock).sort();
       expect(Object.keys(status).sort()).toEqual(expectedStatusKeys);
+      expect(status.policy).toEqual({ dispatchPaused: expect.any(Boolean) });
       expect(status.inbox).toEqual({ open: 0, acked: 0, byKind: {} });
       expect(status.githubIntake).toEqual({
         configured: true,

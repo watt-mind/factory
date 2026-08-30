@@ -17,6 +17,33 @@ import {
 registerCliTmpCleanup();
 
 describe("status and doctor commands", () => {
+  test("status shows an operator dispatch pause in text and JSON anomalies", async () => {
+    const { status } = await import("../cli.mjs");
+    const writes = [];
+    const originalLog = console.log;
+    console.log = (line) => writes.push(line);
+    const payload = {
+      events: {},
+      policy: { dispatchPaused: true },
+      proposals: {},
+      runs: { byState: {} },
+      anomalies: {},
+    };
+
+    try {
+      await status({ status: async () => payload });
+      expect(writes).toContain(
+        "dispatch   PAUSED (config/policy.yaml dispatch.paused)",
+      );
+
+      writes.length = 0;
+      await status({ status: async () => payload }, ["--json"]);
+      expect(JSON.parse(writes[0]).anomalies).toContain("dispatch_paused");
+    } finally {
+      console.log = originalLog;
+    }
+  });
+
   test(
     "status --json reports in-flight counts from a live seeded serve",
     async () => {

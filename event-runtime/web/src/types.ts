@@ -843,6 +843,8 @@ export interface UnmatchedPlacementRun {
 export interface StatusView {
   env: EnvIdentity;
   events: Record<string, number>;
+  /** Operator-controlled pause for unattended dispatches. */
+  policy?: { dispatchPaused: boolean };
   /** GitHub webhook intake health; absent on pre-#1632 control APIs. */
   githubIntake?: GithubIntakeStatus;
   proposals: { open: number; expired: number };

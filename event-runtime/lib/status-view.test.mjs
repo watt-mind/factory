@@ -3,6 +3,21 @@ import { openDb } from "./db.mjs";
 import { statusView } from "./status-view.mjs";
 
 describe("statusView outbox counts", () => {
+  test("publishes whether an operator has paused unattended dispatch", () => {
+    const db = openDb(":memory:");
+
+    expect(
+      statusView(db, { schedules: [] }, Date.now(), {
+        dispatchPaused: () => true,
+      }).policy,
+    ).toEqual({ dispatchPaused: true });
+    expect(
+      statusView(db, { schedules: [] }, Date.now(), {
+        dispatchPaused: () => false,
+      }).policy,
+    ).toEqual({ dispatchPaused: false });
+  });
+
   test("reports parked rows separately from unpublished rows", () => {
     const db = openDb(":memory:");
     const now = Date.now();

@@ -152,7 +152,11 @@ export function getPoolLines(pool, s) {
 export async function status(client, args = []) {
   const s = await client.status();
   const pool = getPoolLines(readPool(), s);
-  const anomalyLines = [...getAnomalyLines(s), ...pool.anomalies];
+  const anomalyLines = [
+    ...getAnomalyLines(s),
+    ...(s?.policy?.dispatchPaused ? ["dispatch_paused"] : []),
+    ...pool.anomalies,
+  ];
   if (args.includes("--json")) {
     console.log(
       JSON.stringify({
@@ -181,6 +185,11 @@ export async function status(client, args = []) {
       "dead_lettered",
     ]),
   );
+  if (s?.policy?.dispatchPaused) {
+    console.log(
+      `${pad("dispatch", 11)}PAUSED (config/policy.yaml dispatch.paused)`,
+    );
+  }
   console.log(countLine("proposals", s.proposals, ["open", "expired"]));
   if (s.inbox) console.log(countLine("inbox", s.inbox, ["open", "acked"]));
   const states = Object.keys(s.runs.byState);
