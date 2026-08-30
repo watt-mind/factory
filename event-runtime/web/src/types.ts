@@ -831,6 +831,8 @@ export interface UnmatchedPlacementRun {
 export interface StatusView {
   env: EnvIdentity;
   events: Record<string, number>;
+  /** GitHub webhook intake health; absent on pre-#1632 control APIs. */
+  githubIntake?: GithubIntakeStatus;
   proposals: { open: number; expired: number };
   runs: { byState: Partial<Record<RunState, number>> };
   /** Fleet counts; `live` and `busy` exclude stale workers, as the API does. */
@@ -875,6 +877,16 @@ export interface StatusView {
     ambiguousOpenProposals: { runId: string; count: number }[];
     proposalsPilingUp?: ProposalPilingUp[];
   };
+}
+
+/** Durable GitHub admission freshness plus process-local rejected deliveries. */
+export interface GithubIntakeStatus {
+  configured: boolean;
+  lastAdmittedAt: string | null;
+  ageMs: number | null;
+  rejected: number;
+  stale: boolean;
+  staleAfterMs: number;
 }
 
 export interface ApproveOutcome {

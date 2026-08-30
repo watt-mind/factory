@@ -419,12 +419,62 @@ async function defaultSpawn(argv) {
     stderr: "pipe",
     timeout: TOOLCHAIN_PROBE_TIMEOUT_MS,
   });
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  const exitCode = await proc.exited;
-  return { exitCode, stdout, stderr };
+  // A timeout can abort one of the pipe reads before its sibling has drained.
+  // Preserve whatever was read and turn the probe into a normal failed result
+  // so the caller can attest the tool instead of losing the whole preflight.
+  const [stdoutResult, stderrResult, exitCodeResult] = await Promise.allSettled(
+    [
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ],
+  );
+  return {
+    exitCode:
+      exitCodeResult.status === "fulfilled" ? exitCodeResult.value : null,
+    stdout: stdoutResult.status === "fulfilled" ? stdoutResult.value : "",
+    stderr: stderrResult.status === "fulfilled" ? stderrResult.value : "",
+  };
+}
+
+function probeErrorMessage(error) {
+  const message = error?.message;
+  return typeof message === "string" && message.trim()
+    ? message
+    : String(error);
+}
+
+function failedToolchainProbe({
+  node,
+  repo,
+  executable,
+  constraint,
+  resolved,
+  error,
+  detail,
+}) {
+  const observedRaw = probeErrorMessage(error);
+  return {
+    tool: {
+      executable,
+      constraint,
+      resolved,
+      observed: null,
+      observedRaw,
+      satisfied: false,
+    },
+    reason: {
+      reason: REPO_TOOLCHAIN_MISSING,
+      node,
+      repo,
+      executable,
+      constraint,
+      observed: null,
+      observedRaw,
+      detail,
+      action: `check that ${executable} is present and executable on ${node}, then re-run toolchain preflight for repo ${repo}`,
+    },
+  };
 }
 
 /**
@@ -454,7 +504,23 @@ export async function preflightToolchain(
   const reasons = [];
 
   for (const { executable, constraint } of toolchain ?? []) {
-    const resolved = await which(executable);
+    let resolved;
+    try {
+      resolved = await which(executable);
+    } catch (error) {
+      const failed = failedToolchainProbe({
+        node,
+        repo: repo.name,
+        executable,
+        constraint,
+        resolved: null,
+        error,
+        detail: "which_failed",
+      });
+      tools.push(failed.tool);
+      reasons.push(failed.reason);
+      continue;
+    }
     if (!resolved) {
       tools.push({
         executable,
@@ -476,10 +542,24 @@ export async function preflightToolchain(
       continue;
     }
 
-    const { exitCode, stdout, stderr } = await spawn([
-      resolved,
-      TOOLCHAIN_VERSION_ARG,
-    ]);
+    let probe;
+    try {
+      probe = await spawn([resolved, TOOLCHAIN_VERSION_ARG]);
+    } catch (error) {
+      const failed = failedToolchainProbe({
+        node,
+        repo: repo.name,
+        executable,
+        constraint,
+        resolved,
+        error,
+        detail: "version_probe_threw",
+      });
+      tools.push(failed.tool);
+      reasons.push(failed.reason);
+      continue;
+    }
+    const { exitCode, stdout, stderr } = probe;
     const output = stdout?.trim() ? stdout : (stderr ?? "");
     const observedRaw =
       output

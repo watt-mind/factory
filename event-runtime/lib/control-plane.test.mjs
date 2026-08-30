@@ -653,6 +653,28 @@ for (const [name, make] of IMPLEMENTATIONS) {
       expect(t.description.match(/## Verification/g)).toHaveLength(1);
     });
 
+    test("replaceDetail replaces the description exactly", async () => {
+      const { cp } = make();
+      const replacement = "# Replacement\n\nThis is the complete body.";
+      await expect(
+        cp.replaceDetail("WM-1", replacement),
+      ).resolves.toBeUndefined();
+      expect((await cp.getTicket("WM-1")).description).toBe(replacement);
+    });
+
+    test("replaceDetail rejects invalid bodies", async () => {
+      const { cp } = make();
+      await expect(cp.replaceDetail("WM-1", "")).rejects.toThrow(
+        ControlPlaneError,
+      );
+      await expect(cp.replaceDetail("WM-1", null)).rejects.toThrow(
+        ControlPlaneError,
+      );
+      await expect(cp.replaceDetail("WM-999", "replacement")).rejects.toThrow(
+        ControlPlaneError,
+      );
+    });
+
     test("raw is the escape hatch; unknown queries throw", async () => {
       const { cp } = make();
       expect(await cp.raw(RAW_PING)).toEqual({ ping: true });

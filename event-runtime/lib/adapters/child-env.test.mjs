@@ -112,6 +112,24 @@ describe("shared child environment", () => {
     }
   });
 
+  test("inherits the control bearer only with runtime identity", () => {
+    process.env.FACTORY_CONTROL_API_TOKEN = "worker-control-bearer";
+
+    expect(
+      safeChildEnvironment({}, false, { inheritRuntimeIdentity: true })
+        .FACTORY_CONTROL_API_TOKEN,
+    ).toBe("worker-control-bearer");
+    expect(
+      safeChildEnvironment({}, false).FACTORY_CONTROL_API_TOKEN,
+    ).toBeUndefined();
+
+    for (const environment of [claudeEnvironment, agyEnvironment]) {
+      expect(
+        environment({}, { mutating: false }).FACTORY_CONTROL_API_TOKEN,
+      ).toBeUndefined();
+    }
+  });
+
   test("applies shared options after the caller environment", () => {
     process.env.FACTORY_EVENT_PORT = "17381";
     const output = safeChildEnvironment(

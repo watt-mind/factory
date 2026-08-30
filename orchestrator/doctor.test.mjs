@@ -189,6 +189,29 @@ describe("repo toolchain diagnostics (#1097)", () => {
     expect(uv.fix).toContain("install uv >=0.5");
   });
 
+  test("a throwing version probe yields a red row and later tools are still diagnosed", async () => {
+    const rows = await repoToolchainDiagnostics({
+      repos: [{ name: "demo", toolchain: { broken: ">=1", bun: ">=1.3 <2" } }],
+      which: async (executable) => `/opt/${executable}`,
+      spawn: async ([resolved]) => {
+        if (resolved === "/opt/broken") throw new Error("permission denied");
+        return { exitCode: 0, stdout: "1.3.14\n", stderr: "" };
+      },
+    });
+
+    expect(rows).toEqual([
+      expect.objectContaining({
+        ok: false,
+        label: "toolchain broken",
+        detail: ">=1  observed permission denied",
+      }),
+      expect.objectContaining({
+        ok: true,
+        label: "toolchain bun",
+      }),
+    ]);
+  });
+
   test("not-declared: no new rows and no probe is spawned", async () => {
     let probes = 0;
     const counted = {

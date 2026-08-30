@@ -20,6 +20,11 @@ export const RUNTIME_IDENTITY_ENV = [
   "FACTORY_EVENT_PORT",
   "FACTORY_EVENT_SECRET",
   "FACTORY_EVENT_ENV",
+  // The control bearer travels with runtime identity: a child that reconnects
+  // to this worker's control API needs it, while BASE_INHERITED_ENV must not
+  // expose it to adapters that do not inherit that identity. PUSH_CREDENTIAL_ENV
+  // remains reserved for explicitly mutating definitions and push transport.
+  "FACTORY_CONTROL_API_TOKEN",
 ];
 
 // These are assigned from a dispatch RunSpec by the worker, rather than

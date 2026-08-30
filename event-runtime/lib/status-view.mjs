@@ -282,6 +282,7 @@ export function statusView(
 
   return {
     events: eventCounts(db),
+    githubIntake,
     proposals: { open: open.length, expired: expiredOpen.length },
     inbox: inboxCounts(db),
     runs,

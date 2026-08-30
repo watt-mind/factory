@@ -99,6 +99,7 @@ import {
   expireRunDeadline,
   extendRunDeadline,
   forceFailRun,
+  HarnessMaterializeError,
   humanDecisionAuthorisationGate,
   LEASE_GRACE_SECONDS,
   policyMaxRunMinutes,
@@ -380,9 +381,79 @@ describe("worker", () => {
     expect(fetches).toBe(0);
   });
 
-  test("materialized harness entries record hashes for every copied file", () => {
+  const demoSkillFixture = () => {
     const factoryRoot = tmpDir("evrt-harness-source-");
+    const catalog = path.join(factoryRoot, "catalog");
+    const source = path.join(factoryRoot, "dist", "fake", "skills", "demo");
+    mkdirSync(path.join(catalog, "skills", "demo"), { recursive: true });
+    mkdirSync(source, { recursive: true });
+    writeFileSync(
+      path.join(catalog, "skills", "demo", "SKILL.md"),
+      "catalog\n",
+    );
+    writeFileSync(path.join(source, "SKILL.md"), "first\n");
+    writeFileSync(path.join(source, "notes.md"), "second\n");
+    return {
+      spec: { harness: { skills: ["demo"] } },
+      adapterKey: "fake",
+      adapter: {
+        HARNESS_LAYOUT: {
+          skills: {
+            source: (name) => ["dist", "fake", "skills", name],
+            dest: (name) => [".fake", "skills", name],
+            type: "dir",
+          },
+        },
+      },
+      registry: { harnessRoots: [{ skills: path.join(catalog, "skills") }] },
+      factoryRoot,
+    };
+  };
+
+  test("materialized harness entries record hashes for every copied file", () => {
     const workspaceDir = tmpDir("evrt-harness-workspace-");
+    const written = materializeRunHarness({
+      ...demoSkillFixture(),
+      workspaceDir,
+    });
+
+    expect(written).toEqual([
+      {
+        kind: "skills",
+        name: "demo",
+        dest: ".fake/skills/demo",
+        pins: {
+          ".fake/skills/demo/SKILL.md": hashBytes("first\n"),
+          ".fake/skills/demo/notes.md": hashBytes("second\n"),
+        },
+      },
+    ]);
+  });
+
+  test("materialize refuses a missing workspace root as harness_unmaterializable", () => {
+    const workspaceDir = path.join(
+      tmpDir("evrt-harness-workspace-missing-"),
+      "does-not-exist",
+    );
+    let caught;
+    try {
+      materializeRunHarness({ ...demoSkillFixture(), workspaceDir });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(HarnessMaterializeError);
+    expect(caught.code).toBe("harness_unmaterializable");
+    expect(caught.message).toContain("workspace root");
+  });
+
+  test("materialized harness entries remain workspace-relative through a symlinked parent", () => {
+    const factoryRoot = tmpDir("evrt-harness-source-");
+    const realWorkspaceParent = tmpDir("evrt-harness-workspace-real-");
+    const workspaceAliasBase = tmpDir("evrt-harness-workspace-alias-");
+    const workspaceAliasParent = path.join(workspaceAliasBase, "parent");
+    symlinkSync(realWorkspaceParent, workspaceAliasParent, "dir");
+    const workspaceDir = path.join(workspaceAliasParent, "workspace");
+    mkdirSync(workspaceDir);
     const catalog = path.join(factoryRoot, "catalog");
     const source = path.join(factoryRoot, "dist", "fake", "skills", "demo");
     mkdirSync(path.join(catalog, "skills", "demo"), { recursive: true });

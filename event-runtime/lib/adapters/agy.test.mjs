@@ -429,10 +429,20 @@ describe("execute with fake binary", () => {
   });
 
   /** Fake agy emitting the line shapes captured from the real CLI (WM-435). */
-  function writeFakeAgy(binDir, lines, beforeOutput = "") {
+  function writeFakeAgy(
+    binDir,
+    lines,
+    beforeOutput = "",
+    { newlineLessLastLine = false } = {},
+  ) {
     const fakeAgy = path.join(binDir, "agy");
     const body = lines
-      .map((l) => `echo ${JSON.stringify(JSON.stringify(l))}`)
+      .map((line, index) => {
+        const encoded = JSON.stringify(JSON.stringify(line));
+        return newlineLessLastLine && index === lines.length - 1
+          ? `printf '%s' ${encoded}`
+          : `echo ${encoded}`;
+      })
       .join("\n");
     writeFileSync(
       fakeAgy,
@@ -524,6 +534,52 @@ describe("execute with fake binary", () => {
     expect(readFileSync(argvFile, "utf8")).toContain(`Do task${PROMPT_SUFFIX}`);
     expect(readFileSync(argvFile, "utf8")).not.toContain("mutable replacement");
     expect(existsSync(path.join(tmp, ".transcript.json"))).toBe(true);
+  });
+
+  test("waits for a newline-less terminal result before resolving", async () => {
+    tmp = tmpDir("agy-test-");
+    const binDir = path.join(tmp, "bin");
+    mkdirSync(binDir, { recursive: true });
+    writeFakeAgy(
+      binDir,
+      [
+        { event: "init", conversation_id: "c1" },
+        {
+          event: "result",
+          result: {
+            status: "SUCCESS",
+            response: "Final response.",
+            duration_seconds: 1,
+            num_turns: 2,
+            usage: { input_tokens: 10, output_tokens: 20 },
+          },
+        },
+      ],
+      "",
+      { newlineLessLastLine: true },
+    );
+
+    const traces = [];
+    const res = await execute({
+      spec: {},
+      def: { promptText: "Do task" },
+      workspaceDir: tmp,
+      env: { PATH: `${binDir}:${process.env.PATH}` },
+      onTrace: (kind, payload) => traces.push({ kind, payload }),
+    });
+
+    expect(res.exitCode).toBe(0);
+    expect(traces).toContainEqual({
+      kind: "assistant_text",
+      payload: { text: "Final response." },
+    });
+    expect(traces).toContainEqual({
+      kind: "usage",
+      payload: expect.objectContaining({
+        usage: { input: 10, output: 20 },
+      }),
+    });
+    expect(res.usage).toEqual({ input: 10, output: 20, turns: 2 });
   });
 
   test("a failed run still produces a trace carrying the error (WM-435)", async () => {

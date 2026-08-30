@@ -177,7 +177,7 @@ function runNotify({ args, stdin = "", exitCode = "0", env = {} }) {
   };
 }
 
-async function withInboxStub(response, fn) {
+async function withInboxStub(response, fn, status = 201) {
   const dir = mkdtempSync(path.join(tmpdir(), "factory-inbox-server-"));
   const requestFile = path.join(dir, "request.json");
   const headersFile = path.join(dir, "headers.json");
@@ -195,7 +195,7 @@ class Handler(BaseHTTPRequestHandler):
         with open(${JSON.stringify(headersFile)}, "w") as f:
             f.write(json.dumps({k.lower(): v for k, v in self.headers.items()}))
         body = json.dumps(json.loads(${JSON.stringify(JSON.stringify(response))})).encode()
-        self.send_response(201)
+        self.send_response(${status})
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))
         self.end_headers()
@@ -321,6 +321,27 @@ test("factory notify sends no authorization header when FACTORY_CONTROL_API_TOKE
         result.cleanup();
       }
     },
+  );
+});
+
+test("factory notify diagnoses a rejected inbox response before exiting terminally", async () => {
+  await withInboxStub(
+    { error: "inbox validation failed" },
+    async ({ port }) => {
+      const result = runNotify({
+        args: ["BLOCKED", "WM-1:", "choose policy"],
+        env: { FACTORY_EVENT_PORT: String(port) },
+      });
+      try {
+        expect(result.status).toBe(10);
+        expect(result.stderr).toContain(
+          "notify: control API POST /inbox failed: HTTP 500 inbox validation failed",
+        );
+      } finally {
+        result.cleanup();
+      }
+    },
+    500,
   );
 });
 

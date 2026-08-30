@@ -545,6 +545,34 @@ describe("planning a tick (§5, §6)", () => {
     expect(openProposals(d, {})[0].id).toBe("prop_registry_replacement");
   });
 
+  test("an unreplannable stale scheduler proposal is cancelled once (#1706)", () => {
+    const d = db();
+    const registry = withLoop({ approval: "auto" });
+    const now = at("2026-08-13T21:00:00Z");
+    emitDueTicks(d, registry, { now });
+    planAdmittedEvents(d, registry, { policyVersion: PV, now });
+    const stale = {
+      ...registry,
+      agents: new Map(registry.agents),
+      eventTypes: { ...registry.eventTypes },
+    };
+    stale.agents.delete("reaper@1");
+    delete stale.eventTypes["clock.tick.reaper"];
+
+    const outcome = autoApproveScheduled(d, stale, approveProposal, {
+      now,
+      policyVersion: PV,
+    });
+
+    expect(outcome.expired).toHaveLength(1);
+    expect(outcome.errors).toEqual([]);
+    expect(d.query(`SELECT state FROM runs`).get().state).toBe("CANCELLED");
+    expect(d.query(`SELECT status, reason FROM proposals`).get()).toEqual({
+      status: "rejected",
+      reason: "registry_stale",
+    });
+  });
+
   test("reserved schedule provenance is refused at the external boundary but the tick loop still admits (#960)", () => {
     const d = db();
     const registry = withLoop({ approval: "auto" });

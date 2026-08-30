@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { artifactReferenceIndex } from "./artifacts.mjs";
 import { canonicalJson, sha256Hex } from "./canonical.mjs";
 import {
+  CONTROL_TOKEN,
   GH_SECRET,
   PV,
   SECRET,
@@ -397,7 +398,7 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
 
   test("declared artifacts and the transcript survive the workspace and stream from the API", async () => {
     const { db, server, port } = await makeServer();
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     const home = tmpDir("evrt-home-");
     try {
       await client.replay(
@@ -448,7 +449,7 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
     });
     await new Promise((resolve) => server.on("listening", resolve));
     const port = server.address().port;
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       await client.replay(
         envelope({ eventId: "art-2", payload: { repos: ["with-artifact"] } }),

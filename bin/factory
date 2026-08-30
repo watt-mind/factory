@@ -239,14 +239,27 @@ case "$cmd" in
               source: process.env.FACTORY_INBOX_SOURCE,
             }),
           });
-          const responseBody = await response.clone().json().catch(() => null);
+          const responseText = await response.clone().text().catch(() => "");
+          let responseBody = null;
+          try {
+            responseBody = JSON.parse(responseText);
+          } catch {}
           if (response.status === 401 || (response.status === 503 && responseBody?.error === "control_api_token_unset")) {
             console.error(token
               ? "notify: control API rejected FACTORY_CONTROL_API_TOKEN"
               : "notify: control API requires FACTORY_CONTROL_API_TOKEN; set it in ~/.factory/secrets.env");
             process.exit(10);
           }
-          if (!response.ok) process.exit(10);
+          if (!response.ok) {
+            const rawDetail = typeof responseBody?.error === "string" ? responseBody.error : responseText;
+            const detail = (token ? rawDetail.split(token).join("[redacted]") : rawDetail)
+              .trim()
+              .replace(/\s+/g, " ")
+              .slice(-200)
+              || "(empty response)";
+            console.error(`notify: control API POST /inbox failed: HTTP ${response.status} ${detail}`);
+            process.exit(10);
+          }
           const body = responseBody;
           // Durable record succeeded; the serve-side notify.py projection did
           // not. Exit 12 so the shell falls through to the CLI transport
