@@ -1,9 +1,11 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { expect, test } from "bun:test";
 
 const ROOT = path.resolve(import.meta.dir, "..");
 
-function run(args) {
+function run(args, { env = process.env } = {}) {
   return Bun.spawnSync({
     cmd: [
       process.execPath,
@@ -11,10 +13,39 @@ function run(args) {
       ...args,
     ],
     cwd: ROOT,
+    env,
     stdout: "pipe",
     stderr: "pipe",
   });
 }
+
+test("security-env emits the validated registry settings byte-for-byte", () => {
+  const factoryRoot = mkdtempSync(path.join(tmpdir(), "security-env-"));
+  try {
+    mkdirSync(path.join(factoryRoot, "config"));
+    writeFileSync(
+      path.join(factoryRoot, "config", "repos.yaml"),
+      `repos:
+  - name: fixture
+    path: ${ROOT}
+    security:
+      semgrep_args: --exclude-rule example.rule
+      gitleaks_args: --no-git
+      python_version: 3.12
+`,
+    );
+    const proc = run([ROOT], {
+      env: { ...process.env, FACTORY_REPOS_ROOT: factoryRoot },
+    });
+    expect(proc.exitCode).toBe(0);
+    expect(proc.stdout.toString()).toBe(
+      'export SEMGREP_ARGS="--exclude-rule example.rule"\nexport GITLEAKS_ARGS="--no-git"\nexport PYTHON_VERSION="3.12"\n',
+    );
+    expect(output(proc, "stderr")).toBe("");
+  } finally {
+    rmSync(factoryRoot, { recursive: true, force: true });
+  }
+});
 
 function output(proc, stream) {
   return proc[stream]?.toString().trim() ?? "";

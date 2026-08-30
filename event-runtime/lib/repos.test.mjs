@@ -1,6 +1,12 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-repos-test-mjs";
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import semver from "semver";
 import { DEFAULT_MAX_IN_FLIGHT } from "./config.mjs";
@@ -14,6 +20,7 @@ import {
   REPO_TOOLCHAIN_MISMATCH,
   REPO_TOOLCHAIN_MISSING,
   RepoError,
+  findRepoForPath,
   repoDispatchPreflight,
   repoReadiness,
   reposView,
@@ -90,7 +97,8 @@ const YAML = `repos:
         - Verify
     security:
       python_version: "3.12"
-      api_token: never-publish-security-token
+      semgrep_args: "--exclude-rule example.rule"
+      gitleaks_args: "--no-git"
     escalate_paths:
       - src/auth/**
 
@@ -124,7 +132,11 @@ describe("loadRepos reads the registry fields the operator surfaces need (OPS-29
         branch: "master",
         revisionField: "revision",
       },
-      security: { pythonVersion: "3.12" },
+      security: {
+        pythonVersion: "3.12",
+        semgrepArgs: "--exclude-rule example.rule",
+        gitleaksArgs: "--no-git",
+      },
       mergeCi: {
         workflow: "CI",
         requiredChecks: ["Shadow runner fleet available", "Verify"],
@@ -193,6 +205,59 @@ describe("loadRepos reads the registry fields the operator surfaces need (OPS-29
     const empty = tmpDir("evrt-repos-empty-");
     scratch.push(empty);
     expect(() => loadRepos({ root: empty })).toThrow(RepoError);
+  });
+
+  test("security only accepts documented, typed scan settings", () => {
+    const valid = loadRepos({
+      root: factoryRoot(`repos:
+  - name: configured
+    path: /tmp/configured
+    security:
+      python_version: 3.12
+      semgrep_args: --exclude-rule example.rule
+      gitleaks_args: --no-git
+`),
+    }).get("configured");
+    expect(valid.security).toEqual({
+      pythonVersion: 3.12,
+      semgrepArgs: "--exclude-rule example.rule",
+      gitleaksArgs: "--no-git",
+    });
+
+    for (const [field, value, expected] of [
+      ["semgrep_args", "[--exclude-rule]", "security.semgrep_args"],
+      ["gitleaks_args", "{no_git: true}", "security.gitleaks_args"],
+      ["python_version", "true", "security.python_version"],
+      ["unexpected", "value", "security has unknown keys"],
+    ]) {
+      const root = factoryRoot(`repos:
+  - name: invalid
+    path: /tmp/invalid
+    security:
+      ${field}: ${value}
+`);
+      expect(() => loadRepos({ root })).toThrow(
+        new RegExp(`repo invalid ${expected}`),
+      );
+    }
+  });
+
+  test("findRepoForPath uses a realpath prefix before the worktree remote fallback", () => {
+    const repos = loadRepos({
+      root: factoryRoot(`repos:
+  - name: configured
+    path: ${process.cwd()}
+    github: watt-mind/configured
+`),
+    });
+    expect(findRepoForPath(repos, realpathSync(process.cwd()))?.name).toBe(
+      "configured",
+    );
+    expect(
+      findRepoForPath(repos, "/tmp/worktree", {
+        remote: "watt-mind/configured",
+      })?.name,
+    ).toBe("configured");
   });
 
   test("max_in_flight must be a positive number when present, or null when absent/null (OPS-347)", () => {
@@ -474,7 +539,11 @@ describe("reposView is what the control API serves", () => {
           baseline: "event-runtime/lib/registry.test.mjs",
         },
       },
-      security: { pythonVersion: "3.12" },
+      security: {
+        pythonVersion: "3.12",
+        semgrepArgs: "--exclude-rule example.rule",
+        gitleaksArgs: "--no-git",
+      },
     });
     expect(rows[1]).toMatchObject({ escalatePaths: null, security: null });
 

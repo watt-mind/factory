@@ -13,9 +13,7 @@
  * factory checkout. (.gitleaks.toml stays in-repo: CI and git hooks need it.)
  */
 import { realpathSync } from "node:fs";
-import { homedir } from "node:os";
-import path from "node:path";
-import { loadConfigYaml } from "../lib/schedule.mjs";
+import { findRepoForPath, loadRepos } from "../event-runtime/lib/repos.mjs";
 
 export const USAGE = "usage: bun tools/security-env.mjs [PATH]";
 
@@ -41,11 +39,8 @@ export function run(argv = process.argv.slice(2)) {
     throw new UsageError(USAGE);
   }
 
-  const cfg = loadConfigYaml("repos");
-  const expand = (p) => realpathSync(p.replace(/^~(?=\/|$)/, homedir()));
-
-  // Worktrees live outside the configured path, so also match by origin remote
-  // (normalized to owner/repo).
+  // Worktrees live outside the configured path, so preserve the normalized
+  // origin remote as a fallback after the registry's canonical path match.
   const remote = (() => {
     const r = Bun.spawnSync([
       "git",
@@ -63,26 +58,18 @@ export function run(argv = process.argv.slice(2)) {
     return m ? m[1] : null;
   })();
 
-  for (const repo of cfg.repos || []) {
-    let byPath = false;
-    try {
-      const repoPath = expand(repo.path);
-      byPath = target === repoPath || target.startsWith(repoPath + path.sep);
-    } catch {
-      /* intentionally ignored */
-    }
-    if (!byPath && !(remote && repo.github === remote)) continue;
-    const sec = repo.security || {};
-    if (sec.semgrep_args)
-      console.log(`export SEMGREP_ARGS=${JSON.stringify(sec.semgrep_args)}`);
-    if (sec.gitleaks_args)
-      console.log(`export GITLEAKS_ARGS=${JSON.stringify(sec.gitleaks_args)}`);
-    if (sec.python_version)
-      console.log(
-        `export PYTHON_VERSION=${JSON.stringify(String(sec.python_version))}`,
-      );
-    break;
-  }
+  const repo = findRepoForPath(loadRepos(), target, { remote });
+  const security = repo?.security;
+  if (security?.semgrepArgs)
+    console.log(`export SEMGREP_ARGS=${JSON.stringify(security.semgrepArgs)}`);
+  if (security?.gitleaksArgs)
+    console.log(
+      `export GITLEAKS_ARGS=${JSON.stringify(security.gitleaksArgs)}`,
+    );
+  if (security?.pythonVersion)
+    console.log(
+      `export PYTHON_VERSION=${JSON.stringify(String(security.pythonVersion))}`,
+    );
 }
 
 if (import.meta.main) {

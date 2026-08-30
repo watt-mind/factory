@@ -13,7 +13,7 @@
  * report-only one, and where its worktrees live (OPS-299).
  */
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import {
   DEFAULT_MAX_IN_FLIGHT,
@@ -689,7 +689,8 @@ export async function repoDispatchPreflight(
  *                        mergeCi: {workflow: string, requiredChecks: string[]}|null,
  *                        escalatePaths: string[]|null, smokeWorkflow: string|null, smokeUrl: string|null,
  *                        deployment: {url: string|null, branch: string|null, revisionField: string|null}|null,
- *                        security: {pythonVersion: string|null}|null,
+ *                        security: {pythonVersion: string|number|null, semgrepArgs: string|null,
+ *                        gitleaksArgs: string|null}|null,
  *                        worktreeRoot: string|null, worktreeUp: string|null, worktreeDown: string|null,
  *                        worktreeWarm: string|null, verify: string|null,
  *                        toolchain: Array<{executable: string, constraint: string}>|null,
@@ -789,16 +790,7 @@ export function loadRepos({ root = reposRoot() } = {}) {
         revisionField: entry.deployment.revision_field ?? null,
       };
     }
-    let security = null;
-    if (entry.security !== undefined && entry.security !== null) {
-      if (typeof entry.security !== "object" || Array.isArray(entry.security)) {
-        throw new RepoError(
-          `${file}: repo ${entry.name} security must be an object`,
-        );
-      }
-      // Deliberate allow-list: never pass through credential-shaped additions.
-      security = { pythonVersion: entry.security.python_version ?? null };
-    }
+    const security = normalizeSecurity(entry.security, entry.name, file);
     // WM-1007: which tracker holds this repo's tickets. Absent means "inherit
     // config/policy.yaml", which is why the default is null and not "linear" —
     // a value here would state a choice this file never made, and would
@@ -853,6 +845,63 @@ export function loadRepos({ root = reposRoot() } = {}) {
     });
   }
   return repos;
+}
+
+function normalizeSecurity(raw, repoName, file) {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new RepoError(`${file}: repo ${repoName} security must be an object`);
+  }
+
+  const keys = ["python_version", "semgrep_args", "gitleaks_args"];
+  const unknown = Object.keys(raw).filter((key) => !keys.includes(key));
+  if (unknown.length) {
+    throw new RepoError(
+      `${file}: repo ${repoName} security has unknown keys (${unknown.join(", ")})`,
+    );
+  }
+
+  for (const field of ["semgrep_args", "gitleaks_args"]) {
+    if (raw[field] !== undefined && typeof raw[field] !== "string") {
+      throw new RepoError(
+        `${file}: repo ${repoName} security.${field} must be a string, got ${JSON.stringify(raw[field])}`,
+      );
+    }
+  }
+  if (
+    raw.python_version !== undefined &&
+    typeof raw.python_version !== "string" &&
+    typeof raw.python_version !== "number"
+  ) {
+    throw new RepoError(
+      `${file}: repo ${repoName} security.python_version must be a string or number, got ${JSON.stringify(raw.python_version)}`,
+    );
+  }
+
+  return {
+    pythonVersion: raw.python_version ?? null,
+    semgrepArgs: raw.semgrep_args ?? null,
+    gitleaksArgs: raw.gitleaks_args ?? null,
+  };
+}
+
+/**
+ * Resolve a filesystem target to its configured repo record. Worktrees live
+ * outside their configured checkout, so an origin remote is a deliberate
+ * fallback after the canonical realpath-prefix match.
+ */
+export function findRepoForPath(repos, target, { remote = null } = {}) {
+  for (const repo of repos.values()) {
+    let byPath = false;
+    try {
+      const repoPath = realpathSync(repo.path);
+      byPath = target === repoPath || target.startsWith(repoPath + path.sep);
+    } catch {
+      /* A missing optional checkout must not prevent a remote match. */
+    }
+    if (byPath || (remote && repo.github === remote)) return repo;
+  }
+  return null;
 }
 
 /**
