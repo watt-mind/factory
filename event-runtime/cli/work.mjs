@@ -27,7 +27,13 @@ import {
   registerWorker,
   satisfiesPlacement,
 } from "../lib/workers.mjs";
-import { fail, flagValue, log } from "./shared.mjs";
+import {
+  fail,
+  flagValue,
+  log,
+  parseWorkerLabel,
+  validWorkerPollMs,
+} from "./shared.mjs";
 
 /** Bound registry diagnostics so one incompatible queue cannot bloat a row. */
 const MAX_SKIPPED_DIAGNOSTICS = 50;
@@ -50,7 +56,7 @@ const MAX_SKIPPED_DIAGNOSTICS = 50;
 export default async function work(args) {
   const adapterOverride = flagValue(args, "--adapter-override") ?? undefined;
   const pollMs = Number(flagValue(args, "--poll-ms") ?? 500);
-  if (!Number.isInteger(pollMs) || pollMs < 25 || pollMs > 5_000) {
+  if (!validWorkerPollMs(pollMs)) {
     fail("work: --poll-ms must be an integer between 25 and 5000");
   }
   const skipReportMs = Number(
@@ -86,9 +92,9 @@ export default async function work(args) {
   const labels = {};
   for (let i = 0; i < args.length; i += 1) {
     if (args[i] !== "--label") continue;
-    const [key, ...rest] = String(args[i + 1] ?? "").split("=");
-    if (!key || rest.length === 0) fail("work: --label expects key=value");
-    labels[key] = rest.join("=");
+    const label = parseWorkerLabel(args[i + 1]);
+    if (!label) fail("work: --label expects key=value");
+    labels[label.key] = label.value;
   }
 
   // Pool supervision (WM-226). The drain file is the scale-down signal: the

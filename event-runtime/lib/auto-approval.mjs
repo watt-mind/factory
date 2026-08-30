@@ -1085,6 +1085,16 @@ async function runPass(
       });
       return { approved, open, errors, skipped, memoised };
     }
+    if (rows.length === 0) return { approved, open, errors, skipped, memoised };
+
+    // Read this once per pass, rather than once per row. Passing the same
+    // snapshot to the guard avoids a second policy read; the next pass reads
+    // again, so clearing a pause resumes approvals without a restart.
+    const runtimePolicy =
+      runtimeGuardOptions.runtimePolicy ??
+      loadRuntimePolicy(runtimeGuardOptions.root ?? reposRoot());
+    const paused = runtimePolicy?.dispatch?.paused === true;
+    const passRuntimeGuardOptions = { ...runtimeGuardOptions, runtimePolicy };
 
     // Verdicts for rows that are no longer pending (decided, superseded,
     // re-planned under a new proposal id) or that were held under another
@@ -1097,6 +1107,11 @@ async function runPass(
     }
 
     for (const row of rows) {
+      if (paused) {
+        noteOpenReason(db, row.id, "dispatch_paused");
+        skipped += 1;
+        continue;
+      }
       const memoKey = `${row.run_id}\0${resolvedPolicyVersion}`;
       const stale = pinnedToOlderRegistry(row, resolvedPolicyVersion);
       const held = stale ? memo.get(memoKey) : undefined;
@@ -1145,7 +1160,7 @@ async function runPass(
         }
         let guardReason;
         try {
-          guardReason = runtimeGuard(db, runtimeGuardOptions);
+          guardReason = runtimeGuard(db, passRuntimeGuardOptions);
         } catch {
           guardReason = "runtime_guard_failed";
         }

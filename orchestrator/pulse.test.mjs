@@ -86,6 +86,17 @@ function deadPort() {
   return port;
 }
 
+function testWorkspaceProbe(args) {
+  const outputByCommand = {
+    "git branch --show-current": "test-branch",
+    "git rev-parse --short HEAD": "test-head",
+    "git status --porcelain": "",
+    "git rev-list --count HEAD..origin/develop": "2",
+    "git rev-list --count origin/develop..HEAD": "3",
+  };
+  return { ok: true, out: outputByCommand[args.join(" ")] ?? "", err: "" };
+}
+
 test("gatherPulse counts qualifying Linear issues across pages", async () => {
   const firstPage = Array.from({ length: 100 }, (_, index) =>
     linearIssue(index + 1, {
@@ -123,8 +134,10 @@ test("gatherPulse counts qualifying Linear issues across pages", async () => {
 
   const pulse = await gatherPulse({
     port: deadPort(),
+    webPort: deadPort(),
     fetchGitHub: false,
     controlPlane,
+    workspaceProbe: testWorkspaceProbe,
   });
 
   expect(pulse.supply.dispatchable).toBe(55);
@@ -134,6 +147,13 @@ test("gatherPulse counts qualifying Linear issues across pages", async () => {
   expect(calls).toHaveLength(2);
   expect(calls[0].query).toContain('state:{name:{in:["Todo","Triage"]}}');
   expect(calls[1].variables.after).toBe("page-2");
+  expect(pulse.workspace).toEqual({
+    branch: "test-branch",
+    head: "test-head",
+    behind: 2,
+    ahead: 3,
+    clean: true,
+  });
 });
 
 test("gatherPulse marks Linear supply as truncated at the page cap", async () => {
@@ -152,8 +172,10 @@ test("gatherPulse marks Linear supply as truncated at the page cap", async () =>
 
   const pulse = await gatherPulse({
     port: deadPort(),
+    webPort: deadPort(),
     fetchGitHub: false,
     controlPlane,
+    workspaceProbe: testWorkspaceProbe,
   });
 
   expect(calls).toHaveLength(5);
@@ -161,16 +183,27 @@ test("gatherPulse marks Linear supply as truncated at the page cap", async () =>
   expect(pulse.supply.truncated).toBe(true);
 });
 
-test("gatherPulse handles unreachable API gracefully", async () => {
+test("gatherPulse uses the configured dead web port instead of the default", async () => {
   // A hardcoded port assumes nothing else is listening on it, which a
   // stranger process (or a concurrent worktree) can invalidate (#876).
+  const webPort = 9876;
+  const webRequests = [];
   const pulse = await gatherPulse({
     port: deadPort(),
+    webPort,
     fetchLinear: false,
     fetchGitHub: false,
+    webFetch: async (url) => {
+      webRequests.push(url);
+      throw new Error("web intentionally unreachable");
+    },
+    workspaceProbe: testWorkspaceProbe,
   });
 
   expect(pulse.stack.api.ok).toBe(false);
+  expect(pulse.stack.web.ok).toBe(false);
+  expect(webRequests).toEqual([`http://127.0.0.1:${webPort}/`]);
+  expect(webRequests.some((url) => url.includes(":7382/"))).toBe(false);
   expect(pulse.stack.workers.total).toBe(0);
   expect(pulse.runs.active.length).toBe(0);
 });
@@ -201,6 +234,7 @@ test("gatherPulse sends the control API bearer on protected reads", async () => 
       webPort: server.port,
       fetchLinear: false,
       fetchGitHub: false,
+      workspaceProbe: testWorkspaceProbe,
     });
     expect(pulse.stack.api.ok).toBe(true);
     expect(authorization.length).toBeGreaterThanOrEqual(4);
@@ -236,6 +270,7 @@ test("gatherPulse surfaces a failed protected read even when /health is fine", a
       webPort: server.port,
       fetchLinear: false,
       fetchGitHub: false,
+      workspaceProbe: testWorkspaceProbe,
     });
     expect(pulse.stack.api.ok).toBe(false);
     expect(pulse.stack.api.code).toBe("API_ERROR");

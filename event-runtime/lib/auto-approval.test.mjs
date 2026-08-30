@@ -700,6 +700,36 @@ describe("chain auto approval (WM-357)", () => {
     );
   });
 
+  test("dispatch.paused skips open chain proposals and resumes them after it clears", async () => {
+    const db = openDb(":memory:");
+    const candidate = seed(db, { id: "paused" });
+    const runtimePolicy = {
+      budget: { per_day_usd: 1 },
+      workers: { max: 2 },
+      circuit_breaker: { consecutive_env_failures: 2 },
+      dispatch: { paused: true },
+    };
+    const runtimeGuardOptions = { runtimePolicy };
+
+    const paused = await auto(db, {
+      runtimeGuardOptions,
+    });
+    expect(paused).toMatchObject({
+      approved: [],
+      open: [],
+      skipped: 1,
+    });
+    expect(runState(db, candidate.runId)).toBe("PROPOSED");
+    expect(openProposals(db, {})[0].reason).toBe(
+      "auto_approval_ineligible:dispatch_paused",
+    );
+
+    runtimePolicy.dispatch.paused = false;
+    expect((await auto(db, { runtimeGuardOptions })).approved).toEqual([
+      { proposalId: candidate.id, runId: candidate.runId },
+    ]);
+  });
+
   test("eligible chain work and triage proposals advance with an auditable actor and reason", async () => {
     const db = openDb(":memory:");
     const work = seed(db, { id: "work", type: "factory.work.requested" });

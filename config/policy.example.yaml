@@ -84,6 +84,9 @@ commitMsg:
     - '\(#[0-9]+\)'
 
 dispatch:
+  # Temporarily stop unattended dispatch and chain approvals. Operator-sourced
+  # dispatches remain available so a human can explicitly force work.
+  paused: false
   owned_paths_collision: advisory
   owned_paths_conformance: advisory
   # Whether the work loop may dispatch `type:security` tickets (WM-1060).

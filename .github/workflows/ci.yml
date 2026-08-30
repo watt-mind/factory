@@ -17,6 +17,12 @@ on:
 permissions:
   contents: read
 
+# CI runs on a self-hosted operator machine too. Never allow tests or their
+# spawned tracker CLIs to consume the real Linear API budget from that host.
+env:
+  FACTORY_LINEAR_OFFLINE: "1"
+  LINEAR_API_KEY: ""
+
 # One live run per PR, and one per pushed branch: a newer push to develop
 # supersedes the older develop run (WM-773 item 6) — a stale develop SHA green
 # proves nothing and used to cost a full lane hold per merge.

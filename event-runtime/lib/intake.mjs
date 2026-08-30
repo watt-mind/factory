@@ -180,9 +180,15 @@ const PR_ACTIONS = ["opened", "synchronize", "ready_for_review"];
 
 /** The repos.yaml entry whose `github` slug matches, or null when unconfigured. */
 function repoForSlug(repos, slug) {
-  if (typeof slug !== "string" || slug === "") return null;
+  if (typeof slug !== "string" || slug.trim() === "") return null;
+  const normalizedSlug = slug.trim().toLowerCase();
   for (const repo of repos.values()) {
-    if (repo.github === slug) return repo;
+    if (
+      typeof repo.github === "string" &&
+      repo.github.trim().toLowerCase() === normalizedSlug
+    ) {
+      return repo;
+    }
   }
   return null;
 }
