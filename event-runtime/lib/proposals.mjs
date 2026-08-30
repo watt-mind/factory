@@ -31,8 +31,19 @@ import { computeDefHash } from "./receipts.mjs";
  */
 const HUMAN_ACTOR = "operator";
 
-function isExpired(proposal, now) {
-  return now - Date.parse(proposal.created_at) > proposal.ttl_seconds * 1000;
+/**
+ * TTL expiry applies only to runnable proposals. Parked human-needed and noop
+ * proposals remain actionable until their event moves on.
+ */
+export function proposalExpiresAt(proposal) {
+  return Date.parse(proposal.created_at) + Number(proposal.ttl_seconds) * 1000;
+}
+
+export function isProposalExpired(proposal, now = Date.now()) {
+  const expiresAt = proposalExpiresAt(proposal);
+  return (
+    proposal.decision === "run" && Number.isFinite(expiresAt) && expiresAt < now
+  );
 }
 
 /** A pin that can be compared. `"unknown"` is the no-registry sentinel, not a version. */
@@ -61,9 +72,7 @@ export function openProposals(db, { now = Date.now() } = {}) {
     .all()
     .map((row) => ({
       ...withSpec(row),
-      // TTL re-planning is only meaningful for runnable proposals. A parked
-      // refusal remains actionable until its event moves on.
-      expired: row.decision === "run" && isExpired(row, now),
+      expired: isProposalExpired(row, now),
     }));
 }
 
@@ -285,7 +294,7 @@ export function approveProposal(
     if (
       !registryReloadMismatch &&
       !registryVersionMismatch &&
-      !isExpired(proposal, now)
+      !isProposalExpired(proposal, now)
     ) {
       // The recorded spec queues as-is, so its model is checked against the
       // adapter it was planned for: the spec's own adapter — not the

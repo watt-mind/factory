@@ -1013,6 +1013,10 @@ describe("human inbox ledger (WM-285)", () => {
       `INSERT INTO proposals (id, event_source, event_id, decision, status, created_at, ttl_seconds)
        VALUES ('live-proposal', 'test', 'live-evt', 'run', 'open', ?, 60)`,
     ).run(liveAt);
+    db.query(
+      `INSERT INTO proposals (id, event_source, event_id, decision, status, created_at, ttl_seconds)
+       VALUES ('parked-proposal', 'test', 'parked-evt', 'human_needed', 'open', ?, 60)`,
+    ).run(expiredAt);
     createInboxItem(db, { kind: "BLOCKED", title: "active" }, { id: "active" });
     createInboxItem(
       db,
@@ -1037,6 +1041,15 @@ describe("human inbox ledger (WM-285)", () => {
       },
       { id: "live-proposal-item" },
     );
+    createInboxItem(
+      db,
+      {
+        kind: "decision_needed",
+        title: "parked by proposal",
+        refs: { proposalId: "parked-proposal" },
+      },
+      { id: "parked-proposal-item" },
+    );
 
     const items = listInboxItems(db, { status: "all" });
     expect(
@@ -1050,6 +1063,14 @@ describe("human inbox ledger (WM-285)", () => {
     expect(
       items.find((item) => item.id === "live-proposal-item"),
     ).toMatchObject({
+      expired: false,
+    });
+    expect(
+      items.find((item) => item.id === "parked-proposal-item"),
+    ).toMatchObject({
+      expired: false,
+    });
+    expect(getInboxItem(db, "parked-proposal-item")).toMatchObject({
       expired: false,
     });
     expect(inboxCounts(db)).toMatchObject({

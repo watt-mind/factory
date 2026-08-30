@@ -904,7 +904,7 @@ describe("ticket journey join (WM-595)", () => {
     }
   });
 
-  test("journey proposals keep TTL expiry and null spec", async () => {
+  test("journey keeps parked human-needed proposals open past their TTL", async () => {
     const s = await makeServer();
     try {
       await s.client.replay(
@@ -949,7 +949,7 @@ describe("ticket journey join (WM-595)", () => {
       const byId = Object.fromEntries(
         journey.proposals.map((proposal) => [proposal.id, proposal]),
       );
-      expect(byId["prop-expired"].expired).toBe(true);
+      expect(byId["prop-expired"].expired).toBe(false);
       expect(byId["prop-expired"].status).toBe("open");
       expect(byId["prop-no-spec"].expired).toBe(false);
       expect(byId["prop-no-spec"].spec).toBeNull();
@@ -958,6 +958,63 @@ describe("ticket journey join (WM-595)", () => {
           nowMs: Date.parse("2026-01-01T10:00:30.000Z"),
         }).proposals.find((proposal) => proposal.id === "prop-expired").expired,
       ).toBe(false);
+    } finally {
+      s.close();
+    }
+  });
+});
+
+describe("parked proposal expiry API projections (factory#1775)", () => {
+  const now = Date.parse("2026-08-19T12:00:00.000Z");
+
+  function insertParkedProposal(db, id) {
+    db.query(
+      `INSERT INTO proposals
+         (id, event_source, event_id, decision, status, created_at, ttl_seconds, spec_json)
+       VALUES (?, 'test', ?, 'human_needed', 'open', ?, 60, '{}')`,
+    ).run(id, `event-${id}`, new Date(now - 120_000).toISOString());
+  }
+
+  test("decision history excludes a parked proposal from virtual expiry", async () => {
+    const s = await makeServer({ now: () => now });
+    try {
+      insertParkedProposal(s.db, "parked-decision");
+      const from = "2026-08-19T10:00:00.000Z";
+      const to = "2026-08-19T13:00:00.000Z";
+      const expired = await fetch(
+        s.url(
+          `/proposals?status=all&population=decision&from=${from}&to=${to}&decisionStatus=expired`,
+        ),
+      );
+      expect(expired.status).toBe(200);
+      expect((await expired.json()).proposals).toEqual([]);
+
+      const open = await fetch(s.url("/proposals?status=open"));
+      expect((await open.json()).proposals).toContainEqual(
+        expect.objectContaining({
+          id: "parked-decision",
+          status: "open",
+          expired: false,
+          decided_at: null,
+        }),
+      );
+    } finally {
+      s.close();
+    }
+  });
+
+  test("proposal detail keeps a parked proposal open past its TTL", async () => {
+    const s = await makeServer({ now: () => now });
+    try {
+      insertParkedProposal(s.db, "parked-detail");
+      const response = await fetch(s.url("/proposals/parked-detail"));
+      expect(response.status).toBe(200);
+      expect((await response.json()).proposal).toMatchObject({
+        id: "parked-detail",
+        status: "open",
+        expired: false,
+        decided_at: null,
+      });
     } finally {
       s.close();
     }

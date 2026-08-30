@@ -13,7 +13,12 @@ import {
   TERMINAL_STATES,
 } from "./lifecycle.mjs";
 import { archiveDeadLetteredEvent, requeueEvent } from "./planner.mjs";
-import { approveProposal, rejectProposal } from "./proposals.mjs";
+import {
+  approveProposal,
+  isProposalExpired,
+  proposalExpiresAt,
+  rejectProposal,
+} from "./proposals.mjs";
 import { traceOf } from "./trace.mjs";
 import {
   attemptDeadline,
@@ -126,14 +131,11 @@ function proposalHistory(
   const proposals = pageRows.flatMap((row) => {
     let decisionAt = row.decided_at ?? null;
     let effectiveStatus = row.status;
-    const expiresAt =
-      Date.parse(row.created_at) + Number(row.ttl_seconds) * 1000;
     const expired =
       row.status === "open" &&
-      Number.isFinite(expiresAt) &&
-      expiresAt < (filters.nowMs ?? Date.now());
+      isProposalExpired(row, filters.nowMs ?? Date.now());
     if (filteredDecision && expired) {
-      decisionAt = new Date(expiresAt).toISOString();
+      decisionAt = new Date(proposalExpiresAt(row)).toISOString();
       effectiveStatus = "expired";
     }
     if (filteredDecision) {
@@ -599,14 +601,9 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
         b.created_at.localeCompare(a.created_at) || b.list_rowid - a.list_rowid,
     )
     .map((row) => {
-      const expiresAt =
-        Date.parse(row.created_at) + Number(row.ttl_seconds) * 1000;
       return proposalView({
         ...row,
-        expired:
-          row.status === "open" &&
-          Number.isFinite(expiresAt) &&
-          expiresAt < nowMs,
+        expired: row.status === "open" && isProposalExpired(row, nowMs),
         spec: row.spec_json ? JSON.parse(row.spec_json) : null,
       });
     });
@@ -2112,17 +2109,12 @@ export async function handleRunApiRoute({
     const id = decodeURIComponent(proposalDetail[1]);
     const row = db.query(`SELECT * FROM proposals WHERE id = ?`).get(id);
     if (!row) return send(404, { error: `unknown proposal ${id}` });
-    const expiresAt =
-      Date.parse(row.created_at) + Number(row.ttl_seconds) * 1000;
     return send(200, {
       proposal: proposalView(
         {
           ...row,
           spec: row.spec_json ? JSON.parse(row.spec_json) : null,
-          expired:
-            row.status === "open" &&
-            Number.isFinite(expiresAt) &&
-            expiresAt < nowMs,
+          expired: row.status === "open" && isProposalExpired(row, nowMs),
         },
         registry,
       ),

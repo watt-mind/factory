@@ -346,6 +346,7 @@ function inboxExpiredPredicate(item = "i") {
     SELECT 1 FROM proposals p
      WHERE p.id = ${item}.proposal_id
        AND p.status = 'open'
+       AND p.decision = 'run'
        AND p.ttl_seconds > 0
        AND unixepoch(p.created_at) + p.ttl_seconds <= unixepoch()
   ))`;
