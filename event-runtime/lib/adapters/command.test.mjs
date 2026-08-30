@@ -24,6 +24,21 @@ const spec = (input) => ({ input });
 const ws = () => tmpDir("evrt-cmd-");
 const REAPER_SCRIPT = path.join(FACTORY_ROOT, "orchestrator", "reaper.mjs");
 
+async function waitForPidExit(pid, { timeoutMs, stepMs }) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error?.code === "ESRCH") return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, stepMs));
+  }
+
+  throw new Error(`pid ${pid} did not exit within ${timeoutMs}ms`);
+}
+
 describe("resolveTemplate", () => {
   test("substitutes placeholders inside argv elements", () => {
     expect(
@@ -346,18 +361,9 @@ writeFileSync("result.json", JSON.stringify({
     });
     expect(outcome.timedOut).toBe(true);
 
-    // Give the kernel a brief moment to finish reaping signals
-    await new Promise((r) => setTimeout(r, 100));
-
     if (existsSync(pidFile)) {
       const grandchildPid = parseInt(readFileSync(pidFile, "utf8").trim(), 10);
-      let alive = true;
-      try {
-        process.kill(grandchildPid, 0);
-      } catch {
-        alive = false;
-      }
-      expect(alive).toBe(false);
+      await waitForPidExit(grandchildPid, { timeoutMs: 5000, stepMs: 50 });
     }
   }, 10_000);
 
@@ -381,16 +387,9 @@ writeFileSync("result.json", JSON.stringify({
     const outcome = await runPromise;
     expect(outcome.timedOut).toBe(false);
 
-    await new Promise((r) => setTimeout(r, 100));
     if (existsSync(pidFile)) {
       const grandchildPid = parseInt(readFileSync(pidFile, "utf8").trim(), 10);
-      let alive = true;
-      try {
-        process.kill(grandchildPid, 0);
-      } catch {
-        alive = false;
-      }
-      expect(alive).toBe(false);
+      await waitForPidExit(grandchildPid, { timeoutMs: 5000, stepMs: 50 });
     }
   }, 10_000);
 });
