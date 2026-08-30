@@ -23,6 +23,11 @@ UP_STARTED_PIDFILES=()
 UP_STARTED_LABELS=()
 UP_PREEXISTING_PIDFILES=()
 UP_PREEXISTING_PIDS=()
+# Only an `up` that has taken its snapshot may clean up on `die`. Every other
+# action (down, tail, a bad option, the __supervise-* loops) has an empty
+# snapshot, and an empty snapshot would make every pidfile in RUN_DIR look like
+# ours — `factory tail nosuchlog` must never stop the operator's live stack.
+UP_SNAPSHOT_TAKEN=0
 
 snapshot_up_pidfiles() {
   local pidfile
@@ -31,11 +36,14 @@ snapshot_up_pidfiles() {
     UP_PREEXISTING_PIDFILES+=("$pidfile")
     UP_PREEXISTING_PIDS+=("$(cat "$pidfile" 2>/dev/null || true)")
   done
+  UP_SNAPSHOT_TAKEN=1
 }
 
 up_pidfile_preexisted_unchanged() { # <pidfile>
   local pidfile="$1" i current
   current="$(cat "$pidfile" 2>/dev/null || true)"
+  # Empty-array guards keep "${arr[@]}" safe under bash 3.2 + set -u.
+  [[ ${#UP_PREEXISTING_PIDFILES[@]} -gt 0 ]] || return 1
   for i in "${!UP_PREEXISTING_PIDFILES[@]}"; do
     if [[ "${UP_PREEXISTING_PIDFILES[$i]}" == "$pidfile" \
       && "${UP_PREEXISTING_PIDS[$i]}" == "$current" ]]; then
@@ -47,9 +55,11 @@ up_pidfile_preexisted_unchanged() { # <pidfile>
 
 track_up_pidfile() { # <label> <pidfile>
   local label="$1" pidfile="$2" existing
-  for existing in "${UP_STARTED_PIDFILES[@]}"; do
-    [[ "$existing" == "$pidfile" ]] && return 0
-  done
+  if [[ ${#UP_STARTED_PIDFILES[@]} -gt 0 ]]; then
+    for existing in "${UP_STARTED_PIDFILES[@]}"; do
+      [[ "$existing" == "$pidfile" ]] && return 0
+    done
+  fi
   UP_STARTED_PIDFILES+=("$pidfile")
   UP_STARTED_LABELS+=("$label")
 }
@@ -66,6 +76,7 @@ track_up_pool_pidfiles() {
 
 cleanup_up_daemons() {
   local round i pidfile label
+  [[ "$UP_SNAPSHOT_TAKEN" -eq 1 ]] || return 0
   # The pool supervisor creates its own supervisor/worker-N pidfiles after the
   # top-level worker daemon is spawned. Discover those before teardown so its
   # detached worker groups are terminated too, while snapshot-matched files
@@ -109,7 +120,7 @@ die() {
 spawn_daemon_tracked() { # <label> <pidfile> <logfile> <workdir> <cmd...>
   local label="$1" pidfile="$2"
   shift 2
-  spawn_daemon "$pidfile" "$@"
+  spawn_daemon "$pidfile" "$@" || die "failed to start $label — check logs at $1"
   track_up_pidfile "$label" "$pidfile"
 }
 
@@ -129,9 +140,10 @@ RUN_DIR="${FACTORY_RUN_DIR:-$HOME/.factory/run}"
 API_PORT="${FACTORY_EVENT_PORT:-7381}"
 WEB_PORT="${FACTORY_EVENT_WEB_PORT:-7382}"
 
-mkdir -p "$RUN_DIR" "$HOME_DIR"
+# `up` creates these itself once `--dry-run` has had its chance to exit: a dry
+# run must leave no trace on disk.
+if [[ "$ACTION" != "up" ]]; then mkdir -p "$RUN_DIR" "$HOME_DIR"; fi
 REPO="$(repo_root)"
-if [[ "$ACTION" == "up" ]]; then snapshot_up_pidfiles; fi
 
 elapsed_seconds() {
   local elapsed="${1//[[:space:]]/}" days=0 rest hours=0 minutes=0 seconds=0
@@ -361,6 +373,11 @@ case "$ACTION" in
       exit 0
     fi
 
+    mkdir -p "$RUN_DIR" "$HOME_DIR"
+    # Record what was already running before this invocation starts anything,
+    # so a failed `up` can tell its own daemons from the operator's.
+    snapshot_up_pidfiles
+
     # Dependency freshness (WM-312). A runtime dependency added to the repo does
     # not exist on the running stack until someone remembers `bun install` after
     # pulling, and nothing detected the gap: on 2026-08-15 the Gondolin sandbox
@@ -545,8 +562,12 @@ case "$ACTION" in
       if curl -sf -m 1 "http://127.0.0.1:$WEB_PORT" >/dev/null 2>&1; then break; fi
       sleep 0.1
     done
+    # Warn, never die: the runtime and worker pool are healthy by now, and the
+    # web supervisor keeps retrying the static server. Tearing down a working
+    # stack because the UI bound slowly on a loaded box would be the worse
+    # outcome (#1396 review).
     if ! curl -sf -m 1 "http://127.0.0.1:$WEB_PORT" >/dev/null 2>&1; then
-      die "web server failed to start on $WEB_PORT — check logs at $RUN_DIR/web.log"
+      warn "web server not responding on $WEB_PORT yet — the web supervisor keeps retrying; check logs at $RUN_DIR/web.log"
     fi
 
     if [[ "$DEV" -eq 1 ]]; then

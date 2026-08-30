@@ -48,6 +48,7 @@ spawn_daemon() { # <pidfile> <logfile> <workdir> <cmd...>
   local pidfile="$1" logfile="$2" workdir="$3"
   shift 3
   printf 'SPAWN pid=%s workdir=%s cmd=%s\\n' "$(basename "$pidfile")" "$workdir" "$*" >>"$SPAWN_LOG"
+  if [[ "$(basename "$pidfile")" == "\${FAKE_SPAWN_FAIL_PIDFILE:-}" ]]; then return 1; fi
   printf '1\\n' >"$pidfile"
   if [[ "\${FAKE_POOL_CHILDREN:-0}" == "1" && "$*" == *"cli.mjs supervise"* ]]; then
     printf '2\\n' >"$(dirname "$pidfile")/supervisor.pid"
@@ -258,6 +259,9 @@ test("`up --dry-run` prints the resolved daemon plan without spawning", () => {
     expect(r.stdout).toContain("worker: env");
     expect(r.stdout).toContain("web server: env");
     expect(r.stdout).toContain("web supervisor: env");
+    // A dry run leaves no trace on disk: no run dir, no event home.
+    expect(existsSync(f.runDir)).toBe(false);
+    expect(existsSync(path.join(f.root, "home"))).toBe(false);
   } finally {
     f.cleanup();
   }
@@ -304,16 +308,42 @@ test("failed `up` leaves an already-running daemon alone", () => {
   }
 }, 20_000);
 
-test("failed web health removes supervised pool children from this `up`", () => {
+test("slow web health warns and keeps the healthy runtime and pool running", () => {
   const f = makeFixture();
   try {
     const r = runStack(f, ["up", "--workers", "1:1"], {
       FAKE_POOL_CHILDREN: "1",
       FAKE_CURL_FAIL_URL: ":7382",
     });
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain("web server not responding on 7382 yet");
+    expect(r.stdout).toContain("ready — live factory stack");
+    expect(r.spawns.some((line) => line.startsWith("TERM "))).toBe(false);
+    for (const file of [
+      "serve.pid",
+      "worker.pid",
+      "supervisor.pid",
+      "worker-1.pid",
+      "web.pid",
+    ]) {
+      expect(existsSync(path.join(f.runDir, file))).toBe(true);
+    }
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
+
+test("a daemon that fails to spawn removes supervised pool children from this `up`", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, ["up", "--workers", "1:1"], {
+      FAKE_POOL_CHILDREN: "1",
+      FAKE_SPAWN_FAIL_PIDFILE: "web.pid",
+    });
     expect(r.status).not.toBe(0);
-    expect(r.stderr).toContain("web server failed to start");
+    expect(r.stderr).toContain("failed to start web server");
     expect(r.spawns).toContain("TERM worker pool worker-1");
+    expect(r.spawns).toContain("TERM event runtime");
     for (const file of [
       "worker.pid",
       "supervisor.pid",
@@ -321,6 +351,38 @@ test("failed web health removes supervised pool children from this `up`", () => 
       "worker-1.id",
     ]) {
       expect(existsSync(path.join(f.runDir, file))).toBe(false);
+    }
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
+
+test("a non-`up` die never touches pre-existing pidfiles or daemons", () => {
+  const f = makeFixture();
+  try {
+    mkdirSync(f.runDir, { recursive: true });
+    const preexisting = {
+      "serve.pid": "4242\n",
+      "worker.pid": "4243\n",
+      "supervisor.pid": "4244\n",
+      "worker-1.pid": "4245\n",
+      "worker-1.id": "worker_live\n",
+      "web.pid": "4246\n",
+    };
+    for (const [file, body] of Object.entries(preexisting)) {
+      writeFileSync(path.join(f.runDir, file), body, "utf8");
+    }
+    for (const args of [
+      ["tail", "nosuchlog"],
+      ["bogus-action"],
+      ["up", "--no-such-option"],
+    ]) {
+      const r = runStack(f, args, { FAKE_ALIVE: "1" });
+      expect(r.status).not.toBe(0);
+      expect(r.spawns).toEqual([]);
+      for (const [file, body] of Object.entries(preexisting)) {
+        expect(readFileSync(path.join(f.runDir, file), "utf8")).toBe(body);
+      }
     }
   } finally {
     f.cleanup();
