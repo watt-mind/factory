@@ -4072,6 +4072,36 @@ sh -c 'sleep 5 & wait'
       expect(calls).toHaveLength(0);
     });
 
+    test("moves an In Progress handoff to In Review", () => {
+      const calls = [];
+      const result = defaultReconcileVerifiedHandoffTicket({
+        repo: "factory",
+        ticket: "WM-1498",
+        fetchTicket: () => ({ state: { name: "In Progress" } }),
+        runCli: (args, options) => (calls.push({ args, options }), ""),
+      });
+
+      expect(result).toBe(true);
+      expect(calls).toEqual([
+        { args: STATE_ARGS, options: { repo: "factory" } },
+      ]);
+    });
+
+    for (const state of ["Blocked", "Done", "Canceled"]) {
+      test(`leaves a ticket a human moved to ${state} mid-run untouched`, () => {
+        const calls = [];
+        const result = defaultReconcileVerifiedHandoffTicket({
+          repo: "factory",
+          ticket: "WM-1498",
+          fetchTicket: () => ({ state: { name: state } }),
+          runCli: (args) => (calls.push(args), ""),
+        });
+
+        expect(result).toBe(false);
+        expect(calls).toHaveLength(0);
+      });
+    }
+
     test("a false mayMutateClaimedTicket guard makes no reconciliation calls", () => {
       const calls = [];
       const result = defaultReconcileVerifiedHandoffTicket({

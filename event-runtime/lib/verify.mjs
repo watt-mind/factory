@@ -888,9 +888,16 @@ function commandLine(label, obs) {
 export function composeHandoffVerification(handoff) {
   const lines = [HANDOFF_COMMENT_HEADING];
   if (Number.isInteger(handoff.prNumber) && handoff.prNumber > 0) {
-    lines.push(
-      `- PR: #${handoff.prNumber} (${handoff.prDraft === true ? "draft" : "ready"})`,
-    );
+    // Only a boolean says anything about the PR's draft state: the
+    // pr_base_unreadable path never sets prDraft, and the same composer writes
+    // the failure comment before the worker drafts the PR.
+    const draftState =
+      typeof handoff.prDraft === "boolean"
+        ? handoff.prDraft
+          ? "draft"
+          : "ready"
+        : "draft state unknown";
+    lines.push(`- PR: #${handoff.prNumber} (${draftState})`);
   }
   const primary = handoff.verification;
   if (primary) {

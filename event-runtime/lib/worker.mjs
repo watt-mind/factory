@@ -2343,8 +2343,13 @@ export function defaultReturnHandoffTicket({
  * final ticket projection. This is deliberately a small, best-effort repair:
  * the caller owns the claim/fencing guard, while this helper re-reads the
  * ticket so an agent that already put it In Review receives no duplicate
- * mutation.
+ * mutation. Like defaultUnclaimTicket / defaultBlockBaselineTicket it only
+ * touches a ticket still in the dispatch states (Todo, In Progress): a human
+ * who moved it to Blocked / Done / Canceled mid-run keeps that decision, and
+ * a closed GitHub issue is never reopened by the worker.
  */
+const RECONCILABLE_HANDOFF_STATES = new Set(["Todo", "In Progress"]);
+
 export function defaultReconcileVerifiedHandoffTicket({
   ticket,
   repo,
@@ -2358,7 +2363,15 @@ export function defaultReconcileVerifiedHandoffTicket({
       typeof fetchTicket === "function"
         ? fetchTicket(ticket, repo)
         : defaultFetchTicket(ticket, repo);
-    if (!cur || cur.state?.name === "In Review") return false;
+    if (!cur) return false;
+    const stateName = cur.state?.name;
+    if (stateName === "In Review") return false;
+    if (!RECONCILABLE_HANDOFF_STATES.has(stateName)) {
+      console.error(
+        `[worker] not reconciling verified handoff ticket ${ticket}: state is ${JSON.stringify(stateName ?? null)}, left as-is`,
+      );
+      return false;
+    }
     runCli(
       [
         "state",
@@ -4193,7 +4206,6 @@ export async function executeClaimed(
           reconcileVerifiedHandoffTicketFn({
             repo: repoName,
             ticket: ticketId,
-            handoff: verified.handoff,
             mayMutate: mayMutateClaimedTicket,
           }) === true;
       } catch (err) {
