@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { Database } from "bun:sqlite";
 import { canonicalJson, sha256Hex } from "./canonical.mjs";
 import { MEMO_SCHEMA_VERSION, memoDigest, withProvenance } from "./memos.mjs";
@@ -958,5 +959,56 @@ describe("memos.json materialization (WM-810)", () => {
       artifactStore: tmpDir("evrt-memo-store-absent-"),
     });
     expect(existsSync(path.join(created.dir, "memos.json"))).toBe(false);
+  });
+});
+
+describe("bin/worktree-up.sh seed_demo_data (#1758)", () => {
+  const BIN = path.resolve(import.meta.dir, "..", "..", "bin");
+
+  // Drive the real `seed_demo_data` function (extracted from worktree-up.sh so
+  // the rest of the script — git, ports, daemons — stays out of the way) against
+  // a fake `event-runtime/demo/seed.mjs` under a temp worktree.
+  function runSeed(fakeSeedSource) {
+    const wt = tmpDir("evrt-seed-wt-");
+    mkdirSync(path.join(wt, "event-runtime", "demo"), { recursive: true });
+    writeFileSync(
+      path.join(wt, "event-runtime", "demo", "seed.mjs"),
+      fakeSeedSource,
+    );
+    const script = [
+      `source '${path.join(BIN, "worktree-common.sh")}'`,
+      `eval "$(sed -n '/^seed_demo_data() {/,/^}/p' '${path.join(BIN, "worktree-up.sh")}')"`,
+      `seed_demo_data '${wt}' 7999 demo`,
+    ].join("\n");
+    const r = spawnSync("bash", ["-c", script], { encoding: "utf8" });
+    return { ...r, wt };
+  }
+
+  test("retries exit 78 (adapter-probe timeout) and succeeds on the next attempt", () => {
+    const r = runSeed(
+      `import { existsSync, writeFileSync } from "node:fs";\n` +
+        `const marker = new URL("./attempted", import.meta.url).pathname;\n` +
+        `if (!existsSync(marker)) {\n` +
+        `  writeFileSync(marker, "1");\n` +
+        `  console.error("seed_probe_timeout: no proposal for demo-adapter-probe within 1ms");\n` +
+        `  process.exit(78);\n` +
+        `}\n` +
+        `console.log("seeded ok " + process.argv.slice(2).join(" "));\n`,
+    );
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain("retryable error (attempt 1/5, exit 78)");
+    expect(r.stdout).toContain("seeded ok --port 7999 --prefix demo");
+    expect(
+      existsSync(path.join(r.wt, "event-runtime", "demo", "attempted")),
+    ).toBe(true);
+  });
+
+  test("dies on a non-retryable exit code without retrying", () => {
+    const r = runSeed(
+      `console.error("seed: refusing — runtime is not fake");\nprocess.exit(1);\n`,
+    );
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("seed failed (exit 1)");
+    expect(r.stderr).not.toContain("retryable error");
   });
 });

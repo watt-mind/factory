@@ -158,7 +158,10 @@ async function until(what, fn, { timeoutMs = 30_000, everyMs = pollMs } = {}) {
     if (value) return value;
     await sleep(everyMs);
   }
-  throw new Error(`timed out waiting for ${what}`);
+  throw Object.assign(new Error(`timed out waiting for ${what}`), {
+    code: "SEED_TIMEOUT",
+    what,
+  });
 }
 
 async function proposalFor(
@@ -263,7 +266,7 @@ try {
     timeoutMs: adapterProbeTimeoutMs,
   });
 } catch (err) {
-  if (err?.message === `timed out waiting for proposal for ${probeId}`) {
+  if (err?.code === "SEED_TIMEOUT") {
     console.error(
       `seed_probe_timeout: no proposal for ${probeId} within ${adapterProbeTimeoutMs}ms`,
     );
