@@ -9,8 +9,12 @@
  * Two sources, both pinned to `--since` (default 2026-08-03, the first
  * dispatch day named in WM-802):
  *
- *   Linear              tickets dispatched / merged / escalated, human-touch,
- *                       median createdAt → completedAt
+ *   control plane       tickets dispatched / merged / escalated, human-touch,
+ *                       median createdAt → completedAt. Linear answers the
+ *                       GraphQL query below (with state history); GitHub
+ *                       answers through the adapter's REST `raw` escape hatch
+ *                       (labels + closed_at, no history — history-dependent
+ *                       fields such as `blocked` are reported as null there).
  *   ~/.factory/logs     tokens by harness, via orchestrator/economics.mjs
  *
  * Humans post the drafts this feeds. This script never publishes.
@@ -27,11 +31,14 @@ import {
 } from "../orchestrator/economics.mjs";
 import { LOG_DIR } from "../lib/transcript.mjs";
 import { loadControlPlane } from "../lib/control-plane/index.mjs";
+import { loadRepos } from "../event-runtime/lib/repos.mjs";
 
 export const DEFAULT_SINCE = "2026-08-03T00:00:00.000Z";
-export const USAGE = `usage: bun tools/launch-numbers.mjs [--json] [--since YYYY-MM-DD]`;
+export const USAGE = `usage: bun tools/launch-numbers.mjs [--json] [--since YYYY-MM-DD]  (reads the factory repo's control plane — Linear or GitHub — plus ~/.factory/logs)`;
 
 class UsageError extends Error {}
+
+export class UnsupportedControlPlaneError extends Error {}
 
 export const DISPATCH_LABELS = new Set([
   "ai:in-progress",
@@ -41,6 +48,8 @@ export const DISPATCH_LABELS = new Set([
 ]);
 
 export const ISSUE_PAGE_SIZE = 50;
+export const GITHUB_PAGE_SIZE = 100;
+export const FACTORY_REPO_NAME = "factory";
 
 export function parseSince(value) {
   const raw = String(value ?? "").trim();
@@ -165,7 +174,13 @@ export function mergedInWindow(issue, sinceMs = 0) {
   return inWindow(issue.completedAt, sinceMs);
 }
 
-export function classifyIssues(issues, { sinceMs = 0 } = {}) {
+/**
+ * `history: false` marks a source that cannot answer state-history questions
+ * (GitHub issues carry labels and closed_at, not a Blocked/label timeline).
+ * The fields that need history — `blocked`, `mergedWithoutHumanTouch` and its
+ * percentage — are then null rather than a confident-looking zero.
+ */
+export function classifyIssues(issues, { sinceMs = 0, history = true } = {}) {
   const dispatched = issues.filter((i) => dispatchedInWindow(i, sinceMs));
   const merged = issues.filter((i) => mergedInWindow(i, sinceMs));
   const escalated = dispatched.filter(isEscalated);
@@ -196,11 +211,12 @@ export function classifyIssues(issues, { sinceMs = 0 } = {}) {
     dispatched: dispatched.length,
     merged: merged.length,
     escalated: escalated.length,
-    blocked: blocked.length,
-    mergedWithoutHumanTouch: untouched.length,
-    mergedWithoutHumanTouchPct: merged.length
-      ? round1((100 * untouched.length) / merged.length)
-      : null,
+    blocked: history ? blocked.length : null,
+    mergedWithoutHumanTouch: history ? untouched.length : null,
+    mergedWithoutHumanTouchPct:
+      history && merged.length
+        ? round1((100 * untouched.length) / merged.length)
+        : null,
     medianTicketToMergeMs: median(createdToMerge),
     medianClaimToMergeMs: median(claimToMerge),
     byTeam: [...byTeam.values()].sort((a, b) => b.dispatched - a.dispatched),
@@ -269,15 +285,96 @@ export async function fetchFactoryIssues({
   return nodes;
 }
 
+export const GITHUB_ISSUES_PATH = (repo) => `/repos/${repo}/issues`;
+
+/**
+ * A GitHub REST issue reshaped into the Linear-shaped node the classifiers
+ * read. GitHub has no workflow-state startedAt and no state/label history, so
+ * `startedAt` is null and `history` is absent; `completedAt` is `closed_at`.
+ * Pull requests share the issues endpoint and are dropped by the caller.
+ */
+export function githubIssueNode(issue, repo) {
+  const closed = issue?.state === "closed";
+  return {
+    identifier: `${repo}#${issue.number}`,
+    title: issue.title ?? "",
+    url: issue.html_url ?? "",
+    createdAt: issue.created_at ?? null,
+    startedAt: null,
+    completedAt: closed ? (issue.closed_at ?? null) : null,
+    updatedAt: issue.updated_at ?? issue.created_at ?? null,
+    state: closed
+      ? { name: "Done", type: "completed" }
+      : { name: "Open", type: "started" },
+    team: { key: repo },
+    labels: {
+      nodes: (issue.labels ?? [])
+        .map((l) => ({ name: typeof l === "string" ? l : l?.name }))
+        .filter((l) => l.name),
+    },
+  };
+}
+
+/**
+ * Issues updated since `sinceIso` from the GitHub adapter's REST `raw` verb
+ * (`/repos/<owner>/<name>/issues`, `state=all`, paged until a short page).
+ * Adapter-neutral verbs are not enough here: `listTickets` reports neither
+ * `closed_at` nor closed issues without a Projects v2 board read.
+ */
+export async function fetchGithubIssues({
+  controlPlane,
+  repo,
+  sinceIso = DEFAULT_SINCE,
+} = {}) {
+  if (typeof controlPlane?.raw !== "function") {
+    throw new UnsupportedControlPlaneError(
+      `${controlPlane?.kind ?? "unknown"} control plane has no raw verb; launch-numbers needs it to read issues`,
+    );
+  }
+  if (!repo || !String(repo).includes("/")) {
+    throw new UnsupportedControlPlaneError(
+      `github control plane needs a repository slug (owner/name) to read launch metrics; got ${JSON.stringify(repo ?? null)}`,
+    );
+  }
+  const nodes = [];
+  for (let page = 1; ; page += 1) {
+    const batch = await controlPlane.raw(GITHUB_ISSUES_PATH(repo), {
+      state: "all",
+      since: sinceIso,
+      per_page: GITHUB_PAGE_SIZE,
+      page,
+    });
+    if (!Array.isArray(batch)) {
+      throw new UnsupportedControlPlaneError(
+        `github control plane returned a non-list for ${GITHUB_ISSUES_PATH(repo)} (page ${page})`,
+      );
+    }
+    for (const issue of batch) {
+      if (issue?.pull_request) continue;
+      nodes.push(githubIssueNode(issue, repo));
+    }
+    if (batch.length < GITHUB_PAGE_SIZE) break;
+  }
+  return nodes;
+}
+
+/** `config/repos.yaml`'s GitHub slug for the factory's own registry entry. */
+export function factoryRepoSlug({ root } = {}) {
+  const repos = loadRepos(root ? { root } : {});
+  return repos.get(FACTORY_REPO_NAME)?.github ?? null;
+}
+
 export function collectLaunchNumbers({
   issues,
   runs,
   sinceIso = DEFAULT_SINCE,
   nowMs = Date.now(),
   generatedAt = new Date().toISOString(),
+  history = true,
 } = {}) {
   const tickets = classifyIssues(issues ?? [], {
     sinceMs: Date.parse(sinceIso) || 0,
+    history,
   });
   const window = weeksUnattended(sinceIso, nowMs);
   const byHarness = harnessTokenTotals(runs ?? []);
@@ -321,6 +418,7 @@ export function formatReport(metrics) {
       : `${w.weeks} week${w.weeks === 1 ? "" : "s"}${
           w.remainderDays ? ` + ${w.remainderDays}d` : ""
         } (${w.days} days)`;
+  const orNa = (n) => (n == null ? "n/a" : String(n));
   const pct =
     t.mergedWithoutHumanTouchPct == null
       ? "n/a"
@@ -330,8 +428,8 @@ export function formatReport(metrics) {
     `  generated  ${metrics.generatedAt}`,
     `  window     ${metrics.since.slice(0, 10)} → ${metrics.generatedAt.slice(0, 10)}  ${weekLabel} unattended`,
     ``,
-    `  tickets    dispatched ${t.dispatched}   merged ${t.merged}   escalated ${t.escalated}   blocked ${t.blocked}`,
-    `             merged without human touch ${t.mergedWithoutHumanTouch} (${pct} of merged)`,
+    `  tickets    dispatched ${t.dispatched}   merged ${t.merged}   escalated ${t.escalated}   blocked ${orNa(t.blocked)}`,
+    `             merged without human touch ${orNa(t.mergedWithoutHumanTouch)} (${pct} of merged)`,
     `             median ticket→merge ${formatDuration(t.medianTicketToMergeMs)}   median claim→merge ${formatDuration(t.medianClaimToMergeMs)}`,
   ];
   if (t.byTeam.length) {
@@ -370,13 +468,48 @@ export function formatReport(metrics) {
 }
 
 export async function buildLaunchNumbers({
-  gqlFn = (query, variables) => loadControlPlane().raw(query, variables),
+  controlPlane,
+  gqlFn,
+  repo,
   logDir = LOG_DIR,
   since = DEFAULT_SINCE,
   nowMs = Date.now(),
 } = {}) {
   const { iso, ms } = parseSince(since);
-  const issues = await fetchFactoryIssues({ gqlFn, sinceIso: iso });
+  // `gqlFn` remains a test seam for the Linear query path. Production selects
+  // the factory repository's adapter explicitly: the workspace default may
+  // still be Linear while factory's own tickets live on GitHub.
+  const plane =
+    controlPlane ??
+    (gqlFn ? null : loadControlPlane({ repoName: FACTORY_REPO_NAME }));
+  const kind = gqlFn ? "linear" : (plane?.kind ?? "unknown");
+  let issues;
+  let history = true;
+  if (gqlFn || ["linear", "memory"].includes(kind)) {
+    const graphQL =
+      gqlFn ?? ((query, variables) => plane.raw(query, variables));
+    if (
+      typeof graphQL !== "function" ||
+      (!gqlFn && typeof plane.raw !== "function")
+    ) {
+      throw new UnsupportedControlPlaneError(
+        `${kind} control plane cannot run the launch metrics query`,
+      );
+    }
+    issues = await fetchFactoryIssues({ gqlFn: graphQL, sinceIso: iso });
+  } else if (kind === "github") {
+    const slug = repo ?? (controlPlane ? null : factoryRepoSlug());
+    issues = await fetchGithubIssues({
+      controlPlane: plane,
+      repo: slug,
+      sinceIso: iso,
+    });
+    history = false;
+  } else {
+    throw new UnsupportedControlPlaneError(
+      `${kind} control plane is unsupported; launch-numbers reads Linear or GitHub`,
+    );
+  }
   const loaded = loadTranscriptRuns({ logDir, sinceMs: ms });
   const runs = loaded.ok ? loaded.runs : [];
   return {
@@ -385,6 +518,7 @@ export async function buildLaunchNumbers({
       runs,
       sinceIso: iso,
       nowMs,
+      history,
     }),
     transcripts: loaded.ok
       ? { ok: true, files: loaded.files.length }
@@ -419,36 +553,56 @@ export function parseArgv(argv) {
   return flags;
 }
 
-async function main(argv = process.argv.slice(2)) {
+export async function main(
+  argv = process.argv.slice(2),
+  {
+    controlPlane,
+    repo,
+    logDir,
+    stdout = console.log,
+    stderr = console.error,
+  } = {},
+) {
   const flags = parseArgv(argv);
   if (flags.help) {
-    console.log(USAGE);
+    stdout(USAGE);
     return 0;
   }
   const { metrics, transcripts } = await buildLaunchNumbers({
     since: flags.since,
+    controlPlane,
+    repo,
+    ...(logDir ? { logDir } : {}),
   });
   if (!transcripts.ok) {
-    console.error(`transcripts: ${transcripts.message}`);
+    stderr(`transcripts: ${transcripts.message}`);
   }
   if (flags.json) {
-    console.log(JSON.stringify({ ...metrics, transcripts }, null, 2));
+    stdout(JSON.stringify({ ...metrics, transcripts }, null, 2));
     return 0;
   }
-  console.log(formatReport(metrics));
+  stdout(formatReport(metrics));
   return 0;
 }
 
-if (import.meta.main) {
+/** The process entry: usage and unsupported-plane errors are one line, exit 2. */
+export async function runCli(argv, deps = {}) {
+  const stderr = deps.stderr ?? console.error;
   try {
-    process.exitCode = await main();
+    return await main(argv, deps);
   } catch (error) {
-    if (error instanceof UsageError) {
-      console.error(error.message);
-      process.exitCode = 2;
-    } else {
-      console.error(`launch-numbers: ${error.message}`);
-      process.exitCode = 1;
+    if (
+      error instanceof UsageError ||
+      error instanceof UnsupportedControlPlaneError
+    ) {
+      stderr(error.message);
+      return 2;
     }
+    stderr(`launch-numbers: ${error.message}`);
+    return 1;
   }
+}
+
+if (import.meta.main) {
+  process.exitCode = await runCli();
 }

@@ -7,19 +7,28 @@ import {
   loadTranscriptRuns,
 } from "../orchestrator/economics.mjs";
 import {
+  buildLaunchNumbers,
   classifyIssues,
+  fetchGithubIssues,
+  formatReport,
+  GITHUB_PAGE_SIZE,
+  githubIssueNode,
+  runCli,
   collectLaunchNumbers,
   dispatchedInWindow,
   formatDuration,
-  formatReport,
   isDispatched,
   isEscalated,
+  labelNames,
   median,
   mergedWithoutHumanTouch,
   parseSince,
+  issuesQueryFor,
+  UnsupportedControlPlaneError,
   visitedState,
   weeksUnattended,
 } from "./launch-numbers.mjs";
+import { memoryControlPlane } from "../lib/control-plane/memory.mjs";
 
 const ROOT = path.resolve(import.meta.dir, "..");
 
@@ -48,6 +57,181 @@ test("launch-numbers help prints usage and argument errors exit 2", () => {
     expect(output(invalid, "stderr").split("\n")).toHaveLength(1);
     expect(output(invalid, "stderr")).toStartWith("usage:");
   }
+});
+
+const NO_LOGS = path.join(os.tmpdir(), "no-such-launch-number-logs");
+
+test("runCli exits 2 with a one-line error when the plane cannot answer", async () => {
+  const out = [];
+  const err = [];
+  const code = await runCli(["--json"], {
+    controlPlane: { kind: "github", listTickets: async () => [] },
+    repo: "watt-mind/factory",
+    logDir: NO_LOGS,
+    stdout: (l) => out.push(l),
+    stderr: (l) => err.push(l),
+  });
+  expect(code).toBe(2);
+  expect(out).toEqual([]);
+  expect(err).toEqual([
+    "github control plane has no raw verb; launch-numbers needs it to read issues",
+  ]);
+
+  const unknown = [];
+  expect(
+    await runCli([], {
+      controlPlane: { kind: "jira" },
+      logDir: NO_LOGS,
+      stdout: () => {},
+      stderr: (l) => unknown.push(l),
+    }),
+  ).toBe(2);
+  expect(unknown).toEqual([
+    "jira control plane is unsupported; launch-numbers reads Linear or GitHub",
+  ]);
+});
+
+const ghIssue = (number, over = {}) => ({
+  number,
+  title: `issue ${number}`,
+  html_url: `https://github.com/watt-mind/factory/issues/${number}`,
+  state: "closed",
+  created_at: "2026-08-04T10:00:00.000Z",
+  updated_at: "2026-08-04T13:00:00.000Z",
+  closed_at: "2026-08-04T13:00:00.000Z",
+  labels: [{ name: "agent:claude-code" }, { name: "type:bug" }],
+  ...over,
+});
+
+test("githubIssueNode maps REST issues onto the classifier shape", () => {
+  const closed = githubIssueNode(ghIssue(7), "watt-mind/factory");
+  expect(closed).toMatchObject({
+    identifier: "watt-mind/factory#7",
+    completedAt: "2026-08-04T13:00:00.000Z",
+    startedAt: null,
+    state: { name: "Done", type: "completed" },
+    team: { key: "watt-mind/factory" },
+  });
+  expect(labelNames(closed)).toEqual(["agent:claude-code", "type:bug"]);
+  expect(closed.history).toBeUndefined();
+
+  const open = githubIssueNode(
+    ghIssue(8, { state: "open", closed_at: null, labels: ["ai:in-progress"] }),
+    "watt-mind/factory",
+  );
+  expect(open.completedAt).toBeNull();
+  expect(open.state.type).toBe("started");
+  expect(labelNames(open)).toEqual(["ai:in-progress"]);
+});
+
+test("fetchGithubIssues pages the REST issues list and drops pull requests", async () => {
+  const calls = [];
+  const first = Array.from({ length: GITHUB_PAGE_SIZE }, (_, i) =>
+    ghIssue(i + 1),
+  );
+  first[3] = ghIssue(4, { pull_request: { url: "x" } });
+  const plane = {
+    kind: "github",
+    raw: async (query, variables) => {
+      calls.push({ query, variables });
+      return variables.page === 1 ? first : [ghIssue(500)];
+    },
+  };
+  const nodes = await fetchGithubIssues({
+    controlPlane: plane,
+    repo: "watt-mind/factory",
+    sinceIso: "2026-08-03T00:00:00.000Z",
+  });
+  expect(nodes).toHaveLength(GITHUB_PAGE_SIZE);
+  expect(nodes.map((n) => n.identifier)).not.toContain("watt-mind/factory#4");
+  expect(nodes.at(-1).identifier).toBe("watt-mind/factory#500");
+  expect(calls).toEqual([
+    {
+      query: "/repos/watt-mind/factory/issues",
+      variables: {
+        state: "all",
+        since: "2026-08-03T00:00:00.000Z",
+        per_page: GITHUB_PAGE_SIZE,
+        page: 1,
+      },
+    },
+    {
+      query: "/repos/watt-mind/factory/issues",
+      variables: {
+        state: "all",
+        since: "2026-08-03T00:00:00.000Z",
+        per_page: GITHUB_PAGE_SIZE,
+        page: 2,
+      },
+    },
+  ]);
+
+  await expect(
+    fetchGithubIssues({ controlPlane: plane, repo: "factory" }),
+  ).rejects.toThrow(UnsupportedControlPlaneError);
+  await expect(
+    fetchGithubIssues({
+      controlPlane: { kind: "github", raw: async () => ({ message: "no" }) },
+      repo: "watt-mind/factory",
+    }),
+  ).rejects.toThrow(/non-list/);
+});
+
+test("buildLaunchNumbers reports github metrics with history fields null", async () => {
+  const plane = {
+    kind: "github",
+    raw: async () => [
+      ghIssue(1),
+      ghIssue(2, { labels: [{ name: "ai:escalated" }] }),
+      ghIssue(3, { labels: [{ name: "ai:agent-ready" }] }),
+      ghIssue(4, {
+        state: "open",
+        closed_at: null,
+        labels: [{ name: "ai:blocked" }],
+      }),
+    ],
+  };
+  const { metrics, transcripts } = await buildLaunchNumbers({
+    controlPlane: plane,
+    repo: "watt-mind/factory",
+    since: "2026-08-03",
+    logDir: NO_LOGS,
+  });
+  expect(metrics.tickets).toMatchObject({
+    dispatched: 3,
+    merged: 2,
+    escalated: 1,
+    blocked: null,
+    mergedWithoutHumanTouch: null,
+    mergedWithoutHumanTouchPct: null,
+    medianTicketToMergeMs: 3 * 3_600_000,
+    medianClaimToMergeMs: null,
+  });
+  expect(metrics.tickets.byTeam).toEqual([
+    { team: "watt-mind/factory", dispatched: 3, merged: 2, escalated: 1 },
+  ]);
+  expect(transcripts).toMatchObject({ ok: false, code: "no-dir" });
+
+  const text = formatReport(metrics);
+  expect(text).toContain("blocked n/a");
+  expect(text).toContain("merged without human touch n/a (n/a of merged)");
+  expect(text).toContain("tokens by harness");
+
+  // The CLI path renders the same report plus the transcripts notice.
+  const out = [];
+  const err = [];
+  expect(
+    await runCli(["--since", "2026-08-03"], {
+      controlPlane: plane,
+      repo: "watt-mind/factory",
+      logDir: NO_LOGS,
+      stdout: (l) => out.push(l),
+      stderr: (l) => err.push(l),
+    }),
+  ).toBe(0);
+  expect(out.join("\n")).toContain("dispatched 3   merged 2   escalated 1");
+  expect(err).toHaveLength(1);
+  expect(err[0]).toStartWith("transcripts:");
 });
 
 const issue = (over = {}) => ({
@@ -235,6 +419,47 @@ test("collectLaunchNumbers joins Linear classification with harness tokens", () 
   const text = formatReport(metrics);
   expect(text).toContain("merged without human touch 1");
   expect(text).toContain("does not publish");
+});
+
+test("buildLaunchNumbers keeps the Linear query path with an injected control plane", async () => {
+  const since = "2026-08-03";
+  const plane = memoryControlPlane({
+    raw: {
+      [issuesQueryFor(parseSince(since).iso)]: {
+        issues: {
+          nodes: [issue()],
+          pageInfo: { hasNextPage: false, endCursor: null },
+        },
+      },
+    },
+  });
+  const result = await buildLaunchNumbers({
+    controlPlane: plane,
+    since,
+    logDir: NO_LOGS,
+  });
+
+  expect(result.metrics.tickets.merged).toBe(1);
+  expect(result.metrics.tickets.blocked).toBe(0);
+  expect(result.transcripts).toMatchObject({ ok: false, code: "no-dir" });
+  expect(plane.calls).toContainEqual(expect.objectContaining({ op: "raw" }));
+});
+
+test("buildLaunchNumbers fails closed for a github control plane without raw", async () => {
+  const github = { kind: "github", listTickets: async () => [] };
+
+  await expect(
+    buildLaunchNumbers({ controlPlane: github, repo: "watt-mind/factory" }),
+  ).rejects.toThrow(UnsupportedControlPlaneError);
+  await expect(
+    buildLaunchNumbers({ controlPlane: github, repo: "watt-mind/factory" }),
+  ).rejects.toThrow("github control plane has no raw verb");
+  // An injected github plane needs an explicit slug; nothing is guessed.
+  await expect(
+    buildLaunchNumbers({
+      controlPlane: { kind: "github", raw: async () => [] },
+    }),
+  ).rejects.toThrow(/repository slug/);
 });
 
 test("loadTranscriptRuns and harnessTokenTotals share economics' parser", () => {
