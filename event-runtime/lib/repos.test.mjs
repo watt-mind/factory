@@ -968,6 +968,64 @@ describe("preflightToolchain verifies without mutating the host", () => {
     expect(reasons[1].observedRaw).toBe("no version here");
   });
 
+  test("throwing which and spawn probes become failed attestations and later tools still run", async () => {
+    const repo = repoWith(
+      `    toolchain:\n      which-broken: ">=1"\n      spawn-broken: ">=1"\n      bun: ">=1.3 <2"\n`,
+    );
+    const spawnCalls = [];
+    const attestation = await preflightToolchain(repo, {
+      now,
+      which: async (executable) => {
+        if (executable === "which-broken") throw new Error("which denied");
+        return `/opt/bin/${executable}`;
+      },
+      spawn: async (argv) => {
+        spawnCalls.push(argv);
+        if (argv[0] === "/opt/bin/spawn-broken") {
+          throw new Error("spawn denied");
+        }
+        return { exitCode: 0, stdout: "1.3.14\n", stderr: "" };
+      },
+    });
+
+    expect(attestation.ok).toBe(false);
+    expect(attestation.tools).toMatchObject([
+      {
+        executable: "which-broken",
+        resolved: null,
+        observed: null,
+        observedRaw: "which denied",
+        satisfied: false,
+      },
+      {
+        executable: "spawn-broken",
+        resolved: "/opt/bin/spawn-broken",
+        observed: null,
+        observedRaw: "spawn denied",
+        satisfied: false,
+      },
+      { executable: "bun", observed: "1.3.14", satisfied: true },
+    ]);
+    expect(attestation.reasons.map((reason) => reason.executable)).toEqual([
+      "which-broken",
+      "spawn-broken",
+    ]);
+    expect(attestation.reasons).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ reason: REPO_TOOLCHAIN_MISSING }),
+      ]),
+    );
+    expect(
+      attestation.reasons.every((reason) =>
+        reason.action.includes(reason.executable),
+      ),
+    ).toBe(true);
+    expect(spawnCalls).toEqual([
+      ["/opt/bin/spawn-broken", "--version"],
+      ["/opt/bin/bun", "--version"],
+    ]);
+  });
+
   test("preflight is non-mutating: the only command spawned is `<exe> --version`", async () => {
     const repo = repoWith(
       `    toolchain:\n      bun: ">=1.3 <2"\n      node: ">=22 <25"\n      git: ">=2.40"\n`,
