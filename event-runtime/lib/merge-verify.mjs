@@ -72,6 +72,10 @@ function blockAll(landed, { finalSha, kind, reason }, shell = sh) {
       "ai:blocked",
       "--remove",
       "ai:needs-review",
+      "--remove",
+      "ai:in-progress",
+      "--remove",
+      "agent:claude-code",
     ]);
     shell("factory", [
       "linear",
@@ -84,6 +88,32 @@ function blockAll(landed, { finalSha, kind, reason }, shell = sh) {
       `${kind} ${item.ticket}/PR#${item.pr}: ${reason}`,
     ]);
   }
+}
+
+function doneArgs(ticket) {
+  return [
+    "linear",
+    "state",
+    ticket,
+    "Done",
+    "--remove",
+    "ai:needs-review",
+    "--remove",
+    "ai:escalated",
+    "--remove",
+    "ai:blocked",
+    "--remove",
+    "ai:in-progress",
+    "--remove",
+    "agent:claude-code",
+  ];
+}
+
+function transitionDone(ticket, shell = sh) {
+  const done = shell("factory", doneArgs(ticket));
+  if (done.status === 0) return null;
+  const detail = (done.stderr || done.stdout || "unknown failure").trim();
+  return `Done transition failed for ${ticket}: ${detail}`;
 }
 
 function githubFailureDetail(action, result) {
@@ -114,6 +144,173 @@ function parseGhJson(action, result, fallback) {
       }),
     };
   }
+}
+
+function readGhJson(action, result, fallback) {
+  if (result.status !== 0) {
+    throw new Error(githubUnavailable(action, result));
+  }
+  const parsed = parseGhJson(action, result, fallback);
+  if (parsed.failure) throw new Error(parsed.failure);
+  return parsed.value;
+}
+
+function repositoryName(repository) {
+  if (repository?.nameWithOwner) return repository.nameWithOwner;
+  const owner = repository?.owner?.login;
+  return owner && repository?.name ? `${owner}/${repository.name}` : null;
+}
+
+/**
+ * Find closed project issues that a merged PR closed before (or at) the
+ * batch commit whose base CI just passed. Two bounded GraphQL reads avoid an
+ * N+1 PR lookup across a potentially large historical backlog.
+ */
+export function listCatchUpItems({
+  github,
+  base,
+  project,
+  verifiedSha,
+  shell = sh,
+  // gh paginates until it reaches the limit or exhausts the connection. This
+  // ceiling is deliberately far above any practical project size so an old
+  // stranded ticket cannot remain permanently hidden behind a newest-first
+  // 1,000-item window.
+  limit = 1_000_000,
+}) {
+  const issues = readGhJson(
+    "list closed issues for merge catch-up",
+    shell("gh", [
+      "issue",
+      "list",
+      "--repo",
+      github,
+      "--state",
+      "closed",
+      "--limit",
+      String(limit),
+      "--json",
+      "number,projectItems",
+    ]),
+    "[]",
+  );
+  const pulls = readGhJson(
+    "list merged PRs for merge catch-up",
+    shell("gh", [
+      "pr",
+      "list",
+      "--repo",
+      github,
+      "--state",
+      "merged",
+      "--limit",
+      String(limit),
+      "--json",
+      "number,baseRefName,mergeCommit,mergedAt,closingIssuesReferences",
+    ]),
+    "[]",
+  );
+  if (!Array.isArray(issues) || !Array.isArray(pulls)) {
+    throw new Error("merge catch-up returned a non-array GitHub response");
+  }
+
+  const verifiedPull = pulls.find(
+    (pull) =>
+      pull.baseRefName === base && pull.mergeCommit?.oid === verifiedSha,
+  );
+  if (!verifiedPull?.mergedAt) {
+    throw new Error(
+      `merge catch-up could not bind verified SHA ${verifiedSha} to a merged PR`,
+    );
+  }
+  const verifiedAt = Date.parse(verifiedPull.mergedAt);
+  if (!Number.isFinite(verifiedAt)) {
+    throw new Error("merge catch-up received an invalid verified merge time");
+  }
+
+  const stranded = new Map();
+  for (const issue of issues) {
+    const status = issue.projectItems?.find((item) => item.title === project)
+      ?.status?.name;
+    if (!status || status.toLowerCase() === "done") continue;
+    stranded.set(issue.number, status);
+  }
+
+  const items = new Map();
+  for (const pull of pulls) {
+    if (pull.baseRefName !== base || !pull.mergeCommit?.oid) continue;
+    const mergedAt = Date.parse(pull.mergedAt);
+    // A different PR with the same second-level mergedAt may have landed just
+    // after finalSha. Defer equal timestamps to a later green batch rather
+    // than let timestamp granularity overrun the exact proof boundary.
+    if (
+      !Number.isFinite(mergedAt) ||
+      (pull.mergeCommit.oid !== verifiedSha && mergedAt >= verifiedAt)
+    )
+      continue;
+    for (const issue of pull.closingIssuesReferences ?? []) {
+      if (repositoryName(issue.repository) !== github) continue;
+      const previousStatus = stranded.get(issue.number);
+      if (!previousStatus) continue;
+      items.set(issue.number, {
+        ticket: `${github}#${issue.number}`,
+        issue: issue.number,
+        pr: pull.number,
+        mergeSha: pull.mergeCommit.oid,
+        previousStatus,
+      });
+    }
+  }
+  return [...items.values()].sort((a, b) => a.issue - b.issue);
+}
+
+export function proveAncestor(github, ancestor, descendant, shell = sh) {
+  const comparison = shell("gh", [
+    "api",
+    `repos/${github}/compare/${ancestor}...${descendant}`,
+    "--jq",
+    ".status",
+  ]);
+  if (comparison.status !== 0) {
+    throw new Error(
+      githubUnavailable("compare catch-up merge ancestry", comparison),
+    );
+  }
+  const status = (comparison.stdout || "").trim();
+  if (status === "ahead" || status === "identical") return true;
+  if (status === "behind" || status === "diverged") return false;
+  throw new Error(
+    githubUnavailable("compare catch-up merge ancestry", {
+      stderr: `unexpected compare status ${JSON.stringify(status)}`,
+    }),
+  );
+}
+
+function catchUpMergedTickets(
+  { github, base, project, verifiedSha, excludeTickets = [] },
+  shell = sh,
+) {
+  const excluded = new Set(excludeTickets);
+  const failures = [];
+  let reconciled = 0;
+  for (const item of listCatchUpItems({
+    github,
+    base,
+    project,
+    verifiedSha,
+    shell,
+  })) {
+    if (excluded.has(item.ticket)) continue;
+    if (!proveAncestor(github, item.mergeSha, verifiedSha, shell)) continue;
+    const failure = transitionDone(item.ticket, shell);
+    if (failure) {
+      console.error(failure);
+      failures.push(failure);
+    } else {
+      reconciled += 1;
+    }
+  }
+  return { reconciled, failures };
 }
 
 /**
@@ -461,25 +658,34 @@ export function runMergeVerify({
   const doneFailures = [];
   for (const item of landed) {
     cleanupItem({ github, repo, factoryRoot, item, shell });
-    const done = shell("factory", [
-      "linear",
-      "state",
-      item.ticket,
-      "Done",
-      "--remove",
-      "ai:needs-review",
-      "--remove",
-      "ai:escalated",
-      "--remove",
-      "ai:blocked",
-      "--remove",
-      "ai:in-progress",
-    ]);
-    if (done.status !== 0) {
-      const detail = (done.stderr || done.stdout || "unknown failure").trim();
-      const message = `Done transition failed for ${item.ticket}: ${detail}`;
-      console.error(message);
-      doneFailures.push(message);
+    const failure = transitionDone(item.ticket, shell);
+    if (failure) {
+      console.error(failure);
+      doneFailures.push(failure);
+    }
+  }
+
+  let catchUpSummary = "merge catch-up skipped";
+  if (repoRecord.controlPlane === "github" && repoRecord.project) {
+    try {
+      const caughtUp = catchUpMergedTickets(
+        {
+          github,
+          base,
+          project: repoRecord.project,
+          verifiedSha: finalSha,
+          excludeTickets: landed.map((item) => item.ticket),
+        },
+        shell,
+      );
+      doneFailures.push(...caughtUp.failures);
+      catchUpSummary = `reconciled ${caughtUp.reconciled} previously stranded ticket(s)`;
+    } catch (err) {
+      // The current batch already has exact green proof. A catch-up listing
+      // failure must not strand it in turn; the next green batch retries the
+      // historical scan.
+      catchUpSummary = `merge catch-up deferred: ${err.message || err}`;
+      console.error(catchUpSummary);
     }
   }
   emitNextScan(db, { repo, finalSha });
@@ -493,6 +699,7 @@ export function runMergeVerify({
       exitCode: 0,
       outputTail: [
         `verified ${landed.length} landed PR(s) at ${finalSha}`,
+        catchUpSummary,
         ...doneFailures,
       ].join("; "),
     },

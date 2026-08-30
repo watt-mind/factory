@@ -295,6 +295,202 @@ describe("merge verification GitHub transport handling", () => {
       }),
     ).toThrow("configured CI workflow failed at exact merge SHA");
     expect(calls.filter(([cmd]) => cmd === "factory")).toHaveLength(3);
+    const blocked = calls.find(
+      ([cmd, args]) =>
+        cmd === "factory" &&
+        args.slice(0, 4).join(" ") === "linear state WM-500 Blocked",
+    );
+    expect(blocked?.[1]).toContain("ai:needs-review");
+    expect(blocked?.[1]).toContain("ai:in-progress");
+    expect(blocked?.[1]).toContain("agent:claude-code");
+    expect(
+      calls.some(([cmd, args]) => cmd === "factory" && args.includes("Done")),
+    ).toBe(false);
+  });
+
+  test("a green batch catches up a previously stranded closed and merged ticket", () => {
+    const cwd = tempInput();
+    const calls = [];
+    const strandedSha = "d".repeat(40);
+    const divergedSha = "f".repeat(40);
+    const db = { query: () => ({ all: () => [] }) };
+
+    expect(
+      runMergeVerify({
+        cwd,
+        db,
+        repoRecord: {
+          ...mergeCi,
+          controlPlane: "github",
+          project: "Factory",
+        },
+        pause: () => {},
+        shell: (cmd, args) => {
+          calls.push([cmd, args]);
+          if (cmd === "factory") return result();
+          if (args[0] === "issue") {
+            return result({
+              stdout: JSON.stringify([
+                {
+                  number: 499,
+                  projectItems: [
+                    { title: "Factory", status: { name: "In Review" } },
+                  ],
+                },
+                {
+                  number: 498,
+                  projectItems: [
+                    { title: "Factory", status: { name: "Done" } },
+                  ],
+                },
+                {
+                  number: 497,
+                  projectItems: [
+                    { title: "Factory", status: { name: "In Review" } },
+                  ],
+                },
+                {
+                  number: 496,
+                  projectItems: [
+                    { title: "Factory", status: { name: "In Review" } },
+                  ],
+                },
+              ]),
+            });
+          }
+          if (args[0] === "pr" && args[1] === "list") {
+            return result({
+              stdout: JSON.stringify([
+                {
+                  number: 42,
+                  baseRefName: "develop",
+                  mergeCommit: { oid: MERGE_SHA },
+                  mergedAt: "2026-08-30T10:00:00Z",
+                  closingIssuesReferences: [],
+                },
+                {
+                  number: 41,
+                  baseRefName: "develop",
+                  mergeCommit: { oid: strandedSha },
+                  mergedAt: "2026-08-30T09:00:00Z",
+                  closingIssuesReferences: [
+                    {
+                      number: 499,
+                      repository: {
+                        name: "factory",
+                        owner: { login: "watt-mind" },
+                      },
+                    },
+                    {
+                      number: 498,
+                      repository: {
+                        name: "factory",
+                        owner: { login: "watt-mind" },
+                      },
+                    },
+                  ],
+                },
+                {
+                  number: 43,
+                  baseRefName: "develop",
+                  mergeCommit: { oid: "e".repeat(40) },
+                  mergedAt: "2026-08-30T10:00:00Z",
+                  closingIssuesReferences: [
+                    {
+                      number: 497,
+                      repository: {
+                        name: "factory",
+                        owner: { login: "watt-mind" },
+                      },
+                    },
+                  ],
+                },
+                {
+                  number: 40,
+                  baseRefName: "develop",
+                  mergeCommit: { oid: divergedSha },
+                  mergedAt: "2026-08-30T08:00:00Z",
+                  closingIssuesReferences: [
+                    {
+                      number: 496,
+                      repository: {
+                        name: "factory",
+                        owner: { login: "watt-mind" },
+                      },
+                    },
+                  ],
+                },
+              ]),
+            });
+          }
+          if (args[0] === "api" && args[1].includes("/pulls/")) {
+            return result({
+              stdout: JSON.stringify({
+                merged: true,
+                merge_commit_sha: MERGE_SHA,
+              }),
+            });
+          }
+          if (args[0] === "run" && args[1] === "list") {
+            return result({
+              stdout: JSON.stringify([
+                {
+                  databaseId: 7,
+                  workflowName: "CI",
+                  headSha: MERGE_SHA,
+                },
+              ]),
+            });
+          }
+          if (args[0] === "run" && args[1] === "view") {
+            return result({
+              stdout: JSON.stringify({
+                jobs: [
+                  {
+                    name: "Verify",
+                    status: "completed",
+                    conclusion: "success",
+                  },
+                ],
+              }),
+            });
+          }
+          if (args[0] === "api" && args[1].includes("/compare/")) {
+            return result({
+              stdout: args[1].includes(divergedSha) ? "diverged\n" : "ahead\n",
+            });
+          }
+          if (args[0] === "api" && args[1].includes("/git/ref/heads/")) {
+            return result({ status: 1, stderr: "HTTP 404" });
+          }
+          throw new Error(`unexpected command: ${cmd} ${args.join(" ")}`);
+        },
+      }),
+    ).toBe(0);
+
+    const doneCalls = calls.filter(
+      ([cmd, args]) => cmd === "factory" && args.includes("Done"),
+    );
+    expect(doneCalls.map(([, args]) => args[2])).toEqual([
+      "WM-500",
+      "watt-mind/factory#499",
+    ]);
+    expect(doneCalls[1][1]).toContain("ai:in-progress");
+    expect(doneCalls[1][1]).toContain("agent:claude-code");
+    expect(
+      calls.some(
+        ([cmd, args]) =>
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[1].includes(`/compare/${divergedSha}...${MERGE_SHA}`),
+      ),
+    ).toBe(true);
+    for (const command of ["issue", "pr"]) {
+      const list = calls.find(
+        ([cmd, args]) => cmd === "gh" && args[0] === command,
+      );
+      expect(list?.[1][list[1].indexOf("--limit") + 1]).toBe("1000000");
+    }
   });
 
   test("proveLanded uses one REST request and validates its exact merge SHA", () => {
