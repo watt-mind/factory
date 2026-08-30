@@ -100,6 +100,14 @@ const InjectDialog = lazy(() =>
   })),
 );
 
+/**
+ * Loader for the ticket-journey chunk. A mutable seam so tests can make the
+ * dynamic import itself reject without poisoning bun's shared module registry.
+ */
+export const ticketJourneyChunk = {
+  load: () => import("./subjectJourney"),
+};
+
 export function App() {
   const [route, navigateRaw] = useHashRoute();
   const view = route[0];
@@ -239,9 +247,23 @@ export function App() {
     if (!root) return;
     let disposed = false;
     let uninstall = () => {};
-    void import("./subjectJourney").then(({ installTicketJourneyLinks }) => {
-      if (!disposed) uninstall = installTicketJourneyLinks(root, jumpToTicket);
-    });
+    // Two separate catches: a rejected dynamic import is a stale chunk after a
+    // deploy (WM-1367) and must not be confused with a genuine install-time
+    // throw, so each failure is logged under its own message.
+    void ticketJourneyChunk.load().then(
+      ({ installTicketJourneyLinks }) => {
+        if (disposed) return;
+        try {
+          uninstall = installTicketJourneyLinks(root, jumpToTicket);
+        } catch (error: unknown) {
+          console.warn("ticket journey links failed to install", error);
+        }
+      },
+      (error: unknown) => {
+        if (disposed) return;
+        console.warn("ticket journey chunk import failed", error);
+      },
+    );
     return () => {
       disposed = true;
       uninstall();

@@ -15,13 +15,22 @@ import { parseArgs } from "node:util";
 import { unauthorizedMessage } from "../event-runtime/lib/client.mjs";
 
 export const DEFAULT_PORT = 7381;
+export const DEFAULT_TIMEOUT_MS = 30_000;
 
 export function resolvePort(env = process.env) {
   return env.FACTORY_EVENT_PORT ? Number(env.FACTORY_EVENT_PORT) : DEFAULT_PORT;
 }
 
+export function resolveTimeoutMs(env = process.env) {
+  const timeoutMs = Number(env.FACTORY_DISPATCH_TIMEOUT_MS);
+  return Number.isFinite(timeoutMs) && timeoutMs > 0
+    ? timeoutMs
+    : DEFAULT_TIMEOUT_MS;
+}
+
 const port = resolvePort();
 const BASE_URL = `http://127.0.0.1:${port}`;
+const timeoutMs = resolveTimeoutMs();
 
 const HELP = `factory dispatch — swift event-runtime task dispatcher
 
@@ -50,6 +59,7 @@ function die(msg, code = 1) {
 
 async function api(path, options = {}) {
   const token = process.env.FACTORY_CONTROL_API_TOKEN || null;
+  const timeout = AbortSignal.timeout(timeoutMs);
   try {
     const res = await fetch(`${BASE_URL}${path}`, {
       ...options,
@@ -58,6 +68,7 @@ async function api(path, options = {}) {
         ...(token ? { authorization: `Bearer ${token}` } : {}),
         ...options.headers,
       },
+      signal: timeout,
     });
     const text = await res.text();
     let json = null;
@@ -79,6 +90,9 @@ async function api(path, options = {}) {
     }
     return json;
   } catch (e) {
+    if (timeout.aborted) {
+      die(`control API request to ${path} timed out after ${timeoutMs}ms`);
+    }
     die(
       `failed to reach event runtime on port ${port} — is 'factory serve' running? (${e.message})`,
     );

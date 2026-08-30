@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test";
 import path from "node:path";
-import { DEFAULT_PORT, resolvePort } from "./dispatch.mjs";
+import {
+  DEFAULT_PORT,
+  DEFAULT_TIMEOUT_MS,
+  resolvePort,
+  resolveTimeoutMs,
+} from "./dispatch.mjs";
 
 const DISPATCH = path.join(import.meta.dir, "dispatch.mjs");
 
@@ -11,6 +16,18 @@ test("defaults to the standard event-runtime port", () => {
 
 test("FACTORY_EVENT_PORT overrides the default port", () => {
   expect(resolvePort({ FACTORY_EVENT_PORT: "8123" })).toBe(8123);
+});
+
+test("FACTORY_DISPATCH_TIMEOUT_MS overrides the default timeout", () => {
+  expect(DEFAULT_TIMEOUT_MS).toBe(30_000);
+  expect(resolveTimeoutMs({})).toBe(DEFAULT_TIMEOUT_MS);
+  expect(resolveTimeoutMs({ FACTORY_DISPATCH_TIMEOUT_MS: "1234" })).toBe(1234);
+  expect(resolveTimeoutMs({ FACTORY_DISPATCH_TIMEOUT_MS: "nope" })).toBe(
+    DEFAULT_TIMEOUT_MS,
+  );
+  expect(resolveTimeoutMs({ FACTORY_DISPATCH_TIMEOUT_MS: "0" })).toBe(
+    DEFAULT_TIMEOUT_MS,
+  );
 });
 
 test("dispatch sends FACTORY_CONTROL_API_TOKEN as a bearer", async () => {
@@ -80,3 +97,33 @@ test.each([
     }
   },
 );
+
+test("dispatch fails fast with the request path and configured timeout", async () => {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => new Promise(() => {}),
+  });
+  try {
+    const child = Bun.spawn(["bun", DISPATCH, "status", "--json"], {
+      env: {
+        ...process.env,
+        FACTORY_EVENT_PORT: String(server.port),
+        FACTORY_CONTROL_API_TOKEN: "dispatch-secret-token",
+        FACTORY_DISPATCH_TIMEOUT_MS: "50",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(exitCode).toBe(1);
+    expect(stderr).toMatch(/control API request to \/\S+ timed out after 50ms/);
+    expect(`${stdout}${stderr}`).not.toContain("dispatch-secret-token");
+  } finally {
+    server.stop(true);
+  }
+});

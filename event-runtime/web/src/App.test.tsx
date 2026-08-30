@@ -1,5 +1,5 @@
 import "./test-dom";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
@@ -9,13 +9,20 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { App, listSelectionPath, navIsCurrent } from "./App";
+import {
+  App,
+  listSelectionPath,
+  navIsCurrent,
+  ticketJourneyChunk,
+} from "./App";
 import { api, ApiError } from "./api";
 import { goPrefix } from "./goSequence";
 import { refetchIntervals } from "./hooks";
 import { NAV } from "./nav";
 import { createProposalFixture } from "./test-render";
 import type { MetricsView, Proposal, StatusView } from "./types";
+
+const actualSubjectJourney = await import("./subjectJourney");
 
 const ENV = { name: "dev", home: "/tmp/factory", adapter: null };
 
@@ -200,6 +207,7 @@ afterEach(() => {
   goPrefix.armedAt = 0;
   cleanup();
   globalThis.fetch = realFetch;
+  mock.module("./subjectJourney", () => actualSubjectJourney);
 });
 
 describe("cold query rendering (WM-266)", () => {
@@ -1053,6 +1061,78 @@ describe("ticket journey navigation (WM-595)", () => {
     expect(why.closest("[cmdk-item]")!.textContent).toContain("Why isn't");
     fireEvent.click(command.closest("[cmdk-item]")!);
     expect(window.location.hash).toBe("#/tickets/WM-595");
+  });
+});
+
+describe("ticket journey chunk loading (WM-1367)", () => {
+  const realLoad = ticketJourneyChunk.load;
+
+  async function withCapturedWarnings(
+    run: (warn: ReturnType<typeof mock>) => Promise<void>,
+  ) {
+    const warn = mock(() => {});
+    const originalWarn = console.warn;
+    const rejections: PromiseRejectionEvent[] = [];
+    const onUnhandledRejection = (event: PromiseRejectionEvent) =>
+      rejections.push(event);
+
+    console.warn = warn;
+    window.addEventListener("unhandledrejection", onUnhandledRejection);
+    try {
+      await run(warn);
+      expect(rejections).toHaveLength(0);
+    } finally {
+      console.warn = originalWarn;
+      window.removeEventListener("unhandledrejection", onUnhandledRejection);
+      ticketJourneyChunk.load = realLoad;
+    }
+  }
+
+  test("warns instead of leaking an unhandled rejection when the dynamic import itself rejects", async () => {
+    // A stale deploy: the chunk URL baked into the shell is gone, so the
+    // dynamic import rejects before any module code runs.
+    ticketJourneyChunk.load = () =>
+      Promise.reject(
+        new TypeError("Failed to fetch dynamically imported module"),
+      );
+
+    await withCapturedWarnings(async (warn) => {
+      renderApp();
+      await waitFor(() => {
+        expect(warn).toHaveBeenCalledWith(
+          "ticket journey chunk import failed",
+          expect.any(TypeError),
+        );
+      });
+      expect(warn).not.toHaveBeenCalledWith(
+        "ticket journey links failed to install",
+        expect.anything(),
+      );
+    });
+  });
+
+  test("logs a genuine install-time throw under its own message, not as a chunk failure", async () => {
+    mock.module("./subjectJourney", () => {
+      return {
+        installTicketJourneyLinks: () => {
+          throw new Error("install exploded");
+        },
+      };
+    });
+
+    await withCapturedWarnings(async (warn) => {
+      renderApp();
+      await waitFor(() => {
+        expect(warn).toHaveBeenCalledWith(
+          "ticket journey links failed to install",
+          expect.any(Error),
+        );
+      });
+      expect(warn).not.toHaveBeenCalledWith(
+        "ticket journey chunk import failed",
+        expect.anything(),
+      );
+    });
   });
 });
 
