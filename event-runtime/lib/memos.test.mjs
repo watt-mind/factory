@@ -1,10 +1,14 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-memos-test-mjs";
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { pruneArtifacts, referencedHashes } from "./artifacts.mjs";
-import { hashJson, sha256Hex } from "./canonical.mjs";
+import {
+  materializeArtifact,
+  pruneArtifacts,
+  referencedHashes,
+} from "./artifacts.mjs";
+import { canonicalJson, hashJson, sha256Hex } from "./canonical.mjs";
 import {
   CURRENT_SCHEMA_VERSION,
   getSchemaVersion,
@@ -21,6 +25,7 @@ import {
   memoDigest,
   normalizeSubjectId,
   registerMemos,
+  retireMemoArtifactMissing,
   sweepMemos,
   validateMemo,
   withProvenance,
@@ -544,6 +549,86 @@ describe("registerMemos / listMemos", () => {
       .query(`SELECT retired_reason FROM memos WHERE sha256 = ?`)
       .get(sha256);
     expect(stored.retired_reason).toBe("description_hash_mismatch");
+    db.close();
+  });
+
+  test("artifact-missing retirement is idempotent and leaves present or corrupt blobs to materialization", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-18T14:02:11.000Z");
+    const store = tmpDir("evrt-memo-artifacts-");
+    const workspace = tmpDir("evrt-memo-materialize-");
+    const missing = accepted(postmortemDoc({ body: "missing" }), { now });
+    const present = accepted(postmortemDoc({ body: "present" }), { now });
+    const corrupt = accepted(postmortemDoc({ body: "corrupt" }), { now });
+    for (const [runId, memo] of [
+      ["run_missing", missing],
+      ["run_present", present],
+      ["run_corrupt", corrupt],
+    ]) {
+      registerMemos(db, runId, memo.result, { now });
+    }
+    writeFileSync(
+      path.join(store, present.sha256),
+      canonicalJson(present.full),
+    );
+    writeFileSync(path.join(store, corrupt.sha256), "wrong bytes");
+
+    expect(
+      retireMemoArtifactMissing(db, missing.sha256, {
+        artifactStore: store,
+        now,
+      }),
+    ).toEqual({
+      retired: true,
+      memo: expect.objectContaining({
+        sha256: missing.sha256,
+        retiredReason: "artifact_missing",
+      }),
+    });
+    expect(
+      retireMemoArtifactMissing(db, missing.sha256, {
+        artifactStore: store,
+        now: now + 1,
+      }).retired,
+    ).toBe(false);
+    expect(
+      retireMemoArtifactMissing(db, present.sha256, {
+        artifactStore: store,
+        now,
+      }).retired,
+    ).toBe(false);
+    expect(
+      retireMemoArtifactMissing(db, corrupt.sha256, {
+        artifactStore: store,
+        now,
+      }).retired,
+    ).toBe(false);
+    expect(
+      db
+        .query(`SELECT sha256, retired_reason FROM memos ORDER BY sha256`)
+        .all(),
+    ).toEqual(
+      [
+        { sha256: missing.sha256, retired_reason: "artifact_missing" },
+        { sha256: present.sha256, retired_reason: null },
+        { sha256: corrupt.sha256, retired_reason: null },
+      ].sort((a, b) => a.sha256.localeCompare(b.sha256)),
+    );
+
+    expect(() =>
+      materializeArtifact({
+        storeRoot: store,
+        sha256hex: corrupt.sha256,
+        workspaceDir: workspace,
+        as: "memos/corrupt.json",
+      }),
+    ).toThrow(/corrupt artifact/);
+    expect(existsSync(path.join(store, corrupt.sha256))).toBe(false);
+    expect(
+      db
+        .query(`SELECT retired_at FROM memos WHERE sha256 = ?`)
+        .get(corrupt.sha256).retired_at,
+    ).toBeNull();
     db.close();
   });
 
