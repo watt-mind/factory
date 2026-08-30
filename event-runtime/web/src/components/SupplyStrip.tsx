@@ -1,4 +1,5 @@
 import type { MouseEvent } from "react";
+import { teamUrl } from "../trackerLinks";
 import { Ago } from "./ui";
 
 export type TicketSupplyAction =
@@ -42,16 +43,11 @@ export const CHIP_FILTER_STATE: Record<SupplyChip, string> = {
   blocked: "Blocked",
 };
 
-const LINEAR_TEAM = "https://linear.app/watt-mind/team";
-
 export function linearTeamUrl(
   team: string | null,
   chip?: SupplyChip,
 ): string | null {
-  if (!team) return null;
-  const base = `${LINEAR_TEAM}/${encodeURIComponent(team)}`;
-  if (chip === "triage") return `${base}/triage`;
-  return `${base}/active`;
+  return teamUrl(team, chip);
 }
 
 export function recommendedActionForRepo(
@@ -266,7 +262,7 @@ function SupplyRow({
   onFilter: (next: { repo: string; state: string }) => void;
 }) {
   const action = recommendedActionForRepo(repo);
-  const linear = linearTeamUrl(repo.team);
+  const tracker = linearTeamUrl(repo.team);
   const inFlightLabel =
     repo.inFlight == null ? "—" : `${repo.inFlight}/${repo.cap}`;
 
@@ -283,13 +279,13 @@ function SupplyRow({
   return (
     <tr className="border-t border-(--border)">
       <th scope="row" className="py-0.5 pr-2 font-medium">
-        {linear ? (
+        {tracker ? (
           <a
-            href={linear}
+            href={tracker}
             target="_blank"
             rel="noreferrer"
             className="mono text-(--accent) hover:underline"
-            title={`Open ${repo.team} on Linear`}
+            title={`Open ${repo.team} in tracker`}
           >
             {repo.name}
           </a>

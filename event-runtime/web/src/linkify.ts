@@ -1,12 +1,14 @@
+import { issueUrl } from "./trackerLinks";
+
 export type LinkifiedPart =
   | { kind: "text"; text: string }
   | { kind: "link"; text: string; href: string; title: string };
 
-const CANDIDATE = /https?:\/\/[^\s<>"']+|[A-Z]{2,5}-\d+/g;
+const CANDIDATE =
+  /https?:\/\/[^\s<>"']+|[A-Z]{2,5}-\d+|[A-Za-z0-9][A-Za-z0-9.-]*\/[A-Za-z0-9][A-Za-z0-9.-]*#[1-9]\d*/g;
 const TRAILING_PUNCTUATION = /[.,!?;:\]\}]+$/;
 const GITHUB_PR =
   /^https?:\/\/github\.com\/([^/\s]+)\/([^/\s]+)\/pull\/(\d+)(?:[/?#].*)?$/;
-const LINEAR_ISSUE_ROOT = "https://linear.app/watt-mind/issue";
 
 function splitTrailingPunctuation(candidate: string): [string, string] {
   let link = candidate;
@@ -62,13 +64,21 @@ export function linkifyText(text: string): LinkifiedPart[] {
     } else {
       const before = text[index - 1] ?? "";
       const after = text[index + candidate.length] ?? "";
-      if (/[A-Za-z0-9_-]/.test(before) || /[A-Za-z0-9_-]/.test(after)) {
+      const identifierBoundary = candidate.includes("/")
+        ? /[A-Za-z0-9_\/-]/
+        : /[A-Za-z0-9_-]/;
+      const href = issueUrl(candidate);
+      if (
+        !href ||
+        identifierBoundary.test(before) ||
+        identifierBoundary.test(after)
+      ) {
         pushText(parts, candidate);
       } else {
         parts.push({
           kind: "link",
           text: candidate,
-          href: `${LINEAR_ISSUE_ROOT}/${candidate}`,
+          href,
           title: candidate,
         });
       }
