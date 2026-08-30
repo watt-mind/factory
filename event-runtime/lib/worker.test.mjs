@@ -99,6 +99,7 @@ import {
   expireRunDeadline,
   extendRunDeadline,
   forceFailRun,
+  humanDecisionAuthorisationGate,
   LEASE_GRACE_SECONDS,
   policyMaxRunMinutes,
   policyWorkspaceOnlyFallback,
@@ -151,6 +152,95 @@ registerTestProcessCleanup(import.meta.url);
 let seq = 0;
 
 describe("worker", () => {
+  test("canonical authorisation hash is verified before dispatch execution", () => {
+    const description =
+      "## Owned Paths\n- event-runtime/lib/worker.mjs\n- docs/event-runtime-inbox.md\n";
+    const input = {
+      repo: "factory",
+      ticket: "watt-mind/factory#1337",
+      humanDecision: {
+        inboxItemId: "inbox_authorised",
+        authorisation: {
+          descriptionHash: hashBytes(description),
+          paths: [
+            "event-runtime/lib/worker.mjs",
+            "docs/event-runtime-inbox.md",
+          ],
+        },
+      },
+    };
+
+    const result = humanDecisionAuthorisationGate(input, {
+      fetchTicket: () => ({ description }),
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      input: {
+        humanDecision: { authorisation: { verified: true } },
+      },
+    });
+    expect(input.humanDecision.authorisation.verified).toBeUndefined();
+  });
+
+  test("trailing-newline authorisation hash is refused before dispatch execution", () => {
+    const description = "## Owned Paths\n- event-runtime/lib/worker.mjs\n";
+    const result = humanDecisionAuthorisationGate(
+      {
+        repo: "factory",
+        ticket: "watt-mind/factory#1337",
+        humanDecision: {
+          authorisation: {
+            descriptionHash: hashBytes(`${description}\n`),
+            paths: ["event-runtime/lib/worker.mjs"],
+          },
+        },
+      },
+      { fetchTicket: () => ({ description }) },
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      refusal: { reason: "authorisation_stale:description" },
+    });
+  });
+
+  test("authorisation paths must cover every parsed Owned Path", () => {
+    const description =
+      "## Owned Paths\n- event-runtime/lib/worker.mjs\n- docs/event-runtime-inbox.md\n";
+    const result = humanDecisionAuthorisationGate(
+      {
+        repo: "factory",
+        ticket: "watt-mind/factory#1337",
+        humanDecision: {
+          authorisation: {
+            descriptionHash: hashBytes(description),
+            paths: ["event-runtime/lib/worker.mjs"],
+          },
+        },
+      },
+      { fetchTicket: () => ({ description }) },
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      refusal: { reason: "authorisation_stale:paths" },
+      evidence: { missingPaths: ["docs/event-runtime-inbox.md"] },
+    });
+  });
+
+  test("dispatch without an authorisation does not add a ticket read", () => {
+    const input = { repo: "factory", ticket: "watt-mind/factory#1337" };
+    let fetches = 0;
+
+    expect(
+      humanDecisionAuthorisationGate(input, {
+        fetchTicket: () => (fetches += 1),
+      }),
+    ).toEqual({ ok: true, input });
+    expect(fetches).toBe(0);
+  });
+
   test("materialized harness entries record hashes for every copied file", () => {
     const factoryRoot = tmpDir("evrt-harness-source-");
     const workspaceDir = tmpDir("evrt-harness-workspace-");

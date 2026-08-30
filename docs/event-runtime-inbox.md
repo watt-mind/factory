@@ -280,7 +280,7 @@ On response the runtime records an authorisation:
 {
   "ticket": "WM-313",
   "repo": "factory",
-  "descriptionHash": "sha256:…", // of the Linear description at decision time
+  "descriptionHash": "sha256:…", // canonical hashBytes of the description at decision time
   "paths": ["…"], // scope.paths ∩ operator's multi-choice, if one was gated on this option
   "summary": "…",
   "insight": "…", // concatenated text fields, if any
@@ -292,13 +292,14 @@ On response the runtime records an authorisation:
 
 Two bindings make it safe:
 
-- **Bound to the ticket as written.** `descriptionHash` is taken from Linear
-  at decision time. When the re-dispatched run starts, the dispatch brief
-  compares it to the current description; a mismatch means the operator
-  approved different work, and the agent refuses again with a new decision
-  request whose context says the ticket changed. The runtime also checks at
-  emit time and raises a fresh `ESCALATED` item instead of dispatching if the
-  description already moved.
+- **Bound to the ticket as written.** `descriptionHash` is
+  `hashBytes(description)`: SHA-256 over the description's exact UTF-8 bytes,
+  with no trailing newline appended. At worker start, before the model runs,
+  the runtime applies the same canonical recipe to the ticket's current
+  description. A mismatch is refused as `authorisation_stale:description`;
+  matching authorisations are delivered with `verified: true`. The runtime
+  also checks at emit time and raises a fresh `ESCALATED` item instead of
+  dispatching if the description already moved.
 - **Bound to paths.** The re-dispatched agent may modify only
   `authorisation.paths` (∩ the ticket's Owned Paths); anything outside is the
   ordinary out-of-scope rule.
@@ -446,12 +447,12 @@ same way any input is. Two consequences fall out for free:
 The `dispatch` brief gains one clause, in the escalation-gate paragraph:
 
 > If the input carries `humanDecision.authorisation` for this ticket, the
-> operator has already seen the escalation. Compare
-> `authorisation.descriptionHash` to the ticket's current description; if it
-> matches, proceed, staying inside `authorisation.paths`, and quote the
-> authorisation (item id, decided-at) in the PR body. If it does not match,
-> refuse with a new decision request whose `context` says the ticket changed
-> after approval.
+> operator has already seen the escalation. The worker compares
+> `authorisation.descriptionHash` to canonical `hashBytes(description)` over
+> the ticket's exact current UTF-8 description bytes, with no trailing newline,
+> before the model runs. Trust `authorisation.verified: true`; do not recompute
+> the hash. Stay inside `authorisation.paths` and quote the authorisation (item
+> id, decided-at) in the PR body.
 
 Other agents that can be re-run after a decision (`triage-scan` after
 `answer`, a parked event after `requeue`) do not need the field: their
