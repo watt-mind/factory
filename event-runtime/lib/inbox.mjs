@@ -667,7 +667,7 @@ function normalizeEffect(effect, item, response) {
 }
 
 /** Validate and claim one response in a short write transaction. */
-function claimInboxDecisionInTransaction(
+function decideInboxItemInTransaction(
   db,
   id,
   response,
@@ -809,7 +809,7 @@ export async function decideInboxItem(db, id, response, options = {}) {
     artifactStore,
   } = options;
   const claim = txImmediate(db, () =>
-    claimInboxDecisionInTransaction(db, id, response, options),
+    decideInboxItemInTransaction(db, id, response, options),
   );
   const effect = await applyInboxEffect(
     db,
@@ -825,7 +825,7 @@ export async function decideInboxItem(db, id, response, options = {}) {
 }
 
 /** Retry the effect for an answer that was already recorded. */
-function claimInboxDecisionRetryInTransaction(
+function retryInboxDecisionInTransaction(
   db,
   id,
   {
@@ -905,7 +905,7 @@ export async function retryInboxDecision(db, id, options = {}) {
     artifactStore,
   } = options;
   const claim = txImmediate(db, () =>
-    claimInboxDecisionRetryInTransaction(db, id, {
+    retryInboxDecisionInTransaction(db, id, {
       ...options,
       expectedResponseJson,
     }),

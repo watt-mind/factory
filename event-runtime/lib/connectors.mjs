@@ -245,9 +245,11 @@ export function createConnectorClient({ db, registry, extension, name }) {
       get(id) {
         return getInboxItem(db, id);
       },
-      decide(id, response, { actor } = {}) {
+      // Async since factory#1434: the decision effect (e.g. the Linear CLI)
+      // runs outside the SQLite write lock, so callers must await the result.
+      async decide(id, response, { actor } = {}) {
         const decidedBy = connectorActor(extension, name, actor);
-        const result = decideInboxItem(db, id, response, { decidedBy });
+        const result = await decideInboxItem(db, id, response, { decidedBy });
         emitInboxChange({
           type: "changed",
           item: result?.item ?? null,

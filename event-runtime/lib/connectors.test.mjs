@@ -485,7 +485,7 @@ describe("narrow loopback client", () => {
     expect(client.inbox.list({ status: "open" }).map((row) => row.id)).toEqual([
       "inbox_conn",
     ]);
-    const decided = client.inbox.decide(
+    const decided = await client.inbox.decide(
       "inbox_conn",
       {
         schemaVersion: "factory.decision-response/v1",
@@ -540,7 +540,7 @@ describe("narrow loopback client", () => {
     expect(run.result.promptTranscript).toBeUndefined();
   });
 
-  test("inbox.markDelivered merges delivery, rejects missing id, leaves decide independent", () => {
+  test("inbox.markDelivered merges delivery, rejects missing id, leaves decide independent", async () => {
     const db = openDb(":memory:");
     const client = createConnectorClient({
       db,
@@ -585,7 +585,7 @@ describe("narrow loopback client", () => {
       client.inbox.markDelivered("inbox_absent", { buzz: { eventId: "x" } }),
     ).toThrow("unknown inbox item inbox_absent");
 
-    const decided = client.inbox.decide("inbox_mark_conn", {
+    const decided = await client.inbox.decide("inbox_mark_conn", {
       schemaVersion: "factory.decision-response/v1",
       requestHash: decisionRequestHash(request),
       optionId: "dismiss",

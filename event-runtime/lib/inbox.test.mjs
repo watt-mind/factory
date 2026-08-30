@@ -50,12 +50,12 @@ function decisionErrorCodesFromSource() {
     between(
       source,
       "function decideInboxItemInTransaction",
-      "export function decideInboxItem",
+      "export async function decideInboxItem",
     ),
     between(
       source,
       "function retryInboxDecisionInTransaction",
-      "export function retryInboxDecision",
+      "export async function retryInboxDecision",
     ),
   ];
   return [
