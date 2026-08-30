@@ -22,6 +22,22 @@ import {
 const ROOT = path.resolve(import.meta.dir, "..");
 const hadLocalReposConfig = existsSync(path.join(ROOT, "config", "repos.yaml"));
 
+test("delivered floor documents valid Owned Paths bullets", () => {
+  const floor = readFileSync(
+    path.join(ROOT, "dist", "AGENTS.floor.md"),
+    "utf8",
+  );
+  expect(floor).toContain("one repo-relative path or glob per bullet");
+  expect(floor).toContain("do not use comma-separated lists");
+  expect(floor).toContain(
+    "shared/** ⇒ dist/** + plugins/core/** + event-runtime/pins.json",
+  );
+  expect(floor).toContain("agents/X.md ⇒ X.json");
+  expect(floor).toContain(
+    "agents/*.json|*.view.json ⇒ event-runtime/lib/registry.test.mjs",
+  );
+});
+
 test.each([
   ["git@github.com:Owner/Repository.git", "owner/repository"],
   ["https://github.com/Owner/Repository", "owner/repository"],
