@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
 import { openDb } from "./db.mjs";
-import { admitEvent, admitExternalEvent, verifyWebhook } from "./intake.mjs";
+import {
+  admitEvent,
+  admitExternalEvent,
+  admitSignedEvent,
+  githubIntakeView,
+  verifyWebhook,
+} from "./intake.mjs";
 import { loadRegistry } from "./registry.mjs";
 
 const registry = loadRegistry();
@@ -190,15 +196,10 @@ describe("admitEvent", () => {
     expect(result.event.payload_hash.startsWith("sha256:")).toBe(true);
   });
 
-  test("same (source, eventId) delivered twice yields one row and duplicate: true", () => {
+  test("identical same (source, eventId) retry yields one row and duplicate: true", () => {
     const db = openDb(":memory:");
     const first = admitEvent(db, registry, envelope(), { now: NOW });
-    const second = admitEvent(
-      db,
-      registry,
-      envelope({ payload: { repos: ["different"] } }),
-      { now: NOW + 5000 },
-    );
+    const second = admitEvent(db, registry, envelope(), { now: NOW + 5000 });
     expect(first.admitted).toBe(true);
     expect(second).toEqual({
       admitted: false,
@@ -209,21 +210,97 @@ describe("admitEvent", () => {
     expect(rows.n).toBe(1);
   });
 
-  test("external admission rejects reserved chain provenance before persistence", () => {
+  test("same (source, eventId) with a different payload is a conflict without a write", () => {
     const db = openDb(":memory:");
-    const result = admitExternalEvent(
+    const first = admitEvent(db, registry, envelope(), { now: NOW });
+    const second = admitEvent(
       db,
       registry,
-      envelope({ source: "chain", causationId: "forged-parent" }),
-      { now: NOW },
+      envelope({ payload: { repos: ["different"] } }),
+      { now: NOW + 5000 },
     );
 
-    expect(result).toEqual({
+    expect(first.admitted).toBe(true);
+    expect(second).toEqual({
+      admitted: false,
+      duplicate: false,
+      conflict: true,
+      errors: ["eventId: already admitted with a different payload"],
+    });
+    const rows = db.query(`SELECT COUNT(*) AS n FROM events`).get();
+    expect(rows.n).toBe(1);
+  });
+
+  test("external admission rejects all reserved provenance before persistence", () => {
+    for (const source of ["chain", "handoff", "schedule"]) {
+      const db = openDb(":memory:");
+      const result = admitExternalEvent(
+        db,
+        registry,
+        envelope({ source, causationId: "forged-parent" }),
+        { now: NOW },
+      );
+
+      expect(result).toEqual({
+        admitted: false,
+        duplicate: false,
+        errors: [`source: reserved internal provenance "${source}"`],
+      });
+      expect(db.query(`SELECT COUNT(*) AS n FROM events`).get().n).toBe(0);
+    }
+  });
+
+  test("authenticated signed admission may admit handoff but still rejects chain", () => {
+    const db = openDb(":memory:");
+    const handoff = admitSignedEvent(
+      db,
+      registry,
+      envelope({ source: "handoff", eventId: "handoff-1" }),
+      { now: NOW },
+    );
+    expect(handoff.admitted).toBe(true);
+
+    const chain = admitSignedEvent(
+      db,
+      registry,
+      envelope({
+        source: "chain",
+        eventId: "chain-1",
+        causationId: "forged-parent",
+      }),
+      { now: NOW },
+    );
+    expect(chain).toEqual({
       admitted: false,
       duplicate: false,
       errors: ['source: reserved internal provenance "chain"'],
     });
+  });
+
+  test("a signed caller cannot forge schedule provenance to inherit auto-approval (#960)", () => {
+    const db = openDb(":memory:");
+    // The concrete attack from #960: a holder of the shared event secret posts
+    // a merge request wearing the enabled auto-approved loop's provenance.
+    const forged = envelope({
+      source: "schedule",
+      eventId: "clock:merge-factory:2026-08-12T10:30:00.000Z",
+      type: "factory.merge.requested",
+      payload: { loop: "merge-factory", repo: "factory" },
+    });
+    expect(admitSignedEvent(db, registry, forged, { now: NOW })).toEqual({
+      admitted: false,
+      duplicate: false,
+      errors: ['source: reserved internal provenance "schedule"'],
+    });
+    expect(admitExternalEvent(db, registry, forged, { now: NOW })).toEqual({
+      admitted: false,
+      duplicate: false,
+      errors: ['source: reserved internal provenance "schedule"'],
+    });
     expect(db.query(`SELECT COUNT(*) AS n FROM events`).get().n).toBe(0);
+
+    // The in-process scheduler still owns the provenance it writes.
+    expect(admitEvent(db, registry, forged, { now: NOW }).admitted).toBe(true);
   });
 
   test("schema-invalid envelope returns errors and writes no row", () => {
@@ -272,5 +349,79 @@ describe("admitEvent", () => {
       "occurredAt: clock tick slot cannot be in the future",
     );
     expect(db.query(`SELECT COUNT(*) AS n FROM events`).get().n).toBe(0);
+  });
+});
+
+describe("githubIntakeView", () => {
+  const STALE_AFTER = 1000;
+  function seed(db, admittedAt) {
+    db.query(
+      `INSERT INTO events (source, event_id, type, subject, occurred_at, received_at,
+         correlation_id, causation_id, envelope_json, payload_hash, admitted_at)
+       VALUES ('github', 'd-1', 'github.issues.labeled', 'watt-mind/factory',
+         ?1, ?1, 'd-1', NULL, '{}', 'hash', ?1)`,
+    ).run(admittedAt);
+  }
+
+  test("configured intake with no admission is not stale", () => {
+    const db = openDb(":memory:");
+    expect(
+      githubIntakeView(db, {
+        nowMs: NOW,
+        configured: true,
+        staleAfterMs: STALE_AFTER,
+      }),
+    ).toMatchObject({
+      configured: true,
+      lastAdmittedAt: null,
+      ageMs: null,
+      stale: false,
+      staleAfterMs: STALE_AFTER,
+    });
+  });
+
+  test("unconfigured intake is never stale, even with an old admission", () => {
+    const db = openDb(":memory:");
+    seed(db, new Date(NOW - 10 * STALE_AFTER).toISOString());
+    expect(
+      githubIntakeView(db, {
+        nowMs: NOW,
+        configured: false,
+        staleAfterMs: STALE_AFTER,
+      }),
+    ).toMatchObject({ configured: false, stale: false });
+  });
+
+  test("stale flips exactly at the >= boundary", () => {
+    const db = openDb(":memory:");
+    seed(db, new Date(NOW - STALE_AFTER).toISOString());
+    const at = githubIntakeView(db, {
+      nowMs: NOW,
+      configured: true,
+      staleAfterMs: STALE_AFTER,
+    });
+    expect(at).toMatchObject({ ageMs: STALE_AFTER, stale: true });
+    const under = githubIntakeView(db, {
+      nowMs: NOW - 1,
+      configured: true,
+      staleAfterMs: STALE_AFTER,
+    });
+    expect(under).toMatchObject({ ageMs: STALE_AFTER - 1, stale: false });
+  });
+
+  test("malformed admitted_at yields a null age and is not stale", () => {
+    const db = openDb(":memory:");
+    seed(db, "not-a-timestamp");
+    expect(
+      githubIntakeView(db, {
+        nowMs: NOW,
+        configured: true,
+        staleAfterMs: STALE_AFTER,
+      }),
+    ).toMatchObject({
+      lastAdmittedAt: "not-a-timestamp",
+      ageMs: null,
+      stale: false,
+    });
   });
 });

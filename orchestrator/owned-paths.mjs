@@ -23,6 +23,18 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 
+/** Inputs whose changes alter the zero-pack merged registry digest. */
+export const REGISTRY_INPUT_GLOBS = [
+  "event-runtime/agents/**",
+  "event-runtime/event-types.json",
+  "event-runtime/edges.json",
+  "event-runtime/schedules.json",
+];
+
+/** The tracked zero-pack registry digest baseline. */
+export const REGISTRY_DIGEST_BASELINE_PATH =
+  "event-runtime/lib/registry.test.mjs";
+
 /**
  * Extract the Owned Paths bullet list (levels 2-4) from a Linear issue description.
  * Returns [] when the section is missing or fails to parse — for dispatch,
@@ -200,6 +212,15 @@ export class OwnedPathsPatternError extends Error {
   }
 }
 
+/** A closure policy was supplied by a caller but does not have a safe shape. */
+export class OwnedPathsPolicyError extends Error {
+  constructor(reason) {
+    super(`invalid Owned Paths policy registryDigest: ${reason}`);
+    this.name = "OwnedPathsPolicyError";
+    this.code = "invalid_owned_paths_policy";
+  }
+}
+
 function compileBraceAlternation(glob, start) {
   const alternatives = [];
   let index = start;
@@ -331,6 +352,104 @@ export function globsOverlap(a, b) {
   }
 }
 
+const hasGlobSyntax = (segment) => /[*?{]/.test(segment);
+
+/**
+ * Whether two one-segment globs could name the same segment. This is
+ * deliberately conservative for two wildcarded segments, but preserves their
+ * literal prefixes/suffixes so `foo*` and `bar*` do not become an anchor.
+ */
+function segmentsMayOverlap(a, b) {
+  if (a === b) return true;
+  if (!hasGlobSyntax(a)) return globToRegExp(b).test(a);
+  if (!hasGlobSyntax(b)) return globToRegExp(a).test(b);
+  if (a.includes("{") || b.includes("{")) return true;
+
+  const literalPrefix = (segment) => segment.slice(0, segment.search(/[*?]/));
+  const literalSuffix = (segment) => {
+    const index = Math.max(segment.lastIndexOf("*"), segment.lastIndexOf("?"));
+    return segment.slice(index + 1);
+  };
+  const prefixA = literalPrefix(a);
+  const prefixB = literalPrefix(b);
+  const suffixA = literalSuffix(a);
+  const suffixB = literalSuffix(b);
+  return (
+    (!prefixA ||
+      !prefixB ||
+      prefixA.startsWith(prefixB) ||
+      prefixB.startsWith(prefixA)) &&
+    (!suffixA ||
+      !suffixB ||
+      suffixA.endsWith(suffixB) ||
+      suffixB.endsWith(suffixA))
+  );
+}
+
+/**
+ * Segment-aware intersection for registry inputs. Unlike generic Owned Paths
+ * collision detection, this must not let a leading `**` make unrelated input
+ * directories look like anchors.
+ */
+function registryGlobOverlaps(owned, input) {
+  // Validate the whole patterns first so malformed Owned Paths retain the
+  // generic fail-closed behavior below.
+  globToRegExp(owned);
+  globToRegExp(input);
+  const a = owned.replace(/^\.\//, "").split("/");
+  const b = input.replace(/^\.\//, "").split("/");
+  const memo = new Map();
+
+  const intersects = (i, j) => {
+    const key = `${i}:${j}`;
+    if (memo.has(key)) return memo.get(key);
+    let result;
+    if (i === a.length || j === b.length) {
+      result =
+        (i === a.length && b.slice(j).every((segment) => segment === "**")) ||
+        (j === b.length && a.slice(i).every((segment) => segment === "**"));
+    } else if (a[i] === "**") {
+      result = intersects(i + 1, j) || intersects(i, j + 1);
+    } else if (b[j] === "**") {
+      result = intersects(i, j + 1) || intersects(i + 1, j);
+    } else {
+      result = segmentsMayOverlap(a[i], b[j]) && intersects(i + 1, j + 1);
+    }
+    memo.set(key, result);
+    return result;
+  };
+
+  return intersects(0, 0);
+}
+
+/**
+ * Registry inputs are deliberately stricter than generic Owned Paths overlap.
+ * A leading wildcard can reach every directory, but must retain a literal
+ * segment anchor before it can opt a ticket into the registry-digest closure.
+ */
+function registryInputOverlaps(owned, input) {
+  try {
+    const ownedSegments = owned.replace(/^\.\//, "").split("/");
+    const inputSegments = input.replace(/^\.\//, "").split("/");
+    // A leading wildcard alone is too broad to opt into a non-root registry
+    // input (for example, `**/*.json`). It must carry at least one literal
+    // path segment as an anchor; root-level files are their own anchor.
+    if (
+      hasGlobSyntax(ownedSegments[0] ?? "") &&
+      (ownedSegments[0] === "**" || inputSegments.length > 1) &&
+      !ownedSegments
+        .slice(1)
+        .some((segment) => segment !== "**" && !hasGlobSyntax(segment))
+    ) {
+      return false;
+    }
+    return registryGlobOverlaps(owned, input);
+  } catch (error) {
+    if (error instanceof OwnedPathsPatternError) return true;
+    throw error;
+  }
+}
+
 /** Do two tickets' Owned Paths sets intersect? */
 export function pathsCollide(setA = [], setB = []) {
   return setA.some((a) => setB.some((b) => globsOverlap(a, b)));
@@ -426,6 +545,55 @@ function matchingManifestPaths(repoPath, manifestGlobs = []) {
   return [...matched].sort();
 }
 
+/**
+ * Normalize a raw pin key into a repository-root-relative path.
+ *
+ * Shipped manifests record their pins relative to the pack root — a manifest at
+ * `event-runtime/agents/triage-scan.json` pins `agents/triage-scan.md`, meaning
+ * `event-runtime/agents/triage-scan.md`. Owned Paths and the manifest path used
+ * for closure are both repo-root-relative, so the raw pack-relative key never
+ * matches and the closure guard silently misses the required manifest. Resolve
+ * the key against the pack root — derived from the manifest's own location
+ * (`<packRoot>/agents/<id>.json`), not a hard-coded `event-runtime` prefix — so
+ * any pack layout normalizes correctly.
+ *
+ * Keys that are already repo-root-relative (they begin with the pack root) are
+ * left untouched, so existing root-relative manifests are not double-prefixed.
+ * A key that normalizes outside the repository (via `..` or an absolute path) is
+ * a manifest/config error and throws — closure is fail-closed around it rather
+ * than silently resolving to a path beyond the repo.
+ */
+function normalizePinPath(pinKey, manifestPath) {
+  const key = String(pinKey ?? "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "");
+  if (!key) return null;
+
+  const manifestRel = String(manifestPath ?? "")
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "");
+  const packRoot = path.posix.dirname(path.posix.dirname(manifestRel));
+  const rootPrefix = packRoot && packRoot !== "." ? `${packRoot}/` : "";
+
+  const joined =
+    rootPrefix && (key === packRoot || key.startsWith(rootPrefix))
+      ? key
+      : path.posix.join(packRoot, key);
+  const normalized = path.posix.normalize(joined);
+
+  if (
+    normalized === ".." ||
+    normalized.startsWith("../") ||
+    path.posix.isAbsolute(normalized)
+  ) {
+    throw new Error(
+      `owned-path closure check failed: pin path ${JSON.stringify(pinKey)} in manifest ${manifestPath} normalizes outside the repository (${normalized})`,
+    );
+  }
+  return normalized;
+}
+
 function parsePinnedPaths(manifestPath) {
   let payload;
   try {
@@ -462,7 +630,11 @@ export function readPinManifestRequirements(repoPath, manifestGlobs = []) {
 
   for (const manifest of manifests) {
     const manifestPath = path.join(absoluteRepo, manifest);
-    const pinnedPaths = parsePinnedPaths(manifestPath);
+    // Raw pin keys are pack-root-relative; normalize them against the manifest's
+    // repo-root-relative location so closure compares like-for-like namespaces.
+    const pinnedPaths = parsePinnedPaths(manifestPath)
+      .map((pinKey) => normalizePinPath(pinKey, manifest))
+      .filter(Boolean);
     out.push({ manifestPath: manifest, pinnedPaths });
   }
 
@@ -481,6 +653,29 @@ export function ownedPathsClosureGaps({
   pinManifestRequirements = [],
 } = {}) {
   const own = Array.isArray(ownedPaths) ? ownedPaths : [];
+  const rawRegistryDigest = ownedPathsPolicy?.registryDigest;
+  let registryDigest = null;
+  if (rawRegistryDigest !== undefined && rawRegistryDigest !== null) {
+    if (
+      typeof rawRegistryDigest !== "object" ||
+      Array.isArray(rawRegistryDigest) ||
+      !Array.isArray(rawRegistryDigest.inputs) ||
+      rawRegistryDigest.inputs.length === 0 ||
+      !rawRegistryDigest.inputs.every(
+        (input) => typeof input === "string" && input.trim(),
+      ) ||
+      typeof rawRegistryDigest.baseline !== "string" ||
+      !rawRegistryDigest.baseline.trim()
+    ) {
+      throw new OwnedPathsPolicyError(
+        "registryDigest must be { inputs: non-empty string[], baseline: non-empty string }",
+      );
+    }
+    registryDigest = {
+      inputs: rawRegistryDigest.inputs.map((input) => input.trim()),
+      baseline: rawRegistryDigest.baseline.trim(),
+    };
+  }
   const policy = {
     direct: Array.isArray(ownedPathsPolicy?.direct)
       ? ownedPathsPolicy.direct
@@ -488,6 +683,7 @@ export function ownedPathsClosureGaps({
     pinManifests: Array.isArray(ownedPathsPolicy?.pinManifests)
       ? ownedPathsPolicy.pinManifests
       : [],
+    registryDigest,
   };
 
   const gaps = [];
@@ -539,6 +735,24 @@ export function ownedPathsClosureGaps({
     }
   }
 
+  const registryInput = policy.registryDigest
+    ? own.find((owned) =>
+        policy.registryDigest.inputs.some((input) =>
+          registryInputOverlaps(owned, input),
+        ),
+      )
+    : null;
+  if (
+    registryInput &&
+    !own.some((owned) => globsOverlap(owned, policy.registryDigest.baseline))
+  ) {
+    addGap({
+      rule: "registry-digest",
+      requiredPath: policy.registryDigest.baseline,
+      requiredBy: registryInput,
+    });
+  }
+
   return gaps;
 }
 
@@ -547,6 +761,9 @@ export function formatOwnedPathClosureGaps(gaps = []) {
   return gaps.map((gap) => {
     if (gap.rule === "direct") {
       return `Missing required Owned Paths entry: ${gap.requiredPath} (required by ${gap.requiredBy})`;
+    }
+    if (gap.rule === "registry-digest") {
+      return `own ${gap.requiredPath}: registry input ${gap.requiredBy} changes the zero-pack digest baseline`;
     }
     return `Missing required Owned Paths entry: ${gap.requiredPath} (required by ${gap.requiredBy} from ${gap.manifestPath})`;
   });

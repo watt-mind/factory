@@ -414,6 +414,39 @@ describe("Inbox view", () => {
     expect(view.queryByText("CI RED")).toBeNull();
   });
 
+  test("hides expired open items by default and shows only them from the Expired chip", async () => {
+    ledger = [
+      item({ id: "active", kind: "BLOCKED", title: "Active decision" }),
+      item({
+        id: "expired-kind",
+        kind: "proposal_expired",
+        title: "Expired by kind",
+      }),
+      item({
+        id: "expired-proposal",
+        kind: "decision_needed",
+        title: "Expired by proposal",
+        refs: { proposalId: "expired-proposal-id" },
+        expired: true,
+      }),
+    ];
+    api.proposals = mock(async () => ({
+      proposals: [],
+    }));
+
+    const { view } = renderInbox();
+    await waitFor(() => view.getByText("Active decision"));
+    expect(view.queryByText("Expired by kind")).toBeNull();
+    expect(view.queryByText("Expired by proposal")).toBeNull();
+    expect(view.getByRole("tab", { name: /Open/ }).textContent).toContain("1");
+    expect(view.getByRole("tab", { name: /All/ }).textContent).toContain("1");
+
+    fireEvent.click(view.getByRole("button", { name: "Expired (2)" }));
+    await waitFor(() => view.getByText("Expired by kind"));
+    expect(view.getByText("Expired by proposal")).toBeTruthy();
+    expect(view.queryByText("Active decision")).toBeNull();
+  });
+
   test("proposal rows show a live right-aligned TTL and hide it without one", async () => {
     ledger = [
       item({
@@ -638,6 +671,67 @@ describe("Inbox view", () => {
     expect(view.getByText(/inbox deliberately cannot merge/)).toBeTruthy();
     expect(view.queryByRole("button", { name: /Resolve…/ })).toBeNull();
     expect(view.queryByRole("button", { name: /^Ack/ })).toBeNull();
+  });
+
+  test("contains a detail render failure and retries it without losing the list", async () => {
+    let failDetail = true;
+    const decision = {
+      schemaVersion: "factory.decision-request/v1" as const,
+      question: "Can this detail recover?",
+      get options() {
+        if (failDetail) {
+          throw new Error("first detail render failed");
+        }
+        return [{ id: "retry", label: "Retry", effect: "dismiss" as const }];
+      },
+    };
+    ledger = [
+      item({
+        id: "inbox_detail_failure",
+        kind: "decision_needed",
+        title: "Decision that initially fails",
+        decision,
+      }),
+    ];
+
+    const { view } = renderInbox({ focusItemId: "inbox_detail_failure" });
+    await waitFor(() => view.getByRole("alert"));
+    expect(view.getByTitle("Decision that initially fails")).toBeTruthy();
+    expect(view.getByText("Open raw item")).toBeTruthy();
+
+    failDetail = false;
+    fireEvent.click(view.getByRole("button", { name: "Retry" }));
+
+    await waitFor(() => view.getByText("Can this detail recover?"));
+    expect(view.queryByText("This item could not render")).toBeNull();
+  });
+
+  test("the detail fallback can be closed like the real detail pane", async () => {
+    const decision = {
+      schemaVersion: "factory.decision-request/v1" as const,
+      question: "Will this ever render?",
+      get options(): { id: string; label: string; effect: "dismiss" }[] {
+        throw new Error("detail render failed");
+      },
+    };
+    ledger = [
+      item({
+        id: "inbox_detail_failure",
+        kind: "decision_needed",
+        title: "Decision that always fails",
+        decision,
+      }),
+    ];
+    const onSelectItem = mock(() => {});
+    const { view } = renderInbox({
+      focusItemId: "inbox_detail_failure",
+      onSelectItem,
+    });
+    await waitFor(() => view.getByRole("alert"));
+    expect(view.getByText("This item could not render")).toBeTruthy();
+
+    fireEvent.click(view.getByRole("button", { name: "Close" }));
+    expect(onSelectItem).toHaveBeenCalledWith(null);
   });
 
   test("unknown deep link shows an inline notice, not a blank list", async () => {
@@ -890,9 +984,15 @@ describe("Inbox view", () => {
     ).toBeTruthy();
   });
 
-  test("bulk ack reports a failure for the eligible subset", async () => {
+  test("bulk ack retains failed items and surfaces the first failure", async () => {
+    ledger = [
+      item({ id: "inbox_bulk_success", kind: "BLOCKED" }),
+      item({ id: "inbox_bulk_failure", kind: "BLOCKED", createdAt: T1 }),
+    ];
     api.ackInbox = mock(async (id: string) => {
-      throw new Error(`race: ${id}`);
+      if (id === "inbox_bulk_failure") throw new Error("race lost");
+      ledger = ledger.map((it) => (it.id === id ? { ...it, ackedAt: T2 } : it));
+      return { item: ledger.find((it) => it.id === id)! };
     });
     const { view } = renderInbox();
     await waitFor(() => view.getByLabelText("Select all inbox items"));
@@ -900,10 +1000,21 @@ describe("Inbox view", () => {
 
     fireEvent.click(view.getByRole("button", { name: /^Ack$/ }));
 
-    await waitFor(() => expect(api.ackInbox).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(api.ackInbox).toHaveBeenCalledTimes(2));
     expect(
-      view.getByRole("button", { name: "Ack: 0 done / 1 failed" }),
+      view.getByRole("button", { name: "Ack: 1 done / 1 failed" }),
     ).toBeTruthy();
+    expect(view.getByText("race lost")).toBeTruthy();
+    expect(
+      view.getByRole("toolbar", { name: "Bulk actions" }).textContent,
+    ).toContain("1 selected");
+    expect(
+      (
+        view.getByLabelText(
+          "Select inbox item inbox_bulk_failure",
+        ) as HTMLInputElement
+      ).checked,
+    ).toBe(true);
   });
 
   test("background refetch preserves selected ids and prunes ids that leave the tab", async () => {

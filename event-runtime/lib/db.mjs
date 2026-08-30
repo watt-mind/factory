@@ -102,10 +102,12 @@ CREATE TABLE IF NOT EXISTS results (
 );
 
 CREATE TABLE IF NOT EXISTS outbox (
-  seq           INTEGER PRIMARY KEY AUTOINCREMENT,
-  event_json    TEXT NOT NULL,
-  created_at    TEXT NOT NULL,
-  published_at  TEXT
+  seq               INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_json        TEXT NOT NULL,
+  created_at        TEXT NOT NULL,
+  published_at      TEXT,
+  delivery_attempts INTEGER NOT NULL DEFAULT 0,
+  delivery_error    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS workers (
@@ -143,6 +145,27 @@ CREATE INDEX IF NOT EXISTS idx_attempt_trace_run ON attempt_trace (run_id, seq);
 `;
 
 const SCHEMA = SCHEMA_V1;
+
+const LINEAR_TICKET_ID = /^[A-Z][A-Z0-9]{1,9}-\d+$/i;
+const GITHUB_ISSUE_REF =
+  /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*#\d+$/;
+
+/**
+ * Return the ticket subject carried by a run specification. Linear IDs are
+ * normalized to uppercase; GitHub-style owner/repo#number references are
+ * retained verbatim for the GitHub control plane. Ambiguous non-ticket values
+ * are left unclassified rather than being indexed as ticket subjects.
+ */
+export function runSubject(spec) {
+  const candidates = [spec?.input?.ticket, spec?.subject];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") continue;
+    const subject = candidate.trim();
+    if (LINEAR_TICKET_ID.test(subject)) return subject.toUpperCase();
+    if (GITHUB_ISSUE_REF.test(subject)) return subject;
+  }
+  return null;
+}
 
 /**
  * Ordered linear migrations list. Each migration runs sequentially inside a
@@ -425,6 +448,140 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    version: 14,
+    name: "chain_resolution_indexes",
+    up(db) {
+      const columns = db
+        .query(`PRAGMA table_info(runs)`)
+        .all()
+        .map((row) => row.name);
+      if (!columns.includes("chain_resolved_at")) {
+        db.exec(`ALTER TABLE runs ADD COLUMN chain_resolved_at TEXT;`);
+      }
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_events_causation
+          ON events (causation_id, source);
+        CREATE INDEX IF NOT EXISTS idx_runs_chain_unresolved
+          ON runs (state, chain_resolved_at);
+      `);
+    },
+  },
+  {
+    // 15, not 14: #1230 (#1197) also introduces a migration 14 and lands
+    // first. Guarded/idempotent like the rest, and the runner applies any
+    // migration above the database's user_version, so a v13 or v14 database
+    // and a fresh one all converge on 15.
+    version: 15,
+    name: "tier_escalations",
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS tier_escalations (
+          root_run_id         TEXT PRIMARY KEY,
+          failed_run_id       TEXT NOT NULL UNIQUE,
+          continuation_run_id TEXT NOT NULL UNIQUE,
+          repo                TEXT NOT NULL,
+          ticket              TEXT NOT NULL,
+          workspace_path      TEXT NOT NULL,
+          source_workspace_path TEXT NOT NULL,
+          projection_state    TEXT NOT NULL DEFAULT 'pending',
+          projection_attempts INTEGER NOT NULL DEFAULT 0,
+          projection_error    TEXT,
+          created_at          TEXT NOT NULL,
+          projected_at        TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_tier_escalations_projection
+          ON tier_escalations (projection_state, created_at);
+      `);
+    },
+  },
+  {
+    version: 16,
+    name: "inbox_proposal_id",
+    up(db) {
+      const columns = new Set(
+        db
+          .query(`PRAGMA table_info(inbox_items)`)
+          .all()
+          .map((row) => row.name),
+      );
+      if (!columns.has("proposal_id")) {
+        db.exec(`ALTER TABLE inbox_items ADD COLUMN proposal_id TEXT;`);
+      }
+      db.exec(`
+        UPDATE inbox_items
+           SET proposal_id = json_extract(refs_json, '$.proposalId');
+        CREATE INDEX IF NOT EXISTS idx_inbox_items_proposal_id
+          ON inbox_items (proposal_id);
+      `);
+    },
+  },
+  {
+    version: 17,
+    name: "proposal_and_event_lookup_indexes",
+    up(db) {
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_proposals_run_id
+          ON proposals (run_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_proposals_event
+          ON proposals (event_source, event_id);
+        CREATE INDEX IF NOT EXISTS idx_events_correlation
+          ON events (correlation_id);
+      `);
+    },
+  },
+  {
+    version: 18,
+    name: "outbox_delivery_failures",
+    up(db) {
+      const columns = new Set(
+        db
+          .query(`PRAGMA table_info(outbox)`)
+          .all()
+          .map((row) => row.name),
+      );
+      if (!columns.has("delivery_attempts")) {
+        db.exec(
+          `ALTER TABLE outbox ADD COLUMN delivery_attempts INTEGER NOT NULL DEFAULT 0;`,
+        );
+      }
+      if (!columns.has("delivery_error")) {
+        db.exec(`ALTER TABLE outbox ADD COLUMN delivery_error TEXT;`);
+      }
+    },
+  },
+  {
+    version: 19,
+    name: "runs_subject",
+    up(db) {
+      const columns = new Set(
+        db
+          .query(`PRAGMA table_info(runs)`)
+          .all()
+          .map((row) => row.name),
+      );
+      if (!columns.has("subject")) {
+        db.exec(`ALTER TABLE runs ADD COLUMN subject TEXT;`);
+        const updateSubject = db.query(
+          `UPDATE runs SET subject = ? WHERE run_id = ?`,
+        );
+        for (const row of db
+          .query(`SELECT run_id, spec_json FROM runs`)
+          .all()) {
+          let spec = null;
+          try {
+            spec = JSON.parse(row.spec_json);
+          } catch {
+            // Preserve malformed legacy specifications as unclassified rows.
+          }
+          updateSubject.run(runSubject(spec), row.run_id);
+        }
+      }
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_runs_subject ON runs (subject);
+      `);
+    },
+  },
 ];
 
 export const CURRENT_SCHEMA_VERSION =
@@ -448,6 +605,7 @@ export const CORE_TABLES = [
   "merge_reviews",
   "runtime_overrides",
   "runtime_override_journal",
+  "tier_escalations",
 ];
 
 /** Read current database schema version from PRAGMA user_version. */
@@ -548,6 +706,13 @@ function enableWal(db, { attempts = 20, waitMs = 50 } = {}) {
   }
 }
 
+/** Every connection's busy_timeout: plain writers block for up to this long. */
+export const DB_BUSY_TIMEOUT_MS = 5_000;
+/** One retryBusy() attempt: short, so the event loop is pinned briefly. */
+export const DB_BUSY_ATTEMPT_TIMEOUT_MS = 100;
+/** The whole retryBusy() budget across attempts (matches the connection). */
+export const DB_BUSY_RETRY_TIMEOUT_MS = DB_BUSY_TIMEOUT_MS;
+
 export function openDb(file = dbPath()) {
   if (file !== ":memory:") mkdirSync(path.dirname(file), { recursive: true });
   const db = new Database(file, { create: true });
@@ -555,7 +720,7 @@ export function openDb(file = dbPath()) {
   // and a second process opening the database concurrently must wait for it
   // rather than failing with SQLITE_BUSY_RECOVERY. Ordering matters here —
   // observed live the moment serve and work became separate processes.
-  db.exec("PRAGMA busy_timeout = 5000;");
+  db.exec(`PRAGMA busy_timeout = ${DB_BUSY_TIMEOUT_MS};`);
   enableWal(db);
   // Set synchronous = FULL (OPS-414): under WAL mode, the default NORMAL only
   // fsyncs at checkpoint boundaries, which can lose recent committed transactions
@@ -606,6 +771,76 @@ export function isBusyError(err) {
   return /database is locked|database table is locked|resource temporarily unavailable|\bSQLITE_BUSY\b|\bSQLITE_LOCKED\b/i.test(
     msg,
   );
+}
+
+/**
+ * Retry an idempotent SQLite attempt without holding the event loop for the
+ * connection's normal busy timeout (#1349).
+ *
+ * Each attempt runs with a short `busy_timeout` (restored afterwards), and a
+ * busy failure sleeps across event-loop turns before trying again, until the
+ * total budget is spent — the same ~5 s a plain writer would block for, but
+ * with /health and other requests served in between. The callback must be
+ * synchronous and contain the complete transaction, so a SQLITE_BUSY rollback
+ * leaves each retry safe to repeat; a thenable is rejected outright because
+ * the timeout is restored as soon as the callback returns.
+ *
+ * A connection whose `busy_timeout` was deliberately lowered below one attempt
+ * keeps its fail-fast contract: that value bounds the attempt, and there is no
+ * retry budget beyond it, so it errors after that single short wait.
+ */
+export async function retryBusy(
+  db,
+  attempt,
+  {
+    busyTimeoutMs = DB_BUSY_ATTEMPT_TIMEOUT_MS,
+    timeoutMs = DB_BUSY_RETRY_TIMEOUT_MS,
+    minDelayMs = 15,
+    maxDelayMs = 50,
+    random = Math.random,
+  } = {},
+) {
+  if (typeof attempt !== "function")
+    throw new TypeError("retryBusy: attempt must be a function");
+  const connectionTimeout = Number(
+    db.query("PRAGMA busy_timeout").get()?.timeout ?? DB_BUSY_TIMEOUT_MS,
+  );
+  const attemptTimeoutMs = Math.max(
+    0,
+    Math.floor(Math.min(busyTimeoutMs, connectionTimeout)),
+  );
+  // SQLite already waits the connection's own timeout inside that single
+  // attempt, so there is nothing left to retry across turns.
+  const budgetMs = connectionTimeout < busyTimeoutMs ? 0 : timeoutMs;
+  const startedAt = Date.now();
+  let lastBusyError;
+  for (;;) {
+    const previousTimeout = db.query("PRAGMA busy_timeout").get().timeout;
+    db.exec(`PRAGMA busy_timeout = ${attemptTimeoutMs};`);
+    try {
+      const result = attempt();
+      if (result !== null && typeof result?.then === "function") {
+        throw new TypeError(
+          "retryBusy: attempt must be synchronous (it returned a thenable); the per-attempt busy_timeout is restored as soon as it returns",
+        );
+      }
+      return result;
+    } catch (err) {
+      if (!isBusyError(err)) throw err;
+      lastBusyError = err;
+    } finally {
+      db.exec(`PRAGMA busy_timeout = ${previousTimeout};`);
+    }
+
+    const remainingMs = budgetMs - (Date.now() - startedAt);
+    if (remainingMs <= 0) throw lastBusyError;
+    const spread = Math.max(0, maxDelayMs - minDelayMs);
+    const delayMs = Math.min(
+      remainingMs,
+      minDelayMs + Math.floor(random() * (spread + 1)),
+    );
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
 }
 
 /** Normalize adapter-supplied usage into durable, non-negative values. */

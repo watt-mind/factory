@@ -1,16 +1,15 @@
 import { pad, withClient } from "./shared.mjs";
 
 export async function ps(client, stateFilter) {
-  const { runs: rows } = await client.runs();
-  const filtered = stateFilter
-    ? rows.filter((r) => r.state.toUpperCase() === stateFilter.toUpperCase())
+  const state = stateFilter?.toUpperCase();
+  const { runs: rows } = await client.runs(state);
+  const filtered = state
+    ? rows.filter((r) => r.state.toUpperCase() === state)
     : rows.filter((r) => r.state === "RUNNING" || r.state === "LEASED");
 
   if (filtered.length === 0) {
     console.log(
-      stateFilter
-        ? `no process runs with state ${stateFilter}`
-        : "no running processes",
+      state ? `no process runs with state ${state}` : "no running processes",
     );
     return;
   }

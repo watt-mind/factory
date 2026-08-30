@@ -1,5 +1,61 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { SCHEMA_FORMATS, validate } from "./schema.mjs";
+
+const sharedCases = JSON.parse(
+  readFileSync(
+    new URL("./fixtures/schema-validation-cases.json", import.meta.url),
+    "utf8",
+  ),
+).cases;
+const runtimeFixture = new URL(
+  "./fixtures/schema-validation-cases.json",
+  import.meta.url,
+);
+const webFixture = new URL(
+  "../web/src/lib/fixtures/schema-validation-cases.json",
+  import.meta.url,
+);
+
+// Drift guard (#823): event-runtime/web/src/lib/schema.test.ts reads this exact
+// same matrix, so a semantic change to one validator that is not mirrored in
+// the other turns red here or there. The runtime copy is the source of truth;
+// the web copy is deliberately checked in and must be recopied after edits.
+describe("shared fixture schema-validation-cases.json", () => {
+  test("the web copy is byte-for-byte identical", () => {
+    expect(
+      Buffer.compare(readFileSync(webFixture), readFileSync(runtimeFixture)),
+      "Copy event-runtime/lib/fixtures/schema-validation-cases.json to event-runtime/web/src/lib/fixtures/schema-validation-cases.json after editing the source fixture",
+    ).toBe(0);
+  });
+
+  test("the matrix is non-empty and every case is well-formed", () => {
+    expect(sharedCases.length).toBeGreaterThan(20);
+    for (const c of sharedCases) {
+      expect(typeof c.name, JSON.stringify(c)).toBe("string");
+      expect(typeof c.valid, c.name).toBe("boolean");
+      expect(Object.hasOwn(c, "schema"), c.name).toBe(true);
+      expect(Object.hasOwn(c, "value"), c.name).toBe(true);
+      expect(Array.isArray(c.errors), c.name).toBe(true);
+      // #1282: errors is the exact contract; the old errorContains hint is
+      // dead and must not creep back in.
+      expect(Object.hasOwn(c, "errorContains"), c.name).toBe(false);
+      if (c.valid) {
+        expect(c.errors, c.name).toEqual([]);
+      } else {
+        expect(c.errors.length, c.name).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  test.each(sharedCases.map((c) => [c.name, c]))("%s", (_name, c) => {
+    const result = validate(c.schema, c.value);
+    expect(result.valid, `${c.name}: ${result.errors.join("; ")}`).toBe(
+      c.valid,
+    );
+    expect(result.errors, c.name).toEqual(c.errors);
+  });
+});
 
 describe("validate", () => {
   test("accepts a conforming object", () => {
@@ -48,6 +104,27 @@ describe("validate", () => {
       false,
     );
     expect(validate({ type: "array", minItems: 1 }, []).valid).toBe(false);
+  });
+
+  // #823: a malformed registered pattern is a schema defect, not a crash.
+  test("a malformed pattern fails closed instead of throwing", () => {
+    expect(() =>
+      validate({ type: "string", pattern: "[" }, "value"),
+    ).not.toThrow();
+    expect(validate({ type: "string", pattern: "[" }, "value")).toEqual({
+      valid: false,
+      errors: ["$: invalid pattern"],
+    });
+    expect(
+      validate(
+        {
+          type: "object",
+          properties: { sha: { type: "string", pattern: "(?<=" } },
+        },
+        { sha: "deadbeef" },
+      ),
+    ).toEqual({ valid: false, errors: ["$.sha: invalid pattern"] });
+    expect(validate({ pattern: "[" }, 12)).toEqual({ valid: true, errors: [] });
   });
 
   test("empty schema accepts anything", () => {

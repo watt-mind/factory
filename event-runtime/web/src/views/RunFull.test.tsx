@@ -8,6 +8,7 @@ import {
   createEventFixture,
   createRunDetailFixture,
   createRunListItemFixture,
+  createWorkerFixture,
   renderWithClient,
   restoreApi,
   withApi,
@@ -80,6 +81,125 @@ describe("RunFull layout (WM-194)", () => {
 });
 
 describe("RunFull header (WM-193)", () => {
+  test("shows elapsed time, lease remaining, and a fresh worker heartbeat for an in-flight run", async () => {
+    const runId = "run_inflight_fresh";
+    const detail = createRunDetailFixture({
+      run: { runId, state: "RUNNING" } as RunDetail["run"],
+      attempts: [
+        {
+          run_id: runId,
+          attempt: 1,
+          lease_owner: "worker_fresh",
+          lease_expires_at: new Date(Date.now() + 3 * 60_000).toISOString(),
+          started_at: new Date(Date.now() - 2 * 60_000).toISOString(),
+          finished_at: null,
+          terminal_state: null,
+          reason_code: null,
+          workspace_path: null,
+        },
+      ],
+    });
+    await withApi(
+      {
+        run: async () => detail,
+        runs: async () => ({
+          runs: [createRunListItemFixture({ runId, state: "RUNNING" })],
+        }),
+        workers: async () => ({
+          workers: [
+            createWorkerFixture({
+              workerId: "worker_fresh",
+              currentRun: runId,
+              state: "busy",
+              lastSeen: new Date(Date.now() - 10_000).toISOString(),
+            }),
+          ],
+        }),
+      },
+      async () => {
+        const view = renderRunFull(runId);
+        const status = await waitFor(() =>
+          view.getByLabelText("In-flight run status"),
+        );
+        expect(status.textContent).toContain("Elapsed 2m");
+        expect(status.textContent).toContain("lease 3m");
+        expect(status.textContent).toContain("worker_fresh");
+        expect(status.textContent).toMatch(/heartbeat \d+s ago/);
+        expect(status.textContent).not.toContain("stale");
+      },
+    );
+  });
+
+  test("marks an in-flight worker with a stale heartbeat", async () => {
+    const runId = "run_inflight_stale";
+    const detail = createRunDetailFixture({
+      run: { runId, state: "VERIFYING" } as RunDetail["run"],
+      attempts: [
+        {
+          run_id: runId,
+          attempt: 1,
+          lease_owner: "worker_stale",
+          lease_expires_at: new Date(Date.now() + 3 * 60_000).toISOString(),
+          started_at: new Date(Date.now() - 2 * 60_000).toISOString(),
+          finished_at: null,
+          terminal_state: null,
+          reason_code: null,
+          workspace_path: null,
+        },
+      ],
+    });
+    await withApi(
+      {
+        run: async () => detail,
+        runs: async () => ({
+          runs: [createRunListItemFixture({ runId, state: "VERIFYING" })],
+        }),
+        workers: async () => ({
+          workers: [
+            createWorkerFixture({
+              workerId: "worker_stale",
+              currentRun: runId,
+              state: "busy",
+              stale: true,
+              lastSeen: new Date(Date.now() - 5 * 60_000).toISOString(),
+            }),
+          ],
+        }),
+      },
+      async () => {
+        const view = renderRunFull(runId);
+        const status = await waitFor(() =>
+          view.getByLabelText("In-flight run status"),
+        );
+        expect(status.textContent).toContain("worker_stale");
+        expect(status.textContent).toMatch(/heartbeat [45]m ago/);
+        expect(status.textContent).toContain("stale");
+      },
+    );
+  });
+
+  test("omits the in-flight status span when elapsed, lease, and worker are all unknown", async () => {
+    const runId = "run_inflight_empty";
+    const detail = createRunDetailFixture({
+      run: { runId, state: "RUNNING" } as RunDetail["run"],
+      attempts: [],
+    });
+    await withApi(
+      {
+        run: async () => detail,
+        runs: async () => ({
+          runs: [createRunListItemFixture({ runId, state: "RUNNING" })],
+        }),
+        workers: async () => ({ workers: [] }),
+      },
+      async () => {
+        const view = renderRunFull(runId);
+        await waitFor(() => view.getByText(/Remaining/));
+        expect(view.queryByLabelText("In-flight run status")).toBeNull();
+      },
+    );
+  });
+
   test("keeps run identity and actions without duplicating sidebar metadata", async () => {
     const runId = "run_clean_header";
     const detail = createRunDetailFixture({

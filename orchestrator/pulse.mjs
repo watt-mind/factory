@@ -15,6 +15,11 @@ import { homedir } from "node:os";
 import { ROOT } from "../lib/schedule.mjs";
 import { loadControlPlane } from "../lib/control-plane/index.mjs";
 import { loadForge } from "../lib/forge/index.mjs";
+import {
+  controlApi,
+  controlApiFailureCode,
+  fetchRecentSandboxRefusals,
+} from "./watchdog.mjs";
 
 const c = {
   bold: (s) => `\x1b[1m${s}\x1b[0m`,
@@ -24,6 +29,9 @@ const c = {
   red: (s) => `\x1b[31m${s}\x1b[0m`,
   cyan: (s) => `\x1b[36m${s}\x1b[0m`,
 };
+
+const LINEAR_SUPPLY_PAGE_SIZE = 100;
+const MAX_LINEAR_SUPPLY_PAGES = 5;
 
 function sh(args, cwd = ROOT) {
   try {
@@ -69,6 +77,7 @@ export async function gatherPulse({
   repoName = "factory",
   fetchLinear = true,
   fetchGitHub = true,
+  controlPlane,
 } = {}) {
   const pulse = {
     timestamp: new Date().toISOString(),
@@ -77,13 +86,14 @@ export async function gatherPulse({
       web: { ok: false, port: webPort },
       workers: { total: 0, busy: 0, idle: 0, list: [] },
     },
-    runs: { active: [], proposed: 0, byState: {} },
+    runs: { active: [], proposed: 0, byState: {}, sandboxRefusals: [] },
     supply: {
       repo: repoName,
       team: "WM",
       dispatchable: 0,
       triage: 0,
       tickets: [],
+      truncated: false,
     },
     prs: { total: 0, candidates: [] },
     workspace: {
@@ -97,19 +107,15 @@ export async function gatherPulse({
 
   // 1. API Health & Status
   try {
-    const healthRes = await fetch(`http://${host}:${port}/health`, {
-      signal: AbortSignal.timeout(3000),
-    });
-    if (healthRes.ok) {
-      const healthJson = await healthRes.json();
-      pulse.stack.api = {
-        ok: true,
-        policyVersion: healthJson.policyVersion,
-        env: healthJson.env?.name,
-      };
-    }
+    const healthJson = await controlApi("/health", { host, port });
+    pulse.stack.api = {
+      ok: true,
+      policyVersion: healthJson.policyVersion,
+      env: healthJson.env?.name,
+    };
   } catch (err) {
-    pulse.stack.api = { ok: false, error: err.message };
+    const code = controlApiFailureCode(err);
+    pulse.stack.api = { ok: false, code, error: `${code}: ${err.message}` };
   }
 
   // 2. Web UI Health
@@ -136,17 +142,13 @@ export async function gatherPulse({
   // 3. Status & Workers & Runs from API (if alive)
   if (pulse.stack.api.ok) {
     try {
-      const [statusRes, workersRes, runsRes] = await Promise.all([
-        fetch(`http://${host}:${port}/status`, {
-          signal: AbortSignal.timeout(3000),
-        }).then((r) => r.json()),
-        fetch(`http://${host}:${port}/workers`, {
-          signal: AbortSignal.timeout(3000),
-        }).then((r) => r.json()),
-        fetch(`http://${host}:${port}/runs?state=RUNNING`, {
-          signal: AbortSignal.timeout(3000),
-        }).then((r) => r.json()),
-      ]);
+      const [statusRes, workersRes, runsRes, sandboxRefusals] =
+        await Promise.all([
+          controlApi("/status", { host, port }),
+          controlApi("/workers", { host, port }),
+          controlApi("/runs?state=RUNNING", { host, port }),
+          fetchRecentSandboxRefusals({ host, port }),
+        ]);
 
       if (workersRes?.workers) {
         const workers = workersRes.workers;
@@ -181,8 +183,18 @@ export async function gatherPulse({
           updated_at: r.updated_at,
         }));
       }
-    } catch {
-      // partial fetch failure handled gracefully
+      pulse.runs.sandboxRefusals = sandboxRefusals;
+    } catch (err) {
+      const code = controlApiFailureCode(err);
+      // A failed protected read (auth, control lock, timeout, 5xx) is not an
+      // idle factory. Surface it to the operator instead of leaving the
+      // default empty workers/runs values, keeping what /health told us.
+      pulse.stack.api = {
+        ...pulse.stack.api,
+        ok: false,
+        code,
+        error: `${code}: ${err.message}`,
+      };
     }
   }
 
@@ -202,26 +214,46 @@ export async function gatherPulse({
       }
       pulse.supply.team = team;
 
-      if (!hasLinearKey()) {
+      if (!controlPlane && !hasLinearKey()) {
         pulse.supply.error = "LINEAR_API_KEY not configured";
       } else {
-        const d = await loadControlPlane().raw(
-          `query($t:String!){
-            issues(first:100, filter:{ team:{key:{eq:$t}}, state:{type:{nin:["completed","canceled"]}} }){
-              nodes{ id identifier title state{ name } labels(first:20){ nodes{ name } } assignee{ name } }
-            }
-          }`,
-          { t: team },
-        );
+        const linear = controlPlane ?? loadControlPlane();
+        const ready = [];
+        const triage = [];
+        let after = null;
 
-        const nodes = d?.issues?.nodes ?? [];
-        const ready = nodes.filter(
-          (i) =>
-            i.state?.name === "Todo" &&
-            !i.assignee &&
-            (i.labels?.nodes ?? []).some((l) => l.name === "ai:agent-ready"),
-        );
-        const triage = nodes.filter((i) => i.state?.name === "Triage");
+        for (let page = 0; page < MAX_LINEAR_SUPPLY_PAGES; page += 1) {
+          const d = await linear.raw(
+            `query($t:String!,$after:String){
+              issues(first:${LINEAR_SUPPLY_PAGE_SIZE}, after:$after, filter:{ team:{key:{eq:$t}}, state:{name:{in:["Todo","Triage"]}} }){
+                nodes{ id identifier title state{ name } labels(first:20){ nodes{ name } } assignee{ name } }
+                pageInfo{ hasNextPage endCursor }
+              }
+            }`,
+            { t: team, after },
+          );
+
+          const issues = d?.issues?.nodes ?? [];
+          ready.push(
+            ...issues.filter(
+              (i) =>
+                i.state?.name === "Todo" &&
+                !i.assignee &&
+                (i.labels?.nodes ?? []).some(
+                  (l) => l.name === "ai:agent-ready",
+                ),
+            ),
+          );
+          triage.push(...issues.filter((i) => i.state?.name === "Triage"));
+
+          const pageInfo = d?.issues?.pageInfo;
+          if (!pageInfo?.hasNextPage) break;
+          if (page === MAX_LINEAR_SUPPLY_PAGES - 1 || !pageInfo.endCursor) {
+            pulse.supply.truncated = true;
+            break;
+          }
+          after = pageInfo.endCursor;
+        }
 
         pulse.supply.dispatchable = ready.length;
         pulse.supply.triage = triage.length;
@@ -329,6 +361,15 @@ export function formatPulse(pulse) {
       ? `${workers.total} registered (${c.green(`${workers.busy} busy`)}, ${workers.idle} idle)`
       : c.yellow("0 registered");
   lines.push(`  Workers:         ${workerDetail}`);
+  const sandboxRefusals = pulse.runs.sandboxRefusals ?? [];
+  if (sandboxRefusals.length > 0) {
+    const agents = [...new Set(sandboxRefusals.map((entry) => entry.agent))]
+      .sort()
+      .join(", ");
+    lines.push(
+      `  ${c.red("Scan loops refused: sandbox unavailable")} (${agents})`,
+    );
+  }
   lines.push("");
 
   // In-Flight Runs
@@ -366,6 +407,9 @@ export function formatPulse(pulse) {
       `  Dispatchable:    ${supplyColor(`${pulse.supply.dispatchable} tickets`)} in Todo (ai:agent-ready, unassigned)`,
     );
     lines.push(`  Triage Backlog:  ${pulse.supply.triage} tickets in Triage`);
+    if (pulse.supply.truncated) {
+      lines.push(c.yellow("  Supply counts:   (truncated)"));
+    }
     if (pulse.supply.tickets.length > 0) {
       lines.push(c.dim("  Next up:"));
       for (const t of pulse.supply.tickets) {

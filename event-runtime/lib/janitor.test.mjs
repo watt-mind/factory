@@ -5,6 +5,7 @@ import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-janitor-t
 import { openDb } from "./db.mjs";
 import {
   DEFAULT_ARTIFACT_RETENTION_DAYS,
+  DEFAULT_ROW_RETENTION_DAYS,
   janitorArgv,
   JANITOR_MAX_BUFFER,
   JANITOR_TIMEOUT_MS,
@@ -116,5 +117,184 @@ describe("runtime retention", () => {
 
   test("retention defaults preserve the documented 30-day artifact window", () => {
     expect(DEFAULT_ARTIFACT_RETENTION_DAYS).toBe(30);
+  });
+});
+
+describe("terminal row retention (#1065)", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const now = Date.parse("2026-08-20T12:00:00.000Z");
+  const old = new Date(now - 40 * DAY).toISOString();
+  const recent = new Date(now - 1 * DAY).toISOString();
+  const cutoff = new Date(now - DEFAULT_ROW_RETENTION_DAYS * DAY).toISOString();
+
+  function insertRun(db, runId, state, updatedAt) {
+    db.query(
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+       VALUES (?, ?, '{}', 'sha256:test', ?, 1, ?, ?)`,
+    ).run(runId, `${runId}-key`, state, updatedAt, updatedAt);
+  }
+
+  function insertProposal(db, id, status, createdAt, ttlSeconds) {
+    db.query(
+      `INSERT INTO proposals (id, event_source, event_id, decision, status, created_at, ttl_seconds)
+       VALUES (?, 'test', ?, 'run', ?, ?, ?)`,
+    ).run(id, `${id}-evt`, status, createdAt, ttlSeconds);
+  }
+
+  function insertEvent(db, eventId, admittedAt, archivedAt) {
+    db.query(
+      `INSERT INTO events (source, event_id, type, occurred_at, received_at, envelope_json, payload_hash, status, admitted_at, archived_at)
+       VALUES ('test', ?, 'ping', ?, ?, '{}', 'h', ?, ?, ?)`,
+    ).run(
+      eventId,
+      admittedAt,
+      admittedAt,
+      archivedAt ? "dead_lettered" : "admitted",
+      admittedAt,
+      archivedAt,
+    );
+  }
+
+  function seed(db) {
+    // Runs: two terminal-old (deleted), everything else kept.
+    insertRun(db, "run-completed-old", "COMPLETED", old);
+    insertRun(db, "run-failed-old", "FAILED", old);
+    insertRun(db, "run-running-old", "RUNNING", old); // active — keep
+    insertRun(db, "run-queued-old", "QUEUED", old); // active — keep
+    insertRun(db, "run-completed-recent", "COMPLETED", recent); // within window
+    insertRun(db, "run-completed-boundary", "COMPLETED", cutoff); // == cutoff, strict < keeps
+
+    // Child rows for one deleted run and one kept run.
+    db.query(
+      `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+       VALUES ('run-completed-old', 1, '{}', 'sha256:test', '{}', '{}', ?)`,
+    ).run(old);
+    db.query(
+      `INSERT INTO lifecycle_events (run_id, to_state, actor, at, record_hash)
+       VALUES ('run-completed-old', 'COMPLETED', 'test', ?, 'h')`,
+    ).run(old);
+    db.query(
+      `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+       VALUES ('run-running-old', 1, '{}', 'sha256:test', '{}', '{}', ?)`,
+    ).run(old);
+
+    // Proposals: three terminal-old (deleted), three kept.
+    insertProposal(db, "prop-rejected-old", "rejected", old, 3600);
+    insertProposal(db, "prop-superseded-old", "superseded", old, 3600);
+    insertProposal(db, "prop-open-expired-old", "open", old, 3600); // past TTL
+    insertProposal(db, "prop-open-within-ttl-old", "open", old, 100 * 86400); // TTL not reached
+    insertProposal(db, "prop-approved-old", "approved", old, 3600); // decided, kept
+    insertProposal(db, "prop-open-fresh", "open", recent, 3600); // inside window
+
+    // Events: one archived-old (deleted), two kept.
+    insertEvent(db, "evt-archived-old", old, old);
+    insertEvent(db, "evt-archived-recent", recent, recent);
+    insertEvent(db, "evt-admitted-old", old, null);
+  }
+
+  function counts(db) {
+    return {
+      runs: db.query(`SELECT COUNT(*) AS c FROM runs`).get().c,
+      proposals: db.query(`SELECT COUNT(*) AS c FROM proposals`).get().c,
+      events: db.query(`SELECT COUNT(*) AS c FROM events`).get().c,
+      results: db.query(`SELECT COUNT(*) AS c FROM results`).get().c,
+      lifecycle: db.query(`SELECT COUNT(*) AS c FROM lifecycle_events`).get().c,
+    };
+  }
+
+  test("dry-run counts terminal rows without deleting; --apply removes them and keeps active state", () => {
+    const root = tmpDir("evrt-rows-");
+    const store = path.join(root, "artifacts");
+    const db = openDb(path.join(root, "runtime.db"));
+    try {
+      mkdirSync(store);
+      seed(db);
+
+      const dry = sweepRuntimeRetention(db, store, { now });
+      expect(dry.runs).toEqual({ deleted: 2, dryRun: true });
+      expect(dry.proposals).toEqual({ deleted: 3, dryRun: true });
+      expect(dry.events).toEqual({ deleted: 1, dryRun: true });
+      expect(dry.vacuum).toEqual({ ran: false });
+      // Nothing actually removed on a dry run.
+      expect(counts(db)).toMatchObject({ runs: 6, proposals: 6, events: 3 });
+
+      const applied = sweepRuntimeRetention(db, store, { now, apply: true });
+      expect(applied.runs).toEqual({ deleted: 2, dryRun: false });
+      expect(applied.proposals).toEqual({ deleted: 3, dryRun: false });
+      expect(applied.events).toEqual({ deleted: 1, dryRun: false });
+      expect(applied.vacuum).toEqual({ ran: true });
+
+      const after = counts(db);
+      expect(after.runs).toBe(4);
+      expect(after.proposals).toBe(3);
+      expect(after.events).toBe(2);
+      // Child rows of a deleted run are swept; a kept run's children remain.
+      expect(after.results).toBe(1);
+      expect(after.lifecycle).toBe(0);
+
+      const survivingRuns = db
+        .query(`SELECT run_id FROM runs ORDER BY run_id`)
+        .all()
+        .map((r) => r.run_id);
+      expect(survivingRuns).toEqual([
+        "run-completed-boundary",
+        "run-completed-recent",
+        "run-queued-old",
+        "run-running-old",
+      ]);
+
+      const survivingProps = db
+        .query(`SELECT id FROM proposals ORDER BY id`)
+        .all()
+        .map((r) => r.id);
+      expect(survivingProps).toEqual([
+        "prop-approved-old",
+        "prop-open-fresh",
+        "prop-open-within-ttl-old",
+      ]);
+
+      const survivingEvents = db
+        .query(`SELECT event_id FROM events ORDER BY event_id`)
+        .all()
+        .map((r) => r.event_id);
+      expect(survivingEvents).toEqual([
+        "evt-admitted-old",
+        "evt-archived-recent",
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("cutoff boundary is strict: a terminal run updated exactly at the cutoff is retained", () => {
+    const root = tmpDir("evrt-boundary-");
+    const store = path.join(root, "artifacts");
+    const db = openDb(path.join(root, "runtime.db"));
+    try {
+      mkdirSync(store);
+      insertRun(db, "run-at-cutoff", "COMPLETED", cutoff);
+      insertRun(
+        db,
+        "run-just-before",
+        "COMPLETED",
+        new Date(now - 40 * DAY).toISOString(),
+      );
+
+      const dry = sweepRuntimeRetention(db, store, { now });
+      expect(dry.runs.deleted).toBe(1);
+
+      sweepRuntimeRetention(db, store, { now, apply: true });
+      const remaining = db
+        .query(`SELECT run_id FROM runs`)
+        .all()
+        .map((r) => r.run_id);
+      expect(remaining).toEqual(["run-at-cutoff"]);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("row retention default is 30 days", () => {
+    expect(DEFAULT_ROW_RETENTION_DAYS).toBe(30);
   });
 });

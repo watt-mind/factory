@@ -1,5 +1,6 @@
 /** Runtime-owned effects for inbox decisions (docs/event-runtime-inbox.md §3). */
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import path from "node:path";
 
 import { hashBytes } from "./canonical.mjs";
@@ -9,14 +10,16 @@ import { requeueEvent } from "./planner.mjs";
 import { approveProposal, rejectProposal } from "./proposals.mjs";
 
 const linearCli = () => path.join(FACTORY_ROOT, "tools", "linear.mjs");
+const execFileAsync = promisify(execFile);
 
-function runLinear(args) {
+async function runLinear(args) {
   try {
-    return execFileSync("bun", [linearCli(), ...args], {
+    const { stdout } = await execFileAsync("bun", [linearCli(), ...args], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 20_000,
     });
+    return stdout;
   } catch (err) {
     const message =
       String(err?.stderr ?? "")
@@ -27,17 +30,17 @@ function runLinear(args) {
   }
 }
 
-/** Synchronous Linear transport: decision application runs inside a DB transaction. */
+/** Async Linear transport so decision effects never hold the SQLite write lock. */
 export const linearDecisionTransport = {
-  get(issue) {
-    return JSON.parse(runLinear(["get", issue, "--json"]));
+  async get(issue) {
+    return JSON.parse(await runLinear(["get", issue, "--json"]));
   },
-  triage(issue, comment) {
-    runLinear(["triage", issue, "--comment", comment]);
+  async triage(issue, comment) {
+    await runLinear(["triage", issue, "--comment", comment]);
     return { ok: true };
   },
-  answer(issue, text) {
-    runLinear(["answer", issue, text]);
+  async answer(issue, text) {
+    await runLinear(["answer", issue, text]);
     return { ok: true };
   },
 };
@@ -110,8 +113,11 @@ function transportSucceeded(result, operation) {
   return result;
 }
 
-function authorise(db, item, response, option, { linear, planner, now }) {
-  const issue = transportSucceeded(linear.get(item.refs.issue), "linear get");
+async function authorise(db, item, response, option, { linear, planner, now }) {
+  const issue = transportSucceeded(
+    await linear.get(item.refs.issue),
+    "linear get",
+  );
   if (!issue || typeof issue.description !== "string") {
     throw new Error(
       `linear description unavailable for ${item.refs.issue} at decision time`,
@@ -150,7 +156,7 @@ function authorise(db, item, response, option, { linear, planner, now }) {
     },
   };
   const admitted = transportSucceeded(
-    planner.admit(db, envelope, { now }),
+    await planner.admit(db, envelope, { now }),
     "dispatch admission",
   );
   if (!admitted?.admitted && !admitted?.duplicate) {
@@ -171,7 +177,7 @@ function authorise(db, item, response, option, { linear, planner, now }) {
  * the seam makes every transport failure deterministic in tests and lets the
  * inbox ledger record it without resolving the item.
  */
-export function applyDecisionEffect(
+export async function applyDecisionEffect(
   db,
   item,
   response,
@@ -195,7 +201,7 @@ export function applyDecisionEffect(
     let descriptionHash;
     switch (kind) {
       case "authorise": {
-        const authorised = authorise(db, item, response, option, {
+        const authorised = await authorise(db, item, response, option, {
           linear,
           planner,
           now: at,
@@ -209,20 +215,20 @@ export function applyDecisionEffect(
           textFields(item, response) ||
           `Operator sent ${item.refs.issue} to Triage from inbox ${item.id}.`;
         transportSucceeded(
-          linear.triage(item.refs.issue, text),
+          await linear.triage(item.refs.issue, text),
           "linear triage",
         );
         break;
       }
       case "answer":
         transportSucceeded(
-          linear.answer(item.refs.issue, textFields(item, response)),
+          await linear.answer(item.refs.issue, textFields(item, response)),
           "linear answer",
         );
         break;
       case "requeue":
         transportSucceeded(
-          planner.requeue(
+          await planner.requeue(
             db,
             {
               source: item.refs.eventSource,
@@ -235,7 +241,7 @@ export function applyDecisionEffect(
         break;
       case "approve_proposal": {
         const approved = transportSucceeded(
-          planner.approveProposal(db, item.refs.proposalId, {
+          await planner.approveProposal(db, item.refs.proposalId, {
             actor: "operator",
             now: at,
           }),
@@ -254,7 +260,7 @@ export function applyDecisionEffect(
       }
       case "reject_proposal":
         transportSucceeded(
-          planner.rejectProposal(db, item.refs.proposalId, {
+          await planner.rejectProposal(db, item.refs.proposalId, {
             actor: "operator",
             reason: textFields(item, response),
             now: at,

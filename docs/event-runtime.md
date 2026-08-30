@@ -76,9 +76,10 @@ Conversely, what no event type above needs yet — and is therefore explicitly
 deferred, with its trigger named:
 
 - **API-mediated worker claims** — the first _remote_ worker node. The
-  control plane keeps `BEGIN IMMEDIATE` and SQLite behind authenticated
-  `/worker/v1` endpoints; workers receive fencing tokens, never database
-  credentials ([event-runtime-worker-protocol.md](event-runtime-worker-protocol.md)).
+  control plane is planned to keep `BEGIN IMMEDIATE` and SQLite behind
+  authenticated [unbuilt `/worker/v1` endpoints](event-runtime-worker-protocol.md);
+  workers will receive fencing tokens, never database credentials. The linked
+  protocol is still design-only and operator-ratified.
   The former `FOR UPDATE SKIP LOCKED`/shared-Postgres cut-line is rejected and
   superseded (§10).
 - **Declared workflows with `dependsOn` and deterministic joins (§11)** — the
@@ -220,7 +221,7 @@ The LLM appears only inside `execute`.
 
 ## 5. Versioned contracts
 
-Besides the three below, `factory.decision-request/v1` and `factory.decision-response/v1` (`event-runtime/schemas/`, validated by `lib/decision.mjs`) define a bounded human question — 1–6 options with runtime effects plus gated fields from a closed widget vocabulary — and its hash-bound answer; a refused agent-result may carry a request as `decision` (docs/event-runtime-inbox.md §2–§4).
+Besides the three below, `factory.decision-request/v1` and `factory.decision-response/v1` (`event-runtime/schemas/`, validated by `lib/decision.mjs`) define a bounded human question — 1–6 options with runtime effects plus gated fields from a closed widget vocabulary — and its hash-bound answer; a refused agent-result may carry a request as `decision` (docs/event-runtime-inbox.md §2–§4). `factory.presentation/v1` (`event-runtime/schemas/`, validated by `lib/presentation.mjs`) is an optional view-only block document an agent may emit beside its `artifact`, its `$ref` values resolving into the accepted artifact; verification is tolerant — an invalid one is dropped to `presentationErrors` and the run still completes (docs/event-runtime-artifact-views.md §3).
 
 ### 5.1 Event envelope
 
@@ -364,6 +365,18 @@ mutating: false
 
 A definition is admitted only when its adapter can prove the required
 capabilities. Adapter support is a contract, not a hopeful command-line flag.
+Adapters execute only the registry-verified `promptText` snapshot and refuse
+definitions without it; `promptPath` is provenance, not executable prompt source.
+
+**Dispatch agent environment.** Any `dispatch@<version>` run receives up to
+three RunSpec-derived identity variables: `FACTORY_RUN_ID` (the dispatch run
+ID), `FACTORY_TICKET` (the ticket identifier), and `FACTORY_REPO` (the
+configured repository name). A key is omitted when the spec does not carry the
+value; it is never exported as the string `"null"`. They are set by the worker
+rather than inherited from its ambient environment, so a dispatch prompt can
+bind its PR handoff to the run that owns the worktree. The shared child-env
+builder re-asserts these keys after its credential and prefix strip loops, so
+an adapter's `extraStrip` or `stripPrefixes: ["FACTORY_"]` cannot remove them.
 
 **Artifact-view sidecar (`agents/<name>.view.json`, WM-454).** An optional
 `factory.artifact-view/v1` document beside the definition annotates pointers
@@ -387,7 +400,7 @@ adapter: the event parks `human_needed` with reason
 `repo_not_allowed: <agent> may not run over <repo> (allowed: …)`, before any
 repo pin, mirror fetch, or worktree materialization happens. The declared
 scope rides in the RunSpec (so the proposal an operator approves names it) and
-is readable in `GET /registry`.
+is readable in `GET /agents` as the `repos` field.
 
 **Model-tier routing (`model_tier`, WM-135).** A definition may declare an
 optional `"model_tier": "strong" | "standard" | "light"` — a statement of
@@ -533,13 +546,13 @@ across every assistant turn's own reported tokens/cost and emitted once at
 process close; fields pi never reported land as explicit `null`/`{}`, never a
 guessed value.
 
-**Both LLM adapters apply the same push-credential carve-out (WM-128,
-WM-223).** `safeChildEnvironment(env, def)` in either adapter hands a mutating
+**All child-process adapters apply the same push-credential carve-out (WM-128,
+WM-223).** The shared `safeChildEnvironment(env, def)` helper hands a mutating
 run `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GITHUB_TOKEN` and `GH_TOKEN` on top of
 the base inherited set, and strips all four from a non-mutating one — after the
 caller's `env` is merged, so a read-only run cannot be handed a token through
-`env` either. `pi.mjs` imports `PUSH_CREDENTIAL_ENV` from `claude.mjs` rather
-than restating it: one list, no drift. Until WM-223 pi had no
+`env` either. `adapters/child-env.mjs` owns `PUSH_CREDENTIAL_ENV`, so every
+adapter uses one list without drift. Until WM-223 pi had no
 mutating/non-mutating distinction at all, which meant the runtime's only
 mutating LLM agent (`dispatch@1`, pi-routed since WM-215) reached its push step
 with no credential of any kind — surviving only because `gh` reads its own
@@ -861,16 +874,17 @@ host-local PIDs, locks, and paths. The physical substrate can start small:
   contention with `BEGIN IMMEDIATE` on claim (the default deferred transaction
   lets two claimers read the same `QUEUED` row before either writes) and
   `busy_timeout` set before `journal_mode`.
-- **Remote workers use the control API, not a shared database** (designed in
+- **Remote workers use the planned, unbuilt control API, not a shared database**
+  (the operator-ratified design is in
   [event-runtime-worker-protocol.md](event-runtime-worker-protocol.md)). This
   is an explicit boundary move and **supersedes this section's former cut-line
   #1**: do not port `db.mjs` to Postgres for distribution and do not put
   `FOR UPDATE SKIP LOCKED` or DB credentials in workers. The server performs
-  the same atomic claim transaction behind `POST /worker/v1/claim`, returns a
-  fencing token, accepts heartbeats and cancellation polling, and publishes a
-  verified result plus outbox event transactionally. Local workers migrate to
-  that API over loopback too, so schema evolution and substrate choice remain
-  control-plane concerns.
+  the same atomic claim transaction behind the planned, unbuilt
+  `POST /worker/v1/claim`, returns a fencing token, accepts heartbeats and
+  cancellation polling, and publishes a verified result plus outbox event
+  transactionally. Local workers migrate to that API over loopback too, so
+  schema evolution and substrate choice remain control-plane concerns.
 - **Remote placement remains earned machinery, not an immediate requirement.**
   Per-node identity, HTTPS, content-addressed artifact ingest, adapters, repo
   mirrors/config, and (for tier-2) worktree coordination must exist before a
@@ -961,6 +975,11 @@ originally proposed: `cli.mjs`, a one-shot verb CLI (`proposals`, `approve
 are **clients, not the runtime**: every read and every verb goes through the
 same control API the runtime exposes, never directly into the database. That keeps a future web app a second client of
 identical endpoints, with the same audit trail, rather than a reimplementation.
+
+All control-API list endpoints reject non-integer, out-of-range `limit` values
+with `422 { error: "invalid_limit", message }`. `GET /inbox` additionally
+returns `invalid_before` for malformed cursors and `invalid_status` for unknown
+status filters.
 
 **Push notifications (WM-65).** For the operator who is _not_ watching, the
 serve tick carries a push channel (`event-runtime/lib/notify.mjs`) over the
@@ -1165,6 +1184,15 @@ What that buys, verified by real-VM tests in
   upstreams. A placeholder sent anywhere else stays a meaningless string. A
   secret scoped to a host the allowlist does not permit is a policy error, not
   a no-op.
+
+Sandbox runtime mounts are read-only but remain a host-data boundary. Mount
+admission therefore denies every path inside the operator home by default,
+including a path reached by resolving a symlink. The sole explicit exception
+is `$HOME/.factory/event-runtime/workspaces` and its descendants: those are
+runtime-owned disposable workspaces. Raw credential-store denials still take
+precedence over that home rule, so an allow-list entry can never admit a
+credential path. Widening this list is a security review decision, not policy
+configuration.
 
 The result contract is identical to the host path — same `result.json`, same
 artifacts, same exit-code semantics — so verification and receipts cannot tell

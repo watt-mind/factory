@@ -48,6 +48,14 @@ export default async function work(args) {
   if (!Number.isInteger(pollMs) || pollMs < 25 || pollMs > 5_000) {
     fail("work: --poll-ms must be an integer between 25 and 5000");
   }
+  const drainTimeoutSeconds = Number(flagValue(args, "--drain-timeout") ?? 60);
+  if (
+    !Number.isInteger(drainTimeoutSeconds) ||
+    drainTimeoutSeconds < 1 ||
+    drainTimeoutSeconds > 3_600
+  ) {
+    fail("work: --drain-timeout must be an integer between 1 and 3600 seconds");
+  }
   // Built-ins first, then allow-listed extensions (lib/extensions.mjs,
   // WM-838) — before toMap(), which is a snapshot. The registry validates the
   // contract and wraps every adapter in the sandbox seam (WM-837); a broken
@@ -100,8 +108,14 @@ export default async function work(args) {
   const adapterNames = adapterOverride
     ? [adapterOverride]
     : Object.keys(adapters);
+  const startedAt = Date.now();
 
-  registerWorker(db, { workerId, labels, adapters: adapterNames });
+  registerWorker(db, {
+    workerId,
+    labels,
+    adapters: adapterNames,
+    now: startedAt,
+  });
   log(`worker ${workerId} on ${hostname()} (db ${dbPath()}, policy ${pv})`);
   if (Object.keys(labels).length > 0) log(`labels: ${JSON.stringify(labels)}`);
   if (!sandboxReport.available)
@@ -138,9 +152,16 @@ export default async function work(args) {
   // so a loop-driven heartbeat would mark every legitimately busy worker as
   // stale — and the doctor's "stalled worker" check exists precisely to tell
   // busy apart from dead.
+  const workerHeartbeat = (options) =>
+    heartbeat(db, workerId, {
+      ...options,
+      labels,
+      adapters: adapterNames,
+      startedAt,
+    });
   const beat = setInterval(
     () =>
-      heartbeat(db, workerId, {
+      workerHeartbeat({
         state: inFlight ? "busy" : "idle",
         runId: inFlight,
       }),
@@ -185,7 +206,7 @@ export default async function work(args) {
           );
           return finish("drain_requested");
         }
-        heartbeat(db, workerId, {
+        workerHeartbeat({
           state: inFlight ? "busy" : "idle",
           runId: inFlight,
         });
@@ -212,7 +233,7 @@ export default async function work(args) {
           continue;
         }
         inFlight = claim.runId;
-        heartbeat(db, workerId, { state: "busy", runId: claim.runId });
+        workerHeartbeat({ state: "busy", runId: claim.runId });
         log(
           `claimed ${claim.runId} attempt ${claim.attempt} (${claim.spec.agent})`,
         );
@@ -247,8 +268,7 @@ export default async function work(args) {
   // SIGKILL, which orphans the agent AND leaves a lying registry row. After
   // the grace period the worker leaves honestly and says what happens next —
   // the lease expires and the reaper requeues the run.
-  const drainTimeoutMs =
-    Number(flagValue(args, "--drain-timeout") ?? 60) * 1000;
+  const drainTimeoutMs = drainTimeoutSeconds * 1000;
   const finish = (reason, code = 0) => {
     clearInterval(beat);
     deregisterWorker(db, workerId);

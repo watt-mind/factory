@@ -12,6 +12,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import { attrIcon } from "./attrIcons";
 export { GitBranchIcon, SourceIcon, RepoBadge, BranchBadge } from "./attrIcons";
@@ -850,6 +851,18 @@ export function Table({ className = "", ...props }: ComponentProps<"table">) {
       className={`text-sm [&_thead]:text-xs [&_thead]:uppercase [&_thead]:text-(--text-faint) [&_td.mono]:text-sm ${className}`}
     />
   );
+}
+
+/** Makes a focusable table row activate like a button without stealing child controls. */
+export function rowKeyHandler(onActivate: () => void) {
+  return (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (event.target !== event.currentTarget) return;
+    if (event.key !== "Enter" && event.key !== " " && event.key !== "Spacebar")
+      return;
+    event.preventDefault();
+    event.stopPropagation();
+    onActivate();
+  };
 }
 
 /** Pinned title, verb, and utility rows; the spec and payload scroll underneath (WM-209). */

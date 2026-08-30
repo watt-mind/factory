@@ -4,13 +4,21 @@ import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
 import { openDb } from "../lib/db.mjs";
-import { workerPassthroughArgs } from "./supervise.mjs";
+import { registerWorker } from "../lib/workers.mjs";
+import supervise, {
+  crashBackoffMs,
+  readPool,
+  spawnDetached,
+  startTickLoop,
+  workerPassthroughArgs,
+} from "./supervise.mjs";
 import {
   CLI,
   DEAD_PORT,
@@ -25,6 +33,7 @@ import {
   seedRun,
   spawnSupervisor,
   spawnWorker,
+  until,
   waitFor,
   registerCliTmpCleanup,
 } from "./test-helpers.mjs";
@@ -72,6 +81,205 @@ describe("supervise (WM-226)", () => {
       ["supervise", "--workers", "x", "--once"],
     ]) {
       expect(runCli(args).status).not.toBe(0);
+    }
+  });
+
+  test("--once propagates tick failures while daemon ticks log non-Error throws and retry", async () => {
+    const error = "transient failure";
+    expect(() =>
+      startTickLoop(
+        () => {
+          throw error;
+        },
+        { once: true, intervalMs: 10, log: () => {} },
+      ),
+    ).toThrow(error);
+
+    // A permanently broken tick must stay loud: every failing tick logs, with
+    // no `lastHold`-style dedupe, and the interval keeps firing regardless.
+    const lines = [];
+    let calls = 0;
+    const timer = startTickLoop(
+      () => {
+        calls += 1;
+        throw error;
+      },
+      { once: false, intervalMs: 10, log: (line) => lines.push(line) },
+    );
+    try {
+      await until(
+        "the guarded tick to fail at least three times",
+        () => calls >= 3,
+        {
+          timeoutMs: 5_000,
+        },
+      );
+    } finally {
+      clearInterval(timer);
+    }
+    expect(calls).toBeGreaterThanOrEqual(3);
+    expect(lines.length).toBe(calls);
+    expect(new Set(lines)).toEqual(new Set(["tick error: transient failure"]));
+  });
+
+  test("a spawn() that throws closes the log fd and the next tick still runs", async () => {
+    const dir = tmpDir("evrt-pool-spawn-throw-");
+    const logFile = path.join(dir, "worker-1.log");
+    const openFds = () => readdirSync("/proc/self/fd").length;
+    const spawnThrows = () => {
+      throw Object.assign(new Error("spawn EAGAIN"), { code: "EAGAIN" });
+    };
+
+    // The parent's copy of the log fd is closed even when spawn() throws:
+    // fifty failed spawns leave the descriptor table where it started.
+    const before = openFds();
+    for (let i = 0; i < 50; i += 1) {
+      expect(() =>
+        spawnDetached(logFile, ["work"], { cwd: dir, spawn: spawnThrows }),
+      ).toThrow("spawn EAGAIN");
+    }
+    expect(openFds()).toBe(before);
+
+    // Inside the guarded loop the failure is logged and the loop keeps ticking.
+    const lines = [];
+    let calls = 0;
+    const timer = startTickLoop(
+      () => {
+        calls += 1;
+        spawnDetached(logFile, ["work"], { cwd: dir, spawn: spawnThrows });
+      },
+      { once: false, intervalMs: 10, log: (line) => lines.push(line) },
+    );
+    try {
+      await until("the tick to fail at least three times", () => calls >= 3, {
+        timeoutMs: 5_000,
+      });
+    } finally {
+      clearInterval(timer);
+    }
+    expect(openFds()).toBe(before);
+    expect(new Set(lines)).toEqual(new Set(["tick error: spawn EAGAIN"]));
+  });
+
+  test("an unwritable primary crash-loop file uses its fallback and keeps the supervisor live", async () => {
+    const home = tmpDir("evrt-pool-tick-error-");
+    const dir = tmpDir("evrt-pool-tick-error-run-");
+    const box = spawnSupervisor(
+      [
+        "--workers",
+        "1:1",
+        "--interval-ms",
+        "100",
+        "--adapter-override",
+        "fake",
+        "--poll-ms",
+        "50",
+      ],
+      { FACTORY_EVENT_HOME: home, FACTORY_RUN_DIR: dir },
+    );
+    try {
+      expect(await waitFor(box, "spawn slot 1")).toBe(true);
+      const worker = readPool(dir).slots[0];
+      const crashLoop = path.join(dir, "worker-1.crash-loop.json");
+      rmSync(crashLoop, { force: true });
+      mkdirSync(crashLoop);
+      process.kill(worker.pid, "SIGKILL");
+      expect(
+        await waitFor(
+          box,
+          "crash-loop state for slot 1 could not be saved",
+          10_000,
+        ),
+      ).toBe(true);
+      await until(
+        "a replacement worker after the crash-loop write fails",
+        () => readPool(dir).slots.find((s) => s.n === 1 && s.alive) ?? null,
+        { timeoutMs: 10_000 },
+      );
+      expect(box.child.exitCode ?? null).toBeNull();
+      expect(existsSync(path.join(dir, "supervisor.pid"))).toBe(true);
+    } finally {
+      await killPool(box, dir);
+      rmSync(home, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("preserves a failed fast exit before release so the next decision backs off", async () => {
+    const home = tmpDir("evrt-pool-crash-fallback-home-");
+    const dir = tmpDir("evrt-pool-crash-fallback-run-");
+    const before = Date.now();
+    const oldHome = process.env.FACTORY_EVENT_HOME;
+    const oldRunDir = process.env.FACTORY_RUN_DIR;
+    process.env.FACTORY_EVENT_HOME = home;
+    process.env.FACTORY_RUN_DIR = dir;
+    writeFileSync(path.join(dir, "worker-1.pid"), "2147483646\n");
+    writeFileSync(
+      path.join(dir, "worker-1.crash-loop.json"),
+      JSON.stringify({
+        fastExits: 2,
+        spawnedAt: before,
+        workerId: "fast-exit-worker",
+        nextAttemptAt: null,
+        loggedRetryAt: null,
+      }),
+    );
+
+    try {
+      await supervise(["--workers", "1:1", "--once"], {
+        writeCrashLoop: () => {
+          throw "injected crash-loop write failure";
+        },
+      });
+      const state = JSON.parse(
+        readFileSync(
+          path.join(dir, "worker-1.crash-loop.fallback.json"),
+          "utf8",
+        ),
+      );
+      expect(state.fastExits).toBe(3);
+      expect(state.nextAttemptAt).toBeGreaterThan(before);
+      expect(existsSync(path.join(dir, "worker-1.pid"))).toBe(false);
+      expect(readPool(dir).slots[0]).toMatchObject({
+        crashLoops: 3,
+        nextAttemptAt: state.nextAttemptAt,
+      });
+    } finally {
+      if (oldHome === undefined) delete process.env.FACTORY_EVENT_HOME;
+      else process.env.FACTORY_EVENT_HOME = oldHome;
+      if (oldRunDir === undefined) delete process.env.FACTORY_RUN_DIR;
+      else process.env.FACTORY_RUN_DIR = oldRunDir;
+      rmSync(home, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the supervise process exits non-zero when its single tick throws", () => {
+    const dir = tmpDir("evrt-pool-once-tick-throw-");
+    try {
+      writeFileSync(path.join(dir, "worker-1.pid"), "2147483646\n");
+      mkdirSync(path.join(dir, "worker-1.crash-loop.json"));
+      const result = runCli(["supervise", "--workers", "1:1", "--once"], {
+        FACTORY_RUN_DIR: dir,
+      });
+      expect(result.status).not.toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects unsafe drain timeouts before writing its pidfile", () => {
+    for (const value of ["not-a-number", "0", "-1"]) {
+      const dir = tmpDir("evrt-pool-invalid-drain-");
+      const r = runCli(
+        ["supervise", "--workers", "1:1", "--drain-timeout", value, "--once"],
+        { FACTORY_RUN_DIR: dir },
+      );
+      expect(r.status).not.toBe(0);
+      expect(r.all).toContain(
+        "supervise: --drain-timeout must be an integer between 1 and 3600 seconds",
+      );
+      expect(existsSync(path.join(dir, "supervisor.pid"))).toBe(false);
     }
   });
 
@@ -160,38 +368,164 @@ describe("supervise (WM-226)", () => {
     }
   }, 60_000);
 
-  test("surplus idle workers drain back to workers.min, and the pool is not respawned past target", async () => {
-    const home = tmpDir("evrt-pool-down-");
-    const dir = tmpDir("evrt-pool-down-run-");
-    // Two short hangs: long enough to force a second worker, short enough that
-    // both go idle while the supervisor is still watching.
-    for (const runId of ["run_drain_a", "run_drain_b"]) {
-      await seedRun(home, {
-        runId,
-        input: { repos: ["hang"] },
-        timeoutSeconds: 3,
-      });
-    }
+  test("fast-exit slots back off exponentially instead of respawning every tick", async () => {
+    const home = tmpDir("evrt-pool-crash-loop-");
+    const dir = tmpDir("evrt-pool-crash-loop-run-");
     const box = spawnSupervisor(
       [
         "--workers",
-        "1:2",
+        "1:1",
         "--interval-ms",
-        "150",
+        "100",
         "--spawn-grace-ms",
-        "150",
+        "500",
         "--adapter-override",
-        "fake",
-        "--poll-ms",
-        "50",
-        "--drain-timeout",
-        "1",
+        "does-not-exist",
       ],
       { FACTORY_EVENT_HOME: home, FACTORY_RUN_DIR: dir },
     );
     try {
-      expect(await waitFor(box, "spawn slot 2", 30_000)).toBe(true);
-      expect(await waitFor(box, "drain slot", 30_000)).toBe(true);
+      expect(
+        await waitFor(
+          box,
+          "crash-loop slot 1: 3 fast exits, next attempt in 2s",
+          15_000,
+        ),
+      ).toBe(true);
+      expect(
+        await waitFor(
+          box,
+          "crash-loop slot 1: 4 fast exits, next attempt in 4s",
+          15_000,
+        ),
+      ).toBe(true);
+      expect(readPool(dir).slots[0].crashLoops).toBeGreaterThanOrEqual(4);
+      expect(crashBackoffMs(3)).toBe(2_000);
+      expect(crashBackoffMs(4)).toBe(4_000);
+      expect(crashBackoffMs(8)).toBe(60_000);
+    } finally {
+      await killPool(box, dir);
+      rmSync(home, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 45_000);
+
+  test("--once reports a persisted crash-loop hold without respawning", () => {
+    const home = tmpDir("evrt-pool-crash-once-");
+    const dir = tmpDir("evrt-pool-crash-once-run-");
+    try {
+      writeFileSync(
+        path.join(dir, "worker-1.crash-loop.json"),
+        JSON.stringify({
+          fastExits: 3,
+          spawnedAt: null,
+          workerId: "failed-worker",
+          nextAttemptAt: Date.now() + 16_000,
+          loggedRetryAt: null,
+        }),
+      );
+      const result = runCli(["supervise", "--workers", "1:1", "--once"], {
+        FACTORY_EVENT_HOME: home,
+        FACTORY_RUN_DIR: dir,
+      });
+      expect(result.status).toBe(0);
+      expect(result.all).toMatch(
+        /crash-loop slot 1: 3 fast exits, next attempt in \d+s/,
+      );
+      expect(readPool(dir).slots[0].crashLoops).toBe(3);
+      expect(existsSync(path.join(dir, "worker-1.pid"))).toBe(false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a registered worker that survives grace resets its crash-loop counter", async () => {
+    const home = tmpDir("evrt-pool-crash-reset-");
+    const dir = tmpDir("evrt-pool-crash-reset-run-");
+    writeFileSync(
+      path.join(dir, "worker-1.crash-loop.json"),
+      JSON.stringify({
+        fastExits: 2,
+        spawnedAt: Date.now() - 1_000,
+        workerId: "old-worker",
+        nextAttemptAt: null,
+        loggedRetryAt: null,
+      }),
+    );
+    const box = spawnSupervisor(
+      [
+        "--workers",
+        "1:1",
+        "--interval-ms",
+        "100",
+        "--spawn-grace-ms",
+        "500",
+        "--adapter-override",
+        "fake",
+        "--poll-ms",
+        "50",
+      ],
+      { FACTORY_EVENT_HOME: home, FACTORY_RUN_DIR: dir },
+    );
+    try {
+      expect(
+        await waitFor(
+          box,
+          "slot 1 registered past spawn grace — crash-loop counter reset",
+          10_000,
+        ),
+      ).toBe(true);
+      expect(readPool(dir).slots[0].crashLoops).toBe(0);
+    } finally {
+      await killPool(box, dir);
+      rmSync(home, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("surplus idle workers drain back to workers.min, and the pool is not respawned past target", async () => {
+    const home = tmpDir("evrt-pool-down-");
+    const dir = tmpDir("evrt-pool-down-run-");
+    const children = [];
+    let box = null;
+    try {
+      // Adopt two known-idle processes instead of waiting on timed fake runs.
+      // That keeps this a supervisor decision test even on a loaded worker,
+      // where run timeouts can otherwise leave transient busy registry rows.
+      const db = openDb(path.join(home, "runtime.db"));
+      for (const n of [1, 2]) {
+        const workerId = `worker_drain_${n}`;
+        registerWorker(db, { workerId });
+        const child = spawn(
+          process.execPath,
+          ["-e", "setInterval(() => {}, 60_000)"],
+          { stdio: "ignore" },
+        );
+        children.push(child);
+        writeFileSync(path.join(dir, `worker-${n}.pid`), `${child.pid}\n`);
+        writeFileSync(path.join(dir, `worker-${n}.id`), `${workerId}\n`);
+      }
+      db.close();
+
+      // A stale backoff for an unavailable slot must not turn a scale-down
+      // decision into a retry hold; draining live capacity remains safe.
+      writeFileSync(
+        path.join(dir, "worker-3.crash-loop.json"),
+        JSON.stringify({
+          fastExits: 3,
+          spawnedAt: null,
+          workerId: "previous-worker",
+          nextAttemptAt: Date.now() + 60_000,
+          loggedRetryAt: null,
+        }),
+      );
+
+      box = spawnSupervisor(["--workers", "1:2", "--interval-ms", "100"], {
+        FACTORY_EVENT_HOME: home,
+        FACTORY_RUN_DIR: dir,
+      });
+      expect(await waitFor(box, "drain slot", 10_000)).toBe(true);
       expect(box.out).toMatch(
         /drain slot \d+ \(worker \S+\): \d+ idle worker\(s\) and no queued runs, pool 2 above workers.min 1/,
       );
@@ -199,19 +533,22 @@ describe("supervise (WM-226)", () => {
       expect(box.out).toContain(
         "it exits at its next idle poll boundary, never mid-run",
       );
-      expect(await waitFor(box, "slot released", 30_000)).toBe(true);
+      const drainedSlot = Number(/drain slot (\d+)/.exec(box.out)?.[1]);
+      expect(drainedSlot).toBeGreaterThanOrEqual(1);
+      children[drainedSlot - 1].kill("SIGKILL");
+      await exitOf(children[drainedSlot - 1]);
+      expect(await waitFor(box, "slot released", 10_000)).toBe(true);
+      expect(await waitFor(box, "steady: 0 queued", 10_000)).toBe(true);
 
-      // Converged at min and stayed there — a drain that is immediately undone
-      // by the next tick's spawn is a busy loop, not a scale-down.
-      const deadline = Date.now() + 3_000;
-      while (Date.now() < deadline) {
-        expect(await poolSize(dir)).toBeLessThanOrEqual(2);
-        await Bun.sleep(200);
-      }
+      // Converged at min and did not immediately undo the drain.
       expect(await poolSize(dir)).toBe(1);
-      expect(box.out.split("spawn slot").length - 1).toBe(2); // slots 1 and 2, no third
+      expect(box.out).not.toContain("spawn slot");
     } finally {
-      await killPool(box, dir);
+      if (box) await killPool(box, dir);
+      for (const child of children) {
+        if (child.exitCode == null && child.signalCode == null)
+          child.kill("SIGKILL");
+      }
       rmSync(home, { recursive: true, force: true });
       rmSync(dir, { recursive: true, force: true });
     }

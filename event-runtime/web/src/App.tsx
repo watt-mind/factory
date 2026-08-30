@@ -20,6 +20,7 @@ import {
   type OperatorContext,
 } from "./context";
 import {
+  artifactFullHash,
   artifactsHash,
   eventsHash,
   hashPath,
@@ -30,6 +31,7 @@ import {
 import {
   keyGuard,
   refetchIntervals,
+  setApiBusyBackoff,
   THEMES,
   useHashRoute,
   useTheme,
@@ -110,6 +112,14 @@ const InjectDialog = lazy(() =>
     default: m.InjectDialog,
   })),
 );
+
+/**
+ * Loader for the ticket-journey chunk. A mutable seam so tests can make the
+ * dynamic import itself reject without poisoning bun's shared module registry.
+ */
+export const ticketJourneyChunk = {
+  load: () => import("./subjectJourney"),
+};
 
 export function App() {
   const [route, navigateRaw] = useHashRoute();
@@ -250,9 +260,23 @@ export function App() {
     if (!root) return;
     let disposed = false;
     let uninstall = () => {};
-    void import("./subjectJourney").then(({ installTicketJourneyLinks }) => {
-      if (!disposed) uninstall = installTicketJourneyLinks(root, jumpToTicket);
-    });
+    // Two separate catches: a rejected dynamic import is a stale chunk after a
+    // deploy (WM-1367) and must not be confused with a genuine install-time
+    // throw, so each failure is logged under its own message.
+    void ticketJourneyChunk.load().then(
+      ({ installTicketJourneyLinks }) => {
+        if (disposed) return;
+        try {
+          uninstall = installTicketJourneyLinks(root, jumpToTicket);
+        } catch (error: unknown) {
+          console.warn("ticket journey links failed to install", error);
+        }
+      },
+      (error: unknown) => {
+        if (disposed) return;
+        console.warn("ticket journey chunk import failed", error);
+      },
+    );
     return () => {
       disposed = true;
       uninstall();
@@ -266,8 +290,8 @@ export function App() {
     navigate(hashPath("runs", runId));
   };
   const openRunFull = (runId: string) => navigate(hashPath("run", runId));
-  const openArtifactFull = (digest: string) =>
-    navigate(hashPath("artifact", digest));
+  const openArtifactFull = (digest: string, backHash?: string) =>
+    navigate(artifactFullHash(digest, backHash));
   const jumpToTicket = (ticketId: string) =>
     navigate(hashPath("tickets", ticketId));
   const jumpToPr = (number: number) =>
@@ -329,6 +353,18 @@ export function App() {
   const registryHealth = health.data?.registry;
   const registryReloadAge = reloadAge(registryHealth?.loadedAt);
 
+  useEffect(() => {
+    if (health.data?.tick?.overruns && health.data.tick.overruns > 0) {
+      setApiBusyBackoff(true);
+    } else if (
+      health.data?.tick &&
+      health.data.tick.overruns === 0 &&
+      (health.data.tick.lastMs ?? 0) < 1000
+    ) {
+      setApiBusyBackoff(false);
+    }
+  }, [health.data]);
+
   const status = useQuery({
     queryKey: ["status"],
     queryFn: api.status,
@@ -348,9 +384,8 @@ export function App() {
   // null until the first status lands: reading "no workers" off a pending
   // fetch is the same false alarm as flashing "unreachable" on first load.
   const liveWorkers = status.data?.workers?.live ?? null;
-  const stoppedSchedulesCount = (
-    (status.data?.anomalies as any)?.stoppedSchedules ?? []
-  ).length;
+  const stoppedSchedulesCount = (status.data?.anomalies?.stoppedSchedules ?? [])
+    .length;
 
   // Workers is the one badge whose meaning can flip: a stale
   // heartbeat is a worker that is gone while claiming to work, so it
@@ -823,7 +858,7 @@ export function App() {
                   "color-mix(in oklch, var(--hue-err) 35%, var(--border))",
               }}
             >
-              Registry reload failed — running last-good configuration. {" "}
+              Registry reload failed — running last-good configuration.{" "}
               <span className="mono">
                 {registryHealth.lastReloadError.message}
               </span>

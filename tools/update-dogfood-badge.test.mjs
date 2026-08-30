@@ -50,14 +50,21 @@ function forgeWith(prs) {
 }
 
 // -------------------------------------------------------- heuristic ---
-test("Fixes <TICKET> in the body is autonomous", () => {
-  expect(isAutonomousPr({ body: "Fixes WM-958\n\nrun:abc" })).toBe(true);
-  expect(isAutonomousPr({ body: "See also Fixes CLNT-12." })).toBe(true);
+test("closing references in the body are autonomous", () => {
+  for (const body of [
+    "Fixes WM-958\n\nrun:abc",
+    "See also fixes clnt-12.",
+    "Closes #1570",
+    "resolves watt-mind/factory#1570",
+    "Fixes https://github.com/watt-mind/factory/issues/1570",
+  ]) {
+    expect(isAutonomousPr({ body })).toBe(true);
+  }
 });
 
 test("human or protocol-less bodies are not autonomous", () => {
   expect(isAutonomousPr({ body: "this PR fixes a bug" })).toBe(false);
-  expect(isAutonomousPr({ body: "Fixes wm-958" })).toBe(false);
+  expect(isAutonomousPr({ body: "Fixes null" })).toBe(false);
   expect(isAutonomousPr({ body: "" })).toBe(false);
   expect(isAutonomousPr({})).toBe(false);
   expect(

@@ -34,6 +34,8 @@ Non-negotiable for every agent in this repo, in any harness. Full protocol: `$FA
 
 **Stay inside `Owned Paths`.** That glob set is what makes parallel work safe; the dispatcher refuses to run two tickets whose sets intersect. Work discovered outside it becomes a new `Triage` issue — it never expands the current ticket.
 
+**Author `Owned Paths` as parser-safe bullets.** Use one repo-relative path or glob per bullet; do not use comma-separated lists, because they are silently dropped. Include sibling test files, and close generated or coupled inputs: `shared/** ⇒ dist/** + plugins/core/** + event-runtime/pins.json`; `agents/X.md ⇒ X.json`; `agents/*.json|*.view.json ⇒ event-runtime/lib/registry.test.mjs`.
+
 **Heartbeat** at each phase change (claimed → implemented → verified → PR open) and at least every 20 minutes, saying what changed. After 45 minutes of silence the ticket is reclaimed.
 
 **Verification is a gate, not a formality.** Run the ticket's exact Verification Command. Never advance state, open a PR, or report success on failing output. Never weaken a test or skip a check to get green — if the test is wrong, that's a finding to report, not to edit around.
@@ -106,8 +108,27 @@ Before blocking on product intent, check whether it's already written down — t
 **For CI:**
 
 ```bash
-gh pr checks <PR> --watch --fail-fast     # returns the moment checks settle
+# Select the CI workflow's run for this exact commit. Without --workflow,
+# `gh run list` returns the newest run of ANY workflow (CLA, Security, ...)
+# and its verdict is not the CI verdict. The run can lag the push by a
+# minute or two, so retry (bounded) instead of failing on the first miss.
+run_id=""
+for i in $(seq 8); do
+  run_id="$(gh run list --workflow ci.yml --commit <sha> --json databaseId --limit 1 --jq '.[0].databaseId // empty')"
+  test -n "$run_id" && break
+  sleep 15
+done
+test -n "$run_id" || { echo "no CI workflow run found for this commit" >&2; exit 1; }
+gh run watch "$run_id" --exit-status --interval 60
 ```
+
+`gh run list` and `gh run watch` use GitHub's REST API. Do not default to
+`gh pr checks <PR> --watch --interval 60`: it polls GraphQL every 10 seconds
+by default and can exhaust the shared GraphQL budget. If it is unavoidable,
+`--interval 60` or greater is mandatory. A green `gh run watch` covers one
+workflow; before a merge that must be fully green, assert every check-run on
+the commit is completed and successful via REST
+(`gh api repos/<owner>/<repo>/commits/<sha>/check-runs`).
 
 **For a dev server, migration, or anything with an observable ready state** — poll the condition on a short interval with a bounded ceiling, so it returns as soon as it is up and still terminates if it never is:
 
@@ -117,9 +138,9 @@ for i in $(seq 60); do curl -sf localhost:4222 >/dev/null && break; sleep 2; don
 
 **For a background job you started**, wait on the process (`wait`, or the harness's own background-task mechanism) rather than guessing how long it takes.
 
-**Never end your turn while background jobs are running.** Subagents must not park mid-flow or yield prematurely while waiting for slow commands, test suites, or background sub-processes. When an agent yields without active foreground execution, the orchestrator cannot distinguish between an agent legitimately waiting on slow work, an agent stalled needing a nudge, or an agent finished but under-reporting. Block on readiness (e.g. `gh pr checks --watch`, `wait <pid>`, or bounded polling) until the work is complete before completing your turn.
+**Never end your turn while background jobs are running.** Subagents must not park mid-flow or yield prematurely while waiting for slow commands, test suites, or background sub-processes. When an agent yields without active foreground execution, the orchestrator cannot distinguish between an agent legitimately waiting on slow work, an agent stalled needing a nudge, or an agent finished but under-reporting. Block on readiness (e.g. `gh run watch <run-id> --exit-status --interval 60`, `wait <pid>`, or bounded polling) until the work is complete before completing your turn.
 
-**GitHub Actions secondary rate limits.** Avoid rapid, unthrottled polling of GitHub's Actions and jobs APIs (e.g. tight loops calling `gh run view` or `gh api`). Aggressive polling triggers GitHub's secondary rate limits and blocks the harness. Use `gh pr checks <PR> --watch --fail-fast` or bounded polling intervals with backoff.
+**GitHub Actions secondary rate limits.** Avoid rapid, unthrottled polling of GitHub's Actions and jobs APIs (e.g. tight loops calling `gh run view` or `gh api`). Aggressive polling triggers GitHub's secondary rate limits and blocks the harness. Prefer the REST-backed `gh run watch <run-id> --exit-status --interval 60`; `gh pr checks <PR> --watch --interval 60` or greater is the minimum only when that GraphQL-backed fallback is unavoidable.
 
 **Session scratchpad isolation.** Never use generic shared filenames (such as `pr-body.md` or `scratch/critique.json`) across concurrent tasks. Reviewer, implementer, and critic agents operating in shared session scratchpads must namespace all temporary files by ticket ID or session identifier (e.g. `pr-body-<TICKET-ID>.md`, `<TICKET-ID>-critique.json`) to prevent cross-agent collisions and silent overwrites.
 

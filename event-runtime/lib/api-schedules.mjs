@@ -1,5 +1,6 @@
 /** Schedule listing and ad-hoc trigger endpoints. */
 import { admitEvent } from "./intake.mjs";
+import { sendPayloadMismatch } from "./api-intake.mjs";
 import { planEvent } from "./planner.mjs";
 import { parseCadence, scheduleView } from "./schedules.mjs";
 
@@ -16,6 +17,7 @@ export async function handleScheduleApiRoute({
   actor,
   policyVersion,
   onEvent,
+  admit = admitEvent,
 }) {
   if (route === "GET /schedules") {
     const schedules = scheduleView(db, registry, { now: nowMs }).map((item) => {
@@ -92,8 +94,10 @@ export async function handleScheduleApiRoute({
     let cadenceSeconds;
     try {
       cadenceSeconds = parseCadence(schedule.every);
-    } catch {
-      // Cadence might have parse error in bad config.
+    } catch (err) {
+      return send(422, {
+        error: `schedule ${loop}: invalid cadence '${schedule.every}': ${err.message}`,
+      });
     }
     const isoNow = new Date(nowMs).toISOString();
     let eventId = `manual:${loop}:${isoNow}`;
@@ -124,7 +128,8 @@ export async function handleScheduleApiRoute({
         ...(prNumbers ? { prNumbers } : {}),
       },
     };
-    const outcome = admitEvent(db, registry, envelope, { now: nowMs });
+    const outcome = admit(db, registry, envelope, { now: nowMs });
+    if (outcome.conflict) return sendPayloadMismatch(send, eventId);
     if (!outcome.admitted && !outcome.duplicate)
       return send(422, { errors: outcome.errors });
     if (outcome.admitted) onEvent("admitted");

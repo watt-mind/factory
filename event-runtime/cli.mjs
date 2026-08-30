@@ -2,6 +2,8 @@
 /** Event-runtime CLI argument routing and command dispatch. */
 import path from "node:path";
 import { COMMANDS } from "./cli/commands.mjs";
+import { renderInspect } from "./cli/inspect.mjs";
+import { withClient } from "./cli/shared.mjs";
 import { USAGE as BASE_USAGE } from "./cli/usage.mjs";
 import { backfillResultArtifacts } from "./lib/artifacts.mjs";
 import { initPack } from "./lib/pack-init.mjs";
@@ -16,6 +18,9 @@ import {
 } from "./lib/config.mjs";
 import { openDb } from "./lib/db.mjs";
 import { decisionRequestHash } from "./lib/decision.mjs";
+import { unauthorizedMessage } from "./lib/client.mjs";
+import { resolveRefs } from "./lib/presentation.mjs";
+import { renderText } from "./lib/presentation-text.mjs";
 import {
   contributionCounts,
   formatContributionCounts,
@@ -39,8 +44,8 @@ const USAGE = BASE_USAGE.replace(
     "\n  pack init <name> [path]          scaffold a pinned, data-only pack (default packs/<name>)\n  pack validate <path>              validate one pack through the registry loader\n  artifacts backfill-results [--apply]\n                                 materialize stored typed result output (dry by default)",
   )
   .replace(
-    "All commands except serve, work, supervise, and update-pins are clients of the control",
-    "All commands except init, serve, work, supervise, update-pins, and artifacts are clients of the control",
+    "All commands except serve, work, plan, supervise, and update-pins are clients of the control",
+    "All commands except init, serve, work, plan, supervise, update-pins, and artifacts are clients of the control",
   );
 
 // Preserve the small programmatic surface used by runtime tests and tooling.
@@ -69,15 +74,22 @@ function controlUrl(pathname) {
 }
 
 async function callControl(method, pathname, body) {
+  const token = process.env.FACTORY_CONTROL_API_TOKEN || null;
   const res = await fetch(controlUrl(pathname), {
     method,
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+    },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const payload = await res.json().catch(() => null);
   if (!res.ok) {
     const err = new Error(
-      payload?.message ?? payload?.error ?? `HTTP ${res.status}`,
+      res.status === 401 ||
+        (res.status === 503 && payload?.error === "control_api_token_unset")
+        ? unauthorizedMessage(Boolean(token))
+        : (payload?.message ?? payload?.error ?? `HTTP ${res.status}`),
     );
     err.status = res.status;
     throw err;
@@ -361,8 +373,73 @@ export function initCommand(args = []) {
   return results;
 }
 
+/** Add optional Layer B text to the split inspect command, before its artifact. */
+export async function inspectWithPresentation(args) {
+  const lines = [];
+  const originalLog = console.log;
+  let detail = null;
+  console.log = (...values) => lines.push(values.join(" "));
+  try {
+    if (!args[0]) {
+      await COMMANDS.inspect(args);
+    } else {
+      await withClient(async (client) => {
+        // Fetch the run once and hand the same detail to both renderers. The
+        // presentation is optional garnish, so it must not make inspect pay
+        // for a second GET /runs/:id.
+        detail = await client.run(args[0]);
+        await renderInspect(detail, client);
+      });
+    }
+  } finally {
+    console.log = originalLog;
+  }
+
+  const extra = [];
+  if (detail?.result?.presentation) {
+    try {
+      const rendered = renderText(
+        resolveRefs(detail.result.presentation, detail.result.artifact ?? {}),
+        { width: Math.max(20, Number(process.stdout.columns ?? 80) - 2) },
+      );
+      extra.push("  presentation");
+      for (const line of rendered.split("\n")) extra.push(`  ${line}`);
+    } catch (error) {
+      // Garnish must never mask the buffered inspect output.
+      console.warn(
+        `warning: presentation not rendered: ${error?.message ?? error}`,
+      );
+    }
+  } else if (detail?.result?.presentationErrors?.length) {
+    const errors = detail.result.presentationErrors;
+    extra.push(`  the agent's summary was dropped: ${errors.length} errors`);
+    for (const error of errors) extra.push(`    - ${error}`);
+  }
+
+  if (extra.length > 0) {
+    const artifactAt = lines.findIndex((line) => /^ {2}artifact /.test(line));
+    const resultAt = lines.findIndex((line) => line.trim() === "result");
+    const at =
+      artifactAt >= 0
+        ? artifactAt
+        : resultAt >= 0
+          ? resultAt + 1
+          : lines.length;
+    lines.splice(at, 0, ...extra);
+  }
+  for (const line of lines) originalLog(line);
+}
+
 export async function dispatch(argv = process.argv.slice(2)) {
   const [command, ...args] = argv;
+  if (!command) {
+    console.error(USAGE);
+    process.exit(1);
+  }
+  if (["help", "-h", "--help"].includes(command)) {
+    console.log(USAGE);
+    return;
+  }
   if (command === "init") return initCommand(args);
   if (command === "decide") return decideCommand(args);
   if (command === "inbox") return inboxCommand(args);
@@ -370,8 +447,9 @@ export async function dispatch(argv = process.argv.slice(2)) {
   if (command === "extensions") return extensionsCommand(args);
   if (command === "pack") return packCommand(args);
   if (command === "artifacts") return artifactsCommand(args);
+  if (command === "inspect") return inspectWithPresentation(args);
   if (!Object.hasOwn(COMMANDS, command)) {
-    console.error(USAGE);
+    console.error(`unknown command: ${command} (try: cli.mjs help)`);
     process.exit(1);
   }
   return COMMANDS[command](args);

@@ -33,11 +33,16 @@ import {
   readdirSync,
   statSync,
 } from "node:fs";
-import { homedir } from "node:os";
+import { spawnSync } from "node:child_process";
+import { homedir, hostname } from "node:os";
 import path from "node:path";
+import { Database } from "bun:sqlite";
 import { emitFactoryEvent } from "../lib/emit-event.mjs";
 import { loadControlPlane } from "../lib/control-plane/index.mjs";
 import { loadRepos } from "../event-runtime/lib/repos.mjs";
+import { dbPath } from "../event-runtime/lib/config.mjs";
+import { HEARTBEAT_STALE_MS } from "../event-runtime/lib/workers.mjs";
+import { ticketSlug } from "../lib/ticket-slug.mjs";
 
 export const REAPER_LOG_DIR = path.join(homedir(), ".factory/logs");
 
@@ -143,7 +148,52 @@ export function getApiKey() {
   return key;
 }
 
-export async function gql(query, variables = {}, retries = 5) {
+function abortReason(signal) {
+  return signal?.reason instanceof Error
+    ? signal.reason
+    : new Error("Linear request aborted");
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw abortReason(signal);
+}
+
+function retryDelay(ms, signal) {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  throwIfAborted(signal);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, ms);
+    const onAbort = () => done(abortReason(signal));
+    function done(error) {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      if (error) reject(error);
+      else resolve();
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * Send a Linear GraphQL request, retrying transient responses unless cancelled.
+ *
+ * A failed or timed-out mutation has an unknown server outcome: Linear may have
+ * committed a non-idempotent create/comment before this client observes the
+ * failure. Callers must inspect the resulting resource instead of replaying it.
+ */
+export async function gql(
+  query,
+  variables = {},
+  retriesOrOptions = 5,
+  legacySignal,
+) {
+  const options =
+    typeof retriesOrOptions === "number"
+      ? { retries: retriesOrOptions, signal: legacySignal }
+      : retriesOrOptions instanceof AbortSignal
+        ? { retries: 5, signal: retriesOrOptions }
+        : (retriesOrOptions ?? {});
+  const { retries = 5, signal } = options;
   const apiKey = getApiKey();
   const headers = {
     "Content-Type": "application/json",
@@ -154,10 +204,12 @@ export async function gql(query, variables = {}, retries = 5) {
 
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
+      throwIfAborted(signal);
       const res = await fetch(LINEAR_API_URL, {
         method: "POST",
         headers,
         body,
+        signal,
       });
 
       if (!res.ok) {
@@ -165,7 +217,7 @@ export async function gql(query, variables = {}, retries = 5) {
           [429, 500, 502, 503, 504].includes(res.status) &&
           attempt < retries - 1
         ) {
-          await new Promise((r) => setTimeout(r, delay));
+          await retryDelay(delay, signal);
           delay *= 2;
           continue;
         }
@@ -180,7 +232,7 @@ export async function gql(query, variables = {}, retries = 5) {
           msg.toUpperCase().includes("RATELIMITED") &&
           attempt < retries - 1
         ) {
-          await new Promise((r) => setTimeout(r, delay));
+          await retryDelay(delay, signal);
           delay *= 2;
           continue;
         }
@@ -189,11 +241,12 @@ export async function gql(query, variables = {}, retries = 5) {
 
       return data.data || {};
     } catch (err) {
+      if (signal?.aborted) throw abortReason(signal);
       if (
         attempt < retries - 1 &&
         !(err.message && err.message.startsWith("HTTP 4"))
       ) {
-        await new Promise((r) => setTimeout(r, delay));
+        await retryDelay(delay, signal);
         delay *= 2;
         continue;
       }
@@ -659,6 +712,300 @@ export async function runReaper(
   return totals;
 }
 
+/**
+ * Selects dead dispatch runs whose per-ticket worktree is safe to reclaim: a
+ * FAILED run that has spent its whole attempt budget (so it will never retry)
+ * and whose workspace is a worktree. Exported so the selection stays testable
+ * without a live runtime ledger.
+ *
+ * This is the runtime half of WM-1066. The planner already excludes such a run
+ * from the `same_ticket_worktree_held` block so a fresh dispatch can proceed;
+ * this reclaims the stale tree it left behind so provisioning finds no stale
+ * checkout and no operator `retry --force` is needed.
+ */
+export const DEAD_DISPATCH_WORKTREE_SQL = `
+  SELECT run_id AS runId,
+         json_extract(spec_json, '$.input.repo')   AS repo,
+         json_extract(spec_json, '$.input.ticket') AS ticket
+    FROM runs
+   WHERE state = 'FAILED'
+     AND json_extract(spec_json, '$.workspace.type') = 'worktree'
+     AND json_extract(spec_json, '$.maxAttempts') IS NOT NULL
+     AND attempts >= json_extract(spec_json, '$.maxAttempts')
+     AND json_extract(spec_json, '$.input.repo') IS NOT NULL
+     AND json_extract(spec_json, '$.input.ticket') IS NOT NULL
+   ORDER BY run_id ASC`;
+
+/**
+ * True when a repo/ticket still has a live run besides the dead one — someone
+ * may be actively holding the worktree, so it must be left alone. A
+ * still-retryable FAILED sibling counts as live; an attempts-exhausted one does
+ * not (mirrors the planner's liveRunForInput exclusion exactly).
+ */
+export function ticketHasLiveRun(db, repo, ticket) {
+  const row = db
+    .query(
+      `SELECT 1 FROM runs
+        WHERE state NOT IN ('COMPLETED','REFUSED','TIMED_OUT','CANCELLED')
+          AND (
+            state <> 'FAILED'
+            OR json_extract(spec_json, '$.maxAttempts') IS NULL
+            OR attempts < json_extract(spec_json, '$.maxAttempts')
+          )
+          AND json_extract(spec_json, '$.input.repo') = ?
+          AND json_extract(spec_json, '$.input.ticket') = ?
+        LIMIT 1`,
+    )
+    .get(repo, ticket);
+  return Boolean(row);
+}
+
+/**
+ * Reclaim worktrees stranded by dead (attempts-exhausted FAILED) dispatch runs.
+ *
+ * Teardown is delegated to the repo's own `worktree_down`, NEVER with --force:
+ * a dirty or unpushed tree refuses and stays visible to the janitor, exactly
+ * like the runtime's own completion teardown (WM-108). A worktree whose ticket
+ * still has an open pull request is left alone (mirrors janitor WM-17), and the
+ * pull-request lookup fails closed — a lookup error keeps the tree, never tears
+ * it down blind.
+ *
+ * Dependencies are injectable so selection and teardown can be tested without a
+ * live runtime database, a real filesystem, or spawning bash.
+ */
+export async function reapDeadDispatchWorktrees(
+  args,
+  {
+    repos = loadRepos(),
+    databasePath = dbPath(),
+    openDatabase = (file) => new Database(file, { readonly: true }),
+    fileExists = existsSync,
+    spawn = spawnSync,
+    hasOpenPullRequest = null,
+    log = (...values) => console.log(...values),
+  } = {},
+) {
+  const totals = { considered: 0, cleaned: 0, held: 0, failed: 0 };
+  if (!fileExists(databasePath)) return totals;
+
+  let db;
+  try {
+    db = openDatabase(databasePath);
+  } catch (err) {
+    totals.failed += 1;
+    log(
+      `  ! dead-dispatch worktree reap: ledger unreadable: ${err.message || err}`,
+    );
+    return totals;
+  }
+
+  try {
+    const seen = new Set();
+    for (const { runId, repo: repoName, ticket } of db
+      .query(DEAD_DISPATCH_WORKTREE_SQL)
+      .all()) {
+      const key = `${repoName} ${ticket}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const repo = repos.get(repoName);
+      if (!repo?.worktreeRoot || !repo?.worktreeDown || !repo?.path) {
+        // The repo declares no worktree lifecycle — never ours to reclaim.
+        continue;
+      }
+      let slug;
+      try {
+        slug = ticketSlug(ticket);
+      } catch {
+        // An unsluggable ticket never had a deterministic worktree path.
+        continue;
+      }
+      const worktreePath = path.join(repo.worktreeRoot, slug);
+      if (!fileExists(worktreePath)) continue; // already clean
+
+      if (ticketHasLiveRun(db, repoName, ticket)) {
+        totals.held += 1;
+        log(
+          `  hold  ${repoName}/${ticket}: a live run still owns ${worktreePath}`,
+        );
+        continue;
+      }
+
+      totals.considered += 1;
+      log(
+        `  STALE ${repoName}/${ticket} worktree at ${worktreePath} (dead dispatch ${runId})`,
+      );
+
+      if (hasOpenPullRequest) {
+        let open;
+        try {
+          open = await hasOpenPullRequest(repoName, ticket);
+        } catch (err) {
+          totals.failed += 1;
+          log(
+            `        ! pull-request lookup failed closed: ${err.message || err}`,
+          );
+          continue;
+        }
+        if (open) {
+          totals.held += 1;
+          log(`        (open pull request — not touching it)`);
+          continue;
+        }
+      }
+
+      if (!args.apply) continue;
+
+      const downPath = path.isAbsolute(repo.worktreeDown)
+        ? repo.worktreeDown
+        : path.join(repo.path, repo.worktreeDown);
+      const result = spawn("/bin/bash", [downPath, ticket], {
+        cwd: repo.path,
+        encoding: "utf8",
+      });
+      if (result.error || result.status !== 0) {
+        totals.failed += 1;
+        const detail = String(
+          result.stderr ||
+            result.stdout ||
+            result.error?.message ||
+            `exit ${result.status}`,
+        )
+          .trim()
+          .slice(0, 200);
+        log(`        ! worktree_down refused/failed: ${detail}`);
+        continue;
+      }
+      totals.cleaned += 1;
+      log(`        -> worktree reclaimed`);
+    }
+  } finally {
+    db.close?.();
+  }
+
+  return totals;
+}
+
+/**
+ * Is a local process still alive? `kill(pid, 0)` sends no signal — it only asks
+ * the kernel whether the pid exists. ESRCH means gone; EPERM means it exists but
+ * is owned by another user (still alive, so keep the row). Exported so the pid
+ * probe can be stubbed in tests without spawning real processes.
+ */
+export function localPidAlive(pid, kill = process.kill.bind(process)) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === "EPERM";
+  }
+}
+
+/**
+ * True when a worker registry row is a dead husk safe to delete: its heartbeat
+ * has expired past the threshold AND its process is not alive. The heartbeat
+ * gate is what protects a live worker — one that checked in within the window,
+ * or whose clock briefly lagged, is never prunable however its pid probes. Pure
+ * and exported so the decision stays testable without a database.
+ *
+ * `alive` is the pid probe's verdict: true (running — keep), false (gone —
+ * prune), or null (a worker on another host, whose pid this box cannot probe;
+ * an expired heartbeat is then the only proof of death, so it prunes).
+ */
+export function workerIsPrunable(
+  row,
+  { now = Date.now(), staleMs = HEARTBEAT_STALE_MS, alive } = {},
+) {
+  const lastSeen = Date.parse(row.last_seen);
+  const heartbeatExpired =
+    !Number.isFinite(lastSeen) || now - lastSeen > staleMs;
+  if (!heartbeatExpired) return false; // live or briefly-lagged — never touch it
+  return alive !== true;
+}
+
+/**
+ * Prune dead-pid / expired-heartbeat worker rows from the runtime registry
+ * (WM-1125). The `workers` table is durable, so every stack restart and host
+ * crash leaves the dead process's rows behind — they never claim work, but they
+ * clutter `factory workers`, mislead idle/capacity views, and used to need a
+ * manual DELETE after a reboot. This reclaims them on the reaper's cadence.
+ *
+ * A currently-heartbeating worker is never removed: the heartbeat gate in
+ * workerIsPrunable() is measured against the same HEARTBEAT_STALE_MS the
+ * registry itself uses to call a worker stale. A local row also gets a
+ * definitive pid probe, so a hung-but-alive process is kept, not pruned.
+ * Deleting a `busy!stale` row that pointed at a terminal run releases it as a
+ * side effect — the row was the only thing still "holding" the finished run.
+ *
+ * Dependencies are injectable so selection and deletion can be tested without a
+ * live runtime database, the local process table, or a real hostname.
+ */
+export function reapDeadWorkers(
+  args,
+  {
+    databasePath = dbPath(),
+    openDatabase = (file) => new Database(file),
+    fileExists = existsSync,
+    now = Date.now(),
+    staleMs = HEARTBEAT_STALE_MS,
+    localHost = hostname(),
+    pidAlive = localPidAlive,
+    log = (...values) => console.log(...values),
+  } = {},
+) {
+  const totals = { considered: 0, pruned: 0, live: 0, failed: 0 };
+  if (!fileExists(databasePath)) return totals;
+
+  let db;
+  try {
+    db = openDatabase(databasePath);
+  } catch (err) {
+    totals.failed += 1;
+    log(`  ! dead-worker reap: registry unreadable: ${err.message || err}`);
+    return totals;
+  }
+
+  try {
+    const rows = db
+      .query(
+        `SELECT worker_id, host, pid, state, last_seen, current_run FROM workers`,
+      )
+      .all();
+    const remove = db.query(`DELETE FROM workers WHERE worker_id = ?`);
+
+    for (const row of rows) {
+      // A worker on another host cannot have its pid probed from here, so its
+      // heartbeat is the only proof of life (alive = null). Local rows get the
+      // definitive check, keeping a hung-but-alive local process off the list.
+      const alive = row.host === localHost ? pidAlive(row.pid) : null;
+      if (!workerIsPrunable(row, { now, staleMs, alive })) {
+        totals.live += 1;
+        continue;
+      }
+
+      totals.considered += 1;
+      const label =
+        `${row.worker_id} (host ${row.host} pid ${row.pid}, state ${row.state}` +
+        `${row.current_run ? `, holding ${row.current_run}` : ""})`;
+      if (!args.apply) {
+        log(`  STALE worker ${label} — dead process, heartbeat expired`);
+        continue;
+      }
+      remove.run(row.worker_id);
+      totals.pruned += 1;
+      log(`  pruned worker ${label}`);
+    }
+  } catch (err) {
+    totals.failed += 1;
+    log(`  ! dead-worker reap failed: ${err.message || err}`);
+  } finally {
+    db.close?.();
+  }
+
+  return totals;
+}
+
 export async function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   if (args.help) {
@@ -682,7 +1029,49 @@ Options:
   console.log(
     `=== Stale-claim reaper [${mode}] threshold=${args.minutes}min${args.team ? ` team=${args.team}` : ""} ===\n`,
   );
-  return runReaper(args);
+  const totals = await runReaper(args);
+
+  // Runtime half of WM-1066: reclaim worktrees stranded by dead dispatch runs
+  // so a fresh dispatch is not wedged behind a checkout no one will ever reuse.
+  // Best-effort and isolated — a failure here must never mask the claim reap
+  // above. The open-PR lookup reuses each repo's control plane and fails closed.
+  const planeCache = new Map();
+  const planeFor = (repoName) => {
+    if (!planeCache.has(repoName))
+      planeCache.set(repoName, loadControlPlane({ repoName }));
+    return planeCache.get(repoName);
+  };
+  try {
+    console.log(`\n=== Dead-dispatch worktree reap [${mode}] ===\n`);
+    const worktreeTotals = await reapDeadDispatchWorktrees(args, {
+      hasOpenPullRequest: (repoName, ticket) =>
+        planeFor(repoName).hasOpenPullRequest(ticket),
+    });
+    console.log(
+      `\n=== Worktrees ${args.apply ? "reclaimed" : "reclaimable"}: ${
+        args.apply ? worktreeTotals.cleaned : worktreeTotals.considered
+      } | Held: ${worktreeTotals.held} | Failures: ${worktreeTotals.failed} ===`,
+    );
+  } catch (err) {
+    console.error(`Dead-dispatch worktree reap failed: ${err.message || err}`);
+  }
+
+  // WM-1125: prune dead-pid / expired-heartbeat worker registry rows so they
+  // stop accumulating across restarts. Best-effort and isolated — a failure
+  // here must never mask the reaps above.
+  try {
+    console.log(`\n=== Dead-worker registry prune [${mode}] ===\n`);
+    const workerTotals = reapDeadWorkers(args);
+    console.log(
+      `\n=== Workers ${args.apply ? "pruned" : "prunable"}: ${
+        args.apply ? workerTotals.pruned : workerTotals.considered
+      } | Live: ${workerTotals.live} | Failures: ${workerTotals.failed} ===`,
+    );
+  } catch (err) {
+    console.error(`Dead-worker registry prune failed: ${err.message || err}`);
+  }
+
+  return totals;
 }
 
 if (import.meta.main || process.argv[1]?.endsWith("reaper.mjs")) {

@@ -1,5 +1,5 @@
 import "./test-dom";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
@@ -9,12 +9,20 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { App, listSelectionPath, navIsCurrent } from "./App";
+import {
+  App,
+  listSelectionPath,
+  navIsCurrent,
+  ticketJourneyChunk,
+} from "./App";
+import { api, ApiError } from "./api";
 import { goPrefix } from "./goSequence";
 import { refetchIntervals } from "./hooks";
 import { NAV } from "./nav";
 import { createProposalFixture } from "./test-render";
 import type { HealthView, MetricsView, Proposal, StatusView } from "./types";
+
+const actualSubjectJourney = await import("./subjectJourney");
 
 const ENV = { name: "dev", home: "/tmp/factory", adapter: null };
 
@@ -200,6 +208,7 @@ beforeEach(() => {
   }) as typeof fetch;
   goPrefix.armedAt = 0;
   window.location.href = "http://localhost/";
+  sessionStorage.clear();
 });
 
 afterEach(() => {
@@ -209,6 +218,7 @@ afterEach(() => {
   goPrefix.armedAt = 0;
   cleanup();
   globalThis.fetch = realFetch;
+  mock.module("./subjectJourney", () => actualSubjectJourney);
 });
 
 describe("cold query rendering (WM-266)", () => {
@@ -231,7 +241,67 @@ describe("cold query rendering (WM-266)", () => {
   });
 });
 
+describe("control API browser token", () => {
+  test("captures a URL token in sessionStorage and sends it only on mutations", async () => {
+    const seen = [] as Headers[];
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      seen.push(new Headers(init?.headers));
+      return jsonResponse({ approved: true });
+    }) as typeof fetch;
+    window.location.href =
+      "http://localhost/#/proposals?token=browser-control-token";
+
+    await api.status();
+    expect(seen[0]?.get("authorization")).toBeNull();
+    expect(sessionStorage.getItem("factory.controlApiToken")).toBe(
+      "browser-control-token",
+    );
+    expect(localStorage.getItem("factory.controlApiToken")).toBeNull();
+    expect(window.location.href).not.toContain("browser-control-token");
+
+    await api.approve("prop-token");
+    expect(seen[1]?.get("authorization")).toBe("Bearer browser-control-token");
+  });
+
+  test("turns a mutating 401 into an actionable token error", async () => {
+    globalThis.fetch = (async () =>
+      Response.json(
+        { error: "unauthorized" },
+        { status: 401 },
+      )) as unknown as typeof fetch;
+
+    let error: unknown;
+    try {
+      await api.approve("prop-token");
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(401);
+    expect((error as Error).message).toBe(
+      "control API token required — reopen this dashboard with a credentialed link",
+    );
+  });
+});
+
 describe("sidebar navigation accessibility", () => {
+  test("does not render an Inbox badge or title count when the status excludes expired items", async () => {
+    currentStatus = {
+      ...STATUS,
+      inbox: { open: 0, acked: 2, byKind: { proposal_expired: 2 } },
+    };
+    const { sidebar, queryClient } = renderApp();
+    await waitFor(() => {
+      expect(queryClient.getQueryState(["status"])?.status).toBe("success");
+    });
+    const inbox = sidebar.getByRole("button", { name: "Inbox" });
+    expect(inbox.hasAttribute("aria-describedby")).toBe(false);
+    expect(document.title).toBe("factory · Overview");
+  });
+
   test("detail routes keep their parent navigation entry current", () => {
     expect(navIsCurrent("runs", "run")).toBe(true);
     expect(navIsCurrent("tickets", "prs")).toBe(true);
@@ -1028,6 +1098,78 @@ describe("ticket journey navigation (WM-595)", () => {
     expect(why.closest("[cmdk-item]")!.textContent).toContain("Why isn't");
     fireEvent.click(command.closest("[cmdk-item]")!);
     expect(window.location.hash).toBe("#/tickets/WM-595");
+  });
+});
+
+describe("ticket journey chunk loading (WM-1367)", () => {
+  const realLoad = ticketJourneyChunk.load;
+
+  async function withCapturedWarnings(
+    run: (warn: ReturnType<typeof mock>) => Promise<void>,
+  ) {
+    const warn = mock(() => {});
+    const originalWarn = console.warn;
+    const rejections: PromiseRejectionEvent[] = [];
+    const onUnhandledRejection = (event: PromiseRejectionEvent) =>
+      rejections.push(event);
+
+    console.warn = warn;
+    window.addEventListener("unhandledrejection", onUnhandledRejection);
+    try {
+      await run(warn);
+      expect(rejections).toHaveLength(0);
+    } finally {
+      console.warn = originalWarn;
+      window.removeEventListener("unhandledrejection", onUnhandledRejection);
+      ticketJourneyChunk.load = realLoad;
+    }
+  }
+
+  test("warns instead of leaking an unhandled rejection when the dynamic import itself rejects", async () => {
+    // A stale deploy: the chunk URL baked into the shell is gone, so the
+    // dynamic import rejects before any module code runs.
+    ticketJourneyChunk.load = () =>
+      Promise.reject(
+        new TypeError("Failed to fetch dynamically imported module"),
+      );
+
+    await withCapturedWarnings(async (warn) => {
+      renderApp();
+      await waitFor(() => {
+        expect(warn).toHaveBeenCalledWith(
+          "ticket journey chunk import failed",
+          expect.any(TypeError),
+        );
+      });
+      expect(warn).not.toHaveBeenCalledWith(
+        "ticket journey links failed to install",
+        expect.anything(),
+      );
+    });
+  });
+
+  test("logs a genuine install-time throw under its own message, not as a chunk failure", async () => {
+    mock.module("./subjectJourney", () => {
+      return {
+        installTicketJourneyLinks: () => {
+          throw new Error("install exploded");
+        },
+      };
+    });
+
+    await withCapturedWarnings(async (warn) => {
+      renderApp();
+      await waitFor(() => {
+        expect(warn).toHaveBeenCalledWith(
+          "ticket journey links failed to install",
+          expect.any(Error),
+        );
+      });
+      expect(warn).not.toHaveBeenCalledWith(
+        "ticket journey chunk import failed",
+        expect.anything(),
+      );
+    });
   });
 });
 

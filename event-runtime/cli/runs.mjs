@@ -1,9 +1,10 @@
 import { pad, withClient } from "./shared.mjs";
 
 export async function runs(client, stateFilter) {
-  const { runs: rows } = await client.runs(stateFilter);
+  const state = stateFilter?.toUpperCase();
+  const { runs: rows } = await client.runs(state);
   if (rows.length === 0) {
-    console.log(stateFilter ? `no runs with state ${stateFilter}` : "no runs");
+    console.log(state ? `no runs with state ${state}` : "no runs");
     return;
   }
   console.log(

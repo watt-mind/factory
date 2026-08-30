@@ -423,6 +423,9 @@ describe("POST /github route (WM-112)", () => {
       duplicate: false,
       eventId: "d-admit-1",
     });
+    // Planning runs off the response path (WM-1162), so drain the deferred
+    // setImmediate before asserting the wake-up.
+    await new Promise((resolve) => setImmediate(resolve));
     expect(s.onEvents).toEqual(["admitted"]);
 
     const again = await deliver(prPayload(), { deliveryId: "d-admit-1" });
@@ -432,6 +435,7 @@ describe("POST /github route (WM-112)", () => {
       duplicate: true,
       eventId: "d-admit-1",
     });
+    await new Promise((resolve) => setImmediate(resolve));
     expect(s.onEvents).toEqual(["admitted"]); // dedup planned nothing new
 
     const row = s.db

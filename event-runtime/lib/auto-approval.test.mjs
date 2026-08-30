@@ -1031,6 +1031,94 @@ describe("chain auto approval (WM-357)", () => {
     expect(reasons).toContain("escalate_paths_intersect");
   });
 
+  test("handoff dispatch reuses evidence, hooks, runtime guard, and execute-time recheck", async () => {
+    const safeDb = openDb(":memory:");
+    const safeEvidence = {
+      ticket: { labels: ["ai:agent-ready"] },
+      escalatePathIntersections: [],
+    };
+    const safe = seed(safeDb, {
+      id: "handoff-safe",
+      source: "handoff",
+      type: "factory.dispatch.requested",
+      input: { repo: "factory", ticket: "WM-1153" },
+      approvalPolicy: {
+        source: "handoff",
+        mode: "auto",
+        eventType: "factory.dispatch.requested",
+        dispatchEvidence: safeEvidence,
+      },
+    });
+    let guardCalls = 0;
+    const safeResult = await auto(safeDb, {
+      dispatchEligibility: () => ({ ok: true, evidence: safeEvidence }),
+      runtimeGuard: () => {
+        guardCalls += 1;
+        return null;
+      },
+    });
+    expect(safeResult.approved).toEqual([
+      { proposalId: safe.id, runId: safe.runId },
+    ]);
+    expect(guardCalls).toBe(1);
+
+    const changedDb = openDb(":memory:");
+    const changed = seed(changedDb, {
+      id: "handoff-changed",
+      source: "handoff",
+      type: "factory.dispatch.requested",
+      input: { repo: "factory", ticket: "WM-1154" },
+      approvalPolicy: {
+        source: "handoff",
+        mode: "auto",
+        eventType: "factory.dispatch.requested",
+        dispatchEvidence: safeEvidence,
+      },
+    });
+    const changedResult = await auto(changedDb, {
+      dispatchEligibility: () => ({
+        ok: true,
+        evidence: {
+          ticket: { labels: ["ai:agent-ready"], descriptionHash: "changed" },
+          escalatePathIntersections: [],
+        },
+      }),
+      runtimeGuard: () => null,
+    });
+    expect(changedResult.approved).toEqual([]);
+    expect(runState(changedDb, changed.runId)).toBe("PROPOSED");
+    expect(openProposals(changedDb, {})[0].reason).toContain(
+      "evidence_changed_since_plan",
+    );
+
+    const sensitiveDb = openDb(":memory:");
+    const sensitiveEvidence = {
+      ticket: { labels: ["ai:agent-ready", "ai:escalated"] },
+      escalatePathIntersections: [],
+    };
+    const sensitive = seed(sensitiveDb, {
+      id: "handoff-sensitive",
+      source: "handoff",
+      type: "factory.dispatch.requested",
+      input: { repo: "factory", ticket: "WM-1155" },
+      approvalPolicy: {
+        source: "handoff",
+        mode: "auto",
+        eventType: "factory.dispatch.requested",
+        dispatchEvidence: sensitiveEvidence,
+      },
+    });
+    const sensitiveResult = await auto(sensitiveDb, {
+      dispatchEligibility: () => ({ ok: true, evidence: sensitiveEvidence }),
+      runtimeGuard: () => null,
+    });
+    expect(sensitiveResult.approved).toEqual([]);
+    expect(runState(sensitiveDb, sensitive.runId)).toBe("PROPOSED");
+    expect(openProposals(sensitiveDb, {})[0].reason).toContain(
+      "escalated_or_security",
+    );
+  });
+
   test("a spoofed chain event without a durable registered predecessor remains watched", async () => {
     const db = openDb(":memory:");
     const spoofed = seed(db, {
@@ -1828,5 +1916,37 @@ describe("chain auto approval (WM-357)", () => {
     expect(reasonOf(db, row.id)).toBe(
       "auto_approval_ineligible:dispatch_recheck_failed:linear_read_failed: HTTP 503 upstream",
     );
+  });
+
+  test("a backlog of dispatch proposals for one repo reads in-flight at most once per pass (#1064)", async () => {
+    const db = openDb(":memory:");
+    const backlog = Array.from({ length: 6 }, (_, i) =>
+      dispatchSeed(db, `backlog-${i}`, { ticket: `WM-70${i}` }),
+    );
+    // The eligibility gate reads the per-repo in-flight list on every dispatch
+    // proposal; the pass must collapse that to one read for the shared repo.
+    let inFlightReads = 0;
+    const fetchInFlight = () => {
+      inFlightReads += 1;
+      return [];
+    };
+    const dispatchEligibility = (payload, dispatch) => {
+      dispatch.fetchInFlight({ name: payload.repo });
+      return {
+        ok: true,
+        evidence: { ticket: { labels: [] }, escalatePathIntersections: [] },
+      };
+    };
+
+    const result = await auto(db, {
+      dispatchEligibility,
+      dispatch: { fetchInFlight },
+      runtimeGuard: () => null,
+    });
+
+    expect(result.approved.map((row) => row.proposalId).sort()).toEqual(
+      backlog.map((row) => row.id).sort(),
+    );
+    expect(inFlightReads).toBe(1);
   });
 });

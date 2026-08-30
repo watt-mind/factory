@@ -195,7 +195,7 @@ open chain-dispatch proposal re-ran `fetchTicket` + `fetchViewer` +
 `fetchInFlight` on every tick. Rate-limited outcomes are **retry-later**:
 
 - `tools/linear.mjs` records `X-RateLimit-Requests-*` (falling back to the
-  complexity headers), exposes `factory linear budget`, and exits 3 with
+  complexity headers), exposes `factory ticket budget`, and exits 3 with
   `{rateLimited:true, resetAt}` instead of a generic failure.
 - One planning pass memoizes in-flight issues by team+project for ≤60s and
   per-ticket reads for the run, so ten candidates in one repo do not issue
@@ -222,7 +222,7 @@ auto-approval path above is what stops the inbox escalation.
 ## 3. Capacity: one budget, checked at plan and again at execute
 
 **Decision.** One per-repo in-flight cap, shared by both paths: the repo's
-`max_in_flight` in `config/repos.yaml`, falling back to
+[`max_in_flight` in the repository config reference](event-runtime-repos.md#config-reference), falling back to
 `concurrency.max_in_flight_per_repo` in `config/policy.yaml`. The ledger that
 counts against it is the existing one — `lib/worker-leases.mjs`: files under
 `~/.factory/worker-leases/` that independent supervisors already share, live
@@ -341,7 +341,7 @@ collided with a dev server.
 
 Consequences, all inherited from the dispatcher's rules rather than invented:
 
-- **`report_only` repos are never tier-2 targets.** A repo without the
+- **[`report_only` repos](event-runtime-repos.md#config-reference) are never tier-2 targets.** A repo without the
   scripts has a safe concurrency of one human; `tick.mjs` refuses to
   dispatch there and the planner refuses to propose there
   (`repo_report_only`), for the same reason.
@@ -351,6 +351,26 @@ Consequences, all inherited from the dispatcher's rules rather than invented:
 - **The runtime stays a reader of `config/repos.yaml`** (`lib/repos.mjs`
   already reads the `worktree_*` and `verify` fields, unused until now). A
   second repo registry is the same drift argument as §4, applied to ports.
+
+### Handoff verification sandbox limits
+
+The worker runs repository and ticket verification in a user, mount, PID, and
+network namespace. `sandbox.tmpfs_mb` in local `config/policy.yaml` controls
+the guest `/tmp` size in MiB; absent, malformed, or smaller-than-safe values
+use the 1024 MiB default, and values above 8192 MiB are capped there. PID 1 is
+a reaping init: after the command exits it SIGTERMs every leftover, and
+anything still alive after a short grace is SIGKILLed, so orphaned descendants
+from process-group tests can neither remain zombies nor keep the sandbox
+alive. The host must provide unprivileged user namespaces and
+`/usr/bin/python3` (the init/setup interpreter); otherwise the gate refuses
+with `sandbox_unavailable` rather than reporting the ticket's command red.
+When every explicit ticket `bun test` path is either named verbatim by
+repository verify, or is an existing `*.test.*`/`*.spec.*` file under a
+directory that repository verify runs, the worker records
+`ticket_verify_covered_by_repo_verify` and does not run a redundant second
+sandbox step. It otherwise preserves the independent ticket command check;
+unparseable shell commands, missing files, non-test modules and flag values
+(`--preload x`) never qualify for skipping.
 
 ---
 
@@ -422,7 +442,7 @@ event-runtime-workers.md §5), with one permanent exception:
 - **The develop-targeting merge chain may eventually earn `auto`.** This is
   autonomy the orchestrator path already has — `policy.yaml`'s
   `auto_merge_base: [develop]` with green CI — so the runtime earning it is
-  parity on a track record, not new ground. Escalation rules
+  parity on a track record, not new ground. [Escalation rules](event-runtime-repos.md#config-reference)
   (`escalate_paths`, the judgment list) apply identically; an escalated PR
   is `human_needed`, never `auto`.
 - **The ship chain's deploy-branch merge is PERMANENTLY `watched`.** That
@@ -459,13 +479,121 @@ remain in force.
 Dispatch is re-read immediately before approval: it must still be Todo,
 unassigned, `ai:agent-ready`, inside its lease cap, and disjoint from active
 Owned Paths. `ai:escalated`, security classification, and a ticket path that
-intersects the repo's `escalate_paths` leave the proposal open with a typed
+intersects the repo's [`escalate_paths`](event-runtime-repos.md#config-reference) leave the proposal open with a typed
 reason. Triage apply additionally revalidates its schema and closed action
 registry. Proposal/run-spec mismatches and expired proposals fail closed.
 
 `merge-apply` and `ship-apply` are not allowlistable by this path. In
 particular, their watched/human-only controls remain structurally unchanged;
 this policy does not implement autonomous merge work.
+
+#### Ineligibility reasons
+
+When the runtime leaves a proposal open it records
+`auto_approval_ineligible:<reason>`. These are the typed reasons an operator
+can use to fix the input or policy and then wait for the next pass; they are
+not approval decisions. Dynamic forms below use their literal prefix from
+`event-runtime/lib/auto-approval.mjs` followed by the value shown in angle
+brackets.
+
+**Policy**
+
+| Reason                            | What unblocks it                                                                 |
+| --------------------------------- | -------------------------------------------------------------------------------- |
+| `policy_missing`                  | Restore `config/policy.yaml`.                                                    |
+| `policy_invalid`                  | Repair the malformed chain auto-approval policy.                                 |
+| `policy_contains_forbidden_event` | Remove an unsupported or permanently watched event from the allowlist.           |
+| `merge_policy_invalid`            | Supply valid merge fix rounds, auto-merge bases, and owners.                     |
+| `policy_unknown`                  | Load a policy which supplies a typed refusal reason.                             |
+| `event_type_not_allowlisted`      | Add the supported event type to the explicit allowlist, or use watched approval. |
+
+**Capacity**
+
+| Reason                           | What unblocks it                                            |
+| -------------------------------- | ----------------------------------------------------------- |
+| `runtime_policy_unavailable`     | Restore a readable runtime policy.                          |
+| `budget_exhausted`               | Replenish or raise the applicable budget.                   |
+| `budget_check_failed`            | Repair the budget checker or its policy data.               |
+| `worker_cap_policy_invalid`      | Configure a positive integer worker cap.                    |
+| `worker_cap_full`                | Wait for a worker to finish or raise the cap deliberately.  |
+| `circuit_breaker_policy_invalid` | Configure a positive integer environment-failure threshold. |
+| `circuit_breaker_tripped`        | Investigate and clear the consecutive environment failures. |
+| `runtime_guard_failed`           | Repair the runtime guard failure before retrying.           |
+
+**Proposal integrity**
+
+| Reason                            | What unblocks it                                                    |
+| --------------------------------- | ------------------------------------------------------------------- |
+| `proposal_expired`                | Create and review a fresh proposal.                                 |
+| `proposal_unparseable`            | Recreate the proposal with valid JSON.                              |
+| `proposal_run_spec_mismatch`      | Replan so proposal and run spec are identical.                      |
+| `proposal_hash_mismatch`          | Recreate the proposal and run spec with matching hashes.            |
+| `proposal_agent_mismatch`         | Replan for the agent registered for the event type.                 |
+| `proposal_input_mismatch:<field>` | Replan with the event payload value copied into the proposal input. |
+| `run_spec_unparseable`            | Recreate the run with a valid immutable spec.                       |
+
+**Dispatch recheck**
+
+| Reason                                                 | What unblocks it                                                                                                              |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| `dispatch_recheck_unavailable`                         | Restore the dispatch eligibility checker.                                                                                     |
+| `dispatch_recheck_deferred`                            | Wait for the Linear rate-limit window, then let the next pass recheck.                                                        |
+| `dispatch_recheck_failed:<message>`                    | Fix the failing dispatch-control-plane call described by the clipped message.                                                 |
+| `dispatch_ineligible:<reason>`                         | Satisfy the current dispatch refusal (for example Todo, unassigned, ready, lease, or path requirements) and replan if needed. |
+| `dispatch_ineligible:approval_policy_missing_evidence` | Replan with immutable dispatch evidence in the approval policy.                                                               |
+| `dispatch_ineligible:evidence_changed_since_plan`      | Replan after the current dispatch evidence stabilizes.                                                                        |
+| `dispatch_ineligible:escalate_paths_intersect`         | Obtain watched/human handling for the escalated path; it cannot be auto-approved.                                             |
+
+**Chain edge**
+
+| Reason                                | What unblocks it                                                       |
+| ------------------------------------- | ---------------------------------------------------------------------- |
+| `chain_causation_missing`             | Emit the event with its predecessor run ID as causation.               |
+| `chain_predecessor_or_result_missing` | Persist the predecessor's approved proposal and result.                |
+| `chain_predecessor_not_completed`     | Wait for the predecessor run to complete.                              |
+| `chain_predecessor_unparseable`       | Repair the predecessor spec or result JSON.                            |
+| `chain_edge_not_registered`           | Declare the emitted edge in the predecessor's registry definition.     |
+| `chain_command_edge_payload_mismatch` | Re-emit the command edge using the immutable predecessor input fields. |
+
+**Merge-fix and merge barrier**
+
+| Reason                                                      | What unblocks it                                                          |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `merge_fix_history_unparseable`                             | Repair the recorded earlier merge-fix envelope.                           |
+| `merge_fix_history_invalid`                                 | Repair the earlier merge-fix round number.                                |
+| `merge_fix_round_not_durable`                               | Use the next durable round after an executed fix, within policy.          |
+| `merge_fix_repo_not_allowed`                                | Use a permitted owner and auto-merge base, or take watched review.        |
+| `merge_fix_not_mechanical_or_in_scope`                      | Mark a genuinely mechanical, Owned-Paths-only fix or take watched review. |
+| `merge_fix_round_exhausted`                                 | Stop after the configured number of fix rounds and escalate.              |
+| `merge_fix_owned_paths_missing`                             | Include the non-empty owned-paths declaration.                            |
+| `merge_owner_not_allowed`                                   | Use an allowed repository owner or take watched review.                   |
+| `merge_base_not_allowed`                                    | Target an allowed non-deploy base branch.                                 |
+| `merge_plan_must_name_one_to_batch_prs`                     | Provide one through the configured batch-size number of PRs.              |
+| `merge_review_not_policy_safe`                              | Supply a policy-safe merge review for every planned PR.                   |
+| `merge_barrier_registry_incomplete`                         | Restore the registered merge-apply and landed-verifier agents.            |
+| `merge_barrier_active:<runId>:state=<state>:age=<seconds>s` | Wait for the active merge apply or verifier run to settle.                |
+| `merge_barrier_unverified:<eventId>`                        | Complete the exact verifier for the prior landed event.                   |
+
+**Eligibility and approval execution**
+
+| Reason                               | What unblocks it                                                               |
+| ------------------------------------ | ------------------------------------------------------------------------------ |
+| `event_source_not_unattended`        | Use `chain` or the permitted `handoff` source, otherwise use watched approval. |
+| `handoff_event_type_not_dispatch`    | Use handoff only for `factory.dispatch.requested`.                             |
+| `event_unparseable`                  | Re-emit a valid event envelope.                                                |
+| `run_approval_policy_missing`        | Replan with an immutable approval policy.                                      |
+| `run_approval_policy_source_unknown` | Make the policy source match the event source.                                 |
+| `run_approval_policy_<mode>`         | Set the policy mode to `auto`, or use watched approval.                        |
+| `run_approval_policy_event_mismatch` | Replan with the policy's event type matching the event.                        |
+| `event_human_approval_only`          | Use watched/human approval for the registered event type.                      |
+| `input_schema_invalid`               | Re-emit a payload that satisfies the target agent schema.                      |
+| `triage_action_not_closed`           | Use only actions in the triage agent's closed action registry.                 |
+| `hook_denied:<reason>`               | Address the denying approval hook's reported reason.                           |
+| `approve_hooks_failed`               | Repair the approval hook failure and retry the next pass.                      |
+| `replanned`                          | Review the replacement proposal; it was not auto-approved.                     |
+| `approval_error`                     | Repair the approval write failure before retrying.                             |
+| `pass_failed`                        | Repair the pass-level database/query failure and retry.                        |
+| `pass_row_failed`                    | Repair the malformed proposal row identified by the pass error.                |
 
 ## 8. The §3 boundary, restated item by item
 
@@ -520,6 +648,29 @@ Recorded, not silently decided:
   answer. Raising event-side parallelism, or scheduling LLM loops beyond
   singletons, waits on the unattended-stage answer §3 already demands — it
   is not unlocked by anything here.
+
+## Remote handoff dispatch provenance (GH-1153)
+
+A remote operator may submit one exact agent-ready ticket through the dedicated
+SSH forced-command boundary documented in
+[remote-handoff.md](remote-handoff.md). The server, not the client, derives a
+`factory.dispatch.requested` event with `source=handoff` and HMAC-signs the
+exact `/events` request bytes using the existing runtime secret.
+
+`handoff` is reserved from every public/operator replay path. Signed `/events`
+is the only caller-facing boundary that may admit it; `chain` remains
+in-process-only. A handoff is unattended and its
+`operator_authorized` dispatch evidence is always false.
+
+Only `source=handoff` + `factory.dispatch.requested` joins the existing
+auto-approval path. It reuses the chain dispatch allowlist, immutable dispatch
+evidence, `approve.before` hooks, runtime budget/worker-cap/circuit-breaker
+guard, and evidence-changing execute-time recheck. It does not require a chain
+predecessor because the authenticated handoff boundary is its provenance.
+Every other handoff event type has no auto-approval policy. Ineligible,
+sensitive, escalated, changed, blocked, overlapping, capacity-limited, or
+otherwise unsafe dispatches therefore keep the same typed noop/watched outcomes
+as unattended chain dispatch; they never become operator-approved.
 
 ## Autonomous develop merge lifecycle (WM-398)
 

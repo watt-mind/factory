@@ -32,7 +32,13 @@ import {
   type DisplayConfig,
 } from "../displayOptions";
 import { EMPTY, formatBytes, formatRelative } from "../format";
-import { hashSearch } from "../hash";
+import {
+  artifactFullHash,
+  flushHash,
+  hashProject,
+  hashSearch,
+  withProject,
+} from "../hash";
 import {
   refetchIntervals,
   useDisplayOptions,
@@ -270,17 +276,26 @@ export function Artifacts({
   onFiltersChange,
   onJumpRun,
   onOpenFull,
+  formatContent = formattedContent,
 }: {
   metrics?: StatusView["artifacts"];
   filters: ArtifactFilters;
   onFiltersChange: (filters: ArtifactFilters) => void;
   onJumpRun: (runId: string) => void;
-  onOpenFull?: (digest: string) => void;
+  onOpenFull?: (digest: string, backHash?: string) => void;
+  /** Injectable formatter keeps the expensive preview derivation testable. */
+  formatContent?: typeof formattedContent;
 }) {
   const now = useNow();
   const artifactsQ = useQuery({
-    queryKey: ["artifacts"],
-    queryFn: () => fetchArtifacts(),
+    queryKey: ["artifacts", filters.kind, filters.orphan, filters.search],
+    queryFn: () =>
+      fetchArtifacts({
+        kind: filters.kind ?? undefined,
+        orphan: filters.orphan ?? undefined,
+        search: filters.search.trim() || undefined,
+      }),
+    placeholderData: (previousData) => previousData,
     ...refetchIntervals.primary,
   });
   const artifacts = artifactsQ.data?.artifacts ?? [];
@@ -296,10 +311,28 @@ export function Artifacts({
     return () => window.removeEventListener("hashchange", syncSelection);
   }, []);
 
-  const selected = useMemo(
+  const listMatch = useMemo(
     () => artifacts.find((artifact) => artifact.sha256 === selectedSha) ?? null,
     [artifacts, selectedSha],
   );
+  // The list is server-filtered by the active facets, so a deep link
+  // (`#/artifacts/<sha>` or a jump from Runs) may target an artifact outside
+  // the current page. Resolve it directly, the same way ArtifactFull does.
+  const fallbackQ = useQuery({
+    queryKey: ["artifact", selectedSha],
+    queryFn: () => fetchArtifacts({ search: selectedSha as string, limit: 1 }),
+    enabled:
+      selectedSha !== null && listMatch === null && !artifactsQ.isPending,
+    ...refetchIntervals.primary,
+  });
+  const selected = useMemo(() => {
+    if (listMatch) return listMatch;
+    const fallback = fallbackQ.data?.artifacts[0];
+    return fallback && fallback.sha256 === selectedSha ? fallback : null;
+  }, [listMatch, fallbackQ.data, selectedSha]);
+  const metadataPending =
+    artifactsQ.isPending ||
+    (fallbackQ.isPending && fallbackQ.fetchStatus !== "idle");
   const contentQ = useQuery({
     queryKey: ["artifact-content", selectedSha],
     queryFn: async () => {
@@ -379,15 +412,24 @@ export function Artifacts({
       ),
     [linkedEvents, producerRunIds],
   );
-  const selectedKinds = selected ? kindsOf(selected) : [];
+  const selectedKinds = useMemo(
+    () => (selected ? kindsOf(selected) : []),
+    [selected],
+  );
   const selectedName = selectedSha
     ? downloadName(selectedSha, selectedKinds)
     : "";
-  const binary = contentQ.data !== undefined && looksBinary(contentQ.data);
-  const preview =
-    contentQ.data === undefined || binary
-      ? null
-      : formattedContent(contentQ.data, selectedKinds);
+  const binary = useMemo(
+    () => contentQ.data !== undefined && looksBinary(contentQ.data),
+    [contentQ.data],
+  );
+  const preview = useMemo(
+    () =>
+      contentQ.data === undefined || binary
+        ? null
+        : formatContent(contentQ.data, selectedKinds),
+    [contentQ.data, binary, selectedKinds, formatContent],
+  );
   const parsedArtifact = useMemo(
     () => (contentQ.data === undefined ? null : parsedObject(contentQ.data)),
     [contentQ.data],
@@ -414,12 +456,14 @@ export function Artifacts({
     parsedArtifact !== null &&
     viewApplies(producerAgent?.outputView, parsedArtifact) &&
     !artifactRaw;
-  const previewLines = preview?.split("\n") ?? [];
-  const matchCount = contentSearch.trim()
-    ? previewLines.filter((line) =>
-        line.toLowerCase().includes(contentSearch.trim().toLowerCase()),
-      ).length
-    : null;
+  const previewLines = useMemo(() => preview?.split("\n") ?? [], [preview]);
+  const matchCount = useMemo(() => {
+    const search = contentSearch.trim().toLowerCase();
+    return search
+      ? previewLines.filter((line) => line.toLowerCase().includes(search))
+          .length
+      : null;
+  }, [contentSearch, previewLines]);
 
   const selectArtifact = (sha256: string) => {
     setContentSearch("");
@@ -434,12 +478,19 @@ export function Artifacts({
 
   const openFull = useCallback(
     (sha256: string) => {
+      // App-level hash writes are coalesced (HASH_WRITE_INTERVAL_MS), so a
+      // filter change made just before opening the reader may not have
+      // reached the URL yet. Land it first, or `back=` carries the stale
+      // catalogue — the very bug the return context exists to fix.
+      flushHash();
+      const backHash = window.location.hash;
       if (onOpenFull) {
-        onOpenFull(sha256);
+        onOpenFull(sha256, backHash);
       } else {
-        window.location.hash = withCurrentArtifactQuery(
-          `artifact/${encodeURIComponent(sha256)}`,
-        );
+        window.location.hash = `#/${withProject(
+          artifactFullHash(sha256, backHash),
+          hashProject(backHash),
+        )}`;
       }
     },
     [onOpenFull],
@@ -609,6 +660,12 @@ export function Artifacts({
                 </>
               }
             />
+            {artifactsQ.data?.nextBefore && (
+              <p role="status" className="mt-2 text-[12px] text-(--text-dim)">
+                Showing {visible.length.toLocaleString()} artifacts; more are
+                available. Narrow the filter to see a smaller result set.
+              </p>
+            )}
           </>
         }
       >
@@ -880,12 +937,12 @@ export function Artifacts({
           }
           close={<Button onClick={closeInspector}>Close</Button>}
         >
-          {!selected && artifactsQ.isPending && (
+          {!selected && metadataPending && (
             <div className="text-(--text-faint)">
               Loading artifact metadata…
             </div>
           )}
-          {!selected && !artifactsQ.isPending && (
+          {!selected && !metadataPending && (
             <div className="mb-4 rounded-md border border-(--border) p-3 text-(--text-faint)">
               Artifact metadata is unavailable. The content may have been
               pruned.

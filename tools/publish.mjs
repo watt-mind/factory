@@ -26,6 +26,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+export const USAGE = "usage: bun tools/publish.mjs --dry-run";
+
+class UsageError extends Error {}
 
 const SEMVER_RE = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
 
@@ -41,13 +44,10 @@ const DENYLIST_PATTERNS = [
   /(^|\/)test-support\//,
 ];
 
-function usage() {
-  return "usage: bun tools/publish.mjs --dry-run";
-}
-
 export function parseArgs(args) {
+  if (args.length === 1 && args[0] === "--help") return { help: true };
   if (args.length === 1 && args[0] === "--dry-run") return { dryRun: true };
-  throw new Error(usage());
+  throw new UsageError(USAGE);
 }
 
 export function validatePackage(dir = ROOT) {
@@ -114,7 +114,8 @@ export function assertNoLeaks(report) {
 }
 
 export function run(args = process.argv.slice(2), { log = console.log } = {}) {
-  parseArgs(args);
+  const parsed = parseArgs(args);
+  if (parsed.help) return { help: true };
   const { manifest } = validatePackage();
   const report = dryRunPackage();
   const { item, files } = assertNoLeaks(report);
@@ -129,9 +130,15 @@ export function run(args = process.argv.slice(2), { log = console.log } = {}) {
 
 if (import.meta.main) {
   try {
-    run();
+    const result = run();
+    if (result.help) console.log(USAGE);
   } catch (error) {
-    console.error(`publish: ${error.message}`);
-    process.exit(1);
+    if (error instanceof UsageError) {
+      console.error(error.message);
+      process.exitCode = 2;
+    } else {
+      console.error(`publish: ${error.message}`);
+      process.exitCode = 1;
+    }
   }
 }

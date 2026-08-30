@@ -1,5 +1,5 @@
 import { tmpDir } from "../../test-support/tmp.mjs?file=event-runtime-lib-adapters-command-test-mjs";
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { FACTORY_ROOT } from "../config.mjs";
@@ -9,13 +9,51 @@ import { loadModelTierMap, loadRegistry } from "../registry.mjs";
 import { validate } from "../schema.mjs";
 import { emitDueTicks } from "../schedules.mjs";
 import { preflight } from "../sandbox/gondolin.mjs";
-import { execute, resolveTemplate, SANDBOX_SUPPORT } from "./command.mjs";
+import {
+  BASE_INHERITED_ENV,
+  execute,
+  PUSH_CREDENTIAL_ENV,
+  resolveTemplate,
+  safeChildEnvironment,
+  SANDBOX_SUPPORT,
+} from "./command.mjs";
 import { SANDBOX_CONSOLE_FILE } from "./sandboxed.mjs";
 
 const def = (command) => ({ ref: "test-cmd@1", command });
 const spec = (input) => ({ input });
 const ws = () => tmpDir("evrt-cmd-");
 const REAPER_SCRIPT = path.join(FACTORY_ROOT, "orchestrator", "reaper.mjs");
+
+async function waitForPidExit(pid, { timeoutMs, stepMs }) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error?.code === "ESRCH") return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, stepMs));
+  }
+
+  throw new Error(`pid ${pid} did not exit within ${timeoutMs}ms`);
+}
+
+// The grandchild pid file must APPEAR before the group is torn down; a test
+// that skips the liveness assertion because the file never showed up would
+// pass vacuously. Poll for it with a bounded deadline instead.
+async function waitForPidFile(pidFile, { timeoutMs, stepMs }) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(pidFile)) {
+      const raw = readFileSync(pidFile, "utf8").trim();
+      const pid = parseInt(raw, 10);
+      if (Number.isInteger(pid) && pid > 0) return pid;
+    }
+    await new Promise((resolve) => setTimeout(resolve, stepMs));
+  }
+  throw new Error(`pid file ${pidFile} did not appear within ${timeoutMs}ms`);
+}
 
 describe("resolveTemplate", () => {
   test("substitutes placeholders inside argv elements", () => {
@@ -61,6 +99,89 @@ describe("resolveTemplate", () => {
         factoryRoot: "/tmp/pwn",
       }),
     ).toEqual(["bun", REAPER_SCRIPT]);
+  });
+});
+
+describe("safeChildEnvironment", () => {
+  const originalEnv = { ...process.env };
+
+  afterAll(() => {
+    process.env = originalEnv;
+  });
+
+  test("inherits only the ambient baseline and pins FACTORY_ROOT", () => {
+    process.env.COMMAND_ADAPTER_AMBIENT_SECRET = "must-not-leak";
+    process.env.HOME = "/tmp/command-adapter-home";
+
+    const childEnv = safeChildEnvironment({
+      CUSTOM_COMMAND_SETTING: "allowed",
+      HOME: "/tmp/overridden-home",
+      FACTORY_ROOT: "/tmp/untrusted-root",
+    });
+
+    expect(childEnv.HOME).toBe("/tmp/overridden-home");
+    expect(childEnv.CUSTOM_COMMAND_SETTING).toBe("allowed");
+    expect(childEnv.FACTORY_ROOT).toBe(FACTORY_ROOT);
+    expect(childEnv.COMMAND_ADAPTER_AMBIENT_SECRET).toBeUndefined();
+    for (const key of Object.keys(originalEnv)) {
+      if (
+        !BASE_INHERITED_ENV.includes(key) &&
+        !PUSH_CREDENTIAL_ENV.includes(key) &&
+        key !== "FACTORY_ROOT"
+      ) {
+        expect(childEnv[key]).toBeUndefined();
+      }
+    }
+  });
+
+  test("strips provider credentials even when supplied as overrides", () => {
+    const providerKeys = [
+      "ANTHROPIC_API_KEY",
+      "OPENAI_API_KEY",
+      "GEMINI_API_KEY",
+      "GOOGLE_API_KEY",
+      "GOOGLE_GENAI_API_KEY",
+      "MISTRAL_API_KEY",
+      "DEEPSEEK_API_KEY",
+      "GROQ_API_KEY",
+      "CLAUDECODE",
+      "CLAUDE_CODE_ENTRYPOINT",
+    ];
+    const childEnv = safeChildEnvironment(
+      Object.fromEntries(providerKeys.map((key) => [key, `secret-${key}`])),
+      { mutating: true },
+    );
+
+    for (const key of providerKeys) {
+      expect(childEnv[key]).toBeUndefined();
+    }
+  });
+
+  test("inherits push credentials only for explicit mutating definitions", () => {
+    for (const key of PUSH_CREDENTIAL_ENV) {
+      process.env[key] = `ambient-${key}`;
+    }
+
+    for (const opts of [{}, { mutating: false }, false]) {
+      const childEnv = safeChildEnvironment(
+        Object.fromEntries(
+          PUSH_CREDENTIAL_ENV.map((key) => [key, `override-${key}`]),
+        ),
+        opts,
+      );
+      for (const key of PUSH_CREDENTIAL_ENV) {
+        expect(childEnv[key]).toBeUndefined();
+      }
+    }
+
+    for (const opts of [{ mutating: true }, true]) {
+      const childEnv = safeChildEnvironment({ GH_TOKEN: "caller-token" }, opts);
+      for (const key of PUSH_CREDENTIAL_ENV) {
+        expect(childEnv[key]).toBe(
+          key === "GH_TOKEN" ? "caller-token" : `ambient-${key}`,
+        );
+      }
+    }
   });
 });
 
@@ -135,6 +256,84 @@ describe("execute", () => {
     expect(result.artifact.command.join(" ")).not.toContain("/tmp/pwn");
   });
 
+  test("does not leak worker or caller secrets to an unsandboxed child", async () => {
+    const workspaceDir = ws();
+    process.env.COMMAND_ADAPTER_AMBIENT_SECRET = "ambient-secret";
+    process.env.OPENAI_API_KEY = "ambient-provider-secret";
+    process.env.GH_TOKEN = "ambient-push-secret";
+    const inspectedKeys = [
+      "COMMAND_ADAPTER_AMBIENT_SECRET",
+      "OPENAI_API_KEY",
+      "ANTHROPIC_API_KEY",
+      "GH_TOKEN",
+      "CUSTOM_COMMAND_SETTING",
+      "FACTORY_ROOT",
+    ];
+    const script = `console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(inspectedKeys)}.map((key) => [key, process.env[key] ?? null]))))`;
+
+    const outcome = await execute({
+      spec: spec({}),
+      def: { ...def(["bun", "-e", script]), mutating: false },
+      workspaceDir,
+      timeoutMs: 5000,
+      env: {
+        ANTHROPIC_API_KEY: "caller-provider-secret",
+        GH_TOKEN: "caller-push-secret",
+        CUSTOM_COMMAND_SETTING: "visible-setting",
+        FACTORY_ROOT: "/tmp/untrusted-root",
+      },
+    });
+
+    expect(outcome).toEqual({ exitCode: 0, timedOut: false });
+    const result = JSON.parse(
+      readFileSync(path.join(workspaceDir, "result.json"), "utf8"),
+    );
+    const childEnv = JSON.parse(result.artifact.outputTail.trim());
+    expect(childEnv).toEqual({
+      COMMAND_ADAPTER_AMBIENT_SECRET: null,
+      OPENAI_API_KEY: null,
+      ANTHROPIC_API_KEY: null,
+      GH_TOKEN: null,
+      CUSTOM_COMMAND_SETTING: "visible-setting",
+      FACTORY_ROOT,
+    });
+  });
+
+  test("an unsandboxed child inherits the worker's runtime identity (#825)", async () => {
+    const workspaceDir = ws();
+    const identity = {
+      FACTORY_EVENT_HOME: "/tmp/command-adapter-runtime-home",
+      FACTORY_EVENT_SECRET: "worker-runtime-secret",
+      FACTORY_EVENT_PORT: "17381",
+      FACTORY_EVENT_ENV: "worktree-test",
+    };
+    const saved = Object.fromEntries(
+      Object.keys(identity).map((key) => [key, process.env[key]]),
+    );
+    Object.assign(process.env, identity);
+    const script = `console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(Object.keys(identity))}.map((key) => [key, process.env[key] ?? null]))))`;
+
+    try {
+      const outcome = await execute({
+        spec: spec({}),
+        def: { ...def(["bun", "-e", script]), mutating: false },
+        workspaceDir,
+        timeoutMs: 5000,
+      });
+
+      expect(outcome).toEqual({ exitCode: 0, timedOut: false });
+      const result = JSON.parse(
+        readFileSync(path.join(workspaceDir, "result.json"), "utf8"),
+      );
+      expect(JSON.parse(result.artifact.outputTail.trim())).toEqual(identity);
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   test("writesResult leaves a command-authored result.json in place (WM-907)", async () => {
     const workspaceDir = ws();
     const script = `import { writeFileSync } from "node:fs";
@@ -170,27 +369,24 @@ writeFileSync("result.json", JSON.stringify({
     const pidFile = path.join(workspaceDir, "grandchild.pid");
     // sh spawns background sleep and writes its pid, then waits
     const script = `sh -c 'sleep 30 & echo $! > "${pidFile}"; wait'`;
-    const outcome = await execute({
+    const runPromise = execute({
       spec: spec({}),
       def: def(["sh", "-c", script]),
       workspaceDir,
-      timeoutMs: 200,
+      timeoutMs: 1000,
     });
+
+    // The grandchild must be running before the timeout fires, otherwise
+    // there is nothing for the group kill to prove.
+    const grandchildPid = await waitForPidFile(pidFile, {
+      timeoutMs: 800,
+      stepMs: 20,
+    });
+    expect(() => process.kill(grandchildPid, 0)).not.toThrow();
+
+    const outcome = await runPromise;
     expect(outcome.timedOut).toBe(true);
-
-    // Give the kernel a brief moment to finish reaping signals
-    await new Promise((r) => setTimeout(r, 100));
-
-    if (existsSync(pidFile)) {
-      const grandchildPid = parseInt(readFileSync(pidFile, "utf8").trim(), 10);
-      let alive = true;
-      try {
-        process.kill(grandchildPid, 0);
-      } catch {
-        alive = false;
-      }
-      expect(alive).toBe(false);
-    }
+    await waitForPidExit(grandchildPid, { timeoutMs: 5000, stepMs: 50 });
   }, 10_000);
 
   test("abortSignal terminates process group immediately (OPS-411)", async () => {
@@ -207,23 +403,17 @@ writeFileSync("result.json", JSON.stringify({
       abortSignal: ac.signal,
     });
 
-    // Abort after 200ms
-    setTimeout(() => ac.abort(), 200);
+    // Abort only once the grandchild is provably alive.
+    const grandchildPid = await waitForPidFile(pidFile, {
+      timeoutMs: 5000,
+      stepMs: 20,
+    });
+    expect(() => process.kill(grandchildPid, 0)).not.toThrow();
+    ac.abort();
 
     const outcome = await runPromise;
     expect(outcome.timedOut).toBe(false);
-
-    await new Promise((r) => setTimeout(r, 100));
-    if (existsSync(pidFile)) {
-      const grandchildPid = parseInt(readFileSync(pidFile, "utf8").trim(), 10);
-      let alive = true;
-      try {
-        process.kill(grandchildPid, 0);
-      } catch {
-        alive = false;
-      }
-      expect(alive).toBe(false);
-    }
+    await waitForPidExit(grandchildPid, { timeoutMs: 5000, stepMs: 50 });
   }, 10_000);
 });
 
@@ -349,7 +539,25 @@ describe("command-adapter registry (OPS-404)", () => {
       },
     };
     emitDueTicks(db, withReaper, { now: Date.parse("2026-08-14T04:30:00Z") });
-    planAdmittedEvents(db, withReaper, { policyVersion: "git:test-pv" });
+    // Planning resolves the runtime's directories even though the reaper is
+    // an ephemeral command. Tests must not fall back to the operator runtime.
+    const previousEventHome = process.env.FACTORY_EVENT_HOME;
+    process.env.FACTORY_EVENT_HOME = tmpDir("evrt-reaper-home-");
+    try {
+      planAdmittedEvents(db, withReaper, { policyVersion: "git:test-pv" });
+    } finally {
+      if (previousEventHome === undefined)
+        delete process.env.FACTORY_EVENT_HOME;
+      else process.env.FACTORY_EVENT_HOME = previousEventHome;
+    }
+
+    const tick = db
+      .query(
+        `SELECT last_plan_error FROM events
+         WHERE source = 'schedule' AND subject = 'reaper'`,
+      )
+      .get();
+    expect(tick).toEqual({ last_plan_error: null });
 
     const row = db.query(`SELECT spec_json FROM runs`).get();
     expect(row).toBeTruthy();

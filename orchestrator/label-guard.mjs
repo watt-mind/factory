@@ -138,6 +138,24 @@ function ownedPathsClosureCheck(description = "", repo, manifestCache) {
   return { messages, gaps };
 }
 
+/** Convert closure errors into an issue-level guard message without aborting a scan. */
+export function ownedPathsClosureGuard(
+  description = "",
+  repo,
+  manifestCache = new Map(),
+) {
+  try {
+    return ownedPathsClosureCheck(description, repo, manifestCache);
+  } catch (err) {
+    return {
+      messages: [
+        `Owned Paths Closure: ${err.code ? `${err.code}: ` : ""}${err.message || String(err)}`,
+      ],
+      gaps: [],
+    };
+  }
+}
+
 export async function fetchReadyIssues(repo) {
   return loadControlPlane().listDispatchable({
     team: repo.team,
@@ -210,18 +228,13 @@ export async function main(argv = process.argv.slice(2)) {
     const bad = issues
       .map((issue) => {
         const gapNames = [...templateGaps(issue.description ?? "")];
-        try {
-          const closure = ownedPathsClosureCheck(
-            issue.description ?? "",
-            repo,
-            closureRequirements,
-          );
-          gapNames.push(...closure.messages);
-          return { issue, gaps: gapNames };
-        } catch (err) {
-          gapNames.push(`Owned Paths Closure: ${err.message || String(err)}`);
-          return { issue, gaps: gapNames };
-        }
+        const closure = ownedPathsClosureGuard(
+          issue.description ?? "",
+          repo,
+          closureRequirements,
+        );
+        gapNames.push(...closure.messages);
+        return { issue, gaps: gapNames };
       })
       .filter((r) => r.gaps.length);
 

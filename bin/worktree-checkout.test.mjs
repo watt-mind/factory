@@ -6,6 +6,7 @@ import {
   writeFileSync,
   mkdirSync,
 } from "node:fs";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -13,6 +14,9 @@ import { describe, expect, test } from "bun:test";
 const UP = path.resolve(import.meta.dir, "worktree-up.sh");
 const DOWN = path.resolve(import.meta.dir, "worktree-down.sh");
 const COMMON = path.resolve(import.meta.dir, "worktree-common.sh");
+// The handoff sandbox intentionally mounts the shared Git directory read-only.
+// Nested-worktree integration cases cannot run there; focused helpers still do.
+const handoffSandbox = process.env.FACTORY_HANDOFF_SANDBOX === "1";
 
 function sh(body, extraEnv = {}) {
   const result = Bun.spawnSync({
@@ -49,6 +53,27 @@ function makeTestLockDir(prefix = "test-lock") {
     tmpdir(),
     `${prefix}-${Date.now()}-${process.pid}-${rand}.lock`,
   );
+}
+
+function cwdForPid(pid) {
+  if (process.platform === "linux") {
+    const result = Bun.spawnSync({
+      cmd: ["readlink", `/proc/${pid}/cwd`],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if (result.exitCode === 0) return result.stdout.toString().trim();
+  }
+  const result = Bun.spawnSync({
+    cmd: ["lsof", "-a", "-p", String(pid), "-d", "cwd", "-Fn"],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  return result.stdout
+    .toString()
+    .split("\n")
+    .find((line) => line.startsWith("n"))
+    ?.slice(1);
 }
 
 test("locked_bun_install executes real bun install under lock and releases lock", () => {
@@ -276,7 +301,10 @@ locked_bun_install "${testDir}"`,
   }
 });
 
-test("multiple contenders race to reclaim a stale pid-less lock and all succeed", async () => {
+test("multiple contenders race to reclaim a stale pid-less lock and none crash", async () => {
+  // Contract (gh-1373): exactly one contender owns the lock at a time; every
+  // contender either wins the reclaim (exit 0) or reports the documented
+  // "lock held" timeout. No contender may crash on a half-reclaimed lock.
   const testDirs = [
     createTempProject(),
     createTempProject(),
@@ -285,10 +313,11 @@ test("multiple contenders race to reclaim a stale pid-less lock and all succeed"
   ];
   const lockDir = makeTestLockDir("test-pidless-race");
   mkdirSync(lockDir, { recursive: true });
+  const deadlineMs = 30_000;
 
   try {
-    const runContender = (dir) =>
-      Bun.spawn(
+    const runContender = async (dir) => {
+      const proc = Bun.spawn(
         ["bash", "-c", `source "${COMMON}"\nlocked_bun_install "${dir}"`],
         {
           stdout: "pipe",
@@ -300,12 +329,33 @@ test("multiple contenders race to reclaim a stale pid-less lock and all succeed"
             FACTORY_LOCK_MAX_WAIT: "10",
           },
         },
-      ).exited;
+      );
+      const stderrPromise = new Response(proc.stderr).text();
+      let timer;
+      const deadline = new Promise((resolve) => {
+        timer = setTimeout(() => resolve("deadline"), deadlineMs);
+      });
+      const outcome = await Promise.race([proc.exited, deadline]);
+      clearTimeout(timer);
+      if (outcome === "deadline") {
+        proc.kill("SIGKILL");
+        await proc.exited;
+        return { code: "deadline", stderr: await stderrPromise };
+      }
+      return { code: outcome, stderr: await stderrPromise };
+    };
 
     const results = await Promise.all(testDirs.map(runContender));
-    for (const code of results) {
-      expect(code).toBe(0);
+    for (const { code, stderr } of results) {
+      expect(code).not.toBe("deadline");
+      if (code !== 0) {
+        // The only permitted non-zero outcome is the documented lock-held
+        // timeout; anything else is a crash on a half-reclaimed lock.
+        expect(stderr).toContain("timed out waiting for bun install lock");
+      }
+      expect(stderr).not.toContain("No such file or directory");
     }
+    expect(results.filter(({ code }) => code === 0).length).toBeGreaterThan(0);
     expect(existsSync(lockDir)).toBe(false);
   } finally {
     for (const d of testDirs) rmSync(d, { recursive: true, force: true });
@@ -344,6 +394,7 @@ test("high concurrency race of 8 parallel locked_bun_install processes serialize
 });
 
 test("worktree-up --checkout-only creates checkout without daemons and worktree-down removes it", () => {
+  if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-root-"));
   const ticketId = makeTestTicket("TEST");
 
@@ -382,6 +433,7 @@ test("worktree-up --checkout-only creates checkout without daemons and worktree-
 });
 
 test("re-dispatch fast-forwards a deliberately stale branch to the current base", () => {
+  if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-stale-"));
   const ticketId = makeTestTicket("STALE");
   const branch = `feat/${ticketId}`;
@@ -450,6 +502,7 @@ test("re-dispatch fast-forwards a deliberately stale branch to the current base"
 });
 
 test("re-dispatch preserves an abandoned dirty zero-ahead worktree on a conventional wip branch", () => {
+  if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(
     path.join(tmpdir(), "factory-wt-abandoned-dirty-"),
   );
@@ -559,6 +612,7 @@ exec "${realGit}" "$@"
 }, 20_000);
 
 test("re-dispatch refuses a dirty worktree with typed worktree_in_use when a live owner exists", () => {
+  if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-live-dirty-"));
   const ticketId = makeTestTicket("LIVEOWNER");
   const branch = `feat/${ticketId}`;
@@ -614,6 +668,7 @@ test("re-dispatch refuses a dirty worktree with typed worktree_in_use when a liv
 });
 
 test("merge-fix re-dispatch resumes a committed PR branch as-is", () => {
+  if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-merge-fix-"));
   const mockBin = mkdtempSync(path.join(tmpdir(), "factory-wt-open-pr-bin-"));
   const ticketId = makeTestTicket("MERGEFIX");
@@ -711,6 +766,7 @@ printf '1\\n'
 });
 
 test("explicit resume flag and environment preserve committed branches without querying PRs", () => {
+  if (handoffSandbox) return;
   for (const mode of ["flag", "environment"]) {
     const tempWtRoot = mkdtempSync(
       path.join(tmpdir(), `factory-wt-resume-${mode}-`),
@@ -827,6 +883,7 @@ exit 99
 // worktree_branch_has_commits. The test above keeps the boundary: a unique
 // commit that exists ONLY locally still refuses.
 test("re-dispatch auto-resumes a branch whose unique commits are already on origin (WM-680)", () => {
+  if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-pushed-"));
   const mockBin = mkdtempSync(path.join(tmpdir(), "factory-wt-pushed-bin-"));
   const ticketId = makeTestTicket("PUSHED");
@@ -948,6 +1005,7 @@ exec "${realGit}" "$@"
 });
 
 test("re-dispatch keeps unique-commit refusal ahead of dirty-worktree preservation", () => {
+  if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-unique-"));
   const mockBin = mkdtempSync(path.join(tmpdir(), "factory-wt-no-pr-bin-"));
   const ticketId = makeTestTicket("UNIQUE");
@@ -1047,6 +1105,7 @@ exec "${realGit}" "$@"
 });
 
 test("worktree-down --prune removes only clean terminal worktrees and preserves dirty or live trees", () => {
+  if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-prune-"));
   const mockBin = mkdtempSync(path.join(tmpdir(), "factory-wt-prune-bin-"));
   const tickets = [
@@ -1127,6 +1186,7 @@ test("worktree-down --prune removes only clean terminal worktrees and preserves 
 });
 
 test("worktree-down --prune recognizes a merged PR for the worktree branch", () => {
+  if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(
     path.join(tmpdir(), "factory-wt-prune-merged-"),
   );
@@ -1182,6 +1242,7 @@ test("worktree-down --prune recognizes a merged PR for the worktree branch", () 
 });
 
 test("concurrent worktree-up --checkout-only succeed in parallel", async () => {
+  if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-conc-"));
   const ticket1 = makeTestTicket("CONCA");
   const ticket2 = makeTestTicket("CONCB");
@@ -1277,6 +1338,7 @@ test("worktree_add retries transient worktree metadata read races", () => {
 });
 
 test("high concurrency worktree-up --checkout-only with 4 parallel bring-ups succeeds", async () => {
+  if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-4conc-"));
   const tickets = [
     makeTestTicket("PARA"),
@@ -1492,10 +1554,12 @@ test("worktree-down CLI argument parsing error paths", () => {
   }
 });
 
-test("worktree-down refuses dirty worktree without --force and cleans up with --force", () => {
+test("worktree-down refuses dirty worktree without --force, leaves cwd-bound processes alone, and cleans up with --force", async () => {
+  if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-down-dirty-"));
   const ticketId = makeTestTicket("DIRTY");
   const expectedPath = path.join(tempWtRoot, ticketId);
+  let fakeServe;
 
   try {
     // 1. Create worktree
@@ -1518,7 +1582,27 @@ test("worktree-down refuses dirty worktree without --force and cleans up with --
       "uncommitted work",
     );
 
-    // 3. Attempt teardown without --force -> should fail and preserve worktree
+    // 3. Park a detached cwd-bound process in the worktree — the shape of an
+    //    orphaned fake serve. A refused teardown keeps the checkout, so it
+    //    must keep this process too: the cwd sweep (#1379) runs only on the
+    //    removal path, after the dirty check.
+    fakeServe = spawn("bash", ["-c", "while :; do sleep 1; done"], {
+      cwd: expectedPath,
+      detached: process.platform !== "win32",
+      stdio: "ignore",
+    });
+    let fakeExit = null;
+    fakeServe.once("exit", (code, signal) => {
+      fakeExit = { code, signal };
+    });
+    const readyDeadline = Date.now() + 5_000;
+    while (Date.now() < readyDeadline) {
+      if (cwdForPid(fakeServe.pid) === expectedPath) break;
+      await Bun.sleep(10);
+    }
+    expect(cwdForPid(fakeServe.pid)).toBe(expectedPath);
+
+    // 4. Attempt teardown without --force -> should fail and preserve worktree
     const downDirty = Bun.spawnSync({
       cmd: ["bash", DOWN, ticketId],
       stdout: "pipe",
@@ -1529,9 +1613,16 @@ test("worktree-down refuses dirty worktree without --force and cleans up with --
     expect(downDirty.stderr.toString()).toContain(
       "has uncommitted changes — commit/stash them, or re-run with --force",
     );
+    expect(`${downDirty.stdout}${downDirty.stderr}`).not.toContain(
+      "stopping cwd-bound",
+    );
     expect(existsSync(expectedPath)).toBe(true);
+    await Bun.sleep(100);
+    expect(fakeExit).toBeNull();
+    expect(cwdForPid(fakeServe.pid)).toBe(expectedPath);
 
-    // 4. Teardown with --force -> should succeed and remove worktree
+    // 5. Teardown with --force -> should succeed, sweep the orphan, and
+    //    remove the worktree
     const downForce = Bun.spawnSync({
       cmd: ["bash", DOWN, ticketId, "--force"],
       stdout: "pipe",
@@ -1540,9 +1631,111 @@ test("worktree-down refuses dirty worktree without --force and cleans up with --
     });
     expect(downForce.exitCode).toBe(0);
     expect(existsSync(expectedPath)).toBe(false);
+    expect(`${downForce.stdout}${downForce.stderr}`).toContain(
+      `stopping cwd-bound process group ${fakeServe.pid}`,
+    );
   } finally {
+    if (fakeServe) {
+      try {
+        if (process.platform === "win32") fakeServe.kill("SIGKILL");
+        else process.kill(-fakeServe.pid, "SIGKILL");
+      } catch {
+        /* teardown already killed it */
+      }
+    }
     rmSync(tempWtRoot, { recursive: true, force: true });
     Bun.spawnSync({ cmd: ["git", "branch", "-D", `feat/${ticketId}`] });
+  }
+});
+
+test("worktree teardown group-kills a cwd-bound fake serve with no pidfile", async () => {
+  const expectedPath = mkdtempSync(
+    path.join(tmpdir(), "factory-down-cwd-process-"),
+  );
+  let fakeServe;
+
+  try {
+    // This is intentionally the same fake serve shape started by the handoff
+    // gate. There is deliberately no pidfile: cwd ownership is teardown's
+    // backstop after a parent gate has been aborted or timed out.
+    const fakeCli = path.join(expectedPath, "event-runtime", "cli.mjs");
+    mkdirSync(path.dirname(fakeCli), { recursive: true });
+    writeFileSync(fakeCli, "setInterval(() => {}, 10_000);\n", "utf8");
+    fakeServe = spawn("bun", [fakeCli, "serve", "--adapter-override", "fake"], {
+      cwd: expectedPath,
+      detached: process.platform !== "win32",
+      stdio: "ignore",
+    });
+
+    const readyDeadline = Date.now() + 5_000;
+    while (Date.now() < readyDeadline) {
+      const cwd = cwdForPid(fakeServe.pid);
+      if (cwd === expectedPath) break;
+      await Bun.sleep(10);
+    }
+    expect(cwdForPid(fakeServe.pid)).toBe(expectedPath);
+
+    const exited = new Promise((resolve) => {
+      fakeServe.once("exit", (code, signal) => resolve({ code, signal }));
+    });
+    const downRes = Bun.spawnSync({
+      cmd: [
+        "bash",
+        "-c",
+        `source "${COMMON}"; kill_worktree_cwd_processes "$TARGET"`,
+      ],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, TARGET: expectedPath },
+    });
+    expect(downRes.exitCode).toBe(0);
+    expect(`${downRes.stdout}${downRes.stderr}`).toContain(
+      `stopping cwd-bound process group ${fakeServe.pid}`,
+    );
+    expect(await exited).not.toEqual({ code: 0, signal: null });
+    const survivors = sh(`worktree_cwd_processes "${expectedPath}"`);
+    expect(survivors.status).toBe(0);
+    expect(survivors.stdout).toBe("");
+  } finally {
+    if (fakeServe) {
+      try {
+        if (process.platform === "win32") fakeServe.kill("SIGKILL");
+        else process.kill(-fakeServe.pid, "SIGKILL");
+      } catch {
+        /* teardown already killed it */
+      }
+    }
+    rmSync(expectedPath, { recursive: true, force: true });
+  }
+});
+
+test("worktree cwd sweep never signals the shell that invoked it from inside the worktree", () => {
+  const expectedPath = mkdtempSync(
+    path.join(tmpdir(), "factory-down-cwd-caller-"),
+  );
+  try {
+    // An agent session or operator shell commonly runs teardown with its cwd
+    // inside the checkout being removed. That caller (and its ancestors) is
+    // cwd-bound too, so the sweep must leave it alone rather than SIGKILL the
+    // terminal it runs in. `--here` is excluded from the sweep entirely; this
+    // covers the removal path with a caller chain rooted in the worktree.
+    const res = Bun.spawnSync({
+      cmd: [
+        "bash",
+        "-c",
+        `bash -c 'source "${COMMON}"; kill_worktree_cwd_processes "$PWD"' && printf 'caller-survived\n'`,
+      ],
+      cwd: expectedPath,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env },
+    });
+    expect(res.exitCode).toBe(0);
+    const output = `${res.stdout}${res.stderr}`;
+    expect(output).toContain("caller-survived");
+    expect(output).not.toContain("stopping cwd-bound");
+  } finally {
+    rmSync(expectedPath, { recursive: true, force: true });
   }
 });
 

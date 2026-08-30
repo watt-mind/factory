@@ -1,4 +1,51 @@
 const REQUIRED_CHECK_FIELDS = ["name", "bucket", "state"];
+const CANCELLED_RUN_CONCLUSIONS = new Set(["cancelled", "stale"]);
+
+function isCancelledWorkflowRun(run) {
+  return (
+    run?.status === "cancelled" ||
+    CANCELLED_RUN_CONCLUSIONS.has(run?.conclusion)
+  );
+}
+
+/**
+ * Select the sole non-cancelled configured workflow run for a reviewed head.
+ * `gh run list` returns newest first, but multiple live runs are ambiguous and
+ * therefore fail closed rather than making list order into merge evidence.
+ */
+export function selectMergeCiRun({ workflow, headSha, runs }) {
+  for (const [label, value] of [
+    ["workflow", workflow],
+    ["head SHA", headSha],
+  ]) {
+    if (typeof value !== "string" || value.trim().length === 0) {
+      throw new Error(`${label} must be a nonempty string`);
+    }
+  }
+  if (!Array.isArray(runs)) {
+    throw new Error("workflow runs must be an array");
+  }
+
+  const matchingRuns = runs.filter(
+    (run) =>
+      run?.workflowName === workflow &&
+      run?.headSha === headSha &&
+      !isCancelledWorkflowRun(run),
+  );
+  if (matchingRuns.length !== 1) {
+    throw new Error(
+      "configured non-cancelled workflow run is missing or ambiguous",
+    );
+  }
+  const [run] = matchingRuns;
+  if (
+    !Number.isInteger(run.databaseId) &&
+    (typeof run.databaseId !== "string" || run.databaseId.length === 0)
+  ) {
+    throw new Error("configured workflow run has no valid database ID");
+  }
+  return run;
+}
 
 export function noRequiredChecksDiagnostic(headRef) {
   if (typeof headRef !== "string" || headRef.length === 0) {
@@ -73,14 +120,6 @@ export function proveMergeCiFallback({
   runs,
   jobs,
 }) {
-  for (const [label, value] of [
-    ["workflow", workflow],
-    ["head SHA", headSha],
-  ]) {
-    if (typeof value !== "string" || value.trim().length === 0) {
-      throw new Error(`${label} must be a nonempty string`);
-    }
-  }
   if (
     !Array.isArray(requiredChecks) ||
     requiredChecks.length === 0 ||
@@ -95,19 +134,7 @@ export function proveMergeCiFallback({
     throw new Error("workflow runs and jobs must be arrays");
   }
 
-  const matchingRuns = runs.filter(
-    (run) => run?.workflowName === workflow && run?.headSha === headSha,
-  );
-  if (matchingRuns.length !== 1) {
-    throw new Error("configured workflow run is missing or ambiguous");
-  }
-  const [run] = matchingRuns;
-  if (
-    !Number.isInteger(run.databaseId) &&
-    (typeof run.databaseId !== "string" || run.databaseId.length === 0)
-  ) {
-    throw new Error("configured workflow run has no valid database ID");
-  }
+  const run = selectMergeCiRun({ workflow, headSha, runs });
 
   for (const requiredName of requiredChecks) {
     const matches = jobs.filter((job) => job?.name === requiredName);

@@ -11,7 +11,7 @@
  * genuine catch (CLNT-871/872's shape) and the false positives that got cut.
  */
 import { test, expect } from "bun:test";
-import { templateGaps } from "./label-guard.mjs";
+import { ownedPathsClosureGuard, templateGaps } from "./label-guard.mjs";
 
 const FULL_SPEC = `## Problem & Context
 
@@ -31,6 +31,16 @@ Something is broken and it matters.
 
 test("a real §5 spec passes with no gaps", () => {
   expect(templateGaps(FULL_SPEC)).toEqual([]);
+});
+
+test("a malformed registry digest policy is rendered as a guard message", () => {
+  const result = ownedPathsClosureGuard("", {
+    name: "factory",
+    ownedPathsPolicy: { registryDigest: { inputs: [] } },
+  });
+  expect(result.gaps).toEqual([]);
+  expect(result.messages).toHaveLength(1);
+  expect(result.messages[0]).toContain("invalid_owned_paths_policy");
 });
 
 test("the 4-section Frappe support-ticket template fails on both mechanical gaps (CLNT-871/872)", () => {

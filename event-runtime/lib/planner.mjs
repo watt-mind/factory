@@ -73,6 +73,8 @@ import {
 import { validate } from "./schema.mjs";
 import { inFlightRunsForAgent } from "./schedules.mjs";
 import { resolveInputRef } from "./workspace.mjs";
+import { computeDefHash } from "./receipts.mjs";
+import { HANDOFF_REASON_CODES } from "./verify.mjs";
 import {
   autoApproveChains,
   buildChainApprovalPolicy,
@@ -145,7 +147,13 @@ export function pinMemos(
   db,
   def,
   payload,
-  { now = Date.now(), descriptionHash, headSha } = {},
+  {
+    now = Date.now(),
+    descriptionHash,
+    headSha,
+    artifactStore = artifactsRoot(),
+    onArtifactMissing,
+  } = {},
 ) {
   const declarations = def?.memos;
   if (!Array.isArray(declarations) || declarations.length === 0) return payload;
@@ -169,6 +177,8 @@ export function pinMemos(
         descriptionHash:
           decl.subject.type === "ticket" ? descriptionHash : undefined,
         headSha: decl.subject.type === "repo" ? headSha : undefined,
+        artifactStore,
+        onArtifactMissing,
       },
     );
     for (const row of folded) {
@@ -320,6 +330,7 @@ export function buildRunSpec(
     approvalPolicy = null,
     modelTierOverride,
     modelOverride,
+    configSnapshot = null,
   } = {},
 ) {
   const def = getAgent(registry, mapping.agent);
@@ -334,6 +345,19 @@ export function buildRunSpec(
     } catch (err) {
       if (!payload?.repoPin) throw err;
     }
+  }
+  // Hand the work scan the same security-dispatch verdict the dispatch gate
+  // will apply (WM-1060), so it stops pre-filtering security tickets the gate
+  // would now admit. Scoped to work-scan to keep every other agent's input —
+  // and thus its idempotency key — untouched.
+  if (mapping.agent?.startsWith("work-scan") && payload?.repo) {
+    payload = {
+      ...payload,
+      dispatchSecurity: policyDispatchSecurity(
+        configSnapshot?.root ?? reposRoot(),
+        configSnapshot,
+      ),
+    };
   }
   const inputHash = hashJson(payload);
   const placement = def.placement ?? mapping.placement ?? undefined;
@@ -359,7 +383,22 @@ export function buildRunSpec(
     promptVersion: policyVersion,
     policyVersion,
     outputContract: def.output_contract,
+    // Attested definition pin (WM-1056): the content sha256 of the registered
+    // agent definition, computed with the same helper the worker's claim-time
+    // verifyDefHash and the receipt seam use. Pinned at plan time so a proposal
+    // that crosses a registry reload is compared against the exact def it was
+    // planned against. Computed from `def`, NOT `planned`, so per-ticket
+    // model/model-tier overrides never redefine the attested definition or make
+    // otherwise identical planner inputs nondeterministic.
+    defHash: computeDefHash(def),
     capabilities: def.capabilities.services,
+    // Pin workspace-only intent into new RunSpecs so the worker's execution
+    // backstop does not depend solely on a mutable live definition. Legacy
+    // model specs without defHash are refused by the worker instead.
+    ...(def.mutating === false &&
+    def.capabilities.filesystem === "workspace-only"
+      ? { filesystem: "workspace-only" }
+      : {}),
     // Declared repo scope (WM-64) rides in the spec so the proposal the
     // operator approves names it, same as capabilities.
     ...(def.repos ? { repos: def.repos } : {}),
@@ -400,6 +439,55 @@ export function buildRunSpec(
   };
 }
 
+/** Build the immutable strong-tier continuation for one admitted dispatch. */
+export function buildEscalatedContinuationSpec(
+  registry,
+  failedSpec,
+  { runId, operatorAuthorized = false, handoffFailure = null } = {},
+) {
+  if (!runId) throw new Error("tier escalation continuation needs a runId");
+  const def = getAgent(registry, failedSpec.agent);
+  const planned = plannedDef(def, { modelTierOverride: "strong" });
+  const rootRunId = failedSpec.rootRunId ?? failedSpec.runId;
+  const input = { ...failedSpec.input, modelTier: "strong" };
+  return {
+    ...failedSpec,
+    runId,
+    input,
+    inputHash: hashJson(input),
+    modelTier: "strong",
+    model: resolveModel(planned, failedSpec.adapter, registry.modelTiers),
+    timeoutSeconds: def.limits.timeout_seconds,
+    maxAttempts: def.limits.attempts,
+    idempotencyKey: `${failedSpec.idempotencyKey}:tier-escalation:${rootRunId}`,
+    rootRunId,
+    escalatedFromRunId: failedSpec.runId,
+    approvalPolicy: {
+      source: "handoff",
+      mode: "auto",
+      eventType: "factory.dispatch.requested",
+      // `operatorAuthorized` is decided by the caller from the ORIGINATING
+      // event source of the failed run. It is never read back out of the
+      // failed spec's own approvalPolicy: dispatchEvidence is inherited by
+      // chain runs, so sourcing it there would launder an operator bypass
+      // through any descendant of one operator dispatch.
+      escalation: {
+        rootRunId,
+        failedRunId: failedSpec.runId,
+        operatorAuthorized: operatorAuthorized === true,
+        ...(typeof handoffFailure === "string" && handoffFailure
+          ? { handoffFailure }
+          : {}),
+      },
+      ...(failedSpec.approvalPolicy?.dispatchEvidence
+        ? {
+            dispatchEvidence: failedSpec.approvalPolicy.dispatchEvidence,
+          }
+        : {}),
+    },
+  };
+}
+
 function resolveNow(now) {
   return typeof now === "function" ? now() : now;
 }
@@ -435,7 +523,10 @@ export function createLinearReadCache() {
   return {
     tickets: new Map(),
     inFlight: new Map(),
-    viewer: { value: undefined },
+    // Viewer identity is control-plane/repo specific. A Linear UUID cached
+    // while planning one repo must never be compared with a GitHub assignee
+    // id while planning the next repo in the same pass.
+    viewers: new Map(),
     rateLimitError: null,
     rateLimitedUntil: 0,
     inFlightCalls: 0,
@@ -488,12 +579,13 @@ export function wrapLinearReads(dispatch = {}, cache, now) {
         throw err;
       }
     },
-    fetchViewer: () => {
+    fetchViewer: (repo) => {
       throwIfLimited();
-      if (cache.viewer.value !== undefined) return cache.viewer.value;
+      const key = repo ?? "__default__";
+      if (cache.viewers.has(key)) return cache.viewers.get(key);
       try {
-        const value = fetchViewer();
-        cache.viewer.value = value;
+        const value = fetchViewer(repo);
+        cache.viewers.set(key, value);
         return value;
       } catch (err) {
         remember(err);
@@ -545,17 +637,33 @@ function fetchTicketDefault(ticketId, repo) {
   }
 }
 
-function fetchViewerDefault() {
+function fetchViewerDefault(repoName, configSnapshot = null) {
   try {
-    const out = execFileSync(
-      "bun",
-      [linearCli(), "raw", "query{ viewer{ id name } }"],
-      {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-    return JSON.parse(out)?.viewer ?? null;
+    const repo = repoName
+      ? getRepo(snapshotRepos(configSnapshot), repoName)
+      : null;
+    // GitHub App installation identities are not assignable users. The
+    // GitHub control plane's claim uses the ambient `gh auth` user as the
+    // lock owner, so resume checks must read that same identity via /user.
+    // The ticket CLI routes the raw call through the repo's own plane.
+    const rawQuery =
+      repo?.controlPlane === "github" ? "/user" : "query{ viewer{ id name } }";
+    const args = [linearCli(), "raw", rawQuery];
+    if (repoName) args.push("--repo", repoName);
+    const out = execFileSync("bun", args, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const parsed = JSON.parse(out);
+    if (repo?.controlPlane === "github") {
+      return parsed?.id == null
+        ? null
+        : {
+            id: String(parsed.id),
+            name: parsed.login ?? parsed.name ?? null,
+          };
+    }
+    return parsed?.viewer ?? null;
   } catch (err) {
     throwIfLinearCliRateLimited(err);
     const stderr = String(err?.stderr ?? "");
@@ -579,6 +687,26 @@ function fetchPullRequestDefault(payload) {
       { cause: err },
     );
   }
+}
+
+function findWorkspacePullRequestDefault(payload) {
+  const workspacePath = payload?.workspacePath;
+  if (!workspacePath || !existsSync(workspacePath)) return null;
+  const branch = execFileSync(
+    "git",
+    ["-C", workspacePath, "branch", "--show-current"],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  ).trim();
+  if (!branch) return null;
+  return (
+    loadForge()
+      .prList(payload?.github, {
+        cwd: workspacePath,
+        state: "open",
+        fields: ["number", "url", "headRefName", "isDraft", "state"],
+      })
+      .find((pr) => pr?.headRefName === branch) ?? null
+  );
 }
 
 // WM-1006: in-flight tickets come from the control-plane adapter via the
@@ -699,18 +827,46 @@ function fetchInFlightDefault(repoConfig) {
   }
 }
 
-function policyMaxInFlight(root = reposRoot()) {
-  const file = resolveConfigPath("policy", { root });
-  if (!existsSync(file)) return DEFAULT_MAX_IN_FLIGHT;
-  try {
-    const value = Bun.YAML.parse(readFileSync(file, "utf8"))?.concurrency
-      ?.max_in_flight_per_repo;
-    return typeof value === "number" && Number.isFinite(value) && value > 0
-      ? value
-      : DEFAULT_MAX_IN_FLIGHT;
-  } catch {
-    return DEFAULT_MAX_IN_FLIGHT;
+/**
+ * The serve loop evaluates every admitted event in one tick. Keep the mutable
+ * config view consistent within that tick and avoid re-parsing both YAML files
+ * for every dispatch candidate. Direct callers deliberately retain the old
+ * root-default path by omitting this snapshot.
+ */
+export function policySnapshot(root = reposRoot()) {
+  const policyFile = resolveConfigPath("policy", { root });
+  let policy = null;
+  if (existsSync(policyFile)) {
+    try {
+      const parsed = Bun.YAML.parse(readFileSync(policyFile, "utf8"));
+      policy = parsed && typeof parsed === "object" ? parsed : null;
+    } catch {
+      // Existing policy helpers fail safe on malformed policy. Preserve that
+      // behavior in the shared snapshot rather than making a whole tick fail.
+    }
   }
+
+  let repos = null;
+  let reposError = null;
+  try {
+    repos = loadRepos({ root });
+  } catch (err) {
+    reposError = err;
+  }
+  return { root, policyFile, policy, repos, reposError };
+}
+
+function snapshotRepos(snapshot) {
+  if (snapshot?.reposError) throw snapshot.reposError;
+  return snapshot?.repos ?? loadRepos();
+}
+
+function policyMaxInFlight(root = reposRoot(), snapshot = null) {
+  const value = loadRuntimePolicy(root, snapshot)?.concurrency
+    ?.max_in_flight_per_repo;
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : DEFAULT_MAX_IN_FLIGHT;
 }
 
 /**
@@ -723,16 +879,25 @@ function policyMaxInFlight(root = reposRoot()) {
  * for conflicts that mostly never materialized.
  */
 export const DEFAULT_OWNED_PATHS_COLLISION = "strict";
-export function policyOwnedPathsCollision(root = reposRoot()) {
-  const file = resolveConfigPath("policy", { root });
-  if (!existsSync(file)) return DEFAULT_OWNED_PATHS_COLLISION;
-  try {
-    const value = Bun.YAML.parse(readFileSync(file, "utf8"))?.dispatch
-      ?.owned_paths_collision;
-    return value === "advisory" ? "advisory" : DEFAULT_OWNED_PATHS_COLLISION;
-  } catch {
-    return DEFAULT_OWNED_PATHS_COLLISION;
-  }
+export function policyOwnedPathsCollision(root = reposRoot(), snapshot = null) {
+  const value = loadRuntimePolicy(root, snapshot)?.dispatch
+    ?.owned_paths_collision;
+  return value === "advisory" ? "advisory" : DEFAULT_OWNED_PATHS_COLLISION;
+}
+
+/**
+ * Whether a `type:security` ticket may enter the dispatch loop (WM-1060).
+ * `excluded` (the fail-closed default) keeps the historical behavior: only an
+ * operator-sourced dispatch may work a security ticket. `auto` lets the normal
+ * work loop dispatch them too — safe because the merge lane still refuses to
+ * merge any PR whose ticket holds a security flag (merge-plan §escalation), so
+ * a security ticket becomes a PR held for human merge, never an auto-merge. The
+ * `escalate_paths` sensitive-file gate is unaffected and still applies.
+ */
+export const DEFAULT_DISPATCH_SECURITY = "excluded";
+export function policyDispatchSecurity(root = reposRoot(), snapshot = null) {
+  const value = loadRuntimePolicy(root, snapshot)?.dispatch?.security_tickets;
+  return value === "auto" ? "auto" : DEFAULT_DISPATCH_SECURITY;
 }
 
 /** Fail-safe merge admission cap when policy is absent or malformed. */
@@ -815,7 +980,23 @@ export function inFlightDispatchForTicket(db, payload) {
   return inFlightRunForTicket(db, "dispatch@1", payload);
 }
 
-function loadRepoEscalatePaths(repoName, root = reposRoot()) {
+function loadRepoEscalatePaths(repoName, root = reposRoot(), snapshot = null) {
+  if (snapshot) {
+    let repo;
+    try {
+      repo = getRepo(snapshotRepos(snapshot), repoName);
+    } catch (err) {
+      throw new RepoError(
+        `${reposConfigPath(root)}: cannot verify escalate_paths: ${err.message}`,
+      );
+    }
+    if (!Array.isArray(repo.escalatePaths)) {
+      throw new RepoError(
+        `${reposConfigPath(root)}: repo ${repoName} must declare escalate_paths as an array (use [] only when deliberately empty)`,
+      );
+    }
+    return [...new Set(repo.escalatePaths.map((item) => item.trim()))];
+  }
   const file = reposConfigPath(root);
   if (!existsSync(file)) {
     throw new RepoError(
@@ -854,7 +1035,8 @@ function loadRepoEscalatePaths(repoName, root = reposRoot()) {
   return [...new Set(escalate.map((item) => item.trim()))];
 }
 
-function loadRuntimePolicy(root = reposRoot()) {
+function loadRuntimePolicy(root = reposRoot(), snapshot = null) {
+  if (snapshot) return snapshot.policy;
   const file = resolveConfigPath("policy", { root });
   if (!existsSync(file)) return null;
   try {
@@ -865,8 +1047,8 @@ function loadRuntimePolicy(root = reposRoot()) {
   }
 }
 
-function defaultBudgetRefusal() {
-  const policy = loadRuntimePolicy();
+function defaultBudgetRefusal(root = reposRoot(), snapshot = null) {
+  const policy = loadRuntimePolicy(root, snapshot);
   if (!policy) return "budget_policy_unavailable";
   return budgetExhausted(policy) ? "budget_exhausted" : null;
 }
@@ -920,9 +1102,12 @@ function evidenceTicket(ticket, ticketId) {
  * lookup time. GitHub is the parser-bearing plane today, so use the same
  * parser its adapter uses rather than duplicating a narrower regex here.
  */
-function invalidTicketIdentifierReason(repo, ticket) {
+function invalidTicketIdentifierReason(repo, ticket, snapshot = null) {
   const controlPlane =
-    repo.controlPlane ?? loadRuntimePolicy()?.controlPlane?.kind ?? "linear";
+    repo.controlPlane ??
+    loadRuntimePolicy(snapshot?.root ?? reposRoot(), snapshot)?.controlPlane
+      ?.kind ??
+    "linear";
   if (controlPlane !== "github") return null;
   try {
     parseIssueIdentifier(ticket, repo.github ?? undefined);
@@ -998,15 +1183,24 @@ export function worktreeDispatchAutoEligibility(
   {
     fetchTicket = fetchTicketDefault,
     fetchViewer = fetchViewerDefault,
+    fetchPullRequest = fetchPullRequestDefault,
+    findWorkspacePullRequest = findWorkspacePullRequestDefault,
     fetchInFlight = fetchInFlightDefault,
     countLeases = (repoName) => liveWorkerLeases(repoName).length,
+    hasTicketLease = (repoName, ticket) =>
+      liveWorkerLeases(repoName).some(
+        (lease) => String(lease.ticket) === String(ticket),
+      ),
     maxInFlightFallback,
     budgetRefusal = defaultBudgetRefusal,
     claimedRetry = null,
+    escalatedContinuation = null,
     operatorAuthorized = false,
     now = Date.now(),
+    configSnapshot = null,
   } = {},
 ) {
+  const configRoot = configSnapshot?.root ?? reposRoot();
   const evidence = {
     checkedAt: new Date(resolveNow(now)).toISOString(),
     repo: {},
@@ -1022,15 +1216,19 @@ export function worktreeDispatchAutoEligibility(
   evidence.checks.operator_authorized = operatorAuthorized === true;
   let repo;
   try {
-    repo = getRepo(loadRepos(), payload?.repo);
+    repo = getRepo(snapshotRepos(configSnapshot), payload?.repo);
   } catch (err) {
     evidence.checks.repo_found = false;
     return refusal(`repo_unknown: ${err.message}`, evidence, "human_needed");
   }
-  const cap = repo.maxInFlight ?? maxInFlightFallback ?? policyMaxInFlight();
+  const cap =
+    repo.maxInFlight ??
+    maxInFlightFallback ??
+    policyMaxInFlight(configRoot, configSnapshot);
   const live = countLeases(repo.name);
   evidence.repo = {
     name: repo.name,
+    github: repo.github ?? null,
     team: repo.team ?? null,
     project: repo.project ?? null,
     capLimit: cap,
@@ -1051,6 +1249,7 @@ export function worktreeDispatchAutoEligibility(
   const invalidTicketIdentifier = invalidTicketIdentifierReason(
     repo,
     payload?.ticket,
+    configSnapshot,
   );
   if (invalidTicketIdentifier) {
     evidence.checks.ticket_identifier_parseable = false;
@@ -1058,16 +1257,62 @@ export function worktreeDispatchAutoEligibility(
   }
   evidence.checks.ticket_identifier_parseable = true;
 
+  const escalationChecks = escalatedContinuation
+    ? {
+        ticket_escalation_failed_run_bound: Boolean(
+          escalatedContinuation.failedRunId,
+        ),
+        ticket_escalation_continuation_run_bound: Boolean(
+          escalatedContinuation.continuationRunId,
+        ),
+        ticket_escalation_root_run_bound: Boolean(
+          escalatedContinuation.rootRunId,
+        ),
+        ticket_escalation_projection_applied:
+          escalatedContinuation.projectionState === "applied",
+        ticket_escalation_repo_matches:
+          escalatedContinuation.repo === payload?.repo,
+        ticket_escalation_ticket_matches:
+          String(escalatedContinuation.ticket) === String(payload?.ticket),
+        ticket_escalation_model_tier_strong: payload?.modelTier === "strong",
+      }
+    : null;
+  if (escalationChecks) Object.assign(evidence.checks, escalationChecks);
+  const canResumeEscalation = Boolean(
+    escalationChecks && Object.values(escalationChecks).every(Boolean),
+  );
+  const failedEscalationCheck = escalationChecks
+    ? (Object.entries(escalationChecks).find(([, passed]) => !passed)?.[0] ??
+      null)
+    : null;
+
   let budgetReason;
   try {
-    budgetReason = budgetRefusal();
+    budgetReason = budgetRefusal(configRoot, configSnapshot);
   } catch {
     budgetReason = "budget_check_failed";
   }
   if (budgetReason) return refusal(budgetReason, evidence);
   evidence.checks.budget_available = true;
 
-  if (live >= cap) return refusal("capacity_full", evidence);
+  // A tier escalation transfers one already-live ticket lease rather than
+  // admitting another dispatch. At a full cap, discount only the exact
+  // ticket lease authenticated by the durable continuation handoff; if the
+  // failed worker has already released it, the ordinary capacity count wins.
+  let transferredLease = false;
+  if (live >= cap && canResumeEscalation) {
+    try {
+      transferredLease = hasTicketLease(repo.name, payload?.ticket) === true;
+    } catch {
+      transferredLease = false;
+    }
+  }
+  const effectiveLive = live - (transferredLease ? 1 : 0);
+  if (canResumeEscalation) {
+    evidence.repo.capTransferred = transferredLease;
+    evidence.repo.capEffective = effectiveLive;
+  }
+  if (effectiveLive >= cap) return refusal("capacity_full", evidence);
   evidence.checks.cap_available = true;
 
   const ticket = fetchTicket(payload?.ticket, payload?.repo);
@@ -1091,6 +1336,42 @@ export function worktreeDispatchAutoEligibility(
         ? "label"
         : "definition";
 
+  // A durable continuation row is not a second route to ordinary dispatch.
+  // If any binding is wrong (including a projection not yet applied), fail
+  // closed even when the ticket happens to be unassigned at this instant.
+  if (escalatedContinuation && !canResumeEscalation) {
+    return refusal(
+      "ticket_assigned",
+      evidence,
+      "noop",
+      `tier_escalation_check_failed:${failedEscalationCheck}`,
+    );
+  }
+
+  const failedPrNumber = escalatedContinuation?.failedRunArtifact?.prNumber;
+  if (canResumeEscalation && Number.isInteger(failedPrNumber)) {
+    let failedPullRequest;
+    try {
+      failedPullRequest = fetchPullRequest({
+        github: repo.github,
+        pr: failedPrNumber,
+      });
+    } catch (err) {
+      return refusal(
+        "ticket_escalation_pr_read_failed",
+        evidence,
+        "noop",
+        err?.message ?? String(err),
+      );
+    }
+    evidence.escalatedPullRequest = failedPullRequest;
+    evidence.checks.ticket_escalation_pr_read = true;
+    if (["MERGED", "CLOSED"].includes(failedPullRequest?.state)) {
+      return refusal("ticket_escalation_pr_closed", evidence);
+    }
+    evidence.checks.ticket_escalation_pr_active = true;
+  }
+
   // A lease-loss retry is the one exception to the ordinary Todo/unassigned
   // admission rule. The prior attempt already performed the Linear claim, so
   // its durable state is expected to be In Progress and assigned. Accept that
@@ -1105,23 +1386,54 @@ export function worktreeDispatchAutoEligibility(
   let retryClaimedByFactory = false;
   let resumingOwnClaim = false;
   if (ticket.assignee) {
-    if (!canResumeClaim) return refusal("ticket_assigned", evidence);
-    const viewer = fetchViewer();
-    if (!viewer?.id || ticket.assignee.id !== viewer.id)
-      return refusal("ticket_assigned", evidence);
+    if (!canResumeClaim && !canResumeEscalation) {
+      return refusal(
+        "ticket_assigned",
+        evidence,
+        "noop",
+        failedEscalationCheck
+          ? `tier_escalation_check_failed:${failedEscalationCheck}`
+          : null,
+      );
+    }
+    const viewer = fetchViewer(payload?.repo, configSnapshot);
+    const viewerOwnsClaim = Boolean(
+      viewer?.id && String(ticket.assignee.id) === String(viewer.id),
+    );
+    evidence.checks.ticket_claim_viewer_identity = viewerOwnsClaim;
+    if (!viewerOwnsClaim) {
+      return refusal(
+        canResumeEscalation ? "ticket_claimed_by_other" : "ticket_assigned",
+        evidence,
+        "noop",
+        canResumeEscalation
+          ? "tier_escalation_check_failed:viewer_identity"
+          : null,
+      );
+    }
     retryClaimedByFactory = true;
   } else {
     evidence.checks.ticket_unassigned = true;
   }
 
   if (ticket.state?.name !== "Todo") {
-    if (!(retryClaimedByFactory && ticket.state?.name === "In Progress")) {
+    const resumableState = canResumeEscalation
+      ? ["In Progress", "In Review"].includes(ticket.state?.name)
+      : ticket.state?.name === "In Progress";
+    if (!(retryClaimedByFactory && resumableState)) {
       return refusal("ticket_not_todo", evidence);
     }
     resumingOwnClaim = true;
-    evidence.checks.ticket_claim_retry = true;
-    evidence.checks.ticket_in_progress_retry = true;
-    evidence.ticket.claimedRetryRunId = claimedRetry.runId;
+    if (canResumeEscalation) {
+      evidence.checks.ticket_claim_escalation = true;
+      evidence.ticket.escalatedFromRunId = escalatedContinuation.failedRunId;
+      evidence.ticket.escalatedContinuationRunId =
+        escalatedContinuation.continuationRunId;
+    } else {
+      evidence.checks.ticket_claim_retry = true;
+      evidence.checks.ticket_in_progress_retry = true;
+      evidence.ticket.claimedRetryRunId = claimedRetry.runId;
+    }
   } else {
     // Assignment alone is not a surviving factory claim. Requiring the state
     // transition as well prevents an own-assigned Todo ticket from bypassing
@@ -1131,14 +1443,46 @@ export function worktreeDispatchAutoEligibility(
   }
 
   if (!evidence.ticket.labels.includes("ai:agent-ready")) {
-    if (!(
-      resumingOwnClaim && evidence.ticket.labels.includes("ai:in-progress")
-    )) {
+    const claimedLabel =
+      evidence.ticket.labels.includes("ai:in-progress") ||
+      (canResumeEscalation &&
+        evidence.ticket.labels.includes("ai:needs-review"));
+    if (!(resumingOwnClaim && claimedLabel)) {
       return refusal("ticket_not_agent_ready", evidence);
     }
     evidence.checks.ticket_in_progress_label_retry = true;
   } else {
     evidence.checks.ticket_agent_ready = true;
+  }
+  // Resolve the checkout branch only after the tracker proves this continuation
+  // still owns the ticket. A foreign claim is a tracker refusal and must not be
+  // converted into a transient forge-read failure.
+  if (canResumeEscalation && escalatedContinuation?.workspacePath) {
+    let workspacePullRequest;
+    try {
+      workspacePullRequest = findWorkspacePullRequest({
+        github: repo.github,
+        workspacePath: escalatedContinuation.workspacePath,
+      });
+    } catch (err) {
+      return refusal(
+        "ticket_escalation_pr_read_failed",
+        evidence,
+        "noop",
+        err?.message ?? String(err),
+      );
+    }
+    evidence.escalatedWorkspacePullRequest = workspacePullRequest;
+    evidence.checks.ticket_escalation_workspace_pr_read = true;
+    if (workspacePullRequest && workspacePullRequest.isDraft !== true) {
+      evidence.checks.ticket_escalation_workspace_pr_ready = true;
+      if (HANDOFF_REASON_CODES.has(escalatedContinuation.failedRunReasonCode)) {
+        evidence.checks.ticket_escalation_workspace_pr_handoff_failed = true;
+        return refusal("ticket_pr_handoff_verification_failed", evidence);
+      }
+      return refusal("ticket_pr_already_open", evidence);
+    }
+    evidence.checks.ticket_escalation_workspace_pr_ready = false;
   }
   if (
     evidence.ticket.labels.includes("ai:escalated") &&
@@ -1161,14 +1505,19 @@ export function worktreeDispatchAutoEligibility(
     evidence.checks.ticket_trusted_author = trustedAuthor;
     if (!trustedAuthor) return refusal("ticket_untrusted_author", evidence);
 
-    // Absent pin (never labeled through a pin-aware path) is not itself a
-    // refusal — only a MISMATCHED pin proves the body changed since it was
-    // marked ready. Refusing on absence would strand every ticket labeled
-    // before this gate shipped.
+    // Verification Command is executable worker input, so an absent pin is
+    // not evidence. Legacy tickets must be re-labelled through the pin-aware
+    // path before dispatch rather than silently retaining a rollout bypass.
+    // The two refusals are kept distinct: a MISSING pin is a ticket the
+    // orchestrator can simply re-stamp (relabel sweep), while a MISMATCHED
+    // pin means the body actually changed after readiness and needs a human
+    // to look at what changed.
+    const hasPin = Boolean(evidence.ticket.readyPinHash);
     const pinMatches =
-      !evidence.ticket.readyPinHash ||
+      hasPin &&
       evidence.ticket.readyPinHash === evidence.ticket.descriptionHash;
     evidence.checks.ticket_body_pin_matches = pinMatches;
+    if (!hasPin) return refusal("ticket_ready_pin_missing", evidence);
     if (!pinMatches)
       return refusal("ticket_body_changed_since_ready", evidence);
   }
@@ -1205,10 +1554,22 @@ export function worktreeDispatchAutoEligibility(
   }
 
   evidence.checks.ticket_not_escalated = true;
+  const isSecurityTicket =
+    evidence.ticket.labels.includes("type:security") ||
+    evidence.ticket.labels.some((label) => /security/i.test(label));
+  // A security ticket may still dispatch when the operator sourced it OR when
+  // policy opts the repo into `dispatch.security_tickets: auto` (WM-1060). The
+  // merge lane refuses to merge a security PR (merge-plan §escalation), so this
+  // only ever produces a PR held for human merge — never an auto-merge — and
+  // the escalate_paths sensitive-file gate below still guards touched files.
+  evidence.checks.security_dispatch_mode = policyDispatchSecurity(
+    configRoot,
+    configSnapshot,
+  );
   if (
-    (evidence.ticket.labels.includes("type:security") ||
-      evidence.ticket.labels.some((label) => /security/i.test(label))) &&
-    !evidence.checks.operator_authorized
+    isSecurityTicket &&
+    !evidence.checks.operator_authorized &&
+    evidence.checks.security_dispatch_mode !== "auto"
   ) {
     return refusal("ticket_security", evidence);
   }
@@ -1225,7 +1586,7 @@ export function worktreeDispatchAutoEligibility(
   evidence.inFlight = inFlight
     .filter((issue) => String(issue.identifier) !== String(payload?.ticket))
     .map(evidenceInFlight);
-  const collisionMode = policyOwnedPathsCollision();
+  const collisionMode = policyOwnedPathsCollision(configRoot, configSnapshot);
   evidence.checks.owned_paths_collision_mode = collisionMode;
   const inFlightPaths = evidence.inFlight.flatMap((issue) => issue.ownedPaths);
   if (pathsCollide(evidence.ticket.ownedPaths, inFlightPaths)) {
@@ -1267,7 +1628,11 @@ export function worktreeDispatchAutoEligibility(
     evidence.checks.owned_paths_disjoint = true;
   }
   try {
-    evidence.repo.escalatePaths = loadRepoEscalatePaths(repo.name);
+    evidence.repo.escalatePaths = loadRepoEscalatePaths(
+      repo.name,
+      configRoot,
+      configSnapshot,
+    );
   } catch (err) {
     evidence.checks.escalate_paths = { verified: false };
     return refusal(
@@ -1534,7 +1899,16 @@ function liveRunForInput(
     .query(
       `SELECT run_id, state FROM runs
      WHERE state NOT IN ('COMPLETED','REFUSED','TIMED_OUT','CANCELLED')
-       AND (? = 1 OR state <> 'FAILED')
+       AND (
+         state <> 'FAILED'
+         OR (
+           ? = 1
+           AND (
+             json_extract(spec_json, '$.maxAttempts') IS NULL
+             OR attempts < json_extract(spec_json, '$.maxAttempts')
+           )
+         )
+       )
        AND json_extract(spec_json, '$.agent') GLOB ?
        AND json_extract(spec_json, '$.input.repo') = ?
        AND (? IS NULL OR json_extract(spec_json, '$.input.ticket') = ?)
@@ -1557,6 +1931,139 @@ function noopBehindLiveRun(db, event, blockingRun, reason, at, ttlSeconds) {
   });
   setEventStatus(db, event, "noop", reason);
   return { decision: "noop", proposal, runId: blockingRun.run_id, reason };
+}
+
+const WEBHOOK_MERGE_SCAN_ALREADY_LIVE = "webhook_merge_scan_already_live";
+const WEBHOOK_MERGE_SCAN_PENDING = "webhook_merge_scan_pending";
+const EXECUTING_MERGE_SCAN_STATES = new Set(["LEASED", "RUNNING", "VERIFYING"]);
+
+function queuedWebhookMergeScan(db, runId) {
+  return db
+    .query(
+      `SELECT id, reason
+         FROM proposals
+         WHERE run_id = ?
+           AND decision = 'noop'
+           AND reason IN (?, ?)
+         LIMIT 1`,
+    )
+    .get(runId, WEBHOOK_MERGE_SCAN_ALREADY_LIVE, WEBHOOK_MERGE_SCAN_PENDING);
+}
+
+function moveQueuedWebhookMergeScan(
+  db,
+  proposalId,
+  event,
+  reason,
+  at,
+  ttlSeconds,
+) {
+  db.query(
+    `UPDATE proposals
+     SET event_source = ?, event_id = ?, reason = ?,
+         spec_json = NULL, spec_hash = NULL, idempotency_key = NULL,
+         created_at = ?, ttl_seconds = ?
+     WHERE id = ?`,
+  ).run(event.source, event.event_id, reason, at, ttlSeconds, proposalId);
+  setEventStatus(db, event, "noop", reason);
+  return db.query(`SELECT * FROM proposals WHERE id = ?`).get(proposalId);
+}
+
+/**
+ * Re-admit the single webhook delivery retained behind each finished merge
+ * scan. A never-executed scan re-arms one coalesced delivery only when refused
+ * or cancelled; an executed scan re-arms only deliveries received while running.
+ * "Never executed" is proven by the lifecycle journal (no LEASED record) rather
+ * than `runs.attempts`, which a claim-lock contention requeue resets to 0.
+ */
+function reAdmitQueuedWebhookMergeScans(db) {
+  const queued = db
+    .query(
+      `SELECT e.source, e.event_id
+       FROM events e
+       JOIN proposals p
+         ON p.event_source = e.source AND p.event_id = e.event_id
+       JOIN runs r ON r.run_id = p.run_id
+       WHERE e.source = 'github'
+         AND e.type = 'factory.merge.requested'
+         AND e.status = 'noop'
+         AND p.decision = 'noop'
+         AND (
+           (p.reason = ?
+            AND r.state IN ('COMPLETED', 'REFUSED', 'FAILED', 'TIMED_OUT', 'CANCELLED'))
+           OR (p.reason = ?
+               AND r.state IN ('REFUSED', 'CANCELLED')
+               AND NOT EXISTS (
+                 SELECT 1 FROM lifecycle_events le
+                 WHERE le.run_id = r.run_id AND le.to_state = 'LEASED'
+               ))
+         )
+       ORDER BY p.created_at, p.rowid`,
+    )
+    .all(WEBHOOK_MERGE_SCAN_ALREADY_LIVE, WEBHOOK_MERGE_SCAN_PENDING);
+  for (const event of queued) {
+    db.query(
+      `UPDATE events
+       SET status = 'admitted', last_plan_error = NULL
+       WHERE source = ? AND event_id = ? AND status = 'noop'`,
+    ).run(event.source, event.event_id);
+  }
+}
+
+/**
+ * GitHub sends a delivery for each CI state change. Unlike an operator or
+ * schedule request, those deliveries do not each deserve an auditable
+ * proposal: a PROPOSED, APPROVED, or QUEUED scan will read current GitHub
+ * state when it executes, so later deliveries stay pure noops. Retain one
+ * pending marker before execution in case the scan is refused or cancelled;
+ * while executing, retain one delivery as the trailing-scan marker. Further
+ * deliveries remain proposal-free noops.
+ */
+function coalesceWebhookMergeRequest(
+  db,
+  event,
+  envelope,
+  agentRef,
+  at,
+  ttlSeconds,
+) {
+  if (
+    event.source !== "github" ||
+    event.type !== "factory.merge.requested" ||
+    typeof envelope.payload?.repo !== "string"
+  ) {
+    return null;
+  }
+  const blockingRun = liveRunForInput(db, agentRef, {
+    repo: envelope.payload.repo,
+  });
+  if (!blockingRun) return null;
+
+  const executing = EXECUTING_MERGE_SCAN_STATES.has(blockingRun.state);
+  const marker = queuedWebhookMergeScan(db, blockingRun.run_id);
+  const reason = executing
+    ? WEBHOOK_MERGE_SCAN_ALREADY_LIVE
+    : WEBHOOK_MERGE_SCAN_PENDING;
+  if (!marker) {
+    return noopBehindLiveRun(db, event, blockingRun, reason, at, ttlSeconds);
+  }
+  if (executing && marker.reason === WEBHOOK_MERGE_SCAN_PENDING) {
+    const proposal = moveQueuedWebhookMergeScan(
+      db,
+      marker.id,
+      event,
+      reason,
+      at,
+      ttlSeconds,
+    );
+    return { decision: "noop", proposal, runId: blockingRun.run_id, reason };
+  }
+  setEventStatus(db, event, "noop", marker.reason);
+  return {
+    decision: "noop",
+    runId: blockingRun.run_id,
+    reason: marker.reason,
+  };
 }
 
 function humanNeeded(db, event, reason, at, ttlSeconds) {
@@ -1609,6 +2116,8 @@ export function planEvent(
     adapterOverride,
     artifactStore = artifactsRoot(),
     dispatch = {},
+    configSnapshot = null,
+    log = console.log,
   } = {},
 ) {
   // Dispatch gate for tier-2 worktree agents (WM-108), evaluated BEFORE the
@@ -1645,6 +2154,7 @@ export function planEvent(
             {
               ...dispatch,
               operatorAuthorized: preEnvelope.source === "operator",
+              configSnapshot,
             },
           );
         } catch (err) {
@@ -1678,7 +2188,8 @@ export function planEvent(
       resetAt: worktreeEligibility.resetAt ?? null,
     };
   }
-  return txImmediate(db, () => {
+  const missingArtifactRetirements = [];
+  const outcome = txImmediate(db, () => {
     const event = db
       .query(`SELECT * FROM events WHERE source = ? AND event_id = ?`)
       .get(source, eventId);
@@ -1782,8 +2293,12 @@ export function planEvent(
       const blockingDispatch = liveRunForInput(db, mapping.agent, {
         repo: envelope.payload.repo,
         ticket: envelope.payload.ticket,
-        // FAILED dispatches remain retryable and retain their worktree; a new
-        // run for the same ticket would still collide with that owner.
+        // A still-retryable FAILED dispatch retains its worktree; a new run for
+        // the same ticket would collide with that owner, so it keeps blocking.
+        // An attempts-exhausted FAILED dispatch (WM-1066) is never retried and
+        // its worktree is reaped, so liveRunForInput excludes it — otherwise the
+        // dead run wedges the ticket forever and work-scan re-dispatch NOOPs
+        // with same_ticket_worktree_held behind a run that will never move.
         includeFailed: true,
       });
       if (blockingDispatch) {
@@ -1798,6 +2313,21 @@ export function planEvent(
         );
       }
     }
+
+    // CI emits a separate GitHub delivery for every check transition. A merge
+    // scan is repo-wide, so a live scan already observes the final state of a
+    // burst; suppress the later webhook deliveries before they can create
+    // duplicate noop proposals. Schedule, operator, and chain requests retain
+    // their ordinary idempotency and proposal semantics.
+    const webhookMergeCoalesced = coalesceWebhookMergeRequest(
+      db,
+      event,
+      envelope,
+      mapping.agent,
+      at,
+      ttlSeconds,
+    );
+    if (webhookMergeCoalesced) return webhookMergeCoalesced;
 
     // §5 singleton is agent policy, not clock-envelope policy: operator and
     // chain origins mapped to an enabled singleton agent must not bypass it by
@@ -1992,6 +2522,8 @@ export function planEvent(
           descriptionHash:
             worktreeEligibility?.evidence?.ticket?.descriptionHash,
           headSha: payload.repoPin?.sha ?? null,
+          artifactStore,
+          onArtifactMissing: (memo) => missingArtifactRetirements.push(memo),
         });
       } catch (err) {
         return humanNeeded(
@@ -2064,7 +2596,7 @@ export function planEvent(
 
     let approvalPolicy = null;
     let dispatchEvidence = worktreeEligibility?.evidence ?? null;
-    if (envelope.source === "chain") {
+    if (envelope.source === "chain" || envelope.source === "handoff") {
       approvalPolicy = buildChainApprovalPolicy(envelope.type, {
         source: envelope.source,
       });
@@ -2076,7 +2608,10 @@ export function planEvent(
           ? worktreeEligibility
           : worktreeDispatchAutoEligibility(pinnedEnvelope.payload, {
               ...dispatch,
-              operatorAuthorized: envelope.source === "operator",
+              // Remote handoff is unattended. Only a durable operator event
+              // may exercise the sensitive/escalate-path bypass.
+              operatorAuthorized: false,
+              configSnapshot,
             });
         if (!result?.ok) {
           return humanNeeded(
@@ -2121,6 +2656,7 @@ export function planEvent(
         approvalPolicy,
         modelTierOverride,
         modelOverride: overlayModel,
+        configSnapshot,
       }),
       idempotencyKey,
     };
@@ -2173,6 +2709,23 @@ export function planEvent(
     setEventStatus(db, event, "planned");
     return { decision: "run", proposal, runId };
   });
+  // Emit only after the enclosing planning transaction commits. A later
+  // planning error rolls the retirement back and must not leave a false or
+  // duplicate line in serve.log.
+  for (const memo of missingArtifactRetirements) {
+    const subject = `${memo.subject.type}:${memo.subject.id}`;
+    const producer = memo.inboxItemId
+      ? `inbox_item_id=${memo.inboxItemId}`
+      : `run_id=${memo.runId ?? "null"}`;
+    try {
+      log(
+        `memo retired artifact_missing sha256=${memo.sha256} subject=${subject} ${producer}`,
+      );
+    } catch {
+      // Observability is best-effort after the durable decision is made.
+    }
+  }
+  return outcome;
 }
 
 /**
@@ -2250,6 +2803,7 @@ export function archiveDeadLetteredEvent(
  * @returns {{ planned: number, failed: number, deadLettered: number }}
  */
 export function planAdmittedEvents(db, registry, opts = {}) {
+  reAdmitQueuedWebhookMergeScans(db);
   const rows = db
     .query(
       `SELECT source, event_id, type FROM events WHERE status = 'admitted' ORDER BY admitted_at, rowid`,
@@ -2257,7 +2811,8 @@ export function planAdmittedEvents(db, registry, opts = {}) {
     .all();
   const cache = opts.linearReadCache ?? createLinearReadCache();
   const dispatch = wrapLinearReads(opts.dispatch ?? {}, cache, opts.now);
-  const planOpts = { ...opts, dispatch };
+  const configSnapshot = opts.configSnapshot ?? policySnapshot();
+  const planOpts = { ...opts, dispatch, configSnapshot };
   let planned = 0;
   let failed = 0;
   let deadLettered = 0;

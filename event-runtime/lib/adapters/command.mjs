@@ -28,6 +28,14 @@ import { spawn } from "node:child_process";
 import { createWriteStream, writeFileSync } from "node:fs";
 import path from "node:path";
 import { FACTORY_ROOT } from "../config.mjs";
+import {
+  BASE_INHERITED_ENV as SHARED_BASE_INHERITED_ENV,
+  PROVIDER_CREDENTIAL_ENV,
+  PUSH_CREDENTIAL_ENV,
+  RUNTIME_IDENTITY_ENV,
+  safeChildEnvironment as sharedSafeChildEnvironment,
+} from "./child-env.mjs";
+import { DETACHED_SPAWN_OPTIONS, killProcessGroup } from "./child-process.mjs";
 import { runSandboxed, sandboxRequested } from "./sandboxed.mjs";
 
 /** This adapter executes inside the VM when a definition asks (WM-185). */
@@ -35,6 +43,45 @@ export const SANDBOX_SUPPORT = "gondolin";
 
 const KILL_GRACE_MS = 10_000;
 const OUTPUT_TAIL_CHARS = 2_000;
+
+/**
+ * Runtime-identity variables every command-adapter child needs so that it
+ * talks to the SAME event-runtime instance as the worker that spawned it.
+ * bin/live-stack.sh and bin/worktree-daemons.sh set these on the worker only;
+ * without them a child's `config.mjs` silently resolves the DEFAULT live home,
+ * port, secret, and env — a worktree stack's merge-apply/merge-scan/reaper/
+ * digest/ci-log-capture would then read and write the production runtime.
+ * This is an explicit allow-list on purpose: no `FACTORY_EVENT_*` wildcard.
+ *
+ * GitHub and Linear credentials are deliberately NOT here. Read-only agents
+ * (merge-scan, merge-plan, ci-log-capture, unblock-digest) authenticate via
+ * files under HOME — `gh` reads its config/hosts (and the App token file that
+ * lib/control-plane/gh-app-auth.mjs resolves from FACTORY_GH_APP_TOKEN_FILE
+ * or ~/.factory/gh-app-token.json), and `factory linear` reads the operator
+ * .env — so no env token is required for reads. Mutating definitions receive
+ * PUSH_CREDENTIAL_ENV below.
+ */
+export const BASE_INHERITED_ENV = [
+  ...RUNTIME_IDENTITY_ENV,
+  ...SHARED_BASE_INHERITED_ENV,
+];
+
+export { PROVIDER_CREDENTIAL_ENV, PUSH_CREDENTIAL_ENV, RUNTIME_IDENTITY_ENV };
+
+/**
+ * Build the environment for an unsandboxed deterministic command.
+ *
+ * Ambient worker authority is allowlisted. Caller-provided values may add or
+ * override ordinary command configuration, but adapter-owned FACTORY_ROOT and
+ * credentials are enforced after that overlay. Push credentials are available
+ * only to an explicitly mutating definition.
+ */
+export function safeChildEnvironment(env = {}, defOrOpts = {}) {
+  return sharedSafeChildEnvironment(env, defOrOpts, {
+    factoryRoot: FACTORY_ROOT,
+    inheritRuntimeIdentity: true,
+  });
+}
 
 /**
  * Substitute `{field}` placeholders in one argv element.
@@ -62,20 +109,6 @@ export function resolveTemplate(template, input) {
       return String(value);
     }),
   );
-}
-
-function killProcessGroup(child, signal = "SIGTERM") {
-  const pid = child?.pid;
-  if (!pid) return;
-  try {
-    process.kill(-pid, signal);
-  } catch {
-    try {
-      child.kill(signal);
-    } catch {
-      // already terminated
-    }
-  }
 }
 
 /**
@@ -167,6 +200,7 @@ export async function execute({
   timeoutMs,
   abortSignal,
   signal,
+  env = {},
   onTrace,
   runSandbox,
 }) {
@@ -192,9 +226,9 @@ export async function execute({
   return new Promise((resolve, reject) => {
     const child = spawn(argv[0], argv.slice(1), {
       cwd: workspaceDir,
-      env: process.env,
+      env: safeChildEnvironment(env, def),
       stdio: ["ignore", "pipe", "pipe"],
-      detached: true,
+      ...DETACHED_SPAWN_OPTIONS,
     });
 
     let output = "";
@@ -213,24 +247,19 @@ export async function execute({
     child.stderr.on("data", collect);
 
     let timedOut = false;
-    let killTimer = null;
+    let cancelTermination = null;
+    const terminate = () => {
+      cancelTermination ??= killProcessGroup(child, {
+        killGraceMs: KILL_GRACE_MS,
+      });
+    };
     const termTimer = setTimeout(() => {
       timedOut = true;
-      killProcessGroup(child, "SIGTERM");
-      killTimer = setTimeout(
-        () => killProcessGroup(child, "SIGKILL"),
-        KILL_GRACE_MS,
-      );
+      terminate();
     }, timeoutMs);
 
     const onAbort = () => {
-      killProcessGroup(child, "SIGTERM");
-      if (!killTimer) {
-        killTimer = setTimeout(
-          () => killProcessGroup(child, "SIGKILL"),
-          KILL_GRACE_MS,
-        );
-      }
+      terminate();
     };
     const abortSig = abortSignal ?? signal;
     if (abortSig) {
@@ -243,14 +272,14 @@ export async function execute({
 
     child.on("error", (err) => {
       clearTimeout(termTimer);
-      if (killTimer) clearTimeout(killTimer);
+      cancelTermination?.();
       if (abortSig) abortSig.removeEventListener?.("abort", onAbort);
       reject(err);
     });
 
     child.on("close", (exitCode) => {
       clearTimeout(termTimer);
-      if (killTimer) clearTimeout(killTimer);
+      cancelTermination?.();
       if (abortSig) abortSig.removeEventListener?.("abort", onAbort);
       if (exitCode === 0 && !timedOut) {
         const write = () => {

@@ -1,5 +1,6 @@
 import { trackTmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-api-schedules-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { handleScheduleApiRoute } from "./api-schedules.mjs";
 import {
   GH_SECRET,
   PV,
@@ -35,8 +36,23 @@ import {
   writeFileSync,
 } from "./api-test-helpers.mjs";
 
-const makeServer = async (...args) => {
-  const result = await makeApiServer(...args);
+// Assertions here about shipped kernel defaults (reaper disabled, source
+// "kernel") must not inherit the operator's local config/schedule.yaml overlay
+// (#1053). Load the registry with the overlay pointed at an absent file so the
+// server sees only tracked kernel schedules, deterministic on any instance.
+const overlayFreeRegistry = loadRegistry({
+  scheduleConfigPath: path.join(
+    os.tmpdir(),
+    `evrt-no-schedule-overlay-${process.pid}`,
+    "schedule.yaml",
+  ),
+});
+
+const makeServer = async (opts = {}) => {
+  const result = await makeApiServer({
+    registry: overlayFreeRegistry,
+    ...opts,
+  });
   trackTmpDir(path.dirname(result.db.filename));
   return result;
 };
@@ -108,6 +124,73 @@ describe("POST /schedules/:loop/run (OPS-401)", () => {
     expect(body.admitted).toBe(true);
     expect(body.loop).toBe("reaper");
     expect(body.decision).toBe("run");
+  });
+
+  test("returns the shared payload mismatch response when admission conflicts", async () => {
+    const response = await handleScheduleApiRoute({
+      route: "POST /schedules/reaper/run",
+      url: new URL("http://127.0.0.1/schedules/reaper/run"),
+      req: { method: "POST" },
+      db: { query: () => ({ get: () => undefined }) },
+      registry: overlayFreeRegistry,
+      send: (status, body) => ({ status, body }),
+      readBody: async () => Buffer.alloc(0),
+      parseJson: () => ({ value: {} }),
+      nowMs: Date.parse("2026-01-01T00:00:00.000Z"),
+      actor: "operator",
+      policyVersion: PV,
+      onEvent: () => {
+        throw new Error("conflicting events must not be planned");
+      },
+      admit: () => ({ admitted: false, duplicate: false, conflict: true }),
+    });
+
+    expect(response).toEqual({
+      status: 409,
+      body: {
+        error: "payload_mismatch",
+        eventId: "manual:reaper:2026-01-01T00:00:00.000Z",
+      },
+    });
+  });
+
+  test("rejects manual fire when the configured cadence is invalid", async () => {
+    const every = "not-a-cadence";
+    const invalidCadenceRegistry = {
+      ...registry,
+      schedules: {
+        ...registry.schedules,
+        reaper: { ...registry.schedules.reaper, every },
+      },
+    };
+    const invalidCadenceServer = await makeServer({
+      registry: invalidCadenceRegistry,
+    });
+    try {
+      const schedules = await fetch(invalidCadenceServer.url("/schedules"));
+      const view = (await schedules.json()).schedules.find(
+        (schedule) => schedule.loop === "reaper",
+      );
+      const before = invalidCadenceServer.db
+        .query(`SELECT COUNT(*) AS n FROM events`)
+        .get().n;
+
+      const res = await fetch(
+        invalidCadenceServer.url("/schedules/reaper/run"),
+        { method: "POST" },
+      );
+
+      expect(res.status).toBe(422);
+      expect(await res.json()).toEqual({
+        error: `schedule reaper: invalid cadence '${every}': ${view.error}`,
+      });
+      expect(
+        invalidCadenceServer.db.query(`SELECT COUNT(*) AS n FROM events`).get()
+          .n,
+      ).toBe(before);
+    } finally {
+      invalidCadenceServer.close();
+    }
   });
 
   test("manual merge trigger propagates selected PR numbers into the immutable event and planned input", async () => {

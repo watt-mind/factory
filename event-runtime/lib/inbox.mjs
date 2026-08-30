@@ -11,6 +11,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { loadControlPlane } from "../../lib/control-plane/index.mjs";
 import { hashJson } from "./canonical.mjs";
+import { ApiParameterError } from "./api-params.mjs";
 import {
   decisionRequestHash,
   validateDecisionRequest,
@@ -224,7 +225,7 @@ function waiterReferentKey(effectKind, refs) {
   }
 }
 
-function fanOutWaiterEffects(db, item, response, waiters, applyEffect) {
+async function fanOutWaiterEffects(db, item, response, waiters, applyEffect) {
   const option = item.decision?.options?.find(
     (candidate) => candidate.id === response?.optionId,
   );
@@ -254,7 +255,7 @@ function fanOutWaiterEffects(db, item, response, waiters, applyEffect) {
     let effect;
     try {
       effect = normalizeEffect(
-        applyEffect(db, waiterItem, response),
+        await applyEffect(db, waiterItem, response),
         waiterItem,
         response,
       );
@@ -268,12 +269,33 @@ function fanOutWaiterEffects(db, item, response, waiters, applyEffect) {
     waiter.effect = effect;
     outcomes.push({ runId: waiter.runId ?? null, effect });
   }
-  db.query(`UPDATE inbox_items SET waiters_json = ? WHERE id = ?`).run(
-    JSON.stringify(nextWaiters),
-    item.id,
-  );
+  // `waiters` was read in the claim transaction and the effects above awaited
+  // outside the lock. `attachWaiter` only appends, and only to undecided rows
+  // (this item has been decided since the claim), so nothing should have
+  // changed; re-read anyway and keep any entry appended after the snapshot.
+  txImmediate(db, () => {
+    const current = parseWaiters(
+      db.query(`SELECT waiters_json FROM inbox_items WHERE id = ?`).get(item.id)
+        ?.waiters_json,
+    );
+    db.query(`UPDATE inbox_items SET waiters_json = ? WHERE id = ?`).run(
+      JSON.stringify([...nextWaiters, ...current.slice(nextWaiters.length)]),
+      item.id,
+    );
+  });
   return outcomes;
 }
+
+/**
+ * How long a `pending` effect claim may stay unsettled before `/decide/retry`
+ * may take it over. The claim is held while the effect runs outside the write
+ * lock; the CLI transport gives up after 20 s
+ * (`decision-effects.mjs:applyDecisionEffect`), so a claim older than this
+ * belongs to a serve that died mid-effect, not to a slow effect still in
+ * flight. Keep it comfortably above the transport timeout so a late settle
+ * cannot race a takeover.
+ */
+export const PENDING_EFFECT_CLAIM_TIMEOUT_MS = 60_000;
 
 export class InboxDecisionError extends Error {
   constructor(code, message, status = 400, errors = undefined) {
@@ -301,6 +323,7 @@ export function itemView(row) {
     refs: parseObject(row.refs_json),
     source: row.source,
     createdAt: row.created_at,
+    expired: row.expired === 1,
     ackedAt: row.acked_at ?? null,
     resolvedAt: row.resolved_at ?? null,
     resolvedBy: row.resolved_by ?? null,
@@ -317,8 +340,26 @@ export function itemView(row) {
   };
 }
 
+/** Shared by inbox projections and the open-count query. */
+function inboxExpiredPredicate(item = "i") {
+  return `(${item}.kind = 'proposal_expired' OR EXISTS (
+    SELECT 1 FROM proposals p
+     WHERE p.id = ${item}.proposal_id
+       AND p.status = 'open'
+       AND p.ttl_seconds > 0
+       AND unixepoch(p.created_at) + p.ttl_seconds <= unixepoch()
+  ))`;
+}
+
 export function getInboxItem(db, id) {
-  return itemView(db.query("SELECT * FROM inbox_items WHERE id = ?").get(id));
+  return itemView(
+    db
+      .query(
+        `SELECT i.*, ${inboxExpiredPredicate("i")} AS expired
+         FROM inbox_items i WHERE i.id = ?`,
+      )
+      .get(id),
+  );
 }
 
 function supersedeInboxDecision(db, row, { title, body, refs, decision }) {
@@ -415,8 +456,8 @@ export function createInboxItem(
       db.query(
         `INSERT INTO inbox_items
            (id, kind, severity, title, body, refs_json, source, created_at,
-            delivery_json, decision_json, dedupe_key, waiters_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, '[]')`,
+            proposal_id, delivery_json, decision_json, dedupe_key, waiters_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, '[]')`,
       ).run(
         id,
         kind,
@@ -426,6 +467,7 @@ export function createInboxItem(
         JSON.stringify(refs),
         source,
         createdAt,
+        refs.proposalId ?? null,
         decision === null ? null : JSON.stringify(decision),
         dedupeKey,
       );
@@ -508,7 +550,13 @@ function retargetedDedupeKey(db, row, previousProposalId, proposalId) {
  * superseded proposal with the new request installed, or decided against a
  * question nobody asked.
  */
-function retargetInboxDecision(db, id, answer, proposalId, { now }) {
+function retargetInboxDecision(
+  db,
+  id,
+  answer,
+  proposalId,
+  { now, claimEffect },
+) {
   const row = decisionRow(db, id);
   const refs = parseObject(row.refs_json);
   const previousProposalId = refs.proposalId ?? null;
@@ -537,32 +585,39 @@ function retargetInboxDecision(db, id, answer, proposalId, { now }) {
     previousProposalId && row.title.includes(previousProposalId)
       ? row.title.split(previousProposalId).join(proposalId)
       : row.title;
-  db.query(
-    `UPDATE inbox_items
-     SET refs_json = ?, decision_json = ?, dedupe_key = ?, delivery_json = ?,
+  const retargeted = db
+    .query(
+      `UPDATE inbox_items
+     SET refs_json = ?, proposal_id = ?, decision_json = ?, dedupe_key = ?, delivery_json = ?,
          title = ?,
          response_json = NULL, decided_at = NULL, decided_by = NULL
-     WHERE id = ?`,
-  ).run(
-    JSON.stringify(nextRefs),
-    JSON.stringify(request),
-    retargetedDedupeKey(db, row, previousProposalId, proposalId),
-    JSON.stringify({
-      ...delivery,
-      responseHistory: [
-        ...history,
-        {
-          retargetedFrom: previousProposalId,
-          retargetedTo: proposalId,
-          retargetedAt: new Date(now).toISOString(),
-          response: answer,
-        },
-      ],
-    }),
-    nextTitle,
-    id,
-  );
-  return getInboxItem(db, id);
+     WHERE id = ?
+       AND json_extract(response_json, '$.effect.claimedAt') = ?
+       AND json_extract(response_json, '$.effect.retryAttempt') = ?`,
+    )
+    .run(
+      JSON.stringify(nextRefs),
+      proposalId,
+      JSON.stringify(request),
+      retargetedDedupeKey(db, row, previousProposalId, proposalId),
+      JSON.stringify({
+        ...delivery,
+        responseHistory: [
+          ...history,
+          {
+            retargetedFrom: previousProposalId,
+            retargetedTo: proposalId,
+            retargetedAt: new Date(now).toISOString(),
+            response: answer,
+          },
+        ],
+      }),
+      nextTitle,
+      id,
+      claimEffect.claimedAt,
+      claimEffect.retryAttempt,
+    );
+  return retargeted.changes === 1 ? getInboxItem(db, id) : null;
 }
 
 /**
@@ -578,7 +633,7 @@ function settleInboxDecision(
   id,
   response,
   effect,
-  { now, recordedEffect = effect, artifactStore },
+  { now, claimEffect, recordedEffect = effect, artifactStore },
 ) {
   const replanned =
     effect.outcome === "applied" && effect.detail === REPLANNED_DETAIL;
@@ -599,28 +654,44 @@ function settleInboxDecision(
   }
   const answer = { ...response, effect: recordedEffect };
   if (replanned && newProposalId) {
+    const item = retargetInboxDecision(db, id, answer, newProposalId, {
+      now,
+      claimEffect,
+    });
+    if (!item) return lostInboxDecisionClaim(db, id, effect);
     return {
-      item: retargetInboxDecision(db, id, answer, newProposalId, {
-        now,
-      }),
+      item,
       effect,
     };
   }
-  db.query("UPDATE inbox_items SET response_json = ? WHERE id = ?").run(
-    JSON.stringify(answer),
-    id,
-  );
-  if (effect.outcome === "applied" && !replanned) {
-    db.query(
+  const resolves = effect.outcome === "applied" && !replanned;
+  const settled = db
+    .query(
       `UPDATE inbox_items
-       SET resolved_at = COALESCE(resolved_at, ?),
-           resolved_by = COALESCE(resolved_by, ?)
-       WHERE id = ?`,
-    ).run(new Date(now).toISOString(), `operator:${effect.kind}`, id);
-  }
+       SET response_json = ?${
+         resolves
+           ? `,
+           resolved_at = COALESCE(resolved_at, ?),
+           resolved_by = COALESCE(resolved_by, ?)`
+           : ""
+       }
+       WHERE id = ?
+         AND json_extract(response_json, '$.effect.claimedAt') = ?
+         AND json_extract(response_json, '$.effect.retryAttempt') = ?`,
+    )
+    .run(
+      JSON.stringify(answer),
+      ...(resolves
+        ? [new Date(now).toISOString(), `operator:${effect.kind}`]
+        : []),
+      id,
+      claimEffect.claimedAt,
+      claimEffect.retryAttempt,
+    );
+  if (settled.changes !== 1) return lostInboxDecisionClaim(db, id, effect);
   const item = getInboxItem(db, id);
   let memos = [];
-  if (effect.outcome === "applied" && !replanned) {
+  if (resolves) {
     memos = registerInboxDecisionMemos(db, item, response, {
       now,
       artifactStore,
@@ -628,6 +699,30 @@ function settleInboxDecision(
     });
   }
   return { item, effect, memos };
+}
+
+/** A late owner must not overwrite the newer claim's settlement. */
+function lostInboxDecisionClaim(db, id, effect) {
+  return {
+    item: getInboxItem(db, id),
+    effect: { ...effect, outcome: "claim_lost" },
+    claimLost: true,
+    memos: [],
+  };
+}
+
+/** The effect record held while the effect runs outside the write lock. */
+function pendingEffect(decision, response, { retryAttempt, claimedAt }) {
+  const kind =
+    decision?.options?.find((option) => option.id === response.optionId)
+      ?.effect ?? "unknown";
+  return { kind, outcome: "pending", retryAttempt, claimedAt };
+}
+
+/** Age of a pending claim in ms; a claim with no readable stamp counts as stale. */
+function pendingClaimAge(effect, now) {
+  const claimedAt = Date.parse(effect?.claimedAt ?? "");
+  return Number.isFinite(claimedAt) ? now - claimedAt : Infinity;
 }
 
 function normalizeEffect(effect, item, response) {
@@ -644,17 +739,12 @@ function normalizeEffect(effect, item, response) {
   return { ...effect, kind };
 }
 
-/** Validate, record, and apply one response to a stored decision request. */
+/** Validate and claim one response in a short write transaction. */
 function decideInboxItemInTransaction(
   db,
   id,
   response,
-  {
-    now = Date.now(),
-    decidedBy = "operator",
-    applyEffect = applyDecisionEffect,
-    artifactStore,
-  } = {},
+  { now = Date.now(), decidedBy = "operator" } = {},
 ) {
   const row = decisionRow(db, id);
   const decision = parseNullableObject(row.decision_json);
@@ -710,13 +800,23 @@ function decideInboxItemInTransaction(
 
   // Persist the answer before invoking the seam. A throwing effect must not
   // lose what the operator entered; retry uses this exact stored response.
+  // The effect runs after this transaction commits, so stamp the claim as
+  // `pending` with its start time: if serve dies before settling, a retry can
+  // take the claim over once it is older than PENDING_EFFECT_CLAIM_TIMEOUT_MS.
+  const pendingResponse = {
+    ...storedResponse,
+    effect: pendingEffect(decision, storedResponse, {
+      retryAttempt: 0,
+      claimedAt: decidedAt,
+    }),
+  };
   const recorded = db
     .query(
       `UPDATE inbox_items
      SET response_json = ?, decided_at = ?, decided_by = ?
      WHERE id = ? AND response_json IS NULL AND decided_at IS NULL`,
     )
-    .run(JSON.stringify(storedResponse), decidedAt, decidedBy, id);
+    .run(JSON.stringify(pendingResponse), decidedAt, decidedBy, id);
   if (recorded.changes !== 1) {
     throw new InboxDecisionError(
       "already_decided",
@@ -725,61 +825,92 @@ function decideInboxItemInTransaction(
     );
   }
 
-  const item = getInboxItem(db, id);
+  return {
+    item: getInboxItem(db, id),
+    response: storedResponse,
+    waiters: parseWaiters(row.waiters_json),
+  };
+}
+
+async function applyInboxEffect(db, item, response, applyEffect) {
   let effect;
   try {
     effect = normalizeEffect(
-      applyEffect(db, item, storedResponse),
+      await applyEffect(db, item, response),
       item,
-      storedResponse,
+      response,
     );
   } catch (err) {
     effect = normalizeEffect(
       { outcome: "failed", error: err?.message ?? String(err) },
       item,
-      storedResponse,
+      response,
     );
   }
-  const settled = settleInboxDecision(db, id, storedResponse, effect, {
-    now,
-    artifactStore,
-  });
-  const waiters = parseWaiters(row.waiters_json);
+  return effect;
+}
+
+async function settleClaimedInboxDecision(
+  db,
+  { item, response, waiters },
+  effect,
+  { now, applyEffect, artifactStore, recordedEffect = effect },
+) {
+  const settled = txImmediate(db, () =>
+    settleInboxDecision(db, item.id, response, effect, {
+      now,
+      artifactStore,
+      claimEffect: item.response.effect,
+      recordedEffect,
+    }),
+  );
   if (
     waiters.length > 0 &&
     settled.effect.outcome === "applied" &&
     settled.effect.detail !== REPLANNED_DETAIL
   ) {
-    settled.waiterEffects = fanOutWaiterEffects(
+    settled.waiterEffects = await fanOutWaiterEffects(
       db,
       settled.item,
-      storedResponse,
+      response,
       waiters,
       applyEffect,
     );
-    settled.item = getInboxItem(db, id);
+    settled.item = getInboxItem(db, item.id);
   }
   return settled;
 }
 
-export function decideInboxItem(db, id, response, options = {}) {
-  // Serialize request claim, effect application, and finalization against
-  // concurrent answers and dedupe supersession on other connections.
-  return txImmediate(db, () =>
-    decideInboxItemInTransaction(db, id, response, options),
+export async function decideInboxItem(db, id, response, options = {}) {
+  const {
+    now = Date.now(),
+    applyEffect = applyDecisionEffect,
+    artifactStore,
+  } = options;
+  const claim = txImmediate(db, () =>
+    decideInboxItemInTransaction(db, id, response, {
+      now,
+      decidedBy: options.decidedBy,
+    }),
   );
+  const effect = await applyInboxEffect(
+    db,
+    claim.item,
+    claim.response,
+    applyEffect,
+  );
+  return settleClaimedInboxDecision(db, claim, effect, {
+    now,
+    applyEffect,
+    artifactStore,
+  });
 }
 
 /** Retry the effect for an answer that was already recorded. */
 function retryInboxDecisionInTransaction(
   db,
   id,
-  {
-    now = Date.now(),
-    applyEffect = applyDecisionEffect,
-    expectedResponseJson,
-    artifactStore,
-  } = {},
+  { now = Date.now(), expectedResponseJson } = {},
 ) {
   const row = decisionRow(db, id);
   if (row.response_json !== expectedResponseJson) {
@@ -805,56 +936,81 @@ function retryInboxDecisionInTransaction(
       409,
     );
   }
+  if (!recorded.effect) {
+    throw new InboxDecisionError(
+      "not_decided",
+      `inbox item ${id} has no decision effect to retry`,
+      409,
+    );
+  }
+  // A pending claim belongs to an effect still running outside the lock, or
+  // to a serve that died mid-effect. Only the latter may be taken over.
+  if (
+    recorded.effect.outcome === "pending" &&
+    pendingClaimAge(recorded.effect, now) < PENDING_EFFECT_CLAIM_TIMEOUT_MS
+  ) {
+    throw new InboxDecisionError(
+      "effect_pending",
+      `inbox item ${id} decision effect is still being applied`,
+      409,
+    );
+  }
   const retryAttempt = Number(recorded.effect?.retryAttempt ?? 0) + 1;
   const { effect: _priorEffect, ...response } = recorded;
-  const item = getInboxItem(db, id);
-  let effect;
-  try {
-    effect = normalizeEffect(applyEffect(db, item, response), item, response);
-  } catch (err) {
-    effect = normalizeEffect(
-      { outcome: "failed", error: err?.message ?? String(err) },
-      item,
-      response,
+  const pendingResponse = {
+    ...response,
+    effect: pendingEffect(decision, response, {
+      retryAttempt,
+      claimedAt: new Date(now).toISOString(),
+    }),
+  };
+  const claimed = db
+    .query(
+      `UPDATE inbox_items SET response_json = ? WHERE id = ? AND response_json = ?`,
+    )
+    .run(JSON.stringify(pendingResponse), id, expectedResponseJson);
+  if (claimed.changes !== 1) {
+    throw new InboxDecisionError(
+      "retry_superseded",
+      `inbox item ${id} decision retry was superseded`,
+      409,
     );
   }
-  const settled = settleInboxDecision(db, id, response, effect, {
-    now,
-    recordedEffect: { ...effect, retryAttempt },
-    artifactStore,
-  });
-  const waiters = parseWaiters(row.waiters_json);
-  if (
-    waiters.length > 0 &&
-    settled.effect.outcome === "applied" &&
-    settled.effect.detail !== REPLANNED_DETAIL
-  ) {
-    settled.waiterEffects = fanOutWaiterEffects(
-      db,
-      settled.item,
-      response,
-      waiters,
-      applyEffect,
-    );
-    settled.item = getInboxItem(db, id);
-  }
-  return settled;
+  return {
+    item: getInboxItem(db, id),
+    response,
+    waiters: parseWaiters(row.waiters_json),
+    retryAttempt,
+  };
 }
 
-export function retryInboxDecision(db, id, options = {}) {
+export async function retryInboxDecision(db, id, options = {}) {
   // Capture the exact failed outcome before waiting for the write lock. A
   // concurrent retry increments retryAttempt, so a waiter cannot replay the
   // same effect after that first retry commits; a later deliberate retry can.
   const expectedResponseJson =
     db.query("SELECT response_json FROM inbox_items WHERE id = ?").get(id)
       ?.response_json ?? null;
-  // The same lock prevents two operators from retrying one effect at once.
-  return txImmediate(db, () =>
-    retryInboxDecisionInTransaction(db, id, {
-      ...options,
-      expectedResponseJson,
-    }),
+  const {
+    now = Date.now(),
+    applyEffect = applyDecisionEffect,
+    artifactStore,
+  } = options;
+  const claim = txImmediate(db, () =>
+    retryInboxDecisionInTransaction(db, id, { now, expectedResponseJson }),
   );
+  const effect = await applyInboxEffect(
+    db,
+    claim.item,
+    claim.response,
+    applyEffect,
+  );
+  return settleClaimedInboxDecision(db, claim, effect, {
+    now,
+    applyEffect,
+    artifactStore,
+    recordedEffect: { ...effect, retryAttempt: claim.retryAttempt },
+  });
 }
 
 export function listInboxItems(db, { status = "open" } = {}) {
@@ -870,7 +1026,12 @@ export function listInboxPage(
   db,
   { status = "open", limit = 100, before = null } = {},
 ) {
-  if (!STATUSES.has(status)) throw new Error(`unknown inbox status: ${status}`);
+  if (!STATUSES.has(status)) {
+    throw new ApiParameterError(
+      "invalid_status",
+      `unknown inbox status: ${status}`,
+    );
+  }
   const where = {
     open: "resolved_at IS NULL AND acked_at IS NULL",
     acked: "resolved_at IS NULL AND acked_at IS NOT NULL",
@@ -885,9 +1046,10 @@ export function listInboxPage(
     : [limit + 1];
   const rows = db
     .query(
-      `SELECT *, rowid AS list_rowid FROM inbox_items
+      `SELECT i.*, i.rowid AS list_rowid, ${inboxExpiredPredicate("i")} AS expired
+       FROM inbox_items i
        WHERE ${where}${cursor}
-       ORDER BY created_at DESC, rowid DESC
+       ORDER BY i.created_at DESC, i.rowid DESC
        LIMIT ?`,
     )
     .all(...params);
@@ -1008,12 +1170,16 @@ export function resolveInboxItem(
 }
 
 export function inboxCounts(db) {
+  // Use the same expiry predicate projected by `listInboxItems` and
+  // `getInboxItem`, so the badge and the Open tab count agree.
   const totals = db
     .query(
       `SELECT
-       SUM(CASE WHEN resolved_at IS NULL AND acked_at IS NULL THEN 1 ELSE 0 END) AS open,
-       SUM(CASE WHEN resolved_at IS NULL AND acked_at IS NOT NULL THEN 1 ELSE 0 END) AS acked
-     FROM inbox_items`,
+       SUM(CASE WHEN i.resolved_at IS NULL AND i.acked_at IS NULL
+                      AND NOT ${inboxExpiredPredicate("i")}
+                      THEN 1 ELSE 0 END) AS open,
+       SUM(CASE WHEN i.resolved_at IS NULL AND i.acked_at IS NOT NULL THEN 1 ELSE 0 END) AS acked
+     FROM inbox_items i`,
     )
     .get();
   const byKind = {};
@@ -1055,9 +1221,9 @@ function bindProposalToItem(db, id, proposalId) {
      SET refs_json = json_set(
        CASE WHEN json_valid(refs_json) THEN refs_json ELSE '{}' END,
        '$.proposalId', ?
-     )
+     ), proposal_id = ?
      WHERE id = ? AND resolved_at IS NULL`,
-  ).run(proposalId, id);
+  ).run(proposalId, proposalId, id);
   return getInboxItem(db, id);
 }
 
@@ -1173,24 +1339,14 @@ function completedShipProposal(db, proposalId) {
   );
 }
 
-function laterCiSuccess(db, row, refs) {
+function laterCiSuccess(row, refs, candidates) {
   const pr = prNumber(refs.pr);
   if (!refs.repo || !pr) return false;
-  const events = db
-    .query(
-      `SELECT subject, envelope_json FROM events
-       WHERE source = 'github'
-         AND type = 'factory.merge.requested'
-         AND admitted_at > ?
-       ORDER BY admitted_at, rowid`,
-    )
-    .all(row.created_at);
-  return events.some((event) => {
-    const envelope = parseObject(event.envelope_json);
-    const payload = envelope.payload;
+  return candidates.some(({ admittedAt, subject, payload }) => {
+    if (admittedAt <= row.created_at) return false;
     if (!payload || typeof payload !== "object" || Array.isArray(payload))
       return false;
-    const repo = payload.repo ?? event.subject;
+    const repo = payload.repo ?? subject;
     return (
       repo === refs.repo &&
       Array.isArray(payload.prNumbers) &&
@@ -1287,6 +1443,34 @@ export function reconcileInbox(
      ORDER BY created_at, rowid`,
     )
     .all();
+  const ciRows = rows.filter((row) => row.kind === "CI RED");
+  const earliestCiCreatedAt = ciRows.reduce(
+    (earliest, row) =>
+      earliest === null || row.created_at < earliest
+        ? row.created_at
+        : earliest,
+    null,
+  );
+  const mergeRequestedCandidates =
+    earliestCiCreatedAt === null
+      ? []
+      : db
+          .query(
+            `SELECT admitted_at, subject, envelope_json FROM events
+             WHERE source = 'github'
+               AND type = 'factory.merge.requested'
+               AND admitted_at > ?
+             ORDER BY admitted_at, rowid`,
+          )
+          .all(earliestCiCreatedAt)
+          .map((event) => {
+            const envelope = parseObject(event.envelope_json);
+            return {
+              admittedAt: event.admitted_at,
+              subject: event.subject,
+              payload: envelope.payload,
+            };
+          });
   const linearRows = [];
   for (const row of rows) {
     // Pending decisions are not skipped: once the referent stops waiting the
@@ -1308,7 +1492,8 @@ export function reconcileInbox(
           refs.proposalId = proposalId;
         }
       }
-      if (laterCiSuccess(db, row, refs)) resolvedBy = "auto:ci_green";
+      if (laterCiSuccess(row, refs, mergeRequestedCandidates))
+        resolvedBy = "auto:ci_green";
     } else if (row.kind === "RC READY") {
       if (refs.proposalId && completedShipProposal(db, refs.proposalId))
         resolvedBy = "auto:ship_completed";

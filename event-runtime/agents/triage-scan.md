@@ -197,6 +197,67 @@ headings above, check lexical ordering and unique identifiers, and check
 validly, replace it with a valid `needs-detail` or `needs-human` decision rather
 than emitting a best-effort malformed item.
 
+## Optional presentation
+
+This human-facing scan is the presentation pilot. Add a `presentation` beside
+`artifact` using `factory.presentation/v1`.
+
+- Lead with the one-sentence finding as a `heading`.
+- Put every number, identifier, and verdict the reader should trust behind a
+  `$ref` into `artifact`; literal prose is interpretation, not evidence.
+- Use a toned `list` for the items that need attention.
+- Put method and caveats in a collapsed `section`.
+- Stay under 40 blocks and 16 KiB, and never nest sections.
+- Do not restate the whole artifact; its schema-derived view appears below.
+
+Worked example, based on the contract sample:
+
+```json
+{
+  "presentation": {
+    "schemaVersion": "factory.presentation/v1",
+    "blocks": [
+      {
+        "type": "heading",
+        "text": "The backlog has a concrete path forward"
+      },
+      {
+        "type": "keyvalue",
+        "items": [
+          {
+            "label": "Recommendation",
+            "value": { "$ref": "/recommendation" },
+            "format": "state"
+          }
+        ]
+      },
+      {
+        "type": "list",
+        "label": "Needs a human",
+        "items": [
+          {
+            "text": "The first plan item needs operator attention",
+            "ref": "/plan/0",
+            "tone": "warn"
+          }
+        ]
+      },
+      {
+        "type": "section",
+        "label": "Method",
+        "collapsed": true,
+        "blocks": [
+          {
+            "type": "markdown",
+            "text": "Complete, lexically sorted scan of Triage and Todo."
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
 ## Output
 
 ````json

@@ -255,17 +255,25 @@ the top of `memos.json` and a note nobody has confirmed sinks under the
 consumer's `max`.
 
 A binding observed broken retires the memo (`retired_at`, `retired_reason`)
-so the next fold is cheaper and the Notes panel can show why it died. Reads
-never fetch: liveness is decided from state the runtime already holds, so
-planning stays offline-cheap and deterministic for a given database state.
+so the next fold is cheaper and the Notes panel can show why it died. Reasons
+include `description_hash_mismatch`, `head_sha_mismatch`, `artifact_missing`,
+and `contradicted`. The artifact-store presence check is local; reads never
+fetch, so liveness is decided from state the runtime already holds and planning
+stays offline-cheap and deterministic for a given database state. The
+`artifact_missing` sweep runs only when the store root itself exists: a missing
+or unreadable root would make every blob look absent and retire the whole
+subject in one pass, so the fold skips the sweep (warning once per root) and
+leaves the memos live until the store is back.
 
 ### 3.3 Registration is part of accept, not a separate step
 
-`registerMemos(db, runId, result)` runs inside the same transaction that
-records an accepted result. A run that publishes has its memos live the
-moment its result is durable; a run that fails verification never touches
-the ledger. Registration is idempotent on `sha256`, so a re-published result
-(lease-loss retry) does not double-register.
+`worker.mjs` calls `registerMemos(db, runId, result, { now: currentNow,
+agent: spec.agent, runState: "COMPLETED" })` immediately after `INSERT INTO
+results`, inside the `txImmediate` transaction that accepts a COMPLETED
+result. A run that publishes has its memos live the moment its result is
+durable; a run that fails verification never touches the ledger. Registration
+is idempotent on `sha256`, so a re-published result (lease-loss retry) does
+not double-register.
 
 The runtime is the second producer (§5.2): `decideInboxItem` calls the same
 `registerMemos` with a runtime-authored document and `run_id = NULL`.

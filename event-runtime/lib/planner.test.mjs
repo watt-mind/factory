@@ -1,14 +1,26 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-planner-test-mjs";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import * as nodeFs from "node:fs";
 import path from "node:path";
 import { canonicalJson, hashBytes, hashJson } from "./canonical.mjs";
-import { DEAD_LETTER_AFTER, DEFAULT_MAX_IN_FLIGHT } from "./config.mjs";
+import {
+  artifactsRoot,
+  DEAD_LETTER_AFTER,
+  DEFAULT_MAX_IN_FLIGHT,
+} from "./config.mjs";
 import { openDb } from "./db.mjs";
 import { admitEvent } from "./intake.mjs";
 import { createRun, lifecycleOf, runState, transition } from "./lifecycle.mjs";
 import {
+  buildEscalatedContinuationSpec,
   buildRunSpec,
   createLinearReadCache,
   DEFAULT_MAX_IN_FLIGHT as PLANNER_DEFAULT_MAX_IN_FLIGHT,
@@ -18,7 +30,9 @@ import {
   planEvent,
   policyMaxConcurrentMerges,
   policyMergeBatchSize,
+  wrapLinearReads,
   worktreeDispatchAutoEligibility,
+  worktreeDispatchGate,
   worktreeMergeFixEligibility,
 } from "./planner.mjs";
 import {
@@ -32,6 +46,7 @@ import {
   registerMemos,
   withProvenance,
 } from "./memos.mjs";
+import { computeDefHash } from "./receipts.mjs";
 import { LinearRateLimitError } from "../../tools/ticket.mjs";
 import {
   KIND_AGENT,
@@ -149,6 +164,22 @@ describe("merge concurrency policy", () => {
 });
 
 describe("planEvent", () => {
+  test("pins workspace-only intent into the RunSpec for the execute-time admission backstop (#962)", () => {
+    const db = openDb(":memory:");
+    const ref = admit(db, {
+      eventId: "workspace-only-pin",
+      correlationId: "workspace-only-pin",
+    });
+    const outcome = planEvent(db, registry, ref, {
+      now: NOW,
+      policyVersion: "git:test",
+    });
+    expect(outcome.decision).toBe("run");
+    expect(JSON.parse(outcome.proposal.spec_json).filesystem).toBe(
+      "workspace-only",
+    );
+  });
+
   test("run decision: PROPOSED run + open proposal with the §5.2 spec", () => {
     const db = openDb(":memory:");
     const ref = admit(db);
@@ -176,7 +207,12 @@ describe("planEvent", () => {
       promptVersion: "git:test",
       policyVersion: "git:test",
       outputContract: "factory.status-report/v1",
+      // Attested definition pin (WM-1056): the content sha256 of the
+      // registered agent def, the same value worker claim-time
+      // verifyDefHash consumes.
+      defHash: computeDefHash(registry.agents.get("factory-status-report@1")),
       capabilities: ["tracker:read"],
+      filesystem: "workspace-only",
       // Model-tier routing (WM-135): the committed definition declares
       // standard, policy maps it to models.pi.standard (WM-215 made pi the
       // default harness), and the planner pins the resolution.
@@ -244,6 +280,239 @@ describe("planEvent", () => {
       .query(`SELECT status FROM events WHERE event_id = 'delivery-2'`)
       .get();
     expect(event.status).toBe("noop");
+  });
+
+  test("GitHub CI bursts retain one trailing scan only behind an executing merge scan", () => {
+    const db = openDb(":memory:");
+    const webhook = (eventId, repo = "factory") => ({
+      eventId,
+      type: "factory.merge.requested",
+      source: "github",
+      subject: repo,
+      correlationId: eventId,
+      payload: { repo },
+    });
+    const firstRef = admit(db, webhook("check-1"));
+    const first = planEvent(db, registry, firstRef, {
+      now: NOW,
+      policyVersion: "git:test",
+    });
+    expect(first.decision).toBe("run");
+
+    const whileProposed = planEvent(
+      db,
+      registry,
+      admit(db, webhook("check-proposed")),
+      { now: NOW + 1000, policyVersion: "git:test" },
+    );
+    expect(whileProposed).toMatchObject({
+      decision: "noop",
+      runId: first.runId,
+      reason: "webhook_merge_scan_pending",
+    });
+    expect(whileProposed.proposal.status).toBe("resolved");
+    expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(2);
+
+    for (const to of ["APPROVED", "QUEUED", "LEASED", "RUNNING"]) {
+      transition(db, { runId: first.runId, to, actor: "test" });
+    }
+
+    const queued = planEvent(db, registry, admit(db, webhook("check-2")), {
+      now: NOW + 1000,
+      policyVersion: "git:test",
+    });
+    expect(queued).toMatchObject({
+      decision: "noop",
+      runId: first.runId,
+      reason: "webhook_merge_scan_already_live",
+    });
+    expect(queued.proposal.status).toBe("resolved");
+    expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(2);
+
+    for (const eventId of ["check-3", "check-4", "check-5"]) {
+      const next = planEvent(db, registry, admit(db, webhook(eventId)), {
+        now: NOW + 1000,
+        policyVersion: "git:test",
+      });
+      expect(next).toEqual({
+        decision: "noop",
+        runId: first.runId,
+        reason: "webhook_merge_scan_already_live",
+      });
+    }
+    expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(1);
+    expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(2);
+
+    for (const to of ["VERIFYING", "COMPLETED"]) {
+      transition(db, { runId: first.runId, to, actor: "test" });
+    }
+
+    expect(
+      planAdmittedEvents(db, registry, {
+        now: NOW + 2000,
+        policyVersion: "git:test",
+      }),
+    ).toEqual({ planned: 1, failed: 0, deadLettered: 0 });
+    const trailing = db
+      .query(`SELECT status FROM events WHERE event_id = 'check-2'`)
+      .get();
+    expect(trailing.status).toBe("planned");
+    expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(2);
+    expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(3);
+
+    const trailingRun = db
+      .query(
+        `SELECT run_id FROM proposals WHERE event_id = 'check-2' AND decision = 'run'`,
+      )
+      .get();
+    for (const to of [
+      "APPROVED",
+      "QUEUED",
+      "LEASED",
+      "RUNNING",
+      "VERIFYING",
+      "COMPLETED",
+    ]) {
+      transition(db, { runId: trailingRun.run_id, to, actor: "test" });
+    }
+
+    const clockRef = admit(db, {
+      eventId: "clock:merge-factory:2026-08-12T10:30:00.000Z",
+      type: "factory.merge.requested",
+      source: "schedule",
+      subject: "factory",
+      correlationId: "clock:merge-factory:2026-08-12T10:30:00.000Z",
+      payload: {
+        repo: "factory",
+        loop: "merge-factory",
+        slot: "2026-08-12T10:30:00.000Z",
+        cadenceSeconds: 14400,
+        skippedSlots: 0,
+      },
+    });
+    const clock = planEvent(db, registry, clockRef, {
+      now: NOW + 2000,
+      policyVersion: "git:test",
+    });
+    expect(clock.decision).toBe("run");
+
+    for (const to of [
+      "APPROVED",
+      "QUEUED",
+      "LEASED",
+      "RUNNING",
+      "VERIFYING",
+      "COMPLETED",
+    ]) {
+      transition(db, { runId: clock.runId, to, actor: "test" });
+    }
+
+    const other = planEvent(
+      db,
+      registry,
+      admit(db, webhook("other-check", "bj29")),
+      { now: NOW + 3000, policyVersion: "git:test" },
+    );
+    expect(other.decision).toBe("run");
+    expect(other.runId).not.toBe(first.runId);
+    expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(5);
+  });
+
+  test("never-executed merge scans retain one webhook delivery only when refused or cancelled", () => {
+    const webhook = (eventId) => ({
+      eventId,
+      type: "factory.merge.requested",
+      source: "github",
+      subject: "factory",
+      correlationId: eventId,
+      payload: { repo: "factory" },
+    });
+    const queueScan = (db, eventId) => {
+      const first = planEvent(db, registry, admit(db, webhook(eventId)), {
+        now: NOW,
+        policyVersion: "git:test",
+      });
+      for (const to of ["APPROVED", "QUEUED"]) {
+        transition(db, { runId: first.runId, to, actor: "test" });
+      }
+      return first;
+    };
+    const coalesceTwoDeliveries = (db, suffix, runId) => {
+      for (const eventId of [`${suffix}-1`, `${suffix}-2`]) {
+        expect(
+          planEvent(db, registry, admit(db, webhook(eventId)), {
+            now: NOW + 1000,
+            policyVersion: "git:test",
+          }),
+        ).toMatchObject({
+          decision: "noop",
+          runId,
+          reason: "webhook_merge_scan_pending",
+        });
+      }
+      expect(
+        db
+          .query(
+            `SELECT COUNT(*) AS n FROM proposals
+             WHERE run_id = ? AND reason = 'webhook_merge_scan_pending'`,
+          )
+          .get(runId).n,
+      ).toBe(1);
+    };
+
+    // A queued scan cancelled before any worker leased it never read GitHub:
+    // the retained pending delivery is re-admitted and plans a fresh scan.
+    {
+      const db = openDb(":memory:");
+      const first = queueScan(db, "cancelled-first");
+      coalesceTwoDeliveries(db, "cancelled", first.runId);
+      transition(db, { runId: first.runId, to: "CANCELLED", actor: "test" });
+
+      expect(
+        planAdmittedEvents(db, registry, {
+          now: NOW + 2000,
+          policyVersion: "git:test",
+        }),
+      ).toEqual({ planned: 1, failed: 0, deadLettered: 0 });
+      expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(2);
+      expect(
+        db
+          .query(`SELECT status FROM events WHERE event_id = ?`)
+          .get("cancelled-1").status,
+      ).toBe("planned");
+      expect(
+        db
+          .query(`SELECT status FROM events WHERE event_id = ?`)
+          .get("cancelled-2").status,
+      ).toBe("noop");
+    }
+
+    // REFUSED is only reachable from VERIFYING, i.e. the scan executed and
+    // read current GitHub state; a pending marker must not re-arm a trailing
+    // scan for it. Same for the executed COMPLETED path.
+    for (const terminal of ["REFUSED", "COMPLETED"]) {
+      const db = openDb(":memory:");
+      const suffix = terminal.toLowerCase();
+      const first = queueScan(db, `${suffix}-first`);
+      coalesceTwoDeliveries(db, suffix, first.runId);
+      for (const to of ["LEASED", "RUNNING", "VERIFYING", terminal]) {
+        transition(db, { runId: first.runId, to, actor: "test" });
+      }
+
+      expect(
+        planAdmittedEvents(db, registry, {
+          now: NOW + 2000,
+          policyVersion: "git:test",
+        }),
+      ).toEqual({ planned: 0, failed: 0, deadLettered: 0 });
+      expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(1);
+      for (const eventId of [`${suffix}-1`, `${suffix}-2`]) {
+        expect(
+          db.query(`SELECT status FROM events WHERE event_id = ?`).get(eventId)
+            .status,
+        ).toBe("noop");
+      }
+    }
   });
 
   test("repeat remediations with identical payload but distinct correlationId produce distinct runs (OPS-419)", () => {
@@ -628,7 +897,7 @@ describe("planEvent", () => {
     });
   });
 
-  test("a duplicate dispatch for a ticket with a live dispatch is refused at plan time (WM-491)", () => {
+  test("same_ticket_worktree: a duplicate dispatch with a live run is refused at plan time (WM-491)", () => {
     const synthetic = { ...registry, agents: new Map(registry.agents) };
     synthetic.agents.set("dispatch@1", {
       ...registry.agents.get("dispatch@1"),
@@ -707,6 +976,68 @@ describe("planEvent", () => {
         policyVersion: "git:test",
       }).decision,
     ).toBe("run");
+  });
+
+  test("an attempts-exhausted FAILED dispatch stops wedging a fresh dispatch for the same ticket (WM-1066)", () => {
+    const synthetic = { ...registry, agents: new Map(registry.agents) };
+    synthetic.agents.set("dispatch@1", {
+      ...registry.agents.get("dispatch@1"),
+      // Keep the focus on the ledger block; the worktree eligibility gate and
+      // its Linear/lease reads are irrelevant to what liveRunForInput decides.
+      workspace: { type: "ephemeral" },
+    });
+    const db = openDb(":memory:");
+    const dispatch = (eventId) => ({
+      eventId,
+      type: "factory.dispatch.requested",
+      source: "operator",
+      correlationId: eventId,
+      causationId: null,
+      payload: { repo: "factory", ticket: "WM-1066" },
+    });
+
+    const firstRef = admit(db, dispatch("dispatch-dead-1"));
+    const first = planEvent(db, synthetic, firstRef, {
+      now: NOW,
+      policyVersion: "git:test",
+    });
+    expect(first.decision).toBe("run");
+
+    // Drive the run to FAILED — the dead dispatch that used to hold this
+    // ticket's worktree forever.
+    for (const to of ["APPROVED", "QUEUED", "LEASED", "RUNNING", "FAILED"]) {
+      transition(db, { runId: first.runId, to, actor: "test" });
+    }
+
+    // While the attempt budget is not yet spent the worktree is still owned and
+    // the run is genuinely retryable, so a fresh dispatch MUST keep NOOPing.
+    const retryableRef = admit(db, dispatch("dispatch-while-retryable"));
+    expect(
+      planEvent(db, synthetic, retryableRef, {
+        now: NOW + 1000,
+        policyVersion: "git:test",
+      }),
+    ).toMatchObject({
+      decision: "noop",
+      reason: `ticket_dispatch_already_live:${first.runId}:same_ticket_worktree_held`,
+    });
+
+    // Exhaust the attempt budget (maxAttempts is 1). The dead run will never
+    // retry and the reaper reclaims its worktree, so it must stop blocking a
+    // fresh work-scan re-dispatch instead of wedging the ticket.
+    db.query(`UPDATE runs SET attempts = ? WHERE run_id = ?`).run(
+      1,
+      first.runId,
+    );
+
+    const freshRef = admit(db, dispatch("dispatch-fresh-work-scan"));
+    const fresh = planEvent(db, synthetic, freshRef, {
+      now: NOW + 2000,
+      policyVersion: "git:test",
+    });
+    expect(fresh.decision).toBe("run");
+    expect(fresh.reason ?? "").not.toContain("same_ticket_worktree_held");
+    expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(2);
   });
 
   test("unregistered event type → human_needed", () => {
@@ -810,7 +1141,7 @@ describe("planEvent worktree gate (WM-108)", () => {
 
   const tierRepo =
     `repos:\n  - name: tiered\n    path: /tmp/nowhere\n    base: develop\n` +
-    `    team: WM\n    project: Factory\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+    `    team: WM\n    project: Factory\n    max_in_flight: 1\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
     `    worktree_root: /tmp/worktrees\n    escalate_paths: []\n`;
 
   const tierTicket = (tierLabels = []) => ({
@@ -893,6 +1224,276 @@ describe("planEvent worktree gate (WM-108)", () => {
     });
   });
 
+  test("escalated continuation pins a fresh strong-tier spec and authenticated claim proof", () => {
+    const base = {
+      schemaVersion: "factory.run-spec/v1",
+      runId: "run_light_failed",
+      agent: "dispatch@1",
+      input: { repo: "tiered", ticket: "WM-694", modelTier: "light" },
+      inputHash: hashJson({
+        repo: "tiered",
+        ticket: "WM-694",
+        modelTier: "light",
+      }),
+      workspace: {
+        type: "worktree",
+        checkoutDir: "repo",
+        retainOnFailure: true,
+      },
+      adapter: "cursor",
+      promptVersion: "git:test",
+      policyVersion: "git:test",
+      outputContract: "factory.dispatch-result/v1",
+      capabilities: ["tracker:write", "repo:write", "github:write"],
+      modelTier: "light",
+      model: "cursor-grok-4.6-low-fast",
+      timeoutSeconds: 5400,
+      maxAttempts: 1,
+      idempotencyKey: "dispatch-light",
+    };
+    const continuation = buildEscalatedContinuationSpec(registry, base, {
+      runId: "run_strong_continuation",
+      operatorAuthorized: true,
+    });
+    expect(continuation).toMatchObject({
+      runId: "run_strong_continuation",
+      rootRunId: "run_light_failed",
+      escalatedFromRunId: "run_light_failed",
+      modelTier: "strong",
+      model: "cursor-grok-4.6-high",
+      timeoutSeconds: 5400,
+      maxAttempts: 1,
+      approvalPolicy: {
+        source: "handoff",
+        mode: "auto",
+        escalation: { operatorAuthorized: true },
+      },
+    });
+
+    withReposRoot(tierRepo, () => {
+      const assigned = tierTicket(["tier:light"]);
+      assigned.state = { name: "In Progress" };
+      assigned.assignee = { id: "10578603", name: "hdkiller" };
+      assigned.labels.nodes.push({ name: "ai:in-progress" });
+      const viewerRepos = [];
+      const dispatch = {
+        ...tierDispatch(["tier:light"]),
+        fetchTicket: () => assigned,
+        fetchViewer: (repo) => {
+          viewerRepos.push(repo);
+          return { id: "10578603", name: "hdkiller" };
+        },
+      };
+      expect(
+        worktreeDispatchAutoEligibility(continuation.input, dispatch).refusal
+          .reason,
+      ).toBe("ticket_assigned");
+      const authenticated = worktreeDispatchAutoEligibility(
+        continuation.input,
+        {
+          ...dispatch,
+          escalatedContinuation: {
+            failedRunId: base.runId,
+            continuationRunId: continuation.runId,
+            rootRunId: base.runId,
+            repo: "tiered",
+            ticket: "WM-694",
+            projectionState: "applied",
+          },
+        },
+      );
+      expect(authenticated.ok).toBe(true);
+      expect(authenticated.evidence.checks).toMatchObject({
+        ticket_escalation_projection_applied: true,
+        ticket_escalation_repo_matches: true,
+        ticket_escalation_ticket_matches: true,
+        ticket_escalation_model_tier_strong: true,
+        ticket_claim_viewer_identity: true,
+        ticket_claim_escalation: true,
+      });
+      expect(viewerRepos).toEqual(["tiered"]);
+
+      const workspaceEscalation = {
+        failedRunId: base.runId,
+        continuationRunId: continuation.runId,
+        rootRunId: base.runId,
+        repo: "tiered",
+        ticket: "WM-694",
+        workspacePath: "/tmp/tiered-checkout",
+        projectionState: "applied",
+      };
+      expect(
+        worktreeDispatchGate(continuation.input, {
+          ...dispatch,
+          escalatedContinuation: workspaceEscalation,
+          findWorkspacePullRequest: () => ({
+            number: 1533,
+            state: "OPEN",
+            isDraft: false,
+          }),
+        }),
+      ).toEqual({ decision: "noop", reason: "ticket_pr_already_open" });
+      for (const pullRequest of [
+        { number: 1533, state: "OPEN", isDraft: true },
+        null,
+      ]) {
+        expect(
+          worktreeDispatchAutoEligibility(continuation.input, {
+            ...dispatch,
+            escalatedContinuation: workspaceEscalation,
+            findWorkspacePullRequest: () => pullRequest,
+          }).ok,
+        ).toBe(true);
+      }
+
+      const closedEscalation = {
+        failedRunId: base.runId,
+        continuationRunId: continuation.runId,
+        rootRunId: base.runId,
+        repo: "tiered",
+        ticket: "WM-694",
+        projectionState: "applied",
+        failedRunArtifact: { prNumber: 1499 },
+      };
+      for (const state of ["MERGED", "CLOSED"]) {
+        expect(
+          worktreeDispatchGate(continuation.input, {
+            ...dispatch,
+            escalatedContinuation: closedEscalation,
+            fetchPullRequest: ({ pr }) => ({ state, number: pr }),
+          }),
+        ).toEqual({ decision: "noop", reason: "ticket_escalation_pr_closed" });
+      }
+      // A transient forge failure is reported under its own reason so the
+      // worker can requeue it instead of refusing the continuation for good.
+      const unreadable = worktreeDispatchAutoEligibility(continuation.input, {
+        ...dispatch,
+        escalatedContinuation: closedEscalation,
+        fetchPullRequest: () => {
+          throw new Error("github_read_failed: x");
+        },
+      });
+      expect(unreadable.ok).toBe(false);
+      expect(unreadable.refusal).toMatchObject({
+        reason: "ticket_escalation_pr_read_failed",
+        decision: "noop",
+        detail: "github_read_failed: x",
+      });
+      expect(unreadable.evidence.checks.ticket_escalation_pr_read).toBe(
+        undefined,
+      );
+      expect(
+        worktreeDispatchAutoEligibility(continuation.input, {
+          ...dispatch,
+          escalatedContinuation: closedEscalation,
+          fetchPullRequest: () => ({ state: "OPEN" }),
+        }).ok,
+      ).toBe(true);
+      let readPullRequest = false;
+      expect(
+        worktreeDispatchAutoEligibility(continuation.input, {
+          ...dispatch,
+          escalatedContinuation: {
+            ...closedEscalation,
+            failedRunArtifact: {},
+          },
+          fetchPullRequest: () => {
+            readPullRequest = true;
+            return { state: "CLOSED" };
+          },
+        }).ok,
+      ).toBe(true);
+      expect(readPullRequest).toBe(false);
+
+      assigned.assignee = { id: "someone-else", name: "Other" };
+      const foreign = worktreeDispatchAutoEligibility(continuation.input, {
+        ...dispatch,
+        escalatedContinuation: {
+          failedRunId: base.runId,
+          continuationRunId: continuation.runId,
+          rootRunId: base.runId,
+          repo: "tiered",
+          ticket: "WM-694",
+          projectionState: "applied",
+        },
+      });
+      expect(foreign.refusal).toMatchObject({
+        reason: "ticket_claimed_by_other",
+        detail: "tier_escalation_check_failed:viewer_identity",
+      });
+      expect(foreign.evidence.checks.ticket_claim_viewer_identity).toBe(false);
+      assigned.assignee = { id: "10578603", name: "hdkiller" };
+
+      const pendingProjection = worktreeDispatchAutoEligibility(
+        continuation.input,
+        {
+          ...dispatch,
+          escalatedContinuation: {
+            failedRunId: base.runId,
+            continuationRunId: continuation.runId,
+            rootRunId: base.runId,
+            repo: "tiered",
+            ticket: "WM-694",
+            projectionState: "pending",
+          },
+        },
+      );
+      expect(pendingProjection.refusal).toMatchObject({
+        reason: "ticket_assigned",
+        detail:
+          "tier_escalation_check_failed:ticket_escalation_projection_applied",
+      });
+
+      const wrongTier = worktreeDispatchAutoEligibility(
+        { ...continuation.input, modelTier: "standard" },
+        {
+          ...dispatch,
+          escalatedContinuation: {
+            failedRunId: base.runId,
+            continuationRunId: continuation.runId,
+            rootRunId: base.runId,
+            repo: "tiered",
+            ticket: "WM-694",
+            projectionState: "applied",
+          },
+        },
+      );
+      expect(wrongTier.refusal).toMatchObject({
+        reason: "ticket_assigned",
+        detail:
+          "tier_escalation_check_failed:ticket_escalation_model_tier_strong",
+      });
+
+      const fullCapacity = {
+        ...dispatch,
+        countLeases: () => 1,
+        hasTicketLease: () => false,
+        escalatedContinuation: {
+          failedRunId: base.runId,
+          continuationRunId: continuation.runId,
+          rootRunId: base.runId,
+          repo: "tiered",
+          ticket: "WM-694",
+          projectionState: "applied",
+        },
+      };
+      expect(
+        worktreeDispatchAutoEligibility(continuation.input, fullCapacity)
+          .refusal.reason,
+      ).toBe("capacity_full");
+      const transferredCapacity = worktreeDispatchAutoEligibility(
+        continuation.input,
+        { ...fullCapacity, hasTicketLease: () => true },
+      );
+      expect(transferredCapacity.ok).toBe(true);
+      expect(transferredCapacity.evidence.repo).toMatchObject({
+        capCurrent: 1,
+        capEffective: 0,
+        capTransferred: true,
+      });
+    });
+  });
+
   test("only operator-sourced dispatches bypass escalated and security gates (GH-999)", () => {
     withReposRoot(tierRepo, () => {
       const escalatedDispatch = tierDispatch(["ai:escalated"]);
@@ -928,23 +1529,106 @@ describe("planEvent worktree gate (WM-108)", () => {
         }).decision,
       ).toBe("run");
 
-      const chainDb = openDb(":memory:");
-      const chainRef = admit(chainDb, {
-        type: "factory.dispatch.requested",
-        source: "chain",
-        eventId: "chain-security-dispatch",
-        correlationId: "chain-security-dispatch",
-        causationId: "run-parent",
-        payload: { repo: "tiered", ticket: "WM-694" },
-      });
-      expect(
-        planEvent(chainDb, registry, chainRef, {
+      for (const source of ["chain", "handoff"]) {
+        const unattendedDb = openDb(":memory:");
+        const unattendedRef = admit(unattendedDb, {
+          type: "factory.dispatch.requested",
+          source,
+          eventId: `${source}-security-dispatch`,
+          correlationId: `${source}-security-dispatch`,
+          causationId: source === "chain" ? "run-parent" : null,
+          payload: { repo: "tiered", ticket: "WM-694" },
+        });
+        expect(
+          planEvent(unattendedDb, registry, unattendedRef, {
+            now: NOW,
+            policyVersion: "git:test",
+            dispatch: securityDispatch,
+          }),
+        ).toMatchObject({ decision: "noop", reason: "ticket_security" });
+      }
+    });
+  });
+
+  test("eligible handoff dispatch pins auto-approval evidence without operator authorization", () => {
+    withReposRoot(
+      tierRepo,
+      () => {
+        const db = openDb(":memory:");
+        const ref = admit(db, {
+          type: "factory.dispatch.requested",
+          source: "handoff",
+          eventId: "handoff-safe-dispatch",
+          correlationId: "handoff-safe-dispatch",
+          causationId: null,
+          payload: { repo: "tiered", ticket: "WM-694" },
+        });
+        const outcome = planEvent(db, registry, ref, {
           now: NOW,
           policyVersion: "git:test",
-          dispatch: securityDispatch,
-        }),
-      ).toMatchObject({ decision: "noop", reason: "ticket_security" });
+          dispatch: tierDispatch(),
+        });
+        expect(outcome.decision).toBe("run");
+        const spec = JSON.parse(outcome.proposal.spec_json);
+        expect(spec.approvalPolicy).toMatchObject({
+          source: "handoff",
+          mode: "auto",
+          eventType: "factory.dispatch.requested",
+          dispatchEvidence: {
+            checks: { operator_authorized: false },
+          },
+        });
+      },
+      "chain_auto_approval:\n  allowed_event_types:\n    - factory.dispatch.requested\n",
+    );
+  });
+
+  test("dispatch.security_tickets: auto admits a chain security dispatch, held for human merge (WM-1060)", () => {
+    const autoPolicy = "dispatch:\n  security_tickets: auto\n";
+    const securityDispatch = tierDispatch(["type:security"]);
+
+    // Default policy (key absent) still refuses a non-operator security dispatch.
+    withReposRoot(tierRepo, () => {
+      const direct = worktreeDispatchAutoEligibility(
+        { repo: "tiered", ticket: "WM-694" },
+        securityDispatch,
+      );
+      expect(direct.ok).toBe(false);
+      expect(direct.refusal.reason).toBe("ticket_security");
+      expect(direct.evidence.checks.security_dispatch_mode).toBe("excluded");
     });
+
+    // With auto, the same non-operator (chain) dispatch is admitted.
+    withReposRoot(
+      tierRepo,
+      () => {
+        const admitted = worktreeDispatchAutoEligibility(
+          { repo: "tiered", ticket: "WM-694" },
+          securityDispatch,
+        );
+        expect(admitted.ok).toBe(true);
+        expect(admitted.evidence.checks.security_dispatch_mode).toBe("auto");
+        expect(admitted.evidence.checks.operator_authorized).toBe(false);
+
+        const db = openDb(":memory:");
+        const ref = admit(db, {
+          type: "factory.dispatch.requested",
+          source: "chain",
+          eventId: "chain-security-auto",
+          correlationId: "chain-security-auto",
+          causationId: "run-parent",
+          payload: { repo: "tiered", ticket: "WM-694" },
+        });
+        expect(
+          planEvent(db, registry, ref, {
+            now: NOW,
+            policyVersion: "git:test",
+            dispatch: securityDispatch,
+          }).decision,
+        ).toBe("run");
+      },
+      autoPolicy,
+    );
   });
 
   test("duplicate or unknown ticket tier labels refuse with typed evidence (WM-694)", () => {
@@ -1079,17 +1763,21 @@ describe("planEvent worktree gate (WM-108)", () => {
       lastEditorAssociation = "OWNER",
       readyPinHash,
       description = "## Owned Paths\n- event-runtime/lib/planner.mjs\n",
-    } = {}) => ({
-      identifier: "acme/widget#1",
-      state: { name: "Todo" },
-      assignee: null,
-      labels: [{ name: "ai:agent-ready" }],
-      description,
-      controlPlaneKind: "github",
-      authorAssociation,
-      lastEditorAssociation,
-      readyPinHash,
-    });
+    } = {}) => {
+      const ticket = {
+        identifier: "acme/widget#1",
+        state: { name: "Todo" },
+        assignee: null,
+        labels: [{ name: "ai:agent-ready" }],
+        description,
+        controlPlaneKind: "github",
+        authorAssociation,
+        lastEditorAssociation,
+        readyPinHash:
+          readyPinHash === undefined ? hashJson(description) : readyPinHash,
+      };
+      return ticket;
+    };
 
     const githubDispatch = (ticket) => ({
       countLeases: () => 0,
@@ -1184,14 +1872,17 @@ describe("planEvent worktree gate (WM-108)", () => {
       });
     });
 
-    test("no pin ever stamped (pre-rollout ticket) does not refuse — only a mismatch does", () => {
+    test("an absent ready pin fails closed under its own reason code", () => {
       withReposRoot(tierRepo, () => {
         const result = worktreeDispatchAutoEligibility(
           { repo: "tiered", ticket: "acme/widget#1" },
           githubDispatch(githubTicket({ readyPinHash: null })),
         );
-        expect(result.ok).toBe(true);
-        expect(result.evidence.checks.ticket_body_pin_matches).toBe(true);
+        expect(result.ok).toBe(false);
+        // Distinct from a mismatch (GH-967): an unpinned ticket is re-stamped
+        // by a relabel sweep, a changed body needs a human.
+        expect(result.refusal.reason).toBe("ticket_ready_pin_missing");
+        expect(result.evidence.checks.ticket_body_pin_matches).toBe(false);
       });
     });
 
@@ -2042,8 +2733,52 @@ describe("buildRunSpec", () => {
       now: 0,
     });
     expect(canonicalJson(spec)).toBe(
-      '{"adapter":"cursor","agent":"dispatch@1","capabilities":["tracker:write","repo:write","github:write"],"idempotencyKey":"dispatch@1:factory.dispatch-result/v1:sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59:dispatch-baseline","input":{"repo":"factory","ticket":"WM-694"},"inputHash":"sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59","maxAttempts":1,"model":"cursor-grok-4.6-high","modelTier":"strong","outputContract":"factory.dispatch-result/v1","policyVersion":"git:test","promptVersion":"git:test","runId":"run_baseline","schemaVersion":"factory.run-spec/v1","timeoutSeconds":5400,"workspace":{"checkoutDir":"repo","retainOnFailure":true,"type":"worktree"}}',
+      '{"adapter":"cursor","agent":"dispatch@1","capabilities":["tracker:write","repo:write","github:write"],"defHash":"sha256:e7c6ec68b91dc1fe02dcbfcbbd5ec662c47ef92e54656ed71b0e44a931621328","idempotencyKey":"dispatch@1:factory.dispatch-result/v1:sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59:dispatch-baseline","input":{"repo":"factory","ticket":"WM-694"},"inputHash":"sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59","maxAttempts":1,"model":"cursor-grok-4.6-high","modelTier":"strong","outputContract":"factory.dispatch-result/v1","policyVersion":"git:test","promptVersion":"git:test","runId":"run_baseline","schemaVersion":"factory.run-spec/v1","timeoutSeconds":5400,"workspace":{"checkoutDir":"repo","retainOnFailure":true,"type":"worktree"}}',
     );
+  });
+
+  test("persists the registered definition's defHash pin (WM-1056)", () => {
+    const mapping = registry.eventTypes["factory.status-report.requested"];
+    const def = registry.agents.get("factory-status-report@1");
+    const spec = buildRunSpec(registry, envelope(), mapping, {
+      runId: "run_defhash",
+      policyVersion: "git:test",
+      now: NOW,
+    });
+    // Present and computed with the canonical helper the worker's
+    // claim-time verifyDefHash consumes.
+    expect(spec.defHash).toBe(computeDefHash(def));
+    expect(spec.defHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    // Deterministic for identical definitions.
+    const again = buildRunSpec(registry, envelope(), mapping, {
+      runId: "run_defhash_2",
+      policyVersion: "git:test",
+      now: NOW,
+    });
+    expect(again.defHash).toBe(spec.defHash);
+    // Changes when attested definition content changes.
+    const synthetic = { ...registry, agents: new Map(registry.agents) };
+    synthetic.agents.set("factory-status-report@1", {
+      ...def,
+      output_contract: "factory.status-report/v2",
+    });
+    const mutated = buildRunSpec(
+      synthetic,
+      envelope(),
+      synthetic.eventTypes["factory.status-report.requested"],
+      { runId: "run_defhash_3", policyVersion: "git:test", now: NOW },
+    );
+    expect(mutated.defHash).not.toBe(spec.defHash);
+    // Per-ticket model/model-tier overrides must NOT redefine the attested
+    // definition (AC4): defHash stays pinned to the registered def.
+    const overridden = buildRunSpec(registry, envelope(), mapping, {
+      runId: "run_defhash_4",
+      policyVersion: "git:test",
+      now: NOW,
+      modelTierOverride: "strong",
+      modelOverride: "openai-codex/gpt-5.6-terra",
+    });
+    expect(overridden.defHash).toBe(spec.defHash);
   });
 
   test("is pure and honors adapterOverride", () => {
@@ -2188,6 +2923,111 @@ describe("planEvent runtime overlay (WM-887)", () => {
 });
 
 describe("planAdmittedEvents", () => {
+  test("snapshots policy.yaml and repos.yaml once for a multi-candidate dispatch tick (GH-1362)", () => {
+    const root = tmpDir("evrt-plan-config-snapshot-");
+    const configDir = path.join(root, "config");
+    mkdirSync(configDir, { recursive: true });
+    const reposFile = path.join(configDir, "repos.yaml");
+    const policyFile = path.join(configDir, "policy.yaml");
+    writeFileSync(
+      reposFile,
+      `repos:\n  - name: snapshotted\n    path: /tmp/nowhere\n    base: develop\n` +
+        `    team: WM\n    project: Factory\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+        `    worktree_root: /tmp/worktrees\n    escalate_paths: []\n`,
+    );
+    writeFileSync(
+      policyFile,
+      "concurrency:\n  max_in_flight_per_repo: 5\ndispatch:\n  security_tickets: auto\n  owned_paths_collision: advisory\n" +
+        "chain_auto_approval:\n  allowed_event_types: []\n",
+    );
+    const previous = process.env.FACTORY_REPOS_ROOT;
+    process.env.FACTORY_REPOS_ROOT = root;
+    const reads = new Map();
+    const realReadFileSync = nodeFs.readFileSync;
+    const readSpy = spyOn(nodeFs, "readFileSync").mockImplementation(
+      (file, ...args) => {
+        const filename = String(file);
+        if (filename === reposFile || filename === policyFile) {
+          reads.set(filename, (reads.get(filename) ?? 0) + 1);
+        }
+        return realReadFileSync(file, ...args);
+      },
+    );
+    try {
+      const snapshotRegistry = {
+        ...registry,
+        agents: new Map(registry.agents),
+        eventTypes: { ...registry.eventTypes },
+      };
+      snapshotRegistry.eventTypes["test.config-snapshot.requested"] = {
+        agent: "test-config-snapshot@1",
+        adapter: "claude",
+        idempotencyScope: ["inputHash"],
+      };
+      snapshotRegistry.agents.set("test-config-snapshot@1", {
+        id: "test-config-snapshot",
+        version: 1,
+        ref: "test-config-snapshot@1",
+        output_contract: "factory.test/v1",
+        workspace: { type: "worktree" },
+        capabilities: { services: [] },
+        limits: { timeout_seconds: 60, attempts: 1 },
+        mutating: true,
+        inputSchema: {
+          type: "object",
+          required: ["repo", "ticket"],
+          properties: {
+            repo: { type: "string" },
+            ticket: { type: "string" },
+          },
+        },
+      });
+      const db = openDb(":memory:");
+      for (let i = 1; i <= 5; i++) {
+        expect(
+          admitEvent(
+            db,
+            snapshotRegistry,
+            envelope({
+              type: "test.config-snapshot.requested",
+              eventId: `snapshot-candidate-${i}`,
+              correlationId: `snapshot-candidate-${i}`,
+              payload: { repo: "snapshotted", ticket: `WM-${13620 + i}` },
+            }),
+            { now: NOW },
+          ).admitted,
+        ).toBe(true);
+      }
+
+      expect(
+        planAdmittedEvents(db, snapshotRegistry, {
+          now: NOW,
+          dispatch: {
+            countLeases: () => 0,
+            budgetRefusal: () => null,
+            fetchTicket: (ticket) => ({
+              identifier: ticket,
+              state: { name: "Todo" },
+              assignee: null,
+              labels: { nodes: [{ name: "ai:agent-ready" }] },
+              description: "## Owned Paths\n- event-runtime/lib/planner.mjs\n",
+            }),
+            fetchInFlight: () => [],
+          },
+        }),
+      ).toEqual({ planned: 5, failed: 0, deadLettered: 0 });
+      // Five candidates used to cost six parses of each file (#1362). The
+      // eligibility path now reads each once; the post-plan auto-approval
+      // pass may read policy.yaml one more time, never once per candidate.
+      expect(reads.get(reposFile)).toBe(1);
+      expect(reads.get(policyFile) ?? 0).toBeLessThanOrEqual(2);
+    } finally {
+      readSpy.mockRestore();
+      if (previous === undefined) delete process.env.FACTORY_REPOS_ROOT;
+      else process.env.FACTORY_REPOS_ROOT = previous;
+    }
+  });
+
   test("records and logs a typed reason for a nooped dispatch", () => {
     const root = tmpDir("evrt-plan-noop-");
     mkdirSync(path.join(root, "config"), { recursive: true });
@@ -2521,6 +3361,9 @@ function memoDoc(overrides = {}) {
 
 function acceptMemo(document) {
   const sha256 = memoDigest(document);
+  const store = artifactsRoot();
+  mkdirSync(store, { recursive: true });
+  writeFileSync(path.join(store, sha256), canonicalJson(document));
   return {
     sha256,
     result: { memos: [{ sha256, document }] },
@@ -2817,6 +3660,161 @@ describe("planEvent memoPin (WM-810)", () => {
     });
   });
 
+  test("missing memo artifacts retire once and leave the surviving fold stable", () => {
+    withMemoConfig(() => {
+      const db = openDb(":memory:");
+      const missing = memoDoc({
+        subject: { type: "repo", id: "factory" },
+        kind: "decision",
+        precedentOnly: true,
+        body: "The missing decision.",
+        refs: { inboxItemId: "inbox_missing" },
+        provenance: {
+          runId: null,
+          agent: "runtime:inbox",
+          createdAt: "2026-08-18T14:02:11.000Z",
+        },
+      });
+      const surviving = memoDoc({
+        subject: { type: "repo", id: "factory" },
+        kind: "decision",
+        precedentOnly: true,
+        body: "The surviving decision.",
+        refs: { inboxItemId: "inbox_surviving" },
+        provenance: {
+          runId: null,
+          agent: "runtime:inbox",
+          createdAt: "2026-08-18T14:02:12.000Z",
+        },
+      });
+      const missingAccepted = acceptMemo(missing);
+      const survivingAccepted = acceptMemo(surviving);
+      registerMemos(db, null, missingAccepted.result, { now: NOW });
+      registerMemos(db, null, survivingAccepted.result, { now: NOW });
+      unlinkSync(path.join(artifactsRoot(), missingAccepted.sha256));
+
+      const retired = [];
+      const def = {
+        memos: [
+          {
+            subject: { type: "repo", id: "$.input.repo" },
+            kinds: ["decision"],
+            max: 10,
+          },
+        ],
+      };
+      const first = pinMemos(
+        db,
+        def,
+        { repo: "factory" },
+        { now: NOW, onArtifactMissing: (memo) => retired.push(memo) },
+      );
+      expect(first.memoPin.entries.map((entry) => entry.sha256)).toEqual([
+        survivingAccepted.sha256,
+      ]);
+      expect(retired).toEqual([
+        expect.objectContaining({
+          sha256: missingAccepted.sha256,
+          inboxItemId: "inbox_missing",
+          retiredReason: "artifact_missing",
+          subject: { type: "repo", id: "factory" },
+        }),
+      ]);
+      expect(
+        db
+          .query(
+            `SELECT retired_at, retired_reason FROM memos WHERE sha256 = ?`,
+          )
+          .get(missingAccepted.sha256),
+      ).toEqual({ retired_at: NOW, retired_reason: "artifact_missing" });
+
+      const second = pinMemos(db, def, first, {
+        now: NOW + 1000,
+        onArtifactMissing: (memo) => retired.push(memo),
+      });
+      expect(second.memoPin).toEqual(first.memoPin);
+      expect(retired).toHaveLength(1);
+      db.close();
+    });
+  });
+
+  test("artifact-missing logging waits for the planner transaction to commit", () => {
+    withMemoConfig(() => {
+      const db = openDb(":memory:");
+      const document = memoDoc({
+        subject: { type: "repo", id: "factory" },
+        kind: "decision",
+        precedentOnly: true,
+        body: "Retire only after commit.",
+        refs: { inboxItemId: "inbox_commit" },
+        provenance: {
+          runId: null,
+          agent: "runtime:inbox",
+          createdAt: "2026-08-18T14:02:13.000Z",
+        },
+      });
+      const accepted = acceptMemo(document);
+      registerMemos(db, null, accepted.result, { now: NOW });
+      unlinkSync(path.join(artifactsRoot(), accepted.sha256));
+
+      const memoRegistry = memoReaderRegistry();
+      const def = memoRegistry.agents.get("memo-reader@1");
+      memoRegistry.agents.set("memo-reader@1", {
+        ...def,
+        memos: [
+          {
+            subject: { type: "repo", id: "$.input.repo" },
+            kinds: ["decision"],
+            max: 10,
+          },
+        ],
+      });
+      memoRegistry.eventTypes["test.memo.requested"] = {
+        ...memoRegistry.eventTypes["test.memo.requested"],
+        idempotencyScope: ["invalid-after-memo-fold"],
+      };
+      const ref = admitMemo(db, memoRegistry, {
+        eventId: "memo-rollback-log",
+        correlationId: "memo-rollback-log",
+      });
+      const logs = [];
+      expect(() =>
+        planEvent(db, memoRegistry, ref, {
+          now: NOW,
+          policyVersion: "git:test",
+          log: (line) => logs.push(line),
+        }),
+      ).toThrow(/unknown idempotency scope/);
+      expect(logs).toEqual([]);
+      expect(
+        db
+          .query(`SELECT retired_at FROM memos WHERE sha256 = ?`)
+          .get(accepted.sha256).retired_at,
+      ).toBeNull();
+
+      memoRegistry.eventTypes["test.memo.requested"] = {
+        ...memoRegistry.eventTypes["test.memo.requested"],
+        idempotencyScope: ["inputHash"],
+      };
+      expect(
+        planEvent(db, memoRegistry, ref, {
+          now: NOW + 1,
+          policyVersion: "git:test",
+          log: (line) => logs.push(line),
+        }).decision,
+      ).toBe("run");
+      expect(logs).toEqual([
+        `memo retired artifact_missing sha256=${accepted.sha256} subject=repo:factory inbox_item_id=inbox_commit`,
+      ]);
+      expect(
+        db
+          .query(`SELECT retired_reason FROM memos WHERE sha256 = ?`)
+          .get(accepted.sha256).retired_reason,
+      ).toBe("artifact_missing");
+      db.close();
+    });
+  });
+
   test("a new memo on a later event is a new run by inputHash", () => {
     withMemoConfig(() => {
       const db = openDb(":memory:");
@@ -2956,6 +3954,23 @@ describe("Linear rate limit (WM-878)", () => {
       expect(cache.inFlightCalls).toBeGreaterThan(0);
     });
   });
+
+  test("viewer reads are cached per repo instead of crossing control planes", () => {
+    const calls = [];
+    const reads = wrapLinearReads(
+      {
+        fetchViewer: (repo) => {
+          calls.push(repo);
+          return { id: `${repo}-viewer` };
+        },
+      },
+      createLinearReadCache(),
+    );
+    expect(reads.fetchViewer("linear-repo").id).toBe("linear-repo-viewer");
+    expect(reads.fetchViewer("github-repo").id).toBe("github-repo-viewer");
+    expect(reads.fetchViewer("linear-repo").id).toBe("linear-repo-viewer");
+    expect(calls).toEqual(["linear-repo", "github-repo"]);
+  });
 });
 
 describe("GitHub dispatch candidate parsing (GH-974)", () => {
@@ -3035,15 +4050,18 @@ describe("GitHub dispatch candidate parsing (GH-974)", () => {
           budgetRefusal: () => null,
           fetchTicket: (ticket) => {
             reads.push(ticket);
+            const description =
+              "## Owned Paths\n- event-runtime/lib/planner.mjs\n";
             return {
               identifier: ticket,
               state: { name: "Todo" },
               assignee: null,
               labels: [{ name: "ai:agent-ready" }],
-              description: "## Owned Paths\n- event-runtime/lib/planner.mjs\n",
+              description,
               controlPlaneKind: "github",
               authorAssociation: "MEMBER",
               lastEditorAssociation: "MEMBER",
+              readyPinHash: hashJson(description),
             };
           },
           fetchInFlight: () => [],

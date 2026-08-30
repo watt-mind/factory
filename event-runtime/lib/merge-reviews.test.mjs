@@ -103,16 +103,21 @@ function insertRun(db, { runId, agent, pr, headSha, state, github = GITHUB }) {
 
 function insertOpenProposal(db, { id, agent, pr, headSha, github = GITHUB }) {
   const now = "2026-08-19T16:45:00.000Z";
+  const runId = `run-${id}`;
   const spec = JSON.stringify({
     agent,
     input: { github, pr, headSha, baseSha: BASE },
   });
   db.query(
+    `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+     VALUES (?, ?, ?, 'sha256:test', 'PROPOSED', 0, ?, ?)`,
+  ).run(runId, `idem-${id}`, spec, now, now);
+  db.query(
     `INSERT INTO proposals (
        id, event_source, event_id, run_id, decision, spec_json, spec_hash,
        idempotency_key, status, created_at, ttl_seconds
-     ) VALUES (?, 'chain', ?, NULL, 'run', ?, 'sha256:test', ?, 'open', ?, 3600)`,
-  ).run(id, `evt-${id}`, spec, `idem-${id}`, now);
+     ) VALUES (?, 'chain', ?, ?, 'run', ?, 'sha256:test', ?, 'open', ?, 3600)`,
+  ).run(id, `evt-${id}`, runId, spec, `idem-${id}`, now);
 }
 
 function forgeWith(prs, { baseSha = BASE } = {}) {
@@ -780,6 +785,31 @@ describe("merge-scan enumerator (WM-936)", () => {
       repos,
     });
     expect(result.artifact.reviews).toEqual([]);
+  });
+
+  test("stale open proposal linked to a refused review does not suppress a retry", () => {
+    const db = openDb(":memory:");
+    insertOpenProposal(db, {
+      id: "prop_review_refused",
+      agent: "merge-review@1",
+      pr: 11,
+      headSha: HEAD2,
+    });
+    db.query(`UPDATE runs SET state = 'REFUSED' WHERE run_id = ?`).run(
+      "run-prop_review_refused",
+    );
+
+    const result = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith([
+        pr({ number: 11, headRefOid: HEAD2, headRefName: "feat/WM-11" }),
+      ]),
+      repos,
+    });
+
+    expect(result.artifact.reviews.map((row) => row.pr)).toEqual([11]);
+    expect(result.artifact.recommendation).toBe("REVIEW");
   });
 
   test("in-flight merge-fix at the same head does not emit a second rebase", () => {

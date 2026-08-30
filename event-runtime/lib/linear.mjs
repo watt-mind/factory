@@ -40,8 +40,8 @@ const PROJECT_QUERY = `query($t:String!,$p:String!,$after:String){
 
 const MAX_PAGES = 8;
 
-let cacheEntry = null;
-let inFlight = null;
+const cacheEntries = new Map();
+const inFlights = new Map();
 let injectedGql = null;
 let injectedBudget = undefined;
 
@@ -56,8 +56,8 @@ export function setLinearSupplyBudget(budget) {
 }
 
 export function clearLinearSupplyCache() {
-  cacheEntry = null;
-  inFlight = null;
+  cacheEntries.clear();
+  inFlights.clear();
 }
 
 export function emptyIssueCounts() {
@@ -123,10 +123,20 @@ async function fetchOpenIssues(gql, { team, project }) {
   return nodes;
 }
 
-function readBudget() {
+function readBudget({
+  allowDisk = true,
+  budgetLoader = loadLinearBudget,
+  override,
+} = {}) {
+  if (override !== undefined) return override;
   if (injectedBudget !== undefined) return injectedBudget;
+  // A caller-supplied GraphQL seam is already an explicit test boundary. It
+  // must not inherit the operator's persisted budget cache from the host
+  // running the tests (#1185); production uses the default gql and still reads
+  // the real fail-closed budget.
+  if (!allowDisk) return null;
   try {
-    return loadLinearBudget();
+    return budgetLoader();
   } catch {
     return null;
   }
@@ -143,7 +153,13 @@ function budgetPayload(budget) {
 async function fetchLinearSupply(repos, options = {}) {
   const nowMs = options.nowMs ?? Date.now();
   const asOf = new Date(nowMs).toISOString();
-  const budget = readBudget();
+  const suppliedGql = options.gql ?? injectedGql;
+  const budgetOptions = {
+    allowDisk: !suppliedGql,
+    budgetLoader: options.budgetLoader ?? loadLinearBudget,
+    override: options.budget,
+  };
+  const budget = readBudget(budgetOptions);
   if (budget?.remaining === 0) {
     return {
       ok: false,
@@ -154,7 +170,7 @@ async function fetchLinearSupply(repos, options = {}) {
     };
   }
 
-  const gql = options.gql ?? injectedGql ?? defaultGql;
+  const gql = suppliedGql ?? defaultGql;
   if (!options.gql && !injectedGql) {
     try {
       installLinearBudgetCapture();
@@ -188,7 +204,7 @@ async function fetchLinearSupply(repos, options = {}) {
       ok: true,
       asOf,
       byRepo,
-      budget: budgetPayload(readBudget()),
+      budget: budgetPayload(readBudget(budgetOptions)),
       error: null,
     };
   } catch (err) {
@@ -196,19 +212,36 @@ async function fetchLinearSupply(repos, options = {}) {
       ok: false,
       asOf: null,
       byRepo: {},
-      budget: budgetPayload(readBudget()),
+      budget: budgetPayload(readBudget(budgetOptions)),
       error: err?.message ? String(err.message) : "linear_unavailable",
     };
   }
 }
 
+function supplyRepoKey(repos) {
+  const configured = Array.isArray(repos)
+    ? repos
+    : [...(repos?.values?.() ?? [])];
+  return configured
+    .map((repo) => [repo?.name ?? "", repo?.team ?? "", repo?.project ?? ""])
+    .sort((left, right) => left[0].localeCompare(right[0]))
+    .map((parts) => parts.join("\t"))
+    .join("\n");
+}
+
 /**
  * Cached Linear snapshot. `refresh: true` bypasses TTL but still joins an
- * in-flight request so a double-click is one GraphQL round-trip.
+ * equivalent in-flight request so a double-click is one GraphQL round-trip.
+ * Cache identity includes the repo registry and GraphQL seam so parallel test
+ * callers cannot consume another caller's fixture response (#1185).
  */
 export async function loadLinearSupply(repos, options = {}) {
   const nowMs = options.nowMs ?? Date.now();
   const refresh = options.refresh === true;
+  const gql = options.gql ?? injectedGql ?? defaultGql;
+  const repoKey = supplyRepoKey(repos);
+  const gqlCache = cacheEntries.get(gql);
+  const cacheEntry = gqlCache?.get(repoKey);
   if (
     !refresh &&
     cacheEntry &&
@@ -216,15 +249,30 @@ export async function loadLinearSupply(repos, options = {}) {
   ) {
     return { ...cacheEntry.value, cached: true };
   }
+  const inFlight = inFlights.get(gql)?.get(repoKey);
   if (inFlight) return inFlight;
+
   const pending = fetchLinearSupply(repos, options).then((value) => {
-    cacheEntry = { at: nowMs, value };
+    if (value.ok) {
+      let entries = cacheEntries.get(gql);
+      if (!entries) {
+        entries = new Map();
+        cacheEntries.set(gql, entries);
+      }
+      entries.set(repoKey, { at: nowMs, value });
+    }
     return { ...value, cached: false };
   });
-  inFlight = pending;
+  let flights = inFlights.get(gql);
+  if (!flights) {
+    flights = new Map();
+    inFlights.set(gql, flights);
+  }
+  flights.set(repoKey, pending);
   try {
     return await pending;
   } finally {
-    if (inFlight === pending) inFlight = null;
+    if (flights.get(repoKey) === pending) flights.delete(repoKey);
+    if (flights.size === 0) inFlights.delete(gql);
   }
 }

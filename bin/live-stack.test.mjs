@@ -35,10 +35,29 @@ const LIVE_STACK = path.resolve(import.meta.dir, "live-stack.sh");
  */
 const COMMON_STUB = `#!/usr/bin/env bash
 repo_root() { printf '%s' "$FAKE_REPO"; }
-info() { printf '==> %s\\n' "$*"; }
+info() {
+  printf '==> %s\\n' "$*"
+  # A command failing *inside* a helper body under set -e (not a non-zero
+  # return to the caller): the shell aborts here, and the ERR trap must still
+  # run cleanup. The line after the failure is never reached.
+  if [[ -n "\${FAKE_INFO_FAIL_ON:-}" && "$*" == "\${FAKE_INFO_FAIL_ON}"* ]]; then
+    false
+    printf 'unreachable under set -e\\n' >&2
+  fi
+}
 warn() { printf 'warn: %s\\n' "$*" >&2; }
 die() { printf 'error: %s\\n' "$*" >&2; exit 1; }
 pid_alive() {
+  if [[ "\${FAKE_WEB_SUPERVISOR:-0}" == "1" ]]; then
+    [[ "$(basename "$1")" == "serve.pid" ]]
+    return
+  fi
+  if [[ "\${FAKE_SERVE_DIES:-0}" == "1" && "$(basename "$1")" == "serve.pid" && -f "$1" ]]; then
+    return 1
+  fi
+  if [[ "$(basename "$1")" == "serve.pid" && -f "$1" ]]; then
+    return 0
+  fi
   [[ "\${FAKE_ALIVE:-0}" == "1" ]] || return 1
   [[ -f "$1" ]] || return 1
   [[ -f "$1.terminated" ]] && return 1
@@ -48,13 +67,25 @@ spawn_daemon() { # <pidfile> <logfile> <workdir> <cmd...>
   local pidfile="$1" logfile="$2" workdir="$3"
   shift 3
   printf 'SPAWN pid=%s workdir=%s cmd=%s\\n' "$(basename "$pidfile")" "$workdir" "$*" >>"$SPAWN_LOG"
+  if [[ "$(basename "$pidfile")" == "\${FAKE_SPAWN_FAIL_PIDFILE:-}" ]]; then return 1; fi
   printf '1\\n' >"$pidfile"
+  if [[ "\${FAKE_POOL_CHILDREN:-0}" == "1" && "$*" == *"cli.mjs supervise"* ]]; then
+    printf '2\\n' >"$(dirname "$pidfile")/supervisor.pid"
+    printf '3\\n' >"$(dirname "$pidfile")/worker-1.pid"
+    printf 'worker_test\\n' >"$(dirname "$pidfile")/worker-1.id"
+  fi
 }
 term_daemon() {
   printf 'TERM %s\\n' "$2" >>"$SPAWN_LOG"
   [[ "\${FAKE_IGNORES_TERM:-0}" == "1" ]] || touch "$1.terminated"
 }
 await_daemon() { printf 'AWAIT %s\\n' "$2" >>"$SPAWN_LOG"; }
+rotate_run_logs() {
+  if [[ -n "\${FAKE_ROTATION_LOG:-}" ]]; then
+    printf 'ROTATE bytes=%s keep=%s\\n' "$2" "$3" >>"$FAKE_ROTATION_LOG"
+  fi
+}
+run_log_total_bytes() { printf '%s' "\${FAKE_LOG_BYTES:-0}"; }
 `;
 
 /**
@@ -132,8 +163,43 @@ function makeFixture({
 
   // The health polls must not gate a test on a server nobody started.
   const curl = path.join(root, "stubs", "curl");
-  writeFileSync(curl, "#!/bin/sh\nexit 0\n", "utf8");
+  writeFileSync(
+    curl,
+    `#!/bin/sh
+if [ -n "\${FAKE_CURL_COUNT_FILE:-}" ]; then
+  calls=0
+  [ -f "$FAKE_CURL_COUNT_FILE" ] && calls=$(cat "$FAKE_CURL_COUNT_FILE")
+  calls=$((calls + 1))
+  printf '%s' "$calls" >"$FAKE_CURL_COUNT_FILE"
+  if [ "$calls" -le "\${FAKE_CURL_SUCCEED_AFTER:-0}" ]; then exit 1; fi
+fi
+if [ "\${FAKE_CURL_SIGNAL_PARENT:-0}" = "1" ] && [ ! -e "\${FAKE_CURL_SIGNAL_MARKER:-}" ]; then
+  case "$*" in
+    *":7381/health"*) : >"$FAKE_CURL_SIGNAL_MARKER"; kill -INT "$PPID" ;;
+  esac
+fi
+if [ -n "\${FAKE_CURL_FAIL_URL:-}" ]; then
+  case "$*" in *"$FAKE_CURL_FAIL_URL"*) exit 1 ;; esac
+fi
+if [ -n "\${FAKE_CURL_STALL:-}" ]; then
+  case "$*" in *"/health"*) /bin/sleep "$FAKE_CURL_STALL"; exit 1 ;; esac
+fi
+exit "\${FAKE_CURL_STATUS:-0}"
+`,
+    "utf8",
+  );
   chmodSync(curl, 0o755);
+
+  const sleep = path.join(root, "stubs", "sleep");
+  writeFileSync(
+    sleep,
+    `#!/bin/sh
+if [ "\${FAKE_FAST_SLEEP:-0}" = "1" ]; then exit 0; fi
+exec /bin/sleep "$@"
+`,
+    "utf8",
+  );
+  chmodSync(sleep, 0o755);
 
   // Non-dev web builds are recorded and materialize the one artifact the
   // script checks. Other bun commands are only arguments to spawn_daemon.
@@ -164,13 +230,42 @@ exit 99
 }
 
 function runStack(fixture, args, extraEnv = {}) {
+  const noCurlBin = path.join(fixture.root, "no-curl-bin");
+  if (extraEnv.FAKE_PATH_WITHOUT_CURL === "1") {
+    mkdirSync(noCurlBin, { recursive: true });
+    for (const command of [
+      "bash",
+      "basename",
+      "cat",
+      "date",
+      "dirname",
+      "find",
+      "grep",
+      "mkdir",
+      "ps",
+      "rm",
+      "sort",
+      "tr",
+    ]) {
+      const source = Bun.spawnSync({
+        cmd: ["sh", "-c", `command -v ${command}`],
+      })
+        .stdout.toString()
+        .trim();
+      copyFileSync(source, path.join(noCurlBin, command));
+      chmodSync(path.join(noCurlBin, command), 0o755);
+    }
+  }
   const result = Bun.spawnSync({
     cmd: ["bash", path.join(fixture.root, "bin", "live-stack.sh"), ...args],
     stdout: "pipe",
     stderr: "pipe",
     env: {
       ...process.env,
-      PATH: `${path.join(fixture.root, "stubs")}:${process.env.PATH}`,
+      PATH:
+        extraEnv.FAKE_PATH_WITHOUT_CURL === "1"
+          ? noCurlBin
+          : `${path.join(fixture.root, "stubs")}:${process.env.PATH}`,
       FAKE_REPO: fixture.root,
       SPAWN_LOG: fixture.spawnLog,
       BUILD_LOG: fixture.buildLog,
@@ -220,6 +315,270 @@ test("plain `up` spawns serve, worker, and the static web server — unchanged b
     f.cleanup();
   }
 });
+
+test("`up --dry-run` prints the resolved daemon plan without spawning", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, [
+      "up",
+      "--dry-run",
+      "--port",
+      "7411",
+      "--web-port",
+      "7412",
+    ]);
+    expect(r.status).toBe(0);
+    expect(r.spawns).toEqual([]);
+    expect(r.builds).toEqual([]);
+    expect(r.stdout).toContain("dry run — no daemons will be started");
+    expect(r.stdout).toContain(`RUN_DIR=${f.runDir}`);
+    expect(r.stdout).toContain("API_PORT=7411");
+    expect(r.stdout).toContain("WEB_PORT=7412");
+    expect(r.stdout).toContain("event runtime: env");
+    expect(r.stdout).toContain("cli.mjs serve --port 7411");
+    expect(r.stdout).toContain("worker: env");
+    expect(r.stdout).toContain("web server: env");
+    expect(r.stdout).toContain("web supervisor: env");
+    // A dry run leaves no trace on disk: no run dir, no event home.
+    expect(existsSync(f.runDir)).toBe(false);
+    expect(existsSync(path.join(f.root, "home"))).toBe(false);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("failed runtime health cleans up only daemons spawned by this `up`", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, ["up"], {
+      FACTORY_GH_APP_ID: "test-app",
+      FACTORY_GH_APP_PRIVATE_KEY_PATH: "/tmp/test-key",
+      FAKE_CURL_STATUS: "1",
+      FAKE_FAST_SLEEP: "1",
+      FACTORY_API_READY_TIMEOUT: "1",
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("event runtime failed to start");
+    expect(r.spawns).toContainEqual(
+      expect.stringContaining("pid=gh-app-auth.pid"),
+    );
+    expect(r.spawns).toContainEqual(expect.stringContaining("pid=serve.pid"));
+    expect(r.spawns).toContain("TERM GitHub App token daemon");
+    expect(r.spawns).toContain("TERM event runtime");
+    expect(existsSync(path.join(f.runDir, "gh-app-auth.pid"))).toBe(false);
+    expect(existsSync(path.join(f.runDir, "serve.pid"))).toBe(false);
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
+
+test("runtime health allows a slow bind beyond the former 30-attempt budget", () => {
+  const f = makeFixture();
+  const calls = path.join(f.root, "curl-calls");
+  try {
+    const r = runStack(f, ["up"], {
+      FAKE_CURL_COUNT_FILE: calls,
+      FAKE_CURL_SUCCEED_AFTER: "31",
+      FAKE_FAST_SLEEP: "1",
+    });
+    expect(r.status).toBe(0);
+    expect(Number(readFileSync(calls, "utf8"))).toBeGreaterThan(31);
+    expect(r.stdout).toContain("ready — live factory stack");
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
+
+test("runtime health is a wall-clock deadline even when /health stalls per attempt", () => {
+  const f = makeFixture();
+  try {
+    // Every probe hangs for a second (a bound socket whose /health never
+    // answers). An attempt-counted loop would wait 600 x 1 s here; the deadline
+    // must cut it off at FACTORY_API_READY_TIMEOUT regardless.
+    const started = Date.now();
+    const r = runStack(f, ["up"], {
+      FAKE_CURL_STALL: "1",
+      FACTORY_API_READY_TIMEOUT: "2",
+    });
+    const elapsed = (Date.now() - started) / 1000;
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("event runtime failed to start");
+    expect(r.stderr).toContain("within 2s");
+    // $SECONDS ticks on wall-clock second boundaries, so a 2 s deadline may
+    // expire shortly after 1 s; the upper bound is what the nit is about.
+    expect(elapsed).toBeGreaterThanOrEqual(1);
+    expect(elapsed).toBeLessThan(8);
+    expect(r.spawns).toContain("TERM event runtime");
+    expect(existsSync(path.join(f.runDir, "serve.pid"))).toBe(false);
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
+
+test("a dead serve pid aborts readiness promptly with its own diagnostic", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, ["up"], {
+      FAKE_SERVE_DIES: "1",
+      FAKE_CURL_STATUS: "1",
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("event runtime exited before becoming healthy");
+    expect(r.spawns).toContain("TERM event runtime");
+    expect(existsSync(path.join(f.runDir, "serve.pid"))).toBe(false);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("SIGINT during `up` cleans up pidfiles owned by this invocation", () => {
+  const f = makeFixture();
+  const marker = path.join(f.root, "signal-sent");
+  try {
+    const r = runStack(f, ["up"], {
+      FAKE_CURL_SIGNAL_PARENT: "1",
+      FAKE_CURL_SIGNAL_MARKER: marker,
+    });
+    expect(r.status).toBe(130);
+    expect(existsSync(marker)).toBe(true);
+    expect(r.spawns).toContain("TERM event runtime");
+    expect(existsSync(path.join(f.runDir, "serve.pid"))).toBe(false);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a set -e abort inside a helper still runs the ERR-trap cleanup", () => {
+  const f = makeFixture();
+  try {
+    // The failure happens inside a function body. Without `set -E` the ERR trap
+    // is not inherited there, and the shell would exit leaving serve.pid behind.
+    const r = runStack(f, ["up"], { FAKE_INFO_FAIL_ON: "starting worker" });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).not.toContain("unreachable");
+    expect(r.spawns).toContainEqual(expect.stringContaining("pid=serve.pid"));
+    expect(r.spawns).not.toContainEqual(
+      expect.stringContaining("pid=worker.pid"),
+    );
+    expect(r.spawns).toContain("TERM event runtime");
+    expect(existsSync(path.join(f.runDir, "serve.pid"))).toBe(false);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("missing curl names the required tool before starting daemons", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, ["up"], { FAKE_PATH_WITHOUT_CURL: "1" });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("curl not found");
+    expect(r.spawns).toEqual([]);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("failed `up` leaves an already-running daemon alone", () => {
+  const f = makeFixture();
+  try {
+    mkdirSync(f.runDir, { recursive: true });
+    writeFileSync(path.join(f.runDir, "serve.pid"), "4242\n", "utf8");
+    const r = runStack(f, ["up"], {
+      FAKE_ALIVE: "1",
+      FAKE_CURL_STATUS: "1",
+      FAKE_FAST_SLEEP: "1",
+      FACTORY_API_READY_TIMEOUT: "1",
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).toContain("event runtime already running");
+    expect(r.spawns).not.toContain("TERM event runtime");
+    expect(existsSync(path.join(f.runDir, "serve.pid"))).toBe(true);
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
+
+test("slow web health warns and keeps the healthy runtime and pool running", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, ["up", "--workers", "1:1"], {
+      FAKE_POOL_CHILDREN: "1",
+      FAKE_CURL_FAIL_URL: ":7382",
+    });
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain("web server not responding on 7382 yet");
+    expect(r.stdout).toContain("ready — live factory stack");
+    expect(r.spawns.some((line) => line.startsWith("TERM "))).toBe(false);
+    for (const file of [
+      "serve.pid",
+      "worker.pid",
+      "supervisor.pid",
+      "worker-1.pid",
+      "web.pid",
+    ]) {
+      expect(existsSync(path.join(f.runDir, file))).toBe(true);
+    }
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
+
+test("a daemon that fails to spawn removes supervised pool children from this `up`", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, ["up", "--workers", "1:1"], {
+      FAKE_POOL_CHILDREN: "1",
+      FAKE_SPAWN_FAIL_PIDFILE: "web.pid",
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("failed to start web server");
+    expect(r.spawns).toContain("TERM worker pool worker-1");
+    expect(r.spawns).toContain("TERM event runtime");
+    for (const file of [
+      "worker.pid",
+      "supervisor.pid",
+      "worker-1.pid",
+      "worker-1.id",
+    ]) {
+      expect(existsSync(path.join(f.runDir, file))).toBe(false);
+    }
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
+
+test("a non-`up` die never touches pre-existing pidfiles or daemons", () => {
+  const f = makeFixture();
+  try {
+    mkdirSync(f.runDir, { recursive: true });
+    const preexisting = {
+      "serve.pid": "4242\n",
+      "worker.pid": "4243\n",
+      "supervisor.pid": "4244\n",
+      "worker-1.pid": "4245\n",
+      "worker-1.id": "worker_live\n",
+      "web.pid": "4246\n",
+    };
+    for (const [file, body] of Object.entries(preexisting)) {
+      writeFileSync(path.join(f.runDir, file), body, "utf8");
+    }
+    for (const args of [
+      ["tail", "nosuchlog"],
+      ["bogus-action"],
+      ["up", "--no-such-option"],
+    ]) {
+      const r = runStack(f, args, { FAKE_ALIVE: "1" });
+      expect(r.status).not.toBe(0);
+      expect(r.spawns).toEqual([]);
+      for (const [file, body] of Object.entries(preexisting)) {
+        expect(readFileSync(path.join(f.runDir, file), "utf8")).toBe(body);
+      }
+    }
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
 
 test("plain `up` rebuilds a stale web bundle and reports the elapsed time", () => {
   const f = makeFixture({ bundle: "stale" });
@@ -551,6 +910,167 @@ test("`up --bogus` is still rejected", () => {
     f.cleanup();
   }
 });
+
+test("`logs rotate` reports its total after requesting the configured retention", () => {
+  const f = makeFixture();
+  const rotationLog = path.join(f.root, "rotations.log");
+  try {
+    const r = runStack(f, ["logs", "rotate"], {
+      FACTORY_LOG_ROTATE_BYTES: "1048576",
+      FACTORY_LOG_KEEP: "2",
+      FAKE_ROTATION_LOG: rotationLog,
+      FAKE_LOG_BYTES: "321",
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("total log bytes: 321");
+    expect(readFileSync(rotationLog, "utf8")).toBe(
+      "ROTATE bytes=1048576 keep=2\n",
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("`logs rotate` treats FACTORY_LOG_ROTATE_BYTES=0 as disabled", () => {
+  const f = makeFixture();
+  const rotationLog = path.join(f.root, "rotations.log");
+  try {
+    const r = runStack(f, ["logs", "rotate"], {
+      FACTORY_LOG_ROTATE_BYTES: "0",
+      FAKE_ROTATION_LOG: rotationLog,
+      FAKE_LOG_BYTES: "7",
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("log rotation disabled");
+    expect(r.stdout).toContain("total log bytes: 7");
+    expect(existsSync(rotationLog)).toBe(false);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("log knobs below 1 MiB or malformed are rejected before anything rotates", () => {
+  const f = makeFixture();
+  const rotationLog = path.join(f.root, "rotations.log");
+  try {
+    for (const [env, message] of [
+      [{ FACTORY_LOG_ROTATE_BYTES: "42" }, "at least 1048576 bytes"],
+      [{ FACTORY_LOG_ROTATE_BYTES: "lots" }, "non-negative integer"],
+      [
+        { FACTORY_LOG_KEEP: "0" },
+        "FACTORY_LOG_KEEP must be a positive integer",
+      ],
+      [
+        { FACTORY_LOG_ROTATE_INTERVAL: "soon" },
+        "FACTORY_LOG_ROTATE_INTERVAL must be a non-negative integer",
+      ],
+    ]) {
+      const r = runStack(f, ["logs", "rotate"], {
+        ...env,
+        FAKE_ROTATION_LOG: rotationLog,
+      });
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain(message);
+      expect(existsSync(rotationLog)).toBe(false);
+    }
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("web supervisor rotates logs on its tick while the stack stays up", async () => {
+  const f = makeFixture();
+  const rotationLog = path.join(f.root, "rotations.log");
+  const counter = path.join(f.root, "sleep-count");
+  const sleep = path.join(f.root, "stubs", "sleep");
+  writeFileSync(
+    sleep,
+    `#!/bin/sh
+n=$(cat "$FAKE_SLEEP_COUNT" 2>/dev/null || printf 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$FAKE_SLEEP_COUNT"
+if [ "$n" -ge 3 ]; then kill -TERM "$PPID"; fi
+`,
+    "utf8",
+  );
+  chmodSync(sleep, 0o755);
+  mkdirSync(f.runDir, { recursive: true });
+  writeFileSync(path.join(f.runDir, "serve.pid"), "1\n", "utf8");
+  const proc = Bun.spawn({
+    cmd: ["bash", path.join(f.root, "bin", "live-stack.sh"), "__supervise-web"],
+    stdout: "pipe",
+    stderr: "pipe",
+    env: {
+      ...process.env,
+      PATH: `${path.join(f.root, "stubs")}:${process.env.PATH}`,
+      FAKE_REPO: f.root,
+      FACTORY_RUN_DIR: f.runDir,
+      FACTORY_EVENT_HOME: path.join(f.root, "home"),
+      FAKE_WEB_SUPERVISOR: "1",
+      FAKE_SLEEP_COUNT: counter,
+      FAKE_ROTATION_LOG: rotationLog,
+      FACTORY_LOG_ROTATE_BYTES: "2097152",
+      FACTORY_LOG_KEEP: "4",
+      // Every tick is a rotation check; the real default is 300 s.
+      FACTORY_LOG_ROTATE_INTERVAL: "0",
+    },
+  });
+  try {
+    const status = await proc.exited;
+    expect(status).toBe(0);
+    const rotations = readFileSync(rotationLog, "utf8").trim().split("\n");
+    expect(rotations.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(rotations)).toEqual(
+      new Set(["ROTATE bytes=2097152 keep=4"]),
+    );
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
+
+test("web supervisor exponentially backs off rapid restarts", async () => {
+  const f = makeFixture();
+  const sleeps = path.join(f.root, "sleeps.log");
+  const counter = path.join(f.root, "sleep-count");
+  const sleep = path.join(f.root, "stubs", "sleep");
+  writeFileSync(
+    sleep,
+    `#!/bin/sh
+n=$(cat "$FAKE_SLEEP_COUNT" 2>/dev/null || printf 0)
+n=$((n + 1))
+printf '%s\\n' "$n" > "$FAKE_SLEEP_COUNT"
+printf '%s\\n' "$1" >> "$FAKE_SLEEP_LOG"
+if [ "$n" -ge 4 ]; then kill -TERM "$PPID"; fi
+`,
+    "utf8",
+  );
+  chmodSync(sleep, 0o755);
+  mkdirSync(f.runDir, { recursive: true });
+  writeFileSync(path.join(f.runDir, "serve.pid"), "1\n", "utf8");
+  const proc = Bun.spawn({
+    cmd: ["bash", path.join(f.root, "bin", "live-stack.sh"), "__supervise-web"],
+    stdout: "pipe",
+    stderr: "pipe",
+    env: {
+      ...process.env,
+      PATH: `${path.join(f.root, "stubs")}:${process.env.PATH}`,
+      FAKE_REPO: f.root,
+      FACTORY_RUN_DIR: f.runDir,
+      FACTORY_EVENT_HOME: path.join(f.root, "home"),
+      FAKE_WEB_SUPERVISOR: "1",
+      FAKE_SLEEP_LOG: sleeps,
+      FAKE_SLEEP_COUNT: counter,
+    },
+  });
+  try {
+    const status = await proc.exited;
+    expect(status).toBe(0);
+    const delays = readFileSync(sleeps, "utf8").trim().split("\n");
+    expect(delays).toEqual(["1", "1", "1", "2"]);
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
 
 // --- __supervise-worker ------------------------------------------------------
 

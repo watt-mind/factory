@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { artifactsRoot, runtimeHome } from "./config.mjs";
-import { openDb } from "./db.mjs";
+import { openDb, txImmediate } from "./db.mjs";
 import { reposRoot } from "./repos.mjs";
 
 /** Bound so a hung Linear call cannot freeze serve forever (OPS-301 review). */
@@ -10,9 +10,89 @@ export const JANITOR_TIMEOUT_MS = 120_000;
 export const JANITOR_MAX_BUFFER = 1_000_000;
 export const DEFAULT_TRACE_RETENTION_DAYS = 14;
 export const DEFAULT_ARTIFACT_RETENTION_DAYS = 30;
+export const DEFAULT_ROW_RETENTION_DAYS = 30;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SHA256 = /^[a-f0-9]{64}$/;
+
+/**
+ * Run states that are terminal for retention purposes (#1065). FAILED is
+ * re-queueable while attempts remain, so it is NOT in lifecycle's
+ * TERMINAL_STATES — but a FAILED run untouched since before the retention
+ * cutoff is never mid-retry, so the `updated_at < cutoff` gate makes it safe
+ * to sweep here. Active/in-flight states (PROPOSED, APPROVED, QUEUED, LEASED,
+ * RUNNING, VERIFYING) are deliberately absent so they can never be removed.
+ */
+const TERMINAL_RUN_STATES = [
+  "COMPLETED",
+  "REFUSED",
+  "TIMED_OUT",
+  "CANCELLED",
+  "FAILED",
+];
+
+/** Per-run child tables keyed by run_id, cleared alongside a swept run. */
+const RUN_CHILD_TABLES = [
+  "results",
+  "attempts",
+  "lifecycle_events",
+  "run_usage",
+  "attempt_trace",
+];
+
+/**
+ * Delete terminal proposal/run/event rows past the retention window, keeping
+ * all active/in-flight state (#1065). Dry-by-default: with `apply: false` it
+ * only counts. Returns per-table counts.
+ */
+function sweepTerminalRows(db, { rowCutoff, nowIso, apply }) {
+  const terminalList = TERMINAL_RUN_STATES.map((s) => `'${s}'`).join(", ");
+  const runFilter = `state IN (${terminalList}) AND updated_at < ?`;
+
+  const runsDeleted = db
+    .query(`SELECT COUNT(*) AS count FROM runs WHERE ${runFilter}`)
+    .get(rowCutoff).count;
+
+  // Terminal proposals: decided (rejected/superseded) or open-but-expired past
+  // their per-row TTL. Active 'open' proposals still within TTL and 'approved'
+  // decisions are never removed.
+  const proposalFilter = `created_at < ?
+      AND (status IN ('rejected', 'superseded')
+           OR (status = 'open'
+               AND (strftime('%s', ?) - strftime('%s', created_at)) > ttl_seconds))`;
+  const proposalsDeleted = db
+    .query(`SELECT COUNT(*) AS count FROM proposals WHERE ${proposalFilter}`)
+    .get(rowCutoff, nowIso).count;
+
+  // Archived (dead-lettered) events past the window.
+  const eventFilter = `archived_at IS NOT NULL AND archived_at < ?`;
+  const eventsDeleted = db
+    .query(`SELECT COUNT(*) AS count FROM events WHERE ${eventFilter}`)
+    .get(rowCutoff).count;
+
+  if (apply) {
+    txImmediate(db, () => {
+      // Subquery predicates (not an id list) so a large sweep can never trip
+      // SQLite's bound-variable limit. Children first, then the runs.
+      const runSubquery = `run_id IN (SELECT run_id FROM runs WHERE ${runFilter})`;
+      for (const table of RUN_CHILD_TABLES) {
+        db.query(`DELETE FROM ${table} WHERE ${runSubquery}`).run(rowCutoff);
+      }
+      db.query(`DELETE FROM runs WHERE ${runFilter}`).run(rowCutoff);
+      db.query(`DELETE FROM proposals WHERE ${proposalFilter}`).run(
+        rowCutoff,
+        nowIso,
+      );
+      db.query(`DELETE FROM events WHERE ${eventFilter}`).run(rowCutoff);
+    });
+  }
+
+  return {
+    runs: { deleted: runsDeleted, dryRun: !apply },
+    proposals: { deleted: proposalsDeleted, dryRun: !apply },
+    events: { deleted: eventsDeleted, dryRun: !apply },
+  };
+}
 
 function retentionMs(days, name) {
   if (!Number.isFinite(days) || days <= 0)
@@ -43,6 +123,7 @@ export function sweepRuntimeRetention(
   {
     traceRetentionDays = DEFAULT_TRACE_RETENTION_DAYS,
     artifactRetentionDays = DEFAULT_ARTIFACT_RETENTION_DAYS,
+    rowRetentionDays = DEFAULT_ROW_RETENTION_DAYS,
     now = Date.now(),
     apply = false,
     log = () => {},
@@ -53,6 +134,10 @@ export function sweepRuntimeRetention(
   ).toISOString();
   const artifactCutoffMs =
     now - retentionMs(artifactRetentionDays, "artifactRetentionDays");
+  const rowCutoff = new Date(
+    now - retentionMs(rowRetentionDays, "rowRetentionDays"),
+  ).toISOString();
+  const nowIso = new Date(now).toISOString();
   const trace = db
     .query(`SELECT COUNT(*) AS count FROM attempt_trace WHERE ts < ?`)
     .get(traceCutoff).count;
@@ -104,12 +189,24 @@ export function sweepRuntimeRetention(
       if (apply) rmSync(file, { force: true });
     }
   }
+  const rows = sweepTerminalRows(db, { rowCutoff, nowIso, apply });
+
+  // VACUUM reclaims the file space freed by the row deletions (#1065). It must
+  // run outside any transaction, so it follows the sweep's own commit.
+  if (apply) db.exec("VACUUM");
+
   const result = {
     trace: { deleted: trace, dryRun: !apply },
     artifacts: { deleted, freedBytes, retained, dryRun: !apply },
+    runs: rows.runs,
+    proposals: rows.proposals,
+    events: rows.events,
+    vacuum: { ran: apply },
   };
   log(
-    `retention: ${trace} trace rows and ${deleted} artifacts (${freedBytes} bytes) ${apply ? "deleted" : "would be deleted"}`,
+    `retention: ${trace} trace rows and ${deleted} artifacts (${freedBytes} bytes)` +
+      `, ${rows.runs.deleted} runs, ${rows.proposals.deleted} proposals, ${rows.events.deleted} events ` +
+      `${apply ? "deleted (VACUUMed)" : "would be deleted"}`,
   );
   return result;
 }
@@ -119,14 +216,16 @@ export function runtimeRetentionCommand(args = [], options = {}) {
   let apply = false;
   let traceRetentionDays = DEFAULT_TRACE_RETENTION_DAYS;
   let artifactRetentionDays = DEFAULT_ARTIFACT_RETENTION_DAYS;
+  let rowRetentionDays = DEFAULT_ROW_RETENTION_DAYS;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--apply") apply = true;
     else if (args[i] === "--trace-days") traceRetentionDays = Number(args[++i]);
     else if (args[i] === "--artifact-days")
       artifactRetentionDays = Number(args[++i]);
+    else if (args[i] === "--row-days") rowRetentionDays = Number(args[++i]);
     else
       throw new Error(
-        "usage: janitor.mjs retention [--apply] [--trace-days N] [--artifact-days N]",
+        "usage: janitor.mjs retention [--apply] [--trace-days N] [--artifact-days N] [--row-days N]",
       );
   }
   const db = options.db ?? openDb();
@@ -137,6 +236,7 @@ export function runtimeRetentionCommand(args = [], options = {}) {
       {
         traceRetentionDays,
         artifactRetentionDays,
+        rowRetentionDays,
         apply,
         now: options.now,
         log: options.log ?? console.log,
@@ -286,7 +386,7 @@ if (import.meta.main) {
   const [command, ...args] = process.argv.slice(2);
   if (command !== "retention") {
     throw new Error(
-      "usage: janitor.mjs retention [--apply] [--trace-days N] [--artifact-days N]",
+      "usage: janitor.mjs retention [--apply] [--trace-days N] [--artifact-days N] [--row-days N]",
     );
   }
   runtimeRetentionCommand(args);

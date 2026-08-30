@@ -8,8 +8,20 @@
 
 import { nextScheduledRetry, scheduledRetryLabel } from "./chainTimeline";
 import { REASONS, humanizeReason } from "./reasons";
+import type { Attempt } from "./types";
 
-export const TICKET_ID_PATTERN = /^[A-Z][A-Z0-9]{1,9}-\d+$/;
+export const TICKET_ID_PATTERN =
+  /^(?:[A-Z][A-Z0-9]{1,9}-\d+|[A-Z0-9_.-]+\/[A-Z0-9_.-]+#[1-9][0-9]{0,9})$/i;
+
+/** Canonical ticket IDs: uppercase Linear IDs and lowercase GitHub owner/repo IDs. */
+export function normalizeTicketId(value: string): string | null {
+  const ticket = value.trim();
+  const linear = ticket.toUpperCase();
+  if (/^[A-Z][A-Z0-9]{1,9}-\d+$/.test(linear)) return linear;
+  if (/^[A-Z0-9_.-]+\/[A-Z0-9_.-]+#[1-9][0-9]{0,9}$/i.test(ticket))
+    return ticket.toLowerCase();
+  return null;
+}
 
 /** `#541`, `PR 541`, `pr:541`, `pull/541`, `541` — what an operator types for a PR. */
 export const PR_REF_PATTERN = /^(?:#|pr[:#\s-]?|pull\/)?(\d{1,7})$/i;
@@ -33,11 +45,10 @@ export function installTicketJourneyLinks(
   const decorate = () => {
     for (const span of root.querySelectorAll<HTMLSpanElement>("span")) {
       if (span.childElementCount > 0 || span.dataset.ticketJourneyId) continue;
-      const ticket = (span.textContent ?? "")
-        .trim()
-        .replace(/^([\"'])|([\"'])$/g, "")
-        .toUpperCase();
-      if (!TICKET_ID_PATTERN.test(ticket)) continue;
+      const ticket = normalizeTicketId(
+        (span.textContent ?? "").trim().replace(/^([\"'])|([\"'])$/g, ""),
+      );
+      if (!ticket) continue;
       span.dataset.ticketJourneyId = ticket;
       span.setAttribute("role", "link");
       span.tabIndex = 0;
@@ -59,13 +70,11 @@ export function installTicketJourneyLinks(
         : null;
     if (!element) return null;
     const dataTicket = element.dataset.ticketJourneyId;
-    const ticket = (dataTicket ?? element.textContent ?? "")
-      .trim()
-      .toUpperCase();
+    const ticket = normalizeTicketId(dataTicket ?? element.textContent ?? "");
     const exactCopyButton =
       element.tagName === "BUTTON" &&
-      element.title.trim().toUpperCase() === ticket;
-    return (dataTicket || exactCopyButton) && TICKET_ID_PATTERN.test(ticket)
+      normalizeTicketId(element.title) === ticket;
+    return ticket && (dataTicket || exactCopyButton)
       ? { element, ticket }
       : null;
   };
@@ -223,6 +232,8 @@ export interface JourneyRun {
     };
   };
   lifecycle: JourneyLifecycle[];
+  /** Attempts emitted by `runView`, ordered by ascending attempt number. */
+  attempts?: Array<Partial<Attempt>>;
   result: Record<string, any> | null;
   usage?: {
     totals?: { attempts?: number; totalTokens?: number; costUSD?: number };
@@ -388,8 +399,8 @@ export function ticketIdsIn(value: unknown): string[] {
   const ids = new Set<string>();
   const add = (candidate: unknown) => {
     if (typeof candidate !== "string") return;
-    const normalized = candidate.trim().toUpperCase();
-    if (TICKET_ID_PATTERN.test(normalized)) ids.add(normalized);
+    const normalized = normalizeTicketId(candidate);
+    if (normalized) ids.add(normalized);
   };
   if (typeof value === "string") add(value);
   walk(value, (key, entry) => {
@@ -502,7 +513,8 @@ function runDuration(run: JourneyRun): number | null {
   return window ? window.end - window.start : null;
 }
 
-export function formatDuration(ms: number | null): string {
+/** Formats a duration expressed in milliseconds. */
+export function formatDurationMs(ms: number | null): string {
   if (ms == null || !Number.isFinite(ms) || ms < 0) return "—";
   const seconds = Math.round(ms / 1000);
   if (seconds < 60) return `${seconds}s`;
@@ -606,31 +618,38 @@ export interface ScanVerdict {
   round: number | null;
 }
 
+type ArtifactPrEntry = Record<string, unknown>;
+
+function isArtifactPrEntry(value: unknown): value is ArtifactPrEntry {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 export function scanVerdictFor(
   artifact: unknown,
   pr: number,
 ): ScanVerdict | null {
-  if (!artifact || typeof artifact !== "object") return null;
-  const record = artifact as Record<string, unknown>;
+  if (!isArtifactPrEntry(artifact)) return null;
   const buckets: Array<[ScanVerdict["bucket"], string]> = [
     ["MERGE", "plan"],
     ["FIX", "fix"],
     ["ESCALATE", "escalate"],
   ];
   for (const [bucket, key] of buckets) {
-    const list = record[key];
+    const list = artifact[key];
     if (!Array.isArray(list)) continue;
     const entry = list.find(
-      (item) =>
-        item && typeof item === "object" && Number((item as any).pr) === pr,
-    ) as Record<string, unknown> | undefined;
+      (item): item is ArtifactPrEntry =>
+        isArtifactPrEntry(item) && Number(item.pr) === pr,
+    );
     if (!entry) continue;
     return {
       bucket,
       headSha: typeof entry.headSha === "string" ? entry.headSha : null,
       headRef: typeof entry.headRef === "string" ? entry.headRef : null,
       ticket:
-        typeof entry.ticket === "string" ? entry.ticket.toUpperCase() : null,
+        typeof entry.ticket === "string"
+          ? normalizeTicketId(entry.ticket)
+          : null,
       mergeable: typeof entry.mergeable === "boolean" ? entry.mergeable : null,
       reason:
         typeof entry.reason === "string"
@@ -998,7 +1017,7 @@ export function subjectJourney(
       run.run.spec.agent,
       run.run.spec.adapter,
       model,
-      formatDuration(duration),
+      formatDurationMs(duration),
       attempts > 0 ? `$${Number(totals?.costUSD ?? 0).toFixed(2)}` : "—",
     ]
       .filter(Boolean)
@@ -1398,11 +1417,18 @@ export function selectPrSource(
     const ticket = ticketOfRun(run);
     if (ticket) tickets.add(ticket);
     for (const bucket of ["plan", "fix", "escalate"]) {
-      const list = (run.result?.artifact as any)?.[bucket];
+      const artifact = run.result?.artifact;
+      if (!isArtifactPrEntry(artifact)) continue;
+      const list = artifact[bucket];
       if (!Array.isArray(list)) continue;
-      const entry = list.find((item: any) => Number(item?.pr) === pr);
-      if (typeof entry?.ticket === "string")
-        tickets.add(entry.ticket.toUpperCase());
+      const entry = list.find(
+        (item): item is ArtifactPrEntry =>
+          isArtifactPrEntry(item) && Number(item.pr) === pr,
+      );
+      if (typeof entry?.ticket === "string") {
+        const ticket = normalizeTicketId(entry.ticket);
+        if (ticket) tickets.add(ticket);
+      }
     }
   }
   // Same-ticket runs are the other chain that moves the PR's head (the

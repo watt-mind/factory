@@ -8,18 +8,33 @@
  * `./input.json` → `./result.json` PROMPT_SUFFIX contract, cwd = workspace),
  * enforces the run spec's timeout with
  * TERM→KILL(killGraceMs), strips API keys so the CLI authenticates against the
- * session/subscription instead of per-token billing, and captures full stdout as
- * the `.transcript.json` artifact.
+ * session/subscription instead of per-token billing, captures full stdout as
+ * the `.transcript.json` artifact, and preserves a bounded stderr tail for
+ * failed runs.
  */
 import { spawn } from "node:child_process";
-import { createWriteStream, readFileSync } from "node:fs";
+import { createWriteStream, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
-import { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV } from "./claude.mjs";
+import { killProcessGroup } from "./child-process.mjs";
+import { PROMPT_SUFFIX, verifiedPrompt } from "./claude.mjs";
 import { FACTORY_ROOT } from "../config.mjs";
+import {
+  BASE_INHERITED_ENV,
+  PROVIDER_CREDENTIAL_ENV,
+  PUSH_CREDENTIAL_ENV,
+  RUNTIME_IDENTITY_ENV,
+  safeChildEnvironment as sharedSafeChildEnvironment,
+} from "./child-env.mjs";
 import { refuseSandbox } from "./sandboxed.mjs";
 
-export { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV };
+export {
+  BASE_INHERITED_ENV,
+  PROVIDER_CREDENTIAL_ENV,
+  PROMPT_SUFFIX,
+  PUSH_CREDENTIAL_ENV,
+  RUNTIME_IDENTITY_ENV,
+};
 
 /**
  * No guest execution path exists for this adapter (WM-313): a sandboxed
@@ -52,8 +67,11 @@ export const HARNESS_LAYOUT = Object.freeze({
   }),
 });
 
+export { killProcessGroup };
+
 export const KILL_GRACE_MS = 30_000;
 const TEXT_PREVIEW_CHARS = 4000;
+const STDERR_FILE_CHARS = 16_384;
 
 /**
  * How much sooner agy's own print-mode wait expires than the worker's timeout.
@@ -142,69 +160,15 @@ export function buildAgyArgv({
   return args;
 }
 
-export const BASE_INHERITED_ENV = [
-  "HOME",
-  "LANG",
-  "LC_ALL",
-  "LC_CTYPE",
-  "LOGNAME",
-  "PATH",
-  "SHELL",
-  "TERM",
-  "TMPDIR",
-  "USER",
-  "XDG_CACHE_HOME",
-  "XDG_CONFIG_HOME",
-];
-
 /**
  * Keep untrusted model subprocesses from inheriting the worker's authority.
  * Strips provider API keys to force subscription/login authentication.
  */
 export function safeChildEnvironment(env = {}, defOrOpts = {}) {
-  const isMutating =
-    typeof defOrOpts === "boolean" ? defOrOpts : defOrOpts?.mutating === true;
-  const inherited = isMutating
-    ? [...BASE_INHERITED_ENV, ...PUSH_CREDENTIAL_ENV]
-    : BASE_INHERITED_ENV;
-  const childEnv = Object.fromEntries(
-    inherited.flatMap((key) =>
-      process.env[key] === undefined ? [] : [[key, process.env[key]]],
-    ),
-  );
-  Object.assign(childEnv, env);
-  // Same contract as pi/claude (WM-433): pinned procedures call Factory
-  // helpers through $FACTORY_ROOT even when the workspace is a target repo.
-  childEnv.FACTORY_ROOT = FACTORY_ROOT;
-
-  for (const key of [
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "GOOGLE_GENAI_API_KEY",
-    "MISTRAL_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "GROQ_API_KEY",
-    "CLAUDECODE",
-    "CLAUDE_CODE_ENTRYPOINT",
-  ]) {
-    delete childEnv[key];
-  }
-
-  for (const key of Object.keys(childEnv)) {
-    if (key.startsWith("ANTIGRAVITY_")) {
-      delete childEnv[key];
-    }
-  }
-
-  if (!isMutating) {
-    for (const key of PUSH_CREDENTIAL_ENV) {
-      delete childEnv[key];
-    }
-  }
-
-  return childEnv;
+  return sharedSafeChildEnvironment(env, defOrOpts, {
+    factoryRoot: FACTORY_ROOT,
+    stripPrefixes: ["ANTIGRAVITY_"],
+  });
 }
 
 function clip(text) {
@@ -405,7 +369,7 @@ export async function execute({
   signal,
 }) {
   refuseSandbox("agy", def, SANDBOX_REFUSAL_REASON);
-  const prompt = readFileSync(def.promptPath, "utf8") + PROMPT_SUFFIX;
+  const prompt = verifiedPrompt(def, "agy");
   const childEnv = safeChildEnvironment(env, def);
 
   const resolved = resolveAgyCommand({
@@ -434,14 +398,30 @@ export async function execute({
       cwd: workspaceDir,
       env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
     });
 
     const transcript = createWriteStream(
       path.join(workspaceDir, ".transcript.json"),
     );
     transcript.on("error", () => {});
+    // Child close only says its stdio handles are closed; the file stream may
+    // still have buffered bytes. Register before piping so a fast child cannot
+    // finish before we can observe the output flush.
+    const transcriptClosed = new Promise((done) => {
+      transcript.once("finish", done);
+      transcript.once("close", done);
+    });
     if (child.stdout) {
       child.stdout.pipe(transcript);
+    }
+
+    let stderrBuf = "";
+    if (child.stderr) {
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk) => {
+        stderrBuf = (stderrBuf + chunk).slice(-STDERR_FILE_CHARS);
+      });
     }
 
     let finalUsage = null;
@@ -485,28 +465,56 @@ export async function execute({
 
     let timedOut = false;
     let timer = null;
+    let cancelTermination = null;
+    const terminate = () => {
+      cancelTermination ??= killProcessGroup(child, { killGraceMs });
+    };
     if (timeoutMs) {
       timer = setTimeout(() => {
         timedOut = true;
-        child.kill("SIGTERM");
-        setTimeout(() => child.kill("SIGKILL"), killGraceMs).unref();
+        terminate();
       }, timeoutMs);
     }
 
-    const cancel = () => {
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), killGraceMs).unref();
-    };
+    const cancel = () => terminate();
     abortSignal?.addEventListener("abort", cancel, { once: true });
     signal?.addEventListener("abort", cancel, { once: true });
 
-    child.on("close", (exitCode) => {
+    child.on("close", async (exitCode) => {
       if (timer) clearTimeout(timer);
+      cancelTermination?.();
       abortSignal?.removeEventListener("abort", cancel);
       signal?.removeEventListener("abort", cancel);
+      await transcriptClosed;
+      if (exitCode !== 0 && stderrBuf) {
+        try {
+          writeFileSync(
+            path.join(workspaceDir, ".stderr.txt"),
+            stderrBuf,
+            "utf8",
+          );
+        } catch {
+          // workspace may already be gone; trace still carries the tail
+        }
+        try {
+          onTrace?.("lifecycle", {
+            note: "adapter_stderr",
+            text: clip(stderrBuf),
+          });
+        } catch {
+          // observability
+        }
+      }
       resolve({ exitCode, timedOut, usage: finalUsage });
     });
 
-    child.on("error", reject);
+    child.on("error", (err) => {
+      if (timer) clearTimeout(timer);
+      cancelTermination?.();
+      abortSignal?.removeEventListener("abort", cancel);
+      signal?.removeEventListener("abort", cancel);
+      transcript.destroy();
+      reject(err);
+    });
   });
 }

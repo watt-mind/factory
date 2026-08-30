@@ -169,7 +169,7 @@ describe("transcripts (OPS-426)", () => {
 
   test("timeout / kill / abort path safely finishes without hanging or unhandled rejection", async () => {
     const ws = tmpWs();
-    const { stream, filePath } = createTranscriptCapture(ws);
+    const { stream } = createTranscriptCapture(ws);
 
     stream.write(JSON.stringify({ type: "system", status: "aborting" }) + "\n");
     // Simulate abrupt destroy
@@ -177,5 +177,81 @@ describe("transcripts (OPS-426)", () => {
 
     // waitForStreamFlush handles destroyed stream gracefully
     await expect(waitForStreamFlush(stream)).resolves.toBeUndefined();
+    // The helper must await the destroyed stream's lifecycle to completion, not
+    // short-circuit on `destroyed`. After it returns the stream is truly closed,
+    // so no async open/close callback survives to fire (and error) after the
+    // test's temp dir is removed.
+    expect(stream.closed).toBe(true);
+  });
+
+  // Regression for the load-sensitive flake where a destroyed-but-not-yet-closed
+  // fs.WriteStream emitted a late `error` (ENOENT, once the tracked temp dir was
+  // removed by afterAll) with no listener attached, which Bun surfaces as a
+  // process-level `1 error` / `0 fail` between tests. In-test assertions cannot
+  // observe that between-tests signature, so this runs the probe in an isolated
+  // Bun child process against the real `waitForStreamFlush` and gates on the
+  // child's exit code and stderr. On the pre-fix implementation the child throws
+  // an unhandled EventEmitter `error` and exits nonzero; on the fixed
+  // implementation the late error is consumed through the awaited promise and the
+  // child exits 0 with no unhandled-error output.
+  test("destroyed-but-not-closed stream's late write error is consumed, not leaked (isolated process)", async () => {
+    const moduleUrl = new URL("./transcripts.mjs", import.meta.url).href;
+    const scriptDir = tmpWs();
+    const scriptPath = path.join(scriptDir, "transcript-leak-probe.mjs");
+
+    const script = `
+import { EventEmitter } from "node:events";
+import { waitForStreamFlush } from ${JSON.stringify(moduleUrl)};
+
+// Mimic an fs.WriteStream that is destroyed but has not finished its async
+// open/close: destroyed === true while closed === false, with a write error
+// still to be emitted on a later tick.
+class LateErrorStream extends EventEmitter {
+  constructor() {
+    super();
+    this.writableFinished = false;
+    this.closed = false;
+    this.destroyed = true;
+  }
+}
+
+const stream = new LateErrorStream();
+let consumed = false;
+const flushed = waitForStreamFlush(stream).then(
+  () => {},
+  (err) => {
+    if (err && err.code === "ENOENT") consumed = true;
+  },
+);
+
+setTimeout(() => {
+  const err = new Error(
+    "ENOENT: no such file or directory, open '.transcript.json'",
+  );
+  err.code = "ENOENT";
+  // If waitForStreamFlush already removed its 'error' listener (pre-fix), this
+  // throws as an unhandled EventEmitter error and crashes the process.
+  stream.emit("error", err);
+}, 0);
+
+await flushed;
+await new Promise((r) => setTimeout(r, 50));
+if (!consumed) {
+  console.error("late error was not consumed through the awaited promise");
+  process.exit(2);
+}
+process.exit(0);
+`;
+    writeFileSync(scriptPath, script);
+
+    const proc = Bun.spawnSync({
+      cmd: ["bun", scriptPath],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    const stderr = proc.stderr.toString();
+    expect(stderr).not.toMatch(/Unhandled|uncaught|ENOENT/i);
+    expect(proc.exitCode).toBe(0);
   });
 });

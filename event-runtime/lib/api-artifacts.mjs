@@ -1,27 +1,59 @@
-/** Artifact endpoints and bounded transcript reads. */
+/**
+ * Artifact endpoints and bounded transcript reads.
+ *
+ * Validation errors: GET /artifacts returns `invalid_limit`, `invalid_orphan`,
+ * or `invalid_before`; POST /artifacts/prune returns `invalid_body`,
+ * `invalid_dry_run`, `invalid_apply`, or `conflicting_flags`.
+ */
 import {
   closeSync,
   createReadStream,
   openSync,
-  readFileSync,
   readSync,
   rmSync,
 } from "node:fs";
-import {
-  findArtifact,
-  hashFile,
-  listArtifactPage,
-  pruneArtifacts,
-} from "./artifacts.mjs";
+import { findArtifact, hashFileAsync, pruneArtifacts } from "./artifacts.mjs";
 import { artifactsRoot } from "./config.mjs";
+import { ApiParameterError, parseListLimit } from "./api-params.mjs";
 
 /** Crude but honest content-type: render text in the browser, download the rest. */
 function looksLikeText(file) {
-  const head = readFileSync(file).subarray(0, 512);
-  return !head.includes(0);
+  let fd;
+  try {
+    fd = openSync(file, "r");
+    const head = Buffer.alloc(512);
+    const read = readSync(fd, head, 0, head.length, 0);
+    return !head.subarray(0, read).includes(0);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 export const TRANSCRIPT_MODEL_SCAN_BYTES = 64 * 1024;
+
+function parseBeforeCursor(rawBefore) {
+  if (!rawBefore) return null;
+  try {
+    const before = JSON.parse(
+      Buffer.from(rawBefore, "base64url").toString("utf8"),
+    );
+    if (
+      !before ||
+      typeof before.mtime !== "string" ||
+      !Number.isFinite(Date.parse(before.mtime)) ||
+      new Date(before.mtime).toISOString() !== before.mtime ||
+      !/^[0-9a-f]{64}$/.test(before.sha256)
+    ) {
+      throw new Error("invalid cursor");
+    }
+    return before;
+  } catch {
+    throw new ApiParameterError(
+      "invalid_before",
+      "before must be a valid cursor",
+    );
+  }
+}
 
 /** Bounded head of a stored artifact; null when it is missing or unreadable. */
 export function artifactHead(
@@ -57,80 +89,94 @@ export async function handleArtifactApiRoute({
   env,
   nowMs,
   clearStoreStats,
+  clearArtifactPage,
+  getArtifactPage,
 }) {
   if (route === "GET /artifacts") {
     const orphanParam = url.searchParams.get("orphan");
-    if (
-      orphanParam !== null &&
-      orphanParam !== "true" &&
-      orphanParam !== "false"
-    ) {
-      return send(422, { error: "orphan must be true or false" });
-    }
-    const limitParam = url.searchParams.get("limit");
-    const limit = limitParam === null ? 100 : Number(limitParam);
-    if (
-      limit !== undefined &&
-      (!Number.isInteger(limit) || limit < 1 || limit > 500)
-    ) {
-      return send(422, { error: "limit must be an integer between 1 and 500" });
-    }
-    const rawBefore = url.searchParams.get("before");
-    let before = null;
-    if (rawBefore) {
-      try {
-        before = JSON.parse(
-          Buffer.from(rawBefore, "base64url").toString("utf8"),
+    let limit;
+    let before;
+    try {
+      if (
+        orphanParam !== null &&
+        orphanParam !== "true" &&
+        orphanParam !== "false"
+      ) {
+        throw new ApiParameterError(
+          "invalid_orphan",
+          "orphan must be true or false",
         );
-        if (
-          !before ||
-          typeof before.mtime !== "string" ||
-          !Number.isFinite(Date.parse(before.mtime)) ||
-          !/^[0-9a-f]{64}$/.test(before.sha256)
-        ) {
-          throw new Error("invalid cursor");
-        }
-      } catch {
-        return send(422, { error: "invalid before cursor" });
       }
+      limit = parseListLimit(url, { defaultLimit: 100, maxLimit: 500 });
+      before = parseBeforeCursor(url.searchParams.get("before"));
+    } catch (err) {
+      if (err instanceof ApiParameterError) return send(422, err.body);
+      throw err;
     }
-    const page = listArtifactPage(db, artifactsRoot(env.home), {
-      orphan: orphanParam === null ? undefined : orphanParam === "true",
-      kind: url.searchParams.has("kind")
-        ? url.searchParams.get("kind")
-        : undefined,
-      search: url.searchParams.has("search")
-        ? url.searchParams.get("search")
-        : undefined,
-      limit,
-      before,
-    });
+    const page = getArtifactPage(
+      {
+        orphan: orphanParam === null ? undefined : orphanParam === "true",
+        kind: url.searchParams.has("kind")
+          ? url.searchParams.get("kind")
+          : undefined,
+        search: url.searchParams.has("search")
+          ? url.searchParams.get("search")
+          : undefined,
+        limit,
+        before,
+      },
+      nowMs,
+    );
     return send(200, page);
   }
 
   if (route === "POST /artifacts/prune") {
     const raw = await readBody(req);
     const parsed = raw.length === 0 ? { value: {} } : parseJson(raw);
-    if (parsed.error) return send(422, { error: parsed.error });
-    const body = parsed.value ?? {};
+    if (parsed.error) {
+      return send(
+        422,
+        new ApiParameterError("invalid_body", parsed.error).body,
+      );
+    }
+    const body = parsed.value;
     if (!body || typeof body !== "object" || Array.isArray(body)) {
-      return send(422, { error: "body must be an object" });
+      return send(
+        422,
+        new ApiParameterError("invalid_body", "body must be an object").body,
+      );
     }
     if (body.dryRun !== undefined && typeof body.dryRun !== "boolean") {
-      return send(422, { error: "dryRun must be a boolean" });
+      return send(
+        422,
+        new ApiParameterError("invalid_dry_run", "dryRun must be a boolean")
+          .body,
+      );
     }
     if (body.apply !== undefined && typeof body.apply !== "boolean") {
-      return send(422, { error: "apply must be a boolean" });
+      return send(
+        422,
+        new ApiParameterError("invalid_apply", "apply must be a boolean").body,
+      );
     }
     if (body.apply === true && body.dryRun === true) {
-      return send(422, { error: "apply and dryRun cannot both be true" });
+      return send(
+        422,
+        new ApiParameterError(
+          "conflicting_flags",
+          "apply and dryRun cannot both be true",
+        ).body,
+      );
     }
     const apply = body.apply === true;
     const result = pruneArtifacts(db, artifactsRoot(env.home), {
       now: nowMs,
       dryRun: !apply,
     });
-    if (apply) clearStoreStats();
+    if (apply) {
+      clearStoreStats();
+      clearArtifactPage();
+    }
     return send(200, result);
   }
 
@@ -138,7 +184,7 @@ export async function handleArtifactApiRoute({
   if (req.method === "GET" && artifactGet) {
     const found = findArtifact(artifactsRoot(env.home), artifactGet[1]);
     if (!found) return send(404, { error: `no artifact ${artifactGet[1]}` });
-    if (hashFile(found.file) !== artifactGet[1]) {
+    if ((await hashFileAsync(found.file)) !== artifactGet[1]) {
       rmSync(found.file, { force: true });
       return send(404, { error: `no artifact ${artifactGet[1]}` });
     }

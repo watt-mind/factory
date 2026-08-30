@@ -10,6 +10,10 @@ Factory CI uses a hybrid runner strategy designed for public open-source operati
 
 Treat self-hosted runner names as parallel executors, not independent machines. CPU, memory, `/tmp`, and process scheduling are shared across all eight shadow services.
 
+### Runner host dependencies
+
+Runner images must provide `unzip`, `curl`, `sha256sum` (from coreutils), and `tar` for the checksum-pinned tool installer. The `Pinned tools forced-install smoke` job on `ubuntu-latest` forces fresh bun, gitleaks, uv, and actionlint installs and verifies these dependencies whenever `.github/**` changes (and on manual dispatch).
+
 ## Fork PR sandboxing & dual routing
 
 In `ci.yml`, a lightweight initial `route` job runs on `ubuntu-latest` to determine the execution lane based on the event context:
@@ -38,6 +42,24 @@ The event-runtime merge lane is being split into parallel per-PR review with a l
 ## Run coalescing
 
 CI and Security use `concurrency.group` keyed by PR number for pull requests and by ref for pushes, with `cancel-in-progress` for both. A newer push to `develop` cancels the older develop run — only the latest develop head is verified — and a newer PR push cancels that PR's older run. Runs never wait in a concurrency group for a _different_ PR, so nothing is dropped across PRs; queueing across PRs happens in GitHub's runner queue for the `verify-lane` label.
+
+### Required Verify umbrella
+
+`Verify` is the required umbrella for the CI test lanes. It uses `if: always()`
+so GitHub evaluates it after every dependency result rather than silently
+skipping it behind the default success gate. Except for `Shadow runner fleet
+available`, which is intentionally `skipped` on the cloud lane, every gating
+dependency (`Route CI lane`, shadow health on self-hosted, `Fast unit tests`,
+and `Full verification`) must conclude `success`. A `cancelled`, `skipped`,
+or `failure` result makes `Verify` fail.
+
+This matters because concurrency cancellation can leave a historical
+`Verify=success` check-run visible for a superseded workflow. The
+merge apply selects the sole non-cancelled configured workflow run for the
+reviewed head SHA; two live runs fail closed rather than trusting list order. When a
+repo configures `merge_ci`, both the branch's required contexts and that run's
+configured required jobs must be green; a stale check from a cancelled run is
+never sufficient merge proof.
 
 ## Dependabot dependency policy
 
@@ -85,6 +107,12 @@ When a required test step fails, `bun event-runtime/lib/test-helpers-timing.mjs 
 
 Both required test invocations use `--timeout 20000 --max-concurrency=4`. The 20-second default allows for scheduling delays on a busy self-hosted machine instead of failing unrelated tests at Bun's 5-second default. Tests that encode genuine liveness bounds continue to declare explicit, narrower timeouts; the CLI default does not replace those assertions. Only `Full verification` joins the verify-lane queue; the fast suite's 15-minute job timeout is a runaway guard rather than queue headroom. Timing-bound tests run on the general `shadow` pool.
 
+### Flake ledger
+
+| Test                                                                                                 | Lane                       | Guard                                                                                                                                                                                                                                                                                                                                          | Regression signal                                                                                                                |
+| ---------------------------------------------------------------------------------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `api-runs.test.mjs` — `contended approvals and rejections yield to /health and return typed db_busy` | Fast unit tests (required) | The real SQLite lock test has a `loadAdjustedTimeout(20_000)` ceiling (scaled by `CI_LOAD_FACTOR`); a 409 is accepted only when the lock child had already exited (`exitCode !== null`, sampled synchronously) at the moment the probe was issued; the 503 branch additionally asserts the probe spent the full `busy_timeout` budget (> 4 s). | A live lock that does not return `{ error: "db_busy", retryable: true }` still fails, as does an unresponsive `/health` request. |
+
 Do not add `describe.skipIf(process.env.CI_FAST)` in the unowned spawn suites from this ticket — the name-pattern split is the quarantine. Follow-up work that owns those files can add in-file tags that match the same list.
 
 ## Operational validation
@@ -94,8 +122,25 @@ After changing the workflow:
 1. Require all checks on the PR itself to pass:
 
    ```bash
-   gh pr checks <PR> --watch --fail-fast
+   # --workflow ci.yml: without it the newest run of ANY workflow (CLA,
+   # Security, Browser E2E) is returned and its verdict is not CI's. The run
+   # can lag the push, so retry briefly instead of failing on the first miss.
+   run_id=""
+   for i in $(seq 8); do
+     run_id="$(gh run list --workflow ci.yml --commit <sha> --json databaseId --limit 1 --jq '.[0].databaseId // empty')"
+     test -n "$run_id" && break
+     sleep 15
+   done
+   test -n "$run_id" || { echo "no CI workflow run found for this commit" >&2; exit 1; }
+   gh run watch "$run_id" --exit-status --interval 60
+   gh api "repos/{owner}/{repo}/commits/<sha>/check-runs" \
+     --jq '.check_runs[] | select(.status != "completed" or (.conclusion | IN("success","neutral","skipped") | not)) | .name' \
+     | grep -q . && { echo "not every check-run on <sha> is green" >&2; exit 1; }
    ```
+
+   This uses the REST API. `gh pr checks <PR> --watch --interval 60` is the
+   minimum only when its GraphQL-backed fallback is unavoidable; it otherwise
+   polls GraphQL every 10 seconds by default.
 
 2. After merge, inspect develop runs and confirm five consecutive green runs, including a period when at least three PR workflows were queued concurrently:
 

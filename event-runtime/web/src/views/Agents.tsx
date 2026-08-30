@@ -255,6 +255,189 @@ function ModelPinEditor({
   );
 }
 
+function promotionLabel(value: unknown): string {
+  if (value === null || value === undefined) return EMPTY;
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+
+/**
+ * Promote runtime overrides into a Git PR (gh-860). This is the reviewable
+ * counterpart to the machine-local overlay editor: it previews which effective
+ * overrides diverge from the tracked defaults, lets the operator select a
+ * subset, and opens a PR against the target repo's configured base through an
+ * isolated worktree. It never clears the runtime overrides — clearing the
+ * overlay stays a separate explicit action after the promoted defaults deploy.
+ */
+export function PromotionPanel({
+  defaultRepo = "factory",
+}: {
+  defaultRepo?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [repo, setRepo] = useState(defaultRepo);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  const preview = useQuery({
+    queryKey: ["promotion-preview"],
+    queryFn: api.promotionPreview,
+    enabled: open,
+    retry: false,
+  });
+  const repos = useQuery({
+    queryKey: ["repos"],
+    queryFn: api.repos,
+    enabled: open,
+    retry: false,
+  });
+
+  const apply = useMutation({
+    mutationFn: () =>
+      api.promotionApply({
+        repo,
+        digest: preview.data?.digest ?? "",
+        keys: [...selected],
+      }),
+    onSuccess: () => {
+      setSelected(new Set());
+      preview.refetch();
+    },
+    onError: (err: unknown) =>
+      notify(err instanceof ApiError ? err.message : "promotion failed", "err"),
+  });
+
+  const selections = preview.data?.selections ?? [];
+  const toggle = (key: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+
+  if (!open) {
+    return (
+      <div className="mt-6">
+        <PrimitiveButton onClick={() => setOpen(true)}>
+          Promote overrides to Git…
+        </PrimitiveButton>
+      </div>
+    );
+  }
+
+  const result = apply.data;
+  return (
+    <div className="mt-6 rounded-md border border-(--border) p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="text-[13px] font-semibold text-(--text)">
+          Promote overrides to Git
+        </span>
+        <PrimitiveButton onClick={() => setOpen(false)}>Close</PrimitiveButton>
+      </div>
+      <p className="mb-3 text-[11px] text-(--text-faint)">
+        Opens a PR against the target repo's base through an isolated worktree.
+        This does not clear the runtime overrides — clear the overlay separately
+        after the promoted defaults deploy.
+      </p>
+      <label className="mb-3 flex items-center gap-2 text-[12px]">
+        <span className="text-(--text-faint)">Target repo</span>
+        <select
+          className={SELECT_CLASS}
+          value={repo}
+          onChange={(e) => setRepo(e.target.value)}
+        >
+          {(repos.data?.repos ?? []).map((r) => (
+            <option key={r.name} value={r.name}>
+              {r.name}
+            </option>
+          ))}
+          {!repos.data && <option value={repo}>{repo}</option>}
+        </select>
+      </label>
+
+      {preview.isError && (
+        <div className="text-[12px] text-(--hue-err)">
+          Preview failed:{" "}
+          {preview.error instanceof ApiError
+            ? preview.error.message
+            : "unavailable"}
+        </div>
+      )}
+      {preview.isSuccess && selections.length === 0 && (
+        <div className="text-[12px] text-(--text-faint)">
+          No runtime overrides diverge from tracked defaults.
+        </div>
+      )}
+      {selections.length > 0 && (
+        <ul className="flex flex-col gap-1.5">
+          {selections.map((s) => (
+            <li key={s.key} className="flex items-start gap-2 text-[12px]">
+              <input
+                type="checkbox"
+                aria-label={s.key}
+                checked={selected.has(s.key)}
+                disabled={!s.current}
+                onChange={() => toggle(s.key)}
+              />
+              <span className="min-w-0">
+                <span className="mono text-(--text)">{s.key}</span>
+                <span className="ml-2 text-(--text-faint)">
+                  {promotionLabel(s.before)} → {promotionLabel(s.effective)}
+                </span>
+                <span className="mono ml-2 text-[11px] text-(--text-faint)">
+                  {s.target.file}
+                </span>
+                {!s.current && (
+                  <span className="ml-2 text-[11px] text-(--hue-err)">
+                    stale
+                  </span>
+                )}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="mt-3 flex items-center gap-2">
+        <PrimitiveButton
+          disabled={selected.size === 0 || apply.isPending}
+          onClick={() => apply.mutate()}
+        >
+          {apply.isPending ? "Promoting…" : `Promote ${selected.size} selected`}
+        </PrimitiveButton>
+      </div>
+
+      {result && result.status === "opened" && (
+        <div className="mt-3 text-[12px] text-(--text-dim)">
+          Opened{" "}
+          {result.pr ? (
+            <a
+              className="text-(--accent)"
+              href={result.pr.url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              PR #{result.pr.number}
+            </a>
+          ) : (
+            "a PR"
+          )}
+          {result.ticket && (
+            <span className="ml-2">ticket {result.ticket}</span>
+          )}
+          {result.branch && (
+            <span className="mono ml-2 text-[11px]">{result.branch}</span>
+          )}
+        </div>
+      )}
+      {result && result.status === "noop" && (
+        <div className="mt-3 text-[12px] text-(--text-faint)">
+          Nothing selected — no PR opened.
+        </div>
+      )}
+    </div>
+  );
+}
+
 /**
  * Agents (webui doc §10.6) — the registry, fully readable, plus a narrow
  * operational overlay editor (WM-884) for event-type adapter and agent
@@ -470,6 +653,9 @@ export function Agents({
                 {rows.length} agents · {mutatingCount} mutating ·{" "}
                 {rows.length - mutatingCount} read-only
               </div>
+              <PromotionPanel
+                defaultRepo={context.kind === "repo" ? context.name : "factory"}
+              />
               <ListToolbar
                 tabs={
                   <div

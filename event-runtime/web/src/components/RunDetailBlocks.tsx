@@ -44,6 +44,9 @@ import { Button as PrimitiveButton } from "./ui";
 const ArtifactPanel = lazy(() =>
   import("./ArtifactView").then((m) => ({ default: m.ArtifactPanel })),
 );
+const PresentationPanel = lazy(() =>
+  import("./BlockRenderer").then((m) => ({ default: m.PresentationPanel })),
+);
 
 /**
  * The per-ticket Decisions block (WM-594) rides its own chunk for the same
@@ -1119,6 +1122,36 @@ export function RunDetailBlocks({
           id="run-result"
           title={`Result · ${d.result.terminalState}${d.result.reasonCode ? ` · ${d.result.reasonCode}` : ""}`}
         >
+          {d.result.presentation && (
+            <Disclosure label="agent summary" defaultOpen>
+              <Suspense fallback={<JsonBlock value={d.result.presentation} />}>
+                <PresentationPanel
+                  presentation={d.result.presentation}
+                  artifact={d.result.artifact ?? {}}
+                />
+              </Suspense>
+            </Disclosure>
+          )}
+          {!d.result.presentation &&
+            d.result.presentationErrors &&
+            d.result.presentationErrors.length > 0 && (
+              <div
+                role="status"
+                className="mb-3 rounded-md border border-(--border) bg-(--surface-0) px-3 py-2 text-[12px] text-(--hue-warn)"
+              >
+                <div>
+                  the agent&apos;s summary was dropped:{" "}
+                  {d.result.presentationErrors.length} errors
+                </div>
+                <Disclosure label="presentation errors">
+                  <ul className="mono m-0 list-disc space-y-1 pl-5 text-[11px] text-(--text-dim)">
+                    {d.result.presentationErrors.map((error, index) => (
+                      <li key={index}>{error}</li>
+                    ))}
+                  </ul>
+                </Disclosure>
+              </div>
+            )}
           {d.result.artifact !== undefined ? (
             <Disclosure label="artifact" defaultOpen>
               <Suspense fallback={<JsonBlock value={d.result.artifact} />}>

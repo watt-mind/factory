@@ -6,6 +6,7 @@ import {
   afterAll,
   afterEach,
   beforeAll,
+  beforeEach,
   describe,
   expect,
   test,
@@ -13,10 +14,12 @@ import {
 import { memoryControlPlane } from "../../lib/control-plane/index.mjs";
 import {
   TICKET_DETAIL_CACHE_TTL_MS,
+  clearObservedModelCache,
   clearTicketDetailCache,
   mergeTicketSupply,
   scanTicketSupply,
   setTicketDetailControlPlane,
+  ticketJourneyView,
   ticketIndexView,
   ticketSupplyView,
 } from "./api-runs.mjs";
@@ -53,12 +56,40 @@ import {
   utimesSync,
   writeFileSync,
 } from "./api-test-helpers.mjs";
+import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
 
 const makeServer = async (...args) => {
   const result = await makeApiServer(...args);
   trackTmpDir(path.dirname(result.db.filename));
   return result;
 };
+
+async function holdWriteLock(file, durationMs) {
+  const child = Bun.spawn(
+    [
+      "bun",
+      "-e",
+      `
+        import { openDb } from "./event-runtime/lib/db.mjs";
+        const db = openDb(process.argv[1]);
+        db.exec("BEGIN IMMEDIATE");
+        console.log("locked");
+        await new Promise((resolve) => setTimeout(resolve, Number(process.argv[2])));
+        db.exec("ROLLBACK");
+        db.close();
+      `,
+      file,
+      String(durationMs),
+    ],
+    { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" },
+  );
+  const reader = child.stdout.getReader();
+  const { value, done } = await reader.read();
+  reader.releaseLock();
+  expect(done).toBe(false);
+  expect(new TextDecoder().decode(value)).toContain("locked");
+  return child;
+}
 
 describe("run deadline extension (WM-566)", () => {
   const start = Date.parse("2026-08-12T10:00:00Z");
@@ -523,8 +554,93 @@ describe("list views carry repos[] (OPS-356)", () => {
 });
 
 describe("ticket journey join (WM-595)", () => {
+  test("accepts canonical GitHub ticket IDs in journeys and the ticket index", async () => {
+    const nowMs = Date.parse("2026-08-18T12:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      await s.client.replay(
+        envelope({
+          eventId: "github-ticket",
+          subject: "dispatch",
+          occurredAt: "2026-08-18T10:00:00.000Z",
+          payload: {
+            repo: "factory",
+            ticket: "Watt-Mind/Factory#1572",
+            nested: { issue: "Watt-Mind/Other#1573" },
+            subject: "Watt-Mind/Third#1574",
+            note: "mentions Watt-Mind/Prose#1575 without naming it",
+          },
+        }),
+      );
+
+      const journey = await fetch(
+        s.url("/runs?ticket=WATT-MIND/FACTORY%231572"),
+      );
+      expect(journey.status).toBe(200);
+      expect(
+        (await journey.json()).events.map((event) => event.eventId),
+      ).toEqual(["github-ticket"]);
+
+      const tickets = ticketIndexView(s.db, { nowMs, since: "14d" }).map(
+        (ticket) => ticket.id,
+      );
+      expect(tickets).toEqual(
+        expect.arrayContaining([
+          "watt-mind/factory#1572",
+          "watt-mind/other#1573",
+          "watt-mind/third#1574",
+        ]),
+      );
+      expect(tickets).not.toContain("watt-mind/prose#1575");
+
+      const invalid = await fetch(s.url("/runs?ticket=not-a-ticket"));
+      expect(invalid.status).toBe(422);
+      expect((await invalid.json()).error).toBe(
+        "ticket must look like WM-123 or owner/repo#123",
+      );
+    } finally {
+      s.close();
+    }
+  });
+
+  test("lowercase hyphenated prose never becomes a ticket row", async () => {
+    const nowMs = Date.parse("2026-08-18T12:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      await s.client.replay(
+        envelope({
+          eventId: "prose-noise",
+          subject: "dispatch",
+          occurredAt: "2026-08-18T10:00:00.000Z",
+          payload: {
+            repo: "factory",
+            ticket: "WM-7",
+            nested: { issue: "watt-mind/factory#1572" },
+            note: "hashed with sha-256, encoded utf-8, dated iso-8601",
+          },
+        }),
+      );
+
+      const tickets = ticketIndexView(s.db, { nowMs, since: "14d" }).map(
+        (ticket) => ticket.id,
+      );
+      expect(tickets).toEqual(
+        expect.arrayContaining(["WM-7", "watt-mind/factory#1572"]),
+      );
+      for (const id of tickets) {
+        expect(id).not.toMatch(/^(sha-256|utf-8|iso-8601)$/i);
+      }
+      expect(tickets.filter((id) => /^[a-z]/.test(id))).toEqual([
+        "watt-mind/factory#1572",
+      ]);
+    } finally {
+      s.close();
+    }
+  });
+
   test("GET /runs?ticket= joins explicit ticket activity and PR-linked merge runs", async () => {
-    const s = await makeServer();
+    const home = tmpDir("evrt-journey-home-");
+    const s = await makeServer({ env: { name: "test", home } });
     try {
       await s.client.replay(
         envelope({
@@ -558,8 +674,8 @@ describe("ticket journey join (WM-595)", () => {
         });
       s.db
         .query(
-          `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+          `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at, subject)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)`,
         )
         .run(
           "run_ticket",
@@ -569,6 +685,23 @@ describe("ticket journey join (WM-595)", () => {
           "COMPLETED",
           "2026-01-01T10:00:00.000Z",
           "2026-01-01T10:10:00.000Z",
+          "WM-595",
+        );
+      // A legacy direct run can name its ticket only below a nested input
+      // field. It has no linked proposal/event to pull it into the journey.
+      s.db
+        .query(
+          `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+        )
+        .run(
+          "run_nested_issue_id",
+          "nested-issue-key",
+          spec({ repo: "factory", dispatch: { issueId: "WM-595" } }),
+          "sha256:nested-issue",
+          "COMPLETED",
+          "2026-01-01T10:05:00.000Z",
+          "2026-01-01T10:06:00.000Z",
         );
       s.db
         .query(
@@ -618,6 +751,12 @@ describe("ticket journey join (WM-595)", () => {
           "sha256:result-merge",
           "2026-01-01T11:01:00.000Z",
         );
+      await s.client.replay(
+        envelope({
+          eventId: "pr-linked-merge",
+          payload: { pr: 595 },
+        }),
+      );
 
       const response = await fetch(s.url("/runs?ticket=WM-595"));
       expect(response.status).toBe(200);
@@ -632,16 +771,192 @@ describe("ticket journey join (WM-595)", () => {
       expect(journey.events.map((event) => event.eventId)).toContain(
         "ticket-dispatch",
       );
+      expect(journey.events.map((event) => event.eventId)).toContain(
+        "pr-linked-merge",
+      );
+      expect(journey.runs.map((run) => run.run.runId)).toEqual(
+        expect.arrayContaining(["run_ticket", "run_nested_issue_id"]),
+      );
       expect(journey.runs.map((run) => run.run.runId)).toEqual([
         "run_ticket",
+        "run_nested_issue_id",
         "run_merge",
       ]);
       expect(journey.activity).toBe(true);
 
       const unknown = await fetch(s.url("/runs?ticket=WM-999"));
       expect((await unknown.json()).activity).toBe(false);
+
+      // The journey view reaches runView without a transcript reader; on a
+      // cache miss it must fall back to the store rather than 500 (#1421).
+      clearObservedModelCache();
+      const transcriptSha = "c".repeat(64);
+      mkdirSync(path.join(home, "artifacts"), { recursive: true });
+      writeFileSync(
+        path.join(home, "artifacts", transcriptSha),
+        `{"type":"system","subtype":"init","model":"claude-opus-5[1m]"}\n`,
+        "utf8",
+      );
+      s.db.query(`UPDATE results SET result_json = ? WHERE run_id = ?`).run(
+        JSON.stringify({
+          terminalState: "completed",
+          artifact: { outcome: "PR_OPEN", ticket: "WM-595" },
+          artifacts: [{ kind: "transcript", sha256: transcriptSha }],
+        }),
+        "run_ticket",
+      );
+      const withTranscript = await fetch(s.url("/runs?ticket=WM-595"));
+      expect(withTranscript.status).toBe(200);
+      const journeyRuns = (await withTranscript.json()).runs;
+      expect(
+        journeyRuns.find((run) => run.run.runId === "run_ticket"),
+      ).toHaveProperty("observedModel", "claude-opus-5[1m]");
+
+      // The memo is keyed by store root too: the same hash under another
+      // artifacts directory is a fresh read, not a stale hit.
+      const otherStore = tmpDir("evrt-other-artifacts-");
+      mkdirSync(otherStore, { recursive: true });
+      writeFileSync(
+        path.join(otherStore, transcriptSha),
+        `{"type":"system","subtype":"init","model":"claude-sonnet-5"}\n`,
+        "utf8",
+      );
+      expect(
+        ticketJourneyView(s.db, "WM-595", {
+          artifactsDir: otherStore,
+        }).runs.find((run) => run.run.runId === "run_ticket").observedModel,
+      ).toBe("claude-sonnet-5");
+      expect(
+        ticketJourneyView(s.db, "WM-595", {
+          artifactsDir: path.join(home, "artifacts"),
+        }).runs.find((run) => run.run.runId === "run_ticket").observedModel,
+      ).toBe("claude-opus-5[1m]");
+      clearObservedModelCache();
       const invalid = await fetch(s.url("/runs?ticket=not-a-ticket"));
       expect(invalid.status).toBe(422);
+    } finally {
+      s.close();
+    }
+  });
+
+  test("keeps unrelated records out without issuing unrestricted table reads", async () => {
+    const s = await makeServer();
+    try {
+      await s.client.replay(
+        envelope({
+          eventId: "ticket-json-only",
+          payload: { ticket: "WM-1328" },
+        }),
+      );
+      await s.client.replay(
+        envelope({
+          eventId: "unrelated-ticket",
+          subject: "WM-999",
+          payload: { ticket: "WM-999" },
+        }),
+      );
+      const spec = () =>
+        JSON.stringify({
+          schemaVersion: "factory.run-spec/v1",
+          runId: "ignored",
+          agent: "dispatch@1",
+          input: { repo: "factory" },
+        });
+      for (const [runId, ticket] of [
+        ["run-json-only", "WM-1328"],
+        ["run-unrelated", "WM-999"],
+      ]) {
+        s.db
+          .query(
+            `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at, subject)
+             VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+          )
+          .run(
+            runId,
+            `${runId}-key`,
+            spec(),
+            `sha256:${runId}`,
+            "COMPLETED",
+            "2026-01-01T10:00:00.000Z",
+            "2026-01-01T10:01:00.000Z",
+            ticket,
+          );
+      }
+      const guardedDb = {
+        query(sql) {
+          if (
+            /SELECT \* FROM (events|proposals|runs|results) ORDER BY/i.test(sql)
+          )
+            throw new Error(`unrestricted ticket journey query: ${sql}`);
+          return s.db.query(sql);
+        },
+      };
+      const journey = ticketJourneyView(guardedDb, "WM-1328");
+      expect(journey.events.map((event) => event.eventId)).toEqual([
+        "ticket-json-only",
+      ]);
+      expect(journey.runs.map((run) => run.run.runId)).toEqual([
+        "run-json-only",
+      ]);
+    } finally {
+      s.close();
+    }
+  });
+
+  test("journey proposals keep TTL expiry and null spec", async () => {
+    const s = await makeServer();
+    try {
+      await s.client.replay(
+        envelope({
+          eventId: "ticket-expiry",
+          payload: { ticket: "WM-1328" },
+        }),
+      );
+      s.db
+        .query(
+          `INSERT INTO proposals (id, event_source, event_id, decision, spec_json, spec_hash, status, reason, created_at, ttl_seconds)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "prop-expired",
+          "linear",
+          "ticket-expiry",
+          "human_needed",
+          JSON.stringify({ input: { repo: "factory", ticket: "WM-1328" } }),
+          "sha256:prop-expired",
+          "open",
+          "needs a human",
+          "2026-01-01T10:00:00.000Z",
+          60,
+        );
+      s.db
+        .query(
+          `INSERT INTO proposals (id, event_source, event_id, decision, status, created_at, ttl_seconds)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "prop-no-spec",
+          "linear",
+          "ticket-expiry",
+          "noop",
+          "open",
+          "2026-01-01T10:00:00.000Z",
+          3600,
+        );
+      const nowMs = Date.parse("2026-01-01T10:30:00.000Z");
+      const journey = ticketJourneyView(s.db, "WM-1328", { nowMs });
+      const byId = Object.fromEntries(
+        journey.proposals.map((proposal) => [proposal.id, proposal]),
+      );
+      expect(byId["prop-expired"].expired).toBe(true);
+      expect(byId["prop-expired"].status).toBe("open");
+      expect(byId["prop-no-spec"].expired).toBe(false);
+      expect(byId["prop-no-spec"].spec).toBeNull();
+      expect(
+        ticketJourneyView(s.db, "WM-1328", {
+          nowMs: Date.parse("2026-01-01T10:00:30.000Z"),
+        }).proposals.find((proposal) => proposal.id === "prop-expired").expired,
+      ).toBe(false);
     } finally {
       s.close();
     }
@@ -930,13 +1245,14 @@ describe("recent-ticket index (WM-821)", () => {
       expect(errBody.error).toBe("invalid_since");
 
       // Verify invalid limit returns 422
-      const resInvalidLimit = await fetch(s.url("/tickets?limit=abc"));
-      expect(resInvalidLimit.status).toBe(422);
-      expect((await resInvalidLimit.json()).error).toBe("invalid_limit");
-
-      const resNegativeLimit = await fetch(s.url("/tickets?limit=-5"));
-      expect(resNegativeLimit.status).toBe(422);
-      expect((await resNegativeLimit.json()).error).toBe("invalid_limit");
+      for (const limit of ["abc", "0", "201"]) {
+        const response = await fetch(s.url(`/tickets?limit=${limit}`));
+        expect(response.status).toBe(422);
+        expect(await response.json()).toMatchObject({
+          error: "invalid_limit",
+          message: "limit must be an integer between 1 and 200",
+        });
+      }
 
       // Verify alternative valid duration units (1w, 24h, 30m, 60s, ISO string)
       const resWeek = await fetch(s.url("/tickets?since=1w"));
@@ -1011,6 +1327,9 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
       duplicate: false,
       eventId: "flow-1",
     });
+    // Planning runs off the response path (WM-1162): drain the deferred
+    // setImmediate before asserting the admitted wake-up.
+    await new Promise((resolve) => setImmediate(resolve));
     expect(s.onEvents).toEqual(["admitted"]);
   });
 
@@ -1114,6 +1433,90 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
     expect(rejectAgain.status).toBe(409);
     expect(rejectAgain.message).toContain("not open");
   });
+
+  test("approval waits for a worker write lock and returns db_busy after its timeout", async () => {
+    const waiting = await planned("approve-waits-for-lock");
+    const lock = await holdWriteLock(s.db.filename, 75);
+    const startedAt = Date.now();
+    const approved = await s.client.approve(waiting.id);
+    const elapsedMs = Date.now() - startedAt;
+    expect(approved).toEqual({ approved: true, runId: waiting.runId });
+    // The lock is held for 75 ms; a lower bound proves the approval actually
+    // waited on it instead of racing past a lock that was never taken.
+    expect(elapsedMs).toBeGreaterThanOrEqual(50);
+    expect(elapsedMs).toBeLessThan(2_000);
+    expect(await lock.exited).toBe(0);
+    expect(await s.client.cancel(waiting.runId, "test cleanup")).toEqual({
+      cancelled: true,
+    });
+
+    // A connection deliberately tuned to fail fast keeps that contract even
+    // though approvals now retry across event-loop turns (#1349): the
+    // lowered busy_timeout bounds the whole retry budget.
+    const timedOut = await planned("approve-busy-timeout");
+    let timeoutLock;
+    try {
+      s.db.exec("PRAGMA busy_timeout = 10;");
+      timeoutLock = await holdWriteLock(s.db.filename, 75);
+      const err = await rejection(s.client.approve(timedOut.id));
+      expect(err.status).toBe(503);
+      expect(err.message).toBe("db_busy");
+      expect(err.body).toEqual({ error: "db_busy", retryable: true });
+    } finally {
+      s.db.exec("PRAGMA busy_timeout = 5000;");
+    }
+    expect(await timeoutLock?.exited).toBe(0);
+  });
+
+  test(
+    "contended approvals and rejections yield to /health and return typed db_busy",
+    async () => {
+      const approvedProposal = await planned("approve-contention");
+      const approveLock = await holdWriteLock(s.db.filename, 400);
+      const approval = s.client.approve(approvedProposal.id);
+      await new Promise((resolve) => setImmediate(resolve));
+      const healthStartedAt = Date.now();
+      const health = await fetch(s.url("/health"));
+      expect(health.status).toBe(200);
+      expect(Date.now() - healthStartedAt).toBeLessThan(500);
+      expect(await approval).toEqual({
+        approved: true,
+        runId: approvedProposal.runId,
+      });
+      expect(await approveLock.exited).toBe(0);
+      expect(
+        await s.client.cancel(approvedProposal.runId, "test cleanup"),
+      ).toEqual({ cancelled: true });
+
+      const rejectedProposal = await planned("reject-contention");
+      const rejectLock = await holdWriteLock(s.db.filename, 6_000);
+      // Snapshot liveness synchronously, before the probe is issued: the
+      // child's exit is observed through `exitCode`, which Bun updates without
+      // an event-loop turn, so this cannot lag behind the probe start.
+      const lockLiveAtProbeStart = rejectLock.exitCode === null;
+      const probeStartedAt = Date.now();
+      const err = await rejection(
+        s.client.reject(rejectedProposal.id, "locked"),
+      );
+      const probeFinishedAt = Date.now();
+      expect(await rejectLock.exited).toBe(0);
+
+      if (err.status === 409) {
+        // A contended runner can be descheduled long enough for the child lock
+        // to release before this probe starts. That is a stale-probe outcome,
+        // not evidence that the live-lock path failed to return `db_busy`.
+        expect(lockLiveAtProbeStart).toBe(false);
+        expect(err.message).toContain("not open");
+      } else {
+        expect(err.status).toBe(503);
+        expect(err.body).toEqual({ error: "db_busy", retryable: true });
+        // The lock outlives busy_timeout (5 s), so a live-lock probe must have
+        // spent the whole retry budget before giving up.
+        expect(probeFinishedAt - probeStartedAt).toBeGreaterThan(4_000);
+      }
+    },
+    loadAdjustedTimeout(20_000),
+  );
 
   test("cancel a QUEUED run → 200; cancel again → 409; unknown run → 404", async () => {
     const prop = await planned("can-1");
@@ -1271,7 +1674,7 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
     }
   });
 
-  test("journal feed pages by seq and outbox lists published result events", async () => {
+  test("journal feed pages by seq and outbox exposes delivery state", async () => {
     const { db, server, port } = await makeServer();
     const client = apiClient({ port });
     try {
@@ -1304,12 +1707,57 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
       expect(outbox).toHaveLength(1);
       expect(outbox[0].event.type).toBe("factory.status-report.completed");
       expect(outbox[0].published_at).toBeNull(); // no serve loop in this test — sink not run
+      expect(outbox[0]).toMatchObject({
+        deliveryAttempts: 0,
+        deliveryError: null,
+        parked: false,
+      });
+
+      // Real transient shape written by transientFailure(): a JSON envelope
+      // with the message and the retry deadline, and published_at still null.
+      db.query(
+        `UPDATE outbox
+         SET delivery_attempts = 1, delivery_error = ?, published_at = NULL
+         WHERE seq = ?`,
+      ).run(
+        JSON.stringify({ message: "sink down", retryAt: Date.now() + 5000 }),
+        outbox[0].seq,
+      );
+      expect((await client.outbox()).outbox[0]).toMatchObject({
+        deliveryAttempts: 1,
+        deliveryError: "sink down",
+        parked: false,
+      });
+
+      db.query(
+        `UPDATE outbox
+         SET delivery_attempts = 3, delivery_error = ?, published_at = ?
+         WHERE seq = ?`,
+      ).run("sink unavailable", new Date().toISOString(), outbox[0].seq);
+      const parked = (await client.outbox()).outbox[0];
+      expect(parked).toMatchObject({
+        deliveryAttempts: 3,
+        deliveryError: "sink unavailable",
+        parked: true,
+      });
+
+      db.query(
+        `UPDATE outbox
+         SET event_json = ?, delivery_attempts = 1, delivery_error = ?
+         WHERE seq = ?`,
+      ).run("not JSON", "Unexpected token", outbox[0].seq);
+      expect((await client.outbox()).outbox[0]).toMatchObject({
+        event: { raw: "not JSON" },
+        deliveryAttempts: 1,
+        deliveryError: "Unexpected token",
+        parked: true,
+      });
     } finally {
       server.close();
     }
   });
 
-  test("journal and outbox bound malformed limits and normalize journal cursors", async () => {
+  test("journal and outbox reject malformed limits and journal cursors", async () => {
     const s = await makeServer();
     try {
       const insertJournal = s.db.query(
@@ -1330,33 +1778,25 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
         }
       })();
 
-      for (const path of ["/journal?limit=-1", "/outbox?limit=-1"]) {
-        const response = await fetch(s.url(path));
-        expect(response.status).toBe(200);
-        const body = await response.json();
-        expect(body.entries ?? body.outbox).toHaveLength(1);
+      for (const endpoint of ["/journal", "/outbox"]) {
+        for (const limit of ["abc", "0", "501"]) {
+          const response = await fetch(s.url(`${endpoint}?limit=${limit}`));
+          expect(response.status).toBe(422);
+          expect(await response.json()).toMatchObject({
+            error: "invalid_limit",
+            message: "limit must be an integer between 1 and 500",
+          });
+        }
       }
 
-      for (const path of ["/journal?limit=999", "/outbox?limit=999"]) {
-        const response = await fetch(s.url(path));
-        expect(response.status).toBe(200);
-        const body = await response.json();
-        expect(body.entries ?? body.outbox).toHaveLength(500);
+      for (const since of ["not-a-cursor", "-1"]) {
+        const response = await fetch(s.url(`/journal?since=${since}`));
+        expect(response.status).toBe(422);
+        expect(await response.json()).toMatchObject({
+          error: "invalid_since",
+          message: expect.any(String),
+        });
       }
-
-      const journalFallback = await fetch(s.url("/journal?limit=abc"));
-      expect(journalFallback.status).toBe(200);
-      expect((await journalFallback.json()).entries).toHaveLength(100);
-
-      const outboxFallback = await fetch(s.url("/outbox?limit=abc"));
-      expect(outboxFallback.status).toBe(200);
-      expect((await outboxFallback.json()).outbox).toHaveLength(50);
-
-      const normalizedSince = await fetch(
-        s.url("/journal?since=not-a-cursor&limit=500"),
-      );
-      expect(normalizedSince.status).toBe(200);
-      expect((await normalizedSince.json()).entries).toHaveLength(500);
     } finally {
       s.close();
     }
@@ -1545,6 +1985,27 @@ describe("run trace surfacing (OPS-295)", () => {
       expect(rest.entries[0].attempt).toBe(1);
       expect(typeof rest.entries[0].ts).toBe("string");
 
+      for (const limit of ["abc", "0", "501"]) {
+        const response = await fetch(
+          `http://127.0.0.1:${port}/runs/${summary.runId}/trace?limit=${limit}`,
+        );
+        expect(response.status).toBe(422);
+        expect(await response.json()).toMatchObject({
+          error: "invalid_limit",
+          message: "limit must be an integer between 1 and 500",
+        });
+      }
+      for (const since of ["abc", "-1"]) {
+        const response = await fetch(
+          `http://127.0.0.1:${port}/runs/${summary.runId}/trace?since=${since}`,
+        );
+        expect(response.status).toBe(422);
+        expect(await response.json()).toMatchObject({
+          error: "invalid_since",
+          message: expect.any(String),
+        });
+      }
+
       // Caught up: since=head → no entries, head unchanged.
       const done = await client.trace(summary.runId, { since: rest.head });
       expect(done).toEqual({ head: rest.head, entries: [] });
@@ -1665,7 +2126,7 @@ describe("GET /tickets/:id/detail (WM-914)", () => {
       const bad = await fetch(s.url("/tickets/not-a-ticket/detail"));
       expect(bad.status).toBe(422);
       expect(await bad.json()).toEqual({
-        error: "ticket must look like WM-123",
+        error: "ticket must look like WM-123 or owner/repo#123",
       });
 
       const missing = await fetch(s.url("/tickets/WM-999/detail"));
@@ -1694,17 +2155,6 @@ describe("GET /tickets/:id/detail (WM-914)", () => {
 });
 
 describe("GET /tickets/supply (WM-824)", () => {
-  afterEach(async () => {
-    const {
-      clearLinearSupplyCache,
-      setLinearSupplyGql,
-      setLinearSupplyBudget,
-    } = await import("./linear.mjs");
-    clearLinearSupplyCache();
-    setLinearSupplyGql(null);
-    setLinearSupplyBudget(undefined);
-  });
-
   function repoMap(rows) {
     return new Map(
       rows.map((row) => [
@@ -1787,12 +2237,9 @@ describe("GET /tickets/supply (WM-824)", () => {
     expect(stale.stale).toBe(true);
   });
 
-  test("GET /tickets/supply queries Linear on demand and honors refresh=1", async () => {
-    const { setLinearSupplyGql, clearLinearSupplyCache } =
-      await import("./linear.mjs");
-    clearLinearSupplyCache();
+  test("ticketSupplyView queries Linear on demand and honors refresh", async () => {
     let calls = 0;
-    setLinearSupplyGql(async () => {
+    const gql = async () => {
       calls += 1;
       return {
         issues: {
@@ -1806,15 +2253,13 @@ describe("GET /tickets/supply (WM-824)", () => {
           pageInfo: { hasNextPage: false },
         },
       };
-    });
+    };
     const repos = repoMap([{ name: "factory" }]);
-    const s = await makeServer({ repos: () => repos });
+    const s = await makeServer();
     try {
-      const first = await fetch(s.url("/tickets/supply"));
-      expect(first.status).toBe(200);
-      const body = await first.json();
-      expect(body.source).toBe("linear");
-      expect(body.repos).toEqual([
+      const first = await ticketSupplyView(s.db, { repos, gql });
+      expect(first.source).toBe("linear");
+      expect(first.repos).toEqual([
         expect.objectContaining({
           name: "factory",
           triage: 1,
@@ -1824,10 +2269,10 @@ describe("GET /tickets/supply (WM-824)", () => {
       ]);
       expect(calls).toBe(1);
 
-      await fetch(s.url("/tickets/supply"));
+      await ticketSupplyView(s.db, { repos, gql });
       expect(calls).toBe(1);
 
-      await fetch(s.url("/tickets/supply?refresh=1"));
+      await ticketSupplyView(s.db, { repos, gql, refresh: true });
       expect(calls).toBe(2);
     } finally {
       s.close();

@@ -18,28 +18,35 @@ import {
 import { openDb } from "../lib/db.mjs";
 import { newWorkerId } from "../lib/ids.mjs";
 import { pruneArtifacts } from "../lib/artifacts.mjs";
+import { sweepMemos } from "../lib/memos.mjs";
 import { publishOutbox } from "../lib/outbox.mjs";
 import { autoApproveScheduled, emitDueTicks } from "../lib/schedules.mjs";
 import { autoApproveChains } from "../lib/auto-approval.mjs";
-import {
-  worktreeDispatchAutoEligibility,
-  planAdmittedEvents,
-} from "../lib/planner.mjs";
 import { resolveChains } from "../lib/chain.mjs";
-import { notifyPending } from "../lib/notify.mjs";
+import { notifyPending, sweepNotifyLog } from "../lib/notify.mjs";
 import { reconcileInbox } from "../lib/inbox.mjs";
-import { loadRegistry } from "../lib/registry.mjs";
+import { loadModelTierMap, loadRegistry } from "../lib/registry.mjs";
+import { applyModelTierCellOverrides } from "../lib/runtime-overrides.mjs";
 import { approveProposal } from "../lib/proposals.mjs";
 import { startApi } from "../lib/api.mjs";
-import {
-  codeStamp,
-  REGISTRY_STAMP_PATHS,
-  runOnce,
-} from "../lib/worker.mjs";
+import { codeStamp, REGISTRY_STAMP_PATHS } from "../lib/worker.mjs";
 import { reapExpiredLeases } from "../lib/reaper.mjs";
+import { startPlannerWorker } from "../lib/planner-worker.mjs";
 import { CLI_PATH, fail, flagValue, log } from "./shared.mjs";
 
 export const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+/**
+ * Shutdown budget (#1585). The supervisor (`await_daemon` in
+ * bin/worktree-common.sh) SIGKILLs a serve that has not exited 3 s after
+ * SIGTERM. Everything below must fit inside that window with margin, or the
+ * lock file and the listening port are torn down by the kernel instead of us:
+ * planner stop + connector stop share CONNECTOR_STOP_TIMEOUT_MS, the HTTP
+ * server gets CLOSE_CONNECTIONS_AFTER_MS to drain keep-alive clients, and
+ * HARD_EXIT_MS is the in-process backstop that always wins before the kill.
+ */
+export const CONNECTOR_STOP_TIMEOUT_MS = 1_500;
+export const CLOSE_CONNECTIONS_AFTER_MS = 500;
+export const HARD_EXIT_MS = 2_500;
 
 /**
  * Mutable ownership seam for the validated registry.  Loading and validation
@@ -56,8 +63,14 @@ export function createRegistryRef({
   log: logLine = log,
   decorate = () => {},
 } = {}) {
-  if (!initial || typeof load !== "function" || typeof sourceStamp !== "function")
-    throw new Error("createRegistryRef requires initial, load, and sourceStamp");
+  if (
+    !initial ||
+    typeof load !== "function" ||
+    typeof sourceStamp !== "function"
+  )
+    throw new Error(
+      "createRegistryRef requires initial, load, and sourceStamp",
+    );
 
   let current = initial;
   let loadedAt = new Date(now()).toISOString();
@@ -143,12 +156,50 @@ export const TICK_SUBSYSTEMS = [
   "plan",
   "auto-approve",
   "auto-approve-chains",
+  "announce",
   "inbox",
   "notify",
+  "reap",
+  "worker",
+  "announce-after",
   "outbox",
   "GC",
   "chains",
 ];
+
+/**
+ * Await `run()` for at most `timeoutMs`; a rejection or a timeout is logged
+ * under `label` and never propagates. Shutdown steps must be bounded — a step
+ * that never settles would otherwise hand the exit to the supervisor's
+ * SIGKILL.
+ */
+export async function stopBounded(label, run, timeoutMs) {
+  let timeout;
+  await Promise.race([
+    Promise.resolve()
+      .then(run)
+      .catch((err) => log(`${label}: ${err?.message ?? err}`)),
+    new Promise((resolve) => {
+      timeout = setTimeout(() => {
+        log(`${label}: timed out after ${timeoutMs}ms`);
+        resolve();
+      }, timeoutMs);
+    }),
+  ]);
+  clearTimeout(timeout);
+}
+
+/**
+ * Connector implementations are third-party, long-running integrations. A
+ * hung socket close must not prevent `serve` from releasing its HTTP server.
+ */
+function stopConnectorsBounded() {
+  return stopBounded(
+    "connector stop",
+    () => stopConnectors(),
+    CONNECTOR_STOP_TIMEOUT_MS,
+  );
+}
 
 /**
  * One serve-loop pass (OPS-412). Each named subsystem is caught on its own
@@ -157,7 +208,7 @@ export const TICK_SUBSYSTEMS = [
  * `subsystems` may replace a step by the names in TICK_SUBSYSTEMS; tests use
  * that to prove isolation. `storeRoot` defaults to `artifactsRoot()`.
  *
- * @returns {{ lastPrune: number }}
+ * @returns {{ lastPrune: number, durationMs: number, stepMs: Record<string, number> }}
  */
 export async function tick({
   db,
@@ -175,12 +226,18 @@ export async function tick({
   announceProposals = () => {},
   announceTransitions = () => {},
   subsystems = {},
+  skipPlan = false,
 } = {}) {
+  const tickStart = Date.now();
+  const stepMs = {};
   const runStep = async (name, fn) => {
+    const start = Date.now();
     try {
       await (subsystems[name] ?? fn)();
     } catch (err) {
       logLine(`tick ${name}: ${err.message}`);
+    } finally {
+      stepMs[name] = Date.now() - start;
     }
   };
 
@@ -194,13 +251,18 @@ export async function tick({
     for (const err of ticks.errors) logLine(`schedule error: ${err}`);
   });
 
-  await runStep("plan", () => {
-    planAdmittedEvents(db, registry, {
-      now,
-      policyVersion: pv,
-      adapterOverride,
+  if (!skipPlan) {
+    const { planAdmittedEvents } = await import("../lib/planner.mjs");
+    await runStep("plan", () => {
+      planAdmittedEvents(db, registry, {
+        now,
+        policyVersion: pv,
+        adapterOverride,
+      });
     });
-  });
+  } else {
+    stepMs["plan"] = 0;
+  }
 
   await runStep("auto-approve", () => {
     const auto = autoApproveScheduled(db, registry, approveProposal, {
@@ -213,6 +275,8 @@ export async function tick({
   });
 
   await runStep("auto-approve-chains", async () => {
+    const { worktreeDispatchAutoEligibility } =
+      await import("../lib/planner.mjs");
     const auto = await autoApproveChains(db, registry, {
       now,
       policyVersion: pv,
@@ -250,6 +314,7 @@ export async function tick({
   });
 
   if (withWorker) {
+    const { runOnce } = await import("../lib/worker.mjs");
     await runStep("worker", async () => {
       await runOnce(db, registry, adapters, {
         workspacesRoot: workspacesRoot(),
@@ -272,21 +337,44 @@ export async function tick({
           `result event ${e.type} (${e.eventId}) artifact ${e.payload?.artifactHash ?? "-"}`,
         ),
       now,
+      log: logLine,
     });
   });
 
   let nextPrune = lastPrune;
   await runStep("GC", () => {
     if (now - lastPrune <= pruneIntervalMs) return;
-    try {
+    // The cadence advances even when a sub-step throws: a broken sweep must
+    // not turn into a hot loop of retries on every tick.
+    nextPrune = now;
+    const gcStep = (name, fn) => {
+      try {
+        fn();
+      } catch (err) {
+        logLine(`tick GC: ${name}: ${err.message}`);
+      }
+    };
+    // Sweep first so memo artifacts become eligible for this GC pass rather
+    // than staying pinned until the next hourly artifact prune. Each sub-step
+    // is isolated: a memo-sweep failure never skips artifact GC.
+    gcStep("memos", () => {
+      const swept = sweepMemos(db, { now });
+      if (swept.deleted > 0)
+        logLine(
+          `memos: swept ${swept.deleted} expired/retired/superseded memo(s)`,
+        );
+    });
+    gcStep("artifacts", () => {
       const pruned = pruneArtifacts(db, storeRoot ?? artifactsRoot(), { now });
       if (pruned.deleted > 0)
         logLine(
           `artifacts: pruned ${pruned.deleted} orphan(s), freed ${pruned.freedBytes}B`,
         );
-    } finally {
-      nextPrune = now;
-    }
+    });
+    gcStep("notify", () => {
+      const swept = sweepNotifyLog(db, { now });
+      if (swept > 0) logLine(`notify: swept ${swept} stale dedup marker(s)`);
+    });
   });
 
   await runStep("chains", () => {
@@ -296,7 +384,11 @@ export async function tick({
     for (const err of chains.errors) logLine(`chain error: ${err}`);
   });
 
-  return { lastPrune: nextPrune };
+  return {
+    lastPrune: nextPrune,
+    durationMs: Date.now() - tickStart,
+    stepMs,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -429,10 +521,17 @@ export default async function serve(args) {
   }
 
   const db = openDb();
+  // Policy models are a startup snapshot. Persisted cells compose over the
+  // tracked map before registry validation; PUT/DELETE never mutate this
+  // process, so operators get the promised explicit restart boundary.
+  const trackedModelTiers = loadModelTierMap();
+  const modelTiers = applyModelTierCellOverrides(db, trackedModelTiers);
   const registryOptions = {
     packRoots: extensions.packRoots,
     panelRoots: extensions.panelRoots,
     harnessRoots: extensions.harnessRoots,
+    modelTiers,
+    trackedModelTiers,
   };
   const loadCurrentRegistry = () => loadRegistry(registryOptions);
   const registry = loadCurrentRegistry();
@@ -509,12 +608,33 @@ export default async function serve(args) {
   // iterate must not kill a running agent. `--with-worker` restores the old
   // all-in-one behaviour for a quick single-process demo.
   const withWorker = args.includes("--with-worker");
+  const noPlanner = args.includes("--no-planner");
 
   let lastPrune = Date.now();
   let busy = false;
+  let tickOverruns = 0;
+  let lastTickMs = 0;
+  let lastOverrunAt = null;
+
+  function getTickStats() {
+    return {
+      lastMs: lastTickMs,
+      overruns: tickOverruns,
+      ...(lastOverrunAt ? { lastOverrunAt } : {}),
+    };
+  }
+
   async function loopTick() {
-    if (busy) return; // never overlap: planning and (optional) execution share this tick
+    if (busy) {
+      tickOverruns++;
+      lastOverrunAt = new Date().toISOString();
+      log(
+        `tick skipped: previous tick still in progress (overruns: ${tickOverruns})`,
+      );
+      return;
+    }
     busy = true;
+    const start = Date.now();
     try {
       registryRef.poll();
       const result = await tick({
@@ -529,13 +649,33 @@ export default async function serve(args) {
         log,
         announceProposals,
         announceTransitions,
+        skipPlan: !noPlanner,
       });
       lastPrune = result.lastPrune;
+      const duration = Date.now() - start;
+      lastTickMs = duration;
+      if (duration > 1000) {
+        tickOverruns++;
+        lastOverrunAt = new Date().toISOString();
+        log(
+          `tick overrun: ${duration}ms (interval 1000ms, overruns: ${tickOverruns}) — step timings: ${JSON.stringify(result.stepMs)}`,
+        );
+      }
     } catch (err) {
       log(`tick error: ${err.message}`);
     } finally {
       busy = false;
     }
+  }
+
+  let plannerWorker = null;
+  if (!noPlanner) {
+    plannerWorker = startPlannerWorker({
+      eventHome: home,
+      policyVersion: pv,
+      adapterOverride,
+      log,
+    });
   }
 
   const env = {
@@ -549,8 +689,10 @@ export default async function serve(args) {
     policyVersion: pv,
     port,
     env,
+    getTickStats,
     onEvent: (kind) => {
       log(`event ${kind} — planning`);
+      plannerWorker?.wake();
       loopTick();
     },
   });
@@ -567,7 +709,12 @@ export default async function serve(args) {
     } else {
       log(`serve: control API failed to start: ${err?.message ?? err}`);
     }
-    process.exit(1);
+    // Connectors are started before the API binds. A bind failure must give
+    // them the same bounded cleanup as SIGTERM before the process exits.
+    stopConnectorsBounded().finally(() => {
+      releaseServeLock(home);
+      process.exit(1);
+    });
   });
   server.on("listening", () => {
     log(
@@ -575,6 +722,11 @@ export default async function serve(args) {
     );
     if (adapterOverride)
       log(`adapter override: all new run specs use "${adapterOverride}"`);
+    if (!process.env.FACTORY_CONTROL_API_TOKEN) {
+      log(
+        "WARNING: FACTORY_CONTROL_API_TOKEN is unset; all non-intake control API routes will return 503",
+      );
+    }
     if (!process.env.FACTORY_EVENT_SECRET) {
       log(
         "webhook intake: disabled (FACTORY_EVENT_SECRET is unset; webhooks will be rejected with 401)",
@@ -590,12 +742,14 @@ export default async function serve(args) {
         ? "worker: in-process (--with-worker) — restarting serve interrupts running agents"
         : "worker: none in this process — start one with: bun event-runtime/cli.mjs work",
     );
+    if (noPlanner) {
+      log(
+        "planner: disabled in this process (--no-planner) — run: bun event-runtime/cli.mjs plan",
+      );
+    } else {
+      log("planner: background worker thread (off HTTP event loop)");
+    }
   });
-  server.on("error", (err) => {
-    releaseServeLock(home);
-    fail(`serve: ${err.message}`);
-  });
-
   // The watched loop starts ONLY once the API actually owns its port. A serve
   // that lost the bind race must die, not keep planning and working the same
   // database as the serve that won — that is a second unmanaged worker and a
@@ -610,19 +764,53 @@ export default async function serve(args) {
   // SIGTERM is what `bun --watch` sends on reload; without a close the next
   // process loses the bind race on 7381.
   let stopping = false;
-  const shutdown = (signal) => {
+  const shutdown = async (signal) => {
     if (stopping) return;
     stopping = true;
     log(`shutting down (${signal})`);
     if (timer) clearInterval(timer);
-    releaseServeLock(home);
-    const finish = () => {
-      server.close(() => process.exit(0));
-      setTimeout(() => process.exit(0), 1000).unref?.();
-    };
-    Promise.resolve(stopConnectors())
-      .catch((err) => log(`connector stop: ${err.message}`))
-      .finally(finish);
+    // Arm this before any cleanup: a connector or the planner thread may
+    // never settle. It sits inside the supervisor's SIGKILL grace so the lock
+    // is released by us, not by a kernel kill; it is longer than the bounded
+    // stops below so `server.close` still gets a chance to release the port.
+    const hardExit = setTimeout(() => {
+      log(`serve: shutdown exceeded ${HARD_EXIT_MS}ms — exiting`);
+      releaseServeLock(home);
+      process.exit(0);
+    }, HARD_EXIT_MS);
+    // The planner thread and the connectors run concurrently under ONE
+    // budget: a hung planner terminate must not push connector cleanup past
+    // the hard exit.
+    await Promise.all([
+      plannerWorker
+        ? stopBounded(
+            "planner stop",
+            () => plannerWorker.stop(),
+            CONNECTOR_STOP_TIMEOUT_MS,
+          )
+        : Promise.resolve(),
+      stopConnectorsBounded(),
+    ]);
+    let closeConnections = null;
+    server.close((err) => {
+      clearTimeout(hardExit);
+      clearTimeout(closeConnections);
+      if (err) log(`serve: control API close failed: ${err.message}`);
+      // Keep the lock while the listening socket exists. The exit hook is a
+      // final safeguard should the hard-exit backstop win this race.
+      releaseServeLock(home);
+      process.exit(err ? 1 : 0);
+    });
+    // `server.close` only fires its callback once every connection is gone;
+    // an HTTP keep-alive client (curl loops, the web UI, a health poller)
+    // keeps its socket open for seconds and would otherwise carry us into the
+    // hard exit. Drop idle sockets now, and any still-active ones shortly
+    // after, so the close can complete.
+    server.closeIdleConnections?.();
+    closeConnections = setTimeout(
+      () => server.closeAllConnections?.(),
+      CLOSE_CONNECTIONS_AFTER_MS,
+    );
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));

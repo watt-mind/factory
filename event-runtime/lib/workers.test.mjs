@@ -219,14 +219,154 @@ describe("worker registry and heartbeats (OPS-233)", () => {
     });
   });
 
-  test("pruning drops long-stopped workers only", () => {
+  test("pruning keeps recent and leased workers while dropping expired rows", () => {
     const d = db();
-    const old = Date.now() - 48 * 60 * 60 * 1000;
-    registerWorker(d, { workerId: "old", now: old });
-    deregisterWorker(d, "old", { now: old });
-    registerWorker(d, { workerId: "live" });
-    expect(pruneWorkers(d)).toBe(1);
-    expect(listWorkers(d).map((w) => w.workerId)).toEqual(["live"]);
+    const now = Date.now();
+    const hour = 60 * 60 * 1000;
+
+    registerWorker(d, { workerId: "old-stopped", now });
+    registerWorker(d, { workerId: "fresh-stopped", now });
+    registerWorker(d, { workerId: "stale-dead", now });
+    registerWorker(d, { workerId: "stale-but-leased", now });
+    deregisterWorker(d, "old-stopped", { now: now - 2 * hour });
+    deregisterWorker(d, "fresh-stopped", { now: now - 30 * 60 * 1000 });
+    heartbeat(d, "stale-dead", { now: now - 7 * hour });
+    heartbeat(d, "stale-but-leased", { now: now - 7 * hour });
+    queueRun(d, { runId: "run_leased" });
+    claimNext(d, {
+      owner: "stale-but-leased",
+      policyVersion: PV,
+      now,
+    });
+
+    expect(pruneWorkers(d, { now })).toBe(2);
+    expect(
+      listWorkers(d, { now })
+        .map((w) => w.workerId)
+        .sort(),
+    ).toEqual(["fresh-stopped", "stale-but-leased"]);
+  });
+
+  test("pruning correlates a lease with its run's current attempt", () => {
+    const d = db();
+    const now = Date.now();
+    const hour = 60 * 60 * 1000;
+
+    registerWorker(d, { workerId: "dead-first-attempt", now });
+    queueRun(d, { runId: "retried-run" });
+    d.query(
+      `UPDATE runs SET state = 'RUNNING', attempts = 2 WHERE run_id = ?`,
+    ).run("retried-run");
+    d.query(
+      `INSERT INTO attempts (run_id, attempt, fencing_token, lease_owner)
+       VALUES (?, ?, ?, ?), (?, ?, ?, ?)`,
+    ).run(
+      "retried-run",
+      1,
+      1,
+      "dead-first-attempt",
+      "retried-run",
+      2,
+      2,
+      "current-worker",
+    );
+    heartbeat(d, "dead-first-attempt", { now: now - 7 * hour });
+
+    expect(pruneWorkers(d, { now })).toBe(1);
+    expect(listWorkers(d, { now })).toEqual([]);
+  });
+
+  test("registering a worker retains recently stopped host rows", () => {
+    const d = db();
+    const now = Date.now();
+
+    registerWorker(d, { workerId: "recently-stopped", now });
+    registerWorker(d, { workerId: "expired-stopped", now });
+    deregisterWorker(d, "recently-stopped", { now });
+    deregisterWorker(d, "expired-stopped", { now: now - 2 * 60 * 60 * 1000 });
+    registerWorker(d, { workerId: "new-pool", now: now + 1 });
+
+    expect(
+      listWorkers(d, { now: now + 1 })
+        .map((w) => w.workerId)
+        .sort(),
+    ).toEqual(["new-pool", "recently-stopped"]);
+  });
+
+  test("a heartbeat restores a worker pruned while it was suspended", () => {
+    const d = db();
+    const now = Date.now();
+    const startedAt = now - 8 * 60 * 60 * 1000;
+    const labels = { node: "lab", can: "infra-exec" };
+    const adapters = ["fake", "pi"];
+
+    registerWorker(d, {
+      workerId: "recovered",
+      labels,
+      adapters,
+      now: startedAt,
+    });
+    heartbeat(d, "recovered", {
+      state: "busy",
+      runId: "run_recovered",
+      now: now - 7 * 60 * 60 * 1000,
+    });
+
+    expect(pruneWorkers(d, { now })).toBe(1);
+    expect(listWorkers(d, { now })).toEqual([]);
+
+    heartbeat(d, "recovered", {
+      state: "idle",
+      labels,
+      adapters,
+      startedAt,
+      now: now + 1,
+    });
+    expect(listWorkers(d, { now: now + 1 })).toEqual([
+      expect.objectContaining({
+        workerId: "recovered",
+        state: "idle",
+        currentRun: null,
+        labels,
+        adapters,
+        startedAt: new Date(startedAt).toISOString(),
+        stale: false,
+      }),
+    ]);
+  });
+
+  test("pruning stopped workers falls back to last_seen when stopped_at is NULL", () => {
+    const d = db();
+    const now = Date.now();
+
+    registerWorker(d, {
+      workerId: "missing-stop-time",
+      now: now - 2 * 60 * 60 * 1000,
+    });
+    d.query(
+      `UPDATE workers SET state = 'stopped', stopped_at = NULL WHERE worker_id = ?`,
+    ).run("missing-stop-time");
+
+    expect(pruneWorkers(d, { now })).toBe(1);
+    expect(listWorkers(d, { now })).toEqual([]);
+  });
+
+  test("pruning retention windows are configurable", () => {
+    const d = db();
+    const now = Date.now();
+
+    registerWorker(d, { workerId: "stopped", now });
+    registerWorker(d, { workerId: "inactive", now });
+    deregisterWorker(d, "stopped", { now: now - 30 * 60 * 1000 });
+    heartbeat(d, "inactive", { now: now - 2 * 60 * 60 * 1000 });
+
+    expect(
+      pruneWorkers(d, {
+        now,
+        stoppedOlderThanMs: 15 * 60 * 1000,
+        inactiveOlderThanMs: 60 * 60 * 1000,
+      }),
+    ).toBe(2);
   });
 });
 

@@ -8,8 +8,15 @@
  * promptVersion is provenance recorded at planning time, not a second
  * identity.
  */
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
+import { format as prettierFormat, resolveConfig } from "prettier";
 import { hashBytes } from "./canonical.mjs";
 import { APPROVAL_MODES, CATCH_UP_MODES, parseCadence } from "./schedules.mjs";
 import { RUNTIME_ROOT, resolveConfigPath } from "./config.mjs";
@@ -49,6 +56,37 @@ function readJson(file, description = file) {
 
 function nullDict() {
   return Object.create(null);
+}
+
+function isStrictDescendant(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return (
+    relative !== "" &&
+    relative !== ".." &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
+}
+
+/** Resolve a pack-owned resource without allowing lexical or symlink escape. */
+function resolvePackResource(root, canonicalRoot, relative) {
+  if (typeof relative !== "string" || relative === "") {
+    throw new RegistryError("pinned resource path must be a non-empty string");
+  }
+  const resolved = path.resolve(root, relative);
+  if (!isStrictDescendant(root, resolved)) {
+    throw new RegistryError(
+      `${relative}: resource resolves outside pack root ${root}`,
+    );
+  }
+  if (!existsSync(resolved)) return resolved;
+  const canonical = realpathSync(resolved);
+  if (!isStrictDescendant(canonicalRoot, canonical)) {
+    throw new RegistryError(
+      `${relative}: resource resolves outside canonical pack root ${canonicalRoot}`,
+    );
+  }
+  return canonical;
 }
 
 const SCHEDULE_OVERLAY_FIELDS = new Set(["enabled", "every", "payload"]);
@@ -277,6 +315,14 @@ export function createFsPackLoader(
   { builtIn = false, ignorePins = false } = {},
 ) {
   const root = path.resolve(pack.path);
+  let canonicalRoot;
+  try {
+    canonicalRoot = realpathSync(root);
+  } catch (err) {
+    throw new RegistryError(
+      `pack "${pack.name}": root ${root} is not accessible — ${err.message}`,
+    );
+  }
   let pins;
   return {
     listAgentDefs() {
@@ -294,7 +340,7 @@ export function createFsPackLoader(
     // notion, so only the fs loader offers them. loadRegistry treats an
     // absent method as "this pack has no views".
     readArtifactView(entry, def) {
-      return loadArtifactView(root, entry.source, def);
+      return loadArtifactView(root, canonicalRoot, entry.source, def);
     },
     // Optional seam member (WM-840): `panels/*.panel.json` under the pack
     // root, validated by lib/panel-view.mjs; a pack without the directory
@@ -311,7 +357,7 @@ export function createFsPackLoader(
           throw new RegistryError(`${file}: pins must be a path-to-hash map`);
         }
       }
-      const file = path.join(root, relative);
+      const file = resolvePackResource(root, canonicalRoot, relative);
       return {
         expected: builtIn
           ? Object.hasOwn(def.pins ?? nullDict(), relative)
@@ -486,14 +532,14 @@ function readViewFile(abs, rel, def, source) {
   return { file: rel, view, source, anomaly: null };
 }
 
-function loadArtifactView(root, defFile, def) {
+function loadArtifactView(root, canonicalRoot, defFile, def) {
   const agentRel = path.relative(root, defFile).replace(/\.json$/, VIEW_SUFFIX);
-  const agentAbs = path.join(root, agentRel);
+  const agentAbs = resolvePackResource(root, canonicalRoot, agentRel);
   if (existsSync(agentAbs))
     return readViewFile(agentAbs, agentRel, def, "agent");
   const contractRel = contractViewRel(def.output_contract);
   if (contractRel) {
-    const contractAbs = path.join(root, contractRel);
+    const contractAbs = resolvePackResource(root, canonicalRoot, contractRel);
     if (existsSync(contractAbs))
       return readViewFile(contractAbs, contractRel, def, "contract");
   }
@@ -520,6 +566,44 @@ export const DEFAULT_MODEL = "default";
 /** Adapters that accept a model at all. command/actions/fake take none: a
  * declared tier there resolves to null (not applicable), never an error. */
 export const MODEL_ADAPTERS = new Set(["claude", "pi", "agy", "cursor"]);
+
+/**
+ * Compose independently persisted runtime tier cells over the tracked policy
+ * map. Both inputs are validated against the same closed adapter/tier
+ * vocabularies as loadModelTierMap so a corrupt stored row cannot silently
+ * add policy surface at startup.
+ */
+export function composeModelTierMap(tracked = {}, runtime = {}) {
+  const effective = Object.fromEntries(
+    Object.entries(tracked).map(([adapter, tiers]) => [adapter, { ...tiers }]),
+  );
+  for (const [adapter, tiers] of Object.entries(runtime)) {
+    if (!MODEL_ADAPTERS.has(adapter)) {
+      throw new RegistryError(
+        `runtime model-tier override has unknown adapter ${JSON.stringify(adapter)} (expected one of ${[...MODEL_ADAPTERS].join(", ")})`,
+      );
+    }
+    if (typeof tiers !== "object" || tiers === null || Array.isArray(tiers)) {
+      throw new RegistryError(
+        `runtime model-tier override for ${adapter} must map tiers to model values`,
+      );
+    }
+    for (const [tier, model] of Object.entries(tiers)) {
+      if (!MODEL_TIERS.includes(tier)) {
+        throw new RegistryError(
+          `runtime model-tier override ${adapter}.${tier} has unknown tier (expected ${MODEL_TIERS.join(", ")})`,
+        );
+      }
+      if (typeof model !== "string" || model.trim() === "") {
+        throw new RegistryError(
+          `runtime model-tier override ${adapter}.${tier} must be a non-empty model value`,
+        );
+      }
+      effective[adapter] = { ...(effective[adapter] ?? {}), [tier]: model };
+    }
+  }
+  return effective;
+}
 
 /**
  * Read the `models:` tier map from config/policy.yaml (same root rule as
@@ -795,6 +879,23 @@ function loadAgentDef(pack, loader, entry, { builtIn = false } = {}) {
     writable: true,
     configurable: true,
   });
+  // Prompt execution and publication must use the exact immutable bytes whose
+  // digest was accepted above, never a later read through the mutable path.
+  // Keep this runtime snapshot non-enumerable for receipt/registry identity.
+  Object.defineProperty(loaded, "promptText", {
+    value: Buffer.from(resources.prompt.bytes).toString("utf8"),
+    enumerable: false,
+  });
+  // The definition's own JSON file, kept non-enumerably for the same reason as
+  // `pack`: it is loader-injected filesystem provenance, not definition content
+  // hashed into the defHash. Overlay promotion (gh-860) needs the owning file to
+  // write a tracked model_tier/model default; `agentDefinitionFile` reads it.
+  Object.defineProperty(loaded, "defSource", {
+    value: entry?.source ?? null,
+    enumerable: false,
+    writable: true,
+    configurable: true,
+  });
   if (def.memos !== undefined) {
     validateMemosDeclaration(def.memos, {
       source,
@@ -925,6 +1026,7 @@ export function loadRegistry({
   panelRoots = [],
   harnessRoots = [],
   modelTiers = loadModelTierMap(),
+  trackedModelTiers = modelTiers,
   loaderFor = defaultLoaderFor,
   // Unit tests must describe the committed kernel unless they explicitly
   // pass an overlay fixture. Dispatched worktrees intentionally contain a
@@ -932,13 +1034,12 @@ export function loadRegistry({
   // instance state leak into `bun test` makes kernel expectations depend on
   // whichever loops the operator currently enabled. Operational processes do
   // not set NODE_ENV=test and continue to resolve the effective local config.
-  scheduleConfigPath =
-    process.env.NODE_ENV === "test"
-      ? path.join(path.dirname(root), "config", ".test-no-schedule.yaml")
-      : resolveConfigPath("schedule", {
-          root: path.dirname(root),
-          warn: false,
-        }),
+  scheduleConfigPath = process.env.NODE_ENV === "test"
+    ? path.join(path.dirname(root), "config", ".test-no-schedule.yaml")
+    : resolveConfigPath("schedule", {
+        root: path.dirname(root),
+        warn: false,
+      }),
 } = {}) {
   const configured =
     packRoots ??
@@ -1358,6 +1459,7 @@ export function loadRegistry({
     kernelSchedules,
     scheduleSources: effectiveScheduleSources,
     modelTiers,
+    trackedModelTiers,
     harnessRoots,
   };
 }
@@ -1373,6 +1475,42 @@ export function getAgent(registry, ref) {
   return def;
 }
 
+/**
+ * The repo-relative JSON file that owns an agent's tracked defaults (gh-860).
+ * Overlay promotion writes model_tier/model into this file inside an isolated
+ * worktree; it never resolves against the live checkout. `root` defaults to the
+ * registry root the definition was loaded from, so the returned `file` is the
+ * path a `worktree_up` checkout of the same repo would carry.
+ *
+ * @returns {{ ref: string, file: string, absSource: string }}
+ */
+export function agentDefinitionFile(
+  registry,
+  ref,
+  { root = registry.root } = {},
+) {
+  const def = registry.agents.get(ref);
+  if (!def) throw new RegistryError(`unregistered agent ${ref}`);
+  const absSource = def.defSource;
+  if (typeof absSource !== "string" || absSource.trim() === "") {
+    throw new RegistryError(
+      `agent ${JSON.stringify(ref)} has no owning definition file (not a filesystem pack)`,
+    );
+  }
+  if (!path.isAbsolute(absSource)) {
+    throw new RegistryError(
+      `agent ${JSON.stringify(ref)} definition source ${JSON.stringify(absSource)} is not an absolute path`,
+    );
+  }
+  const file = path.relative(path.resolve(root), absSource);
+  if (file.startsWith("..") || path.isAbsolute(file)) {
+    throw new RegistryError(
+      `agent ${JSON.stringify(ref)} definition ${JSON.stringify(absSource)} is outside root ${JSON.stringify(root)}`,
+    );
+  }
+  return { ref: def.ref, file, absSource };
+}
+
 export function getEventType(registry, type) {
   return Object.hasOwn(registry.eventTypes, type)
     ? registry.eventTypes[type]
@@ -1380,16 +1518,48 @@ export function getEventType(registry, type) {
 }
 
 /**
+ * Serialize `value` as JSON exactly as Prettier 3 would under the repository
+ * configuration for `file`, so a re-pin write leaves the definition canonical
+ * (WM-1119). Prettier's formatter is async; `updatePins` awaits it. `file` is
+ * only used to select the parser and resolve `.prettierrc`, not read or written.
+ */
+async function formatJsonCanonical(file, value) {
+  const options = await resolveConfig(file);
+  return prettierFormat(`${JSON.stringify(value)}\n`, {
+    ...options,
+    filepath: file,
+  });
+}
+
+/**
  * Recompute pins deliberately. With no `pack`, this is byte-for-byte the
  * built-in behavior: inline pins in built-in definitions only. A configured
  * pack must be named explicitly and receives one root-level pins.json.
  * `check: true` reports the same changed names without writing (WM-811).
+ * Changed built-in definitions are re-emitted in Prettier-canonical form so a
+ * re-pin does not redden `format:check` (WM-1119); this makes `updatePins`
+ * async — callers must await it.
  */
-export function updatePins({ root = RUNTIME_ROOT, pack, check = false } = {}) {
+export async function updatePins({
+  root = RUNTIME_ROOT,
+  pack,
+  check = false,
+} = {}) {
   if (pack !== undefined) {
     let descriptor = pack;
     if (typeof pack === "string") {
-      descriptor = loadPackRoots().find((candidate) => candidate.name === pack);
+      const policyPacks = loadPackRoots();
+      descriptor = policyPacks.find((candidate) => candidate.name === pack);
+      if (!descriptor) {
+        // Extension-contributed packs (gh-857): metadata-only discovery so a
+        // stale extension pins.json can be repaired without importing the
+        // extension. Imported lazily — extensions.mjs depends on this module.
+        const { discoverExtensionPackRoots } = await import("./extensions.mjs");
+        [descriptor] = discoverExtensionPackRoots({
+          packRoots: policyPacks,
+          name: pack,
+        });
+      }
       if (!descriptor)
         throw new RegistryError(`unknown configured pack "${pack}"`);
     }
@@ -1419,20 +1589,26 @@ export function updatePins({ root = RUNTIME_ROOT, pack, check = false } = {}) {
   }
 
   const changed = [];
-  const agentsDir = path.join(root, "agents");
+  const resolvedRoot = path.resolve(root);
+  const canonicalRoot = realpathSync(resolvedRoot);
+  const agentsDir = path.join(resolvedRoot, "agents");
   for (const name of readdirSync(agentsDir).filter(isDefinitionFile).sort()) {
     const file = path.join(agentsDir, name);
     const def = readJson(file);
     const pins = {};
     for (const field of PINNED_FIELDS) {
       if (!def[field]) continue;
-      pins[def[field]] = hashBytes(readFileSync(path.join(root, def[field])));
+      pins[def[field]] = hashBytes(
+        readFileSync(
+          resolvePackResource(resolvedRoot, canonicalRoot, def[field]),
+        ),
+      );
     }
     if (JSON.stringify(def.pins) !== JSON.stringify(pins)) {
       if (!check) {
         writeFileSync(
           file,
-          `${JSON.stringify({ ...def, pins }, null, 2)}\n`,
+          await formatJsonCanonical(file, { ...def, pins }),
           "utf8",
         );
       }

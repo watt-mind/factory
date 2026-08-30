@@ -6,6 +6,7 @@ import {
   listInboxPage,
   resolveInboxItem,
 } from "./inbox.mjs";
+import { ApiParameterError, parseListLimit } from "./api-params.mjs";
 
 export async function handleInboxApiRoute({
   route,
@@ -64,7 +65,8 @@ export async function handleInboxApiRoute({
     try {
       return send(200, listInboxPage(db, { status, ...listPage(url) }));
     } catch (err) {
-      return send(422, { error: err.message });
+      if (err instanceof ApiParameterError) return send(422, err.body);
+      throw err;
     }
   }
 
@@ -120,11 +122,10 @@ const LIST_DEFAULT_LIMIT = 100;
 const LIST_MAX_LIMIT = 200;
 
 function listPage(url) {
-  const rawLimit = url.searchParams.get("limit");
-  const limit = rawLimit === null ? LIST_DEFAULT_LIMIT : Number(rawLimit);
-  if (!Number.isInteger(limit) || limit < 1 || limit > LIST_MAX_LIMIT) {
-    throw new Error(`limit must be an integer between 1 and ${LIST_MAX_LIMIT}`);
-  }
+  const limit = parseListLimit(url, {
+    defaultLimit: LIST_DEFAULT_LIMIT,
+    maxLimit: LIST_MAX_LIMIT,
+  });
   const rawBefore = url.searchParams.get("before");
   if (!rawBefore) return { limit, before: null };
   try {
@@ -142,6 +143,9 @@ function listPage(url) {
     }
     return { limit, before };
   } catch {
-    throw new Error("invalid before cursor");
+    throw new ApiParameterError(
+      "invalid_before",
+      "before must be a valid cursor",
+    );
   }
 }

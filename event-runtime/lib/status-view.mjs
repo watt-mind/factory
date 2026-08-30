@@ -7,6 +7,7 @@ import { artifactsRoot } from "./config.mjs";
 import { usageSpend } from "./db.mjs";
 import { hookDecisionCounts } from "./hooks.mjs";
 import { inboxCounts } from "./inbox.mjs";
+import { githubIntakeView } from "./intake.mjs";
 import { ambiguousOpenProposalRuns, openProposals } from "./proposals.mjs";
 import { proposalsPilingUp, scheduleView } from "./schedules.mjs";
 import {
@@ -201,6 +202,12 @@ export function statusView(
   const unpublishedOutbox = db
     .query(`SELECT COUNT(*) AS n FROM outbox WHERE published_at IS NULL`)
     .get().n;
+  const parkedOutbox = db
+    .query(
+      `SELECT COUNT(*) AS n FROM outbox
+       WHERE published_at IS NOT NULL AND delivery_error IS NOT NULL`,
+    )
+    .get().n;
   const deadLettered = db
     .query(
       `SELECT source, event_id, last_plan_error FROM events WHERE status = 'dead_lettered' AND archived_at IS NULL`,
@@ -244,6 +251,10 @@ export function statusView(
   const runs = { ...runCounts(db), spend: usageSpend(db, { now: nowMs }) };
 
   const configAnomalies = [];
+  const githubIntake = githubIntakeView(db, {
+    nowMs,
+    configured: Boolean(githubSecret),
+  });
   if (!secret)
     configAnomalies.push(
       "FACTORY_EVENT_SECRET is unset (webhook intake disabled)",
@@ -251,6 +262,15 @@ export function statusView(
   if (!githubSecret) {
     configAnomalies.push(
       "FACTORY_GITHUB_WEBHOOK_SECRET is unset (GitHub webhook intake disabled)",
+    );
+  }
+  if (githubIntake.stale) {
+    const age =
+      githubIntake.ageMs === null
+        ? "no GitHub delivery has been admitted"
+        : `last admission was ${githubIntake.ageMs}ms ago`;
+    configAnomalies.push(
+      `GitHub webhook intake is stale (${age}; threshold ${githubIntake.staleAfterMs}ms)`,
     );
   }
   if (policyVersion === "unknown")
@@ -287,6 +307,7 @@ export function statusView(
       expiredOpenProposals: expiredOpen.map((p) => p.id),
       staleLeases,
       unpublishedOutbox,
+      parkedOutbox,
       deadLettered,
       stalledWorkers: stalled.map((w) => ({
         workerId: w.workerId,

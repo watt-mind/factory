@@ -6,6 +6,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -32,14 +33,63 @@ export function runDir() {
   return process.env.FACTORY_RUN_DIR || path.join(homedir(), ".factory", "run");
 }
 
-/** One pool slot's four files. The run dir IS the supervisor's durable state. */
+/** One pool slot's five files. The run dir IS the supervisor's durable state. */
 export function slotFiles(dir, n) {
   return {
     pid: path.join(dir, `worker-${n}.pid`),
     drain: path.join(dir, `worker-${n}.drain`),
     log: path.join(dir, `worker-${n}.log`),
     id: path.join(dir, `worker-${n}.id`),
+    crashLoop: path.join(dir, `worker-${n}.crash-loop.json`),
+    crashLoopFallback: path.join(dir, `worker-${n}.crash-loop.fallback.json`),
   };
+}
+
+const CRASH_LOOP_LIMIT = 3;
+const CRASH_BACKOFF_MS = 2_000;
+const CRASH_BACKOFF_MAX_MS = 60_000;
+
+function readCrashLoop(file) {
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    return {
+      fastExits: Math.max(0, Number(parsed.fastExits) || 0),
+      spawnedAt: Number(parsed.spawnedAt) || null,
+      lastExitedAt: Number(parsed.lastExitedAt) || null,
+      lastExitDurationMs: Number(parsed.lastExitDurationMs) || null,
+      workerId: typeof parsed.workerId === "string" ? parsed.workerId : null,
+      nextAttemptAt: Number(parsed.nextAttemptAt) || null,
+      loggedRetryAt: Number(parsed.loggedRetryAt) || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeCrashLoop(file, state) {
+  // tmp + rename: a concurrent `status` reads either the previous complete
+  // state or the new one, never a torn file.
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(state)}\n`);
+  renameSync(tmp, file);
+}
+
+/** Prefer the durable fallback while an invalid primary crash-loop file heals. */
+function readCrashLoopState(files) {
+  return (
+    readCrashLoop(files.crashLoopFallback) ?? readCrashLoop(files.crashLoop)
+  );
+}
+
+export function crashBackoffMs(fastExits) {
+  return Math.min(
+    CRASH_BACKOFF_MS * 2 ** (fastExits - CRASH_LOOP_LIMIT),
+    CRASH_BACKOFF_MAX_MS,
+  );
+}
+
+function remainingSeconds(at, now) {
+  return Math.max(1, Math.ceil((at - now) / 1000));
 }
 
 /** Signal 0 probes without delivering: EPERM still proves the process exists. */
@@ -80,19 +130,28 @@ export function readPool(dir = runDir()) {
   } catch {
     /* dir missing or unreadable: names stays [] from the initializer */
   }
-  const slots = [];
+  const slotNumbers = new Set();
   for (const name of names) {
-    const m = /^worker-(\d+)\.pid$/.exec(name);
+    const m = /^worker-(\d+)\.(?:pid|crash-loop(?:\.fallback)?\.json)$/.exec(
+      name,
+    );
     if (!m) continue;
-    const n = Number(m[1]);
+    slotNumbers.add(Number(m[1]));
+  }
+  const slots = [];
+  for (const n of slotNumbers) {
     const files = slotFiles(dir, n);
     const pid = readPidFile(files.pid);
+    const crashLoop = readCrashLoopState(files);
     slots.push({
       n,
       pid,
+      hasPidFile: existsSync(files.pid),
       alive: pidAlive(pid),
       draining: existsSync(files.drain),
       workerId: readFileTrimmed(files.id),
+      crashLoops: crashLoop?.fastExits ?? 0,
+      nextAttemptAt: crashLoop?.nextAttemptAt ?? null,
     });
   }
   slots.sort((a, b) => a.n - b.n);
@@ -134,6 +193,54 @@ export function workerPassthroughArgs(args) {
 }
 
 /**
+ * Run the supervisor's first and recurring ticks. A daemon records a transient
+ * tick failure and tries again on its next interval; a scripted --once pass
+ * keeps the failure visible to its caller.
+ */
+export function startTickLoop(tick, { once, intervalMs, log }) {
+  if (once) {
+    tick();
+    return null;
+  }
+  const guardedTick = () => {
+    try {
+      tick();
+    } catch (err) {
+      log(`tick error: ${String(err?.message ?? err)}`);
+    }
+  };
+  const timer = setInterval(guardedTick, intervalMs);
+  guardedTick();
+  return timer;
+}
+
+/**
+ * Spawn a detached child whose stdout/stderr append to `logFile`. The parent's
+ * copy of the log fd is closed on every path — the child holds its own dup —
+ * so a `spawn()` that throws (EAGAIN, ENOMEM) inside a guarded tick cannot
+ * leak one descriptor per tick and spiral the supervisor into EMFILE.
+ */
+export function spawnDetached(
+  logFile,
+  argv,
+  { cwd, spawn: spawnImpl = spawn } = {},
+) {
+  const out = openSync(logFile, "a");
+  try {
+    const child = spawnImpl(process.execPath, argv, {
+      cwd,
+      detached: true,
+      stdio: ["ignore", out, out],
+      env: process.env,
+    });
+    child.unref();
+    return child;
+  } finally {
+    closeSync(out);
+  }
+}
+
+/**
  * The pool supervisor: a deterministic loop that maintains
  * `workers.min ≤ pool ≤ workers.max` from observed queue depth. It is its own
  * process, not part of `serve`, so restarting the control plane never touches
@@ -142,7 +249,10 @@ export function workerPassthroughArgs(args) {
  *
  *   bun event-runtime/cli.mjs supervise [--workers 1:3] [--interval-ms 2000] [--once]
  */
-export default async function supervise(args) {
+export default async function supervise(
+  args,
+  { writeCrashLoop: writeCrashLoopImpl = writeCrashLoop } = {},
+) {
   const dir = runDir();
   mkdirSync(dir, { recursive: true });
 
@@ -166,8 +276,17 @@ export default async function supervise(args) {
       "supervise: --interval-ms must be an integer between 100 and 60000",
     );
   }
-  const drainTimeoutMs =
-    Number(flagValue(args, "--drain-timeout") ?? 60) * 1000;
+  const drainTimeoutSeconds = Number(flagValue(args, "--drain-timeout") ?? 60);
+  if (
+    !Number.isInteger(drainTimeoutSeconds) ||
+    drainTimeoutSeconds < 1 ||
+    drainTimeoutSeconds > 3_600
+  ) {
+    return fail(
+      "supervise: --drain-timeout must be an integer between 1 and 3600 seconds",
+    );
+  }
+  const drainTimeoutMs = drainTimeoutSeconds * 1000;
   const spawnGraceMs = Number(
     flagValue(args, "--spawn-grace-ms") ?? SPAWN_GRACE_MS,
   );
@@ -200,6 +319,32 @@ export default async function supervise(args) {
   );
 
   const spawnedAt = new Map();
+  const crashLoopFallbacks = new Map();
+
+  function slotCrashLoop(n, files = slotFiles(dir, n)) {
+    return crashLoopFallbacks.get(n) ?? readCrashLoopState(files);
+  }
+
+  function saveCrashLoop(n, state, files = slotFiles(dir, n)) {
+    // Keep the state before releasing its pidfile. The in-memory copy covers
+    // ENOSPC, while the sibling file survives a later tick or restart when the
+    // primary path is a directory or otherwise individually unwritable.
+    crashLoopFallbacks.set(n, state);
+    try {
+      writeCrashLoopImpl(files.crashLoop, state);
+      crashLoopFallbacks.delete(n);
+      rmSync(files.crashLoopFallback, { force: true });
+    } catch (err) {
+      try {
+        writeCrashLoop(files.crashLoopFallback, state);
+      } catch {
+        // The in-memory fallback still protects this live supervisor.
+      }
+      log(
+        `crash-loop state for slot ${n} could not be saved: ${String(err?.message ?? err)}; using fallback`,
+      );
+    }
+  }
 
   function releaseSlot(n) {
     const files = slotFiles(dir, n);
@@ -208,15 +353,85 @@ export default async function supervise(args) {
     spawnedAt.delete(n);
   }
 
+  function resetCrashLoop(n, state) {
+    if (state.fastExits === 0 && state.nextAttemptAt === null) return;
+    saveCrashLoop(n, {
+      ...state,
+      fastExits: 0,
+      nextAttemptAt: null,
+      loggedRetryAt: null,
+    });
+    log(`slot ${n} registered past spawn grace — crash-loop counter reset`);
+  }
+
+  function resetRegisteredSlots(now) {
+    for (const slot of readPool(dir).slots) {
+      if (!slot.alive || !slot.workerId) continue;
+      const files = slotFiles(dir, slot.n);
+      const state = slotCrashLoop(slot.n, files);
+      if (
+        !state ||
+        state.fastExits === 0 ||
+        state.workerId !== slot.workerId ||
+        now - (state.spawnedAt ?? now) < spawnGraceMs
+      )
+        continue;
+      const worker = db
+        .query(`SELECT started_at FROM workers WHERE worker_id = ?`)
+        .get(slot.workerId);
+      if (
+        worker &&
+        Number.isFinite(Date.parse(worker.started_at)) &&
+        now - Date.parse(worker.started_at) >= spawnGraceMs
+      )
+        resetCrashLoop(slot.n, state);
+    }
+  }
+
+  function recordExit(slot, now) {
+    const files = slotFiles(dir, slot.n);
+    const state = slotCrashLoop(slot.n, files);
+    const startedAt = spawnedAt.get(slot.n) ?? state?.spawnedAt;
+    const fastExit =
+      !slot.draining &&
+      Number.isFinite(startedAt) &&
+      now - startedAt < spawnGraceMs;
+    if (!fastExit) {
+      releaseSlot(slot.n);
+      rmSync(files.crashLoop, { force: true });
+      rmSync(files.crashLoopFallback, { force: true });
+      crashLoopFallbacks.delete(slot.n);
+      return null;
+    }
+
+    const fastExits = (state?.fastExits ?? 0) + 1;
+    const nextAttemptAt =
+      fastExits >= CRASH_LOOP_LIMIT ? now + crashBackoffMs(fastExits) : null;
+    saveCrashLoop(
+      slot.n,
+      {
+        fastExits,
+        spawnedAt: null,
+        lastExitedAt: now,
+        lastExitDurationMs: now - startedAt,
+        workerId: slot.workerId ?? state?.workerId ?? null,
+        nextAttemptAt,
+        loggedRetryAt: null,
+      },
+      files,
+    );
+    releaseSlot(slot.n);
+    return { fastExits, nextAttemptAt };
+  }
+
   function spawnSlot(n) {
     const files = slotFiles(dir, n);
     // Never inherit the previous tenant's drain flag: a fresh worker that finds
     // one exits immediately and the pool silently refuses to grow.
     rmSync(files.drain, { force: true });
     const workerId = newWorkerId();
-    const out = openSync(files.log, "a");
-    const child = spawn(
-      process.execPath,
+    const child = spawnDetached(
+      files.log,
       [
         CLI_PATH,
         "work",
@@ -226,18 +441,22 @@ export default async function supervise(args) {
         "--drain-file",
         files.drain,
       ],
-      {
-        cwd: FACTORY_ROOT,
-        detached: true,
-        stdio: ["ignore", out, out],
-        env: process.env,
-      },
+      { cwd: FACTORY_ROOT },
     );
-    child.unref();
-    closeSync(out);
     writeFileSync(files.pid, `${child.pid}\n`);
     writeFileSync(files.id, `${workerId}\n`);
-    spawnedAt.set(n, Date.now());
+    const startedAt = Date.now();
+    spawnedAt.set(n, startedAt);
+    const previous = slotCrashLoop(n, files);
+    saveCrashLoop(n, {
+      fastExits: previous?.fastExits ?? 0,
+      spawnedAt: startedAt,
+      lastExitedAt: previous?.lastExitedAt ?? null,
+      lastExitDurationMs: previous?.lastExitDurationMs ?? null,
+      workerId,
+      nextAttemptAt: null,
+      loggedRetryAt: null,
+    });
     return { pid: child.pid, workerId, log: files.log };
   }
 
@@ -261,18 +480,27 @@ export default async function supervise(args) {
   function tick() {
     const now = Date.now();
     for (const s of readPool(dir).slots) {
-      if (s.alive) continue;
+      // A crash-loop state intentionally remains after its pidfile is removed
+      // so status can expose the held slot. It is not a second exit.
+      if (s.alive || !s.hasPidFile) continue;
       log(
         `slot ${s.n} (worker ${s.workerId ?? "?"}, pid ${s.pid ?? "?"}) exited — slot released`,
       );
-      releaseSlot(s.n);
+      recordExit(s, now);
     }
+
+    // A registered worker which survives the boot window is healthy enough to
+    // forget previous fast exits. Check the registry as well as its pid: a
+    // process that never registered has not recovered the pool.
+    resetRegisteredSlots(now);
 
     const alive = readPool(dir).slots.filter((s) => s.alive);
     const observed = poolCounts(db, { now });
-    const pending = alive.filter(
-      (s) => now - (spawnedAt.get(s.n) ?? 0) < spawnGraceMs,
-    ).length;
+    const pending = alive.filter((s) => {
+      const state = slotCrashLoop(s.n);
+      const startedAt = spawnedAt.get(s.n) ?? state?.spawnedAt ?? 0;
+      return now - startedAt < spawnGraceMs;
+    }).length;
     const draining = alive.filter((s) => s.draining).length;
     const decision = poolDecision({
       queued: observed.queued,
@@ -291,6 +519,24 @@ export default async function supervise(args) {
       while (taken.has(slot)) slot += 1;
       if (slot > bounds.max) {
         log(`hold — no free slot below max ${bounds.max} [${counts}]`);
+        return decision;
+      }
+      const files = slotFiles(dir, slot);
+      const crashLoop = slotCrashLoop(slot, files);
+      if (crashLoop?.nextAttemptAt && crashLoop.nextAttemptAt > now) {
+        if (crashLoop.loggedRetryAt !== crashLoop.nextAttemptAt) {
+          log(
+            `crash-loop slot ${slot}: ${crashLoop.fastExits} fast exits, next attempt in ${remainingSeconds(crashLoop.nextAttemptAt, now)}s [${counts}]`,
+          );
+          saveCrashLoop(
+            slot,
+            {
+              ...crashLoop,
+              loggedRetryAt: crashLoop.nextAttemptAt,
+            },
+            files,
+          );
+        }
         return decision;
       }
       const { pid, workerId, log: logFile } = spawnSlot(slot);
@@ -327,15 +573,13 @@ export default async function supervise(args) {
     return decision;
   }
 
+  const timer = startTickLoop(tick, { once, intervalMs, log });
   if (once) {
-    tick();
     rmSync(supervisorPidFile, { force: true });
     return;
   }
 
   let stopping = false;
-  const timer = setInterval(tick, intervalMs);
-  tick();
 
   /**
    * Shutdown escalates, and every step short of the last is a request rather

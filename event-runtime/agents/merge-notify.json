@@ -6,21 +6,15 @@
   "output_schema": "schemas/command-result.output.json",
   "output_contract": "factory.command-result/v1",
   "command": ["factory", "notify", "ESCALATED merge {repo}: {summary}"],
-  "workspace": {
-    "type": "ephemeral",
-    "retainOnFailure": true
-  },
+  "workspace": { "type": "ephemeral", "retainOnFailure": true },
   "capabilities": {
     "filesystem": "workspace-only",
     "services": ["notify:telegram"]
   },
-  "limits": {
-    "timeout_seconds": 60,
-    "attempts": 1
-  },
+  "limits": { "timeout_seconds": 60, "attempts": 1 },
   "mutating": true,
   "pins": {
-    "agents/merge-notify.md": "sha256:08c6b9c75db11728b3959b7f75e15d88f5d38d4dc39009b4c5ff77211011df17",
+    "agents/merge-notify.md": "sha256:90b186eb0ab0159721cd2dab45cea4d72ce400551b3cb6e233b8c377867968c9",
     "schemas/merge-notify.input.json": "sha256:cf759d06e47abd5e60335da8881358e82670b09f81e95a7df69e0d9216b30f26",
     "schemas/command-result.output.json": "sha256:f158c1c76dd848407237c45a12c521b5d8e103cefd6fafdfdd51070a2b7e2585"
   }

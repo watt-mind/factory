@@ -1,4 +1,9 @@
-import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import {
   useEffect,
   useMemo,
@@ -11,6 +16,7 @@ import { api } from "../api";
 import { goPrefixActive } from "../goSequence";
 import {
   keyGuard,
+  pollingOptions,
   refetchIntervals,
   useListKeys,
   useNow,
@@ -18,12 +24,11 @@ import {
 } from "../hooks";
 import {
   buildTicketJourney,
-  formatDuration,
+  formatDurationMs,
   parsePrRef,
   prHref,
   prNumbersIn,
   selectPrSource,
-  subjectJourney,
   TICKET_ID_PATTERN,
   overlayTrackerDetail,
   ticketIdsIn,
@@ -34,6 +39,7 @@ import {
   type TicketTrackerDetail,
   type TimelineItem,
 } from "../subjectJourney";
+import * as subjectJourneyModel from "../subjectJourney";
 import { MarkdownView } from "../components/RunTrace";
 import { SupplyStrip, type TicketSupply } from "../components/SupplyStrip";
 import {
@@ -57,6 +63,7 @@ import type {
   RunDetail,
   RunListItem,
   TicketSummary,
+  Worker,
 } from "../types";
 
 function Metric({ label, value }: { label: string; value: string }) {
@@ -157,7 +164,7 @@ function TimelineRow({ item, last }: { item: TimelineItem; last: boolean }) {
   return (
     <li className="flex items-start gap-3" data-kind={item.kind}>
       <div className="mono w-16 shrink-0 pt-0.5 text-right text-xs tabular-nums text-(--text-faint)">
-        {item.durationMs == null ? "" : `+${formatDuration(item.durationMs)}`}
+        {item.durationMs == null ? "" : `+${formatDurationMs(item.durationMs)}`}
       </div>
       {item.children?.length ? (
         <details className="min-w-0 flex-1" open>
@@ -173,7 +180,7 @@ function TimelineRow({ item, last }: { item: TimelineItem; last: boolean }) {
                 <span className="mono text-right tabular-nums text-(--text-faint)">
                   {child.durationMs == null
                     ? ""
-                    : `+${formatDuration(child.durationMs)}`}
+                    : `+${formatDurationMs(child.durationMs)}`}
                 </span>
                 <SourceLink item={child}>
                   <span className="inline-flex flex-wrap items-baseline gap-x-2">
@@ -836,14 +843,19 @@ function JourneyLayout({
   detail = null,
   detailPending = false,
   detailError = null,
+  currentRunDetail = null,
+  currentWorker = null,
 }: {
   journey: SubjectJourney;
   onNavigateTicket?: (ticketId: string) => void;
   detail?: TicketTrackerDetail | null;
   detailPending?: boolean;
   detailError?: string | null;
+  currentRunDetail?: JourneyRun | null;
+  currentWorker?: Worker | null;
 }) {
   const [tab, setTab] = useState<JourneyTab>("timeline");
+  const now = useNow();
   const cost =
     journey.totalCost == null ? "—" : `$${journey.totalCost.toFixed(2)}`;
   const tokens =
@@ -955,7 +967,7 @@ function JourneyLayout({
             <Metric label="total cost" value={cost} />
             <Metric
               label="lead time"
-              value={formatDuration(journey.leadTimeMs)}
+              value={formatDurationMs(journey.leadTimeMs)}
             />
             <Metric label="runs" value={String(journey.runCount)} />
             {!isPr && (
@@ -1077,9 +1089,20 @@ function JourneyLayout({
                 <div>
                   <dt className="text-(--text-faint)">Current run / worker</dt>
                   <dd className="mono mt-1 break-words text-(--text-dim)">
-                    {journey.currentRun
-                      ? `${journey.currentRun.runId}${journey.currentRun.actor ? ` · ${journey.currentRun.actor}` : ""}`
-                      : "—"}
+                    {journey.currentRun ? (
+                      <>
+                        {journey.currentRun.runId}
+                        {currentRunDetail?.attempts?.at(-1)?.started_at &&
+                          ` · elapsed ${formatDurationMs(now - Date.parse(currentRunDetail.attempts.at(-1)!.started_at!))}`}
+                        {currentWorker &&
+                          ` · ${currentWorker.workerId} · ${currentWorker.stale ? `stale · ${formatDurationMs(now - Date.parse(currentWorker.lastSeen))}` : `heartbeat ${formatDurationMs(now - Date.parse(currentWorker.lastSeen))} ago`}`}
+                        {!currentWorker &&
+                          journey.currentRun.actor &&
+                          ` · ${journey.currentRun.actor}`}
+                      </>
+                    ) : (
+                      "—"
+                    )}
                   </dd>
                 </div>
                 <div>
@@ -1136,7 +1159,7 @@ export function Ticket({
     queryFn: () => fetchTicketJourney(normalized!),
     enabled: valid,
     // fetchTicketJourney uses raw fetch() and bypasses the ETag wrapper in api.ts, so it stays at 5s.
-    refetchInterval: 5000,
+    ...pollingOptions(5_000),
   });
   const schedules = useQuery({
     queryKey: ["schedules"],
@@ -1149,7 +1172,13 @@ export function Ticket({
     queryFn: () => fetchTicketDetail(normalized!),
     enabled: valid,
     staleTime: 15_000,
-    refetchInterval: 30_000,
+    ...pollingOptions(30_000),
+  });
+  const workersQuery = useQuery({
+    queryKey: ["workers"],
+    queryFn: api.workers,
+    enabled: valid,
+    ...refetchIntervals.primary,
   });
 
   if (!ticketId || ticketId.trim() === "")
@@ -1249,6 +1278,22 @@ export function Ticket({
     }),
     detailQuery.data,
   );
+  const currentRunDetail =
+    query.data.runs.find(
+      (run) => run.run.runId === journey.currentRun?.runId,
+    ) ?? null;
+  const workers = workersQuery.data?.workers ?? [];
+  const leaseOwner = currentRunDetail?.attempts?.at(-1)?.lease_owner ?? null;
+  const currentWorker =
+    (leaseOwner
+      ? workers.find((worker) => worker.workerId === leaseOwner)
+      : undefined) ??
+    workers.find(
+      (worker) =>
+        journey.currentRun?.runId != null &&
+        worker.currentRun === journey.currentRun.runId,
+    ) ??
+    null;
   return (
     <JourneyLayout
       journey={journey}
@@ -1259,6 +1304,8 @@ export function Ticket({
           ? ((detailQuery.error as Error)?.message ?? "unavailable")
           : null
       }
+      currentRunDetail={currentRunDetail}
+      currentWorker={currentWorker}
     />
   );
 }
@@ -1338,6 +1385,33 @@ const TERMINAL_STATES = new Set([
   "DEAD",
 ]);
 
+// The API caps collection pages at 200. A PR journey needs recent correlated
+// activity, not unbounded global registries, and can request older pages.
+const PR_JOURNEY_PAGE_LIMIT = 200;
+
+// Refetching an infinite query re-requests every loaded page, so each
+// "Load more" would otherwise multiply the per-tick request count. Only the
+// first page needs the fast cadence; once older pages are loaded the feed
+// drops to the secondary interval.
+export function prJourneyRefetchInterval(query: {
+  state: { data?: { pages?: readonly unknown[] } };
+}): number {
+  const pages = query.state.data?.pages?.length ?? 0;
+  return pages > 1
+    ? refetchIntervals.secondary.refetchInterval()
+    : refetchIntervals.fast.refetchInterval();
+}
+
+function uniqueBy<T>(items: readonly T[], key: (item: T) => string): T[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const id = key(item);
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
 export function PullRequest({
   number,
   onNavigateTicket,
@@ -1350,27 +1424,54 @@ export function PullRequest({
       ? Number(number.trim())
       : null;
   const enabled = pr != null;
-  const events = useQuery({
-    queryKey: ["events", "all"],
-    queryFn: () => api.events(),
+  const events = useInfiniteQuery({
+    queryKey: ["events", "pr-journey", pr, PR_JOURNEY_PAGE_LIMIT],
+    queryFn: ({ pageParam }) =>
+      api.events(undefined, {
+        limit: PR_JOURNEY_PAGE_LIMIT,
+        before: pageParam,
+      }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.nextBefore ?? undefined,
     enabled,
     ...refetchIntervals.fast,
+    refetchInterval: prJourneyRefetchInterval,
   });
-  const proposals = useQuery({
-    queryKey: ["proposals", "history"],
-    queryFn: () => api.proposalHistory("all"),
+  const proposals = useInfiniteQuery({
+    queryKey: ["proposals", "pr-journey", pr, PR_JOURNEY_PAGE_LIMIT],
+    queryFn: ({ pageParam }) =>
+      api.proposalHistory("all", {
+        limit: PR_JOURNEY_PAGE_LIMIT,
+        before: pageParam,
+      }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.nextBefore ?? undefined,
     enabled,
     ...refetchIntervals.fast,
+    refetchInterval: prJourneyRefetchInterval,
   });
-  const runs = useQuery({
-    queryKey: ["runs", "ALL"],
-    queryFn: () => api.runs(),
+  const runs = useInfiniteQuery({
+    queryKey: ["runs", "pr-journey", pr, PR_JOURNEY_PAGE_LIMIT],
+    queryFn: ({ pageParam }) =>
+      api.runs(undefined, {
+        limit: PR_JOURNEY_PAGE_LIMIT,
+        before: pageParam,
+      }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.nextBefore ?? undefined,
     enabled,
     ...refetchIntervals.fast,
+    refetchInterval: prJourneyRefetchInterval,
   });
-  const inbox = useQuery({
-    queryKey: ["inbox", "all"],
-    queryFn: () => api.inbox("all"),
+  const inbox = useInfiniteQuery({
+    queryKey: ["inbox", "pr-journey", pr, PR_JOURNEY_PAGE_LIMIT],
+    queryFn: ({ pageParam }) =>
+      api.inbox("all", {
+        limit: PR_JOURNEY_PAGE_LIMIT,
+        before: pageParam,
+      }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.nextBefore ?? undefined,
     enabled,
     ...refetchIntervals.secondary,
   });
@@ -1381,9 +1482,38 @@ export function PullRequest({
     ...refetchIntervals.secondary,
   });
 
-  const eventList = events.data?.events ?? [];
-  const proposalList = proposals.data?.proposals ?? [];
-  const runList = runs.data?.runs ?? [];
+  const eventList = useMemo(
+    () =>
+      uniqueBy(
+        (events.data?.pages ?? []).flatMap((page) => page.events ?? []),
+        (event) => `${event.source}\0${event.eventId}`,
+      ),
+    [events.data],
+  );
+  const proposalList = useMemo(
+    () =>
+      uniqueBy(
+        (proposals.data?.pages ?? []).flatMap((page) => page.proposals ?? []),
+        (proposal) => proposal.id,
+      ),
+    [proposals.data],
+  );
+  const runList = useMemo(
+    () =>
+      uniqueBy(
+        (runs.data?.pages ?? []).flatMap((page) => page.runs ?? []),
+        (run) => run.runId,
+      ),
+    [runs.data],
+  );
+  const inboxList = useMemo(
+    () =>
+      uniqueBy(
+        (inbox.data?.pages ?? []).flatMap((page) => page.items ?? []),
+        (item) => item.id,
+      ),
+    [inbox.data],
+  );
   const candidateIds = useMemo(
     () =>
       pr != null && events.data && proposals.data && runs.data
@@ -1393,7 +1523,7 @@ export function PullRequest({
             runs: runList,
           })
         : [],
-    [pr, events.data, proposals.data, runs.data],
+    [pr, eventList, proposalList, runList],
   );
   const stateById = useMemo(
     () => new Map(runList.map((run) => [run.runId, run.state])),
@@ -1413,13 +1543,72 @@ export function PullRequest({
     })),
   });
   const detailsReady = details.every((query) => query.data || query.isError);
+  // useQueries returns a new array on every render; data timestamps preserve a
+  // stable memo key while still invalidating when any run detail changes.
+  const detailDataKey = details.map((query) => query.dataUpdatedAt).join(",");
   const loadedRuns = useMemo(
     () =>
       details
         .map((query) => query.data)
         .filter((run): run is RunDetail => !!run) as unknown as JourneyRun[],
-    [details],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [candidateIds, detailDataKey],
   );
+  // Keep these hooks above the loading and invalid-reference branches: React
+  // Query changes those branches as data arrives, but hook order must not.
+  const source = useMemo(
+    () =>
+      selectPrSource(pr ?? 0, {
+        events: eventList as unknown as JourneyEvent[],
+        proposals: proposalList as unknown as JourneyProposal[],
+        runs: loadedRuns,
+        inbox: inboxList.filter((item) => !item.resolvedAt),
+        schedules: schedules.data?.schedules,
+      }),
+    // Query data references and the useQueries result are unstable across
+    // renders. These fetch-generation keys and the PR are the actual inputs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      pr,
+      events.dataUpdatedAt,
+      proposals.dataUpdatedAt,
+      detailDataKey,
+      inbox.dataUpdatedAt,
+      schedules.dataUpdatedAt,
+    ],
+  );
+  const journeyReady =
+    pr != null &&
+    !!events.data &&
+    !!proposals.data &&
+    !!runs.data &&
+    detailsReady;
+  const journey = useMemo(
+    () =>
+      journeyReady
+        ? subjectJourneyModel.subjectJourney("pr", String(pr), source)
+        : null,
+    [journeyReady, pr, source],
+  );
+  const loadingMore =
+    events.isFetchingNextPage ||
+    proposals.isFetchingNextPage ||
+    runs.isFetchingNextPage ||
+    inbox.isFetchingNextPage;
+  // The feeds are global registries, so their hasNextPage says nothing about
+  // whether older pages hold more of THIS PR. Remember the timeline size at
+  // each "Load more"; a page that adds nothing ends the affordance.
+  const [loadMoreBaseline, setLoadMoreBaseline] = useState<number | null>(null);
+  const [exhausted, setExhausted] = useState(false);
+  useEffect(() => {
+    setLoadMoreBaseline(null);
+    setExhausted(false);
+  }, [pr]);
+  useEffect(() => {
+    if (loadMoreBaseline == null || loadingMore || journey == null) return;
+    if (journey.timeline.length <= loadMoreBaseline) setExhausted(true);
+    setLoadMoreBaseline(null);
+  }, [loadMoreBaseline, loadingMore, journey]);
 
   if (pr == null) {
     return (
@@ -1448,7 +1637,7 @@ export function PullRequest({
       </div>
     );
   }
-  if (!events.data || !proposals.data || !runs.data || !detailsReady) {
+  if (!journeyReady || journey == null) {
     return (
       <div className="p-8 text-[13px] text-(--text-faint)">
         Loading PR #{pr} journey…
@@ -1456,15 +1645,54 @@ export function PullRequest({
     );
   }
 
-  const source = selectPrSource(pr, {
-    events: eventList as unknown as JourneyEvent[],
-    proposals: proposalList as unknown as JourneyProposal[],
-    runs: loadedRuns,
-    inbox: (inbox.data?.items ?? []).filter((item) => !item.resolvedAt),
-    schedules: schedules.data?.schedules,
-  });
-  const journey = subjectJourney("pr", String(pr), source);
+  const hasMore =
+    events.hasNextPage ||
+    proposals.hasNextPage ||
+    runs.hasNextPage ||
+    inbox.hasNextPage;
+  const loadedOlder =
+    (events.data?.pages.length ?? 0) > 1 ||
+    (proposals.data?.pages.length ?? 0) > 1 ||
+    (runs.data?.pages.length ?? 0) > 1 ||
+    (inbox.data?.pages.length ?? 0) > 1;
+  const loadMore = () => {
+    if (loadingMore || loadMoreBaseline != null) return;
+    setLoadMoreBaseline(journey.timeline.length);
+    if (events.hasNextPage) void events.fetchNextPage();
+    if (proposals.hasNextPage) void proposals.fetchNextPage();
+    if (runs.hasNextPage) void runs.fetchNextPage();
+    if (inbox.hasNextPage) void inbox.fetchNextPage();
+  };
+  const footerClass =
+    "px-5 pb-5 text-center text-[12px] text-(--text-dim) lg:px-7";
+
   return (
-    <JourneyLayout journey={journey} onNavigateTicket={onNavigateTicket} />
+    <>
+      <JourneyLayout journey={journey} onNavigateTicket={onNavigateTicket} />
+      {exhausted || (loadedOlder && !hasMore) ? (
+        <p className={footerClass}>
+          <span role="status" aria-live="polite">
+            No more activity for PR #{pr} — showing all{" "}
+            {journey.timeline.length} entries.
+          </span>
+        </p>
+      ) : hasMore ? (
+        <p className={footerClass}>
+          <span role="status" aria-live="polite">
+            Showing the most recent {journey.timeline.length} activity entries
+          </span>{" "}
+          —{" "}
+          <PrimitiveButton
+            bare
+            type="button"
+            onClick={loadMore}
+            disabled={loadingMore}
+            className="text-(--accent) hover:underline disabled:cursor-wait disabled:opacity-60"
+          >
+            {loadingMore ? "Loading activity…" : "Load more activity"}
+          </PrimitiveButton>
+        </p>
+      ) : null}
+    </>
   );
 }

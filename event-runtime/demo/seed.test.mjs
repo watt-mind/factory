@@ -79,6 +79,23 @@ function killSuiteProcess(child) {
   }
 }
 
+// The control API fails closed (WM-956): every non-intake route needs the
+// bearer, so the suite's serve, worker, seed, and verify processes all share
+// one token and the bare status/worker polls present it too.
+const CONTROL_API_TOKEN = "seed-suite-control-token";
+
+function suiteEnv(home) {
+  return {
+    ...process.env,
+    FACTORY_EVENT_HOME: home,
+    FACTORY_CONTROL_API_TOKEN: CONTROL_API_TOKEN,
+  };
+}
+
+function controlAuthHeaders() {
+  return { authorization: `Bearer ${CONTROL_API_TOKEN}` };
+}
+
 /** Distinguish "runtime unreachable" from "runtime rejected the request" on failure. */
 async function probeHealth(port) {
   try {
@@ -108,7 +125,9 @@ async function waitForPublishedOutbox(port) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/status`);
+      const response = await fetch(`http://127.0.0.1:${port}/status`, {
+        headers: controlAuthHeaders(),
+      });
       const status = await response.json();
       if (response.ok && status.anomalies?.unpublishedOutbox === 0) return;
     } catch {
@@ -207,7 +226,7 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
       "bun",
       [CLI, "serve", "--adapter-override", "fake", "--port", port],
       {
-        env: { ...process.env, FACTORY_EVENT_HOME: home },
+        env: suiteEnv(home),
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
@@ -242,7 +261,7 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
         "40",
       ],
       {
-        env: { ...process.env, FACTORY_EVENT_HOME: home },
+        env: suiteEnv(home),
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
@@ -253,7 +272,9 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
     const workerDeadline = Date.now() + loadAdjustedTimeout(8_000);
     while (Date.now() < workerDeadline) {
       try {
-        const res = await fetch(`http://127.0.0.1:${port}/workers`);
+        const res = await fetch(`http://127.0.0.1:${port}/workers`, {
+          headers: controlAuthHeaders(),
+        });
         const body = await res.json();
         if (res.ok && Array.isArray(body.workers) && body.workers.length > 0) {
           workerReady = true;
@@ -281,7 +302,7 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
         [SEED, "--port", port, "--prefix", "t1", "--poll-ms", "40"],
         {
           encoding: "utf8",
-          env: { ...process.env, FACTORY_EVENT_HOME: home },
+          env: suiteEnv(home),
         },
       );
       await expectSuccess("initial seed", seedRes, port);
@@ -299,7 +320,7 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
 
       const verifyRes = spawnSync("bun", [VERIFY, "--port", port], {
         encoding: "utf8",
-        env: { ...process.env, FACTORY_EVENT_HOME: home },
+        env: suiteEnv(home),
       });
       await expectSuccess("initial verify", verifyRes, port);
     },
@@ -312,7 +333,7 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
       const t0 = Date.now();
       const res = spawnSync("bun", [SEED, "--port", port, "--prefix", "t1"], {
         encoding: "utf8",
-        env: { ...process.env, FACTORY_EVENT_HOME: home },
+        env: suiteEnv(home),
       });
       const elapsedMs = Date.now() - t0;
       expect(res.status).not.toBe(0);
@@ -332,7 +353,7 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
         [SEED, "--port", port, "--prefix", "t2", "--poll-ms", "40"],
         {
           encoding: "utf8",
-          env: { ...process.env, FACTORY_EVENT_HOME: home },
+          env: suiteEnv(home),
         },
       );
       await expectSuccess("re-seed", seedRes, port);
@@ -352,7 +373,7 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
 
       const verifyRes = spawnSync("bun", [VERIFY, "--port", port], {
         encoding: "utf8",
-        env: { ...process.env, FACTORY_EVENT_HOME: home },
+        env: suiteEnv(home),
       });
       await expectSuccess("re-seed verify", verifyRes, port);
     },

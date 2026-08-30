@@ -21,10 +21,14 @@ import {
   globsOverlap,
   isMatchEverythingGlob,
   OwnedPathsPatternError,
+  OwnedPathsPolicyError,
   pathsCollide,
   nextDispatchable,
   readPinManifestRequirements,
   ownedPathsClosureGaps,
+  formatOwnedPathClosureGaps,
+  REGISTRY_INPUT_GLOBS,
+  REGISTRY_DIGEST_BASELINE_PATH,
 } from "./owned-paths.mjs";
 
 test("parses the Owned Paths section of a real ticket", () => {
@@ -264,6 +268,191 @@ test("owned path closure passes when required paths are also owned", () => {
   );
 });
 
+const registryDigestPolicy = {
+  registryDigest: {
+    inputs: REGISTRY_INPUT_GLOBS,
+    baseline: REGISTRY_DIGEST_BASELINE_PATH,
+  },
+};
+
+test("registry inputs require owning the zero-pack digest baseline when configured", () => {
+  const ownedPaths = [
+    "event-runtime/agents/triage-scan.md",
+    "event-runtime/agents/triage-scan.json",
+  ];
+  const expectedGap = {
+    rule: "registry-digest",
+    requiredPath: REGISTRY_DIGEST_BASELINE_PATH,
+    requiredBy: "event-runtime/agents/triage-scan.md",
+  };
+
+  expectEqual(
+    ownedPathsClosureGaps({
+      ownedPaths,
+      ownedPathsPolicy: registryDigestPolicy,
+    }),
+    [expectedGap],
+  );
+  expectEqual(
+    ownedPathsClosureGaps({
+      ownedPaths: [...ownedPaths, REGISTRY_DIGEST_BASELINE_PATH],
+      ownedPathsPolicy: registryDigestPolicy,
+    }),
+    [],
+  );
+  expectEqual(formatOwnedPathClosureGaps([expectedGap]), [
+    "own event-runtime/lib/registry.test.mjs: registry input event-runtime/agents/triage-scan.md changes the zero-pack digest baseline",
+  ]);
+});
+
+test("a present malformed registry digest policy fails closed", () => {
+  const malformedPolicies = [
+    { registryDigest: { inputs: ["event-runtime/agents/**"] } },
+    {
+      registryDigest: {
+        inputs: "event-runtime/agents/**",
+        baseline: REGISTRY_DIGEST_BASELINE_PATH,
+      },
+    },
+    {
+      registryDigest: {
+        inputs: [],
+        baseline: REGISTRY_DIGEST_BASELINE_PATH,
+      },
+    },
+  ];
+
+  for (const ownedPathsPolicy of malformedPolicies) {
+    try {
+      ownedPathsClosureGaps({ ownedPaths: [], ownedPathsPolicy });
+      throw new Error("expected malformed registry digest policy to throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(OwnedPathsPolicyError);
+      expect(error.code).toBe("invalid_owned_paths_policy");
+    }
+  }
+
+  expectEqual(
+    ownedPathsClosureGaps({ ownedPaths: [], ownedPathsPolicy: {} }),
+    [],
+  );
+  expectEqual(
+    ownedPathsClosureGaps({
+      ownedPaths: [],
+      ownedPathsPolicy: { registryDigest: null },
+    }),
+    [],
+  );
+});
+
+test("each registry data input requires the digest baseline, but unrelated paths do not", () => {
+  for (const input of [
+    "event-runtime/event-types.json",
+    "event-runtime/edges.json",
+    "event-runtime/schedules.json",
+  ]) {
+    expectEqual(
+      ownedPathsClosureGaps({
+        ownedPaths: [input],
+        ownedPathsPolicy: registryDigestPolicy,
+      }),
+      [
+        {
+          rule: "registry-digest",
+          requiredPath: REGISTRY_DIGEST_BASELINE_PATH,
+          requiredBy: input,
+        },
+      ],
+    );
+  }
+
+  expectEqual(
+    ownedPathsClosureGaps({
+      ownedPaths: ["event-runtime/lib/planner.mjs"],
+      ownedPathsPolicy: registryDigestPolicy,
+    }),
+    [],
+  );
+});
+
+test("a broad glob that owns the baseline satisfies registry digest closure", () => {
+  expectEqual(
+    ownedPathsClosureGaps({
+      ownedPaths: ["event-runtime/**"],
+      ownedPathsPolicy: registryDigestPolicy,
+    }),
+    [],
+  );
+});
+
+test("registry digest closure is opt-in and ignores unanchored wildcards", () => {
+  expectEqual(
+    ownedPathsClosureGaps({
+      ownedPaths: ["event-runtime/agents/foo.md"],
+    }),
+    [],
+  );
+
+  for (const ownedPath of ["*.json", "**/*.json"]) {
+    expectEqual(
+      ownedPathsClosureGaps({
+        ownedPaths: [ownedPath],
+        ownedPathsPolicy: registryDigestPolicy,
+      }),
+      [],
+    );
+  }
+
+  expectEqual(
+    ownedPathsClosureGaps({
+      ownedPaths: ["event-runtime/**/*.json"],
+      ownedPathsPolicy: registryDigestPolicy,
+    }),
+    [
+      {
+        rule: "registry-digest",
+        requiredPath: REGISTRY_DIGEST_BASELINE_PATH,
+        requiredBy: "event-runtime/**/*.json",
+      },
+    ],
+  );
+});
+
+test("registry input overlap respects path segments and root-level inputs", () => {
+  const policy = {
+    registryDigest: {
+      inputs: [
+        "event-runtime/agents/*.md",
+        "lib/foobar/*.json",
+        "pins.json",
+        "event-types.json",
+      ],
+      baseline: REGISTRY_DIGEST_BASELINE_PATH,
+    },
+  };
+  const gap = (owned) =>
+    ownedPathsClosureGaps({ ownedPaths: [owned], ownedPathsPolicy: policy });
+
+  for (const owned of [
+    "**/agents/*.md",
+    "pins.json",
+    "*.json",
+    "**/pins.json",
+  ]) {
+    expectEqual(gap(owned), [
+      {
+        rule: "registry-digest",
+        requiredPath: REGISTRY_DIGEST_BASELINE_PATH,
+        requiredBy: owned,
+      },
+    ]);
+  }
+  expectEqual(gap("**/subagents/*.md"), []);
+  expectEqual(gap("**/lib/foo*"), []);
+  expectEqual(gap("**/*.json"), []);
+  expectEqual(gap("event-runtime/**"), []);
+});
+
 test("pin manifests require owning generated output manifests", () => {
   const repo = mkdtempSync(path.join(tmpdir(), "owned-paths-closure-"));
   try {
@@ -300,6 +489,122 @@ test("pin manifests require owning generated output manifests", () => {
         },
       ],
     );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+// WM-1002: the shipped manifests pin pack-root-relative keys (`agents/*.md`),
+// but Owned Paths and the manifest path are repo-root-relative. Without
+// normalization the closure guard compared mismatched namespaces and never
+// flagged the missing JSON manifest, so a ticket could edit a pinned prompt
+// while lacking ownership of the manifest needed to re-pin it.
+test("pin-manifest gap: shipped layout (agents/*.md keys) flags the missing JSON manifest", () => {
+  const repo = mkdtempSync(path.join(tmpdir(), "owned-paths-closure-"));
+  try {
+    mkdirSync(path.join(repo, "event-runtime/agents"), { recursive: true });
+    writeFileSync(
+      path.join(repo, "event-runtime/agents/triage-scan.json"),
+      `${JSON.stringify({
+        pins: {
+          "agents/triage-scan.md": "sha256:aaa",
+          "schemas/triage-scan.input.json": "sha256:bbb",
+        },
+      })}\n`,
+    );
+    const requirements = readPinManifestRequirements(repo, [
+      "event-runtime/agents/*.json",
+    ]);
+    // Pin keys are normalized to repo-root-relative before comparison.
+    expectEqual(requirements, [
+      {
+        manifestPath: "event-runtime/agents/triage-scan.json",
+        pinnedPaths: [
+          "event-runtime/agents/triage-scan.md",
+          "event-runtime/schemas/triage-scan.input.json",
+        ],
+      },
+    ]);
+
+    // Owning the prompt but not its JSON manifest is a pin-manifest gap.
+    expectEqual(
+      ownedPathsClosureGaps({
+        ownedPaths: [
+          "event-runtime/agents/triage-scan.md",
+          REGISTRY_DIGEST_BASELINE_PATH,
+        ],
+        ownedPathsPolicy: {
+          direct: [],
+          pinManifests: ["event-runtime/agents/*.json"],
+        },
+        pinManifestRequirements: requirements,
+      }),
+      [
+        {
+          rule: "pin-manifest",
+          requiredPath: "event-runtime/agents/triage-scan.json",
+          requiredBy: "event-runtime/agents/triage-scan.md",
+          manifestPath: "event-runtime/agents/triage-scan.json",
+        },
+      ],
+    );
+
+    // Owning both the prompt and its manifest satisfies closure.
+    expectEqual(
+      ownedPathsClosureGaps({
+        ownedPaths: [
+          "event-runtime/agents/triage-scan.md",
+          "event-runtime/agents/triage-scan.json",
+          REGISTRY_DIGEST_BASELINE_PATH,
+        ],
+        ownedPathsPolicy: {
+          direct: [],
+          pinManifests: ["event-runtime/agents/*.json"],
+        },
+        pinManifestRequirements: requirements,
+      }),
+      [],
+    );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("pin-manifest normalization: already-root-relative keys are not double-prefixed", () => {
+  const repo = mkdtempSync(path.join(tmpdir(), "owned-paths-closure-"));
+  try {
+    mkdirSync(path.join(repo, "event-runtime/agents"), { recursive: true });
+    writeFileSync(
+      path.join(repo, "event-runtime/agents/triage-scan.json"),
+      `${JSON.stringify({
+        pins: { "event-runtime/schemas/triage-scan.output.json": "sha256:ccc" },
+      })}\n`,
+    );
+    expectEqual(
+      readPinManifestRequirements(repo, ["event-runtime/agents/*.json"]),
+      [
+        {
+          manifestPath: "event-runtime/agents/triage-scan.json",
+          pinnedPaths: ["event-runtime/schemas/triage-scan.output.json"],
+        },
+      ],
+    );
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("pin-manifest normalization: an escaping pin path fails closed", () => {
+  const repo = mkdtempSync(path.join(tmpdir(), "owned-paths-closure-"));
+  try {
+    mkdirSync(path.join(repo, "event-runtime/agents"), { recursive: true });
+    writeFileSync(
+      path.join(repo, "event-runtime/agents/triage-scan.json"),
+      `${JSON.stringify({ pins: { "../../etc/passwd": "sha256:ddd" } })}\n`,
+    );
+    expect(() =>
+      readPinManifestRequirements(repo, ["event-runtime/agents/*.json"]),
+    ).toThrow(/outside the repository/);
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

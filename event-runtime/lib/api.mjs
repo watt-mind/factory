@@ -5,6 +5,7 @@
  * and their view builders live in api-*.mjs and status-view.mjs so unrelated
  * endpoint work no longer contends on one source file.
  */
+import { timingSafeEqual } from "node:crypto";
 import http from "node:http";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -18,6 +19,7 @@ import {
   isLoopbackHost,
   isLoopbackOrigin,
   parseJson,
+  PayloadTooLargeError,
   readBody,
   send as sendJson,
 } from "./api-http.mjs";
@@ -33,7 +35,12 @@ import {
   repoNamesFromInput,
 } from "./api-runs.mjs";
 import { handleScheduleApiRoute } from "./api-schedules.mjs";
-import { storeStats } from "./artifacts.mjs";
+import {
+  artifactInventory,
+  artifactReferenceIndex,
+  listArtifactPage,
+  storeStats,
+} from "./artifacts.mjs";
 import {
   API_HOST,
   DEFAULT_PORT,
@@ -73,6 +80,46 @@ export {
   workerCapacityView,
 };
 
+/**
+ * Routes exempt from the bearer gate (WM-1152). Liveness stays open; the two
+ * webhook intakes authenticate by their own HMAC signature (`POST /events`
+ * factory HMAC, `POST /github` GitHub HMAC) — an external sender cannot present
+ * a bearer, so requiring one would break intake. Every other route — including
+ * the loopback `POST /replay` inject — is gated when a token is configured.
+ * Exact `METHOD path` matches, so `GET /events` (list) and `POST /events/*`
+ * stay gated.
+ */
+const BEARER_EXEMPT_ROUTES = new Set([
+  "GET /health",
+  "POST /events",
+  "POST /github",
+  // The production tunnel's /webhooks/github alias is the same GitHub HMAC
+  // intake as POST /github, so it authenticates by signature and must be
+  // exempt too — an external GitHub sender cannot present a bearer (WM-1150).
+  "POST /webhooks/github",
+]);
+
+function payloadTooLargeBody(err) {
+  if (!(err instanceof PayloadTooLargeError)) return null;
+  return { error: err.code, limitBytes: err.limitBytes };
+}
+
+/**
+ * Constant-time bearer check (WM-1152). Returns true only for a well-formed
+ * `Authorization: Bearer <token>` whose token equals the configured one. The
+ * length guard is required because timingSafeEqual throws on unequal-length
+ * buffers; it leaks only the token length, never its content.
+ */
+function bearerAuthorized(authHeader, token) {
+  if (typeof authHeader !== "string") return false;
+  const prefix = "Bearer ";
+  if (!authHeader.startsWith(prefix)) return false;
+  const presented = Buffer.from(authHeader.slice(prefix.length), "utf8");
+  const expected = Buffer.from(token, "utf8");
+  if (presented.length !== expected.length) return false;
+  return timingSafeEqual(presented, expected);
+}
+
 /** Build the request handler independently so tests can compose it directly. */
 export function createApi({
   db,
@@ -100,12 +147,24 @@ export function createApi({
   configRoot = reposRoot(),
   // Root of the config/policy.yaml the run endpoints consult (tests point it elsewhere).
   policyRoot = FACTORY_ROOT,
+  // Application-level bearer for the control API. Every non-exempt route
+  // fails closed when this is absent and requires the matching bearer when it
+  // is present. Never logged.
+  controlApiToken = process.env.FACTORY_CONTROL_API_TOKEN || null,
+  // Injectable only so API tests can count cache rebuilds.
+  buildArtifactReferenceIndex = artifactReferenceIndex,
+  buildArtifactInventory = artifactInventory,
+  getTickStats = null,
 } = {}) {
   const actor = "operator";
   const staticRegistryLoadedAt = new Date(now()).toISOString();
   const storeStatsTtlMs = 10_000;
   let cachedStoreStats = null;
   let cachedStoreStatsAt = 0;
+  let cachedArtifactReferences = null;
+  let cachedArtifactResultsRowid = null;
+  let cachedArtifactInventory = null;
+  let cachedArtifactInventoryAt = 0;
 
   function getStoreStats(nowMs) {
     if (cachedStoreStats && nowMs - cachedStoreStatsAt < storeStatsTtlMs)
@@ -120,6 +179,37 @@ export function createApi({
     cachedStoreStatsAt = 0;
   }
 
+  function clearArtifactPage() {
+    cachedArtifactReferences = null;
+    cachedArtifactResultsRowid = null;
+    cachedArtifactInventory = null;
+    cachedArtifactInventoryAt = 0;
+  }
+
+  function getArtifactPage(options, nowMs) {
+    const storeRoot = artifactsRoot(env?.home);
+    const resultsRowid =
+      db.query(`SELECT MAX(rowid) AS rowid FROM results`).get().rowid ?? 0;
+    const resultsChanged = resultsRowid !== cachedArtifactResultsRowid;
+    if (resultsChanged) {
+      cachedArtifactReferences = buildArtifactReferenceIndex(db);
+      cachedArtifactResultsRowid = resultsRowid;
+    }
+    if (
+      resultsChanged ||
+      !cachedArtifactInventory ||
+      nowMs - cachedArtifactInventoryAt >= storeStatsTtlMs
+    ) {
+      cachedArtifactInventory = buildArtifactInventory(storeRoot);
+      cachedArtifactInventoryAt = nowMs;
+    }
+    return listArtifactPage(db, storeRoot, {
+      ...options,
+      references: cachedArtifactReferences,
+      inventory: cachedArtifactInventory,
+    });
+  }
+
   return async function handle(req, res) {
     try {
       if (!isLoopbackHost(req.headers.host)) {
@@ -132,6 +222,19 @@ export function createApi({
 
       const url = new URL(req.url, `http://${API_HOST}`);
       const route = `${req.method} ${url.pathname}`;
+
+      // Reject before any work or body read, so an uncredentialed caller never
+      // triggers side effects. Loopback is a network boundary, not an
+      // authentication mechanism.
+      if (!BEARER_EXEMPT_ROUTES.has(route)) {
+        if (!controlApiToken) {
+          return sendJson(res, 503, { error: "control_api_token_unset" });
+        }
+        if (!bearerAuthorized(req.headers.authorization, controlApiToken)) {
+          return sendJson(res, 401, { error: "unauthorized" });
+        }
+      }
+
       const nowMs = now();
       // One coherent snapshot per request.  A swap between requests is
       // visible immediately; a swap during a request cannot mix definitions.
@@ -160,6 +263,7 @@ export function createApi({
         nowMs,
         actor,
         onEvent,
+        getTickStats,
         send,
         readBody,
         parseJson,
@@ -170,10 +274,13 @@ export function createApi({
           "GET /health",
           "POST /events",
           "POST /github",
+          // Production Cloudflare tunnel forwards the literal path
+          // /webhooks/github (no rewrite), so it is an alias of POST /github.
+          "POST /webhooks/github",
           "POST /replay",
         ].includes(route)
       ) {
-        return handleIntakeApiRoute(common);
+        return await handleIntakeApiRoute(common);
       }
       if (url.pathname === "/inbox" || url.pathname.startsWith("/inbox/")) {
         const detailMatch = url.pathname.match(/^\/inbox\/([^/]+)$/);
@@ -210,7 +317,7 @@ export function createApi({
                     message: parsed.error,
                   });
               }
-              result = retryInboxDecision(db, id, {
+              result = await retryInboxDecision(db, id, {
                 now: nowMs,
                 applyEffect,
               });
@@ -221,7 +328,7 @@ export function createApi({
                   error: "invalid_json",
                   message: parsed.error,
                 });
-              result = decideInboxItem(db, id, parsed.value, {
+              result = await decideInboxItem(db, id, parsed.value, {
                 now: nowMs,
                 decidedBy: actor,
                 applyEffect,
@@ -229,6 +336,8 @@ export function createApi({
             }
             return send(200, result);
           } catch (err) {
+            const body = payloadTooLargeBody(err);
+            if (body) return send(413, body);
             const status = Number(err?.status) || 400;
             return send(status, {
               error: err?.code ?? "invalid_response",
@@ -309,9 +418,7 @@ export function createApi({
           const loop = decodeURIComponent(triggerMatch[1]);
           const schedule = scheduleView(db, currentRegistry, {
             now: nowMs,
-          }).find(
-            (item) => item.loop === loop,
-          );
+          }).find((item) => item.loop === loop);
           if (!schedule) return send(status, body);
           const repo = currentRegistry.schedules?.[loop]?.payload?.repo;
           if (
@@ -361,13 +468,18 @@ export function createApi({
         const result = await handleArtifactApiRoute({
           ...common,
           clearStoreStats,
+          clearArtifactPage,
+          getArtifactPage,
         });
         if (result !== false) return result;
       }
       return send(404, { error: `no route: ${route}` });
-    } catch {
+    } catch (err) {
       // Never leak a stack trace across the API boundary.
-      if (!res.headersSent) sendJson(res, 500, { error: "internal_error" });
+      const body = payloadTooLargeBody(err);
+      if (!res.headersSent && body) sendJson(res, 413, body);
+      else if (!res.headersSent)
+        sendJson(res, 500, { error: "internal_error" });
       else res.end();
     }
   };

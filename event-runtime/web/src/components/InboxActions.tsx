@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { issueUrl } from "../trackerLinks";
 import type { AdmittedEvent, InboxItem } from "../types";
 import { Button, JumpLink, VerbError } from "./ui";
 
@@ -16,6 +17,9 @@ const PLAIN_ACTION_KINDS = new Set([
   "SMOKE RED",
   "CIRCUIT BREAKER",
 ]);
+
+const REFERENCED_EVENT_PAGE_LIMIT = 200;
+const REFERENCED_EVENT_MAX_PAGES = 5;
 
 // Jump chips read as links, not stray mono text: pill border + underline on hover.
 const CHIP_CLASS =
@@ -128,6 +132,14 @@ export function InboxActions({
   const [pending, setPending] = useState<string | null>(null);
   const [completed, setCompleted] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
+  const itemSnapshot = JSON.stringify(item);
+  const previousItemSnapshot = useRef(itemSnapshot);
+
+  useEffect(() => {
+    if (previousItemSnapshot.current === itemSnapshot) return;
+    previousItemSnapshot.current = itemSnapshot;
+    setCompleted(null);
+  }, [itemSnapshot]);
 
   const run = async (label: string, action: () => Promise<unknown>) => {
     setPending(label);
@@ -144,14 +156,28 @@ export function InboxActions({
   };
 
   const loadReferencedEvent = async () => {
-    const { events } = await apiCalls.events();
-    return referencedEvent(events, item);
+    const status = item.kind === "human_needed" ? "human_needed" : undefined;
+    let before: string | undefined;
+    for (let page = 0; page < REFERENCED_EVENT_MAX_PAGES; page += 1) {
+      const response = await apiCalls.events(status, {
+        limit: REFERENCED_EVENT_PAGE_LIMIT,
+        before,
+      });
+      const event = referencedEvent(response.events, item);
+      if (event) return event;
+      if (!response.nextBefore) break;
+      before = response.nextBefore;
+    }
+    return null;
   };
 
   const replay = () =>
     run("Replay", async () => {
       const event = await loadReferencedEvent();
-      if (!event) throw new Error("Referenced event is no longer available");
+      if (!event)
+        throw new Error(
+          `Referenced event was not found within the ${REFERENCED_EVENT_MAX_PAGES}-page lookup bound`,
+        );
       await apiCalls.replay(replayEnvelope(item, event, now()));
     });
 
@@ -179,9 +205,7 @@ export function InboxActions({
       await apiCalls.triggerSchedule(loop);
     });
 
-  const issueUrl = item.refs.issue
-    ? `https://linear.app/watt-mind/issue/${encodeURIComponent(item.refs.issue)}`
-    : null;
+  const issueHref = issueUrl(item.refs.issue);
   const jumpChips =
     item.kind === "ESCALATED" ||
     item.kind === "SMOKE RED" ||
@@ -210,10 +234,10 @@ export function InboxActions({
             Open PR
           </JumpLink>
         )}
-        {jumpChips && issueUrl && (
+        {jumpChips && issueHref && (
           <JumpLink
-            href={issueUrl}
-            title="Open issue in Linear"
+            href={issueHref}
+            title="Open issue in tracker"
             className={CHIP_CLASS}
           >
             Open issue
@@ -221,10 +245,14 @@ export function InboxActions({
         )}
         {item.kind === "human_needed" && (
           <Button
-            disabled={!connected || pending !== null}
+            disabled={!connected || pending !== null || completed === "Replay"}
             onClick={() => void replay()}
           >
-            {pending === "Replay" ? "Replaying…" : "Replay"}
+            {pending === "Replay"
+              ? "Replaying…"
+              : completed === "Replay"
+                ? "Replayed"
+                : "Replay"}
           </Button>
         )}
         {item.kind === "CI RED" && !proposalCreated && (

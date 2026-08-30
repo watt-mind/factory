@@ -10,6 +10,7 @@
 import {
   mkdtempSync,
   mkdirSync,
+  existsSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -29,9 +30,13 @@ import {
   formatComments,
   parsePositionalArgs,
   transitionThenComment,
+  fileTicket,
   closureCheckMessages,
   resolveRepoName,
   resolveRepoNameFromTicket,
+  resolveRepoNameForFile,
+  instanceConfigRoot,
+  InstanceConfigMissingError,
   __resetLinearReposCache,
 } from "./ticket.mjs";
 
@@ -327,6 +332,138 @@ test("state does not post a comment when the transition fails", async () => {
     transitionThenComment(cp, "WM-910", "Todo", {}, "do not post"),
   ).rejects.toThrow("transition rejected");
   expect(calls).toEqual(["transition"]);
+});
+
+// ------------------------------------------------------------- file verb ---
+
+function fileHarness(result) {
+  const calls = [];
+  const emitted = [];
+  const exits = [];
+  const cp = {
+    async file(opts) {
+      calls.push(opts);
+      return result;
+    },
+  };
+  const io = {
+    emit: (obj, text) => emitted.push({ obj, text }),
+    setExitCode: (code) => exits.push(code),
+  };
+  return { cp, calls, emitted, exits, io };
+}
+
+test("file surfaces control-plane warnings: warning line, ok:false, exit 1", async () => {
+  const { cp, emitted, exits, io } = fileHarness({
+    identifier: "watt-mind/factory#42",
+    url: "https://github.com/watt-mind/factory/issues/42",
+    warnings: [
+      "watt-mind/factory#42 exists, but a follow-up write failed: boom",
+    ],
+  });
+  const before = process.exitCode ?? 0;
+  try {
+    await fileTicket(
+      cp,
+      { team: "WM", title: "t", body: "", labels: [], state: "Triage" },
+      io,
+    );
+  } finally {
+    process.exitCode = before;
+  }
+  expect(emitted).toHaveLength(1);
+  expect(emitted[0].obj).toMatchObject({
+    ok: false,
+    identifier: "watt-mind/factory#42",
+    warnings: [expect.stringContaining("follow-up write failed")],
+  });
+  expect(emitted[0].text).toBe(
+    "filed watt-mind/factory#42 in Triage  https://github.com/watt-mind/factory/issues/42\nwarning: watt-mind/factory#42 exists, but a follow-up write failed: boom",
+  );
+  expect(exits).toEqual([1]);
+});
+
+test("file sets process.exitCode=1 on warnings by default", async () => {
+  const { cp, io } = fileHarness({
+    identifier: "WM-1",
+    url: "u",
+    warnings: ["off the board"],
+  });
+  // Bun ignores `process.exitCode = undefined`, so restore to a number: a
+  // stale 1 here would make the whole suite exit non-zero with 0 failures.
+  const before = process.exitCode ?? 0;
+  try {
+    process.exitCode = 0;
+    await fileTicket(
+      cp,
+      { team: "WM", title: "t", state: "Triage" },
+      { emit: io.emit },
+    );
+    expect(process.exitCode).toBe(1);
+  } finally {
+    process.exitCode = before;
+  }
+});
+
+test("file without warnings prints the clean line, ok:true, and leaves the exit code alone", async () => {
+  const { cp, calls, emitted, exits, io } = fileHarness({
+    identifier: "WM-2",
+    url: "https://linear.app/wm/issue/WM-2",
+  });
+  await fileTicket(
+    cp,
+    { team: "WM", title: "t", body: "b", labels: ["type:bug"], state: "Todo" },
+    io,
+  );
+  expect(emitted[0].obj).toEqual({
+    ok: true,
+    identifier: "WM-2",
+    url: "https://linear.app/wm/issue/WM-2",
+  });
+  expect(emitted[0].text).toBe(
+    "filed WM-2 in Todo  https://linear.app/wm/issue/WM-2",
+  );
+  expect(exits).toEqual([]);
+  // No dedupe key: neither dedupeKey nor matchTitle reaches the control plane.
+  expect(calls[0]).toEqual({
+    team: "WM",
+    title: "t",
+    body: "b",
+    labels: ["type:bug"],
+    state: "Todo",
+    projectId: undefined,
+  });
+  expect("dedupeKey" in calls[0]).toBe(false);
+  expect("matchTitle" in calls[0]).toBe(false);
+});
+
+test("file --dedupe-key K passes dedupeKey:'K' with matchTitle:true", async () => {
+  const { cp, calls, io } = fileHarness({ identifier: "WM-3", url: "u" });
+  await fileTicket(
+    cp,
+    { team: "WM", title: "t", state: "Triage", dedupeKey: " K " },
+    io,
+  );
+  expect(calls[0]).toMatchObject({ dedupeKey: "K", matchTitle: true });
+});
+
+test("file says 'reused' when the control plane deduplicated onto an existing issue", async () => {
+  const { cp, emitted, exits, io } = fileHarness({
+    identifier: "watt-mind/factory#7",
+    url: "https://github.com/watt-mind/factory/issues/7",
+    reused: true,
+    warnings: ["reused closed issue #7: the dedupe key matched a closed issue"],
+  });
+  await fileTicket(
+    cp,
+    { team: "WM", title: "t", state: "Triage", dedupeKey: "run-1" },
+    io,
+  );
+  expect(emitted[0].text).toBe(
+    "reused watt-mind/factory#7 in Triage  https://github.com/watt-mind/factory/issues/7\nwarning: reused closed issue #7: the dedupe key matched a closed issue",
+  );
+  expect(emitted[0].obj).toMatchObject({ ok: false, reused: true });
+  expect(exits).toEqual([1]);
 });
 
 test("values for other flags are not treated as positional arguments", () => {
@@ -648,4 +785,240 @@ test("resolveRepoNameFromTicket: linear-style and bare ids resolve nothing", () 
   expect(resolveRepoNameFromTicket("WM-123", GH975_REPOS)).toBeNull();
   expect(resolveRepoNameFromTicket("975", GH975_REPOS)).toBeNull();
   expect(resolveRepoNameFromTicket(undefined, GH975_REPOS)).toBeNull();
+});
+
+test("resolveRepoNameForFile: --from chooses its GitHub repo and refuses an ambiguous workspace", () => {
+  expect(
+    resolveRepoNameForFile({
+      cwd: os.tmpdir(),
+      repos: GH975_REPOS,
+      repoFlag: undefined,
+      fromFlag: "watt-mind/factory#975",
+    }),
+  ).toBe("factory");
+  expect(
+    resolveRepoNameForFile({
+      cwd: os.tmpdir(),
+      repos: GH975_REPOS,
+      repoFlag: undefined,
+      fromFlag: undefined,
+    }),
+  ).toBeNull();
+});
+
+test("resolveRepoNameForFile: a Linear-style --from falls through to cwd instead of terminating", () => {
+  const repos = new Map([
+    [
+      "factory",
+      { name: "factory", path: "/srv/factory", github: "watt-mind/factory" },
+    ],
+  ]);
+  // Unresolvable cwd: the Linear id names no repository, so nothing resolves.
+  expect(
+    resolveRepoNameForFile({
+      cwd: os.tmpdir(),
+      repos,
+      repoFlag: undefined,
+      fromFlag: "CLNT-616",
+    }),
+  ).toBeNull();
+  // Inside a configured checkout the same flag lets cwd decide.
+  expect(
+    resolveRepoNameForFile({
+      cwd: "/srv/factory/tools",
+      repos,
+      repoFlag: undefined,
+      fromFlag: "CLNT-616",
+    }),
+  ).toBe("factory");
+});
+
+/**
+ * Spawn `ticket.mjs file` against an ephemeral instance root whose cwd is
+ * outside every configured repository. `gh` is shadowed by a stub that logs
+ * its arguments and fails, and HOME points at the fixture so no operator
+ * Linear key leaks in: each route therefore ends in a deterministic, offline
+ * failure that identifies which control plane was reached.
+ */
+function spawnFileOutsideRepo(args, { controlPlane } = {}) {
+  const root = mkdtempSync(path.join(os.tmpdir(), "ticket-file-route-"));
+  const workspace = path.join(root, "workspace");
+  const bin = path.join(root, "bin");
+  const ghLog = path.join(root, "gh.log");
+  const cliRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+  );
+  try {
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    mkdirSync(workspace);
+    mkdirSync(bin);
+    writeFileSync(
+      path.join(bin, "gh"),
+      [
+        "#!/bin/sh",
+        `printf '%s\n' "$*" >> "${ghLog}"`,
+        'echo "stub gh: offline" >&2',
+        "exit 1",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    // The default (repo-less) plane is read from policy.yaml, as in a real
+    // instance root; the fixture pins it to Linear.
+    writeFileSync(
+      path.join(root, "config", "policy.yaml"),
+      "controlPlane:\n  kind: linear\n",
+    );
+    writeFileSync(
+      path.join(root, "config", "repos.yaml"),
+      `repos:\n  - name: factory\n    path: ${path.join(root, "repo")}\n    github: watt-mind/factory\n` +
+        (controlPlane ? `    control_plane: ${controlPlane}\n` : ""),
+    );
+    const env = { ...process.env, FACTORY_REPOS_ROOT: root, HOME: root };
+    env.PATH = `${bin}${path.delimiter}${env.PATH ?? ""}`;
+    for (const name of Object.keys(env)) {
+      if (
+        name === "LINEAR_API_KEY" ||
+        name === "GH_TOKEN" ||
+        name === "GITHUB_TOKEN" ||
+        name.startsWith("FACTORY_GH_APP_")
+      )
+        delete env[name];
+    }
+    const result = Bun.spawnSync({
+      cmd: ["bun", path.join(cliRoot, "tools", "ticket.mjs"), "file", ...args],
+      cwd: workspace,
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return {
+      exitCode: result.exitCode,
+      stderr: result.stderr.toString(),
+      ghCalls: existsSync(ghLog) ? readFileSync(ghLog, "utf8") : "",
+    };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("file refuses an unresolvable workspace with both routing flags", () => {
+  const result = spawnFileOutsideRepo(["--title", "finding"]);
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain("--repo <name> or --from <owner/repo#N>");
+  expect(result.ghCalls).toBe("");
+});
+
+test("file --from <Linear-id> --team reaches the Linear plane from an unresolvable workspace", () => {
+  const result = spawnFileOutsideRepo([
+    "--from",
+    "CLNT-616",
+    "--team",
+    "CLNT",
+    "--title",
+    "finding",
+  ]);
+  expect(result.exitCode).toBe(1);
+  // The default (Linear) plane was selected and went looking for its key.
+  expect(result.stderr).toContain("LINEAR_API_KEY not found");
+  expect(result.stderr).not.toContain("--repo <name> or --from <owner/repo#N>");
+  expect(result.ghCalls).toBe("");
+});
+
+test("file --from owner/repo#N reaches that repository's GitHub plane without --team", () => {
+  const result = spawnFileOutsideRepo(
+    ["--from", "watt-mind/factory#1", "--title", "finding"],
+    { controlPlane: "github" },
+  );
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).not.toContain("--repo <name> or --from <owner/repo#N>");
+  expect(result.stderr).not.toContain("usage: file");
+  // The GitHub adapter bound to watt-mind/factory and asked gh for its labels.
+  expect(result.ghCalls).toContain("repos/watt-mind/factory/labels");
+});
+
+test("file without --title reports usage before any routing", () => {
+  const result = spawnFileOutsideRepo(["--body", "no title"]);
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain("usage: file --title");
+  expect(result.stderr).not.toContain("--repo <name> or --from <owner/repo#N>");
+});
+
+// ----------------------------------- instance config resolution (GH-975) ---
+// Every ticket verb acts on instance-local control-plane state, so the CLI must
+// resolve which operator checkout owns `config/repos.yaml` BEFORE it touches
+// cwd or the ticket identifier. A dispatched agent runs from an ephemeral
+// runtime workspace that has no `config/repos.yaml`; it receives the operator
+// checkout through `FACTORY_ROOT`, and resolution must honour that rather than
+// falling back to the executing agent's own checkout (which would point at the
+// tracked example config and misroute a real GitHub ticket into a Linear
+// lookup).
+function makeConfiguredRoot(label) {
+  const root = mkdtempSync(path.join(os.tmpdir(), label));
+  mkdirSync(path.join(root, "config"), { recursive: true });
+  writeFileSync(
+    path.join(root, "config", "repos.yaml"),
+    "repos:\n  - name: wm\n    path: /nonexistent\n",
+  );
+  return root;
+}
+
+test("instanceConfigRoot uses FACTORY_ROOT when the execution checkout lacks config/repos.yaml", () => {
+  const factoryRoot = makeConfiguredRoot("ticket-facroot-");
+  // The execution checkout is a bare workspace with no config/ at all — the
+  // exact shape of a dispatched runtime workspace under ~/.factory.
+  const checkoutRoot = mkdtempSync(path.join(os.tmpdir(), "ticket-checkout-"));
+  try {
+    // The bare checkout on its own is not a valid instance config root...
+    expect(() => instanceConfigRoot({ env: {}, checkoutRoot })).toThrow(
+      InstanceConfigMissingError,
+    );
+    // ...but FACTORY_ROOT names the operator checkout that owns the config.
+    expect(
+      instanceConfigRoot({ env: { FACTORY_ROOT: factoryRoot }, checkoutRoot }),
+    ).toBe(path.resolve(factoryRoot));
+  } finally {
+    rmSync(factoryRoot, { recursive: true, force: true });
+    rmSync(checkoutRoot, { recursive: true, force: true });
+  }
+});
+
+test("instanceConfigRoot: FACTORY_REPOS_ROOT is the explicit override, ahead of FACTORY_ROOT", () => {
+  const reposRoot = makeConfiguredRoot("ticket-reposroot-");
+  const factoryRoot = makeConfiguredRoot("ticket-facroot2-");
+  try {
+    expect(
+      instanceConfigRoot({
+        env: { FACTORY_REPOS_ROOT: reposRoot, FACTORY_ROOT: factoryRoot },
+        checkoutRoot: "/nonexistent",
+      }),
+    ).toBe(path.resolve(reposRoot));
+  } finally {
+    rmSync(reposRoot, { recursive: true, force: true });
+    rmSync(factoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("instanceConfigRoot throws instance_config_missing when no instance config is available", () => {
+  // No override env and a checkout without config/repos.yaml: a syntactically
+  // valid fallback is exactly what must NOT happen here, so this is an explicit
+  // refusal rather than a silent default-plane lookup.
+  const checkoutRoot = mkdtempSync(path.join(os.tmpdir(), "ticket-noconfig-"));
+  try {
+    let thrown;
+    try {
+      instanceConfigRoot({ env: {}, checkoutRoot });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(InstanceConfigMissingError);
+    expect(thrown.code).toBe("instance_config_missing");
+    expect(thrown.message).toContain("instance_config_missing");
+    expect(thrown.message).toContain(
+      path.join(path.resolve(checkoutRoot), "config", "repos.yaml"),
+    );
+  } finally {
+    rmSync(checkoutRoot, { recursive: true, force: true });
+  }
 });

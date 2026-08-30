@@ -10,9 +10,17 @@
  * the part that decides whether a restart double-fires — is testable without
  * a clock or a runtime.
  */
+import { canonicalJson } from "./canonical.mjs";
 import { admitEvent } from "./intake.mjs";
 
 export const SCHEDULE_SOURCE = "schedule";
+/** Fields emitDueTicks always stamps itself, overriding a static payload. */
+const TICK_PAYLOAD_FIELDS = new Set([
+  "loop",
+  "slot",
+  "cadenceSeconds",
+  "skippedSlots",
+]);
 export const CATCH_UP_MODES = ["none", "last", "all"];
 export const APPROVAL_MODES = ["watched", "auto"];
 
@@ -83,8 +91,18 @@ export function dueSlots({
     return { slots, skipped };
   }
 
-  // "none" and "last" both fire exactly one tick here; they differ only in
-  // which slot it claims to be, and therefore in what a replay would mean.
+  if (catchUp === "last" && totalMissed > 1) {
+    // The current slot is not missed yet. Emit its immediate predecessor —
+    // the newest missed slot — and leave the current one for the next tick.
+    return {
+      slots: [new Date(Date.parse(current) - period).toISOString()],
+      skipped: totalMissed - 2,
+    };
+  }
+
+  // `none`, and `last` when the previous slot is already the last admitted
+  // one, fire the current slot. There is no missed slot to replay in that
+  // `last` case.
   const slots = [current];
   return { slots, skipped: Math.max(0, totalMissed - 1) };
 }
@@ -206,11 +224,6 @@ export function inFlightRunsForAgent(db, agentRef) {
     .all(agentRef);
 }
 
-/** Is a run for this loop's agent still in flight? (§5 singleton) */
-export function loopInFlight(db, agentRef) {
-  return inFlightRunsForAgent(db, agentRef).length > 0;
-}
-
 /** The newest slot that successfully completed for a loop, or null if never completed (OPS-436). */
 export function lastCompletedSlot(db, loop) {
   const row = db
@@ -283,6 +296,35 @@ export function scheduleView(db, registry, { now = Date.now() } = {}) {
 }
 
 /**
+ * Does this admitted event look exactly like the tick `emitDueTicks` would
+ * have emitted for `loop`? Auto-approval is the one path that runs work with
+ * nobody watching, so it binds to the configured event type, the
+ * `clock:<loop>:<slot>` identity the tick loop mints, and the schedule's
+ * static payload — a stored event that drifts from any of those is left as an
+ * ordinary open proposal for a human.
+ */
+function matchesConfiguredTick(envelope, row, loop, schedule) {
+  const slot = envelope.payload?.slot;
+  if (typeof slot !== "string" || slot === "") return false;
+  if (row.event_id !== tickEventId(loop, slot)) return false;
+  if (row.type !== schedule.eventType) return false;
+  const payload = envelope.payload ?? {};
+  for (const [key, value] of Object.entries(schedule.payload ?? {})) {
+    // The tick fields always win over a schedule's static payload
+    // (see emitDueTicks), so they are not part of the static binding.
+    if (TICK_PAYLOAD_FIELDS.has(key)) continue;
+    if (value === undefined) continue;
+    if (!Object.hasOwn(payload, key)) return false;
+    try {
+      if (canonicalJson(payload[key]) !== canonicalJson(value)) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Approve open proposals belonging to loops that declare `approval: auto`
  * (§6). Separate from planning on purpose: auto-approval is the step that
  * changes what the runtime may do unattended, so it is one explicit call
@@ -300,23 +342,35 @@ export function autoApproveScheduled(
 ) {
   const approved = [];
   const errors = [];
-  const autoLoops = new Set(
-    Object.entries(registry.schedules ?? {})
-      .filter(([, s]) => s.enabled && (s.approval ?? "watched") === "auto")
-      .map(([loop]) => loop),
+  const autoLoops = new Map(
+    Object.entries(registry.schedules ?? {}).filter(
+      ([, s]) => s.enabled && (s.approval ?? "watched") === "auto",
+    ),
   );
   if (autoLoops.size === 0) return { approved, errors };
 
   const rows = db
     .query(
-      `SELECT p.id, e.envelope_json FROM proposals p
+      `SELECT p.id, e.event_id, e.type, e.envelope_json FROM proposals p
        JOIN events e ON e.source = p.event_source AND e.event_id = p.event_id
        WHERE p.status = 'open' AND p.decision = 'run' AND e.source = ?`,
     )
     .all(SCHEDULE_SOURCE);
   for (const row of rows) {
-    const loop = JSON.parse(row.envelope_json).payload?.loop;
-    if (!autoLoops.has(loop)) continue;
+    let envelope;
+    try {
+      envelope = JSON.parse(row.envelope_json);
+    } catch {
+      continue;
+    }
+    const loop = envelope.payload?.loop;
+    const schedule = autoLoops.get(loop);
+    if (!schedule) continue;
+    // Defense in depth (#960): reserved `schedule` provenance is the primary
+    // control, but auto-approval also refuses anything that is not shaped like
+    // the tick this loop's configuration emits — its event type, its
+    // `clock:<loop>:<slot>` identity, and its static payload verbatim.
+    if (!matchesConfiguredTick(envelope, row, loop, schedule)) continue;
     try {
       const outcome = approve(db, registry, row.id, {
         actor: SCHEDULE_SOURCE,

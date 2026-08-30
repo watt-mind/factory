@@ -40,7 +40,10 @@ import {
   symlinkSync,
   lstatSync,
   unlinkSync,
+  realpathSync,
+  statSync,
 } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -406,15 +409,112 @@ const agents = corePack.agents;
 // So the floor is SPLICED into each repo's AGENTS.md between its markers.
 // Marker-delimited rather than whole-file so a repo keeps its own content, and
 // idempotent so running it twice is a no-op.
+/**
+ * Return the canonical GitHub owner/repository slug from a Git remote URL.
+ * Accepts every transport git itself does for github.com — scp-style SSH,
+ * ssh:// (with an optional port), git://, and http(s):// with an optional
+ * userinfo — because the transport does not change which repository the
+ * checkout represents. Anything that is not a github.com URL is null.
+ */
+export function remoteGithubSlug(remote) {
+  if (typeof remote !== "string") return null;
+  const match = remote
+    .trim()
+    .match(
+      /^(?:git@github\.com:|(?:git\+)?(?:ssh|git|https?):\/\/(?:[^@/\s]+@)?github\.com(?::\d+)?\/)([^/\s]+)\/([^/#?\s]+)\/?$/i,
+    );
+  if (!match) return null;
+  const repository = match[2].replace(/\.git$/i, "");
+  return repository ? `${match[1]}/${repository}`.toLowerCase() : null;
+}
+
+/**
+ * Return the canonical GitHub slug from a configured `github:` value.
+ * Config accepts either its usual bare owner/repository slug or a full URL.
+ */
+export function configuredGithubSlug(value) {
+  if (typeof value !== "string") return null;
+  const remote = remoteGithubSlug(value);
+  if (remote) return remote;
+  const match = value.trim().match(/^([^/\s]+)\/([^/#?\s]+)$/);
+  if (!match) return null;
+  const repository = match[2].replace(/\.git$/i, "");
+  return repository ? `${match[1]}/${repository}`.toLowerCase() : null;
+}
+
+function originGithubSlug(root) {
+  try {
+    return remoteGithubSlug(
+      execFileSync("git", ["-C", root, "remote", "get-url", "origin"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }),
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve each configured checkout.
+ *
+ * Read-only (`--check`): a usable explicit path wins over a matching origin,
+ * so the configured checkout's floor status stays visible even when this tree
+ * is a worktree of the same repository. Only a missing/unresolvable path falls
+ * back to the GitHub slug, which is the worktree shape the fallback exists for.
+ *
+ * Writing (`--sync-floor`, `preferRunning`): a repo whose origin matches this
+ * tree resolves to this tree, whatever its configured path says. Writes must
+ * land in the checkout that is running — never in the operator's live checkout
+ * from a worktree, which is the file that serve is reading at the time.
+ */
+export function resolveFloorCheckouts({
+  runningRoot,
+  runningGithub,
+  repos,
+  preferRunning = false,
+}) {
+  return repos.map((repo) => {
+    const repoPath = String(repo.path).replace(/^~/, homedir());
+    let configuredRoot = null;
+    if (existsSync(repoPath)) {
+      try {
+        const resolved = realpathSync(repoPath);
+        if (statSync(resolved).isDirectory()) configuredRoot = resolved;
+      } catch {
+        configuredRoot = null;
+      }
+    }
+    const slugMatches = Boolean(
+      runningGithub &&
+      configuredGithubSlug(String(repo.github ?? "")) === runningGithub,
+    );
+    const isRunningRepo =
+      configuredRoot === runningRoot ||
+      (slugMatches && (preferRunning || !configuredRoot));
+    return {
+      ...repo,
+      checkoutPath: isRunningRepo ? runningRoot : repoPath,
+      isRunningRepo,
+    };
+  });
+}
+
 /** [{name, path, state}] — state is ok | stale | missing | no-checkout. */
-function floorStatus() {
+function floorStatus({ preferRunning = false } = {}) {
   const cfg = Bun.YAML.parse(
     readFileSync(resolveConfigPath("repos", { root: ROOT }), "utf8"),
   );
-  return (cfg.repos ?? []).map((repo) => {
-    const repoPath = String(repo.path).replace(/^~/, homedir());
-    const agentsFile = path.join(repoPath, "AGENTS.md");
-    if (!existsSync(repoPath))
+  const runningRoot = realpathSync(ROOT);
+  const runningGithub = originGithubSlug(ROOT);
+  return resolveFloorCheckouts({
+    runningRoot,
+    runningGithub,
+    repos: cfg.repos ?? [],
+    preferRunning,
+  }).map(({ checkoutPath, ...repo }) => {
+    const agentsFile = path.join(checkoutPath, "AGENTS.md");
+    if (!existsSync(checkoutPath))
       return { ...repo, agents: agentsFile, state: "no-checkout" };
     if (!existsSync(agentsFile))
       return { ...repo, agents: agentsFile, state: "missing" };
@@ -431,7 +531,9 @@ function floorStatus() {
 
 if (process.argv.includes("--sync-floor")) {
   console.log("\nsyncing the floor into each configured repo's AGENTS.md:");
-  for (const r of floorStatus()) {
+  // Writes target the running checkout for this repository, never the
+  // configured (live) checkout of a worktree's origin.
+  for (const r of floorStatus({ preferRunning: true })) {
     if (r.state === "no-checkout") {
       console.log(`  skip     ${r.name} — no checkout at ${r.path}`);
       continue;

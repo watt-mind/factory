@@ -26,7 +26,7 @@ Read the **full diff** (`gh pr diff <PR>`), then review for:
 - **Correctness** — logic errors, edge cases, race conditions, broken assumptions about the existing code it touches. Read the surrounding code where the diff's correctness depends on it; the diff alone lies by omission.
 - **Bugs the tests don't catch** — error handling, null/undefined paths, off-by-ones, state that survives navigation, platform differences (iOS/Android/web).
 - **Security** — injection, authz gaps, secrets in the diff, unsafe input handling.
-- **Protocol compliance** — diff stays inside the ticket's `Owned Paths`; the Handoff's verification line reflects a real pass; PR body carries `Fixes <ISSUE-ID>` (and `run:<id>` on factory-produced PRs).
+- **Protocol compliance** — diff stays inside the ticket's `Owned Paths`; the Handoff's verification line reflects a real pass; PR body carries `Fixes <ISSUE-ID>`. Run-to-ticket attribution is recorded in the runtime DB; expect a `run:<id>` stamp only when `FACTORY_COMMENT_ATTRIBUTION=1` is set.
 - **Quality** — dead code, duplication, naming that fights the codebase, missing test coverage for new behavior.
 
 For user-facing PRs, open the ticket's attached screenshots and judge the visual result; a user-facing PR with no screenshots is a (minor) protocol finding.
