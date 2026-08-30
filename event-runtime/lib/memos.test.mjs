@@ -365,6 +365,121 @@ describe("registerMemos / listMemos", () => {
     db.close();
   });
 
+  test("sweepMemos keeps memos that died inside the retention window", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-18T14:02:11.000Z");
+    const expired = accepted(repoNoteDoc({ body: "expired" }), { now });
+    const retired = accepted(repoNoteDoc({ body: "retired" }), { now });
+    const predecessor = accepted(repoNoteDoc({ body: "predecessor" }), {
+      now: now - MEMO_RETENTION_MS - 1,
+    });
+    const replacement = accepted(repoNoteDoc({ body: "replacement" }), {
+      now,
+    });
+    registerMemos(db, "run_expired", expired.result, { now });
+    registerMemos(db, "run_retired", retired.result, { now });
+    registerMemos(db, "run_predecessor", predecessor.result, {
+      now: now - MEMO_RETENTION_MS - 1,
+    });
+    registerMemos(db, "run_replacement", replacement.result, { now });
+    db.query(`UPDATE memos SET expires_at = ? WHERE sha256 = ?`).run(
+      now - 1,
+      expired.sha256,
+    );
+    db.query(`UPDATE memos SET retired_at = ? WHERE sha256 = ?`).run(
+      now - 1,
+      retired.sha256,
+    );
+    db.query(`UPDATE memos SET superseded_by = ? WHERE sha256 = ?`).run(
+      replacement.sha256,
+      predecessor.sha256,
+    );
+
+    expect(sweepMemos(db, { now })).toEqual({ deleted: 0, usesDeleted: 0 });
+    expect(db.query(`SELECT COUNT(*) AS n FROM memos`).get().n).toBe(4);
+    db.close();
+  });
+
+  test("sweepMemos treats a dangling superseded_by as retained from the predecessor's own age", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-18T14:02:11.000Z");
+    const old = accepted(repoNoteDoc({ body: "old predecessor" }), {
+      now: now - MEMO_RETENTION_MS - 1,
+    });
+    const young = accepted(repoNoteDoc({ body: "young predecessor" }), {
+      now,
+    });
+    registerMemos(db, "run_old", old.result, {
+      now: now - MEMO_RETENTION_MS - 1,
+    });
+    registerMemos(db, "run_young", young.result, { now });
+    // The replacement was itself swept in an earlier pass: no row exists.
+    db.query(`UPDATE memos SET superseded_by = ? WHERE sha256 IN (?, ?)`).run(
+      "f".repeat(64),
+      old.sha256,
+      young.sha256,
+    );
+
+    expect(sweepMemos(db, { now })).toEqual({ deleted: 1, usesDeleted: 0 });
+    expect(
+      db
+        .query(`SELECT sha256 FROM memos`)
+        .all()
+        .map((row) => row.sha256),
+    ).toEqual([young.sha256]);
+    db.close();
+  });
+
+  test("sweepMemos bounds each pass and drains the backlog across passes", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-18T14:02:11.000Z");
+    const memos = ["one", "two", "three"].map((body) =>
+      accepted(repoNoteDoc({ body }), { now }),
+    );
+    for (const [i, memo] of memos.entries()) {
+      registerMemos(db, `run_${i}`, memo.result, { now });
+      db.query(`UPDATE memos SET expires_at = ? WHERE sha256 = ?`).run(
+        now - MEMO_RETENTION_MS - 1,
+        memo.sha256,
+      );
+    }
+
+    expect(sweepMemos(db, { now, limit: 2 })).toEqual({
+      deleted: 2,
+      usesDeleted: 0,
+    });
+    expect(db.query(`SELECT COUNT(*) AS n FROM memos`).get().n).toBe(1);
+    expect(sweepMemos(db, { now, limit: 2 })).toEqual({
+      deleted: 1,
+      usesDeleted: 0,
+    });
+    expect(db.query(`SELECT COUNT(*) AS n FROM memos`).get().n).toBe(0);
+    db.close();
+  });
+
+  test("listMemos orders ties on useful_count and created_at by sha256", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-18T14:02:11.000Z");
+    const memos = ["alpha", "beta", "gamma"].map((body) =>
+      accepted(repoNoteDoc({ body }), { now }),
+    );
+    for (const [i, memo] of memos.entries()) {
+      registerMemos(db, `run_${i}`, memo.result, { now });
+    }
+    const expected = memos
+      .map((memo) => memo.sha256)
+      .sort()
+      .reverse();
+    for (let i = 0; i < 3; i += 1) {
+      expect(
+        listMemos(db, { type: "repo", id: "factory" }, { now }).map(
+          (row) => row.sha256,
+        ),
+      ).toEqual(expected);
+    }
+    db.close();
+  });
+
   test("a binding observed broken retires the memo", () => {
     const db = openDb(":memory:");
     const now = Date.parse("2026-08-18T14:02:11.000Z");

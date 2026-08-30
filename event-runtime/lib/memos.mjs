@@ -552,25 +552,40 @@ function usefulCounts(db, hashes) {
   return counts;
 }
 
+/** Upper bound on memo rows one `sweepMemos` pass will delete. */
+export const MEMO_SWEEP_BATCH = 500;
+
 /**
  * Remove memo rows whose terminal state has outlived the audit retention
  * window. Supersession has no timestamp of its own, so the replacement memo's
- * creation time is the point at which the predecessor became superseded.
+ * creation time is the point at which the predecessor became superseded; when
+ * the replacement is already gone (swept by an earlier pass) the predecessor's
+ * own creation time is the fallback, so a dangling `superseded_by` never pins
+ * a row forever. Each pass is bounded by `limit` so a large backlog cannot
+ * stall the serve tick; the next hourly pass drains the remainder.
  */
 export function sweepMemos(
   db,
-  { now = Date.now(), retentionMs = MEMO_RETENTION_MS } = {},
+  {
+    now = Date.now(),
+    retentionMs = MEMO_RETENTION_MS,
+    limit = MEMO_SWEEP_BATCH,
+  } = {},
 ) {
   const cutoff = now - retentionMs;
+  const batch = Number.isInteger(limit) && limit > 0 ? limit : MEMO_SWEEP_BATCH;
   const doomed = db
     .query(
       `SELECT memo.sha256 FROM memos AS memo
        LEFT JOIN memos AS replacement ON replacement.sha256 = memo.superseded_by
        WHERE (memo.expires_at IS NOT NULL AND memo.expires_at <= ?)
           OR (memo.retired_at IS NOT NULL AND memo.retired_at <= ?)
-          OR (memo.superseded_by IS NOT NULL AND replacement.created_at <= ?)`,
+          OR (memo.superseded_by IS NOT NULL
+              AND COALESCE(replacement.created_at, memo.created_at) <= ?)
+       ORDER BY memo.created_at ASC, memo.sha256 ASC
+       LIMIT ?`,
     )
-    .all(cutoff, cutoff, cutoff)
+    .all(cutoff, cutoff, cutoff, batch)
     .map((row) => row.sha256);
   if (doomed.length === 0) return { deleted: 0, usesDeleted: 0 };
 
@@ -650,7 +665,7 @@ export function listMemos(
          FROM memos LEFT JOIN memo_uses ON memo_uses.sha256 = memos.sha256
          WHERE ${liveWhere}
          GROUP BY memos.sha256
-         ORDER BY useful_count DESC, memos.created_at DESC
+         ORDER BY useful_count DESC, memos.created_at DESC, memos.sha256 DESC
          LIMIT ?`,
       )
       .all(...liveParams, limit);

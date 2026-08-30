@@ -183,25 +183,37 @@ export async function tick({
   let nextPrune = lastPrune;
   await runStep("GC", () => {
     if (now - lastPrune <= pruneIntervalMs) return;
-    try {
-      // Sweep first so memo artifacts become eligible for this GC pass rather
-      // than staying pinned until the next hourly artifact prune.
+    // The cadence advances even when a sub-step throws: a broken sweep must
+    // not turn into a hot loop of retries on every tick.
+    nextPrune = now;
+    const gcStep = (name, fn) => {
+      try {
+        fn();
+      } catch (err) {
+        logLine(`tick GC: ${name}: ${err.message}`);
+      }
+    };
+    // Sweep first so memo artifacts become eligible for this GC pass rather
+    // than staying pinned until the next hourly artifact prune. Each sub-step
+    // is isolated: a memo-sweep failure never skips artifact GC.
+    gcStep("memos", () => {
       const swept = sweepMemos(db, { now });
       if (swept.deleted > 0)
         logLine(
           `memos: swept ${swept.deleted} expired/retired/superseded memo(s)`,
         );
+    });
+    gcStep("artifacts", () => {
       const pruned = pruneArtifacts(db, storeRoot ?? artifactsRoot(), { now });
       if (pruned.deleted > 0)
         logLine(
           `artifacts: pruned ${pruned.deleted} orphan(s), freed ${pruned.freedBytes}B`,
         );
-      const markers = sweepNotifyLog(db, { now });
-      if (markers > 0)
-        logLine(`notify: swept ${markers} stale dedup marker(s)`);
-    } finally {
-      nextPrune = now;
-    }
+    });
+    gcStep("notify", () => {
+      const swept = sweepNotifyLog(db, { now });
+      if (swept > 0) logLine(`notify: swept ${swept} stale dedup marker(s)`);
+    });
   });
 
   await runStep("chains", () => {
