@@ -388,15 +388,30 @@ worktree_cwd_processes() { # <worktree>
 # rather than risking an unrelated caller's shell.
 kill_worktree_cwd_processes() { # <worktree>
   local wt="$1" own_pgid pid pgid cwd groups="" pids="" group processes
+  local ancestor_pids="" ancestor_pgids="" ancestor ancestor_pgid
   own_pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ')
+  # Teardown is often invoked from inside the worktree it removes (an agent
+  # session or operator shell whose cwd is the checkout). Its ancestors — and
+  # the process groups they lead or belong to — must never be signalled: an
+  # interactive shell ignores SIGTERM, and the SIGKILL escalation below would
+  # otherwise take the caller's terminal with it.
+  ancestor=$$
+  while [[ "$ancestor" =~ ^[0-9]+$ && "$ancestor" -gt 1 ]]; do
+    ancestor_pids+=" $ancestor"
+    ancestor_pgid=$(ps -o pgid= -p "$ancestor" 2>/dev/null | tr -d ' ')
+    [[ "$ancestor_pgid" =~ ^[0-9]+$ ]] && ancestor_pgids+=" $ancestor_pgid"
+    ancestor=$(ps -o ppid= -p "$ancestor" 2>/dev/null | tr -d ' ')
+  done
   processes=$(worktree_cwd_processes "$wt")
 
   while IFS=$'\t' read -r pid pgid cwd; do
     [[ "$pid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ ]] || continue
-    # --here can be invoked from the target checkout. Never signal the
-    # teardown shell or the caller's process group; it exits naturally.
+    # Never signal the teardown shell, the caller's process group, or any
+    # ancestor of this script; they exit naturally once teardown returns.
     [[ "$pgid" != "$own_pgid" ]] || continue
+    [[ " $ancestor_pids " != *" $pid "* ]] || continue
     if [[ "$pid" == "$pgid" ]]; then
+      [[ " $ancestor_pgids " != *" $pgid "* ]] || continue
       [[ " $groups " == *" $pgid "* ]] && continue
       groups+=" $pgid"
       info "stopping cwd-bound process group $pgid ($cwd)"

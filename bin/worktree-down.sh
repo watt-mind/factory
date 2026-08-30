@@ -182,9 +182,6 @@ else
 fi
 
 RUN_DIR="$(run_dir "$WT")"
-# A killed handoff gate can leave a detached fake serve with no pidfile. It
-# still owns this worktree as cwd, so sweep it before removing the checkout.
-kill_worktree_cwd_processes "$WT"
 term_daemon "$RUN_DIR/web.pid" "web server"
 term_daemon "$RUN_DIR/worker.pid" "worker"
 term_daemon "$RUN_DIR/serve.pid" "event runtime"
@@ -199,6 +196,15 @@ if [[ "$HERE" -eq 1 ]]; then
   info "done — current checkout's demo environment is down"
   exit 0
 fi
+
+# Backstop for daemons the pidfiles no longer describe (#1379): a killed
+# handoff gate or an aborted bring-up leaves a detached `serve
+# --adapter-override fake` with no pidfile, still holding this worktree as its
+# cwd, a loopback port and a SQLite handle. Sweep every cwd-bound process
+# group before the checkout is deleted, and log what was stopped. Only the
+# removal path runs this — `--here` keeps the checkout, and the operator's own
+# shells live there.
+kill_worktree_cwd_processes "$WT"
 
 if [[ -n "$(git -C "$WT" status --porcelain)" && "$FORCE" -ne 1 ]]; then
   die "$WT has uncommitted changes — commit/stash them, or re-run with --force"

@@ -1670,6 +1670,36 @@ test("worktree teardown group-kills a cwd-bound fake serve with no pidfile", asy
   }
 });
 
+test("worktree cwd sweep never signals the shell that invoked it from inside the worktree", () => {
+  const expectedPath = mkdtempSync(
+    path.join(tmpdir(), "factory-down-cwd-caller-"),
+  );
+  try {
+    // An agent session or operator shell commonly runs teardown with its cwd
+    // inside the checkout being removed. That caller (and its ancestors) is
+    // cwd-bound too, so the sweep must leave it alone rather than SIGKILL the
+    // terminal it runs in. `--here` is excluded from the sweep entirely; this
+    // covers the removal path with a caller chain rooted in the worktree.
+    const res = Bun.spawnSync({
+      cmd: [
+        "bash",
+        "-c",
+        `bash -c 'source "${COMMON}"; kill_worktree_cwd_processes "$PWD"' && printf 'caller-survived\n'`,
+      ],
+      cwd: expectedPath,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env },
+    });
+    expect(res.exitCode).toBe(0);
+    const output = `${res.stdout}${res.stderr}`;
+    expect(output).toContain("caller-survived");
+    expect(output).not.toContain("stopping cwd-bound");
+  } finally {
+    rmSync(expectedPath, { recursive: true, force: true });
+  }
+});
+
 // ------------------------------------------------ GitHub ticket ids (#881) ---
 // After the WM-1006 cutover the worker passes GitHub identifiers. The scripts
 // validated `^[A-Z]+-[0-9]+` only, so a claim landed and then worktree creation
