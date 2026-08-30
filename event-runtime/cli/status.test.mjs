@@ -39,6 +39,12 @@ describe("status and doctor commands", () => {
       writes.length = 0;
       await status({ status: async () => payload }, ["--json"]);
       expect(JSON.parse(writes[0]).anomalies).toContain("dispatch_paused");
+
+      writes.length = 0;
+      await status({
+        status: async () => ({ ...payload, policy: { dispatchPaused: false } }),
+      });
+      expect(writes.some((line) => line.startsWith("dispatch"))).toBe(false);
     } finally {
       console.log = originalLog;
     }
