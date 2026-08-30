@@ -22,7 +22,14 @@ import {
   poolCounts,
   poolDecision,
 } from "../lib/workers.mjs";
-import { CLI_PATH, fail, flagValue, log } from "./shared.mjs";
+import {
+  CLI_PATH,
+  fail,
+  flagValue,
+  log,
+  parseWorkerLabel,
+  validWorkerPollMs,
+} from "./shared.mjs";
 
 // ---------------------------------------------------------------------------
 // supervise — the worker pool supervisor (WM-226; workers doc §2a)
@@ -186,8 +193,8 @@ export function workerPassthroughArgs(args) {
   if (args.includes("--reload-on-change"))
     passthrough.push("--reload-on-change");
   for (let i = 0; i < args.length; i += 1) {
-    if (args[i] === "--label")
-      passthrough.push("--label", String(args[i + 1] ?? ""));
+    if (args[i] !== "--label") continue;
+    if (parseWorkerLabel(args[i + 1])) passthrough.push("--label", args[i + 1]);
   }
   return passthrough;
 }
@@ -275,6 +282,14 @@ export default async function supervise(
     return fail(
       "supervise: --interval-ms must be an integer between 100 and 60000",
     );
+  }
+  const pollMs = Number(flagValue(args, "--poll-ms") ?? 500);
+  if (!validWorkerPollMs(pollMs)) {
+    return fail("supervise: --poll-ms must be an integer between 25 and 5000");
+  }
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] === "--label" && !parseWorkerLabel(args[i + 1]))
+      return fail("supervise: --label expects key=value");
   }
   const drainTimeoutSeconds = Number(flagValue(args, "--drain-timeout") ?? 60);
   if (

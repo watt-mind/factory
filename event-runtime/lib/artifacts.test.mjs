@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  statSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
@@ -199,6 +200,49 @@ describe("storeCollected (OPS-406)", () => {
     expect(stored[0].sizeBytes).toBe(Buffer.byteLength("identical content"));
   });
 
+  test("refreshes a stale deduplicated blob so pruning preserves it", () => {
+    const db = openDb(":memory:");
+    const storeRoot = tmp("evrt-store-");
+    const workspaceDir = tmp("evrt-ws-");
+    const file = path.join(workspaceDir, "valid.log");
+    const bytes = "identical content";
+    const hash = sha256Hex(Buffer.from(bytes));
+    const dest = path.join(storeRoot, hash);
+    const olderThanMs = 7 * 24 * 60 * 60 * 1000;
+    const staleAt = new Date(Date.now() - olderThanMs - 1);
+    writeFileSync(file, bytes);
+    mkdirSync(storeRoot, { recursive: true });
+    writeFileSync(dest, bytes);
+    utimesSync(dest, staleAt, staleAt);
+
+    storeCollected({
+      entries: [{ kind: "log", uri: `file://${file}`, sha256: hash }],
+      storeRoot,
+      workspaceDir,
+    });
+
+    expect(statSync(dest).mtimeMs).toBeGreaterThan(staleAt.getTime());
+    expect(pruneArtifacts(db, storeRoot, { olderThanMs })).toMatchObject({
+      deleted: 0,
+    });
+    expect(existsSync(dest)).toBe(true);
+
+    const untouched = makeStore(bytes);
+    utimesSync(
+      path.join(untouched.storeRoot, untouched.hash),
+      staleAt,
+      staleAt,
+    );
+    expect(
+      pruneArtifacts(db, untouched.storeRoot, { olderThanMs }),
+    ).toMatchObject({
+      deleted: 1,
+    });
+    expect(existsSync(path.join(untouched.storeRoot, untouched.hash))).toBe(
+      false,
+    );
+  });
+
   test("interrupted or failed write leaves no tmp files and no readable entry (OPS-439)", () => {
     const storeRoot = tmp("evrt-store-");
     const workspaceDir = tmp("evrt-ws-");
@@ -262,6 +306,27 @@ describe("result artifacts (WM-858)", () => {
     expect(storeResultArtifact({ artifact, artifactHash, storeRoot })).toEqual(
       stored,
     );
+  });
+
+  test("refreshes a stale deduplicated result blob so pruning preserves it", () => {
+    const db = openDb(":memory:");
+    const storeRoot = tmp("evrt-result-store-");
+    const artifact = { outcome: "UPDATED", pr: 669 };
+    const artifactHash = hashJson(artifact);
+    const hash = artifactHash.slice("sha256:".length);
+    const dest = path.join(storeRoot, hash);
+    const olderThanMs = 7 * 24 * 60 * 60 * 1000;
+    const staleAt = new Date(Date.now() - olderThanMs - 1);
+
+    storeResultArtifact({ artifact, artifactHash, storeRoot });
+    utimesSync(dest, staleAt, staleAt);
+    storeResultArtifact({ artifact, artifactHash, storeRoot });
+
+    expect(statSync(dest).mtimeMs).toBeGreaterThan(staleAt.getTime());
+    expect(pruneArtifacts(db, storeRoot, { olderThanMs })).toMatchObject({
+      deleted: 0,
+    });
+    expect(existsSync(dest)).toBe(true);
   });
 
   test("inventory and prune treat the singular result artifact as a live result reference", () => {
