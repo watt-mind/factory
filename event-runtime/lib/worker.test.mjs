@@ -1198,6 +1198,31 @@ describe("worker", () => {
     expect(summary.reasonCode).toBe("contract_violation");
   });
 
+  test("a trace recorder that cannot be prepared degrades to a no-op instead of throwing out of executeClaimed (#1330)", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec());
+    linkEvent(db, spec.runId);
+    db.exec(`DROP TABLE attempt_trace`);
+    const err = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const summary = await runOnce(
+        db,
+        registry,
+        adapters,
+        opts({ artifactStore: freshRoot() }),
+      );
+      expect(summary.terminalState).toBe("COMPLETED");
+      expect(runState(db, spec.runId)).toBe("COMPLETED");
+      expect(
+        err.mock.calls.some((c) =>
+          String(c[0]).includes("trace recorder unavailable"),
+        ),
+      ).toBe(true);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
   test("no-result: FAILED/contract_violation", async () => {
     const db = openDb(":memory:");
     const spec = queueRun(db, makeSpec({ input: { repos: ["no-result"] } }));

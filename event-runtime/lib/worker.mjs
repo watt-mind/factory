@@ -2703,7 +2703,22 @@ export async function executeClaimed(
   // auditor needs, so it must not be attached to the success path alone.
   // Null until admission runs, and null for every confined run.
   let filesystemConfinementReceipt = null;
-  const recorder = traceRecorder(db, { runId, attempt });
+  // The recorder is built before the main `try` so terminal-error reporting
+  // can use it; its construction prepares a statement and must therefore
+  // never throw out of executeClaimed (§14: trace failures stay invisible to
+  // the attempt). Fall back to a no-op recorder with the same call surface.
+  const recorder = (() => {
+    try {
+      return traceRecorder(db, { runId, attempt });
+    } catch (err) {
+      console.error(
+        `[worker] trace recorder unavailable for run ${runId} attempt ${attempt}: ${err?.message ?? String(err)}`,
+      );
+      const noop = () => {};
+      noop.stats = () => ({ recorded: 0, dropped: 0 });
+      return noop;
+    }
+  })();
   const recordTerminalError = (operation, err) => {
     const message = err?.message ?? String(err);
     console.error(
