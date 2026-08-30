@@ -15,6 +15,123 @@ set -euo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/worktree-common.sh"
 
+# `up` can start several detached daemons before an endpoint health check
+# proves the stack is usable. Keep this invocation's pidfiles separate from
+# pre-existing daemons: an error must clean up what we started, but never tear
+# down a daemon an operator already had running.
+UP_STARTED_PIDFILES=()
+UP_STARTED_LABELS=()
+UP_PREEXISTING_PIDFILES=()
+UP_PREEXISTING_PIDS=()
+# Only an `up` that has taken its snapshot may clean up on `die`. Every other
+# action (down, tail, a bad option, the __supervise-* loops) has an empty
+# snapshot, and an empty snapshot would make every pidfile in RUN_DIR look like
+# ours — `factory tail nosuchlog` must never stop the operator's live stack.
+UP_SNAPSHOT_TAKEN=0
+
+snapshot_up_pidfiles() {
+  local pidfile
+  for pidfile in "$RUN_DIR"/*.pid; do
+    [[ -f "$pidfile" ]] || continue
+    UP_PREEXISTING_PIDFILES+=("$pidfile")
+    UP_PREEXISTING_PIDS+=("$(cat "$pidfile" 2>/dev/null || true)")
+  done
+  UP_SNAPSHOT_TAKEN=1
+}
+
+up_pidfile_preexisted_unchanged() { # <pidfile>
+  local pidfile="$1" i current
+  current="$(cat "$pidfile" 2>/dev/null || true)"
+  # Empty-array guards keep "${arr[@]}" safe under bash 3.2 + set -u.
+  [[ ${#UP_PREEXISTING_PIDFILES[@]} -gt 0 ]] || return 1
+  for i in "${!UP_PREEXISTING_PIDFILES[@]}"; do
+    if [[ "${UP_PREEXISTING_PIDFILES[$i]}" == "$pidfile" \
+      && "${UP_PREEXISTING_PIDS[$i]}" == "$current" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+track_up_pidfile() { # <label> <pidfile>
+  local label="$1" pidfile="$2" existing
+  if [[ ${#UP_STARTED_PIDFILES[@]} -gt 0 ]]; then
+    for existing in "${UP_STARTED_PIDFILES[@]}"; do
+      [[ "$existing" == "$pidfile" ]] && return 0
+    done
+  fi
+  UP_STARTED_PIDFILES+=("$pidfile")
+  UP_STARTED_LABELS+=("$label")
+}
+
+track_up_pool_pidfiles() {
+  local pidfile label
+  for pidfile in "$RUN_DIR/supervisor.pid" "$RUN_DIR"/worker-[0-9]*.pid; do
+    [[ -f "$pidfile" ]] || continue
+    up_pidfile_preexisted_unchanged "$pidfile" && continue
+    label="worker pool $(basename "${pidfile%.pid}")"
+    track_up_pidfile "$label" "$pidfile"
+  done
+}
+
+cleanup_up_daemons() {
+  local round i pidfile label
+  [[ "$UP_SNAPSHOT_TAKEN" -eq 1 ]] || return 0
+  # The pool supervisor creates its own supervisor/worker-N pidfiles after the
+  # top-level worker daemon is spawned. Discover those before teardown so its
+  # detached worker groups are terminated too, while snapshot-matched files
+  # belonging to a pre-existing stack remain untouched.
+  track_up_pool_pidfiles
+  [[ ${#UP_STARTED_PIDFILES[@]} -gt 0 ]] || return 0
+
+  warn "up failed — stopping daemons started by this invocation"
+  # Re-scan after the first await: a just-spawned pool supervisor can publish
+  # its detached worker pidfiles while the top-level supervisor is stopping.
+  for round in 1 2; do
+    track_up_pool_pidfiles
+    for i in "${!UP_STARTED_PIDFILES[@]}"; do
+      pidfile="${UP_STARTED_PIDFILES[$i]}"
+      label="${UP_STARTED_LABELS[$i]}"
+      term_daemon "$pidfile" "$label" || true
+    done
+    for i in "${!UP_STARTED_PIDFILES[@]}"; do
+      pidfile="${UP_STARTED_PIDFILES[$i]}"
+      label="${UP_STARTED_LABELS[$i]}"
+      await_daemon "$pidfile" "$label" || true
+      # await_daemon normally removes this itself. Keep the invariant even for
+      # a platform-specific implementation that only waits, or a dead child
+      # whose pidfile was never valid.
+      rm -f "$pidfile"
+      if [[ "$(basename "$pidfile")" == worker-[0-9]*.pid ]]; then
+        rm -f "${pidfile%.pid}.drain" "${pidfile%.pid}.id"
+      fi
+    done
+  done
+  UP_STARTED_PIDFILES=()
+  UP_STARTED_LABELS=()
+}
+
+die() {
+  cleanup_up_daemons
+  printf '\033[31merror:\033[0m %s\n' "$*" >&2
+  exit 1
+}
+
+spawn_daemon_tracked() { # <label> <pidfile> <logfile> <workdir> <cmd...>
+  local label="$1" pidfile="$2"
+  shift 2
+  spawn_daemon "$pidfile" "$@" || die "failed to start $label — check logs at $1"
+  track_up_pidfile "$label" "$pidfile"
+}
+
+print_daemon_command() { # <label> <cmd...>
+  local label="$1"
+  shift
+  printf '  %s: ' "$label"
+  printf '%q ' "$@"
+  printf '\n'
+}
+
 ACTION="${1:-up}"
 shift || true
 
@@ -23,7 +140,9 @@ RUN_DIR="${FACTORY_RUN_DIR:-$HOME/.factory/run}"
 API_PORT="${FACTORY_EVENT_PORT:-7381}"
 WEB_PORT="${FACTORY_EVENT_WEB_PORT:-7382}"
 
-mkdir -p "$RUN_DIR" "$HOME_DIR"
+# `up` creates these itself once `--dry-run` has had its chance to exit: a dry
+# run must leave no trace on disk.
+if [[ "$ACTION" != "up" ]]; then mkdir -p "$RUN_DIR" "$HOME_DIR"; fi
 REPO="$(repo_root)"
 
 elapsed_seconds() {
@@ -50,9 +169,12 @@ cleanup_stale_fake_runtimes() {
     return 0
   }
 
-  local pid pgid elapsed command age_seconds process_with_env seen_groups=" "
+  local pid pgid elapsed command age_seconds process_with_env seen_groups=" " processes
   local current_pgid
   current_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d '[:space:]')"
+  # A captured stream works in minimal chroots that expose /proc but omit the
+  # conventional /dev/fd symlink Bash process substitution relies on.
+  processes="$(ps -axo pid=,pgid=,etime=,command= 2>/dev/null || true)"
   while read -r pid pgid elapsed command; do
     [[ "$pid" =~ ^[0-9]+$ && "$pid" -ne $$ ]] || continue
     [[ "$pgid" =~ ^[0-9]+$ ]] || continue
@@ -73,7 +195,7 @@ cleanup_stale_fake_runtimes() {
     # being mistaken for test debris. Marked runtimes are detached group
     # leaders, so a group kill also removes wrappers and grandchildren.
     kill -KILL -- "-$pgid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
-  done < <(ps -axo pid=,pgid=,etime=,command=)
+  done <<<"$processes"
 }
 
 # PIDs listening on <port> that THIS checkout started (WM-657, #1068). Ownership
@@ -84,13 +206,14 @@ cleanup_stale_fake_runtimes() {
 # on the shared operator box.
 owned_port_holders() { # <port>
   command -v lsof >/dev/null 2>&1 || return 0
-  local pid cmd
+  local pid cmd holders
+  holders="$(lsof -nP -tiTCP:"$1" -sTCP:LISTEN 2>/dev/null | sort -u || true)"
   while read -r pid; do
     [[ "$pid" =~ ^[0-9]+$ && "$pid" -ne $$ ]] || continue
     cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
     [[ "$cmd" == *"$REPO/"* ]] || continue
     printf '%s\n' "$pid"
-  done < <(lsof -nP -tiTCP:"$1" -sTCP:LISTEN 2>/dev/null | sort -u)
+  done <<<"$holders"
 }
 
 # Reap an orphan of ours still holding <port> after the pidfile teardown, or
@@ -129,8 +252,9 @@ reap_owned_port() { # <port> <label>
 # never touched. This is the acceptance guarantee that no cli.mjs serve/work or
 # web/serve.mjs the stack owns remains after `down`.
 reap_owned_processes() {
-  local pid pgid cmd current_pgid
+  local pid pgid cmd current_pgid processes
   current_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d '[:space:]')"
+  processes="$(ps -axo pid=,pgid=,command= 2>/dev/null || true)"
   while read -r pid pgid cmd; do
     [[ "$pid" =~ ^[0-9]+$ && "$pid" -ne $$ ]] || continue
     [[ "$pgid" =~ ^[0-9]+$ ]] || continue
@@ -143,7 +267,7 @@ reap_owned_processes() {
     esac
     warn "reaping orphaned stack process pid $pid: $cmd"
     kill -KILL -- "-$pgid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
-  done < <(ps -axo pid=,pgid=,command=)
+  done <<<"$processes"
 }
 
 case "$ACTION" in
@@ -151,6 +275,7 @@ case "$ACTION" in
     ADAPTER_FLAG=()
     DEV=0
     NO_BUILD=0
+    DRY_RUN=0
     WEB_BUILD_MESSAGE=""
     WORKERS_SPEC=""
     while [[ $# -gt 0 ]]; do
@@ -161,11 +286,13 @@ case "$ACTION" in
         --web-port) WEB_PORT="$2"; shift ;;
         --dev) DEV=1 ;;
         --no-build) NO_BUILD=1 ;;
+        --dry-run) DRY_RUN=1 ;;
         --workers) WORKERS_SPEC="$2"; shift ;;
         -h|--help)
-          echo "usage: factory up [--fake] [--dev] [--no-build] [--workers min:max] [--port 7381] [--web-port 7382]"
+          echo "usage: factory up [--fake] [--dev] [--no-build] [--dry-run] [--workers min:max] [--port 7381] [--web-port 7382]"
           echo "  --dev       live reload: serve --watch, vite HMR web UI, worker restarts when idle"
           echo "  --no-build  serve the existing web bundle without checking whether it is stale"
+          echo "  --dry-run   print resolved ports and daemon commands without starting anything"
           echo "  --workers   supervised pool scaling between min and max on queue depth (WM-226);"
           echo "             without it, a workers: block in config/policy.yaml selects the pool"
           exit 0
@@ -181,6 +308,75 @@ case "$ACTION" in
     if [[ "$DEV" -eq 1 && -n "$WORKERS_SPEC" ]]; then
       die "--workers and --dev both replace the worker daemon — run the pool without --dev"
     fi
+
+    # Policy-driven by default: the presence of a workers: block is the switch,
+    # so a checkout without one keeps starting exactly one plain worker (the
+    # pre-WM-226 behavior, unchanged).
+    POOL=0
+    if [[ -n "$WORKERS_SPEC" ]]; then
+      POOL=1
+    elif [[ "$DEV" -eq 0 && -f "$REPO/config/policy.yaml" ]] && grep -qE '^workers:[[:space:]]*(#.*)?$' "$REPO/config/policy.yaml"; then
+      POOL=1
+    fi
+
+    # --dev swaps each of the three daemons for its reloading twin and changes
+    # nothing else. SERVE_ARGS/WORKER_ARGS are built rather than branched so the
+    # non-dev command stays exactly what it was before this flag existed. (They
+    # are never empty, which keeps "${arr[@]}" safe under bash 3.2 + set -u.)
+    SERVE_ARGS=(serve --port "$API_PORT")
+    if [[ ${#ADAPTER_FLAG[@]} -gt 0 ]]; then
+      SERVE_ARGS+=("${ADAPTER_FLAG[@]}")
+    fi
+    WORKER_ARGS=(bun "$REPO/event-runtime/cli.mjs" work)
+    if [[ "$POOL" -eq 1 ]]; then
+      # The supervisor takes the worker.pid slot; the workers it spawns get
+      # their own worker-N.pid files in the same run dir, so `down`, `tail`, and
+      # `factory events status` all keep working on the pool as a whole.
+      WORKER_ARGS=(bun "$REPO/event-runtime/cli.mjs" supervise)
+      if [[ -n "$WORKERS_SPEC" ]]; then
+        WORKER_ARGS+=(--workers "$WORKERS_SPEC")
+      fi
+    fi
+    if [[ "$DEV" -eq 1 ]]; then
+      SERVE_ARGS+=(--watch)
+      # The worker is supervised rather than watched: it exits 75 at an idle
+      # poll boundary and this same script re-execs it (see __supervise-worker).
+      WORKER_ARGS=(bash "$REPO/bin/live-stack.sh" __supervise-worker --reload-on-change)
+    fi
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      printf 'dry run — no daemons will be started\n'
+      printf 'RUN_DIR=%s\nAPI_PORT=%s\nWEB_PORT=%s\n' "$RUN_DIR" "$API_PORT" "$WEB_PORT"
+      printf 'daemon commands:\n'
+      if [[ -n "${FACTORY_GH_APP_ID:-}" && -n "${FACTORY_GH_APP_PRIVATE_KEY_PATH:-}" ]]; then
+        print_daemon_command "GitHub App token daemon" \
+          bun "$REPO/lib/control-plane/gh-app-auth.mjs" --daemon
+      fi
+      print_daemon_command "event runtime" \
+        env FACTORY_EVENT_HOME="$HOME_DIR" FACTORY_EVENT_PORT="$API_PORT" \
+        bun "$REPO/event-runtime/cli.mjs" "${SERVE_ARGS[@]}"
+      print_daemon_command "worker" \
+        env FACTORY_EVENT_HOME="$HOME_DIR" FACTORY_EVENT_PORT="$API_PORT" \
+        "${WORKER_ARGS[@]}"
+      if [[ "$DEV" -eq 1 ]]; then
+        print_daemon_command "web server" \
+          env FACTORY_EVENT_PORT="$API_PORT" FACTORY_EVENT_WEB_PORT="$WEB_PORT" \
+          bunx vite --host 127.0.0.1 --port "$WEB_PORT" --strictPort
+      else
+        print_daemon_command "web server" \
+          env FACTORY_EVENT_PORT="$API_PORT" FACTORY_EVENT_WEB_PORT="$WEB_PORT" \
+          bun "$REPO/event-runtime/web/serve.mjs"
+      fi
+      print_daemon_command "web supervisor" \
+        env FACTORY_RUN_DIR="$RUN_DIR" FACTORY_EVENT_PORT="$API_PORT" FACTORY_EVENT_WEB_PORT="$WEB_PORT" \
+        bash "$REPO/bin/live-stack.sh" __supervise-web "$DEV"
+      exit 0
+    fi
+
+    mkdir -p "$RUN_DIR" "$HOME_DIR"
+    # Record what was already running before this invocation starts anything,
+    # so a failed `up` can tell its own daemons from the operator's.
+    snapshot_up_pidfiles
 
     # Dependency freshness (WM-312). A runtime dependency added to the repo does
     # not exist on the running stack until someone remembers `bun install` after
@@ -217,39 +413,7 @@ case "$ACTION" in
     ensure_deps "root" "$REPO"
     ensure_deps "event-runtime/web" "$REPO/event-runtime/web"
 
-    # Policy-driven by default: the presence of a workers: block is the switch,
-    # so a checkout without one keeps starting exactly one plain worker (the
-    # pre-WM-226 behavior, unchanged).
-    POOL=0
-    if [[ -n "$WORKERS_SPEC" ]]; then
-      POOL=1
-    elif [[ "$DEV" -eq 0 && -f "$REPO/config/policy.yaml" ]] && grep -qE '^workers:[[:space:]]*(#.*)?$' "$REPO/config/policy.yaml"; then
-      POOL=1
-    fi
-
-    # --dev swaps each of the three daemons for its reloading twin and changes
-    # nothing else. SERVE_ARGS/WORKER_ARGS are built rather than branched so the
-    # non-dev command stays exactly what it was before this flag existed. (They
-    # are never empty, which keeps "${arr[@]}" safe under bash 3.2 + set -u.)
-    SERVE_ARGS=(serve --port "$API_PORT")
-    if [[ ${#ADAPTER_FLAG[@]} -gt 0 ]]; then
-      SERVE_ARGS+=("${ADAPTER_FLAG[@]}")
-    fi
-    WORKER_ARGS=(bun "$REPO/event-runtime/cli.mjs" work)
-    if [[ "$POOL" -eq 1 ]]; then
-      # The supervisor takes the worker.pid slot; the workers it spawns get
-      # their own worker-N.pid files in the same run dir, so `down`, `tail`, and
-      # `factory events status` all keep working on the pool as a whole.
-      WORKER_ARGS=(bun "$REPO/event-runtime/cli.mjs" supervise)
-      if [[ -n "$WORKERS_SPEC" ]]; then
-        WORKER_ARGS+=(--workers "$WORKERS_SPEC")
-      fi
-    fi
     if [[ "$DEV" -eq 1 ]]; then
-      SERVE_ARGS+=(--watch)
-      # The worker is supervised rather than watched: it exits 75 at an idle
-      # poll boundary and this same script re-execs it (see __supervise-worker).
-      WORKER_ARGS=(bash "$REPO/bin/live-stack.sh" __supervise-worker --reload-on-change)
       if [[ ! -d "$REPO/event-runtime/web/node_modules" ]]; then
         die "--dev needs the web deps for vite — run: (cd $REPO/event-runtime/web && bun install)"
       fi
@@ -322,7 +486,7 @@ case "$ACTION" in
           warn "initial GitHub App token mint failed — control-plane falls back to the operator PAT until the daemon succeeds (see $RUN_DIR/gh-app-auth.log)"
         fi
         info "starting GitHub App token-refresh daemon"
-        spawn_daemon "$RUN_DIR/gh-app-auth.pid" "$RUN_DIR/gh-app-auth.log" "$REPO" \
+        spawn_daemon_tracked "GitHub App token daemon" "$RUN_DIR/gh-app-auth.pid" "$RUN_DIR/gh-app-auth.log" "$REPO" \
           bun "$REPO/lib/control-plane/gh-app-auth.mjs" --daemon
       fi
     fi
@@ -332,7 +496,7 @@ case "$ACTION" in
       info "event runtime already running (pid $(cat "$RUN_DIR/serve.pid"), port $API_PORT)"
     else
       info "starting event runtime on $API_PORT (home $HOME_DIR)"
-      spawn_daemon "$RUN_DIR/serve.pid" "$RUN_DIR/serve.log" "$REPO" \
+      spawn_daemon_tracked "event runtime" "$RUN_DIR/serve.pid" "$RUN_DIR/serve.log" "$REPO" \
         env FACTORY_EVENT_HOME="$HOME_DIR" FACTORY_EVENT_PORT="$API_PORT" \
         bun "$REPO/event-runtime/cli.mjs" "${SERVE_ARGS[@]}"
     fi
@@ -355,7 +519,7 @@ case "$ACTION" in
       else
         info "starting worker"
       fi
-      spawn_daemon "$RUN_DIR/worker.pid" "$RUN_DIR/worker.log" "$REPO" \
+      spawn_daemon_tracked "worker" "$RUN_DIR/worker.pid" "$RUN_DIR/worker.log" "$REPO" \
         env FACTORY_EVENT_HOME="$HOME_DIR" FACTORY_EVENT_PORT="$API_PORT" \
         "${WORKER_ARGS[@]}"
     fi
@@ -369,11 +533,11 @@ case "$ACTION" in
         # vite's own dev server, not the static serve.mjs: HMR replaces the
         # module in the open tab, so no `bun run build` step in the loop. It
         # proxies /api to FACTORY_EVENT_PORT exactly as serve.mjs does.
-        spawn_daemon "$RUN_DIR/web.pid" "$RUN_DIR/web.log" "$REPO/event-runtime/web" \
+        spawn_daemon_tracked "web server" "$RUN_DIR/web.pid" "$RUN_DIR/web.log" "$REPO/event-runtime/web" \
           env FACTORY_EVENT_PORT="$API_PORT" FACTORY_EVENT_WEB_PORT="$WEB_PORT" \
           bunx vite --host 127.0.0.1 --port "$WEB_PORT" --strictPort
       else
-        spawn_daemon "$RUN_DIR/web.pid" "$RUN_DIR/web.log" "$REPO/event-runtime/web" \
+        spawn_daemon_tracked "web server" "$RUN_DIR/web.pid" "$RUN_DIR/web.log" "$REPO/event-runtime/web" \
           env FACTORY_EVENT_PORT="$API_PORT" FACTORY_EVENT_WEB_PORT="$WEB_PORT" \
           bun "$REPO/event-runtime/web/serve.mjs"
       fi
@@ -386,7 +550,7 @@ case "$ACTION" in
       info "web supervisor already running (pid $(cat "$RUN_DIR/web-supervisor.pid"))"
     else
       info "starting web supervisor"
-      spawn_daemon "$RUN_DIR/web-supervisor.pid" "$RUN_DIR/web.log" "$REPO" \
+      spawn_daemon_tracked "web supervisor" "$RUN_DIR/web-supervisor.pid" "$RUN_DIR/web.log" "$REPO" \
         env FACTORY_RUN_DIR="$RUN_DIR" FACTORY_EVENT_PORT="$API_PORT" FACTORY_EVENT_WEB_PORT="$WEB_PORT" \
         bash "$REPO/bin/live-stack.sh" __supervise-web "$DEV"
     fi
@@ -398,6 +562,13 @@ case "$ACTION" in
       if curl -sf -m 1 "http://127.0.0.1:$WEB_PORT" >/dev/null 2>&1; then break; fi
       sleep 0.1
     done
+    # Warn, never die: the runtime and worker pool are healthy by now, and the
+    # web supervisor keeps retrying the static server. Tearing down a working
+    # stack because the UI bound slowly on a loaded box would be the worse
+    # outcome (#1396 review).
+    if ! curl -sf -m 1 "http://127.0.0.1:$WEB_PORT" >/dev/null 2>&1; then
+      warn "web server not responding on $WEB_PORT yet — the web supervisor keeps retrying; check logs at $RUN_DIR/web.log"
+    fi
 
     if [[ "$DEV" -eq 1 ]]; then
       printf '\n\033[32m==>\033[0m \033[1mready — live factory stack (dev, live reload)\033[0m\n\n'

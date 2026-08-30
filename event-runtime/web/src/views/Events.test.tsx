@@ -81,6 +81,43 @@ function ticketSchemaRegistry(eventType: string): AgentsView {
 }
 
 describe("Events component harness: selection & detail view", () => {
+  test("loads older event pages with the cursor and keeps existing rows", async () => {
+    const newest = stubEvent("evt_newest", "admitted");
+    const older = stubEvent("evt_older", "admitted");
+    const pages: Array<{ before?: string }> = [];
+
+    await withApi(
+      {
+        events: async (_status, page = {}) => {
+          pages.push(page);
+          return page.before === "cursor-1"
+            ? { events: [older], nextBefore: null }
+            : { events: [newest], nextBefore: "cursor-1" };
+        },
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { container, getByRole, getByText } = renderEvents();
+
+        await waitFor(() =>
+          expect(
+            container.querySelector('td[title="evt_newest"]'),
+          ).toBeTruthy(),
+        );
+        expect(getByText(/1 loaded row · more events available/)).toBeTruthy();
+        fireEvent.click(getByRole("button", { name: "Older events" }));
+
+        await waitFor(() => {
+          expect(
+            container.querySelector('td[title="evt_newest"]'),
+          ).toBeTruthy();
+          expect(container.querySelector('td[title="evt_older"]')).toBeTruthy();
+        });
+        expect(pages.some((page) => page.before === "cursor-1")).toBe(true);
+      },
+    );
+  });
+
   test("renders an x-ui ticket payload column from its route schema", async () => {
     localStorage.setItem(
       "evrt-display-events",
@@ -447,6 +484,37 @@ describe("Events component harness: cross-tab reveal", () => {
           expect(tab.getAttribute("aria-selected")).toBe("true");
           expect(onFocusConsumed).toHaveBeenCalled();
         });
+      },
+    );
+  });
+});
+
+describe("Events component harness: malformed /events pages (#1394)", () => {
+  test("a page without an events key renders the empty state instead of throwing", async () => {
+    await withApi(
+      {
+        events: async () =>
+          ({ nextBefore: null }) as unknown as { events: AdmittedEvent[] },
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { findByText } = renderEvents();
+        expect(await findByText(/No events\./i)).toBeTruthy();
+        expect(await findByText(/0 loaded rows/i)).toBeTruthy();
+      },
+    );
+  });
+
+  test("a bare [] /events response renders the empty state instead of throwing", async () => {
+    await withApi(
+      {
+        events: async () => [] as unknown as { events: AdmittedEvent[] },
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { findByText } = renderEvents();
+        expect(await findByText(/No events\./i)).toBeTruthy();
+        expect(await findByText(/0 loaded rows/i)).toBeTruthy();
       },
     );
   });

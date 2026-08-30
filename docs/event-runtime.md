@@ -928,6 +928,9 @@ are **clients, not the runtime**: every read and every verb goes through the
 same control API the runtime exposes, never directly into the database. That keeps a future web app a second client of
 identical endpoints, with the same audit trail, rather than a reimplementation.
 
+All control-API list endpoints reject non-integer, out-of-range `limit` values
+with `422 { error: "invalid_limit", message }`.
+
 **Push notifications (WM-65).** For the operator who is _not_ watching, the
 serve tick carries a push channel (`event-runtime/lib/notify.mjs`) over the
 configured notify transport, covering exactly the two states that wait on a

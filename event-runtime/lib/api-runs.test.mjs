@@ -14,6 +14,7 @@ import {
 import { memoryControlPlane } from "../../lib/control-plane/index.mjs";
 import {
   TICKET_DETAIL_CACHE_TTL_MS,
+  clearObservedModelCache,
   clearTicketDetailCache,
   mergeTicketSupply,
   scanTicketSupply,
@@ -553,7 +554,8 @@ describe("list views carry repos[] (OPS-356)", () => {
 
 describe("ticket journey join (WM-595)", () => {
   test("GET /runs?ticket= joins explicit ticket activity and PR-linked merge runs", async () => {
-    const s = await makeServer();
+    const home = tmpDir("evrt-journey-home-");
+    const s = await makeServer({ env: { name: "test", home } });
     try {
       await s.client.replay(
         envelope({
@@ -678,6 +680,52 @@ describe("ticket journey join (WM-595)", () => {
 
       const unknown = await fetch(s.url("/runs?ticket=WM-999"));
       expect((await unknown.json()).activity).toBe(false);
+
+      // The journey view reaches runView without a transcript reader; on a
+      // cache miss it must fall back to the store rather than 500 (#1421).
+      clearObservedModelCache();
+      const transcriptSha = "c".repeat(64);
+      mkdirSync(path.join(home, "artifacts"), { recursive: true });
+      writeFileSync(
+        path.join(home, "artifacts", transcriptSha),
+        `{"type":"system","subtype":"init","model":"claude-opus-5[1m]"}\n`,
+        "utf8",
+      );
+      s.db.query(`UPDATE results SET result_json = ? WHERE run_id = ?`).run(
+        JSON.stringify({
+          terminalState: "completed",
+          artifact: { outcome: "PR_OPEN", ticket: "WM-595" },
+          artifacts: [{ kind: "transcript", sha256: transcriptSha }],
+        }),
+        "run_ticket",
+      );
+      const withTranscript = await fetch(s.url("/runs?ticket=WM-595"));
+      expect(withTranscript.status).toBe(200);
+      const journeyRuns = (await withTranscript.json()).runs;
+      expect(
+        journeyRuns.find((run) => run.run.runId === "run_ticket"),
+      ).toHaveProperty("observedModel", "claude-opus-5[1m]");
+
+      // The memo is keyed by store root too: the same hash under another
+      // artifacts directory is a fresh read, not a stale hit.
+      const otherStore = tmpDir("evrt-other-artifacts-");
+      mkdirSync(otherStore, { recursive: true });
+      writeFileSync(
+        path.join(otherStore, transcriptSha),
+        `{"type":"system","subtype":"init","model":"claude-sonnet-5"}\n`,
+        "utf8",
+      );
+      expect(
+        ticketJourneyView(s.db, "WM-595", {
+          artifactsDir: otherStore,
+        }).runs.find((run) => run.run.runId === "run_ticket").observedModel,
+      ).toBe("claude-sonnet-5");
+      expect(
+        ticketJourneyView(s.db, "WM-595", {
+          artifactsDir: path.join(home, "artifacts"),
+        }).runs.find((run) => run.run.runId === "run_ticket").observedModel,
+      ).toBe("claude-opus-5[1m]");
+      clearObservedModelCache();
       const invalid = await fetch(s.url("/runs?ticket=not-a-ticket"));
       expect(invalid.status).toBe(422);
     } finally {
@@ -1090,13 +1138,14 @@ describe("recent-ticket index (WM-821)", () => {
       expect(errBody.error).toBe("invalid_since");
 
       // Verify invalid limit returns 422
-      const resInvalidLimit = await fetch(s.url("/tickets?limit=abc"));
-      expect(resInvalidLimit.status).toBe(422);
-      expect((await resInvalidLimit.json()).error).toBe("invalid_limit");
-
-      const resNegativeLimit = await fetch(s.url("/tickets?limit=-5"));
-      expect(resNegativeLimit.status).toBe(422);
-      expect((await resNegativeLimit.json()).error).toBe("invalid_limit");
+      for (const limit of ["abc", "0", "201"]) {
+        const response = await fetch(s.url(`/tickets?limit=${limit}`));
+        expect(response.status).toBe(422);
+        expect(await response.json()).toMatchObject({
+          error: "invalid_limit",
+          message: "limit must be an integer between 1 and 200",
+        });
+      }
 
       // Verify alternative valid duration units (1w, 24h, 30m, 60s, ISO string)
       const resWeek = await fetch(s.url("/tickets?since=1w"));
@@ -1534,7 +1583,7 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
     }
   });
 
-  test("journal and outbox bound malformed limits and normalize journal cursors", async () => {
+  test("journal and outbox reject malformed limits and journal cursors", async () => {
     const s = await makeServer();
     try {
       const insertJournal = s.db.query(
@@ -1555,33 +1604,25 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
         }
       })();
 
-      for (const path of ["/journal?limit=-1", "/outbox?limit=-1"]) {
-        const response = await fetch(s.url(path));
-        expect(response.status).toBe(200);
-        const body = await response.json();
-        expect(body.entries ?? body.outbox).toHaveLength(1);
+      for (const endpoint of ["/journal", "/outbox"]) {
+        for (const limit of ["abc", "0", "501"]) {
+          const response = await fetch(s.url(`${endpoint}?limit=${limit}`));
+          expect(response.status).toBe(422);
+          expect(await response.json()).toMatchObject({
+            error: "invalid_limit",
+            message: "limit must be an integer between 1 and 500",
+          });
+        }
       }
 
-      for (const path of ["/journal?limit=999", "/outbox?limit=999"]) {
-        const response = await fetch(s.url(path));
-        expect(response.status).toBe(200);
-        const body = await response.json();
-        expect(body.entries ?? body.outbox).toHaveLength(500);
+      for (const since of ["not-a-cursor", "-1"]) {
+        const response = await fetch(s.url(`/journal?since=${since}`));
+        expect(response.status).toBe(422);
+        expect(await response.json()).toMatchObject({
+          error: "invalid_since",
+          message: expect.any(String),
+        });
       }
-
-      const journalFallback = await fetch(s.url("/journal?limit=abc"));
-      expect(journalFallback.status).toBe(200);
-      expect((await journalFallback.json()).entries).toHaveLength(100);
-
-      const outboxFallback = await fetch(s.url("/outbox?limit=abc"));
-      expect(outboxFallback.status).toBe(200);
-      expect((await outboxFallback.json()).outbox).toHaveLength(50);
-
-      const normalizedSince = await fetch(
-        s.url("/journal?since=not-a-cursor&limit=500"),
-      );
-      expect(normalizedSince.status).toBe(200);
-      expect((await normalizedSince.json()).entries).toHaveLength(500);
     } finally {
       s.close();
     }
@@ -1769,6 +1810,27 @@ describe("run trace surfacing (OPS-295)", () => {
       expect(rest.head).toBe(rest.entries.at(-1).seq);
       expect(rest.entries[0].attempt).toBe(1);
       expect(typeof rest.entries[0].ts).toBe("string");
+
+      for (const limit of ["abc", "0", "501"]) {
+        const response = await fetch(
+          `http://127.0.0.1:${port}/runs/${summary.runId}/trace?limit=${limit}`,
+        );
+        expect(response.status).toBe(422);
+        expect(await response.json()).toMatchObject({
+          error: "invalid_limit",
+          message: "limit must be an integer between 1 and 500",
+        });
+      }
+      for (const since of ["abc", "-1"]) {
+        const response = await fetch(
+          `http://127.0.0.1:${port}/runs/${summary.runId}/trace?since=${since}`,
+        );
+        expect(response.status).toBe(422);
+        expect(await response.json()).toMatchObject({
+          error: "invalid_since",
+          message: expect.any(String),
+        });
+      }
 
       // Caught up: since=head → no entries, head unchanged.
       const done = await client.trace(summary.runId, { since: rest.head });

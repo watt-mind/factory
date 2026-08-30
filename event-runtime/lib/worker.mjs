@@ -10,7 +10,7 @@
  * mid-flight surfaces here as IllegalTransition; the worker stops quietly,
  * publishing nothing.
  */
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   cpSync,
@@ -86,6 +86,10 @@ import {
 import { createInboxItem } from "./inbox.mjs";
 import { persistMergeReviewFromResult } from "./merge-reviews.mjs";
 import { templateFor } from "./decision-templates.mjs";
+import {
+  DETACHED_SPAWN_OPTIONS,
+  killProcessGroup,
+} from "./adapters/child-process.mjs";
 
 const HARNESS_UNKNOWN_CODES = Object.freeze({
   skills: "harness_unknown_skill",
@@ -115,23 +119,90 @@ const INSTANCE_LOCAL_CONFIG_FILES = Object.freeze([
  * run while staying un-stageable — a copied-but-committable instance config
  * would leak the operator's routing/policy into the repo.
  */
-function ensureLocallyIgnored(checkoutPath, rel) {
-  const isIgnored = () =>
-    spawnSync("git", ["-C", checkoutPath, "check-ignore", "-q", "--", rel], {
-      encoding: "utf8",
-      timeout: workerSubprocessTimeoutMs(),
-      killSignal: "SIGKILL",
-    }).status === 0;
-  if (isIgnored()) return true;
-  const resolved = spawnSync(
-    "git",
-    ["-C", checkoutPath, "rev-parse", "--git-path", "info/exclude"],
-    {
-      encoding: "utf8",
-      timeout: workerSubprocessTimeoutMs(),
-      killSignal: "SIGKILL",
-    },
-  );
+/**
+ * Run one bounded `git` probe on the claim path. Always settles: on normal
+ * exit (`close`), on a spawn failure (`error`, e.g. ENOENT — Node need not
+ * emit `close` after that), and on the subprocess-timeout ceiling. stderr is
+ * discarded rather than piped so a chatty git can never stall the probe on an
+ * undrained pipe. `command` exists only so tests can point the probe at a
+ * non-existent binary.
+ */
+export async function runClaimPathGitProbe({
+  checkoutPath,
+  args,
+  name,
+  onTimeout,
+  command = "git",
+}) {
+  const timeoutMs = workerSubprocessTimeoutMs();
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(command, args, {
+        ...DETACHED_SPAWN_OPTIONS,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+    } catch (error) {
+      resolve({ status: null, stdout: "", error });
+      return;
+    }
+
+    let stdout = "";
+    let error = null;
+    let settled = false;
+    const settle = (status) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ status, stdout, error });
+    };
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.once("error", (spawnError) => {
+      error = spawnError;
+      // A failed spawn (ENOENT, EACCES) may never reach `close`; settle now so
+      // the claim path cannot hang on a missing or broken git binary.
+      settle(null);
+    });
+    const timer = setTimeout(() => {
+      error = Object.assign(
+        new Error(`git ${name} timed out after ${timeoutMs}ms`),
+        { code: "ETIMEDOUT" },
+      );
+      console.warn(
+        `[worker] claim-path git probe timed out: repo=${checkoutPath} probe=${name} ceiling=${timeoutMs}ms`,
+      );
+      try {
+        onTimeout?.({ repo: checkoutPath, name, ceilingMs: timeoutMs });
+      } catch {
+        // Trace observability cannot interfere with config provisioning.
+      }
+      killProcessGroup(child, { signal: "SIGKILL" });
+    }, timeoutMs);
+    timer.unref?.();
+    child.once("close", (status) => settle(status));
+  });
+}
+
+async function ensureLocallyIgnored(checkoutPath, rel, { onTimeout } = {}) {
+  const isIgnored = async () =>
+    (
+      await runClaimPathGitProbe({
+        checkoutPath,
+        args: ["-C", checkoutPath, "check-ignore", "-q", "--", rel],
+        name: "check-ignore",
+        onTimeout,
+      })
+    ).status === 0;
+  if (await isIgnored()) return true;
+  const resolved = await runClaimPathGitProbe({
+    checkoutPath,
+    args: ["-C", checkoutPath, "rev-parse", "--git-path", "info/exclude"],
+    name: "rev-parse",
+    onTimeout,
+  });
   if (resolved.status !== 0) return false;
   const excludeFile = path.resolve(checkoutPath, resolved.stdout.trim());
   try {
@@ -155,9 +226,10 @@ function ensureLocallyIgnored(checkoutPath, rel) {
  * back to examples and cannot use this factory instance's routing or policy.
  * The schedule overlay is excluded on purpose (see INSTANCE_LOCAL_CONFIG_FILES).
  */
-export function provisionInstanceLocalConfigs({
+export async function provisionInstanceLocalConfigs({
   checkoutPath,
   factoryRoot = process.env.FACTORY_ROOT || FACTORY_ROOT,
+  onProbeTimeout,
 } = {}) {
   if (!checkoutPath) return [];
   const sourceConfig = path.join(factoryRoot, "config");
@@ -192,7 +264,12 @@ export function provisionInstanceLocalConfigs({
     // silently skipped the copy, leaving only the tracked example, which the
     // client repo does not ship). Only fall back to the example if the path
     // cannot be made ignore-protected.
-    if (isGitCheckout && !ensureLocallyIgnored(checkoutPath, rel)) {
+    if (
+      isGitCheckout &&
+      !(await ensureLocallyIgnored(checkoutPath, rel, {
+        onTimeout: onProbeTimeout,
+      }))
+    ) {
       continue;
     }
     mkdirSync(destinationConfig, { recursive: true });
@@ -3342,7 +3419,21 @@ export async function executeClaimed(
     // separately for an escalation ownership transfer.
     checkoutPath = created.checkout?.path ?? null;
     worktreePath = created.worktree?.path ?? null;
-    provisionInstanceLocalConfigs({ checkoutPath });
+    // The guard is load-bearing, not redundant: provisioning is async, and
+    // awaiting it for a checkout-less run would yield before the adapter
+    // starts, letting a cancel issued right after the claim short-circuit the
+    // attempt instead of aborting a started adapter (OPS-417).
+    if (checkoutPath) {
+      await provisionInstanceLocalConfigs({
+        checkoutPath,
+        onProbeTimeout: ({ repo, name, ceilingMs }) =>
+          recorder("lifecycle", {
+            note: `probe_timeout:${name}`,
+            repo,
+            ceilingMs,
+          }),
+      });
+    }
     checkoutBaseline = checkoutPath ? repositoryStatus(checkoutPath) : null;
     worktreeRecord = created.worktree
       ? {
@@ -4405,84 +4496,108 @@ export function releaseStalledWorkerLease(
  */
 export function reapExpiredLeases(
   db,
-  { now = () => Date.now(), policyVersion = "unknown" } = {},
+  {
+    now = () => Date.now(),
+    policyVersion = "unknown",
+    onError = ({ runId, error }) =>
+      console.error(
+        `[worker] expired lease ${runId}: ${error?.message ?? String(error)}`,
+      ),
+  } = {},
 ) {
   const currentNow = resolveNow(now);
-  return txImmediate(db, () => {
-    const rows = db
-      .query(
-        `SELECT r.run_id, r.attempts, r.spec_json, r.state FROM runs r
-         JOIN attempts a ON a.run_id = r.run_id AND a.attempt = r.attempts
-         WHERE r.state IN ('LEASED', 'RUNNING', 'VERIFYING') AND a.lease_expires_at < ?`,
-      )
-      .all(iso(currentNow));
-    for (const row of rows) {
-      const spec = JSON.parse(row.spec_json);
-      const decision = retryDecision(db, row.run_id, spec, "lease_expired", {
-        includeCurrentFailure: true,
+  const nowIso = iso(currentNow);
+  const candidateSql = `SELECT r.run_id, r.attempts, r.spec_json, r.state FROM runs r
+       JOIN attempts a ON a.run_id = r.run_id AND a.attempt = r.attempts
+       WHERE r.state IN ('LEASED', 'RUNNING', 'VERIFYING') AND a.lease_expires_at < ?`;
+  const candidates = db.query(candidateSql).all(nowIso);
+  let reaped = 0;
+
+  for (const candidate of candidates) {
+    try {
+      const outcome = txImmediate(db, () => {
+        // The candidate list is a snapshot taken outside this transaction. A
+        // worker may have renewed the lease (or the run may have moved on)
+        // since; re-read under the write lock and only act when the row is
+        // still exactly the expired attempt we selected.
+        const row = db
+          .query(
+            `${candidateSql} AND r.run_id = ? AND r.attempts = ? AND r.state = ?`,
+          )
+          .get(nowIso, candidate.run_id, candidate.attempts, candidate.state);
+        if (!row) return "skipped";
+        const spec = JSON.parse(row.spec_json);
+        const decision = retryDecision(db, row.run_id, spec, "lease_expired", {
+          includeCurrentFailure: true,
+        });
+        const failureReason = terminalFailureReason(decision, "lease_expired");
+
+        // VERIFYING cannot transition directly to QUEUED; record its failure first.
+        if (row.state === "VERIFYING") {
+          transition(db, {
+            runId: row.run_id,
+            to: "FAILED",
+            actor: "reaper",
+            reason: failureReason,
+            attempt: row.attempts,
+            policyVersion,
+            now: currentNow,
+          });
+        }
+        finishAttempt(
+          db,
+          row.run_id,
+          row.attempts,
+          "FAILED",
+          "lease_expired",
+          currentNow,
+        );
+        if (decision.retry) {
+          transition(db, {
+            runId: row.run_id,
+            to: "QUEUED",
+            actor: "reaper",
+            reason: `retry:${decision.cause}`,
+            attempt: row.attempts,
+            policyVersion,
+            now: currentNow,
+          });
+          return "reaped";
+        }
+
+        // LEASED has no direct FAILED edge; advance through RUNNING only when
+        // the environment retry ceiling is exhausted and the run must terminate.
+        if (row.state === "LEASED") {
+          transition(db, {
+            runId: row.run_id,
+            to: "RUNNING",
+            actor: "reaper",
+            reason: failureReason,
+            attempt: row.attempts,
+            policyVersion,
+            now: currentNow,
+          });
+        }
+        if (row.state !== "VERIFYING") {
+          transition(db, {
+            runId: row.run_id,
+            to: "FAILED",
+            actor: "reaper",
+            reason: failureReason,
+            attempt: row.attempts,
+            policyVersion,
+            now: currentNow,
+          });
+        }
+        return "reaped";
       });
-      const failureReason = terminalFailureReason(decision, "lease_expired");
-
-      // VERIFYING cannot transition directly to QUEUED; record its failure first.
-      if (row.state === "VERIFYING") {
-        transition(db, {
-          runId: row.run_id,
-          to: "FAILED",
-          actor: "reaper",
-          reason: failureReason,
-          attempt: row.attempts,
-          policyVersion,
-          now: currentNow,
-        });
-      }
-      finishAttempt(
-        db,
-        row.run_id,
-        row.attempts,
-        "FAILED",
-        "lease_expired",
-        currentNow,
-      );
-      if (decision.retry) {
-        transition(db, {
-          runId: row.run_id,
-          to: "QUEUED",
-          actor: "reaper",
-          reason: `retry:${decision.cause}`,
-          attempt: row.attempts,
-          policyVersion,
-          now: currentNow,
-        });
-        continue;
-      }
-
-      // LEASED has no direct FAILED edge; advance through RUNNING only when
-      // the environment retry ceiling is exhausted and the run must terminate.
-      if (row.state === "LEASED") {
-        transition(db, {
-          runId: row.run_id,
-          to: "RUNNING",
-          actor: "reaper",
-          reason: failureReason,
-          attempt: row.attempts,
-          policyVersion,
-          now: currentNow,
-        });
-      }
-      if (row.state !== "VERIFYING") {
-        transition(db, {
-          runId: row.run_id,
-          to: "FAILED",
-          actor: "reaper",
-          reason: failureReason,
-          attempt: row.attempts,
-          policyVersion,
-          now: currentNow,
-        });
-      }
+      if (outcome === "reaped") reaped += 1;
+    } catch (error) {
+      onError({ runId: candidate.run_id, error });
     }
-    return rows.length;
-  });
+  }
+
+  return reaped;
 }
 
 /** Claim and execute one run, or return a typed refusal/null without execution. */

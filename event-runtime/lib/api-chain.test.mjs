@@ -369,8 +369,19 @@ describe("GET /chains (WM-537)", () => {
   });
 
   test("validates window and limit and applies the limit", async () => {
-    expect((await fetch(s.url("/chains?window=soon"))).status).toBe(400);
-    expect((await fetch(s.url("/chains?limit=0"))).status).toBe(400);
+    for (const path of [
+      "/chains?window=soon",
+      "/chains?limit=abc",
+      "/chains?limit=0",
+      "/chains?limit=501",
+    ]) {
+      const response = await fetch(s.url(path));
+      expect(response.status).toBe(422);
+      expect(await response.json()).toMatchObject({
+        error: path.includes("window") ? "invalid_window" : "invalid_limit",
+        message: expect.any(String),
+      });
+    }
     const body = await (await fetch(s.url("/chains?window=2h&limit=2"))).json();
     expect(body.chains).toHaveLength(2);
   });

@@ -148,7 +148,14 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       expect(secondPage.artifacts).toHaveLength(1);
       expect(secondPage.nextBefore).toBeNull();
       expect((await fetch(`${base}/artifacts?orphan=maybe`)).status).toBe(422);
-      expect((await fetch(`${base}/artifacts?limit=0`)).status).toBe(422);
+      for (const limit of ["abc", "0", "501"]) {
+        const response = await fetch(`${base}/artifacts?limit=${limit}`);
+        expect(response.status).toBe(422);
+        expect(await response.json()).toMatchObject({
+          error: "invalid_limit",
+          message: "limit must be an integer between 1 and 500",
+        });
+      }
 
       const dry = await fetch(`${base}/artifacts/prune`, {
         method: "POST",
@@ -329,6 +336,45 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       expect(existsSync(path.join(home, "artifacts", corruptHash))).toBe(false);
     } finally {
       server.close();
+    }
+  });
+
+  test("GET /artifacts/:hash streams large text and binary artifacts with bounded sniffing", async () => {
+    const home = tmpDir("evrt-large-artifacts-api-");
+    const store = path.join(home, "artifacts");
+    const db = openDb(path.join(home, "runtime.db"));
+    mkdirSync(store, { recursive: true });
+    const server = startApi({
+      db,
+      registry,
+      secret: SECRET,
+      policyVersion: PV,
+      port: 0,
+      env: { name: "test", home, adapter: "fake" },
+    });
+    await new Promise((resolve) => server.on("listening", resolve));
+    const port = server.address().port;
+    const text = Buffer.alloc(1024 * 1024 + 1, "t");
+    const binary = Buffer.concat([Buffer.from([0]), text]);
+    const artifacts = [
+      { bytes: text, contentType: "text/plain; charset=utf-8" },
+      { bytes: binary, contentType: "application/octet-stream" },
+    ];
+
+    try {
+      for (const { bytes, contentType } of artifacts) {
+        const sha256 = sha256Hex(bytes);
+        writeFileSync(path.join(store, sha256), bytes);
+
+        const res = await fetch(`http://127.0.0.1:${port}/artifacts/${sha256}`);
+        expect(res.status).toBe(200);
+        expect(res.headers.get("content-type")).toBe(contentType);
+        expect(res.headers.get("content-length")).toBe(String(bytes.length));
+        expect(Buffer.from(await res.arrayBuffer())).toEqual(bytes);
+      }
+    } finally {
+      server.close();
+      db.close();
     }
   });
 });

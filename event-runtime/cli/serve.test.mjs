@@ -2,11 +2,13 @@ import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-cli-serve-tes
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createServer } from "node:http";
+import path from "node:path";
 import {
   existsSync,
   mkdirSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { API_HOST } from "../lib/config.mjs";
@@ -319,6 +321,88 @@ describe("serve command", () => {
       true,
     );
     expect(chainsRan).toBe(true);
+  });
+
+  test("tick sweeps retained memo rows alongside artifact GC and logs the count", async () => {
+    const { tick } = await import("../cli.mjs");
+    const { loadRegistry } = await import("../lib/registry.mjs");
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-18T14:02:11.000Z");
+    db.query(
+      `INSERT INTO memos (sha256, subject_type, subject_id, kind, created_at, expires_at)
+       VALUES (?, 'repo', 'factory', 'repo-note', ?, ?)`,
+    ).run("a".repeat(64), now - 100, now - 31 * 24 * 60 * 60 * 1000);
+    const logs = [];
+    await tick({
+      db,
+      registry: loadRegistry(),
+      now,
+      policyVersion: "git:test",
+      lastPrune: 0,
+      log: (line) => logs.push(line),
+    });
+    expect(db.query(`SELECT COUNT(*) AS n FROM memos`).get().n).toBe(0);
+    expect(logs).toContain("memos: swept 1 expired/retired/superseded memo(s)");
+    db.close();
+  });
+
+  test("tick still prunes artifacts when the memo sweep throws", async () => {
+    const { tick } = await import("../cli.mjs");
+    const { loadRegistry } = await import("../lib/registry.mjs");
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-18T14:02:11.000Z");
+    db.query(
+      `INSERT INTO memos (sha256, subject_type, subject_id, kind, created_at, expires_at)
+       VALUES (?, 'repo', 'factory', 'repo-note', ?, ?)`,
+    ).run("a".repeat(64), now - 100, now - 31 * 24 * 60 * 60 * 1000);
+    // With a doomed row present the sweep's transaction touches memo_uses;
+    // removing the table makes that step throw without affecting artifact GC.
+    db.exec(`DROP TABLE memo_uses`);
+    const storeRoot = tmpDir("evrt-gc-store-");
+    const orphan = path.join(storeRoot, "b".repeat(64));
+    writeFileSync(orphan, "orphan bytes");
+    const stale = new Date(now - 8 * 24 * 60 * 60 * 1000);
+    utimesSync(orphan, stale, stale);
+    const logs = [];
+    const result = await tick({
+      db,
+      registry: loadRegistry(),
+      now,
+      policyVersion: "git:test",
+      lastPrune: 0,
+      storeRoot,
+      log: (line) => logs.push(line),
+    });
+    expect(logs.some((line) => line.startsWith("tick GC: memos: "))).toBe(true);
+    expect(existsSync(orphan)).toBe(false);
+    expect(logs).toContain("artifacts: pruned 1 orphan(s), freed 12B");
+    expect(db.query(`SELECT COUNT(*) AS n FROM memos`).get().n).toBe(1);
+    expect(result.lastPrune).toBe(now);
+    db.close();
+  });
+
+  test("tick sweeps stale notify-log markers on the hourly GC cadence", async () => {
+    const { tick, PRUNE_INTERVAL_MS } = await import("../cli.mjs");
+    const { loadRegistry } = await import("../lib/registry.mjs");
+    const { ensureNotifyLog } = await import("../lib/notify.mjs");
+    const db = openDb(":memory:");
+    const now = Date.now();
+    ensureNotifyLog(db);
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES ('human_needed', 'test/resolved-event', 'old marker', ?)`,
+    ).run(new Date(now - 15 * 24 * 60 * 60 * 1000).toISOString());
+
+    await tick({
+      db,
+      registry: loadRegistry(),
+      policyVersion: "git:test",
+      now,
+      lastPrune: now - PRUNE_INTERVAL_MS - 1,
+      subsystems: { notify: () => {} },
+    });
+
+    expect(db.query("SELECT COUNT(*) AS n FROM notify_log").get().n).toBe(0);
   });
 
   test("tick with FACTORY_EVENT_NOTIFY=1 pushes a human_needed park through the stub notifier exactly once", async () => {

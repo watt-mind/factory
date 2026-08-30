@@ -94,6 +94,7 @@ import {
   repositoryIsClean,
   repositoryStatus,
   provisionInstanceLocalConfigs,
+  runClaimPathGitProbe,
   resolveLinearApiKey,
   reconcileTierEscalations,
   scheduleTierEscalation,
@@ -210,7 +211,7 @@ describe("worker", () => {
     });
   });
 
-  test("provisions present instance configs into an ignored checkout and skips absent files", () => {
+  test("provisions present instance configs into an ignored checkout and skips absent files", async () => {
     const factoryRoot = tmpDir("evrt-instance-config-source-");
     const checkout = tmpDir("evrt-instance-config-checkout-");
     try {
@@ -233,7 +234,10 @@ describe("worker", () => {
       );
 
       expect(
-        provisionInstanceLocalConfigs({ factoryRoot, checkoutPath: checkout }),
+        await provisionInstanceLocalConfigs({
+          factoryRoot,
+          checkoutPath: checkout,
+        }),
       ).toEqual(["config/repos.yaml", "config/policy.yaml"]);
       expect(
         readFileSync(path.join(checkout, "config", "repos.yaml"), "utf8"),
@@ -253,7 +257,7 @@ describe("worker", () => {
     }
   });
 
-  test("does not materialize a stale operator schedule overlay, so a worktree stays verifiable after client schedules leave the kernel (#1051)", () => {
+  test("does not materialize a stale operator schedule overlay, so a worktree stays verifiable after client schedules leave the kernel (#1051)", async () => {
     const factoryRoot = tmpDir("evrt-schedule-overlay-source-");
     const checkout = tmpDir("evrt-schedule-overlay-checkout-");
     try {
@@ -287,7 +291,10 @@ describe("worker", () => {
       );
 
       expect(
-        provisionInstanceLocalConfigs({ factoryRoot, checkoutPath: checkout }),
+        await provisionInstanceLocalConfigs({
+          factoryRoot,
+          checkoutPath: checkout,
+        }),
       ).toEqual(["config/repos.yaml"]);
 
       // The stale overlay never lands in the checkout ...
@@ -311,12 +318,15 @@ describe("worker", () => {
     }
   });
 
-  test("silently skips instance config provisioning when no local files exist", () => {
+  test("silently skips instance config provisioning when no local files exist", async () => {
     const factoryRoot = tmpDir("evrt-instance-config-empty-source-");
     const checkout = tmpDir("evrt-instance-config-empty-checkout-");
     try {
       expect(
-        provisionInstanceLocalConfigs({ factoryRoot, checkoutPath: checkout }),
+        await provisionInstanceLocalConfigs({
+          factoryRoot,
+          checkoutPath: checkout,
+        }),
       ).toEqual([]);
     } finally {
       rmSync(factoryRoot, { recursive: true, force: true });
@@ -324,7 +334,7 @@ describe("worker", () => {
     }
   });
 
-  test("provisions instance config into a client checkout but makes it un-stageable", () => {
+  test("provisions instance config into a client checkout but makes it un-stageable", async () => {
     // A client repo (bj29, cashsaas, …) does not gitignore config/repos.yaml,
     // so the old guard skipped the copy and left the review with no config —
     // failing it closed. Now the path is added to the checkout's local exclude
@@ -343,7 +353,10 @@ describe("worker", () => {
       );
 
       expect(
-        provisionInstanceLocalConfigs({ factoryRoot, checkoutPath: checkout }),
+        await provisionInstanceLocalConfigs({
+          factoryRoot,
+          checkoutPath: checkout,
+        }),
       ).toEqual(["config/repos.yaml"]);
       // Copied in, so the run can read it.
       expect(existsSync(path.join(checkout, "config", "repos.yaml"))).toBe(
@@ -363,7 +376,7 @@ describe("worker", () => {
     }
   });
 
-  test("does not hang or copy instance config when a git ignore probe times out", () => {
+  test("kills timed-out claim-path probe groups and traces both probes", async () => {
     const factoryRoot = tmpDir("evrt-instance-config-timeout-source-");
     const checkout = tmpDir("evrt-instance-config-timeout-checkout-");
     const bin = tmpDir("evrt-instance-config-timeout-bin-");
@@ -387,21 +400,29 @@ case "$3" in
       printf 'true\\n'
       exit 0
     fi
-    exit 1
     ;;
 esac
-exec sleep 1
+sh -c 'sleep 5 & wait'
 `,
         { mode: 0o755 },
       );
       process.env.PATH = `${bin}${path.delimiter}${previousPath}`;
       process.env.FACTORY_WORKER_SUBPROCESS_TIMEOUT_MS = "25";
 
+      const timeouts = [];
       const started = Date.now();
       expect(
-        provisionInstanceLocalConfigs({ factoryRoot, checkoutPath: checkout }),
+        await provisionInstanceLocalConfigs({
+          factoryRoot,
+          checkoutPath: checkout,
+          onProbeTimeout: (timeout) => timeouts.push(timeout),
+        }),
       ).toEqual([]);
       expect(Date.now() - started).toBeLessThan(1_000);
+      expect(timeouts).toEqual([
+        expect.objectContaining({ name: "check-ignore", ceilingMs: 25 }),
+        expect.objectContaining({ name: "rev-parse", ceilingMs: 25 }),
+      ]);
     } finally {
       process.env.PATH = previousPath;
       if (previousTimeout === undefined)
@@ -411,6 +432,34 @@ exec sleep 1
       rmSync(checkout, { recursive: true, force: true });
       rmSync(bin, { recursive: true, force: true });
     }
+  });
+
+  test("claim-path git probe settles as a failed probe when the binary does not exist", async () => {
+    const missing = path.join(
+      tmpDir("evrt-claim-probe-missing-bin-"),
+      "definitely-not-git",
+    );
+    const timeouts = [];
+    const started = Date.now();
+    const probe = await runClaimPathGitProbe({
+      checkoutPath: "/nonexistent/checkout",
+      args: ["rev-parse", "--git-path", "info/exclude"],
+      name: "rev-parse",
+      command: missing,
+      onTimeout: (timeout) => timeouts.push(timeout),
+    });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(probe.status).not.toBe(0);
+    expect(probe.stdout).toBe("");
+    expect(probe.error?.code).toBe("ENOENT");
+    expect(timeouts).toEqual([]);
+    rmSync(path.dirname(missing), { recursive: true, force: true });
+  });
+
+  test("provisioning always returns a promise, even without a checkout path", async () => {
+    const result = provisionInstanceLocalConfigs({});
+    expect(result).toBeInstanceOf(Promise);
+    expect(await result).toEqual([]);
   });
 
   test("repository integrity gate rejects any checkout dirt before output acceptance", () => {

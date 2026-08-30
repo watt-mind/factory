@@ -6,7 +6,11 @@ import { STALE_SCAN_MS, loadLinearSupply } from "./linear.mjs";
 import { loadRepos, RepoError } from "./repos.mjs";
 import { isBusyError, retryBusy, runUsage } from "./db.mjs";
 import { hookDecisionsFor } from "./hooks.mjs";
-import { IllegalTransition, lifecycleOf } from "./lifecycle.mjs";
+import {
+  IllegalTransition,
+  lifecycleOf,
+  TERMINAL_STATES,
+} from "./lifecycle.mjs";
 import { archiveDeadLetteredEvent, requeueEvent } from "./planner.mjs";
 import { approveProposal, rejectProposal } from "./proposals.mjs";
 import { traceOf } from "./trace.mjs";
@@ -19,8 +23,23 @@ import {
   retryRun,
 } from "./worker.mjs";
 import { proposalSubject } from "./proposal-subject.mjs";
+import {
+  ApiParameterError,
+  parseListLimit,
+  parseNonNegativeSince,
+} from "./api-params.mjs";
 
 export const MAX_EXTENSION_SECONDS = 3600;
+export const OBSERVED_MODEL_CACHE_LIMIT = 512;
+
+// Transcript artifacts are content-addressed, so a model observed for a hash
+// cannot change. Keep this module-local FIFO bounded because run detail views
+// poll frequently and artifactHead performs synchronous I/O.
+const observedModelCache = new Map();
+
+export function clearObservedModelCache() {
+  observedModelCache.clear();
+}
 
 export { policyMaxRunMinutes };
 
@@ -1709,21 +1728,6 @@ function outboxView(db, limit) {
     }));
 }
 
-function journalLimit(url, defaultLimit) {
-  const rawLimit = url.searchParams.get("limit");
-  if (rawLimit === null || rawLimit.trim() === "") return defaultLimit;
-  const limit = Number(rawLimit);
-  if (!Number.isInteger(limit)) return defaultLimit;
-  return Math.max(1, Math.min(limit, 500));
-}
-
-function journalSince(url) {
-  const since = Number(url.searchParams.get("since") ?? 0);
-  if (!Number.isFinite(since)) return 0;
-  const normalized = Math.floor(since);
-  return Number.isSafeInteger(normalized) ? Math.max(0, normalized) : 0;
-}
-
 export function observedModelFromTranscript(head) {
   if (typeof head !== "string" || head === "") return null;
   const lines = head.split("\n");
@@ -1762,7 +1766,38 @@ export function observedModelFromTranscript(head) {
   return null;
 }
 
-function runView(db, runId, { artifactsDir, registry } = {}) {
+function observedModelForRun({
+  artifactsDir,
+  sha256,
+  state,
+  readArtifactHead = artifactHead,
+}) {
+  if (!artifactsDir || !sha256) return null;
+  const terminal = TERMINAL_STATES.has(state);
+  // Keyed by store root as well as hash: a test or a relocated store must not
+  // serve an observation read from a different artifacts directory.
+  const cacheKey = `${artifactsDir} ${sha256}`;
+  if (observedModelCache.has(cacheKey)) return observedModelCache.get(cacheKey);
+
+  const observedModel = observedModelFromTranscript(
+    readArtifactHead(artifactsDir, sha256),
+  );
+  // A growing transcript may gain its model line later, but a terminal one
+  // cannot. Cache null only for terminal runs while caching all model values.
+  if (observedModel !== null || terminal) {
+    if (observedModelCache.size >= OBSERVED_MODEL_CACHE_LIMIT) {
+      observedModelCache.delete(observedModelCache.keys().next().value);
+    }
+    observedModelCache.set(cacheKey, observedModel);
+  }
+  return observedModel;
+}
+
+function runView(
+  db,
+  runId,
+  { artifactsDir, registry, readArtifactHead = artifactHead } = {},
+) {
   const row = db.query(`SELECT * FROM runs WHERE run_id = ?`).get(runId);
   if (!row) return null;
   const attempts = db
@@ -1802,12 +1837,12 @@ function runView(db, runId, { artifactsDir, registry } = {}) {
     deadlineAt: Number.isFinite(deadline)
       ? new Date(deadline).toISOString()
       : null,
-    observedModel:
-      artifactsDir && transcript?.sha256
-        ? observedModelFromTranscript(
-            artifactHead(artifactsDir, transcript.sha256),
-          )
-        : null,
+    observedModel: observedModelForRun({
+      artifactsDir,
+      sha256: transcript?.sha256,
+      state: row.state,
+      readArtifactHead,
+    }),
     usage: runUsage(db, runId),
   };
 }
@@ -1825,6 +1860,7 @@ export async function handleRunApiRoute({
   actor,
   policyVersion,
   artifactsDir,
+  readArtifactHead = artifactHead,
   onEvent,
   policyRoot = FACTORY_ROOT,
   controlPlane,
@@ -1893,14 +1929,29 @@ export async function handleRunApiRoute({
   }
 
   if (route === "GET /journal") {
-    const since = journalSince(url);
-    const limit = journalLimit(url, 100);
-    return send(200, journalView(db, since, limit));
+    try {
+      return send(
+        200,
+        journalView(
+          db,
+          parseNonNegativeSince(url),
+          parseListLimit(url, { defaultLimit: 100, maxLimit: 500 }),
+        ),
+      );
+    } catch (err) {
+      if (err instanceof ApiParameterError) return send(422, err.body);
+      throw err;
+    }
   }
 
   if (route === "GET /outbox") {
-    const limit = journalLimit(url, 50);
-    return send(200, { outbox: outboxView(db, limit) });
+    try {
+      const limit = parseListLimit(url, { defaultLimit: 50, maxLimit: 500 });
+      return send(200, { outbox: outboxView(db, limit) });
+    } catch (err) {
+      if (err instanceof ApiParameterError) return send(422, err.body);
+      throw err;
+    }
   }
 
   if (route === "POST /events/requeue" || route === "POST /events/archive") {
@@ -2042,23 +2093,13 @@ export async function handleRunApiRoute({
 
   if (route === "GET /tickets") {
     const since = url.searchParams.get("since") ?? undefined;
-    const limitParam = url.searchParams.get("limit");
     const repo = url.searchParams.get("repo") ?? undefined;
-    let limit = 50;
-    if (limitParam !== null && limitParam !== undefined && limitParam !== "") {
-      const parsedLimit = Number(limitParam);
-      if (!Number.isInteger(parsedLimit) || parsedLimit <= 0) {
-        return send(422, {
-          error: "invalid_limit",
-          message: "limit must be a positive integer",
-        });
-      }
-      limit = Math.min(parsedLimit, 200);
-    }
     try {
+      const limit = parseListLimit(url, { defaultLimit: 50, maxLimit: 200 });
       const tickets = ticketIndexView(db, { since, limit, repo, nowMs });
       return send(200, { tickets });
     } catch (err) {
+      if (err instanceof ApiParameterError) return send(422, err.body);
       if (err instanceof ListQueryError) return send(422, err.body);
       throw err;
     }
@@ -2189,20 +2230,27 @@ export async function handleRunApiRoute({
     if (!db.query(`SELECT run_id FROM runs WHERE run_id = ?`).get(runId)) {
       return send(404, { error: `unknown run ${runId}` });
     }
-    const since = Number(url.searchParams.get("since") ?? 0);
-    const limit = Math.min(Number(url.searchParams.get("limit") ?? 100), 500);
-    return send(
-      200,
-      traceOf(db, runId, {
-        since: Number.isFinite(since) ? since : 0,
-        limit: Number.isFinite(limit) ? limit : 100,
-      }),
-    );
+    try {
+      return send(
+        200,
+        traceOf(db, runId, {
+          since: parseNonNegativeSince(url),
+          limit: parseListLimit(url, { defaultLimit: 100, maxLimit: 500 }),
+        }),
+      );
+    } catch (err) {
+      if (err instanceof ApiParameterError) return send(422, err.body);
+      throw err;
+    }
   }
 
   const runGet = url.pathname.match(/^\/runs\/([^/]+)$/);
   if (req.method === "GET" && runGet) {
-    const view = runView(db, runGet[1], { artifactsDir, registry });
+    const view = runView(db, runGet[1], {
+      artifactsDir,
+      registry,
+      readArtifactHead,
+    });
     if (!view) return send(404, { error: `unknown run ${runGet[1]}` });
     return send(200, view);
   }

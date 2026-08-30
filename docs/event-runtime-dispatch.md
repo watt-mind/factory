@@ -352,6 +352,26 @@ Consequences, all inherited from the dispatcher's rules rather than invented:
   already reads the `worktree_*` and `verify` fields, unused until now). A
   second repo registry is the same drift argument as §4, applied to ports.
 
+### Handoff verification sandbox limits
+
+The worker runs repository and ticket verification in a user, mount, PID, and
+network namespace. `sandbox.tmpfs_mb` in local `config/policy.yaml` controls
+the guest `/tmp` size in MiB; absent, malformed, or smaller-than-safe values
+use the 1024 MiB default, and values above 8192 MiB are capped there. PID 1 is
+a reaping init: after the command exits it SIGTERMs every leftover, and
+anything still alive after a short grace is SIGKILLed, so orphaned descendants
+from process-group tests can neither remain zombies nor keep the sandbox
+alive. The host must provide unprivileged user namespaces and
+`/usr/bin/python3` (the init/setup interpreter); otherwise the gate refuses
+with `sandbox_unavailable` rather than reporting the ticket's command red.
+When every explicit ticket `bun test` path is either named verbatim by
+repository verify, or is an existing `*.test.*`/`*.spec.*` file under a
+directory that repository verify runs, the worker records
+`ticket_verify_covered_by_repo_verify` and does not run a redundant second
+sandbox step. It otherwise preserves the independent ticket command check;
+unparseable shell commands, missing files, non-test modules and flag values
+(`--preload x`) never qualify for skipping.
+
 ---
 
 ## 6. Execution form: the `claude` adapter, `mutating: true`
