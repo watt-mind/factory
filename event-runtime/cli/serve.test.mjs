@@ -585,6 +585,55 @@ export default async function start() {
     expect(chainsRan).toBe(true);
   });
 
+  test("tick logs one stale-proposal summary when it expires a retired scheduler row (#1706)", async () => {
+    const { tick } = await import("../cli.mjs");
+    const { emitDueTicks } = await import("../lib/schedules.mjs");
+    const { planAdmittedEvents } = await import("../lib/planner.mjs");
+    const { loadRegistry } = await import("../lib/registry.mjs");
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-30T13:00:00.000Z");
+    const current = loadRegistry();
+    const registry = {
+      ...current,
+      schedules: {
+        reaper: {
+          every: "60m",
+          eventType: "clock.tick.reaper",
+          catchUp: "none",
+          singleton: true,
+          approval: "auto",
+          enabled: true,
+        },
+      },
+    };
+    emitDueTicks(db, registry, { now });
+    planAdmittedEvents(db, registry, { now, policyVersion: "git:old" });
+    const stale = {
+      ...registry,
+      agents: new Map(registry.agents),
+      eventTypes: { ...registry.eventTypes },
+    };
+    stale.agents.delete("reaper@1");
+    delete stale.eventTypes["clock.tick.reaper"];
+    const logs = [];
+
+    await tick({
+      db,
+      registry: stale,
+      now,
+      policyVersion: "git:test",
+      skipPlan: true,
+      log: (line) => logs.push(line),
+    });
+
+    expect(logs).toEqual(
+      expect.arrayContaining([
+        "proposal staleness: skipped 0 pending chain row(s) (0 memoised registry-stale); expired 1 unreplannable scheduler row(s)",
+      ]),
+    );
+    db.close();
+  });
+
   test("tick sweeps retained memo rows alongside artifact GC and logs the count", async () => {
     const { tick } = await import("../cli.mjs");
     const { loadRegistry } = await import("../lib/registry.mjs");

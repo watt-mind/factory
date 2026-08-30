@@ -24,6 +24,7 @@ import {
   ticketSupplyView,
 } from "./api-runs.mjs";
 import {
+  CONTROL_TOKEN,
   GH_SECRET,
   PV,
   SECRET,
@@ -1628,7 +1629,7 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
 describe("webui surface: proposal linkage, history, journal, outbox, requeue (OPS-212)", () => {
   test("proposals carry their originating event; history filter works; runs list is enriched", async () => {
     const { db, server, port } = await makeServer();
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       await client.replay(envelope({ eventId: "link-1" }));
       planAdmittedEvents(db, registry, {
@@ -1676,7 +1677,7 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
 
   test("journal feed pages by seq and outbox exposes delivery state", async () => {
     const { db, server, port } = await makeServer();
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       await client.replay(envelope({ eventId: "feed-1" }));
       planAdmittedEvents(db, registry, {
@@ -1804,7 +1805,7 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
 
   test("requeue recovers a dead-lettered event and refuses everything else", async () => {
     const { db, server, port, onEvents } = await makeServer();
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       await client.replay(envelope({ eventId: "dead-1" }));
       db.query(
@@ -1829,7 +1830,7 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
   test("archives dead-lettered events and releases stalled worker leases from status anomalies (WM-326)", async () => {
     const nowMs = 300_000;
     const { db, server, port } = await makeServer({ now: () => nowMs });
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       await client.replay(envelope({ eventId: "dead-archive" }));
       db.query(
@@ -1924,7 +1925,7 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
 
   test("requeueing a human_needed event supersedes its open proposal", async () => {
     const { db, server, port } = await makeServer();
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       await client.replay(
         envelope({ eventId: "hn-1", type: "unregistered.event.type" }),
@@ -1946,7 +1947,7 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
 describe("run trace surfacing (OPS-295)", () => {
   test("GET /runs/:id/trace pages incrementally; 404 unknown; empty for an untraced run (OPS-295)", async () => {
     const { db, server, port } = await makeServer();
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       await client.replay(
         envelope({ eventId: "trace-1", payload: { repos: ["ok"] } }),

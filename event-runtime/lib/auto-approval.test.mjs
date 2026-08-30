@@ -5,6 +5,7 @@ import {
   chainRuntimeGuard,
   CHAIN_AUTO_APPROVAL_ACTOR,
   CHAIN_AUTO_APPROVAL_EVENT_TYPES,
+  DEFAULT_STALE_CHAIN_REVISIT_MS,
   CHAIN_AUTO_APPROVAL_REASON,
   loadChainAutoApprovalPolicy,
 } from "./auto-approval.mjs";
@@ -1948,5 +1949,152 @@ describe("chain auto approval (WM-357)", () => {
       backlog.map((row) => row.id).sort(),
     );
     expect(inFlightReads).toBe(1);
+  });
+
+  /** Re-pin a seeded proposal/run pair to an older registry version (#1706). */
+  const pinRegistryVersion = (db, seeded, version) => {
+    const spec = {
+      ...JSON.parse(
+        db
+          .query(`SELECT spec_json FROM runs WHERE run_id = ?`)
+          .get(seeded.runId).spec_json,
+      ),
+      promptVersion: version,
+      policyVersion: version,
+    };
+    const json = canonicalJson(spec);
+    const hash = hashJson(spec);
+    db.query(
+      `UPDATE runs SET spec_json = ?, spec_hash = ? WHERE run_id = ?`,
+    ).run(json, hash, seeded.runId);
+    db.query(
+      `UPDATE proposals SET spec_json = ?, spec_hash = ? WHERE id = ?`,
+    ).run(json, hash, seeded.id);
+    return seeded;
+  };
+
+  test("a large pending chain backlog is bounded per pass (#1706)", async () => {
+    const db = openDb(":memory:");
+    const backlog = Array.from({ length: 50 }, (_, i) =>
+      dispatchSeed(db, `bounded-${i}`, { ticket: `WM-${17060 + i}` }),
+    );
+    let eligibilityChecks = 0;
+    const startedAt = Date.now();
+
+    const result = await auto(db, {
+      maxRows: 8,
+      dispatchEligibility: () => {
+        eligibilityChecks += 1;
+        return {
+          ok: false,
+          reason: "registry_stale",
+          evidence: { ticket: { labels: [] }, escalatePathIntersections: [] },
+        };
+      },
+      runtimeGuard: () => null,
+    });
+
+    expect(result.skipped).toBe(42);
+    expect(result.memoised).toBe(0);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(eligibilityChecks).toBe(8);
+    expect(result.open).toHaveLength(8);
+    expect(
+      db.query(`SELECT COUNT(*) AS n FROM runs WHERE state = 'PROPOSED'`).get()
+        .n,
+    ).toBe(backlog.length);
+  });
+
+  test("registry-stale rows are evaluated once per (run, registryVersion) and then memoised (#1706)", async () => {
+    const db = openDb(":memory:");
+    const backlog = Array.from({ length: 60 }, (_, i) =>
+      pinRegistryVersion(
+        db,
+        dispatchSeed(db, `stale-${i}`, { ticket: `WM-${17100 + i}` }),
+        "git:old",
+      ),
+    );
+    const checksByRun = new Map();
+    const options = {
+      maxRows: 100,
+      policyVersion: "git:new",
+      dispatchEligibility: ({ ticket }) => {
+        checksByRun.set(ticket, (checksByRun.get(ticket) ?? 0) + 1);
+        return {
+          ok: false,
+          reason: "registry_stale",
+          evidence: { ticket: { labels: [] }, escalatePathIntersections: [] },
+        };
+      },
+      runtimeGuard: () => null,
+    };
+
+    const startedAt = Date.now();
+    const first = await auto(db, options);
+    expect(first.open).toHaveLength(backlog.length);
+    expect(first.memoised).toBe(0);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+
+    // Every subsequent tick under the same registry version skips the whole
+    // backlog without another control-plane read.
+    for (let tick = 1; tick <= 5; tick += 1) {
+      const next = await auto(db, { ...options, now: now + tick * 1000 });
+      expect(next.open).toHaveLength(0);
+      expect(next.skipped).toBe(backlog.length);
+      expect(next.memoised).toBe(backlog.length);
+    }
+    expect(checksByRun.size).toBe(backlog.length);
+    for (const count of checksByRun.values()) expect(count).toBe(1);
+
+    // The hold expires, and a registry bump re-evaluates immediately.
+    const revisited = await auto(db, {
+      ...options,
+      now: now + DEFAULT_STALE_CHAIN_REVISIT_MS,
+    });
+    expect(revisited.memoised).toBe(0);
+    expect(revisited.open).toHaveLength(backlog.length);
+    const bumped = await auto(db, { ...options, policyVersion: "git:newer" });
+    expect(bumped.memoised).toBe(0);
+    expect(bumped.open).toHaveLength(backlog.length);
+    expect(
+      db.query(`SELECT COUNT(*) AS n FROM runs WHERE state = 'PROPOSED'`).get()
+        .n,
+    ).toBe(backlog.length);
+  });
+
+  test("memoised stale rows do not consume the per-tick budget of fresh rows (#1706)", async () => {
+    const db = openDb(":memory:");
+    for (let i = 0; i < 20; i += 1)
+      pinRegistryVersion(
+        db,
+        dispatchSeed(db, `stale-${i}`, { ticket: `WM-${17200 + i}` }),
+        "git:old",
+      );
+    const fresh = dispatchSeed(db, "fresh", { ticket: "WM-17299" });
+    const ineligible = {
+      ok: false,
+      reason: "registry_stale",
+      evidence: { ticket: { labels: [] }, escalatePathIntersections: [] },
+    };
+    const options = {
+      maxRows: 8,
+      policyVersion: "git:new",
+      dispatchEligibility: ({ ticket }) =>
+        ticket === "WM-17299" ? dispatchOk() : ineligible,
+      runtimeGuard: () => null,
+    };
+
+    // Three ticks walk the stale backlog (8 + 8 + 4) before the newest row.
+    const first = await auto(db, options);
+    expect(first.approved).toEqual([]);
+    expect(first.memoised).toBe(0);
+    const second = await auto(db, { ...options, now: now + 1000 });
+    expect(second.memoised).toBe(8);
+    const third = await auto(db, { ...options, now: now + 2000 });
+    expect(third.memoised).toBe(16);
+    expect(third.approved).toEqual([
+      { proposalId: fresh.id, runId: fresh.runId },
+    ]);
+    expect(runState(db, fresh.runId)).toBe("QUEUED");
   });
 });

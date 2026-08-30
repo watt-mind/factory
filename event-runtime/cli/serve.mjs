@@ -230,6 +230,7 @@ export async function tick({
 } = {}) {
   const tickStart = Date.now();
   const stepMs = {};
+  let expiredScheduledProposals = 0;
   const runStep = async (name, fn) => {
     const start = Date.now();
     try {
@@ -271,6 +272,7 @@ export async function tick({
     });
     for (const a of auto.approved)
       logLine(`schedule approved ${a.loop} → run ${a.runId} (actor: schedule)`);
+    expiredScheduledProposals = auto.expired.length;
     for (const err of auto.errors) logLine(`schedule approval error: ${err}`);
   });
 
@@ -289,6 +291,11 @@ export async function tick({
       );
     for (const e of auto.errors)
       logLine(`chain approval error: ${e.proposalId}:${e.reason}`);
+    if (auto.skipped > 0 || expiredScheduledProposals > 0) {
+      logLine(
+        `proposal staleness: skipped ${auto.skipped} pending chain row(s) (${auto.memoised ?? 0} memoised registry-stale); expired ${expiredScheduledProposals} unreplannable scheduler row(s)`,
+      );
+    }
   });
 
   await runStep("announce", () => {
