@@ -636,6 +636,10 @@ describe("store maintenance: referencedHashes, storeStats, pruneArtifacts, pinRu
     const hashes = referencedHashes(db);
     expect(hashes.has(referencedHash)).toBe(true);
     expect(hashes.invalid).toBe(1);
+    expect(storeStats(db, storeRoot)).toMatchObject({
+      orphans: 1,
+      invalidResults: 1,
+    });
     expect(artifactReferenceIndex(db).get(referencedHash)).toEqual([
       expect.objectContaining({ runId: "run_valid", kind: "transcript" }),
     ]);
