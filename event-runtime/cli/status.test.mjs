@@ -104,11 +104,13 @@ describe("status and doctor commands", () => {
     "doctor against a healthy live serve outputs anomalies none and exits 0",
     async () => {
       const home = tmpDir("evrt-doc-healthy-");
+      const controlApiToken = "doctor-healthy-control-token";
       const box = await spawnLiveServe({
         home,
         extraEnv: {
           FACTORY_EVENT_SECRET: "test-secret",
           FACTORY_GITHUB_WEBHOOK_SECRET: "test-gh-secret",
+          FACTORY_CONTROL_API_TOKEN: controlApiToken,
         },
       });
       let docRes;
@@ -121,6 +123,7 @@ describe("status and doctor commands", () => {
             FACTORY_EVENT_HOME: home,
             FACTORY_EVENT_PORT: box.port,
             FACTORY_RUN_DIR: throwawayRunDir(),
+            FACTORY_CONTROL_API_TOKEN: controlApiToken,
           },
         });
       } finally {
@@ -156,7 +159,11 @@ describe("status and doctor commands", () => {
       );
       db.close();
 
-      const box = await spawnLiveServe({ home });
+      const controlApiToken = "doctor-anomaly-control-token";
+      const box = await spawnLiveServe({
+        home,
+        extraEnv: { FACTORY_CONTROL_API_TOKEN: controlApiToken },
+      });
       let docRes;
       try {
         expect(box.out).toContain("control API on");
@@ -167,6 +174,7 @@ describe("status and doctor commands", () => {
             FACTORY_EVENT_HOME: home,
             FACTORY_EVENT_PORT: box.port,
             FACTORY_RUN_DIR: throwawayRunDir(),
+            FACTORY_CONTROL_API_TOKEN: controlApiToken,
           },
         });
       } finally {
