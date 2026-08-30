@@ -74,12 +74,12 @@ describe("inbox decision API (WM-390)", () => {
         { id: "api_decision" },
       );
 
-      const detail = await fetch(s.url("/inbox/api_decision"));
+      const detail = await s.request("/inbox/api_decision");
       expect(detail.status).toBe(200);
       expect((await detail.json()).item.decision).toEqual(request);
-      expect((await fetch(s.url("/inbox/missing"))).status).toBe(404);
+      expect((await s.request("/inbox/missing")).status).toBe(404);
 
-      const stale = await fetch(s.url("/inbox/api_decision/decide"), {
+      const stale = await s.request("/inbox/api_decision/decide", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -92,7 +92,7 @@ describe("inbox decision API (WM-390)", () => {
       expect(stale.status).toBe(409);
       expect((await stale.json()).error).toBe("stale_request");
 
-      const malformed = await fetch(s.url("/inbox/api_decision/decide"), {
+      const malformed = await s.request("/inbox/api_decision/decide", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -104,7 +104,7 @@ describe("inbox decision API (WM-390)", () => {
       expect(malformed.status).toBe(400);
       expect((await malformed.json()).error).toBe("invalid_response");
 
-      const decided = await fetch(s.url("/inbox/api_decision/decide"), {
+      const decided = await s.request("/inbox/api_decision/decide", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -120,14 +120,13 @@ describe("inbox decision API (WM-390)", () => {
         effect: { kind: "dismiss", outcome: "applied" },
       });
 
-      const appliedRetry = await fetch(
-        s.url("/inbox/api_decision/decide/retry"),
-        { method: "POST" },
-      );
+      const appliedRetry = await s.request("/inbox/api_decision/decide/retry", {
+        method: "POST",
+      });
       expect(appliedRetry.status).toBe(409);
       expect((await appliedRetry.json()).error).toBe("already_applied");
 
-      const again = await fetch(s.url("/inbox/api_decision/decide"), {
+      const again = await s.request("/inbox/api_decision/decide", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -148,7 +147,7 @@ describe("inbox decision API (WM-390)", () => {
         },
         { id: "not_decided" },
       );
-      const retry = await fetch(s.url(`/inbox/${undecided.id}/decide/retry`), {
+      const retry = await s.request(`/inbox/${undecided.id}/decide/retry`, {
         method: "POST",
       });
       expect(retry.status).toBe(409);
@@ -200,7 +199,7 @@ describe("inbox decision API (WM-390)", () => {
         },
         { id: "api_authorise" },
       );
-      const res = await fetch(s.url("/inbox/api_authorise/decide"), {
+      const res = await s.request("/inbox/api_authorise/decide", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -278,7 +277,7 @@ describe("schedule trigger metadata (WM-259)", () => {
       });
 
       for (const action of ["run", "trigger"]) {
-        const res = await fetch(s.url(`/schedules/reaper/${action}`), {
+        const res = await s.request(`/schedules/reaper/${action}`, {
           method: "POST",
         });
         expect(res.status).toBe(200);
@@ -303,7 +302,7 @@ describe("schedule trigger metadata (WM-259)", () => {
         operatorEvents.every((event) => event.payload.repo === "factory"),
       ).toBe(true);
 
-      const schedules = await (await fetch(s.url("/schedules"))).json();
+      const schedules = await (await s.request("/schedules")).json();
       expect(schedules.schedules[0]).toMatchObject({
         lastSlot: "2026-08-17T11:00:00.000Z",
         nextDue: "2026-08-17T12:00:00.000Z",
@@ -347,7 +346,7 @@ describe("schedule trigger metadata (WM-259)", () => {
         },
         { id: "rc-ready-api" },
       );
-      const response = await fetch(s.url("/schedules/ship-bj29/run"), {
+      const response = await s.request("/schedules/ship-bj29/run", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: "{}",
@@ -373,8 +372,7 @@ describe("schedule trigger metadata (WM-259)", () => {
 
 describe("artifact-view sidecar on GET /agents (WM-454)", () => {
   test("every agent item carries outputView/outputViewFile; views are objects where a sidecar exists, null elsewhere", async () => {
-    const { server, port } = await makeServer();
-    const client = apiClient({ port });
+    const { server, client } = await makeServer();
     try {
       const { agents: defs } = await client.agents();
       for (const def of defs) {
@@ -450,8 +448,7 @@ describe("artifact-view sidecar on GET /agents (WM-454)", () => {
     view.summary = "/tldr";
     writeFileSync(viewFile, JSON.stringify(view));
     const drifted = loadRegistry({ root, modelTiers: registry.modelTiers });
-    const { server, port } = await makeServer({ registry: drifted });
-    const client = apiClient({ port });
+    const { server, client } = await makeServer({ registry: drifted });
     try {
       const { agents: defs } = await client.agents();
       const triage = defs.find((d) => d.ref === "triage-scan@1");
@@ -504,7 +501,7 @@ describe("spec subject on GET /runs/:id and /proposals (WM-897)", () => {
           "2026-08-19T12:00:00.000Z",
           "2026-08-19T12:00:00.000Z",
         );
-      const res = await fetch(s.url("/runs/run_subject"));
+      const res = await s.request("/runs/run_subject");
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.subject).toBe(
@@ -525,7 +522,7 @@ describe("spec subject on GET /runs/:id and /proposals (WM-897)", () => {
            VALUES (?, 'test', 'ev-subject', 'run', 'open', ?, 3600, ?)`,
         )
         .run("prop_subject", "2026-08-19T12:00:00.000Z", JSON.stringify(spec));
-      const list = await fetch(s.url("/proposals?status=all"));
+      const list = await s.request("/proposals?status=all");
       expect(list.status).toBe(200);
       const listed = (await list.json()).proposals.find(
         (p) => p.id === "prop_subject",
@@ -533,7 +530,7 @@ describe("spec subject on GET /runs/:id and /proposals (WM-897)", () => {
       expect(listed.subject).toBe(
         "Dispatch WM-862 · factory · cursor-grok-4.6-high",
       );
-      const detail = await fetch(s.url("/proposals/prop_subject"));
+      const detail = await s.request("/proposals/prop_subject");
       expect(detail.status).toBe(200);
       expect((await detail.json()).proposal.subject).toBe(
         "Dispatch WM-862 · factory · cursor-grok-4.6-high",
@@ -555,9 +552,13 @@ describe("environment identity (webui chip)", () => {
       policyVersion: PV,
       port: 0,
       env: { name: "dev", home: dir, adapter: "fake" },
+      controlApiToken: "env-test-token",
     });
     await new Promise((resolve) => server.on("listening", resolve));
-    const client = apiClient({ port: server.address().port });
+    const client = apiClient({
+      port: server.address().port,
+      token: "env-test-token",
+    });
     try {
       const health = await client.health();
       expect(health.env).toEqual({ name: "dev", home: dir, adapter: "fake" });
@@ -572,7 +573,10 @@ describe("bearer-token auth on the control API (WM-1152)", () => {
   const TOKEN = "s3cr3t-control-token";
 
   test("token set: privileged route needs a correct bearer (401 without/with-wrong, 200 with correct)", async () => {
-    const s = await makeServer({ controlApiToken: TOKEN });
+    const s = await makeServer({
+      controlApiToken: TOKEN,
+      autoAuthorize: false,
+    });
     try {
       const missing = await fetch(s.url("/status"));
       expect(missing.status).toBe(401);
@@ -601,7 +605,10 @@ describe("bearer-token auth on the control API (WM-1152)", () => {
   });
 
   test("token set: the apiClient carries the bearer, so internal callers do not 401 themselves", async () => {
-    const s = await makeServer({ controlApiToken: TOKEN });
+    const s = await makeServer({
+      controlApiToken: TOKEN,
+      autoAuthorize: false,
+    });
     const client = apiClient({ port: s.port, token: TOKEN });
     try {
       const status = await client.status();
@@ -616,7 +623,10 @@ describe("bearer-token auth on the control API (WM-1152)", () => {
   });
 
   test("token set: GET /health stays open (liveness, no bearer)", async () => {
-    const s = await makeServer({ controlApiToken: TOKEN });
+    const s = await makeServer({
+      controlApiToken: TOKEN,
+      autoAuthorize: false,
+    });
     try {
       const res = await fetch(s.url("/health"));
       expect(res.status).toBe(200);
@@ -627,7 +637,10 @@ describe("bearer-token auth on the control API (WM-1152)", () => {
   });
 
   test("token set: POST /events stays signature-gated, not bearer-gated", async () => {
-    const s = await makeServer({ controlApiToken: TOKEN });
+    const s = await makeServer({
+      controlApiToken: TOKEN,
+      autoAuthorize: false,
+    });
     try {
       // A correctly signed webhook is admitted with NO bearer present.
       const body = JSON.stringify(envelope({ eventId: "hook-1152" }));
@@ -669,15 +682,134 @@ describe("bearer-token auth on the control API (WM-1152)", () => {
     }
   });
 
-  test("token unset: behavior is unchanged — privileged routes work with no bearer (no regression)", async () => {
+  test("token unset: every privileged mutation fails closed before side effects", async () => {
     const s = await makeServer({ controlApiToken: null });
     try {
-      const res = await fetch(s.url("/status"));
-      expect(res.status).toBe(200);
-      expect(typeof (await res.json()).events).toBe("object");
-      // No Authorization header is sent and none is required.
-      const agents = await fetch(s.url("/agents"));
-      expect(agents.status).toBe(200);
+      createInboxItem(
+        s.db,
+        {
+          kind: "BLOCKED",
+          title: "must stay open",
+          decision: {
+            schemaVersion: "factory.decision-request/v1",
+            question: "Dismiss?",
+            options: [{ id: "dismiss", label: "Dismiss", effect: "dismiss" }],
+          },
+        },
+        { id: "auth_gate_inbox" },
+      );
+      s.db
+        .query(
+          `INSERT INTO runs
+          (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+         VALUES ('auth_gate_run', 'auth-gate-idem', '{}', 'sha256:auth-gate',
+           'RUNNING', 1, '2026-08-29T00:00:00.000Z', '2026-08-29T00:00:00.000Z')`,
+        )
+        .run();
+
+      const mutations = [
+        ["POST", "/inbox/auth_gate_inbox/decide"],
+        ["POST", "/proposals/missing/approve"],
+        ["POST", "/proposals/missing/reject"],
+        ["POST", "/repos/factory/janitor"],
+        ["PUT", "/overrides/config/models/fake/high"],
+        ["DELETE", "/overrides/config/models/fake/high"],
+        ["POST", "/schedules/reaper/run"],
+        ["POST", "/schedules/reaper/trigger"],
+        ["POST", "/runs/auth_gate_run/cancel"],
+        ["POST", "/runs/auth_gate_run/extend"],
+        ["POST", "/replay"],
+      ];
+      for (const [method, pathname] of mutations) {
+        const response = await fetch(s.url(pathname), {
+          method,
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        });
+        expect(response.status, `${method} ${pathname}`).toBe(503);
+        expect(await response.json()).toEqual({
+          error: "control_api_token_unset",
+        });
+      }
+
+      expect(
+        s.db
+          .query("SELECT resolved_at FROM inbox_items WHERE id = ?")
+          .get("auth_gate_inbox").resolved_at,
+      ).toBeNull();
+      expect(
+        s.db
+          .query("SELECT state FROM runs WHERE run_id = ?")
+          .get("auth_gate_run").state,
+      ).toBe("RUNNING");
+    } finally {
+      s.close();
+    }
+  });
+
+  test("wrong token: every privileged mutation returns 401", async () => {
+    const s = await makeServer({
+      controlApiToken: TOKEN,
+      autoAuthorize: false,
+    });
+    try {
+      createInboxItem(
+        s.db,
+        {
+          kind: "BLOCKED",
+          title: "must stay open",
+          decision: {
+            schemaVersion: "factory.decision-request/v1",
+            question: "Dismiss?",
+            options: [{ id: "dismiss", label: "Dismiss", effect: "dismiss" }],
+          },
+        },
+        { id: "wrong_token_inbox" },
+      );
+      s.db
+        .query(
+          `INSERT INTO runs
+          (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+         VALUES ('wrong_token_run', 'wrong-token-idem', '{}', 'sha256:wrong-token',
+           'RUNNING', 1, '2026-08-29T00:00:00.000Z', '2026-08-29T00:00:00.000Z')`,
+        )
+        .run();
+
+      const mutations = [
+        ["POST", "/inbox/wrong_token_inbox/decide"],
+        ["POST", "/proposals/x/approve"],
+        ["POST", "/proposals/x/reject"],
+        ["POST", "/repos/factory/janitor"],
+        ["PUT", "/overrides/config/models/fake/high"],
+        ["DELETE", "/overrides/config/models/fake/high"],
+        ["POST", "/schedules/reaper/run"],
+        ["POST", "/schedules/reaper/trigger"],
+        ["POST", "/runs/wrong_token_run/cancel"],
+        ["POST", "/runs/wrong_token_run/extend"],
+        ["POST", "/replay"],
+      ];
+      for (const [method, pathname] of mutations) {
+        const response = await fetch(s.url(pathname), {
+          method,
+          headers: {
+            authorization: "Bearer definitely-wrong",
+            "content-type": "application/json",
+          },
+          body: "{}",
+        });
+        expect(response.status, `${method} ${pathname}`).toBe(401);
+        expect(await response.json()).toEqual({ error: "unauthorized" });
+      }
+      expect(
+        s.db
+          .query("SELECT resolved_at FROM inbox_items WHERE id = ?")
+          .get("wrong_token_inbox").resolved_at,
+      ).toBeNull();
+      expect(
+        s.db
+          .query("SELECT state FROM runs WHERE run_id = ?")
+          .get("wrong_token_run").state,
+      ).toBe("RUNNING");
     } finally {
       s.close();
     }

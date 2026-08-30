@@ -27,15 +27,25 @@ const LINEAR_TICKET = /^[A-Z][A-Z0-9]{1,9}-[1-9][0-9]{0,9}$/;
 const GITHUB_TICKET = /^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#[1-9][0-9]{0,9}$/;
 
 export class HandoffError extends Error {
-  constructor(code, message = code) {
-    super(message);
+  constructor(code, message = code, cause) {
+    super(message, cause === undefined ? undefined : { cause });
     this.name = "HandoffError";
     this.code = code;
   }
 }
 
-function fail(code, message) {
-  throw new HandoffError(code, message);
+export function fail(code, message, cause) {
+  throw new HandoffError(code, message, cause);
+}
+
+export function handoffErrorBody(err) {
+  const body = {
+    schemaVersion: "factory.handoff-error/v1",
+    error: err?.code ?? "handoff_failed",
+    message: String(err?.message ?? err),
+  };
+  if (err?.cause !== undefined) body.cause = String(err.cause);
+  return body;
 }
 
 export function createHandoffRequest({ requestId, repo, ticket }) {
@@ -283,6 +293,7 @@ export async function acceptHandoff(
   }
 
   let state = null;
+  const warnings = [];
   try {
     state = await runtimeState(
       fetchImpl,
@@ -295,6 +306,9 @@ export async function acceptHandoff(
     // A duplicate must be bound to its original request, so lookup failures
     // fail closed instead of returning a misleading retry receipt.
     if (admission.duplicate) throw err;
+    const warning = `state_unavailable: ${String(err?.message ?? err)}`;
+    warnings.push(warning);
+    console.error(warning);
   }
   if (admission.duplicate) {
     if (!state?.event)
@@ -315,7 +329,7 @@ export async function acceptHandoff(
     duplicate: admission.duplicate,
     event: {
       id: request.requestId,
-      state: state?.event?.status ?? "admitted",
+      state: state?.event?.status ?? "unknown",
     },
     proposal: state?.event?.proposalId
       ? { id: state.event.proposalId, state: state.proposalState }
@@ -323,6 +337,7 @@ export async function acceptHandoff(
     run: state?.event?.runId
       ? { id: state.event.runId, state: state.runState }
       : null,
+    ...(warnings.length > 0 ? { warnings } : {}),
     dashboardUrl,
   };
 }
@@ -488,11 +503,7 @@ async function main(argv = process.argv.slice(2)) {
 
 if (import.meta.main) {
   main().catch((err) => {
-    const body = {
-      schemaVersion: "factory.handoff-error/v1",
-      error: err?.code ?? "handoff_failed",
-      message: String(err?.message ?? err),
-    };
+    const body = handoffErrorBody(err);
     // Forced-command clients need one machine-readable failure. No environment
     // values (especially the signing secret) are projected into this object.
     process.stdout.write(`${JSON.stringify(body)}\n`);

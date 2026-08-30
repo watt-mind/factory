@@ -1,12 +1,22 @@
 import { pad, withClient } from "./shared.mjs";
+import { unauthorizedMessage } from "../lib/client.mjs";
 
 export async function inbox(client) {
+  const token = client.token ?? process.env.FACTORY_CONTROL_API_TOKEN ?? null;
   const res = await fetch(
     `http://${client.host}:${client.port}/inbox?status=open`,
+    {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+    },
   );
   const body = await res.json();
   if (!res.ok) {
-    const err = new Error(body?.error ?? `HTTP ${res.status}`);
+    const err = new Error(
+      res.status === 401 ||
+        (res.status === 503 && body?.error === "control_api_token_unset")
+        ? unauthorizedMessage(Boolean(token))
+        : (body?.error ?? `HTTP ${res.status}`),
+    );
     err.status = res.status;
     throw err;
   }

@@ -627,6 +627,9 @@ jobs:
           DIR="$(mktemp -d "$RUNNER_TEMP/factory-event-home.XXXXXX")"
           export FACTORY_EVENT_HOME="$DIR"
           export FACTORY_EVENT_PORT="$PORT"
+          # The control API fails closed: serve, work, seed and verify all
+          # need the same bearer (#956). A throwaway value is fine on CI.
+          export FACTORY_CONTROL_API_TOKEN="ci-demo-control-token-$PORT"
 
           bun event-runtime/cli.mjs serve --adapter-override fake --port "$PORT" &
           SERVE_PID=$!

@@ -119,12 +119,18 @@ function ensureLocallyIgnored(checkoutPath, rel) {
   const isIgnored = () =>
     spawnSync("git", ["-C", checkoutPath, "check-ignore", "-q", "--", rel], {
       encoding: "utf8",
+      timeout: workerSubprocessTimeoutMs(),
+      killSignal: "SIGKILL",
     }).status === 0;
   if (isIgnored()) return true;
   const resolved = spawnSync(
     "git",
     ["-C", checkoutPath, "rev-parse", "--git-path", "info/exclude"],
-    { encoding: "utf8" },
+    {
+      encoding: "utf8",
+      timeout: workerSubprocessTimeoutMs(),
+      killSignal: "SIGKILL",
+    },
   );
   if (resolved.status !== 0) return false;
   const excludeFile = path.resolve(checkoutPath, resolved.stdout.trim());
@@ -162,6 +168,8 @@ export function provisionInstanceLocalConfigs({
       ["-C", checkoutPath, "rev-parse", "--is-inside-work-tree"],
       {
         encoding: "utf8",
+        timeout: workerSubprocessTimeoutMs(),
+        killSignal: "SIGKILL",
       },
     ).status === 0;
   const copied = [];

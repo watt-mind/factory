@@ -35,6 +35,12 @@ beforeAll(() => {
           headers: { "content-type": "text/plain" },
         });
       }
+      if (url.pathname === "/agents") {
+        return Response.json(
+          { error: "control_api_token_unset" },
+          { status: 503 },
+        );
+      }
       return Response.json({ error: "not found" }, { status: 404 });
     },
   });
@@ -81,6 +87,16 @@ test("401 with a rejected token names the variable, never the value", async () =
   expect(err.message).toBe(unauthorizedMessage(true));
   expect(err.message).not.toContain(wrong);
   expect(String(err.stack)).not.toContain(wrong);
+});
+
+test("503 token-unset response maps to the same actionable setup message", async () => {
+  const client = apiClient({ port, token: null });
+  let err;
+  await client.agents().catch((e) => (err = e));
+  expect(err.status).toBe(503);
+  expect(err.message).toBe(unauthorizedMessage(false));
+  expect(err.message).toContain("FACTORY_CONTROL_API_TOKEN");
+  expect(err.message).toContain("~/.factory/secrets.env");
 });
 
 test("non-401 errors keep the server's message and status", async () => {

@@ -12,6 +12,7 @@
  *   factory dispatch event <event-type> [--payload '<json>'] [--watch]
  */
 import { parseArgs } from "node:util";
+import { unauthorizedMessage } from "../event-runtime/lib/client.mjs";
 
 export const DEFAULT_PORT = 7381;
 
@@ -48,10 +49,15 @@ function die(msg, code = 1) {
 }
 
 async function api(path, options = {}) {
+  const token = process.env.FACTORY_CONTROL_API_TOKEN || null;
   try {
     const res = await fetch(`${BASE_URL}${path}`, {
-      headers: { "content-type": "application/json" },
       ...options,
+      headers: {
+        "content-type": "application/json",
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+        ...options.headers,
+      },
     });
     const text = await res.text();
     let json = null;
@@ -62,10 +68,13 @@ async function api(path, options = {}) {
     }
     if (!res.ok) {
       const err =
-        json?.error ||
-        (Array.isArray(json?.errors)
-          ? json.errors.join("; ")
-          : `HTTP ${res.status}`);
+        res.status === 401 ||
+        (res.status === 503 && json?.error === "control_api_token_unset")
+          ? unauthorizedMessage(Boolean(token))
+          : json?.error ||
+            (Array.isArray(json?.errors)
+              ? json.errors.join("; ")
+              : `HTTP ${res.status}`);
       die(`control API error on ${path}: ${err}`);
     }
     return json;

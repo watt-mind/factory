@@ -6,6 +6,8 @@ import {
   acceptHandoff,
   assertForcedCommandEnvironment,
   createHandoffRequest,
+  fail,
+  handoffErrorBody,
   resolveHandoffRepo,
   sendHandoff,
   validateHandoffRequest,
@@ -258,6 +260,39 @@ describe("forced-command accept server", () => {
     expect(receipt.run).toEqual({ id: "run-old", state: "QUEUED" });
   });
 
+  test("warns when fresh-admission state lookup fails instead of claiming admitted state", async () => {
+    const lookupFailure = new Error("connect ECONNREFUSED 127.0.0.1:7381");
+    const stderr = [];
+    const fetchImpl = async (_url, options = {}) => {
+      if (options.method === "POST") {
+        return Response.json({
+          admitted: true,
+          duplicate: false,
+          eventId: REQUEST.requestId,
+        });
+      }
+      throw lookupFailure;
+    };
+    const originalError = console.error;
+    console.error = (line) => stderr.push(line);
+    let receipt;
+    try {
+      receipt = await acceptHandoff(JSON.stringify(REQUEST), {
+        repos,
+        secret: "secret",
+        fetchImpl,
+      });
+    } finally {
+      console.error = originalError;
+    }
+
+    expect(receipt.event).toEqual({ id: REQUEST.requestId, state: "unknown" });
+    expect(receipt.warnings).toEqual([
+      "state_unavailable: connect ECONNREFUSED 127.0.0.1:7381",
+    ]);
+    expect(stderr).toEqual(receipt.warnings);
+  });
+
   test("rejects request-id reuse for a different ticket", async () => {
     const fetchImpl = async (url, options = {}) => {
       if (options.method === "POST") {
@@ -307,6 +342,21 @@ describe("forced-command accept server", () => {
     await expect(
       acceptHandoff(JSON.stringify(REQUEST), { repos, secret: null }),
     ).rejects.toThrow(/FACTORY_EVENT_SECRET/);
+  });
+
+  test("preserves a fail cause in the forced-command error body", () => {
+    const cause = new Error("HTTP 503 runtime unavailable");
+    try {
+      fail("runtime_status_failed", "runtime status lookup failed", cause);
+      expect.unreachable();
+    } catch (err) {
+      expect(handoffErrorBody(err)).toEqual({
+        schemaVersion: "factory.handoff-error/v1",
+        error: "runtime_status_failed",
+        message: "runtime status lookup failed",
+        cause: "Error: HTTP 503 runtime unavailable",
+      });
+    }
   });
 
   test("rejects a caller-supplied SSH original command", () => {
