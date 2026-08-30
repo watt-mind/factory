@@ -1,4 +1,7 @@
+import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-proposals-test-mjs";
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { hashJson } from "./canonical.mjs";
 import { openDb } from "./db.mjs";
 import { admitEvent } from "./intake.mjs";
@@ -51,6 +54,36 @@ function planned(
   return { db, proposal: outcome.proposal, runId: outcome.runId };
 }
 
+/**
+ * Plan the dispatch against a repos root owned by this test, never the
+ * ambient one. The dispatch gate resolves `repo: "factory"` through
+ * `FACTORY_REPOS_ROOT`/`config/repos.yaml` and checks that the checkout path
+ * exists; with the example config (`~/Develop/factory`) that only holds on an
+ * operator host, and inside the handoff sandbox (`HOME=/tmp/home`) the plan
+ * refuses with `owned_paths_not_closed` before any proposal exists.
+ */
+function withHermeticReposRoot(fn) {
+  const root = tmpDir("evrt-proposals-ttl-");
+  const repoPath = path.join(root, "checkout");
+  mkdirSync(path.join(root, "config"), { recursive: true });
+  mkdirSync(repoPath, { recursive: true });
+  writeFileSync(
+    path.join(root, "config", "repos.yaml"),
+    `repos:\n  - name: factory\n    path: ${repoPath}\n    base: develop\n` +
+      `    github: watt-mind/factory\n    team: WM\n    project: Factory\n` +
+      `    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+      `    worktree_root: ${path.join(root, "worktrees")}\n    escalate_paths: []\n`,
+  );
+  const previous = process.env.FACTORY_REPOS_ROOT;
+  process.env.FACTORY_REPOS_ROOT = root;
+  try {
+    return fn();
+  } finally {
+    if (previous === undefined) delete process.env.FACTORY_REPOS_ROOT;
+    else process.env.FACTORY_REPOS_ROOT = previous;
+  }
+}
+
 function dispatchPlanned() {
   const db = openDb(":memory:");
   const admitted = admitEvent(
@@ -71,28 +104,30 @@ function dispatchPlanned() {
     { now: NOW },
   );
   expect(admitted.admitted).toBe(true);
-  const outcome = planEvent(
-    db,
-    registry,
-    { source: admitted.event.source, eventId: admitted.event.event_id },
-    {
-      now: NOW,
-      policyVersion: "git:test",
-      dispatch: {
-        countLeases: () => 0,
-        budgetRefusal: () => null,
-        fetchTicket: () => ({
-          identifier: "watt-mind/factory#1611",
-          state: { name: "Todo" },
-          assignee: null,
-          labels: { nodes: [{ name: "ai:agent-ready" }] },
-          description: "## Owned Paths\n- event-runtime/lib/proposals.mjs\n",
-        }),
-        fetchInFlight: () => [],
+  const outcome = withHermeticReposRoot(() =>
+    planEvent(
+      db,
+      registry,
+      { source: admitted.event.source, eventId: admitted.event.event_id },
+      {
+        now: NOW,
+        policyVersion: "git:test",
+        dispatch: {
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          fetchTicket: () => ({
+            identifier: "watt-mind/factory#1611",
+            state: { name: "Todo" },
+            assignee: null,
+            labels: { nodes: [{ name: "ai:agent-ready" }] },
+            description: "## Owned Paths\n- event-runtime/lib/proposals.mjs\n",
+          }),
+          fetchInFlight: () => [],
+        },
       },
-    },
+    ),
   );
-  expect(outcome.decision).toBe("run");
+  expect(outcome.decision, outcome.reason ?? "").toBe("run");
   const spec = JSON.parse(outcome.proposal.spec_json);
   spec.idempotencyKey = `${spec.idempotencyKey}#1`;
   spec.configSnapshot = {
