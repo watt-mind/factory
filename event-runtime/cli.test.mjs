@@ -351,7 +351,7 @@ describe("cli routing", () => {
     expect(lines).toEqual(["0"]);
   });
 
-  test("dispatch-only keeps dispatch agents by id, prefix, or contract and drops unregistered ones", () => {
+  test("dispatch-only keeps only explicit dispatch-class agents", () => {
     const keep = dispatchOnlyPredicate([
       { id: "dispatch", ref: "dispatch@1" },
       { id: "dispatch-hotfix", ref: "dispatch-hotfix@2" },
@@ -364,14 +364,11 @@ describe("cli routing", () => {
       { id: "merge-review", ref: "merge-review@1" },
       { id: "work-scan", ref: "work-scan@1" },
     ]);
-    const kept = [
-      "dispatch@1",
+    const kept = ["dispatch@1", "dispatch@7"];
+    const dropped = [
       "dispatch-hotfix@2",
       "lander@1",
       "worker@1",
-      "dispatch@7",
-    ];
-    const dropped = [
       "merge-fix@1",
       "merge-review@1",
       "work-scan@1",

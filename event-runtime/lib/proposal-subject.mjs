@@ -42,6 +42,18 @@ export function agentFamily(agent) {
   return agent.trim().replace(/@\d+$/, "");
 }
 
+/**
+ * Agent IDs whose runs hold a ticket lease and worktree, including their
+ * strong-tier escalation continuation. Keep this explicit: a dispatch-like
+ * name alone does not make an agent dispatch-class work.
+ */
+export const DISPATCH_CLASS_AGENT_IDS = new Set(["dispatch"]);
+
+/** Whether an agent id or versioned ref belongs to the dispatch class. */
+export function isDispatchClassAgent(agent) {
+  return DISPATCH_CLASS_AGENT_IDS.has(agentFamily(agent));
+}
+
 /** Title-case the agent family so it reads as a verb (`ci-doctor` → `Ci-doctor`). */
 export function agentVerb(agent) {
   const family = agentFamily(agent);
