@@ -24,11 +24,45 @@
 # reinstalls only what bun decides is stale, and re-seeds only on --reseed.
 source "$(dirname "${BASH_SOURCE[0]}")/worktree-common.sh"
 
+# seed_demo_data <worktree> <api-port> <prefix>
+# Runs event-runtime/demo/seed.mjs with a bounded retry. The status is
+# captured directly from the command substitution (`|| seed_exit=$?`, which also
+# survives `set -e`) — an `if cmd; then` wrapper would leave `$?` reporting the
+# compound's (always-zero) status and make the retry arm unreachable (#1758). Exit 78 is the seed's typed adapter-probe
+# timeout; transient store contention is matched on output. Anything else dies.
+seed_demo_data() { # <worktree> <api-port> <prefix>
+  local wt="$1" api_port="$2" prefix="$3"
+  local seed_attempt=1 max_seed_attempts=5 seed_ok=0 seed_out="" seed_exit=0
+  local backoff_delay
+  while [[ $seed_attempt -le $max_seed_attempts ]]; do
+    seed_exit=0
+    seed_out=$(cd "$wt" && bun event-runtime/demo/seed.mjs --port "$api_port" --prefix "$prefix" 2>&1) || seed_exit=$?
+    if [[ $seed_exit -eq 0 ]]; then
+      printf '%s\n' "$seed_out"
+      seed_ok=1
+      break
+    fi
+    if [[ "$seed_exit" -eq 78 || "$seed_out" =~ "SQLITE_BUSY" || "$seed_out" =~ "database is locked" || "$seed_out" =~ "locked" || "$seed_out" =~ "internal_error" || "$seed_out" =~ "500" || "$seed_out" =~ "409" ]]; then
+      backoff_delay=$(( 1 << (seed_attempt - 1) ))
+      warn "demo seed hit retryable error (attempt $seed_attempt/$max_seed_attempts, exit $seed_exit) — retrying in ${backoff_delay}s"
+      sleep "$backoff_delay"
+      seed_attempt=$(( seed_attempt + 1 ))
+    else
+      printf '%s\n' "$seed_out" >&2
+      die "seed failed (exit $seed_exit) — see output above"
+    fi
+  done
+  if [[ "$seed_ok" -ne 1 ]]; then
+    printf '%s\n' "$seed_out" >&2
+    die "seed failed after $max_seed_attempts attempts — see output above"
+  fi
+}
+
 TICKET=""
 TYPE="feat"
 SLUG=""
 HERE=0
-SEED=1
+SEED="${FACTORY_WORKTREE_SEED:-1}"
 RESEED=0
 LIVE=0
 CHECKOUT_ONLY=0
@@ -40,6 +74,9 @@ PRESERVATION_REPORT="${FACTORY_WORKTREE_PRESERVATION_REPORT:-}"
 EXPECTED_LEASE_FILE="${FACTORY_WORKTREE_EXPECTED_LEASE_FILE:-}"
 EXPECTED_LEASE_PID="${FACTORY_WORKTREE_EXPECTED_LEASE_PID:-}"
 POS=0
+
+[[ "$SEED" == "0" || "$SEED" == "1" ]] \
+  || die "FACTORY_WORKTREE_SEED must be 0 or 1 (got '$SEED')"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -434,23 +471,29 @@ dump_daemon_log() { # <logfile> <label>
 # count as ready. If our recorded pid died at bind, say so from serve.log
 # instead of adopting the process that won the port.
 HEALTH_JSON=""
-for _ in {1..50}; do
-  HEALTH_JSON=$(curl -sf -m 1 "http://127.0.0.1:$API_PORT/health" 2>/dev/null) && break
-  HEALTH_JSON=""
+HEALTH_WAIT_STARTED=$SECONDS
+HEALTH_LAST_CURL_EXIT=0
+while :; do
+  if HEALTH_JSON=$(curl -sf -m 1 "http://127.0.0.1:$API_PORT/health" 2>/dev/null); then
+    break
+  else
+    HEALTH_LAST_CURL_EXIT=$?
+    HEALTH_JSON=""
+  fi
   if ! pid_alive "$RUN_DIR/serve.pid"; then
     dump_daemon_log "$RUN_DIR/serve.log" "event runtime"
     die "event runtime died during startup on $API_PORT — see $RUN_DIR/serve.log"
+  fi
+  HEALTH_WAIT_ELAPSED=$((SECONDS - HEALTH_WAIT_STARTED))
+  if (( HEALTH_WAIT_ELAPSED >= WORKTREE_HEALTH_TIMEOUT_S )); then
+    dump_daemon_log "$RUN_DIR/serve.log" "event runtime"
+    die "control API not healthy after ${HEALTH_WAIT_ELAPSED}s (budget ${WORKTREE_HEALTH_TIMEOUT_S}s, last curl exit ${HEALTH_LAST_CURL_EXIT}) — see $RUN_DIR/serve.log"
   fi
   sleep 0.1
 done
 if ! pid_alive "$RUN_DIR/serve.pid"; then
   dump_daemon_log "$RUN_DIR/serve.log" "event runtime"
   die "event runtime died during startup on $API_PORT — see $RUN_DIR/serve.log"
-fi
-if [[ -z "$HEALTH_JSON" ]]; then
-  dump_daemon_log "$RUN_DIR/serve.log" "event runtime"
-  HEALTH_JSON=$(curl -sf -m 2 "http://127.0.0.1:$API_PORT/health") \
-    || die "control API never came up on $API_PORT — see $RUN_DIR/serve.log"
 fi
 assert_event_home "$HEALTH_JSON" "$HOME_DIR" "$API_PORT"
 assert_event_adapter "$HEALTH_JSON" "$LIVE" "$API_PORT"
@@ -484,19 +527,21 @@ if [[ "$WEB_AVAILABLE" -eq 1 ]]; then
   # adjacent port after allocation. Require the recorded web daemon itself to own
   # the persisted port before reporting the environment ready.
   WEB_PID_PORT=""
-  for _ in {1..50}; do
+  WEB_WAIT_STARTED=$SECONDS
+  while :; do
     if ! pid_alive "$RUN_DIR/web.pid"; then
       dump_daemon_log "$RUN_DIR/web.log" "web server"
       die "web server died during startup on $WEB_PORT — see $RUN_DIR/web.log"
     fi
     WEB_PID_PORT=$(listen_tcp_port "$RUN_DIR/web.pid" || true)
     [[ "$WEB_PID_PORT" == "$WEB_PORT" ]] && break
+    WEB_WAIT_ELAPSED=$((SECONDS - WEB_WAIT_STARTED))
+    if (( WEB_WAIT_ELAPSED >= WORKTREE_WEB_TIMEOUT_S )); then
+      dump_daemon_log "$RUN_DIR/web.log" "web server"
+      die "web server pid $(cat "$RUN_DIR/web.pid") did not bind reserved port $WEB_PORT after ${WEB_WAIT_ELAPSED}s (budget ${WORKTREE_WEB_TIMEOUT_S}s, last observed port ${WEB_PID_PORT:-none})"
+    fi
     sleep 0.1
   done
-  if [[ "$WEB_PID_PORT" != "$WEB_PORT" ]]; then
-    dump_daemon_log "$RUN_DIR/web.log" "web server"
-    die "web server pid $(cat "$RUN_DIR/web.pid") did not bind reserved port $WEB_PORT"
-  fi
 fi
 
 # ------------------------------------------------------------------- seed ---
@@ -504,30 +549,7 @@ if [[ "$SEED" -eq 1 && ( "$FRESH" -eq 1 || "$RESEED" -eq 1 ) ]]; then
   PREFIX="demo"
   [[ "$RESEED" -eq 1 && "$FRESH" -eq 0 ]] && PREFIX="demo-$(date +%s)"
   info "seeding demo data (prefix $PREFIX)"
-  seed_attempt=1
-  max_seed_attempts=5
-  seed_ok=0
-  seed_out=""
-  while [[ $seed_attempt -le $max_seed_attempts ]]; do
-    if seed_out=$(cd "$WT" && bun event-runtime/demo/seed.mjs --port "$API_PORT" --prefix "$PREFIX" 2>&1); then
-      printf '%s\n' "$seed_out"
-      seed_ok=1
-      break
-    fi
-    if [[ "$seed_out" =~ "SQLITE_BUSY" || "$seed_out" =~ "database is locked" || "$seed_out" =~ "locked" || "$seed_out" =~ "internal_error" || "$seed_out" =~ "500" || "$seed_out" =~ "409" ]]; then
-      backoff_delay=$(( 1 << (seed_attempt - 1) ))
-      warn "demo seed hit transient lock/error (attempt $seed_attempt/$max_seed_attempts) — retrying in ${backoff_delay}s"
-      sleep "$backoff_delay"
-      seed_attempt=$(( seed_attempt + 1 ))
-    else
-      printf '%s\n' "$seed_out" >&2
-      die "seed failed — see output above"
-    fi
-  done
-  if [[ "$seed_ok" -ne 1 ]]; then
-    printf '%s\n' "$seed_out" >&2
-    die "seed failed after $max_seed_attempts attempts — see output above"
-  fi
+  seed_demo_data "$WT" "$API_PORT" "$PREFIX"
 elif [[ "$SEED" -eq 1 ]]; then
   info "existing database found — not reseeding (use --reseed for a fresh set)"
 else

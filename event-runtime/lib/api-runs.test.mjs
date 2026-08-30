@@ -1287,6 +1287,233 @@ describe("recent-ticket index (WM-821)", () => {
       s.close();
     }
   });
+
+  test("bounds ticket index reads by since and retains recent lifecycle activity", async () => {
+    const nowMs = Date.parse("2026-08-18T12:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      const insertRun = s.db.query(
+        `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+         VALUES (?, ?, ?, 'sha256:test', 'COMPLETED', 1, ?, ?)`,
+      );
+      const insertLifecycle = s.db.query(
+        `INSERT INTO lifecycle_events (run_id, to_state, actor, at, record_hash)
+         VALUES (?, 'COMPLETED', 'test', ?, ?)`,
+      );
+      const insertEvent = s.db.query(
+        `INSERT INTO events
+         (source, event_id, type, subject, occurred_at, received_at, envelope_json, payload_hash, admitted_at)
+         VALUES ('test', ?, 'ticket.updated', ?, ?, ?, '{}', 'sha256:test', ?)`,
+      );
+      const at = (daysAgo) =>
+        new Date(nowMs - daysAgo * 86_400_000).toISOString();
+
+      insertRun.run(
+        "run-recent-lifecycle",
+        "recent-lifecycle",
+        spec({ repo: "factory", ticket: "WM-1765" }),
+        at(3),
+        at(3),
+      );
+      insertLifecycle.run(
+        "run-recent-lifecycle",
+        at(1),
+        "sha256:recent-lifecycle",
+      );
+      insertEvent.run(
+        "recent-event",
+        "WM-1766",
+        at(1 / 24),
+        at(1 / 24),
+        at(1 / 24),
+      );
+      insertEvent.run("stale-event", "WM-1767", at(30), at(30), at(30));
+
+      const queries = [];
+      const observedDb = {
+        filename: s.db.filename,
+        query(sql) {
+          queries.push(sql);
+          return s.db.query(sql);
+        },
+      };
+      const tickets = ticketIndexView(observedDb, {
+        nowMs,
+        since: "2d",
+        noCache: true,
+      });
+
+      expect(tickets.map((ticket) => ticket.id)).toEqual([
+        "WM-1766",
+        "WM-1765",
+      ]);
+      expect(
+        queries.some((sql) => /events WHERE admitted_at >= \?/.test(sql)),
+      ).toBe(true);
+      expect(
+        queries.some((sql) => /lifecycle_events\s+WHERE at >= \?/.test(sql)),
+      ).toBe(true);
+      expect(
+        queries.some((sql) => /WHERE at >= \? AND run_id IN \(\?\)/.test(sql)),
+      ).toBe(true);
+      expect(queries.join("\n")).not.toContain(
+        "SELECT * FROM results ORDER BY",
+      );
+    } finally {
+      s.close();
+    }
+  });
+
+  test("re-enriches a ticket with history older than the window (gh-1764)", async () => {
+    const nowMs = Date.parse("2026-08-18T12:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      const at = (daysAgo) =>
+        new Date(nowMs - daysAgo * 86_400_000).toISOString();
+      // Old history: proposal -> merge run (subject-indexed) -> MERGED result,
+      // all 30 days ago, far outside the 2d window.
+      s.db
+        .query(
+          `INSERT INTO events
+           (source, event_id, type, subject, occurred_at, received_at, envelope_json, payload_hash, admitted_at)
+           VALUES ('test', 'old-dispatch', 'ticket.ready', 'WM-1764', ?, ?, ?, 'sha256:test', ?)`,
+        )
+        .run(
+          at(30),
+          at(30),
+          JSON.stringify({
+            payload: { ticket: "WM-1764", ticketTitle: "Old but merged" },
+          }),
+          at(30),
+        );
+      s.db
+        .query(
+          `INSERT INTO proposals (id, event_source, event_id, run_id, decision, spec_json, spec_hash, status, created_at, ttl_seconds, decided_at, decided_by)
+           VALUES ('prop-1764', 'test', 'old-dispatch', 'run-1764-merge', 'dispatch', ?, 'sha256:test', 'approved', ?, 3600, ?, 'operator')`,
+        )
+        .run(spec({ repo: "factory", ticket: "WM-1764" }), at(30), at(30));
+      s.db
+        .query(
+          `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at, subject)
+           VALUES ('run-1764-merge', 'key-1764-merge', ?, 'sha256:test', 'COMPLETED', 2, ?, ?, 'WM-1764')`,
+        )
+        .run(
+          spec({ repo: "factory", ticket: "WM-1764" }, "merge-apply@1"),
+          at(29),
+          at(29),
+        );
+      s.db
+        .query(
+          `INSERT INTO results
+           (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+           VALUES ('run-1764-merge', 1, ?, 'sha256:res', '{}', '{}', ?)`,
+        )
+        .run(
+          JSON.stringify({
+            terminalState: "completed",
+            artifact: {
+              outcome: "MERGED",
+              prUrl: "https://github.com/watt-mind/factory/pull/1771",
+            },
+          }),
+          at(29),
+        );
+      // Fresh activity: a bare event inside the window with no metadata.
+      s.db
+        .query(
+          `INSERT INTO events
+           (source, event_id, type, subject, occurred_at, received_at, envelope_json, payload_hash, admitted_at)
+           VALUES ('test', 'fresh-comment', 'ticket.commented', 'WM-1764', ?, ?, '{}', 'sha256:test', ?)`,
+        )
+        .run(at(0.5), at(0.5), at(0.5));
+
+      const [ticket] = ticketIndexView(s.db, {
+        nowMs,
+        since: "2d",
+        noCache: true,
+      });
+      expect(ticket.id).toBe("WM-1764");
+      expect(ticket.merged).toBe(true);
+      expect(ticket.state).toBe("Done");
+      expect(ticket.pr).toEqual({
+        number: 1771,
+        url: "https://github.com/watt-mind/factory/pull/1771",
+      });
+      expect(ticket.title).toBe("Old but merged");
+      expect(ticket.repo).toBe("factory");
+      expect(ticket.attempts).toBe(2);
+      expect(ticket.lastDecision).toBe("dispatch");
+      expect(ticket.lastActivityKind).toBe("event");
+      expect(ticket.lastActivityAt).toBe(at(0.5));
+    } finally {
+      s.close();
+    }
+  });
+
+  test("lifecycle transitions keep a run's merge/pr activity kind (gh-1764)", async () => {
+    const nowMs = Date.parse("2026-08-18T12:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      const at = (hoursAgo) =>
+        new Date(nowMs - hoursAgo * 3_600_000).toISOString();
+      const insertRun = s.db.query(
+        `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at, subject)
+         VALUES (?, ?, ?, 'sha256:test', 'COMPLETED', 1, ?, ?, ?)`,
+      );
+      const insertResult = s.db.query(
+        `INSERT INTO results
+         (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+         VALUES (?, 1, ?, 'sha256:res', '{}', '{}', ?)`,
+      );
+      const insertLifecycle = s.db.query(
+        `INSERT INTO lifecycle_events (run_id, to_state, actor, at, record_hash)
+         VALUES (?, 'COMPLETED', 'test', ?, 'sha256:lc')`,
+      );
+
+      insertRun.run(
+        "run-1768-merge",
+        "key-1768-merge",
+        spec({ repo: "factory", ticket: "WM-1768" }, "merge-apply@1"),
+        at(6),
+        at(2),
+        "WM-1768",
+      );
+      insertResult.run(
+        "run-1768-merge",
+        JSON.stringify({ artifact: { outcome: "MERGED", pr: 1768 } }),
+        at(3),
+      );
+      insertLifecycle.run("run-1768-merge", at(2));
+
+      insertRun.run(
+        "run-1769-pr",
+        "key-1769-pr",
+        spec({ repo: "factory", ticket: "WM-1769" }),
+        at(6),
+        at(2),
+        "WM-1769",
+      );
+      insertResult.run(
+        "run-1769-pr",
+        JSON.stringify({ artifact: { outcome: "PR_OPEN", pr: 1769 } }),
+        at(3),
+      );
+      insertLifecycle.run("run-1769-pr", at(2));
+
+      const tickets = ticketIndexView(s.db, {
+        nowMs,
+        since: "1d",
+        noCache: true,
+      });
+      const byId = Object.fromEntries(tickets.map((t) => [t.id, t]));
+      expect(byId["WM-1768"].lastActivityAt).toBe(at(2));
+      expect(byId["WM-1768"].lastActivityKind).toBe("merge");
+      expect(byId["WM-1769"].lastActivityAt).toBe(at(2));
+      expect(byId["WM-1769"].lastActivityKind).toBe("pr");
+    } finally {
+      s.close();
+    }
+  });
 });
 
 describe("watched flow and operator verbs (§12, §13, §15)", () => {

@@ -963,16 +963,20 @@ describe("execute-side dispatch hardening (WM-115)", () => {
   test("same-identity dispatch claims share the supervisor lock when event home is isolated", async () => {
     const previousEventHome = process.env.FACTORY_EVENT_HOME;
     const previousLocksDir = process.env.FACTORY_LOCKS_DIR;
+    const previousHome = process.env.HOME;
     const repoName = "wt-worker";
-    const supervisorLock = dispatchLockPath(
-      repoName,
-      path.join(homedir(), ".factory", "locks"),
-    );
-    process.env.FACTORY_EVENT_HOME = tmpDir("evrt-isolated-event-home-");
-    delete process.env.FACTORY_LOCKS_DIR;
+    const scratchHome = tmpDir("evrt-isolated-lock-home-");
+    let supervisorLock;
     let claimCalls = 0;
 
     try {
+      process.env.HOME = scratchHome;
+      process.env.FACTORY_EVENT_HOME = tmpDir("evrt-isolated-event-home-");
+      delete process.env.FACTORY_LOCKS_DIR;
+      supervisorLock = dispatchLockPath(
+        repoName,
+        path.join(homedir(), ".factory", "locks"),
+      );
       expect(acquireClaimLock(supervisorLock)).toBe(true);
       const db = openDb(":memory:");
       queueRun(
@@ -1003,12 +1007,14 @@ describe("execute-side dispatch hardening (WM-115)", () => {
       expect(summary.reasonCode).toBe("claim_lock_contention");
       expect(claimCalls).toBe(0);
     } finally {
-      releaseClaimLock(supervisorLock);
+      if (supervisorLock) releaseClaimLock(supervisorLock);
       if (previousEventHome === undefined)
         delete process.env.FACTORY_EVENT_HOME;
       else process.env.FACTORY_EVENT_HOME = previousEventHome;
       if (previousLocksDir === undefined) delete process.env.FACTORY_LOCKS_DIR;
       else process.env.FACTORY_LOCKS_DIR = previousLocksDir;
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
     }
   });
 

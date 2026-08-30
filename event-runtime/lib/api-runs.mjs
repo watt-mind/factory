@@ -932,28 +932,121 @@ export function ticketIndexView(db, options = {}) {
     }
   }
 
+  // The activity window only decides WHICH tickets are candidates: a ticket is
+  // listed when any event, proposal, run, or lifecycle row touching it landed in
+  // the window. Every JSON-bearing read here is bounded by that window through
+  // the indexed `admitted_at` / `created_at` / `at` columns.
+  //
+  // Once the candidate set is known, each ticket is re-enriched with bounded,
+  // indexed lookups (runs by `subject`, proposals by `run_id` and event key,
+  // events/runs/results by primary key) so that title, repo, PR, merge state,
+  // attempts, and the last decision stay complete even when the ticket's
+  // history predates the window.
   const eventRows = db
-    .query(`SELECT * FROM events ORDER BY admitted_at, rowid`)
-    .all();
+    .query(
+      `SELECT * FROM events WHERE admitted_at >= ? ORDER BY admitted_at, rowid`,
+    )
+    .all(sinceIso);
   const proposalRows = db
-    .query(`SELECT * FROM proposals ORDER BY created_at, rowid`)
-    .all();
+    .query(
+      `SELECT * FROM proposals WHERE created_at >= ? ORDER BY created_at, rowid`,
+    )
+    .all(sinceIso);
   const runRows = db
-    .query(`SELECT * FROM runs ORDER BY created_at, rowid`)
-    .all();
-  const resultRows = db.query(`SELECT * FROM results ORDER BY rowid`).all();
-  const lifecycleRows = db
-    .query(`SELECT * FROM lifecycle_events ORDER BY rowid`)
-    .all();
+    .query(
+      `SELECT * FROM runs WHERE created_at >= ? ORDER BY created_at, rowid`,
+    )
+    .all(sinceIso);
+  const lifecycleRunIds = db
+    .query(
+      `SELECT DISTINCT run_id FROM lifecycle_events WHERE at >= ? ORDER BY run_id`,
+    )
+    .all(sinceIso)
+    .map((row) => row.run_id);
+  const chunked = (values, size = 400) => {
+    const chunks = [];
+    for (let i = 0; i < values.length; i += size)
+      chunks.push(values.slice(i, i + size));
+    return chunks;
+  };
+  const placeholders = (values) => values.map(() => "?").join(", ");
+  const eventKey = (row) => `${row.source}\0${row.event_id}`;
+  const runIds = new Set(runRows.map((row) => row.run_id));
+  const eventKeys = new Set(eventRows.map(eventKey));
+  const proposalIds = new Set(proposalRows.map((row) => row.id));
+  const addRuns = (rows) => {
+    for (const row of rows) {
+      if (runIds.has(row.run_id)) continue;
+      runIds.add(row.run_id);
+      runRows.push(row);
+    }
+  };
+  const addEvents = (rows) => {
+    for (const row of rows) {
+      const key = eventKey(row);
+      if (eventKeys.has(key)) continue;
+      eventKeys.add(key);
+      eventRows.push(row);
+    }
+  };
+  const addProposals = (rows) => {
+    for (const row of rows) {
+      if (proposalIds.has(row.id)) continue;
+      proposalIds.add(row.id);
+      proposalRows.push(row);
+    }
+  };
+  const fetchRunsById = (ids) => {
+    for (const chunk of chunked(ids.filter((id) => !runIds.has(id)))) {
+      addRuns(
+        db
+          .query(`SELECT * FROM runs WHERE run_id IN (${placeholders(chunk)})`)
+          .all(...chunk),
+      );
+    }
+  };
+  fetchRunsById(lifecycleRunIds);
 
-  const resultByRun = new Map();
-  for (const row of resultRows) {
-    const result = parseObject(row.result_json);
-    if (!resultByRun.has(row.run_id)) resultByRun.set(row.run_id, []);
-    resultByRun.get(row.run_id).push(result);
+  // Lifecycle rows are read only inside the window: they can surface a ticket
+  // (via reasons) and they carry recent activity, but older transitions never
+  // outrank in-window activity and add nothing to the enrichment below.
+  const lifecycleRows = [];
+  for (const chunk of chunked([...runIds])) {
+    lifecycleRows.push(
+      ...db
+        .query(
+          `SELECT * FROM lifecycle_events
+           WHERE at >= ? AND run_id IN (${placeholders(chunk)}) ORDER BY rowid`,
+        )
+        .all(sinceIso, ...chunk),
+    );
+  }
+  const lifecycleByRun = new Map();
+  for (const row of lifecycleRows) {
+    if (!lifecycleByRun.has(row.run_id)) lifecycleByRun.set(row.run_id, []);
+    lifecycleByRun.get(row.run_id).push(row);
   }
 
-  // Collect candidate ticket IDs across all entities
+  const resultByRun = new Map();
+  const fetchResults = () => {
+    const missing = [...runIds].filter((id) => !resultByRun.has(id));
+    for (const chunk of chunked(missing)) {
+      for (const row of db
+        .query(
+          `SELECT * FROM results WHERE run_id IN (${placeholders(chunk)}) ORDER BY rowid`,
+        )
+        .all(...chunk)) {
+        if (!resultByRun.has(row.run_id)) resultByRun.set(row.run_id, []);
+        resultByRun.get(row.run_id).push(parseObject(row.result_json));
+      }
+      for (const id of chunk) {
+        if (!resultByRun.has(id)) resultByRun.set(id, []);
+      }
+    }
+  };
+  fetchResults();
+
+  // Collect candidate ticket IDs across all in-window entities
   const allTicketIds = new Set();
   for (const row of eventRows) {
     if (normalizeTicketId(row.subject)) {
@@ -977,6 +1070,77 @@ export function ticketIndexView(db, options = {}) {
   for (const row of lifecycleRows) {
     collectTicketIds(row.reason, allTicketIds);
   }
+
+  // Enrichment: pull the full history of every candidate ticket through
+  // indexed lookups, independent of the window. Subjects are matched by their
+  // normalized id plus every raw spelling seen in-window (GitHub refs keep
+  // their original case in `runs.subject` / `events.subject`).
+  const subjectKeys = new Set(allTicketIds);
+  for (const row of [...runRows, ...eventRows]) {
+    if (
+      typeof row.subject === "string" &&
+      allTicketIds.has(normalizeTicketId(row.subject))
+    ) {
+      subjectKeys.add(row.subject);
+    }
+  }
+  for (const chunk of chunked([...subjectKeys])) {
+    addRuns(
+      db
+        .query(`SELECT * FROM runs WHERE subject IN (${placeholders(chunk)})`)
+        .all(...chunk),
+    );
+    addEvents(
+      db
+        .query(`SELECT * FROM events WHERE subject IN (${placeholders(chunk)})`)
+        .all(...chunk),
+    );
+  }
+  // Close the event ↔ proposal ↔ run graph: proposals by run_id and by event
+  // key, then the runs/events those proposals reference, until stable.
+  const proposalsByEvent = db.query(
+    `SELECT * FROM proposals WHERE event_source = ? AND event_id = ?`,
+  );
+  const eventsByKey = db.query(
+    `SELECT * FROM events WHERE source = ? AND event_id = ?`,
+  );
+  const seenRunLookups = new Set();
+  const seenEventLookups = new Set();
+  const seenEventFetches = new Set();
+  for (let pass = 0; pass < 8; pass += 1) {
+    const before = proposalIds.size + runIds.size + eventKeys.size;
+    const newRunIds = [...runIds].filter((id) => !seenRunLookups.has(id));
+    for (const chunk of chunked(newRunIds)) {
+      addProposals(
+        db
+          .query(
+            `SELECT * FROM proposals WHERE run_id IN (${placeholders(chunk)})`,
+          )
+          .all(...chunk),
+      );
+      for (const id of chunk) seenRunLookups.add(id);
+    }
+    for (const row of eventRows) {
+      const key = eventKey(row);
+      if (seenEventLookups.has(key)) continue;
+      seenEventLookups.add(key);
+      addProposals(proposalsByEvent.all(row.source, row.event_id));
+    }
+    fetchRunsById(
+      proposalRows.map((row) => row.run_id).filter((id) => id != null),
+    );
+    for (const row of proposalRows) {
+      const key = `${row.event_source}\0${row.event_id}`;
+      if (eventKeys.has(key) || seenEventFetches.has(key)) continue;
+      seenEventFetches.add(key);
+      addEvents(eventsByKey.all(row.event_source, row.event_id));
+    }
+    if (proposalIds.size + runIds.size + eventKeys.size === before) break;
+  }
+  fetchResults();
+  eventRows.sort((a, b) => a.admitted_at.localeCompare(b.admitted_at));
+  proposalRows.sort((a, b) => a.created_at.localeCompare(b.created_at));
+  runRows.sort((a, b) => a.created_at.localeCompare(b.created_at));
 
   const summaries = [];
 
@@ -1197,22 +1361,33 @@ export function ticketIndexView(db, options = {}) {
     for (const r of matchedRunRows) {
       const results = resultByRun.get(r.run_id) ?? [];
       const spec = parseObject(r.spec_json);
+      // A run's activity kind is its strongest outcome (merge > pr > run);
+      // lifecycle transitions inherit it so a later state change never
+      // downgrades a merge/pr activity to a plain "run".
+      let runKind = spec.agent?.startsWith("merge-") ? "merge" : "run";
       for (const res of results) {
         const isMerge =
           res?.artifact?.outcome === "MERGED" ||
           spec.agent?.startsWith("merge-");
         const isPr =
           res?.artifact?.outcome === "PR_OPEN" || Boolean(res?.artifact?.prUrl);
+        const kind = isMerge ? "merge" : isPr ? "pr" : "run";
+        if (kind === "merge" || (kind === "pr" && runKind === "run")) {
+          runKind = kind;
+        }
         activities.push({
           at: res.accepted_at || r.updated_at || r.created_at,
-          kind: isMerge ? "merge" : isPr ? "pr" : "run",
+          kind,
         });
       }
       if (results.length === 0) {
         activities.push({
           at: r.updated_at || r.created_at,
-          kind: spec.agent?.startsWith("merge-") ? "merge" : "run",
+          kind: runKind,
         });
+      }
+      for (const lifecycle of lifecycleByRun.get(r.run_id) ?? []) {
+        activities.push({ at: lifecycle.at, kind: runKind });
       }
     }
 
