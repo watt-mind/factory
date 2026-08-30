@@ -1303,7 +1303,12 @@ test("worktree-down --prune recognizes merged GitHub worktrees and preserves dir
     );
     writeFileSync(
       path.join(mockBin, "gh"),
-      "#!/usr/bin/env bash\nprintf '1\\n'\n",
+      `#!/usr/bin/env bash\n${branches
+        .map(
+          (branch) =>
+            `[[ "$*" == *"--head ${branch}"* ]] && { printf '1\\n'; exit 0; }`,
+        )
+        .join("\n")}\nprintf '0\\n'\n`,
       { mode: 0o755 },
     );
     const pruned = Bun.spawnSync({

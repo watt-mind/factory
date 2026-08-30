@@ -365,6 +365,7 @@ export function detectWorktreeOwnershipConflict({
     console.warn(`worktree_owner_stale:${staleRunId}`),
 } = {}) {
   const runs = [];
+  const staleOwners = [];
   if (existsSync(databasePath)) {
     let db;
     try {
@@ -387,7 +388,7 @@ export function detectWorktreeOwnershipConflict({
           spec?.maxAttempts != null &&
           row.attempts >= spec.maxAttempts
         ) {
-          staleOwnerLog(row.run_id);
+          staleOwners.push(row.run_id);
           continue;
         }
         runs.push({ runId: row.run_id, state: row.state });
@@ -424,7 +425,12 @@ export function detectWorktreeOwnershipConflict({
       return tokenSeparator <= 0 || identity.slice(0, tokenSeparator) !== runId;
     })
     .map((lease) => ({ owner: lease.owner, pid: lease.pid }));
-  if (runs.length === 0 && competingLeases.length === 0) return null;
+  if (runs.length === 0 && competingLeases.length === 0) {
+    // Only announce a release once nothing else still holds the ticket; an
+    // exhausted owner next to a live one is not stale ownership being reclaimed.
+    for (const staleRunId of staleOwners) staleOwnerLog(staleRunId);
+    return null;
+  }
   return {
     reason: "ticket has a non-terminal run or live worker lease",
     runs,

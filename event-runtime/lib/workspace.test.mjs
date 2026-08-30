@@ -228,6 +228,8 @@ test("detectWorktreeOwnershipConflict releases only attempts-exhausted FAILED ow
   insert("run_unbounded", "WM-UNBOUNDED", "FAILED", 3, undefined);
   insert("run_running", "WM-RUNNING", "RUNNING", 1, 3);
   insert("run_dead", "WM-DEAD", "COMPLETED", 1, 3);
+  insert("run_mixed_exhausted", "WM-MIXED", "FAILED", 3, 3);
+  insert("run_mixed_live", "WM-MIXED", "RUNNING", 1, 3);
   db.close();
 
   const staleOwners = [];
@@ -252,6 +254,12 @@ test("detectWorktreeOwnershipConflict releases only attempts-exhausted FAILED ow
   expect(detect("WM-RUNNING")?.runs).toEqual([
     { runId: "run_running", state: "RUNNING" },
   ]);
+  // An exhausted owner beside a live one is not released, so nothing is
+  // announced as stale.
+  expect(detect("WM-MIXED")?.runs).toEqual([
+    { runId: "run_mixed_live", state: "RUNNING" },
+  ]);
+  expect(staleOwners).toEqual(["run_exhausted"]);
 
   const liveLease = {
     repo,
