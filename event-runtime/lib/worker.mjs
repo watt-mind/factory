@@ -4408,22 +4408,33 @@ export function reapExpiredLeases(
   {
     now = () => Date.now(),
     policyVersion = "unknown",
-    onError = (error) => console.error(`[worker] ${error}`),
+    onError = ({ runId, error }) =>
+      console.error(
+        `[worker] expired lease ${runId}: ${error?.message ?? String(error)}`,
+      ),
   } = {},
 ) {
   const currentNow = resolveNow(now);
-  const rows = db
-    .query(
-      `SELECT r.run_id, r.attempts, r.spec_json, r.state FROM runs r
+  const nowIso = iso(currentNow);
+  const candidateSql = `SELECT r.run_id, r.attempts, r.spec_json, r.state FROM runs r
        JOIN attempts a ON a.run_id = r.run_id AND a.attempt = r.attempts
-       WHERE r.state IN ('LEASED', 'RUNNING', 'VERIFYING') AND a.lease_expires_at < ?`,
-    )
-    .all(iso(currentNow));
+       WHERE r.state IN ('LEASED', 'RUNNING', 'VERIFYING') AND a.lease_expires_at < ?`;
+  const candidates = db.query(candidateSql).all(nowIso);
   let reaped = 0;
 
-  for (const row of rows) {
+  for (const candidate of candidates) {
     try {
-      txImmediate(db, () => {
+      const outcome = txImmediate(db, () => {
+        // The candidate list is a snapshot taken outside this transaction. A
+        // worker may have renewed the lease (or the run may have moved on)
+        // since; re-read under the write lock and only act when the row is
+        // still exactly the expired attempt we selected.
+        const row = db
+          .query(
+            `${candidateSql} AND r.run_id = ? AND r.attempts = ? AND r.state = ?`,
+          )
+          .get(nowIso, candidate.run_id, candidate.attempts, candidate.state);
+        if (!row) return "skipped";
         const spec = JSON.parse(row.spec_json);
         const decision = retryDecision(db, row.run_id, spec, "lease_expired", {
           includeCurrentFailure: true,
@@ -4460,7 +4471,7 @@ export function reapExpiredLeases(
             policyVersion,
             now: currentNow,
           });
-          return;
+          return "reaped";
         }
 
         // LEASED has no direct FAILED edge; advance through RUNNING only when
@@ -4487,10 +4498,11 @@ export function reapExpiredLeases(
             now: currentNow,
           });
         }
+        return "reaped";
       });
-      reaped += 1;
-    } catch (err) {
-      onError(`expired lease ${row.run_id}: ${err?.message ?? String(err)}`);
+      if (outcome === "reaped") reaped += 1;
+    } catch (error) {
+      onError({ runId: candidate.run_id, error });
     }
   }
 
