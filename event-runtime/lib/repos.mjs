@@ -1,10 +1,10 @@
 /**
- * Repo facts, read from the factory's local config/repos.yaml (OPS-228).
+ * Repo facts, read from the factory's local config/repos.yaml (OPS-228) and
+ * overlaid with portable policy from each checkout's factory.repo/v1 file.
  *
- * Deliberately a reader, not an owner: repos.yaml is already the single
- * source of routing truth for the dispatcher (base branch, worktree scripts,
- * verify command). A second registry inside the event runtime would drift,
- * and a drifting port or base branch is how two agents collide.
+ * Deliberately a reader, not an owner: host config remains the source of
+ * checkout identity, routing, and concurrency, while repository-intrinsic
+ * build and policy settings evolve with that repository in git.
  *
  * Tier 1 uses `name`, `path`, `github`, and `base`. The `worktree_*` and
  * `verify` fields are read but unused until tier 2 (docs/event-runtime-workers.md).
@@ -21,6 +21,7 @@ import {
   FACTORY_ROOT,
   resolveConfigPath,
 } from "./config.mjs";
+import { validate } from "./schema.mjs";
 // types.mjs only, never index.mjs: index.mjs reads this registry to resolve a
 // repo's control plane (WM-1007), so importing it back here would cycle.
 // types.mjs imports nothing.
@@ -45,6 +46,136 @@ export function reposRoot() {
 
 export function reposConfigPath(root = reposRoot()) {
   return resolveConfigPath("repos", { root });
+}
+
+const IN_REPO_CONFIG_PATHS = [".factory.yaml", ".factory/config.yaml"];
+const IN_REPO_CONFIG_SCHEMA_PATH = new URL(
+  "../schemas/repo-config.schema.json",
+  import.meta.url,
+);
+let inRepoConfigSchema;
+
+function repoConfigSchema() {
+  if (inRepoConfigSchema) return inRepoConfigSchema;
+  try {
+    inRepoConfigSchema = JSON.parse(
+      readFileSync(IN_REPO_CONFIG_SCHEMA_PATH, "utf8"),
+    );
+  } catch (error) {
+    throw new RepoError(
+      `cannot load built-in factory.repo/v1 schema: ${error.message}`,
+    );
+  }
+  return inRepoConfigSchema;
+}
+
+function validateInRepoConfigSemantics(config, file) {
+  normalizeToolchain(config.toolchain, "in-repo config", file);
+  normalizeOwnedPathsPolicy(config.owned_paths_policy, "in-repo config", file);
+  normalizeSecurity(config.security, "in-repo config", file);
+
+  if (config.merge_ci !== undefined && config.merge_ci !== null) {
+    const { workflow, required_checks: requiredChecks } = config.merge_ci;
+    if (new Set(requiredChecks).size !== requiredChecks.length) {
+      throw new RepoError(
+        `${file}: in-repo config merge_ci.required_checks must be unique`,
+      );
+    }
+    if (!workflow.trim() || requiredChecks.some((check) => !check.trim())) {
+      throw new RepoError(
+        `${file}: in-repo config merge_ci values must be non-empty`,
+      );
+    }
+  }
+}
+
+/**
+ * Read portable repository policy from the checkout itself.
+ *
+ * A repository may use either the root-level shorthand or the namespaced
+ * location, never both. Missing files are the legacy/host-only case and return
+ * null; malformed or ambiguous declarations fail closed before host overlay.
+ */
+export function loadInRepoConfig(repoRoot = process.cwd()) {
+  const files = IN_REPO_CONFIG_PATHS.map((relative) =>
+    path.join(repoRoot, relative),
+  ).filter((file) => existsSync(file));
+  if (files.length === 0) return null;
+  if (files.length > 1) {
+    throw new RepoError(
+      `${repoRoot}: both .factory.yaml and .factory/config.yaml exist; keep exactly one in-repo config`,
+    );
+  }
+
+  const file = files[0];
+  let parsed;
+  try {
+    parsed = Bun.YAML.parse(readFileSync(file, "utf8"));
+  } catch (error) {
+    throw new RepoError(`${file}: invalid YAML: ${error.message}`);
+  }
+  const result = validate(repoConfigSchema(), parsed);
+  if (!result.valid) {
+    throw new RepoError(
+      `${file}: invalid factory.repo/v1 config: ${result.errors.join("; ")}`,
+    );
+  }
+  validateInRepoConfigSemantics(parsed, file);
+  return parsed;
+}
+
+const hasOwn = (value, key) =>
+  value !== null &&
+  typeof value === "object" &&
+  Object.prototype.hasOwnProperty.call(value, key);
+
+/**
+ * Overlay repository-owned policy onto one host registry entry.
+ *
+ * Host identity and infrastructure stay intact. In-repo values own the
+ * portable fields, escalate paths are a stable union, and the two explicitly
+ * host-owned scheduling/routing controls always win.
+ */
+export function mergeRepoConfig(hostConfig, inRepoConfig) {
+  if (inRepoConfig === null || inRepoConfig === undefined) {
+    return { ...hostConfig };
+  }
+
+  const { schemaVersion: _schemaVersion, worktree, ...portable } = inRepoConfig;
+  const merged = { ...hostConfig, ...portable };
+
+  if (hasOwn(inRepoConfig, "escalate_paths")) {
+    const hostPaths = hostConfig.escalate_paths;
+    const repoPaths = inRepoConfig.escalate_paths;
+    if (Array.isArray(hostPaths) && Array.isArray(repoPaths)) {
+      merged.escalate_paths = [...new Set([...hostPaths, ...repoPaths])];
+    } else if (
+      (hostPaths === undefined || hostPaths === null) &&
+      Array.isArray(repoPaths)
+    ) {
+      merged.escalate_paths = [...repoPaths];
+    } else {
+      // Preserve malformed host policy as malformed. loadRepos projects it to
+      // null so the planner's escalate-path gate refuses to evaluate it.
+      merged.escalate_paths = hostPaths;
+    }
+  }
+
+  if (worktree && typeof worktree === "object") {
+    for (const [nested, flat] of [
+      ["up", "worktree_up"],
+      ["down", "worktree_down"],
+      ["warm", "worktree_warm"],
+    ]) {
+      if (hasOwn(worktree, nested)) merged[flat] = worktree[nested];
+    }
+  }
+
+  for (const hostOnly of ["max_in_flight", "control_plane"]) {
+    if (hasOwn(hostConfig, hostOnly)) merged[hostOnly] = hostConfig[hostOnly];
+    else delete merged[hostOnly];
+  }
+  return merged;
 }
 
 /** Expand a leading ~ the way the config files write paths. */
@@ -946,10 +1077,15 @@ export function loadRepos({ root = reposRoot() } = {}) {
     throw new RepoError(`${file}: invalid YAML: ${err.message}`);
   }
   const repos = new Map();
-  for (const entry of parsed?.repos ?? []) {
-    if (!entry?.name) throw new RepoError(`${file}: a repo entry has no name`);
-    if (!entry.path)
-      throw new RepoError(`${file}: repo ${entry.name} has no path`);
+  for (const hostEntry of parsed?.repos ?? []) {
+    if (!hostEntry?.name)
+      throw new RepoError(`${file}: a repo entry has no name`);
+    if (!hostEntry.path)
+      throw new RepoError(`${file}: repo ${hostEntry.name} has no path`);
+    const entry = mergeRepoConfig(
+      hostEntry,
+      loadInRepoConfig(expandHome(hostEntry.path)),
+    );
     let maxInFlight = null;
     if (entry.max_in_flight !== undefined && entry.max_in_flight !== null) {
       if (

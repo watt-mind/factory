@@ -12,7 +12,9 @@ import semver from "semver";
 import { DEFAULT_MAX_IN_FLIGHT } from "./config.mjs";
 import {
   isToolchainConstraint,
+  loadInRepoConfig,
   loadRepos,
+  mergeRepoConfig,
   normalizeToolVersion,
   preflightToolchain,
   preflightToolchainSync,
@@ -50,6 +52,185 @@ function factoryRoot(yaml) {
   writeFileSync(path.join(root, "config", "repos.yaml"), yaml);
   return root;
 }
+
+function repositoryRoot(relativeConfigPath, yaml) {
+  const root = tmpDir("evrt-in-repo-config-");
+  scratch.push(root);
+  if (relativeConfigPath) {
+    const file = path.join(root, relativeConfigPath);
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, yaml);
+  }
+  return root;
+}
+
+const IN_REPO_YAML = `schemaVersion: factory.repo/v1
+base: develop
+deploy_branch: main
+verify: bun test
+toolchain:
+  bun: ">=1.3 <2"
+owned_paths_policy:
+  direct:
+    - source: shared/**
+      requires: [dist/**]
+  pin_manifests: [event-runtime/agents/*.json]
+  registry_digest:
+    inputs: [event-runtime/agents/**]
+    baseline: event-runtime/lib/registry.test.mjs
+escalate_paths: [src/auth/**]
+merge_ci:
+  workflow: CI
+  required_checks: [Verify]
+worktree:
+  up: bin/worktree-up.sh
+  down: bin/worktree-down.sh
+  warm: bin/worktree-warm.sh
+security:
+  python_version: "3.12"
+  semgrep_args: --exclude-rule example.rule
+  gitleaks_args: --no-git
+`;
+
+describe("factory.repo/v1 in-repo configuration", () => {
+  test("loads the root-level and namespaced file locations", () => {
+    for (const relative of [".factory.yaml", ".factory/config.yaml"]) {
+      const config = loadInRepoConfig(repositoryRoot(relative, IN_REPO_YAML));
+      expect(config).toMatchObject({
+        schemaVersion: "factory.repo/v1",
+        base: "develop",
+        deploy_branch: "main",
+        verify: "bun test",
+        toolchain: { bun: ">=1.3 <2" },
+        escalate_paths: ["src/auth/**"],
+        worktree: {
+          up: "bin/worktree-up.sh",
+          down: "bin/worktree-down.sh",
+          warm: "bin/worktree-warm.sh",
+        },
+      });
+    }
+  });
+
+  test("returns null when a repository has no in-repo config", () => {
+    expect(loadInRepoConfig(repositoryRoot(null, null))).toBeNull();
+  });
+
+  test("fails closed for ambiguous, malformed, unknown, and semantically invalid config", () => {
+    const ambiguous = repositoryRoot(".factory.yaml", IN_REPO_YAML);
+    mkdirSync(path.join(ambiguous, ".factory"), { recursive: true });
+    writeFileSync(path.join(ambiguous, ".factory/config.yaml"), IN_REPO_YAML);
+    expect(() => loadInRepoConfig(ambiguous)).toThrow(/both \.factory\.yaml/);
+
+    const invalidCases = [
+      ["invalid YAML", "schemaVersion: ["],
+      ["wrong version", "schemaVersion: factory.repo/v2\n"],
+      [
+        "unknown host field",
+        "schemaVersion: factory.repo/v1\nmax_in_flight: 4\n",
+      ],
+      [
+        "unknown nested field",
+        "schemaVersion: factory.repo/v1\nworktree:\n  root: /tmp/worktrees\n",
+      ],
+      [
+        "invalid toolchain range",
+        "schemaVersion: factory.repo/v1\ntoolchain:\n  bun: latest\n",
+      ],
+      [
+        "duplicate merge checks",
+        "schemaVersion: factory.repo/v1\nmerge_ci:\n  workflow: CI\n  required_checks: [Verify, Verify]\n",
+      ],
+    ];
+    for (const [, yaml] of invalidCases) {
+      const root = repositoryRoot(".factory.yaml", yaml);
+      expect(() => loadInRepoConfig(root)).toThrow(RepoError);
+    }
+  });
+
+  test("overlays portable fields, unions escalation paths, and keeps host controls", () => {
+    const host = {
+      name: "configured",
+      path: "/tmp/configured",
+      base: "main",
+      verify: "host verify",
+      control_plane: "github",
+      max_in_flight: 7,
+      worktree_root: "/tmp/worktrees",
+      worktree_up: "host-up.sh",
+      escalate_paths: ["ops/**", "src/auth/**"],
+    };
+    const inRepo = {
+      schemaVersion: "factory.repo/v1",
+      base: "develop",
+      verify: "bun test",
+      // These are rejected by loadInRepoConfig's schema; direct callers still
+      // cannot use mergeRepoConfig to override host controls.
+      control_plane: "linear",
+      max_in_flight: 100,
+      escalate_paths: ["src/auth/**", "payments/**"],
+      worktree: { up: "bin/up.sh", down: "bin/down.sh" },
+    };
+
+    expect(mergeRepoConfig(host, inRepo)).toEqual({
+      ...host,
+      base: "develop",
+      verify: "bun test",
+      escalate_paths: ["ops/**", "src/auth/**", "payments/**"],
+      worktree_up: "bin/up.sh",
+      worktree_down: "bin/down.sh",
+    });
+  });
+
+  test("loadRepos applies an in-repo overlay and preserves host-only fallback", () => {
+    const configured = repositoryRoot(".factory.yaml", IN_REPO_YAML);
+    const hostOnly = repositoryRoot(null, null);
+    const repos = loadRepos({
+      root: factoryRoot(`repos:
+  - name: configured
+    path: ${configured}
+    base: main
+    verify: host verify
+    max_in_flight: 5
+    control_plane: github
+    escalate_paths: [ops/**]
+    worktree_root: /tmp/configured-worktrees
+  - name: host-only
+    path: ${hostOnly}
+    base: release
+    verify: host-only verify
+`),
+    });
+
+    expect(repos.get("configured")).toMatchObject({
+      base: "develop",
+      deployBranch: "main",
+      verify: "bun test",
+      maxInFlight: 5,
+      controlPlane: "github",
+      escalatePaths: ["ops/**", "src/auth/**"],
+      worktreeRoot: "/tmp/configured-worktrees",
+      worktreeUp: "bin/worktree-up.sh",
+      worktreeDown: "bin/worktree-down.sh",
+      worktreeWarm: "bin/worktree-warm.sh",
+      mergeCi: { workflow: "CI", requiredChecks: ["Verify"] },
+      security: {
+        pythonVersion: "3.12",
+        semgrepArgs: "--exclude-rule example.rule",
+        gitleaksArgs: "--no-git",
+      },
+    });
+    expect(repos.get("configured").toolchain).toEqual([
+      { executable: "bun", constraint: ">=1.3 <2" },
+    ]);
+    expect(repos.get("host-only")).toMatchObject({
+      base: "release",
+      verify: "host-only verify",
+      maxInFlight: null,
+      controlPlane: null,
+    });
+  });
+});
 
 // One fully configured dispatch target and one report-only repo with nothing
 // but the minimum — between them they cover every field's present and absent
