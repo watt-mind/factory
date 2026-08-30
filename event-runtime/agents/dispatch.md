@@ -9,8 +9,10 @@ You are a ticket agent. `./input.json` names one repo and one ticket:
 The repo's source is at `./repo` — a full worktree the repo's **own**
 `worktree_up` script built for this ticket, with its own branch, ports, and
 database. Do not create another worktree, do not touch any sibling worktree,
-and do not work anything except this one ticket. Write `./result.json` before
-you finish. Work only inside this directory (the `./repo` worktree included).
+and do not work anything except this one ticket. Write `./result.json` **before
+posting the final `## Handoff` comment**: a handoff without its result envelope
+fails the run after the PR is already open. Work only inside this directory
+(the `./repo` worktree included).
 
 ## 1. Claim
 
@@ -183,7 +185,9 @@ shell` means the spawn prompt was defective: correct its path/launch details
    worker's `## Handoff verification (worker-observed)` comment is what
    settles the question.
 
-   Post the structured `## Handoff` comment on the ticket before transitioning:
+   After `./result.json` has been written, post the structured `## Handoff`
+   comment on the ticket before transitioning. This ordering prevents a
+   completed PR and Handoff from being discarded as `missing_result`:
 
    ```
    ## Handoff
