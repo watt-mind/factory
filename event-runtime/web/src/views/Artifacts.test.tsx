@@ -1,5 +1,5 @@
 import "../test-dom";
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, jest, mock, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
@@ -13,7 +13,12 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { useState } from "react";
 import type { ArtifactInventoryItem } from "../types";
-import { Artifacts, formatBytes, type ArtifactFilters } from "./Artifacts";
+import {
+  Artifacts,
+  formatBytes,
+  formattedContent,
+  type ArtifactFilters,
+} from "./Artifacts";
 import { ARTIFACT_RAW_KEY } from "../components/ArtifactView";
 import { handleRunArtifactClick } from "./Runs";
 
@@ -80,6 +85,7 @@ function renderArtifacts(
     items?: ArtifactInventoryItem[];
     agents?: unknown[];
     nextBefore?: string | null;
+    formatContent?: typeof formattedContent;
   } = {},
   onOpenFull = mock(() => {}),
 ) {
@@ -144,6 +150,7 @@ function renderArtifacts(
           onFiltersChange={setFilters}
           onJumpRun={onJumpRun}
           onOpenFull={onOpenFull}
+          formatContent={seed.formatContent}
         />
       </QueryClientProvider>
     );
@@ -443,6 +450,46 @@ describe("Artifacts inventory (WM-207)", () => {
     fireEvent.click(view.getByRole("button", { name: "Copy SHA-256" }));
     expect(writeText).toHaveBeenNthCalledWith(1, raw);
     expect(writeText).toHaveBeenNthCalledWith(2, "a".repeat(64));
+  });
+
+  test("formats a large artifact once across a useNow tick", async () => {
+    const raw = JSON.stringify({
+      entries: Array.from({ length: 10_000 }, (_, index) => ({
+        index,
+        message: `artifact line ${index}`,
+      })),
+    });
+    const intervalSpy = jest.spyOn(globalThis, "setInterval");
+    let tick: (() => void) | undefined;
+    intervalSpy.mockImplementation((callback, delay, ...args) => {
+      if (delay === 1_000 && typeof callback === "function")
+        tick = () => callback(...args);
+      return 0 as unknown as ReturnType<typeof setInterval>;
+    });
+    const formatContent = mock(formattedContent);
+    globalThis.fetch = mock(
+      async () => new Response(raw, { status: 200 }),
+    ) as unknown as typeof fetch;
+    window.location.hash = `#/artifacts/${"a".repeat(64)}`;
+
+    try {
+      const view = renderArtifacts(undefined, undefined, { formatContent });
+      await view.findByRole("region", { name: "Artifact content" });
+      expect(formatContent).toHaveBeenCalledTimes(1);
+
+      expect(typeof tick).toBe("function");
+      const realDateNow = Date.now;
+      Date.now = () => realDateNow() + 1_000;
+      try {
+        act(() => (tick as () => void)());
+      } finally {
+        Date.now = realDateNow;
+      }
+
+      expect(formatContent).toHaveBeenCalledTimes(1);
+    } finally {
+      intervalSpy.mockRestore();
+    }
   });
 
   test("selects a row into the inspector and routes run artifact links to the same deep link", async () => {
