@@ -21,6 +21,22 @@ describe("statusView outbox counts", () => {
     });
   });
 
+  test("counts only expired run proposals as anomalies", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-30T08:00:00.000Z");
+    const createdAt = new Date(now - 61_000).toISOString();
+    const insert = db.query(
+      `INSERT INTO proposals (id, event_source, event_id, decision, status, created_at, ttl_seconds)
+       VALUES (?, 'test', ?, ?, 'open', ?, 60)`,
+    );
+    insert.run("run-expired", "run-event", "run", createdAt);
+    insert.run("parked-past-ttl", "parked-event", "human_needed", createdAt);
+
+    const view = statusView(db, { schedules: [] }, now);
+    expect(view.proposals).toEqual({ open: 2, expired: 1 });
+    expect(view.anomalies.expiredOpenProposals).toEqual(["run-expired"]);
+  });
+
   test("reports an unconfigured GitHub intake separately from a stale configured intake", () => {
     const db = openDb(":memory:");
     const now = Date.parse("2026-08-30T08:00:00.000Z");

@@ -59,7 +59,35 @@ export function openProposals(db, { now = Date.now() } = {}) {
       `SELECT * FROM proposals WHERE status = 'open' ORDER BY created_at, rowid`,
     )
     .all()
-    .map((row) => ({ ...withSpec(row), expired: isExpired(row, now) }));
+    .map((row) => ({
+      ...withSpec(row),
+      // TTL re-planning is only meaningful for runnable proposals. A parked
+      // refusal remains actionable until its event moves on.
+      expired: row.decision === "run" && isExpired(row, now),
+    }));
+}
+
+/**
+ * Retire parked refusals after their event has moved on. Unlike runnable
+ * proposals, human-needed and noop rows do not expire by TTL: they remain
+ * open while the event is still parked so the inbox can surface the decision.
+ */
+export function sweepOrphanedNonRunProposals(db, { now = Date.now() } = {}) {
+  const result = db
+    .query(
+      `UPDATE proposals AS p
+       SET status = 'expired', decided_by = 'serve', reason = 'event_moved_on', decided_at = ?
+       WHERE p.status = 'open'
+         AND p.decision IN ('human_needed', 'noop')
+         AND NOT EXISTS (
+           SELECT 1 FROM events AS e
+           WHERE e.source = p.event_source
+             AND e.event_id = p.event_id
+             AND e.status IN ('human_needed', 'noop')
+         )`,
+    )
+    .run(new Date(now).toISOString());
+  return result.changes;
 }
 
 /**

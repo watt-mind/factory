@@ -27,7 +27,10 @@ import { notifyPending, sweepNotifyLog } from "../lib/notify.mjs";
 import { reconcileInbox } from "../lib/inbox.mjs";
 import { loadModelTierMap, loadRegistry } from "../lib/registry.mjs";
 import { applyModelTierCellOverrides } from "../lib/runtime-overrides.mjs";
-import { approveProposal } from "../lib/proposals.mjs";
+import {
+  approveProposal,
+  sweepOrphanedNonRunProposals,
+} from "../lib/proposals.mjs";
 import { startApi } from "../lib/api.mjs";
 import { codeStamp, REGISTRY_STAMP_PATHS } from "../lib/worker.mjs";
 import { reapExpiredLeases } from "../lib/reaper.mjs";
@@ -158,6 +161,7 @@ export const TICK_SUBSYSTEMS = [
   "auto-approve-chains",
   "announce",
   "inbox",
+  "proposals",
   "notify",
   "reap",
   "worker",
@@ -307,6 +311,14 @@ export async function tick({
   // resolve automatically once the proposal/event no longer needs a human.
   await runStep("inbox", () => {
     reconcileInbox(db, { now });
+  });
+
+  await runStep("proposals", () => {
+    const expired = sweepOrphanedNonRunProposals(db, { now });
+    if (expired > 0)
+      logLine(
+        `proposals: expired ${expired} orphaned human_needed/noop row(s)`,
+      );
   });
 
   // Push channel for states awaiting a human (WM-65): human_needed parks and

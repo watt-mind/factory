@@ -634,6 +634,60 @@ export default async function start() {
     db.close();
   });
 
+  test("tick expires orphaned non-run proposals and logs only when it does", async () => {
+    const { tick } = await import("../cli.mjs");
+    const { loadRegistry } = await import("../lib/registry.mjs");
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-30T13:00:00.000Z");
+    const at = new Date(now).toISOString();
+    const insertEvent = db.query(
+      `INSERT INTO events (source, event_id, type, occurred_at, received_at, envelope_json, payload_hash, admitted_at, status)
+       VALUES ('test', ?, 'test.event', ?, ?, '{}', 'hash', ?, ?)`,
+    );
+    insertEvent.run("moved-on", at, at, at, "admitted");
+    insertEvent.run("still-parked", at, at, at, "human_needed");
+    const insertProposal = db.query(
+      `INSERT INTO proposals (id, event_source, event_id, decision, status, created_at, ttl_seconds)
+       VALUES (?, 'test', ?, 'human_needed', 'open', ?, 1800)`,
+    );
+    insertProposal.run("orphaned", "moved-on", at);
+    insertProposal.run("parked", "still-parked", at);
+    const logs = [];
+
+    await tick({
+      db,
+      registry: loadRegistry(),
+      now,
+      policyVersion: "git:test",
+      skipPlan: true,
+      log: (line) => logs.push(line),
+    });
+
+    expect(
+      db.query("SELECT status FROM proposals WHERE id = 'orphaned'").get(),
+    ).toEqual({ status: "expired" });
+    expect(
+      db.query("SELECT status FROM proposals WHERE id = 'parked'").get(),
+    ).toEqual({ status: "open" });
+    expect(logs).toContain(
+      "proposals: expired 1 orphaned human_needed/noop row(s)",
+    );
+
+    logs.length = 0;
+    await tick({
+      db,
+      registry: loadRegistry(),
+      now: now + 1_000,
+      policyVersion: "git:test",
+      skipPlan: true,
+      log: (line) => logs.push(line),
+    });
+    expect(logs).not.toContain(
+      "proposals: expired 0 orphaned human_needed/noop row(s)",
+    );
+    db.close();
+  });
+
   test("tick sweeps retained memo rows alongside artifact GC and logs the count", async () => {
     const { tick } = await import("../cli.mjs");
     const { loadRegistry } = await import("../lib/registry.mjs");

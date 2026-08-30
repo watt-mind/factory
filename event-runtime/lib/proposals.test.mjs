@@ -15,6 +15,7 @@ import {
   getProposal,
   openProposals,
   rejectProposal,
+  sweepOrphanedNonRunProposals,
 } from "./proposals.mjs";
 import { loadRegistry } from "./registry.mjs";
 import { claimNext } from "./worker.mjs";
@@ -166,6 +167,59 @@ describe("openProposals / getProposal", () => {
 
     expect(getProposal(db, proposal.id).spec.runId).toBe(runId);
     expect(getProposal(db, "prop_nope")).toBeNull();
+  });
+
+  test("does not expire a parked non-run proposal by TTL", () => {
+    const db = openDb(":memory:");
+    const admitted = admitEvent(
+      db,
+      registry,
+      envelope({ eventId: "parked-past-ttl", type: "totally.unknown.type" }),
+      { now: NOW },
+    );
+    const outcome = planEvent(
+      db,
+      registry,
+      { source: admitted.event.source, eventId: admitted.event.event_id },
+      { now: NOW },
+    );
+
+    expect(outcome.decision).toBe("human_needed");
+    expect(openProposals(db, { now: NOW + TTL_MS + 1 })[0].expired).toBe(false);
+  });
+});
+
+describe("sweepOrphanedNonRunProposals", () => {
+  test("expires an orphaned row and leaves a still-parked row open", () => {
+    const db = openDb(":memory:");
+    const plan = (eventId) => {
+      const admitted = admitEvent(
+        db,
+        registry,
+        envelope({ eventId, type: "totally.unknown.type" }),
+        { now: NOW },
+      );
+      return planEvent(
+        db,
+        registry,
+        { source: admitted.event.source, eventId: admitted.event.event_id },
+        { now: NOW },
+      );
+    };
+    const orphaned = plan("orphaned-park");
+    const parked = plan("still-parked");
+    db.query(
+      "UPDATE events SET status = 'admitted' WHERE source = ? AND event_id = ?",
+    ).run(orphaned.proposal.event_source, orphaned.proposal.event_id);
+
+    expect(sweepOrphanedNonRunProposals(db, { now: NOW + 1_000 })).toBe(1);
+    expect(getProposal(db, orphaned.proposal.id)).toMatchObject({
+      status: "expired",
+      decided_by: "serve",
+      reason: "event_moved_on",
+      decided_at: new Date(NOW + 1_000).toISOString(),
+    });
+    expect(getProposal(db, parked.proposal.id).status).toBe("open");
   });
 });
 
