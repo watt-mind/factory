@@ -1008,6 +1008,41 @@ describe("multi-emit chain resolution (WM-119)", () => {
     }
   });
 
+  test("a non-busy bookkeeping throw propagates instead of being retried every tick (#1589)", () => {
+    const db = openDb(":memory:");
+    seedCompletedRun(db, {
+      runId: "run-bookkeeping-bug",
+      agent: "work-scan@1",
+      input: { repo: "wm/bookkeeping-bug" },
+      artifact: {
+        recommendation: "DISPATCH",
+        repo: "wm/bookkeeping-bug",
+        plan: [{ ticket: "WM-1591" }],
+      },
+    });
+    failInsertOf(db, "chain-run-bookkeeping-bug-WM-1591");
+    // A permanent bookkeeping bug: the transient marker itself cannot be written.
+    db.exec(
+      `CREATE TRIGGER fail_bookkeeping_bug
+         BEFORE INSERT ON attempt_trace
+         WHEN NEW.run_id = 'run-bookkeeping-bug'
+       BEGIN SELECT RAISE(ABORT, 'constraint failed: attempt_trace'); END;`,
+    );
+
+    expect(() =>
+      resolveChains(db, registry, { maxTransientPasses: 1 }),
+    ).toThrow(/constraint failed: attempt_trace/);
+    expect(resolvedAtOf(db, "run-bookkeeping-bug")).toBeNull();
+    expect(
+      db
+        .query(
+          `SELECT COUNT(*) AS n FROM attempt_trace
+            WHERE run_id = 'run-bookkeeping-bug'`,
+        )
+        .get().n,
+    ).toBe(0);
+  });
+
   test("records later transient passes and gives up once a bookkeeping lock is released (#1589)", () => {
     const dir = tmpDir("evrt-chain-bookkeeping-recovery-");
     const file = path.join(dir, "runtime.db");

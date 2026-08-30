@@ -17,7 +17,7 @@
  * watched like any other.
  */
 import { admitEvent } from "./intake.mjs";
-import { txImmediate } from "./db.mjs";
+import { isBusyError, txImmediate } from "./db.mjs";
 
 export const CHAIN_SOURCE = "chain";
 
@@ -486,6 +486,10 @@ export function resolveChains(
       resolvedAt,
       JSON.stringify({ note, ...payload }),
     );
+  // Messages produced inside the transaction body are held back until it
+  // commits: a mid-body throw rolls the writes back, so a "gave up" line
+  // must not be reported for a marker that never landed.
+  const committed = [];
   try {
     txImmediate(db, () => {
       for (const { row, error } of transient) {
@@ -493,7 +497,7 @@ export function resolveChains(
           countTransient.get(row.run_id, CHAIN_TRANSIENT_NOTE).n + 1;
         record(row, CHAIN_TRANSIENT_NOTE, { pass: passes, error });
         if (passes >= maxTransientPasses) {
-          outcome.errors.push(
+          committed.push(
             `chain-${row.run_id}: gave up after ${passes} transient failure(s)`,
           );
           resolved.push({
@@ -508,7 +512,12 @@ export function resolveChains(
         record(row, CHAIN_RESOLVED_NOTE, { reason, ...detail });
       }
     });
+    outcome.errors.push(...committed);
   } catch (err) {
+    // Only a lock collision is worth retrying on the next tick; a permanent
+    // bookkeeping bug (constraint violation, TypeError) must surface instead
+    // of becoming an unbounded per-tick retry.
+    if (!isBusyError(err)) throw err;
     outcome.errors.push(`chain-bookkeeping: ${err.message}`);
   }
   return outcome;
