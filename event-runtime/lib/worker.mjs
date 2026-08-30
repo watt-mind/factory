@@ -2455,13 +2455,13 @@ function defaultHoldPullRequest({ github, prNumber, body }) {
   return held;
 }
 
-/** Read the live PR base at handoff; dispatch must never rely on GitHub's default branch. */
+/** Read the live PR form at handoff; dispatch must never rely on GitHub's default branch. */
 function defaultFetchHandoffPullRequest({ github, prNumber }) {
   if (!github || !Number.isInteger(prNumber)) {
     throw new Error("handoff PR requires github and a numeric PR number");
   }
   return loadForge().prView(github, prNumber, {
-    fields: ["baseRefName", "isDraft"],
+    fields: ["baseRefName", "body", "isDraft"],
     timeout: workerSubprocessTimeoutMs(),
   });
 }
@@ -2472,12 +2472,47 @@ function handoffPrNumber(handoff) {
   return null;
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * True when some body line is a `Fixes <ticket>` line (case-insensitive,
+ * tolerant of surrounding whitespace and one trailing punctuation mark).
+ * Accepts the full `owner/repo#n` form, the short `#n` form when the PR
+ * lives in that repository, and Linear ids verbatim. Returns null when the
+ * handoff carries no usable ticket, so the caller reports "unknown" rather
+ * than probing the body for `Fixes null`.
+ */
+function handoffFixesLinePresent({ lines, ticket, github }) {
+  const ref = typeof ticket === "string" ? ticket.trim() : "";
+  if (!ref) return null;
+  const alternatives = [escapeRegExp(ref)];
+  const repoMatch = /^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#([0-9]+)$/.exec(ref);
+  if (
+    repoMatch &&
+    typeof github === "string" &&
+    github.trim().toLowerCase() === repoMatch[1].toLowerCase()
+  ) {
+    alternatives.push(`#${repoMatch[2]}`);
+  }
+  const pattern = new RegExp(
+    `^\\s*fixes\\s+(?:${alternatives.join("|")})\\s*[.,;:]?\\s*$`,
+    "i",
+  );
+  return lines.some((line) => pattern.test(line));
+}
+
 /**
  * Fail the handoff closed if GitHub cannot prove that the PR targets the
  * configured repository base. Kept here, beside the worker's other external
  * handoff effects, so tests can inject the PR read without a live forge.
  */
-function assertHandoffPullRequestBase({ handoff, base, fetchPullRequest }) {
+export function assertHandoffPullRequestBase({
+  handoff,
+  base,
+  fetchPullRequest,
+}) {
   const expected = typeof base === "string" ? base.trim() : "";
   const prNumber = handoffPrNumber(handoff);
   if (!expected || !handoff?.github || !prNumber) {
@@ -2502,7 +2537,26 @@ function assertHandoffPullRequestBase({ handoff, base, fetchPullRequest }) {
   const actual =
     typeof pr?.baseRefName === "string" ? pr.baseRefName.trim() : "";
   handoff.prBase = { expected, actual: actual || null };
-  handoff.prDraft = pr?.isDraft === true;
+  // GitHub returns `body: null` for an empty description; treat it as "".
+  const bodyLines = (typeof pr?.body === "string" ? pr.body : "").split(
+    /\r?\n/,
+  );
+  const hasFixesLine = handoffFixesLinePresent({
+    lines: bodyLines,
+    ticket: handoff.ticket,
+    github: handoff.github,
+  });
+  const hasRunTrailer =
+    typeof handoff.runId === "string" && handoff.runId.trim()
+      ? bodyLines.some((line) => line.trim() === `run:${handoff.runId.trim()}`)
+      : null;
+  handoff.pr = {
+    number: prNumber,
+    draft: pr?.isDraft === true,
+    hasFixesLine,
+    hasRunTrailer,
+  };
+  handoff.prDraft = handoff.pr.draft;
   if (!actual) {
     throw new ContractViolation(
       [`pr_base_unreadable: PR #${prNumber} has no baseRefName`],
@@ -2515,6 +2569,14 @@ function assertHandoffPullRequestBase({ handoff, base, fetchPullRequest }) {
         `pr_base_mismatch: PR #${prNumber} targets ${actual}, expected configured base ${expected}`,
       ],
       { reasonCode: "handoff_verification_failed", handoff },
+    );
+  }
+  if (hasFixesLine === false) {
+    throw new ContractViolation(
+      [
+        `handoff_pr_form_invalid: PR #${prNumber} is missing Fixes ${handoff.ticket}`,
+      ],
+      { reasonCode: "handoff_pr_form_invalid", handoff },
     );
   }
 }

@@ -2146,7 +2146,9 @@ describe("handoff verification helpers (WM-718)", () => {
     });
     const lines = body.split("\n");
     expect(lines[0]).toBe("## Handoff verification (worker-observed)");
-    expect(lines[1]).toBe("- PR: #42 (draft)");
+    expect(lines[1]).toBe(
+      "- PR: #42 (draft) · Fixes: unknown · run trailer: unknown",
+    );
     expect(lines[2]).toBe("- Verification: `bun test` — exit 1 (FAIL)");
     expect(body).toContain("(fail) x > y");
     expect(body).toContain(
@@ -2169,5 +2171,20 @@ describe("handoff verification helpers (WM-718)", () => {
     expect(lines.filter((l) => l.startsWith("- Verification:"))).toHaveLength(
       1,
     );
+  });
+
+  test("composeHandoffVerification reports fetched PR form evidence", () => {
+    const body = composeHandoffVerification({
+      verification: null,
+      repoVerify: null,
+      webBuild: null,
+      pr: {
+        number: 77,
+        draft: false,
+        hasFixesLine: true,
+        hasRunTrailer: false,
+      },
+    });
+    expect(body).toContain("- PR: #77 (ready) · Fixes: yes · run trailer: no");
   });
 });
