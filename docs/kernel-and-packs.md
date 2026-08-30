@@ -153,3 +153,11 @@ call (`event-runtime/cli/serve.mjs`, `event-runtime/cli/work.mjs`), recording
 the per-run materialized-harness content hash on `RunSpec`/execution
 receipts, and surfacing harness pins on the Web UI's Run detail view are
 tracked as follow-up work, outside this ticket's owned paths.
+
+## Floor delivery
+
+`shared/floor.md` is spliced into each repository's committed `AGENTS.md`.
+After every edit to that source, run `bun build/emit.mjs --sync-floor` and
+commit the regenerated `AGENTS.md` for the repository being changed. The
+factory verification gate rejects a stale floor splice in its own checkout;
+reports about configured sibling checkouts remain informational.

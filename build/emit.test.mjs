@@ -325,6 +325,37 @@ test("floor check uses the running checkout when its configured path is missing"
   }
 });
 
+test("floor check fails when the running checkout's floor is stale", () => {
+  const fixture = makeEmitFixture();
+  const staleAgents =
+    "<!-- FACTORY:FLOOR:BEGIN -->\nstale floor\n<!-- FACTORY:FLOOR:END -->\n";
+
+  try {
+    writeFileSync(path.join(fixture, "AGENTS.md"), staleAgents);
+    writeFileSync(path.join(fixture, "config", "repos.yaml"), "repos: []\n");
+
+    const result = Bun.spawnSync({
+      cmd: ["bun", "build/emit.mjs", "--check"],
+      cwd: fixture,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain(
+      "Current checkout floor is stale: AGENTS.md",
+    );
+    expect(result.stderr.toString()).toContain(
+      "bun build/emit.mjs --sync-floor",
+    );
+    expect(result.stdout.toString()).toContain(
+      "floor delivery: no configured repo checked out here — not verified",
+    );
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test("sync-floor writes the running checkout, never the configured one", () => {
   const fixture = makeEmitFixture();
   const configured = mkdtempSync(path.join(tmpdir(), "emit-floor-live-"));
