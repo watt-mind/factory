@@ -3,13 +3,12 @@ import {
   closeSync,
   createReadStream,
   openSync,
-  readFileSync,
   readSync,
   rmSync,
 } from "node:fs";
 import {
   findArtifact,
-  hashFile,
+  hashFileAsync,
   listArtifactPage,
   pruneArtifacts,
 } from "./artifacts.mjs";
@@ -17,8 +16,15 @@ import { artifactsRoot } from "./config.mjs";
 
 /** Crude but honest content-type: render text in the browser, download the rest. */
 function looksLikeText(file) {
-  const head = readFileSync(file).subarray(0, 512);
-  return !head.includes(0);
+  let fd;
+  try {
+    fd = openSync(file, "r");
+    const head = Buffer.alloc(512);
+    const read = readSync(fd, head, 0, head.length, 0);
+    return !head.subarray(0, read).includes(0);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
 }
 
 export const TRANSCRIPT_MODEL_SCAN_BYTES = 64 * 1024;
@@ -138,7 +144,7 @@ export async function handleArtifactApiRoute({
   if (req.method === "GET" && artifactGet) {
     const found = findArtifact(artifactsRoot(env.home), artifactGet[1]);
     if (!found) return send(404, { error: `no artifact ${artifactGet[1]}` });
-    if (hashFile(found.file) !== artifactGet[1]) {
+    if ((await hashFileAsync(found.file)) !== artifactGet[1]) {
       rmSync(found.file, { force: true });
       return send(404, { error: `no artifact ${artifactGet[1]}` });
     }

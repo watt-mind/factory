@@ -16,6 +16,7 @@ import {
   CLI,
   DEAD_PORT,
   assertHealthyLiveServe,
+  cleanupTrackedProcesses,
   editStampRoot,
   exitOf,
   killPool,
@@ -34,6 +35,37 @@ import {
 
 registerCliTmpCleanup();
 registerTestProcessCleanup(import.meta.url);
+
+/**
+ * Every live `serve --adapter-override fake` whose cwd is `cwd`, by pid. Linux
+ * exposes cwd through procfs; lsof provides the equivalent elsewhere. This is
+ * the same ownership signal `bin/worktree-down.sh` sweeps on (#1379).
+ */
+function fakeServesRootedAt(cwd) {
+  const ps = spawnSync("ps", ["-axo", "pid=,command="], { encoding: "utf8" });
+  const serves = [];
+  for (const line of ps.stdout.split("\n")) {
+    const match = line.match(/^\s*(\d+)\s+(.*)$/);
+    if (!match) continue;
+    if (!/cli\.mjs\s+serve\s.*--adapter-override\s+fake(\s|$)/.test(match[2]))
+      continue;
+    serves.push(Number(match[1]));
+  }
+  return serves.filter((pid) => {
+    if (process.platform === "linux") {
+      const link = spawnSync("readlink", [`/proc/${pid}/cwd`], {
+        encoding: "utf8",
+      });
+      return link.status === 0 && link.stdout.trim() === cwd;
+    }
+    const lsof = spawnSync(
+      "lsof",
+      ["-a", "-p", String(pid), "-d", "cwd", "-Fn"],
+      { encoding: "utf8" },
+    );
+    return lsof.stdout.split("\n").includes(`n${cwd}`);
+  });
+}
 
 describe("serve command", () => {
   test("serve --watch re-execs under bun --watch and binds", async () => {
@@ -214,6 +246,53 @@ describe("serve command", () => {
     expect(out).toContain("control API on");
   });
 
+  test("an aborted test leaves no cwd-bound serve --adapter-override fake behind (#1379)", async () => {
+    // Regression for the orphaned fake serves found on the operator box: a
+    // fake serve started through the shared helper must run detached in its
+    // own process group and die with the test that owned it, even when that
+    // test never reaches its own kill (timeout, thrown assertion). The spawn
+    // is rooted in a throwaway cwd so ownership is asserted the way
+    // worktree-down asserts it: by cwd, not by pidfile.
+    const home = tmpDir("evrt-serve-orphan-");
+    const cwd = tmpDir("evrt-serve-orphan-cwd-");
+    const port = freePort();
+    const child = spawnTracked(
+      "bun",
+      [CLI, "serve", "--adapter-override", "fake", "--port", port],
+      {
+        cwd,
+        env: { ...process.env, FACTORY_EVENT_HOME: home },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let out = "";
+    child.stdout.on("data", (b) => {
+      out += b;
+    });
+    child.stderr.on("data", (b) => {
+      out += b;
+    });
+    const box = {
+      child,
+      get out() {
+        return out;
+      },
+    };
+    expect(await waitFor(box, "control API on", 8000)).toBe(true);
+    expect(fakeServesRootedAt(cwd)).toEqual([child.pid]);
+
+    // Abort the test the way a timed-out/failed test does: the per-test
+    // cleanup hook runs, the test body never calls child.kill().
+    await cleanupTrackedProcesses({ scope: "test" });
+    await exitOf(child);
+
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && fakeServesRootedAt(cwd).length > 0) {
+      await Bun.sleep(25);
+    }
+    expect(fakeServesRootedAt(cwd)).toEqual([]);
+  });
+
   test("tick runs notify as an isolated subsystem (WM-65): a throwing notifier step cannot break the tick", async () => {
     const { tick, TICK_SUBSYSTEMS } = await import("../cli.mjs");
     const { loadRegistry } = await import("../lib/registry.mjs");
@@ -263,6 +342,30 @@ describe("serve command", () => {
     expect(db.query(`SELECT COUNT(*) AS n FROM memos`).get().n).toBe(0);
     expect(logs).toContain("memos: swept 1 expired/retired/superseded memo(s)");
     db.close();
+  });
+
+  test("tick sweeps stale notify-log markers on the hourly GC cadence", async () => {
+    const { tick, PRUNE_INTERVAL_MS } = await import("../cli.mjs");
+    const { loadRegistry } = await import("../lib/registry.mjs");
+    const { ensureNotifyLog } = await import("../lib/notify.mjs");
+    const db = openDb(":memory:");
+    const now = Date.now();
+    ensureNotifyLog(db);
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES ('human_needed', 'test/resolved-event', 'old marker', ?)`,
+    ).run(new Date(now - 15 * 24 * 60 * 60 * 1000).toISOString());
+
+    await tick({
+      db,
+      registry: loadRegistry(),
+      policyVersion: "git:test",
+      now,
+      lastPrune: now - PRUNE_INTERVAL_MS - 1,
+      subsystems: { notify: () => {} },
+    });
+
+    expect(db.query("SELECT COUNT(*) AS n FROM notify_log").get().n).toBe(0);
   });
 
   test("tick with FACTORY_EVENT_NOTIFY=1 pushes a human_needed park through the stub notifier exactly once", async () => {

@@ -122,10 +122,11 @@ them to native labels of the same spelling.
 `type:chore` is invalid. Adapters reject it locally rather than as an opaque
 API error. Every new issue carries exactly one `source:*`.
 
-**Labels are replaced wholesale, never merged.** Always go through `--add` /
-`--remove` (`factory ticket state` / `claim`, or `setLabels` on the adapter).
-A mutation that passes only the labels you want added silently drops every
-other label on the ticket.
+**Labels are replaced wholesale, never merged.** Use `--add` / `--remove` on
+`factory ticket state` or `factory ticket labels` (or `setLabels` on the
+adapter). A mutation that passes only the labels you want added silently drops
+every other label on the ticket. `claim` selects the claim labels itself; it
+accepts only `--agent` for label-related behavior.
 
 ## 4. States
 
@@ -193,9 +194,8 @@ ticket; bundles never arrive there.
 
 ## 7. Execution
 
-**Work comes from the tracker, and only when it's ready.** Dispatchable
-means `Todo` + `ai:agent-ready` + unassigned. `Triage` and `Backlog` are
-not queues to pull from.
+**Work comes from the tracker, and only when it's ready.** Dispatchable means
+`Todo` + `ai:agent-ready` + unassigned. `Triage` is not a queue to pull from.
 
 **Claim before you code.** Assign yourself, move to `In Progress`, add
 `ai:in-progress` + `agent:<harness>`, drop `ai:agent-ready`, then **re-read
@@ -350,12 +350,37 @@ and its `claim` verb performs the advisory read-back. The authoritative
 concurrency control is the per-repository dispatch lock described in §7.
 
 ```bash
+# Read a ticket.
 factory ticket get CLNT-616
+# List its comments.
+factory ticket comments CLNT-616
+# Atomically claim a dispatchable ticket (`--agent` selects the harness).
 factory ticket claim CLNT-616 --agent claude
+# Return a claim to Todo and unassign it.
+factory ticket unclaim CLNT-616
+# Add a comment.
 factory ticket comment CLNT-616 "..."
+# Demote an underspecified ticket to Triage with an explanation.
+factory ticket triage CLNT-616 --comment "..."
+# Record an answer and return a blocked ticket to Todo when applicable.
+factory ticket answer CLNT-616 "..."
+# Append idempotent Markdown detail to a ticket.
+factory ticket detail CLNT-616 -- "..."
+# Read or mutate labels (`label` is an alias for `labels`).
+factory ticket labels CLNT-616 --add ai:needs-review --remove ai:in-progress
+factory ticket label CLNT-616
+# Change state and/or labels, optionally with a comment.
 factory ticket state CLNT-616 "In Review" --add ai:needs-review
+# File a new Triage or Todo ticket.
 factory ticket file --team CLNT --title "..." --body "..." --type bug
-factory ticket queue --team CLNT
+# List In Progress tickets for Owned Paths collision checks.
+factory ticket inflight --team CLNT --project "BJ29 Coaching"
+# List dispatchable tickets for a team or configured repo.
+factory ticket queue --repo bj29
+# Show the tracker request budget captured by the adapter.
+factory ticket budget
+# Run an explicit adapter query with variables for an unsupported operation.
+factory ticket raw '<query>' --var key=value
 ```
 
 `claim` exits non-zero when another agent won the race — that is not a

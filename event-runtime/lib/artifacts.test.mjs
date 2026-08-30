@@ -15,6 +15,7 @@ import {
   backfillResultArtifacts,
   findArtifact,
   hashFile,
+  hashFileAsync,
   listArtifacts,
   materializeArtifact,
   pinRunArtifact,
@@ -400,6 +401,15 @@ describe("hashFile", () => {
     writeFileSync(file, "hello crypto world");
     const expected = sha256Hex(Buffer.from("hello crypto world"));
     expect(hashFile(file)).toBe(expected);
+  });
+
+  test("computes SHA256 asynchronously without buffering the file", async () => {
+    const dir = tmp("evrt-hash-async-");
+    const file = path.join(dir, "large-sample.txt");
+    const contents = Buffer.alloc(1024 * 1024 + 1, "x");
+    writeFileSync(file, contents);
+
+    expect(await hashFileAsync(file)).toBe(sha256Hex(contents));
   });
 });
 
