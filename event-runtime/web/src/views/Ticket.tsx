@@ -1393,6 +1393,19 @@ const TERMINAL_STATES = new Set([
 // activity, not unbounded global registries, and can request older pages.
 const PR_JOURNEY_PAGE_LIMIT = 200;
 
+// Refetching an infinite query re-requests every loaded page, so each
+// "Load more" would otherwise multiply the per-tick request count. Only the
+// first page needs the fast cadence; once older pages are loaded the feed
+// drops to the secondary interval.
+export function prJourneyRefetchInterval(query: {
+  state: { data?: { pages?: readonly unknown[] } };
+}): number {
+  const pages = query.state.data?.pages?.length ?? 0;
+  return pages > 1
+    ? refetchIntervals.secondary.refetchInterval()
+    : refetchIntervals.fast.refetchInterval();
+}
+
 function uniqueBy<T>(items: readonly T[], key: (item: T) => string): T[] {
   const seen = new Set<string>();
   return items.filter((item) => {
@@ -1426,6 +1439,7 @@ export function PullRequest({
     getNextPageParam: (lastPage) => lastPage.nextBefore ?? undefined,
     enabled,
     ...refetchIntervals.fast,
+    refetchInterval: prJourneyRefetchInterval,
   });
   const proposals = useInfiniteQuery({
     queryKey: ["proposals", "pr-journey", pr, PR_JOURNEY_PAGE_LIMIT],
@@ -1438,6 +1452,7 @@ export function PullRequest({
     getNextPageParam: (lastPage) => lastPage.nextBefore ?? undefined,
     enabled,
     ...refetchIntervals.fast,
+    refetchInterval: prJourneyRefetchInterval,
   });
   const runs = useInfiniteQuery({
     queryKey: ["runs", "pr-journey", pr, PR_JOURNEY_PAGE_LIMIT],
@@ -1450,6 +1465,7 @@ export function PullRequest({
     getNextPageParam: (lastPage) => lastPage.nextBefore ?? undefined,
     enabled,
     ...refetchIntervals.fast,
+    refetchInterval: prJourneyRefetchInterval,
   });
   const inbox = useInfiniteQuery({
     queryKey: ["inbox", "pr-journey", pr, PR_JOURNEY_PAGE_LIMIT],
@@ -1578,6 +1594,25 @@ export function PullRequest({
         : null,
     [journeyReady, pr, source],
   );
+  const loadingMore =
+    events.isFetchingNextPage ||
+    proposals.isFetchingNextPage ||
+    runs.isFetchingNextPage ||
+    inbox.isFetchingNextPage;
+  // The feeds are global registries, so their hasNextPage says nothing about
+  // whether older pages hold more of THIS PR. Remember the timeline size at
+  // each "Load more"; a page that adds nothing ends the affordance.
+  const [loadMoreBaseline, setLoadMoreBaseline] = useState<number | null>(null);
+  const [exhausted, setExhausted] = useState(false);
+  useEffect(() => {
+    setLoadMoreBaseline(null);
+    setExhausted(false);
+  }, [pr]);
+  useEffect(() => {
+    if (loadMoreBaseline == null || loadingMore || journey == null) return;
+    if (journey.timeline.length <= loadMoreBaseline) setExhausted(true);
+    setLoadMoreBaseline(null);
+  }, [loadMoreBaseline, loadingMore, journey]);
 
   if (pr == null) {
     return (
@@ -1619,27 +1654,38 @@ export function PullRequest({
     proposals.hasNextPage ||
     runs.hasNextPage ||
     inbox.hasNextPage;
-  const loadingMore =
-    events.isFetchingNextPage ||
-    proposals.isFetchingNextPage ||
-    runs.isFetchingNextPage ||
-    inbox.isFetchingNextPage;
+  const loadedOlder =
+    (events.data?.pages.length ?? 0) > 1 ||
+    (proposals.data?.pages.length ?? 0) > 1 ||
+    (runs.data?.pages.length ?? 0) > 1 ||
+    (inbox.data?.pages.length ?? 0) > 1;
   const loadMore = () => {
+    if (loadingMore || loadMoreBaseline != null) return;
+    setLoadMoreBaseline(journey.timeline.length);
     if (events.hasNextPage) void events.fetchNextPage();
     if (proposals.hasNextPage) void proposals.fetchNextPage();
     if (runs.hasNextPage) void runs.fetchNextPage();
     if (inbox.hasNextPage) void inbox.fetchNextPage();
   };
+  const footerClass =
+    "px-5 pb-5 text-center text-[12px] text-(--text-dim) lg:px-7";
 
   return (
     <>
       <JourneyLayout journey={journey} onNavigateTicket={onNavigateTicket} />
-      {hasMore && (
-        <p
-          role="status"
-          className="px-5 pb-5 text-center text-[12px] text-(--text-dim) lg:px-7"
-        >
-          Showing the most recent {journey.timeline.length} activity entries —{" "}
+      {exhausted || (loadedOlder && !hasMore) ? (
+        <p className={footerClass}>
+          <span role="status" aria-live="polite">
+            No more activity for PR #{pr} — showing all{" "}
+            {journey.timeline.length} entries.
+          </span>
+        </p>
+      ) : hasMore ? (
+        <p className={footerClass}>
+          <span role="status" aria-live="polite">
+            Showing the most recent {journey.timeline.length} activity entries
+          </span>{" "}
+          —{" "}
           <PrimitiveButton
             bare
             type="button"
@@ -1650,7 +1696,7 @@ export function PullRequest({
             {loadingMore ? "Loading activity…" : "Load more activity"}
           </PrimitiveButton>
         </p>
-      )}
+      ) : null}
     </>
   );
 }
