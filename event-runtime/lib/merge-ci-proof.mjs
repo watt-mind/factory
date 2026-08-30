@@ -8,6 +8,45 @@ function isCancelledWorkflowRun(run) {
   );
 }
 
+/**
+ * Select the sole non-cancelled configured workflow run for a reviewed head.
+ * `gh run list` returns newest first, but multiple live runs are ambiguous and
+ * therefore fail closed rather than making list order into merge evidence.
+ */
+export function selectMergeCiRun({ workflow, headSha, runs }) {
+  for (const [label, value] of [
+    ["workflow", workflow],
+    ["head SHA", headSha],
+  ]) {
+    if (typeof value !== "string" || value.trim().length === 0) {
+      throw new Error(`${label} must be a nonempty string`);
+    }
+  }
+  if (!Array.isArray(runs)) {
+    throw new Error("workflow runs must be an array");
+  }
+
+  const matchingRuns = runs.filter(
+    (run) =>
+      run?.workflowName === workflow &&
+      run?.headSha === headSha &&
+      !isCancelledWorkflowRun(run),
+  );
+  if (matchingRuns.length !== 1) {
+    throw new Error(
+      "configured non-cancelled workflow run is missing or ambiguous",
+    );
+  }
+  const [run] = matchingRuns;
+  if (
+    !Number.isInteger(run.databaseId) &&
+    (typeof run.databaseId !== "string" || run.databaseId.length === 0)
+  ) {
+    throw new Error("configured workflow run has no valid database ID");
+  }
+  return run;
+}
+
 export function noRequiredChecksDiagnostic(headRef) {
   if (typeof headRef !== "string" || headRef.length === 0) {
     throw new Error("head ref must be a nonempty string");
@@ -81,14 +120,6 @@ export function proveMergeCiFallback({
   runs,
   jobs,
 }) {
-  for (const [label, value] of [
-    ["workflow", workflow],
-    ["head SHA", headSha],
-  ]) {
-    if (typeof value !== "string" || value.trim().length === 0) {
-      throw new Error(`${label} must be a nonempty string`);
-    }
-  }
   if (
     !Array.isArray(requiredChecks) ||
     requiredChecks.length === 0 ||
@@ -103,27 +134,7 @@ export function proveMergeCiFallback({
     throw new Error("workflow runs and jobs must be arrays");
   }
 
-  // `gh run list` returns newest first. A newer workflow can supersede and
-  // cancel an older run for the same head SHA, while its old Verify check-run
-  // remains success. That stale success must never be merge evidence.
-  const matchingRuns = runs.filter(
-    (run) =>
-      run?.workflowName === workflow &&
-      run?.headSha === headSha &&
-      !isCancelledWorkflowRun(run),
-  );
-  if (matchingRuns.length !== 1) {
-    throw new Error(
-      "configured non-cancelled workflow run is missing or ambiguous",
-    );
-  }
-  const [run] = matchingRuns;
-  if (
-    !Number.isInteger(run.databaseId) &&
-    (typeof run.databaseId !== "string" || run.databaseId.length === 0)
-  ) {
-    throw new Error("configured workflow run has no valid database ID");
-  }
+  const run = selectMergeCiRun({ workflow, headSha, runs });
 
   for (const requiredName of requiredChecks) {
     const matches = jobs.filter((job) => job?.name === requiredName);
