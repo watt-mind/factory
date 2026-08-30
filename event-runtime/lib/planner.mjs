@@ -864,8 +864,7 @@ export function policyOwnedPathsCollision(root = reposRoot(), snapshot = null) {
  */
 export const DEFAULT_DISPATCH_SECURITY = "excluded";
 export function policyDispatchSecurity(root = reposRoot(), snapshot = null) {
-  const value = loadRuntimePolicy(root, snapshot)?.dispatch
-    ?.security_tickets;
+  const value = loadRuntimePolicy(root, snapshot)?.dispatch?.security_tickets;
   return value === "auto" ? "auto" : DEFAULT_DISPATCH_SECURITY;
 }
 
@@ -949,11 +948,7 @@ export function inFlightDispatchForTicket(db, payload) {
   return inFlightRunForTicket(db, "dispatch@1", payload);
 }
 
-function loadRepoEscalatePaths(
-  repoName,
-  root = reposRoot(),
-  snapshot = null,
-) {
+function loadRepoEscalatePaths(repoName, root = reposRoot(), snapshot = null) {
   if (snapshot) {
     let repo;
     try {
@@ -2520,13 +2515,13 @@ export function planEvent(
       ) {
         const result = worktreeEligibility?.ok
           ? worktreeEligibility
-            : worktreeDispatchAutoEligibility(pinnedEnvelope.payload, {
-                ...dispatch,
-                // Remote handoff is unattended. Only a durable operator event
-                // may exercise the sensitive/escalate-path bypass.
-                operatorAuthorized: false,
-                configSnapshot,
-              });
+          : worktreeDispatchAutoEligibility(pinnedEnvelope.payload, {
+              ...dispatch,
+              // Remote handoff is unattended. Only a durable operator event
+              // may exercise the sensitive/escalate-path bypass.
+              operatorAuthorized: false,
+              configSnapshot,
+            });
         if (!result?.ok) {
           return humanNeeded(
             db,
@@ -2786,6 +2781,7 @@ export function planAdmittedEvents(db, registry, opts = {}) {
     policyVersion: opts.policyVersion ?? "unknown",
     dispatchEligibility: worktreeDispatchAutoEligibility,
     dispatch,
+    ...(opts.autoApprovalPolicy ? { policy: opts.autoApprovalPolicy } : {}),
   });
   return { planned, failed, deadLettered };
 }
