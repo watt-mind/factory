@@ -371,6 +371,33 @@ describe("schedule trigger metadata (WM-259)", () => {
 });
 
 describe("artifact-view sidecar on GET /agents (WM-454)", () => {
+  test("each request reads the current registry reference", async () => {
+    let current = registry;
+    const loadedAt = "2026-08-28T10:00:00.000Z";
+    const { server, port } = await makeServer({
+      registryRef: {
+        get current() {
+          return current;
+        },
+        state: () => ({ loadedAt, stamp: "files:test", lastReloadError: null }),
+      },
+    });
+    const client = apiClient({ port });
+    try {
+      const before = await client.agents();
+      const agents = new Map(registry.agents);
+      agents.delete("disk-diagnose@1");
+      current = { ...registry, agents };
+      const after = await client.agents();
+      expect(after.agents).toHaveLength(before.agents.length - 1);
+      expect(
+        after.agents.some((agent) => agent.ref === "disk-diagnose@1"),
+      ).toBe(false);
+    } finally {
+      server.close();
+    }
+  });
+
   test("every agent item carries outputView/outputViewFile; views are objects where a sidecar exists, null elsewhere", async () => {
     const { server, client } = await makeServer();
     try {

@@ -17,7 +17,8 @@ import { txImmediate } from "./db.mjs";
 import { newProposalId } from "./ids.mjs";
 import { runState, transition } from "./lifecycle.mjs";
 import { buildRunSpec } from "./planner.mjs";
-import { getEventType } from "./registry.mjs";
+import { getAgent, getEventType } from "./registry.mjs";
+import { computeDefHash } from "./receipts.mjs";
 
 /**
  * The one human actor in the MVP (lib/api.mjs §14). An event type flagged
@@ -172,7 +173,20 @@ export function approveProposal(
       err.code = "human_approval_only";
       throw err;
     }
-    if (!isExpired(proposal, now)) {
+    const recordedSpec = proposal.spec_json
+      ? JSON.parse(proposal.spec_json)
+      : null;
+    let registryReloadMismatch = false;
+    if (recordedSpec?.defHash) {
+      try {
+        registryReloadMismatch =
+          computeDefHash(getAgent(registry, recordedSpec.agent)) !==
+          recordedSpec.defHash;
+      } catch {
+        registryReloadMismatch = true;
+      }
+    }
+    if (!registryReloadMismatch && !isExpired(proposal, now)) {
       return approveRun(db, proposal, envelope, {
         actor,
         now,
@@ -181,13 +195,15 @@ export function approveProposal(
       });
     }
 
-    // Expired: re-plan against current registry state, reusing the runId.
+    // Expired or definition-stale: re-plan against current registry state,
+    // reusing the runId.  A defHash mismatch is checked even inside the TTL:
+    // approval names an immutable definition, not merely an unexpired row.
     if (!mapping)
       throw new Error(
         `proposal ${id} expired and event type ${envelope.type} is no longer registered`,
       );
-    const storedSpec = JSON.parse(proposal.spec_json);
-    const fresh = {
+    const storedSpec = recordedSpec ?? JSON.parse(proposal.spec_json);
+    const built = {
       ...buildRunSpec(registry, envelope, mapping, {
         runId: proposal.run_id,
         policyVersion,
@@ -206,8 +222,17 @@ export function approveProposal(
       // declaration key.
       idempotencyKey: storedSpec.idempotencyKey,
     };
+    // Preserve the definition-attestation generation of the recorded spec.
+    // Older rows without defHash remain byte-compatible; pinned rows always
+    // receive a fresh pin rather than losing the guard during re-planning.
+    const fresh = storedSpec?.defHash
+      ? {
+          ...built,
+          defHash: computeDefHash(getAgent(registry, built.agent)),
+        }
+      : built;
     const freshHash = hashJson(fresh);
-    if (freshHash === proposal.spec_hash) {
+    if (!registryReloadMismatch && freshHash === proposal.spec_hash) {
       return approveRun(db, proposal, envelope, {
         actor,
         now,
@@ -224,7 +249,14 @@ export function approveProposal(
     const at = new Date(now).toISOString();
     db.query(
       `UPDATE proposals SET status = 'superseded', decided_at = ?, decided_by = ?, reason = ? WHERE id = ?`,
-    ).run(at, actor, "superseded_by_ttl_replan", id);
+    ).run(
+      at,
+      actor,
+      registryReloadMismatch
+        ? "superseded_by_registry_reload"
+        : "superseded_by_ttl_replan",
+      id,
+    );
     const freshJson = canonicalJson(fresh);
     db.query(
       `UPDATE runs SET spec_json = ?, spec_hash = ?, updated_at = ? WHERE run_id = ?`,
@@ -234,7 +266,7 @@ export function approveProposal(
       `INSERT INTO proposals
          (id, event_source, event_id, run_id, decision, spec_json, spec_hash,
           idempotency_key, status, reason, created_at, ttl_seconds)
-       VALUES (?, ?, ?, ?, 'run', ?, ?, ?, 'open', 'replanned_after_ttl', ?, ?)`,
+       VALUES (?, ?, ?, ?, 'run', ?, ?, ?, 'open', ?, ?, ?)`,
     ).run(
       newId,
       proposal.event_source,
@@ -243,12 +275,16 @@ export function approveProposal(
       freshJson,
       freshHash,
       fresh.idempotencyKey,
+      registryReloadMismatch
+        ? "replanned_after_registry_reload"
+        : "replanned_after_ttl",
       at,
       mapping.proposalTtlSeconds ?? DEFAULT_PROPOSAL_TTL_SECONDS,
     );
     return {
       approved: false,
       replanned: true,
+      ...(registryReloadMismatch ? { registryReloaded: true } : {}),
       proposal: getProposal(db, newId),
     };
   });

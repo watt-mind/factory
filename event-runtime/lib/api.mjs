@@ -124,6 +124,7 @@ function bearerAuthorized(authHeader, token) {
 export function createApi({
   db,
   registry,
+  registryRef,
   secret = webhookSecret(),
   githubSecret = githubWebhookSecret(),
   now = () => Date.now(),
@@ -156,10 +157,8 @@ export function createApi({
   getTickStats = null,
 } = {}) {
   const actor = "operator";
-  const registryLoadedAt = new Date(now()).toISOString();
+  const staticRegistryLoadedAt = new Date(now()).toISOString();
   const storeStatsTtlMs = 10_000;
-  const composedInboxPlanner =
-    inboxPlanner ?? decisionEffectPlanner(registry, { onEvent, policyVersion });
   let cachedStoreStats = null;
   let cachedStoreStatsAt = 0;
   let cachedArtifactReferences = null;
@@ -237,6 +236,14 @@ export function createApi({
       }
 
       const nowMs = now();
+      // One coherent snapshot per request.  A swap between requests is
+      // visible immediately; a swap during a request cannot mix definitions.
+      const currentRegistry = registryRef?.current ?? registry;
+      const registryState = registryRef?.state?.() ?? {
+        loadedAt: staticRegistryLoadedAt,
+        stamp: null,
+        lastReloadError: null,
+      };
       const send = (status, body) => sendJson(res, status, body);
       const common = {
         route,
@@ -244,7 +251,8 @@ export function createApi({
         res,
         url,
         db,
-        registry,
+        registry: currentRegistry,
+        registryHealth: registryState,
         secret,
         githubSecret,
         policyVersion,
@@ -291,7 +299,12 @@ export function createApi({
             const applyEffect = (effectDb, item, response) =>
               inboxApplyEffect(effectDb, item, response, {
                 linear: inboxLinear,
-                planner: composedInboxPlanner,
+                planner:
+                  inboxPlanner ??
+                  decisionEffectPlanner(currentRegistry, {
+                    onEvent,
+                    policyVersion,
+                  }),
                 now: nowMs,
               });
             if (decisionMatch[2] === "retry") {
@@ -350,7 +363,7 @@ export function createApi({
           ...common,
           root: configRoot,
           now: nowMs,
-          registryLoadedAt,
+          registryLoadedAt: registryState.loadedAt,
         });
       }
       if (route === "GET /memos") {
@@ -403,11 +416,11 @@ export function createApi({
             return send(status, body);
           }
           const loop = decodeURIComponent(triggerMatch[1]);
-          const schedule = scheduleView(db, registry, { now: nowMs }).find(
-            (item) => item.loop === loop,
-          );
+          const schedule = scheduleView(db, currentRegistry, {
+            now: nowMs,
+          }).find((item) => item.loop === loop);
           if (!schedule) return send(status, body);
-          const repo = registry.schedules?.[loop]?.payload?.repo;
+          const repo = currentRegistry.schedules?.[loop]?.payload?.repo;
           if (
             loop.startsWith("ship-") &&
             typeof repo === "string" &&

@@ -72,6 +72,10 @@ function blockAll(landed, { finalSha, kind, reason }, shell = sh) {
       "ai:blocked",
       "--remove",
       "ai:needs-review",
+      "--remove",
+      "ai:in-progress",
+      "--remove",
+      "agent:claude-code",
     ]);
     shell("factory", [
       "linear",
@@ -84,6 +88,32 @@ function blockAll(landed, { finalSha, kind, reason }, shell = sh) {
       `${kind} ${item.ticket}/PR#${item.pr}: ${reason}`,
     ]);
   }
+}
+
+function doneArgs(ticket) {
+  return [
+    "linear",
+    "state",
+    ticket,
+    "Done",
+    "--remove",
+    "ai:needs-review",
+    "--remove",
+    "ai:escalated",
+    "--remove",
+    "ai:blocked",
+    "--remove",
+    "ai:in-progress",
+    "--remove",
+    "agent:claude-code",
+  ];
+}
+
+function transitionDone(ticket, shell = sh) {
+  const done = shell("factory", doneArgs(ticket));
+  if (done.status === 0) return null;
+  const detail = (done.stderr || done.stdout || "unknown failure").trim();
+  return `Done transition failed for ${ticket}: ${detail}`;
 }
 
 function githubFailureDetail(action, result) {
@@ -114,6 +144,261 @@ function parseGhJson(action, result, fallback) {
       }),
     };
   }
+}
+
+function readGhJson(action, result, fallback) {
+  if (result.status !== 0) {
+    throw new Error(githubUnavailable(action, result));
+  }
+  const parsed = parseGhJson(action, result, fallback);
+  if (parsed.failure) throw new Error(parsed.failure);
+  return parsed.value;
+}
+
+function repositoryName(repository) {
+  if (repository?.nameWithOwner) return repository.nameWithOwner;
+  const owner = repository?.owner?.login;
+  return owner && repository?.name ? `${owner}/${repository.name}` : null;
+}
+
+/**
+ * Bounds for the merge catch-up scan. Both list calls are newest-first, and
+ * `projectItems` is a per-issue GraphQL read, so the windows stay small: an
+ * unbounded closed-issue listing is the same shape as the #1061 closed-backlog
+ * stall, on the merge hot path. Older stranded tickets drain across successive
+ * green batches; `closedWithinDays` narrows the issue search to the recent
+ * backlog and `maxItems` caps the ancestry proofs issued per run.
+ */
+export const CATCH_UP_DEFAULTS = Object.freeze({
+  issueLimit: 200,
+  pullLimit: 200,
+  closedWithinDays: 30,
+  maxItems: 25,
+});
+
+function positiveInt(value, fallback, name) {
+  if (value === undefined || value === null) return fallback;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(`merge catch-up ${name} must be a positive integer`);
+  }
+  return n;
+}
+
+function closedSinceDate(now, days) {
+  const since = new Date(now - days * 24 * 60 * 60 * 1000);
+  if (!Number.isFinite(since.getTime())) {
+    throw new Error("merge catch-up received an invalid clock");
+  }
+  return since.toISOString().slice(0, 10);
+}
+
+/**
+ * Canonical ticket form for dedupe: `owner/repo#N`, `#N`, and `N` all name
+ * the same GitHub issue, so a landed ticket recorded in any of those forms
+ * still excludes its catch-up twin. Other trackers compare case-insensitively.
+ */
+export function normalizeTicket(ticket, github) {
+  const text = String(ticket ?? "").trim();
+  const match = /^(?:([\w.-]+\/[\w.-]+))?#?(\d+)$/.exec(text);
+  if (match && (!match[1] || match[1].toLowerCase() === github.toLowerCase())) {
+    return `${github.toLowerCase()}#${Number(match[2])}`;
+  }
+  return text.toLowerCase();
+}
+
+/**
+ * Find closed project issues that a merged PR closed before (or at) the
+ * batch commit whose base CI just passed. Two bounded GraphQL reads avoid an
+ * N+1 PR lookup across a potentially large historical backlog.
+ */
+export function listCatchUpItems({
+  github,
+  base,
+  project,
+  verifiedSha,
+  shell = sh,
+  issueLimit,
+  pullLimit,
+  closedWithinDays,
+  now = Date.now(),
+}) {
+  const issueCap = positiveInt(
+    issueLimit,
+    CATCH_UP_DEFAULTS.issueLimit,
+    "issueLimit",
+  );
+  const pullCap = positiveInt(
+    pullLimit,
+    CATCH_UP_DEFAULTS.pullLimit,
+    "pullLimit",
+  );
+  const days = positiveInt(
+    closedWithinDays,
+    CATCH_UP_DEFAULTS.closedWithinDays,
+    "closedWithinDays",
+  );
+  const issues = readGhJson(
+    "list closed issues for merge catch-up",
+    shell("gh", [
+      "issue",
+      "list",
+      "--repo",
+      github,
+      "--state",
+      "closed",
+      "--search",
+      `closed:>=${closedSinceDate(now, days)}`,
+      "--limit",
+      String(issueCap),
+      "--json",
+      "number,projectItems",
+    ]),
+    "[]",
+  );
+  const pulls = readGhJson(
+    "list merged PRs for merge catch-up",
+    shell("gh", [
+      "pr",
+      "list",
+      "--repo",
+      github,
+      "--state",
+      "merged",
+      "--limit",
+      String(pullCap),
+      "--json",
+      "number,baseRefName,mergeCommit,mergedAt,closingIssuesReferences",
+    ]),
+    "[]",
+  );
+  if (!Array.isArray(issues) || !Array.isArray(pulls)) {
+    throw new Error("merge catch-up returned a non-array GitHub response");
+  }
+
+  const verifiedPull = pulls.find(
+    (pull) =>
+      pull.baseRefName === base && pull.mergeCommit?.oid === verifiedSha,
+  );
+  if (!verifiedPull?.mergedAt) {
+    throw new Error(
+      `merge catch-up could not bind verified SHA ${verifiedSha} to a merged PR`,
+    );
+  }
+  const verifiedAt = Date.parse(verifiedPull.mergedAt);
+  if (!Number.isFinite(verifiedAt)) {
+    throw new Error("merge catch-up received an invalid verified merge time");
+  }
+
+  const stranded = new Map();
+  for (const issue of issues) {
+    const status = issue.projectItems?.find((item) => item.title === project)
+      ?.status?.name;
+    if (!status || status.toLowerCase() === "done") continue;
+    stranded.set(issue.number, status);
+  }
+
+  const items = new Map();
+  for (const pull of pulls) {
+    if (pull.baseRefName !== base || !pull.mergeCommit?.oid) continue;
+    const mergedAt = Date.parse(pull.mergedAt);
+    // A different PR with the same second-level mergedAt may have landed just
+    // after finalSha. Defer equal timestamps to a later green batch rather
+    // than let timestamp granularity overrun the exact proof boundary.
+    if (
+      !Number.isFinite(mergedAt) ||
+      (pull.mergeCommit.oid !== verifiedSha && mergedAt >= verifiedAt)
+    )
+      continue;
+    for (const issue of pull.closingIssuesReferences ?? []) {
+      if (repositoryName(issue.repository) !== github) continue;
+      const previousStatus = stranded.get(issue.number);
+      if (!previousStatus) continue;
+      items.set(issue.number, {
+        ticket: `${github}#${issue.number}`,
+        issue: issue.number,
+        pr: pull.number,
+        mergeSha: pull.mergeCommit.oid,
+        previousStatus,
+      });
+    }
+  }
+  // Oldest issue first so a capped run drains the backlog from the far end.
+  return [...items.values()].sort((a, b) => a.issue - b.issue);
+}
+
+export function proveAncestor(github, ancestor, descendant, shell = sh) {
+  const comparison = shell("gh", [
+    "api",
+    `repos/${github}/compare/${ancestor}...${descendant}`,
+    "--jq",
+    ".status",
+  ]);
+  if (comparison.status !== 0) {
+    throw new Error(
+      githubUnavailable("compare catch-up merge ancestry", comparison),
+    );
+  }
+  const status = (comparison.stdout || "").trim();
+  if (status === "ahead" || status === "identical") return true;
+  if (status === "behind" || status === "diverged") return false;
+  throw new Error(
+    githubUnavailable("compare catch-up merge ancestry", {
+      stderr: `unexpected compare status ${JSON.stringify(status)}`,
+    }),
+  );
+}
+
+export function catchUpMergedTickets(
+  {
+    github,
+    base,
+    project,
+    verifiedSha,
+    excludeTickets = [],
+    issueLimit,
+    pullLimit,
+    closedWithinDays,
+    maxItems,
+    now,
+  },
+  shell = sh,
+) {
+  const cap = positiveInt(maxItems, CATCH_UP_DEFAULTS.maxItems, "maxItems");
+  const excluded = new Set(
+    excludeTickets.map((ticket) => normalizeTicket(ticket, github)),
+  );
+  const failures = [];
+  let reconciled = 0;
+  let processed = 0;
+  let deferred = 0;
+  for (const item of listCatchUpItems({
+    github,
+    base,
+    project,
+    verifiedSha,
+    shell,
+    issueLimit,
+    pullLimit,
+    closedWithinDays,
+    now,
+  })) {
+    if (excluded.has(normalizeTicket(item.ticket, github))) continue;
+    if (processed >= cap) {
+      deferred += 1;
+      continue;
+    }
+    processed += 1;
+    if (!proveAncestor(github, item.mergeSha, verifiedSha, shell)) continue;
+    const failure = transitionDone(item.ticket, shell);
+    if (failure) {
+      console.error(failure);
+      failures.push(failure);
+    } else {
+      reconciled += 1;
+    }
+  }
+  return { reconciled, failures, processed, deferred };
 }
 
 /**
@@ -401,6 +686,7 @@ export function runMergeVerify({
   pause = wait,
   pollAttempts = 90,
   repoRecord: configuredRepoRecord,
+  catchUp = {},
 } = {}) {
   const input = JSON.parse(readFileSync(path.join(cwd, "input.json"), "utf8"));
   const { repo, github, base, landed, finalSha } = input;
@@ -461,25 +747,38 @@ export function runMergeVerify({
   const doneFailures = [];
   for (const item of landed) {
     cleanupItem({ github, repo, factoryRoot, item, shell });
-    const done = shell("factory", [
-      "linear",
-      "state",
-      item.ticket,
-      "Done",
-      "--remove",
-      "ai:needs-review",
-      "--remove",
-      "ai:escalated",
-      "--remove",
-      "ai:blocked",
-      "--remove",
-      "ai:in-progress",
-    ]);
-    if (done.status !== 0) {
-      const detail = (done.stderr || done.stdout || "unknown failure").trim();
-      const message = `Done transition failed for ${item.ticket}: ${detail}`;
-      console.error(message);
-      doneFailures.push(message);
+    const failure = transitionDone(item.ticket, shell);
+    if (failure) {
+      console.error(failure);
+      doneFailures.push(failure);
+    }
+  }
+
+  let catchUpSummary = "merge catch-up skipped";
+  if (repoRecord.controlPlane === "github" && repoRecord.project) {
+    try {
+      const caughtUp = catchUpMergedTickets(
+        {
+          github,
+          base,
+          project: repoRecord.project,
+          verifiedSha: finalSha,
+          excludeTickets: landed.map((item) => item.ticket),
+          ...catchUp,
+        },
+        shell,
+      );
+      doneFailures.push(...caughtUp.failures);
+      catchUpSummary = `reconciled ${caughtUp.reconciled} previously stranded ticket(s)`;
+      if (caughtUp.deferred > 0) {
+        catchUpSummary += ` (${caughtUp.deferred} deferred to the next green batch)`;
+      }
+    } catch (err) {
+      // The current batch already has exact green proof. A catch-up listing
+      // failure must not strand it in turn; the next green batch retries the
+      // historical scan.
+      catchUpSummary = `merge catch-up deferred: ${err.message || err}`;
+      console.error(catchUpSummary);
     }
   }
   emitNextScan(db, { repo, finalSha });
@@ -493,6 +792,7 @@ export function runMergeVerify({
       exitCode: 0,
       outputTail: [
         `verified ${landed.length} landed PR(s) at ${finalSha}`,
+        catchUpSummary,
         ...doneFailures,
       ].join("; "),
     },

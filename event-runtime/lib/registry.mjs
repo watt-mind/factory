@@ -1028,10 +1028,18 @@ export function loadRegistry({
   modelTiers = loadModelTierMap(),
   trackedModelTiers = modelTiers,
   loaderFor = defaultLoaderFor,
-  scheduleConfigPath = resolveConfigPath("schedule", {
-    root: path.dirname(root),
-    warn: false,
-  }),
+  // Unit tests must describe the committed kernel unless they explicitly
+  // pass an overlay fixture. Dispatched worktrees intentionally contain a
+  // copy of the operator's ignored config/schedule.yaml; letting that ambient
+  // instance state leak into `bun test` makes kernel expectations depend on
+  // whichever loops the operator currently enabled. Operational processes do
+  // not set NODE_ENV=test and continue to resolve the effective local config.
+  scheduleConfigPath = process.env.NODE_ENV === "test"
+    ? path.join(path.dirname(root), "config", ".test-no-schedule.yaml")
+    : resolveConfigPath("schedule", {
+        root: path.dirname(root),
+        warn: false,
+      }),
 } = {}) {
   const configured =
     packRoots ??

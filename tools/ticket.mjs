@@ -8,13 +8,15 @@
  * `tools/linear.mjs` remains as a deprecated shim.
  *
  *   bun tools/ticket.mjs get CLNT-616
+ *   bun tools/ticket.mjs get owner/repo#123  # or configured-repo-name#123
  *   bun tools/ticket.mjs comments CLNT-616
  *   bun tools/ticket.mjs claim CLNT-616 --agent claude
  *   bun tools/ticket.mjs unclaim CLNT-616
  *   bun tools/ticket.mjs comment CLNT-616 "verified: 42 tests pass"
  *   bun tools/ticket.mjs triage CLNT-616 --comment "Owned Paths need revision"
  *   bun tools/ticket.mjs answer CLNT-616 "Use the existing token cache"
- *   bun tools/ticket.mjs detail CLNT-616 -- "## Acceptance criteria\n- [ ] ..."
+ *   bun tools/ticket.mjs detail CLNT-616 -- "## Acceptance criteria\n- [ ] ..." # append
+ *   bun tools/ticket.mjs detail CLNT-616 --replace -- "## Acceptance criteria\n- [ ] ..."
  *   bun tools/ticket.mjs labels CLNT-616 --add ai:needs-review --remove ai:in-progress
  *   bun tools/ticket.mjs state CLNT-616 "In Review" --add ai:needs-review
  *   bun tools/ticket.mjs file --team CLNT --title "..." --body "..." --type bug --dedupe-key "..."
@@ -392,23 +394,48 @@ export function resolveRepoName({
 /**
  * When cwd identifies no repo (dispatched agents run from ephemeral runtime
  * workspaces under ~/.factory, matching neither `path` nor `worktree_root` —
- * GH-975), the ticket identifier itself still can: `owner/repo#N` names the
- * GitHub repo, and a registry entry whose `github:` matches decides the
- * plane. Without this, a workspace-run claim silently falls back to the
- * workspace-wide default plane and misreads or misses the ticket entirely.
+ * GH-975), the ticket identifier itself still can: `owner/repo#N` or a
+ * configured `repo-name#N` names the GitHub repo. Without this, a workspace-
+ * run claim silently falls back to the workspace-wide default plane and
+ * misreads or misses the ticket entirely.
  */
 export function resolveRepoNameFromTicket(ticketArg, repos) {
   const registry = repos ?? getRepos();
-  const m =
-    typeof ticketArg === "string" &&
-    ticketArg.match(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#[0-9]+/);
-  if (!m) return null;
-  const github = m[1].toLowerCase();
+  const ref = configuredGithubTicketRef(ticketArg, registry);
+  return ref?.repo.name ?? null;
+}
+
+function configuredGithubTicketRef(ticketArg, registry) {
+  if (typeof ticketArg !== "string") return null;
+  const full = ticketArg.match(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#([0-9]+)$/);
+  const short = ticketArg.match(/^([A-Za-z0-9_.-]+)#([0-9]+)$/);
+  if (!full && !short) return null;
+  const [, rawName, number] = full ?? short;
+  const name = rawName.toLowerCase();
   for (const repo of registry.values()) {
-    if (typeof repo.github === "string" && repo.github.toLowerCase() === github)
-      return repo.name;
+    const matches = full
+      ? typeof repo.github === "string" && repo.github.toLowerCase() === name
+      : typeof repo.name === "string" && repo.name.toLowerCase() === name;
+    if (matches) return { repo, identifier: `${repo.github}#${number}` };
   }
   return null;
+}
+
+/** Return the full GitHub slug, or reject a miss before fallback routing. */
+export function normalizeTicketRef(ticketArg, repos) {
+  // Same registry `controlPlane()` binds to, so the ref that passes here is
+  // the ref the adapter is built for.
+  const registry = repos ?? getRepos(instanceConfigRoot());
+  const ref = configuredGithubTicketRef(ticketArg, registry);
+  if (ref) return ref.identifier;
+  if (typeof ticketArg === "string" && /^[^#\s]+#[0-9]+$/.test(ticketArg)) {
+    const err = new Error(
+      `unrecognised ticket ref ${JSON.stringify(ticketArg)}: expected <owner>/<repo>#N or <repo-name>#N for a configured GitHub repo, or a Linear id like CLNT-616`,
+    );
+    err.exitCode = 2;
+    throw err;
+  }
+  return ticketArg;
 }
 
 /**
@@ -548,6 +575,53 @@ export function closureCheckMessages(issue) {
   return formatOwnedPathClosureGaps(gaps);
 }
 
+/** A Linear issue key: team prefix, dash, number (`CLNT-616`, `WM-1007`). */
+const LINEAR_KEY = /^[A-Z][A-Z0-9]*-\d+$/;
+
+/**
+ * Build the tracker-native escape-hatch mutation for `detail --replace`.
+ *
+ * The replacement stays in the ticket CLI's declared surface while adapters
+ * grow a first-class replacement verb (see #1666). The control plane's own
+ * `kind` decides the tracker; without one, a Linear key shape (`CLNT-616`)
+ * selects Linear and everything else — `owner/repo#N`, `#N`, bare `N`, all of
+ * which the GitHub adapter accepts — selects GitHub.
+ */
+export function descriptionReplacementRequest(
+  identifier,
+  id,
+  description,
+  { kind } = {},
+) {
+  const linear =
+    kind === "linear" ||
+    (kind == null && LINEAR_KEY.test(String(identifier).trim()));
+  if (linear) {
+    return {
+      query:
+        "mutation($id:String!,$description:String!){issueUpdate(id:$id,input:{description:$description}){success}}",
+      variables: { id, description },
+      resultAt: ["issueUpdate", "success"],
+    };
+  }
+  return {
+    query:
+      "mutation($id:ID!,$body:String!){updateIssue(input:{id:$id,body:$body}){issue{id}}}",
+    variables: { id, body: description },
+    resultAt: ["updateIssue", "issue", "id"],
+  };
+}
+
+/**
+ * Did the replacement mutation take? The tail of `resultAt` is either a
+ * boolean (`success`) or an id; both must be truthy — `success: false` is a
+ * failure, not "a value came back".
+ */
+export function replacementSucceeded(result, resultAt) {
+  const payload = result?.data ?? result;
+  return Boolean(resultAt.reduce((value, key) => value?.[key], payload));
+}
+
 const teamOf = (key) => String(key).split("-")[0];
 
 // ------------------------------------------------------------------ verbs ---
@@ -628,23 +702,24 @@ const out = (obj, text) =>
 
 const VERBS = {
   async get() {
-    const issue = await controlPlane().getTicket(positional[0]);
+    const key = normalizeTicketRef(positional[0]);
+    const issue = await controlPlane(key).getTicket(key);
     out(issue, formatTicket(issue));
   },
 
   async comments() {
-    const key = positional[0];
-    if (!key) throw new Error(`usage: comments <ISSUE-ID>`);
-    const nodes = await controlPlane().listComments(key);
+    if (!positional[0]) throw new Error(`usage: comments <ISSUE-ID>`);
+    const key = normalizeTicketRef(positional[0]);
+    const nodes = await controlPlane(key).listComments(key);
     out(nodes, formatComments(nodes));
   },
 
   async claim() {
-    const key = positional[0];
+    const key = normalizeTicketRef(positional[0]);
     const harness = flag("agent", "claude");
     // Linear has no compare-and-swap; the adapter's read-back IS the
     // concurrency control. `ok: false` is a lost race, not a transport error.
-    const result = await controlPlane().claim(key, { harness });
+    const result = await controlPlane(key).claim(key, { harness });
     out(
       result,
       result.ok
@@ -655,9 +730,9 @@ const VERBS = {
   },
 
   async unclaim() {
-    const key = positional[0];
-    if (!key) throw new Error(`usage: unclaim <ISSUE-ID>`);
-    const cp = controlPlane();
+    if (!positional[0]) throw new Error(`usage: unclaim <ISSUE-ID>`);
+    const key = normalizeTicketRef(positional[0]);
+    const cp = controlPlane(key);
     const issue = await cp.getTicket(key);
     const currentNames = (issue.labels ?? []).map((label) => label.name);
     const { add, remove } = releaseLabels(currentNames, { to: "Todo" });
@@ -669,30 +744,30 @@ const VERBS = {
   },
 
   async comment() {
-    const key = positional[0];
+    const key = normalizeTicketRef(positional[0]);
     const body = positional[1];
     if (!body) throw new Error(`usage: comment <ISSUE-ID> [--] "<text>"`);
-    await controlPlane().comment(key, body);
+    await controlPlane(key).comment(key, body);
     out({ ok: true, identifier: key }, `commented on ${key}`);
   },
 
   async triage() {
-    const key = positional[0];
     const comment = flag("comment");
-    if (!key || comment === null)
+    if (!positional[0] || comment === null)
       throw new Error(`usage: triage <ISSUE-ID> --comment "<text>"`);
-    const cp = controlPlane();
+    const key = normalizeTicketRef(positional[0]);
+    const cp = controlPlane(key);
     await cp.transition(key, "Triage", { remove: ["ai:agent-ready"] });
     if (comment.trim()) await cp.comment(key, comment);
     out({ ok: true, identifier: key }, `${key} -> Triage`);
   },
 
   async answer() {
-    const key = positional[0];
     const text = positional[1];
-    if (!key || !text)
+    if (!positional[0] || !text)
       throw new Error(`usage: answer <ISSUE-ID> [--] "<text>"`);
-    const cp = controlPlane();
+    const key = normalizeTicketRef(positional[0]);
+    const cp = controlPlane(key);
     const issue = await cp.getTicket(key);
     if (issue.state?.name?.toLowerCase() === "blocked")
       await cp.transition(key, "Todo");
@@ -701,11 +776,38 @@ const VERBS = {
   },
 
   async detail() {
-    const key = positional[0];
     const rawDetail = positional[1];
-    if (!key || !rawDetail)
-      throw new Error(`usage: detail <ISSUE-ID> [--] "<markdown>"`);
-    const { appended } = await controlPlane().appendDetail(key, rawDetail);
+    if (!positional[0] || !rawDetail)
+      throw new Error(`usage: detail <ISSUE-ID> [--replace] [--] "<markdown>"`);
+    const key = normalizeTicketRef(positional[0]);
+    const cp = controlPlane(key);
+    if (has("replace")) {
+      const issue = await cp.getTicket(key);
+      const description = String(rawDetail).trim();
+      const current = String(issue.description ?? "").trim();
+      if (description === current) {
+        out(
+          { ok: true, identifier: key, replaced: false },
+          `${key} detail already matches`,
+        );
+        return;
+      }
+      const request = descriptionReplacementRequest(
+        key,
+        issue.id,
+        description,
+        { kind: cp.kind },
+      );
+      const result = await cp.raw(request.query, request.variables);
+      if (!replacementSucceeded(result, request.resultAt))
+        throw new Error(`detail replacement failed for ${key}`);
+      out(
+        { ok: true, identifier: key, replaced: true },
+        `${key} detail replaced`,
+      );
+      return;
+    }
+    const { appended } = await cp.appendDetail(key, rawDetail);
     if (!appended) {
       out(
         { ok: true, identifier: key, appended: false },
@@ -720,12 +822,12 @@ const VERBS = {
   },
 
   async labels() {
-    const key = positional[0];
-    if (!key)
+    if (!positional[0])
       throw new Error(
         `usage: labels <ISSUE-ID> [--add <label>] [--remove <label>]`,
       );
-    const cp = controlPlane();
+    const key = normalizeTicketRef(positional[0]);
+    const cp = controlPlane(key);
     const add = flagAll("add"),
       remove = flagAll("remove");
     if (!add.length && !remove.length) {
@@ -746,12 +848,11 @@ const VERBS = {
   },
 
   async state() {
-    const key = positional[0];
     const wanted = positional[1];
     const add = flagAll("add"),
       remove = flagAll("remove");
     const comment = flag("comment");
-    if (!key)
+    if (!positional[0])
       throw new Error(
         `usage: state <ISSUE-ID> ["<State Name>"] [--add label] [--remove label] [--comment "<text>"]`,
       );
@@ -760,7 +861,8 @@ const VERBS = {
         `usage: state <ISSUE-ID> "<State Name>" [--add label] [--remove label] [--comment "<text>"]`,
       );
     }
-    const cp = controlPlane();
+    const key = normalizeTicketRef(positional[0]);
+    const cp = controlPlane(key);
     const issue = await cp.getTicket(key);
 
     if (add.includes("ai:agent-ready")) {
@@ -921,7 +1023,7 @@ export async function main() {
       process.exit(LINEAR_RATE_LIMIT_EXIT);
     }
     console.error(`ticket ${verb}: ${e.message}`);
-    process.exit(1);
+    process.exit(e.exitCode ?? 1);
   }
 }
 
