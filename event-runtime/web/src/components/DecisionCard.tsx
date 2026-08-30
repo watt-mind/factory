@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { keyGuard, modal } from "../hooks";
 import { goPrefixActive } from "../goSequence";
 import {
@@ -180,11 +180,12 @@ export function DecisionCard({
   const invalidReason = !selected
     ? "Choose an option to continue."
     : (Object.values(errors)[0] ?? null);
-  const invalidField = selected
-    ? visibleFields.find((field) => errors[field.id] !== undefined)
-    : undefined;
-  const showInvalidReason =
-    invalidReason !== null && invalidField?.kind !== "text";
+  const statusReason = !selected
+    ? invalidReason
+    : (visibleFields
+        .filter((field) => field.kind !== "text")
+        .map((field) => errors[field.id])
+        .find((error) => error !== undefined) ?? null);
 
   const refresh = async (): Promise<InboxItem> => {
     const { item } = await apiCalls.get(itemId);
@@ -217,6 +218,7 @@ export function DecisionCard({
         const nextRequest = item.decision ?? currentRequest;
         setSelected(null);
         setValues(initialValues(nextRequest));
+        setTouchedFields(new Set());
         setMessage("This question changed — please re-read");
       } else {
         setMessage((error as Error).message);
@@ -518,9 +520,9 @@ export function DecisionCard({
             "Choose an option"
           )}
         </Button>
-        {showInvalidReason && (
+        {statusReason && (
           <span className="text-[11px] text-(--text-faint)" role="status">
-            {invalidReason}
+            {statusReason}
           </span>
         )}
       </div>
@@ -548,7 +550,7 @@ function DecisionFieldControl({
   onChange: (value: unknown) => void;
 }) {
   const required = field.required ? " *" : "";
-  const hintId = `decision-field-${field.id}-error`;
+  const hintId = useId();
   if (field.kind === "confirm") {
     return (
       <label className="flex cursor-pointer items-start gap-2 text-[12px] text-(--text)">
@@ -679,8 +681,9 @@ function DecisionFieldControl({
     maxLength: field.maxLength,
     "aria-describedby": error ? hintId : undefined,
     "aria-invalid": error ? true : undefined,
-    onInput: (event: React.FormEvent<HTMLInputElement | HTMLTextAreaElement>) =>
-      onChange(event.currentTarget.value),
+    onChange: (
+      event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
+    ) => onChange(event.target.value),
     className: `${controlClass} mt-1`,
   };
   return (
