@@ -1015,11 +1015,14 @@ export function Events({
 
   const eventCounts = statusQ.data?.events ?? {};
   const allCount = Object.values(eventCounts).reduce((n, v) => n + v, 0);
+  // In repo context each status tab is paged server-side, so `scoped` only
+  // holds the active tab's loaded rows — counting other statuses over it
+  // would falsely read 0. Badge only the active tab (gh-1894 review).
   const tabCount = (t: StatusTab) =>
     repoScoped
-      ? t === "all"
+      ? t === tab
         ? scoped.length
-        : scoped.filter((e) => e.status === t).length
+        : 0
       : t === "all"
         ? allCount
         : (eventCounts[t] ?? 0);
@@ -1054,7 +1057,7 @@ export function Events({
               {list.hasNextPage && " · more events available"}. Facet counts
               reflect loaded rows.
               {repoScoped
-                ? " Status-tab counts reflect loaded rows."
+                ? " Only the active status tab shows a count, from loaded rows."
                 : " Status-tab counts reflect all available events."}
             </p>
 

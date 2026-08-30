@@ -1149,6 +1149,56 @@ describe("Events repo scope caption (WM-142)", () => {
     );
   });
 
+  test("repo context badges only the active status tab — non-active tabs carry no false count (gh-1894)", async () => {
+    const admitted = stubEvent("evt_repo_admitted", "admitted", {
+      repos: ["factory"],
+    });
+    const dead = stubEvent("evt_repo_dead", "dead_lettered", {
+      repos: ["factory"],
+    });
+
+    await withApi(
+      {
+        events: async (status) => ({
+          events: status === "dead_lettered" ? [dead] : [admitted, dead],
+        }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { container, getByRole } = renderEvents({
+          context: { kind: "repo", name: "factory" },
+        });
+
+        await waitFor(() =>
+          expect(
+            container.querySelector('td[title="evt_repo_admitted"]'),
+          ).toBeTruthy(),
+        );
+        fireEvent.click(getByRole("tab", { name: /^Dead lettered/i }));
+
+        // Active tab shows the loaded-row count for its server-scoped page.
+        await waitFor(() =>
+          expect(
+            getByRole("tab", { name: /^Dead lettered/i }).querySelector(
+              ".tabular-nums",
+            )?.textContent,
+          ).toBe("1"),
+        );
+        // Non-active tabs render no badge at all: the loaded page holds only
+        // the active status, so any number here (a stale page length on
+        // "All", or an implied 0 on "Admitted") would be false.
+        expect(
+          getByRole("tab", { name: /^All/i }).querySelector(".tabular-nums"),
+        ).toBeNull();
+        expect(
+          getByRole("tab", { name: /^Admitted/i }).querySelector(
+            ".tabular-nums",
+          ),
+        ).toBeNull();
+      },
+    );
+  });
+
   test("repo context renders scope caption while rows are filtered", async () => {
     const matching = stubEvent("evt_repo_match", "admitted", {
       repos: ["factory"],
