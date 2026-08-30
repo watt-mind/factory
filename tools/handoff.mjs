@@ -157,8 +157,13 @@ async function responseJson(response, code) {
   let body;
   try {
     body = text ? JSON.parse(text) : null;
-  } catch (err) {
-    fail(code, `${code}: runtime returned non-JSON`, err);
+  } catch {
+    // Never forward the SyntaxError: engines embed a prefix of the body in it.
+    fail(
+      code,
+      `${code}: runtime returned non-JSON`,
+      new Error(`invalid JSON body (${Buffer.byteLength(text, "utf8")} bytes)`),
+    );
   }
   if (!response.ok) {
     const reason =
@@ -354,6 +359,24 @@ export async function acceptHandoff(
   };
 }
 
+const RECEIPT_WARNING_MAX_LENGTH = 512;
+
+function validReceiptWarnings(warnings) {
+  if (warnings === undefined) return true;
+  return (
+    Array.isArray(warnings) &&
+    warnings.length <= 32 &&
+    warnings.every(
+      (warning) =>
+        typeof warning === "string" &&
+        warning.length > 0 &&
+        warning.length <= RECEIPT_WARNING_MAX_LENGTH &&
+        // eslint-disable-next-line no-control-regex
+        !/[\0-\x1f\x7f]/.test(warning),
+    )
+  );
+}
+
 function validReceipt(value, requestId) {
   return Boolean(
     value &&
@@ -363,7 +386,8 @@ function validReceipt(value, requestId) {
     typeof value.admitted === "boolean" &&
     typeof value.duplicate === "boolean" &&
     value.event?.id === requestId &&
-    typeof value.event?.state === "string",
+    typeof value.event?.state === "string" &&
+    validReceiptWarnings(value.warnings),
   );
 }
 

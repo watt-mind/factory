@@ -384,9 +384,9 @@ describe("forced-command accept server", () => {
     expect(body.cause).not.toContain("runtime unavailable");
   });
 
-  test("preserves a malformed admission response's parse error cause", async () => {
+  test("keeps a malformed admission response's body out of the error cause", async () => {
     const fetchImpl = async () =>
-      new Response("{runtime-secret", { status: 200 });
+      new Response("secret-token-xyz", { status: 200 });
 
     let err;
     try {
@@ -402,8 +402,8 @@ describe("forced-command accept server", () => {
 
     const body = handoffErrorBody(err);
     expect(body.error).toBe("runtime_admission_failed");
-    expect(body.cause).toBeDefined();
-    expect(body.cause).not.toContain("runtime-secret");
+    expect(body.cause).toBe("Error: invalid JSON body (16 bytes)");
+    expect(JSON.stringify(body)).not.toContain("secret-token-xyz");
   });
 
   test("warns when a fresh admission's event cannot be found", async () => {
@@ -523,5 +523,38 @@ describe("handoff SSH client", () => {
         ssh: async () => ({ exitCode: 0, stdout: "not-json", stderr: "" }),
       }),
     ).rejects.toThrow(/invalid receipt/);
+  });
+
+  test("rejects receipts whose warnings are not short printable strings", async () => {
+    const receipt = (warnings) => ({
+      schemaVersion: "factory.handoff-receipt/v1",
+      requestId: REQUEST.requestId,
+      admitted: true,
+      duplicate: false,
+      event: { id: REQUEST.requestId, state: "unknown" },
+      warnings,
+    });
+    const send = (warnings) =>
+      sendHandoff(REQUEST, {
+        host: "factory-runner",
+        ssh: async () => ({
+          exitCode: 0,
+          stdout: JSON.stringify(receipt(warnings)),
+          stderr: "",
+        }),
+      });
+    for (const bad of [
+      "not-an-array",
+      [42],
+      [""],
+      ["line\nbreak"],
+      ["\x1b[31mred"],
+      ["x".repeat(513)],
+    ]) {
+      await expect(send(bad)).rejects.toThrow(/invalid receipt/);
+    }
+    await expect(send(["state_unavailable: event not found"])).resolves.toEqual(
+      receipt(["state_unavailable: event not found"]),
+    );
   });
 });
