@@ -2642,6 +2642,99 @@ sh -c 'sleep 5 & wait'
     db.close();
   });
 
+  test("tier escalation refuses a continuation when its failed run PR is closed", async () => {
+    const db = openDb(":memory:");
+    const failedRunId = "run_tier_closed_failed";
+    const continuationRunId = "run_tier_closed_continuation";
+    queueRun(
+      db,
+      makeSpec({
+        runId: continuationRunId,
+        agent: "dispatch@1",
+        input: {
+          repo: "factory",
+          ticket: "watt-mind/factory#1499",
+          modelTier: "strong",
+        },
+        workspace: { type: "worktree", checkoutDir: "repo" },
+        outputContract: "factory.dispatch-result/v1",
+        modelTier: "strong",
+      }),
+    );
+    db.query(
+      `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+       VALUES (?, 1, ?, 'sha256:test', '{}', '{}', ?)`,
+    ).run(
+      failedRunId,
+      JSON.stringify({ artifact: { prNumber: 1499 } }),
+      new Date(T0).toISOString(),
+    );
+    db.query(
+      `INSERT INTO tier_escalations
+         (root_run_id, failed_run_id, continuation_run_id, repo, ticket,
+          workspace_path, source_workspace_path, projection_state, created_at)
+       VALUES (?, ?, ?, 'factory', 'watt-mind/factory#1499', '/tmp/checkout', '/tmp/wrapper', 'applied', ?)`,
+    ).run(
+      failedRunId,
+      failedRunId,
+      continuationRunId,
+      new Date(T0).toISOString(),
+    );
+
+    const locksDir = tmpDir("tier-closed-locks-");
+    const leasesDir = tmpDir("tier-closed-leases-");
+    let claims = 0;
+    const summary = await runOnce(
+      db,
+      registry,
+      adapters,
+      opts({
+        dispatch: {
+          locksDir,
+          leasesDir,
+          fetchTicket: () => ({
+            identifier: "watt-mind/factory#1499",
+            state: { name: "In Progress" },
+            assignee: { id: "factory-owner", name: "Factory" },
+            labels: {
+              nodes: [{ name: "ai:in-progress" }, { name: "tier:strong" }],
+            },
+            description: "## Owned Paths\n- event-runtime/lib/worker.mjs\n",
+          }),
+          fetchViewer: () => ({ id: "factory-owner", name: "Factory" }),
+          fetchPullRequest: ({ github, pr }) => {
+            expect(github).toBe("watt-mind/factory");
+            expect(pr).toBe(1499);
+            return { state: "MERGED" };
+          },
+          fetchInFlight: () => [],
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          claimTicket: () => ((claims += 1), { ok: true }),
+        },
+      }),
+    );
+
+    expect(summary).toMatchObject({
+      runId: continuationRunId,
+      terminalState: "REFUSED",
+      reasonCode: "ticket_escalation_pr_closed",
+    });
+    expect(claims).toBe(0);
+    expect(existsSync(dispatchLockPath("factory", locksDir))).toBe(false);
+    expect(
+      db
+        .query(
+          `SELECT projection_state, projection_error FROM tier_escalations WHERE continuation_run_id = ?`,
+        )
+        .get(continuationRunId),
+    ).toEqual({
+      projection_state: "refused",
+      projection_error: "ticket_escalation_pr_closed",
+    });
+    db.close();
+  });
+
   test("tier escalation projection replaces every tier label and comments both run ids idempotently", () => {
     const calls = [];
     const runCli = (args) => {

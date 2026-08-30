@@ -1174,6 +1174,20 @@ function originatingEvent(db, runId) {
   );
 }
 
+function resultArtifactForRun(db, runId) {
+  const row = db
+    .query(
+      `SELECT result_json FROM results WHERE run_id = ? ORDER BY attempt DESC LIMIT 1`,
+    )
+    .get(runId);
+  if (!row?.result_json) return null;
+  try {
+    return JSON.parse(row.result_json)?.artifact ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function tierEscalationForContinuation(db, runId) {
   const row = db
     .query(`SELECT * FROM tier_escalations WHERE continuation_run_id = ?`)
@@ -1188,6 +1202,7 @@ function tierEscalationForContinuation(db, runId) {
     workspacePath: row.workspace_path,
     sourceWorkspacePath: row.source_workspace_path,
     projectionState: row.projection_state,
+    failedRunArtifact: resultArtifactForRun(db, row.failed_run_id),
   };
 }
 
@@ -3259,7 +3274,9 @@ export async function executeClaimed(
         releaseClaimLock(lockFile);
         if (
           gate === "dispatch" &&
-          gateRefusal.reason === "ticket_claimed_by_other" &&
+          ["ticket_claimed_by_other", "ticket_escalation_pr_closed"].includes(
+            gateRefusal.reason,
+          ) &&
           worktreeHandoff
         ) {
           refuseTierEscalationClaim(db, worktreeHandoff, gateRefusal.reason);
