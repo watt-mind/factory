@@ -37,6 +37,10 @@ import {
 
 export const MAX_EXTENSION_SECONDS = 3600;
 export const OBSERVED_MODEL_CACHE_LIMIT = 512;
+export const RUN_STATE_GROUPS = Object.freeze({
+  ACTIVE: Object.freeze(["QUEUED", "LEASED", "RUNNING", "VERIFYING"]),
+  FAILED: Object.freeze(["FAILED", "TIMED_OUT", "REFUSED"]),
+});
 
 // Transcript artifacts are content-addressed, so a model observed for a hash
 // cannot change. Keep this module-local FIFO bounded because run detail views
@@ -1767,6 +1771,16 @@ function runPage(url) {
   return collectionPage(url);
 }
 
+function stateFilterValues(state) {
+  return RUN_STATE_GROUPS[state] ?? [state];
+}
+
+function stateFilterClause(column, state) {
+  return `${column} IN (${stateFilterValues(state)
+    .map(() => "?")
+    .join(", ")})`;
+}
+
 function runsView(db, filters = {}, page = {}) {
   const { state, agent, from, to, population } = filters;
   const clauses = [];
@@ -1777,8 +1791,8 @@ function runsView(db, filters = {}, page = {}) {
   }
   if (!population || population === "created") {
     if (state) {
-      clauses.push("r.state = ?");
-      params.push(state);
+      clauses.push(stateFilterClause("r.state", state));
+      params.push(...stateFilterValues(state));
     }
     if (population === "created") {
       clauses.push("r.created_at >= ? AND r.created_at < ?");
@@ -1791,10 +1805,10 @@ function runsView(db, filters = {}, page = {}) {
         WHERE metric_event.run_id = r.run_id
           AND metric_event.at >= ? AND metric_event.at < ?
           AND metric_event.to_state IN ('COMPLETED', 'FAILED', 'REFUSED', 'TIMED_OUT', 'CANCELLED')
-          ${state ? "AND metric_event.to_state = ?" : ""}
+          ${state ? `AND ${stateFilterClause("metric_event.to_state", state)}` : ""}
       )`,
     );
-    params.push(from, to, ...(state ? [state] : []));
+    params.push(from, to, ...(state ? stateFilterValues(state) : []));
   } else if (population === "started" || population === "leased") {
     clauses.push(
       `EXISTS (
