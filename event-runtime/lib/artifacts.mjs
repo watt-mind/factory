@@ -11,6 +11,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
   copyFileSync,
+  createReadStream,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -68,6 +69,17 @@ function storeBytes({ bytes, sha256hex, storeRoot }) {
 /** Compute sha256 hex digest of a file on disk. */
 export function hashFile(filePath) {
   return createHash("sha256").update(readFileSync(filePath)).digest("hex");
+}
+
+/** Compute sha256 without buffering the file in the event loop. */
+export function hashFileAsync(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(filePath);
+    stream.on("error", reject);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
 }
 
 /** Resolve a store path from a content hash; malformed hashes fail closed. */
