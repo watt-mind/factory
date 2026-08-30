@@ -29,6 +29,9 @@ import {
 } from "../lib/workers.mjs";
 import { fail, flagValue, log } from "./shared.mjs";
 
+/** Bound registry diagnostics so one incompatible queue cannot bloat a row. */
+const MAX_SKIPPED_DIAGNOSTICS = 50;
+
 // ---------------------------------------------------------------------------
 // work — the worker process (OPS-233; docs/event-runtime-workers.md §2)
 // ---------------------------------------------------------------------------
@@ -120,27 +123,11 @@ export default async function work(args) {
     : Object.keys(adapters);
   const startedAt = Date.now();
 
-  registerWorker(db, {
-    workerId,
-    labels,
-    adapters: adapterNames,
-    now: startedAt,
-  });
-  log(`worker ${workerId} on ${hostname()} (db ${dbPath()}, policy ${pv})`);
-  if (Object.keys(labels).length > 0) log(`labels: ${JSON.stringify(labels)}`);
-  if (!sandboxReport.available)
-    log(`sandbox: unavailable — ${sandboxReport.reason}`);
-  if (adapterOverride)
-    log(`adapter override: executing every run with "${adapterOverride}"`);
-  if (drainFile)
-    log(
-      `drain-file: ${drainFile} (supervised worker — exits 0 when it appears, between claims)`,
-    );
-
   let draining = false;
   let inFlight = null;
   let idleSince = null;
   let lastSkipInspectionAt = null;
+  let skippedQueuedRuns = [];
   const reportedSkips = new Map();
 
   // Keep this exactly aligned with claimNext: a run in this window is QUEUED
@@ -164,7 +151,7 @@ export default async function work(args) {
       .all();
     const checkoutVersion = checkoutPolicyVersion();
 
-    return candidates.flatMap((candidate) => {
+    const skipped = candidates.flatMap((candidate) => {
       const spec = JSON.parse(candidate.spec_json);
       const backoff = claimBackoff.exec(candidate.queue_reason ?? "");
       if (backoff) {
@@ -210,10 +197,19 @@ export default async function work(args) {
       }
       return [];
     });
+    if (skipped.length <= MAX_SKIPPED_DIAGNOSTICS) return skipped;
+    return [
+      ...skipped.slice(0, MAX_SKIPPED_DIAGNOSTICS - 1),
+      {
+        runId: "...",
+        reason: `and ${skipped.length - MAX_SKIPPED_DIAGNOSTICS + 1} more`,
+      },
+    ];
   }
 
   function reportSkippedQueuedRuns(now) {
     const skipped = inspectSkippedQueuedRuns(now);
+    skippedQueuedRuns = skipped;
     lastSkipInspectionAt = now;
     const present = new Set(
       skipped.map(({ runId, reason }) => `${runId}\u0000${reason}`),
@@ -228,6 +224,27 @@ export default async function work(args) {
       reportedSkips.set(key, now);
     }
   }
+
+  // Inspect once before registration so the first registry row is useful, and
+  // retain this bounded snapshot until the idle-loop throttle refreshes it.
+  reportSkippedQueuedRuns(startedAt);
+  registerWorker(db, {
+    workerId,
+    labels,
+    adapters: adapterNames,
+    skipped: skippedQueuedRuns,
+    now: startedAt,
+  });
+  log(`worker ${workerId} on ${hostname()} (db ${dbPath()}, policy ${pv})`);
+  if (Object.keys(labels).length > 0) log(`labels: ${JSON.stringify(labels)}`);
+  if (!sandboxReport.available)
+    log(`sandbox: unavailable — ${sandboxReport.reason}`);
+  if (adapterOverride)
+    log(`adapter override: executing every run with "${adapterOverride}"`);
+  if (drainFile)
+    log(
+      `drain-file: ${drainFile} (supervised worker — exits 0 when it appears, between claims)`,
+    );
 
   function reportSkipsWhenDue(now) {
     idleSince ??= now;
@@ -267,6 +284,7 @@ export default async function work(args) {
       ...options,
       labels,
       adapters: adapterNames,
+      skipped: skippedQueuedRuns,
       startedAt,
     });
   const beat = setInterval(
