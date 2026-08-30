@@ -1,6 +1,6 @@
 {
   "title": "factory.repo/v1 — portable repository-owned Factory configuration",
-  "description": "Repository-intrinsic settings read from .factory.yaml or .factory/config.yaml. Host identity, checkout paths, control-plane routing, concurrency, and credentials are deliberately excluded.",
+  "description": "Repository-intrinsic settings read from .factory.yaml or .factory/config.yaml. Host identity, checkout paths, control-plane routing, concurrency, credentials, and every input to a host-executed command (verify, security scanner flags) are deliberately excluded: they stay host-owned in repos.yaml so a pull request cannot weaken its own verification or secret scan.",
   "type": "object",
   "required": ["schemaVersion"],
   "additionalProperties": false,
@@ -8,7 +8,6 @@
     "schemaVersion": { "const": "factory.repo/v1" },
     "base": { "type": "string", "pattern": "\\S" },
     "deploy_branch": { "type": ["string", "null"], "pattern": "\\S" },
-    "verify": { "type": ["string", "null"], "pattern": "\\S" },
     "toolchain": {
       "type": ["object", "array", "null"],
       "additionalProperties": { "type": "string", "pattern": "\\S" },
@@ -85,15 +84,6 @@
         "up": { "type": ["string", "null"], "pattern": "\\S" },
         "down": { "type": ["string", "null"], "pattern": "\\S" },
         "warm": { "type": ["string", "null"], "pattern": "\\S" }
-      }
-    },
-    "security": {
-      "type": ["object", "null"],
-      "additionalProperties": false,
-      "properties": {
-        "python_version": { "type": ["string", "number"] },
-        "semgrep_args": { "type": "string" },
-        "gitleaks_args": { "type": "string" }
       }
     }
   }

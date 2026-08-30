@@ -67,7 +67,6 @@ function repositoryRoot(relativeConfigPath, yaml) {
 const IN_REPO_YAML = `schemaVersion: factory.repo/v1
 base: develop
 deploy_branch: main
-verify: bun test
 toolchain:
   bun: ">=1.3 <2"
 owned_paths_policy:
@@ -86,10 +85,6 @@ worktree:
   up: bin/worktree-up.sh
   down: bin/worktree-down.sh
   warm: bin/worktree-warm.sh
-security:
-  python_version: "3.12"
-  semgrep_args: --exclude-rule example.rule
-  gitleaks_args: --no-git
 `;
 
 describe("factory.repo/v1 in-repo configuration", () => {
@@ -100,7 +95,6 @@ describe("factory.repo/v1 in-repo configuration", () => {
         schemaVersion: "factory.repo/v1",
         base: "develop",
         deploy_branch: "main",
-        verify: "bun test",
         toolchain: { bun: ">=1.3 <2" },
         escalate_paths: ["src/auth/**"],
         worktree: {
@@ -141,15 +135,53 @@ describe("factory.repo/v1 in-repo configuration", () => {
         "duplicate merge checks",
         "schemaVersion: factory.repo/v1\nmerge_ci:\n  workflow: CI\n  required_checks: [Verify, Verify]\n",
       ],
-      [
-        "non-finite security version",
-        "schemaVersion: factory.repo/v1\nsecurity:\n  python_version: .inf\n",
-      ],
     ];
     for (const [, yaml] of invalidCases) {
       const root = repositoryRoot(".factory.yaml", yaml);
       expect(() => loadInRepoConfig(root)).toThrow(RepoError);
     }
+  });
+
+  test("rejects host-owned verify and security by name (#1638 review)", () => {
+    // A PR that could author the verify command or the scanner flags could
+    // weaken its own verification or secret scan; those inputs to
+    // host-executed commands stay in repos.yaml.
+    const hostOwnedCases = [
+      ["verify", "schemaVersion: factory.repo/v1\nverify: bun test\n"],
+      [
+        "security",
+        "schemaVersion: factory.repo/v1\nsecurity:\n  gitleaks_args: --no-git\n",
+      ],
+      [
+        "security",
+        "schemaVersion: factory.repo/v1\nsecurity:\n  semgrep_args: --exclude-rule secrets\n",
+      ],
+      [
+        "security",
+        'schemaVersion: factory.repo/v1\nsecurity:\n  python_version: "3.12"\n',
+      ],
+      ["max_in_flight", "schemaVersion: factory.repo/v1\nmax_in_flight: 4\n"],
+      [
+        "control_plane",
+        "schemaVersion: factory.repo/v1\ncontrol_plane: linear\n",
+      ],
+    ];
+    for (const [key, yaml] of hostOwnedCases) {
+      const root = repositoryRoot(".factory.yaml", yaml);
+      expect(() => loadInRepoConfig(root)).toThrow(
+        new RegExp(`host-owned "${key}"`),
+      );
+    }
+    // Explicit null is still an attempt to own the key (it would clear the
+    // host verify command), so it is rejected the same way.
+    expect(() =>
+      loadInRepoConfig(
+        repositoryRoot(
+          ".factory.yaml",
+          "schemaVersion: factory.repo/v1\nverify: null\nsecurity: null\n",
+        ),
+      ),
+    ).toThrow(/host-owned "verify", "security"/);
   });
 
   test("overlays portable fields, unions escalation paths, and keeps host controls", () => {
@@ -158,6 +190,7 @@ describe("factory.repo/v1 in-repo configuration", () => {
       path: "/tmp/configured",
       base: "main",
       verify: "host verify",
+      security: { gitleaks_args: "--redact" },
       control_plane: "github",
       max_in_flight: 7,
       worktree_root: "/tmp/worktrees",
@@ -167,9 +200,11 @@ describe("factory.repo/v1 in-repo configuration", () => {
     const inRepo = {
       schemaVersion: "factory.repo/v1",
       base: "develop",
-      verify: "bun test",
-      // These are rejected by loadInRepoConfig's schema; direct callers still
-      // cannot use mergeRepoConfig to override host controls.
+      // These are rejected by loadInRepoConfig; direct callers still cannot
+      // use mergeRepoConfig to override host-owned controls or the inputs to
+      // host-executed commands.
+      verify: "true",
+      security: { gitleaks_args: "--no-git" },
       control_plane: "linear",
       max_in_flight: 100,
       escalate_paths: ["src/auth/**", "payments/**"],
@@ -179,11 +214,17 @@ describe("factory.repo/v1 in-repo configuration", () => {
     expect(mergeRepoConfig(host, inRepo)).toEqual({
       ...host,
       base: "develop",
-      verify: "bun test",
       escalate_paths: ["ops/**", "src/auth/**", "payments/**"],
       worktree_up: "bin/up.sh",
       worktree_down: "bin/down.sh",
     });
+    // Host-owned keys the host never set do not appear from the overlay.
+    expect(
+      mergeRepoConfig(
+        { name: "bare" },
+        { schemaVersion: "factory.repo/v1", verify: "true", security: {} },
+      ),
+    ).toEqual({ name: "bare" });
   });
 
   test("worktree omission inherits host scripts while null clears them", () => {
@@ -228,6 +269,8 @@ describe("factory.repo/v1 in-repo configuration", () => {
     path: ${configured}
     base: main
     verify: host verify
+    security:
+      gitleaks_args: --redact
     max_in_flight: 5
     control_plane: github
     escalate_paths: [ops/**]
@@ -242,7 +285,7 @@ describe("factory.repo/v1 in-repo configuration", () => {
     expect(repos.get("configured")).toMatchObject({
       base: "develop",
       deployBranch: "main",
-      verify: "bun test",
+      verify: "host verify",
       maxInFlight: 5,
       controlPlane: "github",
       escalatePaths: ["ops/**", "src/auth/**"],
@@ -252,9 +295,9 @@ describe("factory.repo/v1 in-repo configuration", () => {
       worktreeWarm: "bin/worktree-warm.sh",
       mergeCi: { workflow: "CI", requiredChecks: ["Verify"] },
       security: {
-        pythonVersion: "3.12",
-        semgrepArgs: "--exclude-rule example.rule",
-        gitleaksArgs: "--no-git",
+        pythonVersion: null,
+        semgrepArgs: null,
+        gitleaksArgs: "--redact",
       },
     });
     expect(repos.get("configured").toolchain).toEqual([
@@ -266,6 +309,50 @@ describe("factory.repo/v1 in-repo configuration", () => {
       maxInFlight: null,
       controlPlane: null,
     });
+  });
+
+  test("loadRepos skips one repo's malformed overlay with a warning instead of failing the registry", () => {
+    const broken = repositoryRoot(
+      ".factory.yaml",
+      "schemaVersion: factory.repo/v1\nsecurity:\n  gitleaks_args: --no-git\n",
+    );
+    const healthy = repositoryRoot(".factory.yaml", IN_REPO_YAML);
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (...args) => warnings.push(args.join(" "));
+    let repos;
+    try {
+      repos = loadRepos({
+        root: factoryRoot(`repos:
+  - name: broken
+    path: ${broken}
+    base: main
+    verify: host verify
+    security:
+      gitleaks_args: --redact
+  - name: healthy
+    path: ${healthy}
+    base: main
+`),
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    // The broken checkout keeps its host config verbatim...
+    expect(repos.get("broken")).toMatchObject({
+      base: "main",
+      verify: "host verify",
+      security: { gitleaksArgs: "--redact" },
+    });
+    // ...and the other repos still get their overlay.
+    expect(repos.get("healthy")).toMatchObject({
+      base: "develop",
+      worktreeUp: "bin/worktree-up.sh",
+    });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/repo broken: in-repo config ignored/);
+    expect(warnings[0]).toMatch(/host-owned "security"/);
   });
 });
 

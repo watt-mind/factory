@@ -3,8 +3,9 @@
  * overlaid with portable policy from each checkout's factory.repo/v1 file.
  *
  * Deliberately a reader, not an owner: host config remains the source of
- * checkout identity, routing, and concurrency, while repository-intrinsic
- * build and policy settings evolve with that repository in git.
+ * checkout identity, routing, concurrency, and every input to a host-executed
+ * command (`verify`, the `security` scanner flags), while repository-intrinsic
+ * policy settings evolve with that repository in git.
  *
  * Tier 1 uses `name`, `path`, `github`, and `base`. The `worktree_*` and
  * `verify` fields are read but unused until tier 2 (docs/event-runtime-workers.md).
@@ -49,6 +50,19 @@ export function reposConfigPath(root = reposRoot()) {
 }
 
 const IN_REPO_CONFIG_PATHS = [".factory.yaml", ".factory/config.yaml"];
+/**
+ * Keys the host registry owns outright. An in-repo file may never set them:
+ * `verify` and `security` are inputs to commands the host executes against a
+ * PR's own checkout, so a PR that could author them could weaken its own
+ * verification or secret scan; `max_in_flight` and `control_plane` are host
+ * scheduling and routing controls (#1638 review).
+ */
+export const IN_REPO_HOST_OWNED_KEYS = Object.freeze([
+  "verify",
+  "security",
+  "max_in_flight",
+  "control_plane",
+]);
 const IN_REPO_CONFIG_SCHEMA_PATH = new URL(
   "../schemas/repo-config.schema.json",
   import.meta.url,
@@ -69,19 +83,14 @@ function repoConfigSchema() {
   return inRepoConfigSchema;
 }
 
+const hasOwn = (value, key) =>
+  value !== null &&
+  typeof value === "object" &&
+  Object.prototype.hasOwnProperty.call(value, key);
+
 function validateInRepoConfigSemantics(config, file) {
   normalizeToolchain(config.toolchain, "in-repo config", file);
   normalizeOwnedPathsPolicy(config.owned_paths_policy, "in-repo config", file);
-  normalizeSecurity(config.security, "in-repo config", file);
-
-  if (
-    typeof config.security?.python_version === "number" &&
-    !Number.isFinite(config.security.python_version)
-  ) {
-    throw new RepoError(
-      `${file}: in-repo config security.python_version must be finite`,
-    );
-  }
 
   if (config.merge_ci !== undefined && config.merge_ci !== null) {
     const { workflow, required_checks: requiredChecks } = config.merge_ci;
@@ -123,6 +132,18 @@ export function loadInRepoConfig(repoRoot = process.cwd()) {
   } catch (error) {
     throw new RepoError(`${file}: invalid YAML: ${error.message}`);
   }
+  const hostOwned = IN_REPO_HOST_OWNED_KEYS.filter((key) =>
+    hasOwn(parsed, key),
+  );
+  if (hostOwned.length > 0) {
+    throw new RepoError(
+      `${file}: in-repo config may not set host-owned ${hostOwned
+        .map((key) => `"${key}"`)
+        .join(
+          ", ",
+        )}; the host repos.yaml owns ${IN_REPO_HOST_OWNED_KEYS.join(", ")}`,
+    );
+  }
   const result = validate(repoConfigSchema(), parsed);
   if (!result.valid) {
     throw new RepoError(
@@ -133,17 +154,13 @@ export function loadInRepoConfig(repoRoot = process.cwd()) {
   return parsed;
 }
 
-const hasOwn = (value, key) =>
-  value !== null &&
-  typeof value === "object" &&
-  Object.prototype.hasOwnProperty.call(value, key);
-
 /**
  * Overlay repository-owned policy onto one host registry entry.
  *
  * Host identity and infrastructure stay intact. In-repo values own the
- * portable fields, escalate paths are a stable union, and the two explicitly
- * host-owned scheduling/routing controls always win.
+ * portable fields, escalate paths are a stable union, and every
+ * IN_REPO_HOST_OWNED_KEYS entry always comes from the host — even for direct
+ * callers that bypass loadInRepoConfig's rejection.
  */
 export function mergeRepoConfig(hostConfig, inRepoConfig) {
   if (inRepoConfig === null || inRepoConfig === undefined) {
@@ -187,7 +204,7 @@ export function mergeRepoConfig(hostConfig, inRepoConfig) {
     }
   }
 
-  for (const hostOnly of ["max_in_flight", "control_plane"]) {
+  for (const hostOnly of IN_REPO_HOST_OWNED_KEYS) {
     if (hasOwn(hostConfig, hostOnly)) merged[hostOnly] = hostConfig[hostOnly];
     else delete merged[hostOnly];
   }
@@ -1098,10 +1115,20 @@ export function loadRepos({ root = reposRoot() } = {}) {
       throw new RepoError(`${file}: a repo entry has no name`);
     if (!hostEntry.path)
       throw new RepoError(`${file}: repo ${hostEntry.name} has no path`);
-    const entry = mergeRepoConfig(
-      hostEntry,
-      loadInRepoConfig(expandHome(hostEntry.path)),
-    );
+    // One checkout's malformed .factory.yaml must not take the whole registry
+    // down (and every other repo's dispatch with it): skip that repo's overlay,
+    // warn, and let the host entry stand on its own. Mirrors the escalate_paths
+    // stance below — the strict check belongs to the repo it describes.
+    let inRepoConfig = null;
+    try {
+      inRepoConfig = loadInRepoConfig(expandHome(hostEntry.path));
+    } catch (err) {
+      if (!(err instanceof RepoError)) throw err;
+      console.warn(
+        `warning: repo ${hostEntry.name}: in-repo config ignored, host config applies: ${err.message}`,
+      );
+    }
+    const entry = mergeRepoConfig(hostEntry, inRepoConfig);
     let maxInFlight = null;
     if (entry.max_in_flight !== undefined && entry.max_in_flight !== null) {
       if (
