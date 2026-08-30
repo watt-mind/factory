@@ -408,7 +408,7 @@ describe("registry", () => {
     // Regenerated (#1829): dispatch emits a concrete run trailer and rejects
     // the literal environment-variable form during handoff verification.
     const expected =
-      "sha256:dbd5426576135c4c20545d719faacd9414ca8ffd1c2cace416f8632865f9cc94";
+      "sha256:28c5980c970e233ebefba80b8be53d94a711132b49f9666d5b5aa0b2c20e87db";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -698,7 +698,7 @@ describe("registry", () => {
     // Regenerated (#1829): dispatch emits the concrete run trailer with printf,
     // so quoted PR-body files cannot leave the environment variable literal.
     expect(computeDefHash(def)).toBe(
-      "sha256:5ab07ac3ca2343a57082a2f66835f2480b5d27339e6b8adafff64fb8dccb8d95",
+      "sha256:b629b32521d6f81e9ba798403eeb8db6c7703745e42fd2ffe949d8a52a9d467d",
     );
   });
 
