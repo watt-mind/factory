@@ -4335,6 +4335,88 @@ describe("Linear rate limit (WM-878)", () => {
     description: "## Owned Paths\n- event-runtime/lib/planner.mjs\n",
   });
 
+  function withLinearCli(source, fn) {
+    const root = tmpDir("evrt-plan-linear-cli-");
+    const cli = path.join(root, "linear.mjs");
+    writeFileSync(cli, source);
+    const previous = process.env.FACTORY_LINEAR_CLI;
+    process.env.FACTORY_LINEAR_CLI = cli;
+    try {
+      return fn();
+    } finally {
+      if (previous === undefined) delete process.env.FACTORY_LINEAR_CLI;
+      else process.env.FACTORY_LINEAR_CLI = previous;
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  function deadlineBudget() {
+    let reads = 0;
+    return {
+      deadline: 10_000,
+      now: () => (reads++ < 2 ? 0 : 10_000),
+    };
+  }
+
+  test("binds the read budget without replacing an omitted viewer config snapshot", () => {
+    withLinearCli(
+      'console.log(JSON.stringify({ viewer: { id: "viewer-1" } }));',
+      () => {
+        const cache = createLinearReadCache();
+        cache.linearReadBudget = { deadline: 10_000, now: () => 0 };
+        const reads = wrapLinearReads({}, cache, NOW, {
+          repos: new Map([
+            ["gated", { name: "gated", controlPlane: "linear" }],
+          ]),
+        });
+
+        expect(reads.fetchViewer("gated")).toEqual({ id: "viewer-1" });
+      },
+    );
+  });
+
+  test("a deadline-boundary CLI 429 retains its resetAt", () => {
+    withLinearCli(
+      [
+        'console.error(JSON.stringify({ resetAt: "2026-08-19T13:00:00.000Z" }));',
+        "process.exit(3);",
+      ].join("\n"),
+      () => {
+        const cache = createLinearReadCache();
+        cache.linearReadBudget = deadlineBudget();
+        const reads = wrapLinearReads({}, cache, NOW, {
+          repos: new Map([
+            ["gated", { name: "gated", controlPlane: "linear" }],
+          ]),
+        });
+
+        let error;
+        try {
+          reads.fetchTicket("WM-429", "gated");
+        } catch (caught) {
+          error = caught;
+        }
+        expect(error).toBeInstanceOf(LinearRateLimitError);
+        expect(error.resetAt).toBe("2026-08-19T13:00:00.000Z");
+        expect(cache.rateLimitedUntil).toBe(
+          Date.parse("2026-08-19T13:00:00.000Z"),
+        );
+      },
+    );
+  });
+
+  test("a deadline-boundary missing ticket still returns null", () => {
+    withLinearCli('console.error("no such issue"); process.exit(1);', () => {
+      const cache = createLinearReadCache();
+      cache.linearReadBudget = deadlineBudget();
+      const reads = wrapLinearReads({}, cache, NOW, {
+        repos: new Map([["gated", { name: "gated", controlPlane: "linear" }]]),
+      });
+
+      expect(reads.fetchTicket("WM-missing", "gated")).toBeNull();
+    });
+  });
+
   test("a simulated Linear 400 rate-limit refuses linear_rate_limited, leaves the event admitted, and does not dead-letter", () => {
     withReposRoot(gatedYaml, () => {
       const db = openDb(":memory:");

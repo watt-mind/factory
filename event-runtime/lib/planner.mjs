@@ -573,6 +573,22 @@ function linearReadTimeout(readBudget) {
   return Math.min(LINEAR_READ_TIMEOUT_MS, remaining);
 }
 
+function linearReadTimedOut(err) {
+  return (
+    err?.code === "ETIMEDOUT" ||
+    (err?.signal === "SIGTERM" && err?.status == null)
+  );
+}
+
+function throwIfLinearReadBudgetExhausted(err, readBudget) {
+  if (
+    readBudget &&
+    linearReadTimedOut(err) &&
+    readBudget.deadline - readBudget.now() <= 0
+  )
+    throw new LinearReadBudgetExceededError();
+}
+
 function isLinearReadDeferred(err) {
   return (
     isLinearRateLimited(err) || err instanceof LinearReadBudgetExceededError
@@ -681,9 +697,26 @@ export function wrapLinearReads(
       : resolveNow() + 60_000;
   };
 
-  const fetchTicket = dispatch.fetchTicket ?? fetchTicketDefault;
-  const fetchViewer = dispatch.fetchViewer ?? fetchViewerDefault;
-  const fetchInFlight = dispatch.fetchInFlight ?? fetchInFlightDefault;
+  // Bind policy dependencies into production fetchers rather than appending
+  // them to every call. In particular, fetchViewer's second positional value
+  // is its config snapshot, so a caller that omits it must not receive the
+  // budget object in its place.
+  const fetchTicket =
+    dispatch.fetchTicket ??
+    ((ticketId, repo) =>
+      fetchTicketDefault(ticketId, repo, {
+        readBudget: cache.linearReadBudget,
+      }));
+  const fetchViewer =
+    dispatch.fetchViewer ??
+    ((repoName, snapshot = configSnapshot) =>
+      fetchViewerDefault(repoName, snapshot, {
+        readBudget: cache.linearReadBudget,
+      }));
+  const fetchInFlight =
+    dispatch.fetchInFlight ??
+    ((repo) =>
+      fetchInFlightDefault(repo, { readBudget: cache.linearReadBudget }));
 
   return {
     ...dispatch,
@@ -695,7 +728,7 @@ export function wrapLinearReads(
       if (cache.tickets.has(key)) return cache.tickets.get(key);
       throwIfReadBudgetExhausted(repo);
       try {
-        const value = fetchTicket(id, repo, cache.linearReadBudget);
+        const value = fetchTicket(id, repo);
         cache.tickets.set(key, value);
         return value;
       } catch (err) {
@@ -709,7 +742,7 @@ export function wrapLinearReads(
       if (cache.viewers.has(key)) return cache.viewers.get(key);
       throwIfReadBudgetExhausted(repo);
       try {
-        const value = fetchViewer(repo, ...args, cache.linearReadBudget);
+        const value = fetchViewer(repo, ...args);
         cache.viewers.set(key, value);
         return value;
       } catch (err) {
@@ -726,7 +759,7 @@ export function wrapLinearReads(
       throwIfReadBudgetExhausted(repo);
       try {
         cache.inFlightCalls += 1;
-        const value = fetchInFlight(repo, cache.linearReadBudget);
+        const value = fetchInFlight(repo);
         cache.inFlight.set(key, { value, at });
         return value;
       } catch (err) {
@@ -737,7 +770,7 @@ export function wrapLinearReads(
   };
 }
 
-function fetchTicketDefault(ticketId, repo, readBudget = null) {
+function fetchTicketDefault(ticketId, repo, { readBudget = null } = {}) {
   try {
     // Pass --repo so tools/ticket.mjs resolves the ticket's OWN control plane
     // (linear for CLNT repos, github for factory) instead of falling back to
@@ -754,11 +787,10 @@ function fetchTicketDefault(ticketId, repo, readBudget = null) {
       }),
     );
   } catch (err) {
-    if (readBudget && readBudget.deadline - readBudget.now() <= 0)
-      throw new LinearReadBudgetExceededError();
     throwIfLinearCliRateLimited(err);
     const stderr = String(err?.stderr ?? "");
     if (stderr.includes("no such issue")) return null;
+    throwIfLinearReadBudgetExhausted(err, readBudget);
     throw new Error(
       `linear_read_failed: ${stderr.trim().split("\n").pop() || err.message}`,
       { cause: err },
@@ -769,7 +801,7 @@ function fetchTicketDefault(ticketId, repo, readBudget = null) {
 function fetchViewerDefault(
   repoName,
   configSnapshot = null,
-  readBudget = null,
+  { readBudget = null } = {},
 ) {
   try {
     const repo = repoName
@@ -799,9 +831,8 @@ function fetchViewerDefault(
     }
     return parsed?.viewer ?? null;
   } catch (err) {
-    if (readBudget && readBudget.deadline - readBudget.now() <= 0)
-      throw new LinearReadBudgetExceededError();
     throwIfLinearCliRateLimited(err);
+    throwIfLinearReadBudgetExhausted(err, readBudget);
     const stderr = String(err?.stderr ?? "");
     throw new Error(
       `linear_read_failed: ${stderr.trim().split("\n").pop() || err.message}`,
@@ -932,7 +963,7 @@ function ownedPathsClosureDetails(repoName, repo, ticketDescription) {
   });
 }
 
-function fetchInFlightDefault(repoConfig, readBudget = null) {
+function fetchInFlightDefault(repoConfig, { readBudget = null } = {}) {
   try {
     // --repo so ticket.mjs resolves this repo's own control plane (a Linear
     // team/project query against the GitHub plane fails as a project-title
@@ -955,9 +986,8 @@ function fetchInFlightDefault(repoConfig, readBudget = null) {
     const rows = JSON.parse(out);
     return Array.isArray(rows) ? rows : [];
   } catch (err) {
-    if (readBudget && readBudget.deadline - readBudget.now() <= 0)
-      throw new LinearReadBudgetExceededError();
     throwIfLinearCliRateLimited(err);
+    throwIfLinearReadBudgetExhausted(err, readBudget);
     const stderr = String(err?.stderr ?? "");
     throw new Error(
       `linear_read_failed: ${stderr.trim().split("\n").pop() || err.message}`,
