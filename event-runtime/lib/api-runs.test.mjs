@@ -944,6 +944,22 @@ describe("ticket journey join (WM-595)", () => {
           "2026-01-01T10:00:00.000Z",
           3600,
         );
+      s.db
+        .query(
+          `INSERT INTO proposals (id, event_source, event_id, decision, spec_json, spec_hash, status, created_at, ttl_seconds)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "prop-run-expired",
+          "linear",
+          "ticket-expiry",
+          "run",
+          JSON.stringify({ input: { repo: "factory", ticket: "WM-1328" } }),
+          "sha256:prop-run-expired",
+          "open",
+          "2026-01-01T10:00:00.000Z",
+          60,
+        );
       const nowMs = Date.parse("2026-01-01T10:30:00.000Z");
       const journey = ticketJourneyView(s.db, "WM-1328", { nowMs });
       const byId = Object.fromEntries(
@@ -953,11 +969,15 @@ describe("ticket journey join (WM-595)", () => {
       expect(byId["prop-expired"].status).toBe("open");
       expect(byId["prop-no-spec"].expired).toBe(false);
       expect(byId["prop-no-spec"].spec).toBeNull();
-      expect(
+      expect(byId["prop-run-expired"].expired).toBe(true);
+      expect(byId["prop-run-expired"].status).toBe("open");
+      const beforeTtl = Object.fromEntries(
         ticketJourneyView(s.db, "WM-1328", {
           nowMs: Date.parse("2026-01-01T10:00:30.000Z"),
-        }).proposals.find((proposal) => proposal.id === "prop-expired").expired,
-      ).toBe(false);
+        }).proposals.map((proposal) => [proposal.id, proposal.expired]),
+      );
+      expect(beforeTtl["prop-expired"]).toBe(false);
+      expect(beforeTtl["prop-run-expired"]).toBe(false);
     } finally {
       s.close();
     }
