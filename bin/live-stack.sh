@@ -187,11 +187,14 @@ WEB_SUPERVISOR_INTERVAL="${FACTORY_WEB_SUPERVISOR_INTERVAL:-1}"
 # These values feed shell arithmetic and sleep below. Validate them before an
 # action can snapshot, spawn, or signal a daemon so malformed environment
 # overrides leave an existing stack untouched.
+# The two timeouts accept 0 (an immediate deadline: no wait, then the usual
+# teardown / fall-through); the supervisor interval must stay positive because
+# it is the sleep between ticks.
 validate_timing_knobs() {
-  [[ "$POOL_DRAIN_TIMEOUT" =~ ^[1-9][0-9]*$ ]] ||
-    die "FACTORY_POOL_DRAIN_TIMEOUT must be a positive integer"
-  [[ "$API_READY_TIMEOUT" =~ ^[1-9][0-9]*$ ]] ||
-    die "FACTORY_API_READY_TIMEOUT must be a positive integer"
+  [[ "$POOL_DRAIN_TIMEOUT" =~ ^(0|[1-9][0-9]*)$ ]] ||
+    die "FACTORY_POOL_DRAIN_TIMEOUT must be a non-negative integer"
+  [[ "$API_READY_TIMEOUT" =~ ^(0|[1-9][0-9]*)$ ]] ||
+    die "FACTORY_API_READY_TIMEOUT must be a non-negative integer"
   [[ "$WEB_SUPERVISOR_INTERVAL" =~ ^([1-9][0-9]*(\.[0-9]+)?|0\.[0-9]*[1-9][0-9]*)$ ]] ||
     die "FACTORY_WEB_SUPERVISOR_INTERVAL must be a positive number"
 }
@@ -216,10 +219,13 @@ rotate_stack_logs() {
   rotate_run_logs "$RUN_DIR" "$LOG_ROTATE_BYTES" "$LOG_KEEP"
 }
 
-# Validate before actions touch disk or daemon lifecycle state. `up` creates
-# these itself once `--dry-run` has had its chance to exit.
-validate_timing_knobs
-if [[ "$ACTION" != "up" ]]; then mkdir -p "$RUN_DIR" "$HOME_DIR"; fi
+# Validate before actions touch disk or daemon lifecycle state. `up` validates
+# after its option parsing (so `--help` still prints on a malformed knob) and
+# creates these itself once `--dry-run` has had its chance to exit.
+if [[ "$ACTION" != "up" ]]; then
+  validate_timing_knobs
+  mkdir -p "$RUN_DIR" "$HOME_DIR"
+fi
 REPO="$(repo_root)"
 
 elapsed_seconds() {
@@ -378,6 +384,7 @@ case "$ACTION" in
       esac
       shift
     done
+    validate_timing_knobs
 
     # A supervised pool and --dev both want to own the worker slot, and they
     # want it for different reasons (scale vs. reload). Saying so beats silently
