@@ -34,6 +34,7 @@ import { startPlannerWorker } from "../lib/planner-worker.mjs";
 import { CLI_PATH, fail, flagValue, log } from "./shared.mjs";
 
 export const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+const CONNECTOR_STOP_TIMEOUT_MS = 2_000;
 
 export const TICK_SUBSYSTEMS = [
   "tick emit",
@@ -50,6 +51,26 @@ export const TICK_SUBSYSTEMS = [
   "GC",
   "chains",
 ];
+
+/**
+ * Connector implementations are third-party, long-running integrations. A
+ * hung socket close must not prevent `serve` from releasing its HTTP server.
+ */
+async function stopConnectorsBounded() {
+  let timeout;
+  await Promise.race([
+    Promise.resolve(stopConnectors()).catch((err) =>
+      log(`connector stop: ${err.message}`),
+    ),
+    new Promise((resolve) => {
+      timeout = setTimeout(() => {
+        log(`connector stop: timed out after ${CONNECTOR_STOP_TIMEOUT_MS}ms`);
+        resolve();
+      }, CONNECTOR_STOP_TIMEOUT_MS);
+    }),
+  ]);
+  clearTimeout(timeout);
+}
 
 /**
  * One serve-loop pass (OPS-412). Each named subsystem is caught on its own
@@ -542,7 +563,12 @@ export default async function serve(args) {
     } else {
       log(`serve: control API failed to start: ${err?.message ?? err}`);
     }
-    process.exit(1);
+    // Connectors are started before the API binds. A bind failure must give
+    // them the same bounded cleanup as SIGTERM before the process exits.
+    stopConnectorsBounded().finally(() => {
+      releaseServeLock(home);
+      process.exit(1);
+    });
   });
   server.on("listening", () => {
     log(
@@ -578,11 +604,6 @@ export default async function serve(args) {
       log("planner: background worker thread (off HTTP event loop)");
     }
   });
-  server.on("error", (err) => {
-    releaseServeLock(home);
-    fail(`serve: ${err.message}`);
-  });
-
   // The watched loop starts ONLY once the API actually owns its port. A serve
   // that lost the bind race must die, not keep planning and working the same
   // database as the serve that won — that is a second unmanaged worker and a
@@ -602,6 +623,10 @@ export default async function serve(args) {
     stopping = true;
     log(`shutting down (${signal})`);
     if (timer) clearInterval(timer);
+    // Arm this before connector shutdown: a connector may never settle. It is
+    // deliberately longer than the bounded stop so `server.close` gets a
+    // chance to release the port first.
+    const hardExit = setTimeout(() => process.exit(0), 3_000);
     if (plannerWorker) {
       try {
         await plannerWorker.stop();
@@ -609,14 +634,16 @@ export default async function serve(args) {
         /* best effort */
       }
     }
-    releaseServeLock(home);
-    const finish = () => {
-      server.close(() => process.exit(0));
-      setTimeout(() => process.exit(0), 1000).unref?.();
-    };
-    Promise.resolve(stopConnectors())
-      .catch((err) => log(`connector stop: ${err.message}`))
-      .finally(finish);
+    stopConnectorsBounded().finally(() => {
+      server.close((err) => {
+        if (err) log(`serve: control API close failed: ${err.message}`);
+        clearTimeout(hardExit);
+        // Keep the lock while the listening socket exists. The exit hook is a
+        // final safeguard should the hard-exit backstop win this race.
+        releaseServeLock(home);
+        process.exit(0);
+      });
+    });
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));

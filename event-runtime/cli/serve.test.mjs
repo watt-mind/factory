@@ -77,6 +77,30 @@ function fakeServesRootedAt(cwd) {
   });
 }
 
+function connectorFixture({
+  connectorSource,
+  name = "factory/test-connector",
+}) {
+  const root = tmpDir("evrt-serve-connector-root-");
+  const extension = path.join(root, "connector");
+  mkdirSync(extension, { recursive: true });
+  writeFileSync(
+    path.join(extension, "factory-extension.json"),
+    JSON.stringify({
+      name,
+      version: "1.0.0",
+      contributes: { connectors: { test: "./connector.mjs" } },
+    }),
+  );
+  writeFileSync(path.join(extension, "connector.mjs"), connectorSource);
+  mkdirSync(path.join(root, "config"), { recursive: true });
+  writeFileSync(
+    path.join(root, "config", "policy.yaml"),
+    `${readFileSync(path.join(path.dirname(path.dirname(CLI)), "config", "policy.yaml"), "utf8").trim()}\nextensions:\n  - path: ${JSON.stringify(extension)}\n`,
+  );
+  return root;
+}
+
 describe("serve command", () => {
   test("serve --watch re-execs under bun --watch and binds", async () => {
     const home = tmpDir("evrt-watch-");
@@ -182,9 +206,69 @@ describe("serve command", () => {
     }
   });
 
+  test("SIGTERM closes the server when a connector stop never resolves", async () => {
+    const home = tmpDir("evrt-serve-hanging-stop-");
+    const port = freePort();
+    const root = connectorFixture({
+      connectorSource: `export const id = "factory/test-connector:test";
+export default async function start() {
+  return {
+    stop() { return new Promise(() => {}); },
+    health() { return { ok: true }; },
+  };
+}
+`,
+    });
+    const child = spawnTracked("bun", [CLI, "serve", "--port", port], {
+      env: {
+        ...process.env,
+        FACTORY_EVENT_HOME: home,
+        FACTORY_EVENT_ENV: "live",
+        FACTORY_REPOS_ROOT: root,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let out = "";
+    child.stdout.on("data", (b) => {
+      out += b;
+    });
+    child.stderr.on("data", (b) => {
+      out += b;
+    });
+    const box = {
+      child,
+      get out() {
+        return out;
+      },
+    };
+    try {
+      expect(await waitFor(box, "control API on", 8000)).toBe(true);
+      const started = Date.now();
+      child.kill("SIGTERM");
+      expect((await exitOf(child, 3500)).code).toBe(0);
+      expect(Date.now() - started).toBeLessThan(3500);
+      expect(out).toContain("connector stop: timed out after 2000ms");
+    } finally {
+      if (child.exitCode == null) child.kill("SIGKILL");
+      await exitOf(child);
+    }
+  });
+
   test("a busy port is named, not a silent exit 1 (WM-1037)", async () => {
     const home = tmpDir("evrt-busy-port-");
     const port = freePort();
+    const stoppedFile = path.join(home, "connector-stopped");
+    const root = connectorFixture({
+      connectorSource: `import { writeFileSync } from "node:fs";
+export const id = "factory/test-connector:test";
+export default async function start() {
+  return {
+    stop() { writeFileSync(${JSON.stringify(stoppedFile)}, "stopped\\n"); },
+    health() { return { ok: true }; },
+  };
+}
+`,
+    });
     // Hold the port the way a leftover runtime from an aborted concurrent job
     // does. Before WM-1037 serve died here with no output at all, so every
     // waiter downstream reported "never printed control API on" and the real
@@ -198,7 +282,12 @@ describe("serve command", () => {
     );
     try {
       const child = spawnTracked("bun", [CLI, "serve", "--port", port], {
-        env: { ...process.env, FACTORY_EVENT_HOME: home },
+        env: {
+          ...process.env,
+          FACTORY_EVENT_HOME: home,
+          FACTORY_EVENT_ENV: "live",
+          FACTORY_REPOS_ROOT: root,
+        },
         stdio: ["ignore", "pipe", "pipe"],
       });
       let out = "";
@@ -218,6 +307,7 @@ describe("serve command", () => {
       expect(out).toContain(`port ${port} is already in use`);
       expect(out).not.toContain("control API on");
       expect((await exitOf(child)).code).not.toBe(0);
+      expect(readFileSync(stoppedFile, "utf8")).toBe("stopped\n");
     } finally {
       await new Promise((resolve) => stranger.close(resolve));
     }
