@@ -114,6 +114,7 @@ them to native labels of the same spelling.
 | `ai:needs-review` | PR is up; merge stage owns it.                                                        |
 | `ai:blocked`      | Waiting on a human.                                                                   |
 | `ai:escalated`    | Security-relevant (or intent-changing) diff; a human must merge.                      |
+| `ai:landing`      | An external lander owns the branch; merge-scan must not rebase it.                    |
 | `agent:<harness>` | Which harness holds the claim. CLI `claude` maps to `agent:claude-code`.              |
 | `type:*`          | `bug` `feature` `ui-ux` `security` `performance` `maintenance` `docs` `a11y`          |
 | `source:*`        | `agent` `human` `sentry` `client-support`                                             |
