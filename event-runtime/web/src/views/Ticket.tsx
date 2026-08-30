@@ -1,4 +1,9 @@
-import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import {
   useEffect,
   useMemo,
@@ -1385,8 +1390,18 @@ const TERMINAL_STATES = new Set([
 ]);
 
 // The API caps collection pages at 200. A PR journey needs recent correlated
-// activity, not the entire event journal, so use that bounded newest-first page.
-const PR_JOURNEY_EVENT_LIMIT = 200;
+// activity, not unbounded global registries, and can request older pages.
+const PR_JOURNEY_PAGE_LIMIT = 200;
+
+function uniqueBy<T>(items: readonly T[], key: (item: T) => string): T[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const id = key(item);
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
 
 export function PullRequest({
   number,
@@ -1400,27 +1415,51 @@ export function PullRequest({
       ? Number(number.trim())
       : null;
   const enabled = pr != null;
-  const events = useQuery({
-    queryKey: ["events", "pr-journey", pr, PR_JOURNEY_EVENT_LIMIT],
-    queryFn: () => api.events(undefined, { limit: PR_JOURNEY_EVENT_LIMIT }),
+  const events = useInfiniteQuery({
+    queryKey: ["events", "pr-journey", pr, PR_JOURNEY_PAGE_LIMIT],
+    queryFn: ({ pageParam }) =>
+      api.events(undefined, {
+        limit: PR_JOURNEY_PAGE_LIMIT,
+        before: pageParam,
+      }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.nextBefore ?? undefined,
     enabled,
     ...refetchIntervals.fast,
   });
-  const proposals = useQuery({
-    queryKey: ["proposals", "history"],
-    queryFn: () => api.proposalHistory("all"),
+  const proposals = useInfiniteQuery({
+    queryKey: ["proposals", "pr-journey", pr, PR_JOURNEY_PAGE_LIMIT],
+    queryFn: ({ pageParam }) =>
+      api.proposalHistory("all", {
+        limit: PR_JOURNEY_PAGE_LIMIT,
+        before: pageParam,
+      }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.nextBefore ?? undefined,
     enabled,
     ...refetchIntervals.fast,
   });
-  const runs = useQuery({
-    queryKey: ["runs", "ALL"],
-    queryFn: () => api.runs(),
+  const runs = useInfiniteQuery({
+    queryKey: ["runs", "pr-journey", pr, PR_JOURNEY_PAGE_LIMIT],
+    queryFn: ({ pageParam }) =>
+      api.runs(undefined, {
+        limit: PR_JOURNEY_PAGE_LIMIT,
+        before: pageParam,
+      }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.nextBefore ?? undefined,
     enabled,
     ...refetchIntervals.fast,
   });
-  const inbox = useQuery({
-    queryKey: ["inbox", "all"],
-    queryFn: () => api.inbox("all"),
+  const inbox = useInfiniteQuery({
+    queryKey: ["inbox", "pr-journey", pr, PR_JOURNEY_PAGE_LIMIT],
+    queryFn: ({ pageParam }) =>
+      api.inbox("all", {
+        limit: PR_JOURNEY_PAGE_LIMIT,
+        before: pageParam,
+      }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.nextBefore ?? undefined,
     enabled,
     ...refetchIntervals.secondary,
   });
@@ -1431,9 +1470,38 @@ export function PullRequest({
     ...refetchIntervals.secondary,
   });
 
-  const eventList = events.data?.events ?? [];
-  const proposalList = proposals.data?.proposals ?? [];
-  const runList = runs.data?.runs ?? [];
+  const eventList = useMemo(
+    () =>
+      uniqueBy(
+        (events.data?.pages ?? []).flatMap((page) => page.events ?? []),
+        (event) => `${event.source}\0${event.eventId}`,
+      ),
+    [events.data],
+  );
+  const proposalList = useMemo(
+    () =>
+      uniqueBy(
+        (proposals.data?.pages ?? []).flatMap((page) => page.proposals ?? []),
+        (proposal) => proposal.id,
+      ),
+    [proposals.data],
+  );
+  const runList = useMemo(
+    () =>
+      uniqueBy(
+        (runs.data?.pages ?? []).flatMap((page) => page.runs ?? []),
+        (run) => run.runId,
+      ),
+    [runs.data],
+  );
+  const inboxList = useMemo(
+    () =>
+      uniqueBy(
+        (inbox.data?.pages ?? []).flatMap((page) => page.items ?? []),
+        (item) => item.id,
+      ),
+    [inbox.data],
+  );
   const candidateIds = useMemo(
     () =>
       pr != null && events.data && proposals.data && runs.data
@@ -1443,11 +1511,11 @@ export function PullRequest({
             runs: runList,
           })
         : [],
-    [pr, events.dataUpdatedAt, proposals.dataUpdatedAt, runs.dataUpdatedAt],
+    [pr, eventList, proposalList, runList],
   );
   const stateById = useMemo(
     () => new Map(runList.map((run) => [run.runId, run.state])),
-    [runs.dataUpdatedAt],
+    [runs.data],
   );
   const details = useQueries({
     queries: candidateIds.map((id) => ({
@@ -1482,7 +1550,7 @@ export function PullRequest({
         events: eventList as unknown as JourneyEvent[],
         proposals: proposalList as unknown as JourneyProposal[],
         runs: loadedRuns,
-        inbox: (inbox.data?.items ?? []).filter((item) => !item.resolvedAt),
+        inbox: inboxList.filter((item) => !item.resolvedAt),
         schedules: schedules.data?.schedules,
       }),
     // Query data references and the useQueries result are unstable across
@@ -1545,7 +1613,44 @@ export function PullRequest({
       </div>
     );
   }
+
+  const hasMore =
+    events.hasNextPage ||
+    proposals.hasNextPage ||
+    runs.hasNextPage ||
+    inbox.hasNextPage;
+  const loadingMore =
+    events.isFetchingNextPage ||
+    proposals.isFetchingNextPage ||
+    runs.isFetchingNextPage ||
+    inbox.isFetchingNextPage;
+  const loadMore = () => {
+    if (events.hasNextPage) void events.fetchNextPage();
+    if (proposals.hasNextPage) void proposals.fetchNextPage();
+    if (runs.hasNextPage) void runs.fetchNextPage();
+    if (inbox.hasNextPage) void inbox.fetchNextPage();
+  };
+
   return (
-    <JourneyLayout journey={journey} onNavigateTicket={onNavigateTicket} />
+    <>
+      <JourneyLayout journey={journey} onNavigateTicket={onNavigateTicket} />
+      {hasMore && (
+        <p
+          role="status"
+          className="px-5 pb-5 text-center text-[12px] text-(--text-dim) lg:px-7"
+        >
+          Showing the most recent {journey.timeline.length} activity entries —{" "}
+          <PrimitiveButton
+            bare
+            type="button"
+            onClick={loadMore}
+            disabled={loadingMore}
+            className="text-(--accent) hover:underline disabled:cursor-wait disabled:opacity-60"
+          >
+            {loadingMore ? "Loading activity…" : "Load more activity"}
+          </PrimitiveButton>
+        </p>
+      )}
+    </>
   );
 }

@@ -765,6 +765,93 @@ describe("PR journey view", () => {
     expect(deriveJourney).toHaveBeenCalledTimes(1);
   });
 
+  test("bounds every PR-journey feed and loads an older page without duplicate timeline activity", async () => {
+    const data = prData();
+    const prEvent = data.events[1]!;
+    const olderPrEvent = {
+      ...prEvent,
+      eventId: "chain-run_scan-older-541",
+      occurredAt: "2026-08-17T19:05:03.000Z",
+      admittedAt: "2026-08-17T19:05:03.000Z",
+    };
+    const urls: string[] = [];
+    const json = (body: unknown) =>
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      urls.push(url);
+      const older = url.includes("before=");
+      if (/\/api\/events/.test(url))
+        return json({
+          events: older ? [prEvent, olderPrEvent] : [prEvent],
+          nextBefore: older ? null : "events-before",
+        });
+      if (/\/api\/proposals/.test(url))
+        return json({
+          proposals: data.proposals,
+          nextBefore: older ? null : "proposals-before",
+        });
+      if (/\/api\/inbox/.test(url))
+        return json({ items: [], nextBefore: older ? null : "inbox-before" });
+      if (/\/api\/schedules/.test(url)) return json({ schedules: [] });
+      const detail = url.match(/\/api\/runs\/([^/?]+)$/);
+      if (detail) {
+        const run = data.runs[decodeURIComponent(detail[1])];
+        return run ? json(run) : json({ error: "unknown run" });
+      }
+      if (/\/api\/runs(\?|$)/.test(url))
+        return json({
+          runs: Object.values(data.runs).map((run) => ({
+            runId: run.run.runId,
+            state: run.run.state,
+            attempts: 1,
+            agent: run.run.spec.agent,
+            adapter: run.run.spec.adapter,
+            created_at: run.run.created_at,
+            updated_at: run.run.updated_at,
+          })),
+          nextBefore: older ? null : "runs-before",
+        });
+      return json({ error: `unexpected ${url}` });
+    }) as typeof fetch;
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, refetchInterval: false } },
+    });
+    const view = render(
+      <QueryClientProvider client={client}>
+        <PullRequest number="541" />
+      </QueryClientProvider>,
+    );
+
+    const loadMore = await view.findByRole("button", {
+      name: "Load more activity",
+    });
+    expect(urls).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/\/api\/events\?limit=200$/),
+        expect.stringMatching(/\/api\/proposals\?status=all&limit=200$/),
+        expect.stringMatching(/\/api\/runs\?limit=200$/),
+        expect.stringMatching(/\/api\/inbox\?status=all&limit=200$/),
+      ]),
+    );
+    const timeline = view.getByRole("tabpanel", { name: /timeline/i });
+    const initialTimelineItems = timeline.querySelectorAll("li[data-kind]");
+    expect(initialTimelineItems.length).toBeGreaterThan(0);
+
+    fireEvent.click(loadMore);
+    await waitFor(() =>
+      expect(urls.filter((url) => url.includes("before=")).length).toBe(4),
+    );
+    await waitFor(() =>
+      expect(timeline.querySelectorAll("li[data-kind]").length).toBe(
+        initialTimelineItems.length + 1,
+      ),
+    );
+  });
+
   test("an unknown PR reads as no runtime activity, and a bad reference as an inline error", async () => {
     globalThis.fetch = prFetch({ events: [], proposals: [], runs: {} });
     const client = new QueryClient({

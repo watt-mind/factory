@@ -234,6 +234,8 @@ export type RunListFilters = {
   agent?: string;
   /** Opaque cursor returned by the preceding GET /runs page. */
   before?: string;
+  /** Maximum number of newest-first summaries to return. */
+  limit?: number;
 };
 
 export type RunListResponse = {
@@ -264,7 +266,18 @@ function withQuery(path: string, values: Record<string, string | undefined>) {
 }
 
 export function fetchRuns(filters: RunListFilters = {}) {
-  return call<RunListResponse>("GET", withQuery("/runs", filters));
+  return call<RunListResponse>(
+    "GET",
+    withQuery("/runs", {
+      state: filters.state,
+      from: filters.from,
+      to: filters.to,
+      population: filters.population,
+      agent: filters.agent,
+      before: filters.before,
+      limit: filters.limit == null ? undefined : String(filters.limit),
+    }),
+  );
 }
 
 export function fetchProposalHistory(
