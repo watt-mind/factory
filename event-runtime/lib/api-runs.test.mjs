@@ -1597,6 +1597,18 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
         deliveryError: "sink unavailable",
         parked: true,
       });
+
+      db.query(
+        `UPDATE outbox
+         SET event_json = ?, delivery_attempts = 1, delivery_error = ?
+         WHERE seq = ?`,
+      ).run("not JSON", "Unexpected token", outbox[0].seq);
+      expect((await client.outbox()).outbox[0]).toMatchObject({
+        event: { raw: "not JSON" },
+        deliveryAttempts: 1,
+        deliveryError: "Unexpected token",
+        parked: true,
+      });
     } finally {
       server.close();
     }

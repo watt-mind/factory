@@ -1720,15 +1720,25 @@ function outboxView(db, limit) {
        FROM outbox ORDER BY seq DESC LIMIT ?`,
     )
     .all(limit)
-    .map((row) => ({
-      seq: row.seq,
-      event: JSON.parse(row.event_json),
-      created_at: row.created_at,
-      published_at: row.published_at,
-      deliveryAttempts: row.delivery_attempts,
-      deliveryError: deliveryErrorMessage(row.delivery_error),
-      parked: row.published_at !== null && row.delivery_error !== null,
-    }));
+    .map((row) => {
+      let event;
+      try {
+        event = JSON.parse(row.event_json);
+      } catch {
+        // Parse-poison rows are intentionally retained for inspection. Keep
+        // one malformed row from making the entire outbox endpoint fail.
+        event = { raw: row.event_json };
+      }
+      return {
+        seq: row.seq,
+        event,
+        created_at: row.created_at,
+        published_at: row.published_at,
+        deliveryAttempts: row.delivery_attempts,
+        deliveryError: deliveryErrorMessage(row.delivery_error),
+        parked: row.published_at !== null && row.delivery_error !== null,
+      };
+    });
 }
 
 export function observedModelFromTranscript(head) {

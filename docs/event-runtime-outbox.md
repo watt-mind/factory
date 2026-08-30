@@ -12,5 +12,7 @@ set. Its error remains available through `GET /outbox` and it is excluded from
 the published-row retention sweep for forensic review.
 
 `GET /outbox` exposes `deliveryAttempts`, `deliveryError`, and `parked` for
-each row. The status view reports both `unpublishedOutbox` and `parkedOutbox`
-so delayed deliveries and terminal delivery failures remain distinguishable.
+each row; a malformed event is returned as `{ "raw": "..." }` so one poison
+row cannot hide the rest of the feed. The status view reports both
+`unpublishedOutbox` and `parkedOutbox` so delayed deliveries and terminal
+delivery failures remain distinguishable.
