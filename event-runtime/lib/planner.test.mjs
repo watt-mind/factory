@@ -1165,6 +1165,110 @@ describe("planEvent worktree gate (WM-108)", () => {
     fetchInFlight: () => [],
   });
 
+  test("ticket-scoped human-needed refusals deduplicate unchanged bodies and supersede changed ones", () => {
+    const closureRepo =
+      `repos:\n  - name: closure\n    path: /tmp/nowhere\n    base: develop\n` +
+      `    team: WM\n    project: Factory\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+      `    worktree_root: /tmp/worktrees\n    escalate_paths: []\n` +
+      `    owned_paths_policy:\n      direct:\n        - source: generated/input.mjs\n          requires:\n            - generated/pin.json\n`;
+    withReposRoot(closureRepo, () => {
+      const db = openDb(":memory:");
+      const ticket = {
+        ...tierTicket(),
+        description: "## Owned Paths\n- generated/input.mjs\n",
+      };
+      const dispatch = {
+        ...tierDispatch(),
+        fetchTicket: () => ticket,
+      };
+      const plan = (eventId) => {
+        const ref = admit(db, {
+          type: "test.worktree.requested",
+          eventId,
+          correlationId: eventId,
+          payload: { repo: "closure", ticket: "WM-694" },
+        });
+        return planEvent(db, syntheticRegistry(), ref, {
+          now: NOW,
+          dispatch,
+        });
+      };
+
+      const first = plan("closure-first");
+      expect(first).toMatchObject({
+        decision: "human_needed",
+        reason: "owned_paths_not_closed",
+      });
+      expect(first.proposal.reason).toContain("[dispatch_ticket_body_hash:");
+
+      const unchanged = plan("closure-unchanged");
+      expect(unchanged).toEqual({
+        decision: "noop",
+        reason: `human_needed_already_open:${first.proposal.id}`,
+      });
+      expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(1);
+
+      ticket.description =
+        "## Owned Paths\n- generated/input.mjs\n\nChanged ticket body.\n";
+      const changed = plan("closure-changed");
+      expect(changed).toMatchObject({
+        decision: "human_needed",
+        reason: "owned_paths_not_closed",
+      });
+      expect(changed.proposal.id).not.toBe(first.proposal.id);
+      expect(
+        db
+          .query(`SELECT status FROM proposals WHERE id = ?`)
+          .get(first.proposal.id).status,
+      ).toBe("superseded");
+    });
+  });
+
+  test("the human-needed guard covers other ticket refusals and reopens after resolution", () => {
+    const unconfiguredRepo =
+      `repos:\n  - name: unconfigured\n    path: /tmp/nowhere\n    base: develop\n` +
+      `    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+      `    worktree_root: /tmp/worktrees\n    escalate_paths: []\n`;
+    withReposRoot(unconfiguredRepo, () => {
+      const db = openDb(":memory:");
+      const dispatch = tierDispatch();
+      const plan = (eventId) => {
+        const ref = admit(db, {
+          type: "test.worktree.requested",
+          eventId,
+          correlationId: eventId,
+          payload: { repo: "unconfigured", ticket: "WM-694" },
+        });
+        return planEvent(db, syntheticRegistry(), ref, {
+          now: NOW,
+          dispatch,
+        });
+      };
+
+      const first = plan("unconfigured-first");
+      expect(first).toMatchObject({
+        decision: "human_needed",
+        reason:
+          "repo_unconfigured: team/project missing for the in-flight query",
+      });
+      expect(plan("unconfigured-unchanged")).toEqual({
+        decision: "noop",
+        reason: `human_needed_already_open:${first.proposal.id}`,
+      });
+
+      let active = first.proposal;
+      for (const status of ["approved", "rejected", "expired"]) {
+        db.query(`UPDATE proposals SET status = ? WHERE id = ?`).run(
+          status,
+          active.id,
+        );
+        const fresh = plan(`unconfigured-${status}`);
+        expect(fresh.decision).toBe("human_needed");
+        active = fresh.proposal;
+      }
+    });
+  });
+
   test("dispatch model tier precedence is payload > ticket label > definition and records its source (WM-694)", () => {
     withReposRoot(tierRepo, () => {
       const cases = [
