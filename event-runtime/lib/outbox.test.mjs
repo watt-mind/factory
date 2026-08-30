@@ -266,6 +266,20 @@ describe("publishOutbox", () => {
       "retryBaseMs must be a positive number of milliseconds",
     );
   });
+
+  test("rejects retry policies that cannot back off", () => {
+    const db = openDb(":memory:");
+    const sink = () => {};
+    expect(() => publishOutbox(db, { sink, retryFactor: 1 })).toThrow(
+      "retryFactor must be a number greater than 1",
+    );
+    expect(() => publishOutbox(db, { sink, retryCapMs: 0 })).toThrow(
+      "retryCapMs must be a positive number of milliseconds",
+    );
+    expect(() => publishOutbox(db, { sink, random: 0.5 })).toThrow(
+      "random must be a function",
+    );
+  });
 });
 
 describe("outbox retention and drain index", () => {
