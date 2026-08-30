@@ -380,9 +380,14 @@ describe("worker", () => {
     expect(fetches).toBe(0);
   });
 
-  test("materialized harness entries record hashes for every copied file", () => {
+  test("materialized harness entries remain workspace-relative through a symlinked parent", () => {
     const factoryRoot = tmpDir("evrt-harness-source-");
-    const workspaceDir = tmpDir("evrt-harness-workspace-");
+    const realWorkspaceParent = tmpDir("evrt-harness-workspace-real-");
+    const workspaceAliasBase = tmpDir("evrt-harness-workspace-alias-");
+    const workspaceAliasParent = path.join(workspaceAliasBase, "parent");
+    symlinkSync(realWorkspaceParent, workspaceAliasParent, "dir");
+    const workspaceDir = path.join(workspaceAliasParent, "workspace");
+    mkdirSync(workspaceDir);
     const catalog = path.join(factoryRoot, "catalog");
     const source = path.join(factoryRoot, "dist", "fake", "skills", "demo");
     mkdirSync(path.join(catalog, "skills", "demo"), { recursive: true });
