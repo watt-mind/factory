@@ -6,7 +6,11 @@ import { STALE_SCAN_MS, loadLinearSupply } from "./linear.mjs";
 import { loadRepos, RepoError } from "./repos.mjs";
 import { isBusyError, retryBusy, runUsage } from "./db.mjs";
 import { hookDecisionsFor } from "./hooks.mjs";
-import { IllegalTransition, lifecycleOf } from "./lifecycle.mjs";
+import {
+  IllegalTransition,
+  lifecycleOf,
+  TERMINAL_STATES,
+} from "./lifecycle.mjs";
 import { archiveDeadLetteredEvent, requeueEvent } from "./planner.mjs";
 import { approveProposal, rejectProposal } from "./proposals.mjs";
 import { traceOf } from "./trace.mjs";
@@ -21,6 +25,16 @@ import {
 import { proposalSubject } from "./proposal-subject.mjs";
 
 export const MAX_EXTENSION_SECONDS = 3600;
+export const OBSERVED_MODEL_CACHE_LIMIT = 512;
+
+// Transcript artifacts are content-addressed, so a model observed for a hash
+// cannot change. Keep this module-local FIFO bounded because run detail views
+// poll frequently and artifactHead performs synchronous I/O.
+const observedModelCache = new Map();
+
+export function clearObservedModelCache() {
+  observedModelCache.clear();
+}
 
 export { policyMaxRunMinutes };
 
@@ -1762,7 +1776,31 @@ export function observedModelFromTranscript(head) {
   return null;
 }
 
-function runView(db, runId, { artifactsDir, registry } = {}) {
+function observedModelForRun({
+  artifactsDir,
+  sha256,
+  state,
+  readArtifactHead,
+}) {
+  if (!artifactsDir || !sha256) return null;
+  const terminal = TERMINAL_STATES.has(state);
+  if (observedModelCache.has(sha256)) return observedModelCache.get(sha256);
+
+  const observedModel = observedModelFromTranscript(
+    readArtifactHead(artifactsDir, sha256),
+  );
+  // A growing transcript may gain its model line later, but a terminal one
+  // cannot. Cache null only for terminal runs while caching all model values.
+  if (observedModel !== null || terminal) {
+    if (observedModelCache.size >= OBSERVED_MODEL_CACHE_LIMIT) {
+      observedModelCache.delete(observedModelCache.keys().next().value);
+    }
+    observedModelCache.set(sha256, observedModel);
+  }
+  return observedModel;
+}
+
+function runView(db, runId, { artifactsDir, registry, readArtifactHead } = {}) {
   const row = db.query(`SELECT * FROM runs WHERE run_id = ?`).get(runId);
   if (!row) return null;
   const attempts = db
@@ -1802,12 +1840,12 @@ function runView(db, runId, { artifactsDir, registry } = {}) {
     deadlineAt: Number.isFinite(deadline)
       ? new Date(deadline).toISOString()
       : null,
-    observedModel:
-      artifactsDir && transcript?.sha256
-        ? observedModelFromTranscript(
-            artifactHead(artifactsDir, transcript.sha256),
-          )
-        : null,
+    observedModel: observedModelForRun({
+      artifactsDir,
+      sha256: transcript?.sha256,
+      state: row.state,
+      readArtifactHead,
+    }),
     usage: runUsage(db, runId),
   };
 }
@@ -1825,6 +1863,7 @@ export async function handleRunApiRoute({
   actor,
   policyVersion,
   artifactsDir,
+  readArtifactHead = artifactHead,
   onEvent,
   policyRoot = FACTORY_ROOT,
   controlPlane,
@@ -2202,7 +2241,11 @@ export async function handleRunApiRoute({
 
   const runGet = url.pathname.match(/^\/runs\/([^/]+)$/);
   if (req.method === "GET" && runGet) {
-    const view = runView(db, runGet[1], { artifactsDir, registry });
+    const view = runView(db, runGet[1], {
+      artifactsDir,
+      registry,
+      readArtifactHead,
+    });
     if (!view) return send(404, { error: `unknown run ${runGet[1]}` });
     return send(200, view);
   }
