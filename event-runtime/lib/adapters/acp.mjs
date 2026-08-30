@@ -16,10 +16,11 @@
  * Owned Paths. Tests register the module through `createAdapterRegistry`.
  */
 import { spawn } from "node:child_process";
-import { createWriteStream, existsSync, writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { Readable } from "node:stream";
+import { transcriptMaxBytes } from "../config.mjs";
 import {
   HARNESS_LAYOUT as CLAUDE_HARNESS_LAYOUT,
   KILL_GRACE_MS as CLAUDE_KILL_GRACE_MS,
@@ -29,6 +30,7 @@ import {
   safeChildEnvironment,
   verifiedPrompt,
 } from "./claude.mjs";
+import { boundedTranscriptStream } from "./child-process.mjs";
 import { refuseSandbox } from "./sandboxed.mjs";
 
 export { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV, killProcessGroup };
@@ -475,7 +477,8 @@ export async function execute({
   abortSignal,
   signal,
   spawnProcess = spawn,
-  transcriptFactory = createWriteStream,
+  transcriptFactory = boundedTranscriptStream,
+  transcriptMaxBytes: maxTranscriptBytes = transcriptMaxBytes(),
 }) {
   refuseSandbox("acp", def, SANDBOX_DEFERRAL_REASON);
 
@@ -502,6 +505,14 @@ export async function execute({
     // whose child reached the protocol handshake.
     const transcript = transcriptFactory(
       path.join(workspaceDir, ".transcript.json"),
+      {
+        maxBytes: maxTranscriptBytes,
+        onTruncated: ({ bytes }) =>
+          emitTrace(onTrace, {
+            kind: "lifecycle",
+            payload: { note: "transcript_truncated", bytes },
+          }),
+      },
     );
     transcript.on("error", () => {});
     // Child close only says its stdio handles are closed; the file stream may
@@ -833,6 +844,7 @@ export async function execute({
         timedOut,
         policyDenials: finalExit === 0 ? [] : policyDenials,
         ...(usage ? { usage } : {}),
+        ...(transcript.truncated ? { transcriptTruncated: true } : {}),
       });
     });
   });

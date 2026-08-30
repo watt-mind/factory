@@ -176,6 +176,16 @@ export const DEAD_LETTER_AFTER = 3;
 /** Default cap when neither repo nor policy config supplies one. */
 export const DEFAULT_MAX_IN_FLIGHT = 3;
 
+/** Bound each raw CLI transcript before artifact storage can amplify it. */
+export const DEFAULT_TRANSCRIPT_MAX_BYTES = 64 * 1024 * 1024;
+
+export function transcriptMaxBytes(env = process.env) {
+  const configured = Number(env.FACTORY_EVENT_TRANSCRIPT_MAX_BYTES);
+  return Number.isSafeInteger(configured) && configured > 0
+    ? configured
+    : DEFAULT_TRANSCRIPT_MAX_BYTES;
+}
+
 export const DEFAULT_PROPOSAL_TTL_SECONDS = 30 * 60;
 
 let cachedPolicyVersion;
