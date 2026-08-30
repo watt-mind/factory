@@ -32,7 +32,12 @@ import { harnessGitignoreIsCurrent } from "../lib/factory-gitignore.mjs";
 import {
   normalizeToolchain,
   preflightToolchain,
+  reposRoot,
 } from "../event-runtime/lib/repos.mjs";
+import {
+  CHAIN_AUTO_APPROVAL_EVENT_TYPES,
+  loadChainAutoApprovalPolicy,
+} from "../event-runtime/lib/auto-approval.mjs";
 import {
   browserLaunchCheck,
   piChromeDevtoolsCheck,
@@ -272,6 +277,106 @@ export async function repoToolchainDiagnostics({
   return diagnostics;
 }
 
+const CHAIN_POLICY_FIX =
+  "compare config/policy.yaml chain_auto_approval.allowed_event_types with CHAIN_AUTO_APPROVAL_EVENT_TYPES";
+
+function chainPolicySource(root) {
+  const local = path.join(root, "config", "policy.yaml");
+  if (existsSync(local)) return local;
+  const example = path.join(root, "config", "policy.example.yaml");
+  return existsSync(example) ? example : local;
+}
+
+function invalidAllowedEventTypesDetail(root) {
+  try {
+    const allowed = Bun.YAML.parse(
+      readFileSync(chainPolicySource(root), "utf8"),
+    )?.chain_auto_approval?.allowed_event_types;
+    if (!Array.isArray(allowed)) {
+      return "chain_auto_approval.allowed_event_types must be an array of strings";
+    }
+    if (!allowed.every((eventType) => typeof eventType === "string")) {
+      return "chain_auto_approval.allowed_event_types contains non-string entries";
+    }
+  } catch {
+    return "config/policy.yaml is not valid YAML";
+  }
+  return "chain_auto_approval.allowed_event_types is invalid";
+}
+
+function forbiddenAllowedEventTypes(root) {
+  try {
+    const allowed = Bun.YAML.parse(
+      readFileSync(chainPolicySource(root), "utf8"),
+    )?.chain_auto_approval?.allowed_event_types;
+    return Array.isArray(allowed)
+      ? allowed.filter(
+          (eventType) =>
+            typeof eventType === "string" &&
+            !CHAIN_AUTO_APPROVAL_EVENT_TYPES.has(eventType),
+        )
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Diagnose the instance policy through the runtime's authoritative loader.
+ * Defaults to `reposRoot()` (FACTORY_REPOS_ROOT || FACTORY_ROOT) — the same
+ * resolution `loadChainAutoApprovalPolicy()` uses in serve — so the doctor
+ * validates the config/policy.yaml the runtime actually reads.
+ */
+export function chainAutoApprovalPolicyDiagnostic({ root = reposRoot() } = {}) {
+  const policy = loadChainAutoApprovalPolicy({ root });
+  const label = "chain auto-approval policy";
+  if (policy.reason === null) {
+    const allowed = [...policy.allowed].sort();
+    return {
+      ok: true,
+      label,
+      detail:
+        `ok (${allowed.length} allowed event type${allowed.length === 1 ? "" : "s"}: ${allowed.join(", ")}; ` +
+        `merge max_fix_rounds=${policy.maxFixRounds}, batch_size=${policy.mergeBatchSize}; ` +
+        `escalation auto_merge_base=${[...policy.autoMergeBase].join(",") || "none"}, ` +
+        `auto_merge_owners=${[...policy.autoMergeOwners].join(",") || "none"})`,
+      fix: null,
+    };
+  }
+  if (policy.reason === "policy_missing") {
+    return {
+      ok: "warn",
+      label,
+      detail: "policy_missing — every chain proposal is watched",
+      fix: "add config/policy.yaml chain_auto_approval.allowed_event_types to opt into safe chain approvals",
+    };
+  }
+  if (policy.reason === "policy_invalid") {
+    return {
+      ok: false,
+      label,
+      detail: `policy_invalid — ${invalidAllowedEventTypesDetail(root)}`,
+      fix: CHAIN_POLICY_FIX,
+    };
+  }
+  if (policy.reason === "policy_contains_forbidden_event") {
+    const offending = forbiddenAllowedEventTypes(root);
+    return {
+      ok: false,
+      label,
+      detail: `policy_contains_forbidden_event — offending entries: ${offending.join(", ") || "unreadable"}`,
+      fix: CHAIN_POLICY_FIX,
+    };
+  }
+  return {
+    ok: false,
+    label,
+    detail:
+      "merge_policy_invalid — merge.max_fix_rounds and escalation.auto_merge_base/auto_merge_owners must be valid when merge events are allowed",
+    fix: "repair merge.max_fix_rounds and escalation.auto_merge_base/auto_merge_owners in config/policy.yaml",
+  };
+}
+
 const ROOT = factoryRoot();
 installLinearBudgetCapture();
 const argv = process.argv.slice(2);
@@ -381,6 +486,11 @@ if (import.meta.main) {
       pcd.detail,
       pcd.status === "pass" ? null : pcd.fix,
     );
+  }
+
+  {
+    const diagnostic = chainAutoApprovalPolicyDiagnostic();
+    check(diagnostic.ok, diagnostic.label, diagnostic.detail, diagnostic.fix);
   }
 
   // Disk: worktrees are the bulk of what this machine holds, and a bootstrap that

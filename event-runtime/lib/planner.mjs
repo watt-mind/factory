@@ -68,8 +68,10 @@ import {
   RepoError,
   getRepo,
   loadRepos,
+  repoDispatchPreflightSync,
   reposConfigPath,
   reposRoot,
+  toolchainHash,
 } from "./repos.mjs";
 import { validate } from "./schema.mjs";
 import { inFlightRunsForAgent } from "./schedules.mjs";
@@ -90,6 +92,11 @@ import {
 /** In-flight issues list is stable across one scan; 60s is the ticket cap. */
 export const IN_FLIGHT_CACHE_TTL_MS = 60_000;
 export { DEFAULT_MAX_IN_FLIGHT };
+
+// Readiness belongs to this planner process and a repo's declared constraints,
+// not to an individual event. Cache failures too: dispatch bursts must run one
+// bounded probe set per repo/toolchain declaration.
+const dispatchToolchainPreflightCache = new Map();
 
 /**
  * §5.4 idempotency key: agent ref, output contract, then the event type's
@@ -899,6 +906,35 @@ export function policySnapshot(root = reposRoot()) {
 function snapshotRepos(snapshot) {
   if (snapshot?.reposError) throw snapshot.reposError;
   return snapshot?.repos ?? loadRepos();
+}
+
+function dispatchToolchainEligibility(
+  payload,
+  { configSnapshot = null, toolchain = {} } = {},
+) {
+  let repo;
+  try {
+    repo = getRepo(snapshotRepos(configSnapshot), payload?.repo);
+  } catch (err) {
+    // An unknown repo is not a toolchain fact: leave it to the worktree gate,
+    // which refuses it as `human_needed repo_unknown` with full evidence.
+    if (err instanceof RepoError) return null;
+    throw err;
+  }
+  // Preserve the additive path exactly: no declared tools means no probe and
+  // no new dispatch behavior.
+  if (!repo.toolchain?.length) return null;
+  const cache = toolchain.cache ?? dispatchToolchainPreflightCache;
+  const key = `${repo.name}:${toolchainHash(repo.toolchain)}`;
+  if (cache.has(key)) return cache.get(key);
+  const result = repoDispatchPreflightSync(repo, {
+    node: toolchain.node,
+    now: toolchain.now,
+    which: toolchain.which,
+    spawn: toolchain.spawn,
+  });
+  cache.set(key, result);
+  return result;
 }
 
 function policyMaxInFlight(root = reposRoot(), snapshot = null) {
@@ -2136,7 +2172,15 @@ function ticketHumanNeededContext(payload, evidence) {
   return { repo, ticket, descriptionHash };
 }
 
-function humanNeeded(db, event, reason, at, ttlSeconds, ticketContext = null) {
+function humanNeeded(
+  db,
+  event,
+  reason,
+  at,
+  ttlSeconds,
+  ticketContext = null,
+  detail = null,
+) {
   const outcomeReason = reason;
   if (ticketContext) {
     const reasonPrefix = humanNeededReasonPrefix(reason);
@@ -2194,6 +2238,7 @@ function humanNeeded(db, event, reason, at, ttlSeconds, ticketContext = null) {
     // ticket body that produced this question without changing the schema.
     reason = `${reason}\n${hashMarker}`;
   }
+  if (detail) reason = `${reason}\n${detail}`;
   const proposal = insertProposal(db, {
     id: newProposalId(),
     event,
@@ -2243,6 +2288,7 @@ export function planEvent(
     adapterOverride,
     artifactStore = artifactsRoot(),
     dispatch = {},
+    toolchain = {},
     configSnapshot = null,
     log = console.log,
   } = {},
@@ -2253,6 +2299,7 @@ export function planEvent(
   // transaction only when the event is still admitted there — a raced plan
   // simply discards it via the idempotent early return.
   let worktreeEligibility = null;
+  let toolchainEligibility = null;
   {
     const row = db
       .query(
@@ -2275,27 +2322,35 @@ export function planEvent(
         typeof preEnvelope.payload?.ticket === "string" &&
         !repoNotAllowed(preDef, preEnvelope.payload)
       ) {
-        try {
-          worktreeEligibility = worktreeDispatchAutoEligibility(
+        if (preEnvelope.type === "factory.dispatch.requested") {
+          toolchainEligibility = dispatchToolchainEligibility(
             preEnvelope.payload,
-            {
-              ...dispatch,
-              operatorAuthorized: preEnvelope.source === "operator",
-              configSnapshot,
-            },
+            { configSnapshot, toolchain },
           );
-        } catch (err) {
-          if (!isLinearRateLimited(err)) throw err;
-          worktreeEligibility = {
-            ok: false,
-            rateLimited: true,
-            resetAt: err.resetAt ?? null,
-            refusal: {
-              decision: "retry_later",
-              reason: "linear_rate_limited",
-              detail: err.message,
-            },
-          };
+        }
+        if (toolchainEligibility?.ready !== false) {
+          try {
+            worktreeEligibility = worktreeDispatchAutoEligibility(
+              preEnvelope.payload,
+              {
+                ...dispatch,
+                operatorAuthorized: preEnvelope.source === "operator",
+                configSnapshot,
+              },
+            );
+          } catch (err) {
+            if (!isLinearRateLimited(err)) throw err;
+            worktreeEligibility = {
+              ok: false,
+              rateLimited: true,
+              resetAt: err.resetAt ?? null,
+              refusal: {
+                decision: "retry_later",
+                reason: "linear_rate_limited",
+                detail: err.message,
+              },
+            };
+          }
         }
       }
     }
@@ -2381,6 +2436,24 @@ export function planEvent(
     const scopeRefusal = repoNotAllowed(def, envelope.payload);
     if (scopeRefusal)
       return humanNeeded(db, event, scopeRefusal, at, ttlSeconds);
+
+    if (
+      envelope.type === "factory.dispatch.requested" &&
+      toolchainEligibility?.ready === false
+    ) {
+      const executable =
+        toolchainEligibility.reasons?.find((reason) => reason?.executable)
+          ?.executable ?? "unknown";
+      return humanNeeded(
+        db,
+        event,
+        `toolchain_unsatisfied:${executable}`,
+        at,
+        ttlSeconds,
+        null,
+        JSON.stringify(toolchainEligibility.reasons ?? []),
+      );
+    }
 
     // A work scan reserves its repo as soon as its run is PROPOSED, before the
     // expensive model read can select a ticket. This is deliberately stronger

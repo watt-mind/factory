@@ -17,12 +17,71 @@ import {
 registerCliTmpCleanup();
 
 describe("status and doctor commands", () => {
+  test(
+    "status --json reports in-flight counts from a live seeded serve",
+    async () => {
+      const home = tmpDir("evrt-status-json-");
+      const controlApiToken = "status-json-control-token";
+      const box = await spawnLiveServe({
+        home,
+        extraEnv: { FACTORY_CONTROL_API_TOKEN: controlApiToken },
+      });
+      let result;
+      try {
+        const at = new Date().toISOString();
+        const db = openDb(path.join(home, "runtime.db"));
+        db.query(
+          `INSERT INTO events (source, event_id, type, occurred_at, received_at, envelope_json, payload_hash, status, admitted_at)
+           VALUES ('test', 'admitted-event', 'test.event', ?, ?, '{}', 'hash', 'admitted', ?)`,
+        ).run(at, at, at);
+        db.query(
+          `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, created_at, updated_at)
+           VALUES ('queued-run', 'queued-key', '{}', 'hash', 'QUEUED', ?, ?)`,
+        ).run(at, at);
+        db.close();
+        result = spawnSync("bun", [CLI, "status", "--json"], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            FACTORY_EVENT_HOME: home,
+            FACTORY_EVENT_PORT: box.port,
+            FACTORY_RUN_DIR: throwawayRunDir(),
+            FACTORY_CONTROL_API_TOKEN: controlApiToken,
+          },
+        });
+      } finally {
+        box.child.kill("SIGTERM");
+        await new Promise((resolve) => box.child.once("exit", resolve));
+      }
+
+      expect(result.status).toBe(0);
+      const payload = JSON.parse(result.stdout);
+      expect(payload.events.admitted).toBeNumber();
+      expect(payload.inFlight).toMatchObject({
+        admittedNotPlanned: payload.events.admitted,
+        queued: 1,
+        running: 0,
+      });
+      expect(Array.isArray(payload.anomalies)).toBe(true);
+    },
+    loadAdjustedTimeout(30_000),
+  );
+
   test("status against a dead port says serve is not running, non-zero exit", () => {
     const r = runCli(["status"], { FACTORY_EVENT_PORT: DEAD_PORT });
     expect(r.status).not.toBe(0);
     expect(r.all).toContain(
       `control API not reachable on 127.0.0.1:${DEAD_PORT} — start it with: bun event-runtime/cli.mjs serve`,
     );
+
+    const json = runCli(["status", "--json"], {
+      FACTORY_EVENT_PORT: DEAD_PORT,
+    });
+    expect(json.status).not.toBe(0);
+    expect(json.stdout).toBe("");
+    expect(JSON.parse(json.stderr)).toEqual({
+      error: `control API not reachable on 127.0.0.1:${DEAD_PORT} — start it with: bun event-runtime/cli.mjs serve`,
+    });
   });
 
   test("ps against a dead port says serve is not running, non-zero exit", () => {
