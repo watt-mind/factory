@@ -932,25 +932,80 @@ export function ticketIndexView(db, options = {}) {
     }
   }
 
+  // Keep every JSON-bearing table bounded by the requested activity window.
+  // Lifecycle activity can revive an older run, so first select those run IDs
+  // by their indexed `at` value, then include their runs with the recent ones.
+  // Results and lifecycle reasons are fetched only for that selected run set.
   const eventRows = db
-    .query(`SELECT * FROM events ORDER BY admitted_at, rowid`)
-    .all();
+    .query(
+      `SELECT * FROM events WHERE admitted_at >= ? ORDER BY admitted_at, rowid`,
+    )
+    .all(sinceIso);
   const proposalRows = db
-    .query(`SELECT * FROM proposals ORDER BY created_at, rowid`)
-    .all();
+    .query(
+      `SELECT * FROM proposals WHERE created_at >= ? ORDER BY created_at, rowid`,
+    )
+    .all(sinceIso);
   const runRows = db
-    .query(`SELECT * FROM runs ORDER BY created_at, rowid`)
-    .all();
-  const resultRows = db.query(`SELECT * FROM results ORDER BY rowid`).all();
-  const lifecycleRows = db
-    .query(`SELECT * FROM lifecycle_events ORDER BY rowid`)
-    .all();
+    .query(
+      `SELECT * FROM runs WHERE created_at >= ? ORDER BY created_at, rowid`,
+    )
+    .all(sinceIso);
+  const lifecycleRunIds = db
+    .query(
+      `SELECT DISTINCT run_id FROM lifecycle_events WHERE at >= ? ORDER BY run_id`,
+    )
+    .all(sinceIso)
+    .map((row) => row.run_id);
+  const chunked = (values, size = 400) => {
+    const chunks = [];
+    for (let i = 0; i < values.length; i += size)
+      chunks.push(values.slice(i, i + size));
+    return chunks;
+  };
+  const placeholders = (values) => values.map(() => "?").join(", ");
+  const runIds = new Set(runRows.map((row) => row.run_id));
+  for (const chunk of chunked(
+    lifecycleRunIds.filter((id) => !runIds.has(id)),
+  )) {
+    for (const row of db
+      .query(`SELECT * FROM runs WHERE run_id IN (${placeholders(chunk)})`)
+      .all(...chunk)) {
+      runRows.push(row);
+      runIds.add(row.run_id);
+    }
+  }
+
+  const resultRows = [];
+  const lifecycleRows = [];
+  for (const chunk of chunked([...runIds])) {
+    resultRows.push(
+      ...db
+        .query(
+          `SELECT * FROM results WHERE run_id IN (${placeholders(chunk)}) ORDER BY rowid`,
+        )
+        .all(...chunk),
+    );
+    lifecycleRows.push(
+      ...db
+        .query(
+          `SELECT * FROM lifecycle_events
+           WHERE at >= ? AND run_id IN (${placeholders(chunk)}) ORDER BY rowid`,
+        )
+        .all(sinceIso, ...chunk),
+    );
+  }
 
   const resultByRun = new Map();
   for (const row of resultRows) {
     const result = parseObject(row.result_json);
     if (!resultByRun.has(row.run_id)) resultByRun.set(row.run_id, []);
     resultByRun.get(row.run_id).push(result);
+  }
+  const lifecycleByRun = new Map();
+  for (const row of lifecycleRows) {
+    if (!lifecycleByRun.has(row.run_id)) lifecycleByRun.set(row.run_id, []);
+    lifecycleByRun.get(row.run_id).push(row);
   }
 
   // Collect candidate ticket IDs across all entities
@@ -1213,6 +1268,9 @@ export function ticketIndexView(db, options = {}) {
           at: r.updated_at || r.created_at,
           kind: spec.agent?.startsWith("merge-") ? "merge" : "run",
         });
+      }
+      for (const lifecycle of lifecycleByRun.get(r.run_id) ?? []) {
+        activities.push({ at: lifecycle.at, kind: "run" });
       }
     }
 

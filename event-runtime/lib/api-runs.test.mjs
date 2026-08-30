@@ -1287,6 +1287,82 @@ describe("recent-ticket index (WM-821)", () => {
       s.close();
     }
   });
+
+  test("bounds ticket index reads by since and retains recent lifecycle activity", async () => {
+    const nowMs = Date.parse("2026-08-18T12:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      const insertRun = s.db.query(
+        `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+         VALUES (?, ?, ?, 'sha256:test', 'COMPLETED', 1, ?, ?)`,
+      );
+      const insertLifecycle = s.db.query(
+        `INSERT INTO lifecycle_events (run_id, to_state, actor, at, record_hash)
+         VALUES (?, 'COMPLETED', 'test', ?, ?)`,
+      );
+      const insertEvent = s.db.query(
+        `INSERT INTO events
+         (source, event_id, type, subject, occurred_at, received_at, envelope_json, payload_hash, admitted_at)
+         VALUES ('test', ?, 'ticket.updated', ?, ?, ?, '{}', 'sha256:test', ?)`,
+      );
+      const at = (daysAgo) =>
+        new Date(nowMs - daysAgo * 86_400_000).toISOString();
+
+      insertRun.run(
+        "run-recent-lifecycle",
+        "recent-lifecycle",
+        spec({ repo: "factory", ticket: "WM-1765" }),
+        at(3),
+        at(3),
+      );
+      insertLifecycle.run(
+        "run-recent-lifecycle",
+        at(1),
+        "sha256:recent-lifecycle",
+      );
+      insertEvent.run(
+        "recent-event",
+        "WM-1766",
+        at(1 / 24),
+        at(1 / 24),
+        at(1 / 24),
+      );
+      insertEvent.run("stale-event", "WM-1767", at(30), at(30), at(30));
+
+      const queries = [];
+      const observedDb = {
+        filename: s.db.filename,
+        query(sql) {
+          queries.push(sql);
+          return s.db.query(sql);
+        },
+      };
+      const tickets = ticketIndexView(observedDb, {
+        nowMs,
+        since: "2d",
+        noCache: true,
+      });
+
+      expect(tickets.map((ticket) => ticket.id)).toEqual([
+        "WM-1766",
+        "WM-1765",
+      ]);
+      expect(
+        queries.some((sql) => /events WHERE admitted_at >= \?/.test(sql)),
+      ).toBe(true);
+      expect(
+        queries.some((sql) => /lifecycle_events\s+WHERE at >= \?/.test(sql)),
+      ).toBe(true);
+      expect(
+        queries.some((sql) => /WHERE at >= \? AND run_id IN \(\?\)/.test(sql)),
+      ).toBe(true);
+      expect(queries.join("\n")).not.toContain(
+        "SELECT * FROM results ORDER BY",
+      );
+    } finally {
+      s.close();
+    }
+  });
 });
 
 describe("watched flow and operator verbs (§12, §13, §15)", () => {
