@@ -929,6 +929,32 @@ describe("Full-page artifact reader view navigation & 'o' shortcut (WM-828)", ()
     fireEvent.click(openBtns[0]);
     expect(view.onOpenFull).toHaveBeenCalledWith(SHA_A, `#/artifacts/${SHA_A}`);
   });
+
+  test("passes filtered catalogue context when opening the full-page reader", async () => {
+    globalThis.fetch = mock(async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.endsWith("/api/artifacts") || u.includes("/api/artifacts?")) {
+        return new Response(JSON.stringify({ artifacts: ITEMS }), {
+          status: 200,
+        });
+      }
+      return new Response("line one\nline two", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    window.location.hash = `#/artifacts/${SHA_A}`;
+    const view = renderArtifacts();
+    await view.findByRole("region", { name: "Artifact content" });
+
+    const query = "kind=transcript&search=f99e8b&project=demo";
+    window.location.hash = `#/artifacts/${SHA_A}?${query}`;
+    fireEvent.click(
+      view.getAllByRole("button", { name: "Open in full page" })[0]!,
+    );
+    expect(view.onOpenFull).toHaveBeenCalledWith(
+      SHA_A,
+      `#/artifacts/${SHA_A}?${query}`,
+    );
+  });
 });
 
 describe("Artifacts list row height (WM-843)", () => {
