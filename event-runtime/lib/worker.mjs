@@ -119,14 +119,28 @@ const INSTANCE_LOCAL_CONFIG_FILES = Object.freeze([
  * run while staying un-stageable — a copied-but-committable instance config
  * would leak the operator's routing/policy into the repo.
  */
-async function runClaimPathGitProbe({ checkoutPath, args, name, onTimeout }) {
+/**
+ * Run one bounded `git` probe on the claim path. Always settles: on normal
+ * exit (`close`), on a spawn failure (`error`, e.g. ENOENT — Node need not
+ * emit `close` after that), and on the subprocess-timeout ceiling. stderr is
+ * discarded rather than piped so a chatty git can never stall the probe on an
+ * undrained pipe. `command` exists only so tests can point the probe at a
+ * non-existent binary.
+ */
+export async function runClaimPathGitProbe({
+  checkoutPath,
+  args,
+  name,
+  onTimeout,
+  command = "git",
+}) {
   const timeoutMs = workerSubprocessTimeoutMs();
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn("git", args, {
+      child = spawn(command, args, {
         ...DETACHED_SPAWN_OPTIONS,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["ignore", "pipe", "ignore"],
       });
     } catch (error) {
       resolve({ status: null, stdout: "", error });
@@ -135,12 +149,22 @@ async function runClaimPathGitProbe({ checkoutPath, args, name, onTimeout }) {
 
     let stdout = "";
     let error = null;
+    let settled = false;
+    const settle = (status) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ status, stdout, error });
+    };
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk) => {
       stdout += chunk;
     });
     child.once("error", (spawnError) => {
       error = spawnError;
+      // A failed spawn (ENOENT, EACCES) may never reach `close`; settle now so
+      // the claim path cannot hang on a missing or broken git binary.
+      settle(null);
     });
     const timer = setTimeout(() => {
       error = Object.assign(
@@ -158,10 +182,7 @@ async function runClaimPathGitProbe({ checkoutPath, args, name, onTimeout }) {
       killProcessGroup(child, { signal: "SIGKILL" });
     }, timeoutMs);
     timer.unref?.();
-    child.once("close", (status) => {
-      clearTimeout(timer);
-      resolve({ status, stdout, error });
-    });
+    child.once("close", (status) => settle(status));
   });
 }
 
@@ -205,24 +226,12 @@ async function ensureLocallyIgnored(checkoutPath, rel, { onTimeout } = {}) {
  * back to examples and cannot use this factory instance's routing or policy.
  * The schedule overlay is excluded on purpose (see INSTANCE_LOCAL_CONFIG_FILES).
  */
-export function provisionInstanceLocalConfigs({
+export async function provisionInstanceLocalConfigs({
   checkoutPath,
   factoryRoot = process.env.FACTORY_ROOT || FACTORY_ROOT,
   onProbeTimeout,
 } = {}) {
   if (!checkoutPath) return [];
-  return provisionInstanceLocalConfigsAsync({
-    checkoutPath,
-    factoryRoot,
-    onProbeTimeout,
-  });
-}
-
-async function provisionInstanceLocalConfigsAsync({
-  checkoutPath,
-  factoryRoot,
-  onProbeTimeout,
-}) {
   const sourceConfig = path.join(factoryRoot, "config");
   const destinationConfig = path.join(checkoutPath, "config");
   const isGitCheckout =
@@ -3410,6 +3419,10 @@ export async function executeClaimed(
     // separately for an escalation ownership transfer.
     checkoutPath = created.checkout?.path ?? null;
     worktreePath = created.worktree?.path ?? null;
+    // The guard is load-bearing, not redundant: provisioning is async, and
+    // awaiting it for a checkout-less run would yield before the adapter
+    // starts, letting a cancel issued right after the claim short-circuit the
+    // attempt instead of aborting a started adapter (OPS-417).
     if (checkoutPath) {
       await provisionInstanceLocalConfigs({
         checkoutPath,

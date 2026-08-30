@@ -94,6 +94,7 @@ import {
   repositoryIsClean,
   repositoryStatus,
   provisionInstanceLocalConfigs,
+  runClaimPathGitProbe,
   resolveLinearApiKey,
   reconcileTierEscalations,
   scheduleTierEscalation,
@@ -431,6 +432,34 @@ sh -c 'sleep 5 & wait'
       rmSync(checkout, { recursive: true, force: true });
       rmSync(bin, { recursive: true, force: true });
     }
+  });
+
+  test("claim-path git probe settles as a failed probe when the binary does not exist", async () => {
+    const missing = path.join(
+      tmpDir("evrt-claim-probe-missing-bin-"),
+      "definitely-not-git",
+    );
+    const timeouts = [];
+    const started = Date.now();
+    const probe = await runClaimPathGitProbe({
+      checkoutPath: "/nonexistent/checkout",
+      args: ["rev-parse", "--git-path", "info/exclude"],
+      name: "rev-parse",
+      command: missing,
+      onTimeout: (timeout) => timeouts.push(timeout),
+    });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(probe.status).not.toBe(0);
+    expect(probe.stdout).toBe("");
+    expect(probe.error?.code).toBe("ENOENT");
+    expect(timeouts).toEqual([]);
+    rmSync(path.dirname(missing), { recursive: true, force: true });
+  });
+
+  test("provisioning always returns a promise, even without a checkout path", async () => {
+    const result = provisionInstanceLocalConfigs({});
+    expect(result).toBeInstanceOf(Promise);
+    expect(await result).toEqual([]);
   });
 
   test("repository integrity gate rejects any checkout dirt before output acceptance", () => {
