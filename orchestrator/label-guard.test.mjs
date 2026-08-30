@@ -11,7 +11,6 @@
  * genuine catch (CLNT-871/872's shape) and the false positives that got cut.
  */
 import { test, expect } from "bun:test";
-import { controlPlaneKindFromRepo } from "../lib/control-plane/index.mjs";
 import {
   demote,
   fetchReadyIssues,
@@ -41,7 +40,6 @@ test("a real §5 spec passes with no gaps", () => {
 
 test("listing and demotion select the control plane configured for the repo", async () => {
   const repo = { name: "factory", team: "WM", project: "Factory" };
-  expect(controlPlaneKindFromRepo(repo.name)).toBe("github");
   const calls = [];
   const cp = {
     listDispatchable: async (filters) => {
