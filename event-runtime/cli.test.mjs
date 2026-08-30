@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { COMMAND_NAMES } from "./cli/commands.mjs";
 import { events } from "./cli/events.mjs";
+import { inbox as legacyInbox } from "./cli/inbox.mjs";
 import { renderInspect } from "./cli/inspect.mjs";
 import { ps } from "./cli/ps.mjs";
 import { runs } from "./cli/runs.mjs";
@@ -37,6 +38,94 @@ const EXPECTED_COMMANDS = [
 ];
 
 describe("cli routing", () => {
+  test("callControl sends the configured bearer", async () => {
+    const token = "cli-control-token";
+    let authorization;
+    const server = Bun.serve({
+      port: Number(freePort()),
+      fetch(request) {
+        authorization = request.headers.get("authorization");
+        return Response.json({ memos: [] });
+      },
+    });
+    try {
+      const child = Bun.spawn(["bun", CLI, "memos", "repo", "factory"], {
+        env: {
+          ...process.env,
+          FACTORY_EVENT_PORT: String(server.port),
+          FACTORY_CONTROL_API_TOKEN: token,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [status, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stderr).text(),
+      ]);
+      expect(status, stderr).toBe(0);
+      expect(authorization).toBe(`Bearer ${token}`);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test.each([
+    [401, "unauthorized"],
+    [503, "control_api_token_unset"],
+  ])(
+    "callControl gives actionable text for HTTP %i",
+    async (statusCode, error) => {
+      const server = Bun.serve({
+        port: Number(freePort()),
+        fetch: () => Response.json({ error }, { status: statusCode }),
+      });
+      try {
+        const child = Bun.spawn(["bun", CLI, "memos", "repo", "factory"], {
+          env: {
+            ...process.env,
+            FACTORY_EVENT_PORT: String(server.port),
+            FACTORY_CONTROL_API_TOKEN: "",
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [exitCode, stdout, stderr] = await Promise.all([
+          child.exited,
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+        ]);
+        expect(exitCode).not.toBe(0);
+        expect(`${stdout}${stderr}`).toContain("FACTORY_CONTROL_API_TOKEN");
+        expect(`${stdout}${stderr}`).toContain("~/.factory/secrets.env");
+      } finally {
+        server.stop(true);
+      }
+    },
+  );
+
+  test("split inbox client sends its bearer", async () => {
+    const token = "inbox-control-token";
+    let authorization;
+    const server = Bun.serve({
+      port: Number(freePort()),
+      fetch(request) {
+        authorization = request.headers.get("authorization");
+        return Response.json({ items: [] });
+      },
+    });
+    const logs = [];
+    const originalLog = console.log;
+    console.log = (...values) => logs.push(values.join(" "));
+    try {
+      await legacyInbox({ host: "127.0.0.1", port: server.port, token });
+      expect(authorization).toBe(`Bearer ${token}`);
+      expect(logs).toEqual(["no open inbox items"]);
+    } finally {
+      console.log = originalLog;
+      server.stop(true);
+    }
+  });
+
   test("no command → usage text listing all verbs, non-zero exit", () => {
     const r = runCli([]);
     expect(r.status).not.toBe(0);

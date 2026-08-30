@@ -207,9 +207,9 @@ case "$cmd" in
           || (!issue && !pr ? prefix.match(/^(\S+)/) : null);
         if (repo) refs.repo = repo[1];
         try {
-          // #1132: the control API requires the operator bearer when
-          // FACTORY_CONTROL_API_TOKEN is set (#1152); unset means no header.
-          // The value is only ever placed in the header — never printed.
+          // The control API requires the operator bearer. An unset token sends
+          // no header and the server fails closed with an actionable 503. The
+          // value is only ever placed in the header — never printed.
           const token = process.env.FACTORY_CONTROL_API_TOKEN;
           const response = await fetch(`http://127.0.0.1:${process.env.FACTORY_EVENT_PORT || "7381"}/inbox`, {
             method: "POST",
@@ -224,14 +224,15 @@ case "$cmd" in
               source: process.env.FACTORY_INBOX_SOURCE,
             }),
           });
-          if (response.status === 401) {
+          const responseBody = await response.clone().json().catch(() => null);
+          if (response.status === 401 || (response.status === 503 && responseBody?.error === "control_api_token_unset")) {
             console.error(token
               ? "notify: control API rejected FACTORY_CONTROL_API_TOKEN"
               : "notify: control API requires FACTORY_CONTROL_API_TOKEN; set it in ~/.factory/secrets.env");
             process.exit(10);
           }
           if (!response.ok) process.exit(10);
-          const body = await response.json();
+          const body = responseBody;
           // Durable record succeeded; the serve-side notify.py projection did
           // not. Exit 12 so the shell falls through to the CLI transport
           // rather than treating this as delivered (WM-759). WM-825 exited 0

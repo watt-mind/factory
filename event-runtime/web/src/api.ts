@@ -134,6 +134,90 @@ export interface RepoItem extends BaseRepoItem {
 
 type CachedResponse = { etag: string; body: unknown };
 const responseCache = new Map<string, CachedResponse>();
+const CONTROL_TOKEN_KEY = "factory.controlApiToken";
+
+// sessionStorage throws when site data is blocked (private mode, storage
+// policies); a token that cannot be remembered must not break every API call.
+function readStoredControlToken(): string | null {
+  try {
+    return sessionStorage.getItem(CONTROL_TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredControlToken(token: string): void {
+  try {
+    if (token) sessionStorage.setItem(CONTROL_TOKEN_KEY, token);
+    else sessionStorage.removeItem(CONTROL_TOKEN_KEY);
+  } catch {
+    /* storage unavailable: the token still applies for this page load */
+  }
+}
+
+function safeDecode(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+/**
+ * Splits a fragment query without URLSearchParams' form decoding: a `+` in a
+ * token is a literal `+`, not a space. Returns the token (if present) and the
+ * remaining query with the token pair removed.
+ */
+function extractFragmentToken(query: string): {
+  token: string | null;
+  rest: string;
+} {
+  let token: string | null = null;
+  const kept: string[] = [];
+  for (const pair of query.split("&")) {
+    if (pair === "") continue;
+    const eq = pair.indexOf("=");
+    const key = eq >= 0 ? pair.slice(0, eq) : pair;
+    if (safeDecode(key) === "token") {
+      token ??= eq >= 0 ? safeDecode(pair.slice(eq + 1)) : "";
+      continue;
+    }
+    kept.push(pair);
+  }
+  return { token, rest: kept.join("&") };
+}
+
+function suppliedControlToken(): string | null {
+  if (typeof window === "undefined") return null;
+
+  const url = new URL(window.location.href);
+  let token = url.searchParams.get("token");
+  let changed = false;
+  if (token !== null) {
+    url.searchParams.delete("token");
+    changed = true;
+  }
+
+  const hash = url.hash.startsWith("#") ? url.hash.slice(1) : url.hash;
+  const queryAt = hash.indexOf("?");
+  if (queryAt >= 0) {
+    const route = hash.slice(0, queryAt);
+    const fragment = extractFragmentToken(hash.slice(queryAt + 1));
+    if (fragment.token !== null) {
+      token ??= fragment.token;
+      url.hash = `#${route}${fragment.rest ? `?${fragment.rest}` : ""}`;
+      changed = true;
+    }
+  }
+
+  let supplied: string | null = null;
+  if (token !== null) {
+    supplied = token.trim();
+    writeStoredControlToken(supplied);
+  }
+  if (changed) window.history.replaceState(null, "", url);
+  return readStoredControlToken() ?? (supplied || null);
+}
 
 export type RunListFilters = {
   state?: string;
@@ -243,6 +327,10 @@ async function call<T>(
   const headers: Record<string, string> = {
     "content-type": "application/json",
   };
+  const mutating = !["GET", "HEAD", "OPTIONS"].includes(method);
+  const suppliedToken = suppliedControlToken();
+  const controlToken = mutating ? suppliedToken : null;
+  if (controlToken) headers.authorization = `Bearer ${controlToken}`;
   if (cached) headers["if-none-match"] = cached.etag;
   const res = await fetch(url, {
     method,
@@ -265,10 +353,12 @@ async function call<T>(
   }
   if (!res.ok) {
     const message =
-      json?.error ??
-      (Array.isArray(json?.errors)
-        ? json.errors.join("; ")
-        : `HTTP ${res.status}`);
+      res.status === 401 && mutating
+        ? "control API token required — reopen this dashboard with a credentialed link"
+        : (json?.error ??
+          (Array.isArray(json?.errors)
+            ? json.errors.join("; ")
+            : `HTTP ${res.status}`));
     throw new ApiError(message, res.status);
   }
   if (cacheKey) {

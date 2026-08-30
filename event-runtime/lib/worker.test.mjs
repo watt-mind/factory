@@ -471,6 +471,56 @@ describe("worker", () => {
     }
   });
 
+  test("does not hang or copy instance config when a git ignore probe times out", () => {
+    const factoryRoot = tmpDir("evrt-instance-config-timeout-source-");
+    const checkout = tmpDir("evrt-instance-config-timeout-checkout-");
+    const bin = tmpDir("evrt-instance-config-timeout-bin-");
+    const previousPath = process.env.PATH;
+    const previousTimeout = process.env.FACTORY_WORKER_SUBPROCESS_TIMEOUT_MS;
+    try {
+      mkdirSync(path.join(factoryRoot, "config"), { recursive: true });
+      writeFileSync(
+        path.join(factoryRoot, "config", "repos.yaml"),
+        "repos: []\n",
+      );
+      expect(spawnSync("git", ["init", "-q"], { cwd: checkout }).status).toBe(
+        0,
+      );
+      writeFileSync(
+        path.join(bin, "git"),
+        `#!/bin/sh
+case "$3" in
+  rev-parse)
+    if [ "$4" = "--is-inside-work-tree" ]; then
+      printf 'true\\n'
+      exit 0
+    fi
+    exit 1
+    ;;
+esac
+exec sleep 1
+`,
+        { mode: 0o755 },
+      );
+      process.env.PATH = `${bin}${path.delimiter}${previousPath}`;
+      process.env.FACTORY_WORKER_SUBPROCESS_TIMEOUT_MS = "25";
+
+      const started = Date.now();
+      expect(
+        provisionInstanceLocalConfigs({ factoryRoot, checkoutPath: checkout }),
+      ).toEqual([]);
+      expect(Date.now() - started).toBeLessThan(1_000);
+    } finally {
+      process.env.PATH = previousPath;
+      if (previousTimeout === undefined)
+        delete process.env.FACTORY_WORKER_SUBPROCESS_TIMEOUT_MS;
+      else process.env.FACTORY_WORKER_SUBPROCESS_TIMEOUT_MS = previousTimeout;
+      rmSync(factoryRoot, { recursive: true, force: true });
+      rmSync(checkout, { recursive: true, force: true });
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
   test("repository integrity gate rejects any checkout dirt before output acceptance", () => {
     const repo = tmpDir("evrt-clean-repo-");
     const git = (args) =>

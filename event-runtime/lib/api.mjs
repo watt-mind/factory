@@ -135,9 +135,9 @@ export function createApi({
   configRoot = reposRoot(),
   // Root of the config/policy.yaml the run endpoints consult (tests point it elsewhere).
   policyRoot = FACTORY_ROOT,
-  // WM-1152: application-level bearer for the control API. Unset (empty/null)
-  // keeps the historical loopback-trust behavior byte-for-byte; set requires
-  // `Authorization: Bearer <token>` on every non-exempt route. Never logged.
+  // Application-level bearer for the control API. Every non-exempt route
+  // fails closed when this is absent and requires the matching bearer when it
+  // is present. Never logged.
   controlApiToken = process.env.FACTORY_CONTROL_API_TOKEN || null,
 } = {}) {
   const actor = "operator";
@@ -174,10 +174,13 @@ export function createApi({
       const url = new URL(req.url, `http://${API_HOST}`);
       const route = `${req.method} ${url.pathname}`;
 
-      // WM-1152: bearer gate. Only when a token is configured; otherwise the
-      // API behaves exactly as before (loopback-trust). Reject before any work
-      // or body read, so an unauthorized caller never triggers side effects.
-      if (controlApiToken && !BEARER_EXEMPT_ROUTES.has(route)) {
+      // Reject before any work or body read, so an uncredentialed caller never
+      // triggers side effects. Loopback is a network boundary, not an
+      // authentication mechanism.
+      if (!BEARER_EXEMPT_ROUTES.has(route)) {
+        if (!controlApiToken) {
+          return sendJson(res, 503, { error: "control_api_token_unset" });
+        }
         if (!bearerAuthorized(req.headers.authorization, controlApiToken)) {
           return sendJson(res, 401, { error: "unauthorized" });
         }

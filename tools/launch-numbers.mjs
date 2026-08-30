@@ -29,6 +29,9 @@ import { LOG_DIR } from "../lib/transcript.mjs";
 import { loadControlPlane } from "../lib/control-plane/index.mjs";
 
 export const DEFAULT_SINCE = "2026-08-03T00:00:00.000Z";
+export const USAGE = `usage: bun tools/launch-numbers.mjs [--json] [--since YYYY-MM-DD]`;
+
+class UsageError extends Error {}
 
 export const DISPATCH_LABELS = new Set([
   "ai:in-progress",
@@ -389,19 +392,39 @@ export async function buildLaunchNumbers({
   };
 }
 
-function parseArgv(argv) {
-  const val = (f) => {
-    const i = argv.indexOf(f);
-    return i === -1 ? null : argv[i + 1];
-  };
-  return {
-    json: argv.includes("--json"),
-    since: val("--since") ?? DEFAULT_SINCE,
-  };
+export function parseArgv(argv) {
+  const flags = { json: false, since: DEFAULT_SINCE };
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === "--help") {
+      if (argv.length !== 1) throw new UsageError(USAGE);
+      return { help: true };
+    }
+    if (arg === "--json" && !flags.json) {
+      flags.json = true;
+      continue;
+    }
+    if (arg === "--since" && flags.since === DEFAULT_SINCE) {
+      const since = argv[++i];
+      if (!since || since.startsWith("--")) throw new UsageError(USAGE);
+      try {
+        flags.since = parseSince(since).iso;
+      } catch {
+        throw new UsageError(USAGE);
+      }
+      continue;
+    }
+    throw new UsageError(USAGE);
+  }
+  return flags;
 }
 
 async function main(argv = process.argv.slice(2)) {
   const flags = parseArgv(argv);
+  if (flags.help) {
+    console.log(USAGE);
+    return 0;
+  }
   const { metrics, transcripts } = await buildLaunchNumbers({
     since: flags.since,
   });
@@ -417,5 +440,15 @@ async function main(argv = process.argv.slice(2)) {
 }
 
 if (import.meta.main) {
-  process.exitCode = await main();
+  try {
+    process.exitCode = await main();
+  } catch (error) {
+    if (error instanceof UsageError) {
+      console.error(error.message);
+      process.exitCode = 2;
+    } else {
+      console.error(`launch-numbers: ${error.message}`);
+      process.exitCode = 1;
+    }
+  }
 }

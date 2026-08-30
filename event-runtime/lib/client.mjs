@@ -10,7 +10,7 @@
 import { API_HOST, DEFAULT_PORT } from "./config.mjs";
 
 /**
- * Actionable text for a control-API 401 (#1132). Names the variable and the
+ * Actionable text for a control-API auth failure (#1132). Names the variable and the
  * file the operator has to touch, and never the credential itself — the
  * message reaches stderr, transcripts and PR bodies.
  */
@@ -51,7 +51,8 @@ export function apiClient({
     }
     if (!res.ok) {
       const message =
-        res.status === 401
+        res.status === 401 ||
+        (res.status === 503 && json?.error === "control_api_token_unset")
           ? unauthorizedMessage(Boolean(token))
           : (json?.error ??
             (Array.isArray(json?.errors)
@@ -68,6 +69,7 @@ export function apiClient({
   return {
     host,
     port,
+    token,
     health: () => call("GET", "/health"),
     /** Webhook intake: raw body string plus the §14 signature headers. */
     postEvent: (rawBody, { signature, timestamp } = {}) => {

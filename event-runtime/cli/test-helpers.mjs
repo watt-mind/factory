@@ -166,11 +166,13 @@ export async function spawnLiveServe({
 
 export async function assertHealthyLiveServe() {
   const home = tmpDir("evrt-doc-healthy-");
+  const controlApiToken = "healthy-live-serve-control-token";
   const box = await spawnLiveServe({
     home,
     extraEnv: {
       FACTORY_EVENT_SECRET: "test-secret",
       FACTORY_GITHUB_WEBHOOK_SECRET: "test-gh-secret",
+      FACTORY_CONTROL_API_TOKEN: controlApiToken,
     },
   });
   let docRes;
@@ -183,6 +185,7 @@ export async function assertHealthyLiveServe() {
         FACTORY_EVENT_HOME: home,
         FACTORY_EVENT_PORT: box.port,
         FACTORY_RUN_DIR: throwawayRunDir(),
+        FACTORY_CONTROL_API_TOKEN: controlApiToken,
       },
     });
   } finally {

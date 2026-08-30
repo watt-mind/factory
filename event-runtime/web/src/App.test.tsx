@@ -10,6 +10,7 @@ import {
   within,
 } from "@testing-library/react";
 import { App, listSelectionPath, navIsCurrent } from "./App";
+import { api, ApiError } from "./api";
 import { goPrefix } from "./goSequence";
 import { refetchIntervals } from "./hooks";
 import { NAV } from "./nav";
@@ -189,6 +190,7 @@ beforeEach(() => {
   }) as typeof fetch;
   goPrefix.armedAt = 0;
   window.location.href = "http://localhost/";
+  sessionStorage.clear();
 });
 
 afterEach(() => {
@@ -217,6 +219,52 @@ describe("cold query rendering (WM-266)", () => {
     expect(sidebar.getByRole("button", { name: "Proposals" })).toBeTruthy();
     expect(sidebar.getByRole("button", { name: "Runs" })).toBeTruthy();
     expect(sidebar.getByRole("button", { name: "Artifacts" })).toBeTruthy();
+  });
+});
+
+describe("control API browser token", () => {
+  test("captures a URL token in sessionStorage and sends it only on mutations", async () => {
+    const seen = [] as Headers[];
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      seen.push(new Headers(init?.headers));
+      return jsonResponse({ approved: true });
+    }) as typeof fetch;
+    window.location.href =
+      "http://localhost/#/proposals?token=browser-control-token";
+
+    await api.status();
+    expect(seen[0]?.get("authorization")).toBeNull();
+    expect(sessionStorage.getItem("factory.controlApiToken")).toBe(
+      "browser-control-token",
+    );
+    expect(localStorage.getItem("factory.controlApiToken")).toBeNull();
+    expect(window.location.href).not.toContain("browser-control-token");
+
+    await api.approve("prop-token");
+    expect(seen[1]?.get("authorization")).toBe("Bearer browser-control-token");
+  });
+
+  test("turns a mutating 401 into an actionable token error", async () => {
+    globalThis.fetch = (async () =>
+      Response.json(
+        { error: "unauthorized" },
+        { status: 401 },
+      )) as unknown as typeof fetch;
+
+    let error: unknown;
+    try {
+      await api.approve("prop-token");
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(401);
+    expect((error as Error).message).toBe(
+      "control API token required — reopen this dashboard with a credentialed link",
+    );
   });
 });
 

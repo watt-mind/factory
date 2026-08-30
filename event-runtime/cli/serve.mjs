@@ -469,6 +469,11 @@ export default async function serve(args) {
     );
     if (adapterOverride)
       log(`adapter override: all new run specs use "${adapterOverride}"`);
+    if (!process.env.FACTORY_CONTROL_API_TOKEN) {
+      log(
+        "WARNING: FACTORY_CONTROL_API_TOKEN is unset; all non-intake control API routes will return 503",
+      );
+    }
     if (!process.env.FACTORY_EVENT_SECRET) {
       log(
         "webhook intake: disabled (FACTORY_EVENT_SECRET is unset; webhooks will be rejected with 401)",
