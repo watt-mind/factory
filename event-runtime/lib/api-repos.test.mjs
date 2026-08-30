@@ -1,6 +1,14 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-api-repos-test-mjs";
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { makeServer } from "./api-test-helpers.mjs";
 import { loadRepos, reposView } from "./repos.mjs";
@@ -217,6 +225,95 @@ describe("repository management API", () => {
       expect(readFileSync(file, "utf8")).toBe(before);
     } finally {
       api.close();
+    }
+  });
+
+  test("rejects relative checkout paths before writing", async () => {
+    const { root } = factoryRoot();
+    const api = await server(root);
+    try {
+      const created = await api.request("/repos", {
+        method: "POST",
+        body: JSON.stringify({
+          name: "relative",
+          github: "watt-mind/relative",
+          path: "checkouts/relative",
+        }),
+      });
+      expect(created.status).toBe(422);
+      expect((await created.json()).error).toBe(
+        "path must be absolute or ~-prefixed",
+      );
+    } finally {
+      api.close();
+    }
+  });
+
+  test("preserves config mode and writes the file resolved by the reader", async () => {
+    const { root } = factoryRoot();
+    const configDir = path.join(root, "config");
+    const local = path.join(configDir, "repos.yaml");
+    const example = path.join(configDir, "repos.example.yaml");
+    chmodSync(local, 0o600);
+    renameSync(local, example);
+    const api = await server(root);
+    try {
+      const patched = await api.request("/repos/existing", {
+        method: "PATCH",
+        body: JSON.stringify({ maxInFlight: 3 }),
+      });
+      expect(patched.status).toBe(200);
+    } finally {
+      api.close();
+    }
+    expect(statSync(example).mode & 0o777).toBe(0o600);
+    expect(existsSync(local)).toBe(false);
+    expect(loadRepos({ root }).get("existing")?.maxInFlight).toBe(3);
+  });
+
+  test("returns 409 instead of clobbering an external registry writer", async () => {
+    const { root } = factoryRoot();
+    const file = path.join(root, "config", "repos.yaml");
+    const contents = readFileSync(file, "utf8");
+    const ready = path.join(root, "external-writer-ready");
+    const writer = Bun.spawn(
+      [
+        process.execPath,
+        "-e",
+        `import { renameSync, writeFileSync } from "node:fs";
+         const [file, contents, ready] = process.argv.slice(1);
+         const tmp = file + ".external-writer";
+         const until = Date.now() + 2000;
+         writeFileSync(tmp, contents);
+         renameSync(tmp, file);
+         writeFileSync(ready, "ready");
+         while (Date.now() < until) {
+           writeFileSync(tmp, contents);
+           renameSync(tmp, file);
+         }`,
+        file,
+        contents,
+        ready,
+      ],
+      { stdout: "ignore", stderr: "ignore" },
+    );
+    const api = await server(root);
+    try {
+      for (let attempts = 0; !existsSync(ready); attempts += 1) {
+        if (attempts === 10_000)
+          throw new Error("external writer did not start");
+        await new Promise(setImmediate);
+      }
+      const patched = await api.request("/repos/existing", {
+        method: "PATCH",
+        body: JSON.stringify({ maxInFlight: 3 }),
+      });
+      expect(patched.status).toBe(409);
+      expect((await patched.json()).error).toContain("changed while");
+    } finally {
+      api.close();
+      writer.kill();
+      await writer.exited;
     }
   });
 

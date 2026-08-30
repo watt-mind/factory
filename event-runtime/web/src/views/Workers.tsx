@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import {
@@ -24,7 +24,7 @@ import { DisplayOptions } from "../components/DisplayOptions";
 import { CustomCell } from "../components/CustomCell";
 import { TicketText } from "../components/TicketHoverCard";
 import { setContextActions } from "../palette";
-import type { RunListItem, Worker, WorkerCapacity } from "../types";
+import type { RunDetail, RunListItem, Worker, WorkerCapacity } from "../types";
 import type { OperatorContext } from "../context";
 import { pinnedModelText } from "../components/RunDetailBlocks";
 import {
@@ -201,20 +201,93 @@ export interface EnrichedWorker extends Worker {
   runItem: RunListItem | null;
 }
 
+const LOADING = "Loading…";
+
+function runContext(input: unknown): {
+  repos: string[];
+  eventId: string | null;
+} {
+  const repos = new Set<string>();
+  let eventId: string | null = null;
+  const visit = (value: unknown): void => {
+    if (!value || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    for (const [key, entry] of Object.entries(value)) {
+      if (key === "repo" && typeof entry === "string") repos.add(entry);
+      if (
+        key === "repos" &&
+        Array.isArray(entry) &&
+        entry.every((item) => typeof item === "string")
+      ) {
+        entry.forEach((repo) => repos.add(repo));
+      }
+      if (
+        !eventId &&
+        /^(ticket|ticketId|issue|issueId|linearId|subject)$/i.test(key) &&
+        typeof entry === "string"
+      ) {
+        eventId = entry;
+      }
+      visit(entry);
+    }
+  };
+  visit(input);
+  return { repos: [...repos], eventId };
+}
+
+/**
+ * The run list is intentionally a bounded summary, but a worker's current
+ * run is a direct reference and must remain resolvable after it falls off
+ * that page. Adapt the detail response to the display fields this view uses.
+ */
+function runItemFromDetail(detail: RunDetail): RunListItem {
+  const { run } = detail;
+  const { spec } = run;
+  const { repos, eventId } = runContext(spec.input);
+  return {
+    runId: run.runId,
+    state: run.state,
+    attempts: run.attempts,
+    maxAttempts: spec.maxAttempts,
+    agent: spec.agent,
+    adapter: spec.adapter,
+    reasonCode: detail.result?.reasonCode ?? null,
+    eventId,
+    eventSource: null,
+    created_at: run.created_at,
+    updated_at: run.updated_at,
+    modelTier: spec.modelTier ?? null,
+    model: spec.model ?? null,
+    repos,
+    spec,
+  };
+}
+
 export function enrichWorker(
   w: Worker,
   runMap: Map<string, RunListItem>,
+  loadingRunIds: Set<string> = new Set(),
 ): EnrichedWorker {
   const r = w.currentRun ? (runMap.get(w.currentRun) ?? null) : null;
-  const activeAgent = r?.agent ?? EMPTY;
+  const loading = !!w.currentRun && loadingRunIds.has(w.currentRun);
+  const activeAgent = r?.agent ?? (loading ? LOADING : EMPTY);
   const repos = r?.repos?.length ? r.repos.join(", ") : "";
   const ticketMatch =
     r?.eventId?.match(/\b([A-Z]{2,10}-\d+|PR-\d+)\b/)?.[0] ?? "";
   const activeTarget =
     repos && ticketMatch && !repos.includes(ticketMatch)
       ? `${repos} · ${ticketMatch}`
-      : repos || ticketMatch || (r?.eventId ? shortId(r.eventId) : EMPTY);
-  const activeModel = r ? pinnedModelText(r.adapter, r.model) : EMPTY;
+      : repos ||
+        ticketMatch ||
+        (r?.eventId ? shortId(r.eventId) : loading ? LOADING : EMPTY);
+  const activeModel = r
+    ? pinnedModelText(r.adapter, r.model)
+    : loading
+      ? LOADING
+      : EMPTY;
   return {
     ...w,
     activeAgent,
@@ -562,9 +635,57 @@ export function Workers({
   const response = query.data as
     { workers: Worker[]; capacity?: WorkerCapacity } | undefined;
   const rawRows = response?.workers ?? [];
-  const rows = useMemo(
-    () => rawRows.map((w) => enrichWorker(w, runMap)),
+  const missingRunIds = useMemo(
+    () =>
+      [...new Set(rawRows.flatMap((w) => w.currentRun ?? []))].filter(
+        (runId) => !runMap.has(runId),
+      ),
     [rawRows, runMap],
+  );
+  const missingRunQueries = useQueries({
+    queries: missingRunIds.map((id) => ({
+      queryKey: ["run", id],
+      queryFn: () => api.run(id),
+      ...refetchIntervals.primary,
+      retry: 1,
+    })),
+  });
+  const missingRunDataKey = missingRunQueries
+    .map((query) => query.dataUpdatedAt)
+    .join(",");
+  const missingRunMap = useMemo(
+    () =>
+      new Map(
+        missingRunQueries.flatMap((query) =>
+          query.data
+            ? [[query.data.run.runId, runItemFromDetail(query.data)] as const]
+            : [],
+        ),
+      ),
+    // useQueries returns a new array every render; its data timestamps are
+    // the stable inputs that should recompute this projection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [missingRunIds, missingRunDataKey],
+  );
+  const loadingRunIds = useMemo(
+    () =>
+      new Set(
+        missingRunQueries.flatMap((query, index) =>
+          query.isPending ? [missingRunIds[index]] : [],
+        ),
+      ),
+    // useQueries returns a new array every render; its data timestamps are
+    // the stable inputs that should recompute this projection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [missingRunIds, missingRunDataKey],
+  );
+  const allRuns = useMemo(
+    () => new Map([...runMap, ...missingRunMap]),
+    [runMap, missingRunMap],
+  );
+  const rows = useMemo(
+    () => rawRows.map((w) => enrichWorker(w, allRuns, loadingRunIds)),
+    [rawRows, allRuns, loadingRunIds],
   );
   const capacity = response?.capacity ?? capacityFromWorkers(rawRows);
 
