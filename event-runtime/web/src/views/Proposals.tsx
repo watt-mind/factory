@@ -509,9 +509,13 @@ export function Proposals({
     });
   };
 
+  // Bulk actions target exactly the rows on screen. `scoped` (tab + expired
+  // chip + repo context) is not what the operator sees once a filter query is
+  // typed — `visible` is — so scoping the bulk set to `scoped` would still act
+  // on filter-hidden selections (#1899, same bug class as #1872).
   const selectedRows = useMemo(
-    () => scoped.filter((p) => selectedIds.has(p.id)),
-    [scoped, selectedIds],
+    () => visible.filter((p) => selectedIds.has(p.id)),
+    [visible, selectedIds],
   );
   const approvableSelected = useMemo(
     () =>
@@ -568,7 +572,13 @@ export function Proposals({
         return next;
       });
     } else {
-      setSelectedIds(new Set());
+      // Only the rows this action actually touched lose their selection;
+      // selections the scope/filter excluded are the operator's, not ours.
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        for (const id of processed) next.delete(id);
+        return next;
+      });
     }
     if (ok) notify(`Approved ${ok} proposal${ok === 1 ? "" : "s"}`, "ok");
     if (err)
@@ -581,7 +591,9 @@ export function Proposals({
     setBulkRejecting(true);
     let ok = 0;
     let err = 0;
+    const processed = new Set<string>();
     for (const p of rejectableSelected) {
+      processed.add(p.id);
       try {
         await api.reject(p.id, why);
         ok++;
@@ -590,7 +602,11 @@ export function Proposals({
       }
     }
     invalidate();
-    setSelectedIds(new Set());
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      for (const id of processed) next.delete(id);
+      return next;
+    });
     setBulkRejecting(false);
     setBulkRejectOpen(false);
     setBulkReason("");

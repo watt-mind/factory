@@ -351,11 +351,15 @@ export function chainAutoApprovalPolicyDiagnostic({ root = reposRoot() } = {}) {
       fix: "add config/policy.yaml chain_auto_approval.allowed_event_types to opt into safe chain approvals",
     };
   }
-  if (policy.reason === "policy_invalid") {
+  if (String(policy.reason ?? "").startsWith("policy_invalid")) {
+    // The loader appends a clipped parse-error message to the reason
+    // (`policy_invalid:<message>`, GH-1901); match the prefix so a YAML
+    // syntax error still reports as the policy failure it is.
+    const [, loaderDetail] = String(policy.reason).split(/:(.*)/s);
     return {
       ok: false,
       label,
-      detail: `policy_invalid — ${invalidAllowedEventTypesDetail(root)}`,
+      detail: `policy_invalid — ${loaderDetail?.trim() || invalidAllowedEventTypesDetail(root)}`,
       fix: CHAIN_POLICY_FIX,
     };
   }
