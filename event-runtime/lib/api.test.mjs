@@ -682,6 +682,44 @@ describe("bearer-token auth on the control API (WM-1152)", () => {
     }
   });
 
+  test("POST /events rejects an oversized declared body before reading it", async () => {
+    const s = await makeServer({ autoAuthorize: false });
+    try {
+      const res = await new Promise((resolve, reject) => {
+        const req = http.request({
+          host: "127.0.0.1",
+          port: s.port,
+          path: "/events",
+          method: "POST",
+          headers: {
+            "content-length": String(1024 * 1024 + 1),
+            "x-factory-timestamp": String(Date.now()),
+            "x-factory-signature": "sha256=not-checked-before-body-limit",
+          },
+        });
+        req.on("response", (response) => {
+          const chunks = [];
+          response.on("data", (chunk) => chunks.push(chunk));
+          response.on("end", () =>
+            resolve({
+              status: response.statusCode,
+              body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+            }),
+          );
+        });
+        req.on("error", reject);
+        req.end();
+      });
+      expect(res.status).toBe(413);
+      expect(res.body).toEqual({
+        error: "payload_too_large",
+        limitBytes: 1024 * 1024,
+      });
+    } finally {
+      s.close();
+    }
+  });
+
   test("token unset: every privileged mutation fails closed before side effects", async () => {
     const s = await makeServer({ controlApiToken: null });
     try {

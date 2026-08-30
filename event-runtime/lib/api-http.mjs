@@ -2,17 +2,35 @@
 import { createHash } from "node:crypto";
 
 /** §14 size limit: a control-plane payload has no business being megabytes. */
-const MAX_BODY_BYTES = 1024 * 1024;
+export const MAX_BODY_BYTES = 1024 * 1024;
+
+export class PayloadTooLargeError extends Error {
+  constructor(limitBytes = MAX_BODY_BYTES) {
+    super("payload_too_large");
+    this.name = "PayloadTooLargeError";
+    this.code = "payload_too_large";
+    this.status = 413;
+    this.limitBytes = limitBytes;
+  }
+}
 
 export function readBody(req) {
   return new Promise((resolve, reject) => {
+    const contentLength = req.headers?.["content-length"];
+    if (Number(contentLength) > MAX_BODY_BYTES) {
+      reject(new PayloadTooLargeError());
+      return;
+    }
+
     const chunks = [];
     let size = 0;
+    let tooLarge = false;
     req.on("data", (chunk) => {
+      if (tooLarge) return;
       size += chunk.length;
       if (size > MAX_BODY_BYTES) {
-        reject(new Error("payload_too_large"));
-        req.destroy();
+        tooLarge = true;
+        reject(new PayloadTooLargeError());
         return;
       }
       chunks.push(chunk);

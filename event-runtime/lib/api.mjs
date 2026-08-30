@@ -19,6 +19,7 @@ import {
   isLoopbackHost,
   isLoopbackOrigin,
   parseJson,
+  PayloadTooLargeError,
   readBody,
   send as sendJson,
 } from "./api-http.mjs";
@@ -97,6 +98,11 @@ const BEARER_EXEMPT_ROUTES = new Set([
   // exempt too — an external GitHub sender cannot present a bearer (WM-1150).
   "POST /webhooks/github",
 ]);
+
+function payloadTooLargeBody(err) {
+  if (!(err instanceof PayloadTooLargeError)) return null;
+  return { error: err.code, limitBytes: err.limitBytes };
+}
 
 /**
  * Constant-time bearer check (WM-1152). Returns true only for a well-formed
@@ -264,7 +270,7 @@ export function createApi({
           "POST /replay",
         ].includes(route)
       ) {
-        return handleIntakeApiRoute(common);
+        return await handleIntakeApiRoute(common);
       }
       if (url.pathname === "/inbox" || url.pathname.startsWith("/inbox/")) {
         const detailMatch = url.pathname.match(/^\/inbox\/([^/]+)$/);
@@ -315,6 +321,8 @@ export function createApi({
             }
             return send(200, result);
           } catch (err) {
+            const body = payloadTooLargeBody(err);
+            if (body) return send(413, body);
             const status = Number(err?.status) || 400;
             return send(status, {
               error: err?.code ?? "invalid_response",
@@ -451,9 +459,12 @@ export function createApi({
         if (result !== false) return result;
       }
       return send(404, { error: `no route: ${route}` });
-    } catch {
+    } catch (err) {
       // Never leak a stack trace across the API boundary.
-      if (!res.headersSent) sendJson(res, 500, { error: "internal_error" });
+      const body = payloadTooLargeBody(err);
+      if (!res.headersSent && body) sendJson(res, 413, body);
+      else if (!res.headersSent)
+        sendJson(res, 500, { error: "internal_error" });
       else res.end();
     }
   };
