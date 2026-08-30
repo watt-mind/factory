@@ -37,6 +37,52 @@ const check = (label, ok, detail = "") => {
 
 const sha256hex = (data) => createHash("sha256").update(data).digest("hex");
 
+const inboxUrl = `http://${client.host}:${port}/inbox?status=open`;
+const inboxHeaders = client.token
+  ? { authorization: `Bearer ${client.token}` }
+  : {};
+
+async function openInbox() {
+  const response = await fetch(inboxUrl, { headers: inboxHeaders });
+  if (!response.ok) {
+    throw new Error(`GET /inbox?status=open returned HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
+/** The Inbox is projected by the serve tick, after the seed has completed. */
+async function waitForOpenInbox(
+  match,
+  { timeoutMs = 5_000, everyMs = 100 } = {},
+) {
+  const deadline = Date.now() + timeoutMs;
+  let items = [];
+  while (Date.now() < deadline) {
+    ({ items = [] } = await openInbox());
+    if (match(items)) return items;
+    await Bun.sleep(everyMs);
+  }
+  return items;
+}
+
+const inboxSummary = (items) =>
+  items
+    .map((item) => `${item.kind}:${item.refs?.eventId ?? item.title}`)
+    .join(", ") || "none";
+
+const parkedDecision = (item) =>
+  item.kind === "BLOCKED" &&
+  item.refs?.eventId?.endsWith("-human-needed") &&
+  item.decision?.schemaVersion === "factory.decision-request/v1" &&
+  item.decision.question === "Should this parked event be requeued?" &&
+  JSON.stringify(item.decision.options?.map((option) => option.id)) ===
+    JSON.stringify(["requeue", "dismiss"]);
+
+const expiringDecision = (item) =>
+  item.refs?.eventId?.endsWith("-expired") &&
+  item.decision?.options?.some((option) => option.id === "approve") &&
+  item.decision?.options?.some((option) => option.id === "reject");
+
 // 1. Health endpoint
 const health = await client.health().catch(() => null);
 if (!health) {
@@ -433,6 +479,31 @@ check(
   "≥1 open TTL-expired proposal (p.expired === true)",
   expiredProposals.length >= 1,
   `found ${expiredProposals.length}`,
+);
+
+// 8a. Inbox projection verification. Notifications are created by the serve
+// tick, so poll each expectation rather than racing a one-time read after seed.
+const inboxItems = await waitForOpenInbox((items) => items.length >= 1);
+check(
+  "GET /inbox?status=open returns ≥1 open item",
+  inboxItems.length >= 1,
+  `found ${inboxSummary(inboxItems)}`,
+);
+const parkedInboxItems = await waitForOpenInbox((items) =>
+  items.some(parkedDecision),
+);
+check(
+  "BLOCKED parked human_needed Inbox item has requeue/dismiss decision",
+  parkedInboxItems.some(parkedDecision),
+  `found ${inboxSummary(parkedInboxItems)}`,
+);
+const expiredInboxItems = await waitForOpenInbox((items) =>
+  items.some(expiringDecision),
+);
+check(
+  "TTL-expired Inbox item offers approve/reject decision",
+  expiredInboxItems.some(expiringDecision),
+  `found ${inboxSummary(expiredInboxItems)}`,
 );
 
 const { proposals: allProposals } = await client.proposals("all");
