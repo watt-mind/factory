@@ -30,6 +30,10 @@ import {
 } from "../lib/control-plane/index.mjs";
 import { harnessGitignoreIsCurrent } from "../lib/factory-gitignore.mjs";
 import {
+  normalizeToolchain,
+  preflightToolchain,
+} from "../event-runtime/lib/repos.mjs";
+import {
   browserLaunchCheck,
   piChromeDevtoolsCheck,
 } from "./doctor-browser.mjs";
@@ -206,6 +210,68 @@ export function ossOnboardingDiagnostics({
   return diagnostics;
 }
 
+/**
+ * Per-repo toolchain status for `factory doctor` (WM-316 / #1097).
+ *
+ * Pure except for the injectable `which`/`spawn` probes — the same
+ * injection `preflightToolchain` uses — so doctor.test.mjs can cover
+ * pass, mismatch, and the undeclared no-block case without touching the
+ * host. Repos may be raw YAML entries (map-form `toolchain:`) or
+ * `loadRepos()` records; the helper always normalizes first so iterating a
+ * map cannot throw, and a malformed block becomes a red `toolchain` check
+ * instead of an exception.
+ */
+export async function repoToolchainDiagnostics({
+  repos = [],
+  file = "config/repos.yaml",
+  node = "local",
+  which,
+  spawn,
+} = {}) {
+  const diagnostics = [];
+  const preflightOpts = { node };
+  if (typeof which === "function") preflightOpts.which = which;
+  if (typeof spawn === "function") preflightOpts.spawn = spawn;
+
+  for (const repo of repos) {
+    // A malformed `toolchain:` block is itself the diagnosis — surface it as
+    // a red check and keep going rather than letting the RepoError kill
+    // doctor with a stack trace before the remaining repos are examined.
+    let toolchain;
+    try {
+      toolchain = normalizeToolchain(repo?.toolchain, repo?.name, file);
+    } catch (err) {
+      diagnostics.push({
+        ok: false,
+        label: "toolchain",
+        detail: err?.message ?? String(err),
+        fix: `fix the toolchain: block for ${repo?.name ?? "this repo"} in ${file}`,
+      });
+      continue;
+    }
+    if (!toolchain?.length) continue;
+    const attestation = await preflightToolchain(
+      { ...repo, toolchain },
+      preflightOpts,
+    );
+    for (const tool of attestation.tools) {
+      const reason = attestation.reasons.find(
+        (r) => r.executable === tool.executable,
+      );
+      const observed = tool.observed ?? tool.observedRaw ?? null;
+      diagnostics.push({
+        ok: tool.satisfied,
+        label: `toolchain ${tool.executable}`,
+        detail: observed
+          ? `${tool.constraint}  observed ${observed}`
+          : `${tool.constraint}  missing`,
+        fix: reason?.action ?? null,
+      });
+    }
+  }
+  return diagnostics;
+}
+
 const ROOT = factoryRoot();
 installLinearBudgetCapture();
 const argv = process.argv.slice(2);
@@ -350,6 +416,13 @@ if (import.meta.main) {
     console.log(
       c.bold(`\n${repo.name}`) + c.dim(`  ${repo.team} / ${repo.project}`),
     );
+
+    // Node-local: independent of whether the checkout exists. A mismatch is
+    // diagnosable here instead of only as a dispatch refusal.
+    for (const row of await repoToolchainDiagnostics({ repos: [repo] })) {
+      check(row.ok, row.label, row.detail, row.fix);
+    }
+
     const p = expand(repo.path);
 
     const cloned = existsSync(p) && existsSync(path.join(p, ".git"));

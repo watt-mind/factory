@@ -515,6 +515,7 @@ describe("reposView is what the control API serves", () => {
         "smokeUrl",
         "smokeWorkflow",
         "team",
+        "toolchain",
         "verify",
         "worktreeRoot",
       ]);
@@ -799,14 +800,16 @@ describe("toolchain: declaration parsing and validation", () => {
     ).toThrow(/declares toolchain executable "bun" twice/);
   });
 
-  test("the registry projection does not publish toolchain yet (removed by #1097)", () => {
-    // Not an oversight: /repos and the config view assert this projection
-    // exactly, in api-registry.test.mjs and api-config.test.mjs, both outside
-    // gh-1076's Owned Paths. Issue #1097 — toolchain status in `factory
-    // doctor` — publishes the field and updates those assertions in the same
-    // commit, and deletes this pin.
+  test("the registry projection publishes declared toolchain constraints, never observed versions", () => {
     const rows = reposView(loadRepos({ root: factoryRoot(YAML) }));
-    expect(rows[0]).not.toHaveProperty("toolchain");
+    expect(rows[0].toolchain).toEqual([
+      { executable: "bun", constraint: ">=1.3 <2" },
+      { executable: "node", constraint: ">=22 <25" },
+    ]);
+    expect(rows[1].toolchain).toBeNull();
+    expect(JSON.stringify(rows[0].toolchain)).not.toMatch(
+      /observed|resolved|satisfied/,
+    );
   });
 });
 

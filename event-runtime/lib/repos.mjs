@@ -278,7 +278,7 @@ export function isToolchainConstraint(constraint) {
  * Absent/null returns null — "not declared" — which is what keeps this change
  * additive for every repo that has no block.
  */
-function normalizeToolchain(raw, repoName, file) {
+export function normalizeToolchain(raw, repoName, file) {
   if (raw === undefined || raw === null) return null;
 
   /** @type {Array<[unknown, unknown]>} */
@@ -599,7 +599,7 @@ export function repoReadiness({
           // Must be runnable: `bin/factory` has no `repo` subcommand, so the
           // repo-scoped `factory repo doctor <name>` the design sketches does
           // not exist yet. Name what exists and what is pending.
-          action: `re-run toolchain preflight for repo ${repo.name} on ${node} — \`factory doctor\` reports it once #1097 lands`,
+          action: `re-run toolchain preflight for repo ${repo.name} on ${node} — \`factory doctor\` reports the mismatch`,
         },
       ],
       refusal: `repo ${repo.name} has no current toolchain attestation on ${node} (${detail})`,
@@ -950,12 +950,9 @@ export function reposView(repos) {
     hasWorktreeDown: repo.worktreeDown !== null,
     hasWorktreeWarm: repo.worktreeWarm !== null,
     verify: repo.verify,
-    // `toolchain` is deliberately NOT published here yet. Adding a field to
-    // this projection changes /repos and the config view in the same commit,
-    // and both are asserted exactly in files outside gh-1076's Owned Paths
-    // (api-registry.test.mjs, api-config.test.mjs). Issue #1097 — teach
-    // `factory doctor` to report toolchain status — publishes it and updates
-    // those assertions alongside.
+    // Declared constraints only — observed versions belong to a node's
+    // attestation, not the registry projection.
+    toolchain: repo.toolchain ?? null,
   }));
 }
 
