@@ -457,6 +457,7 @@ export function Events({
     focusEvent?.type ? `type:${focusEvent.type}` : "",
   );
   const [confirmReplay, setConfirmReplay] = useState(false);
+  const [replayedEventKey, setReplayedEventKey] = useState<string | null>(null);
 
   const fetchAll = context.kind === "repo";
   const list = useInfiniteQuery({
@@ -699,6 +700,14 @@ export function Events({
         : null,
     [visible, selectedKey],
   );
+  const replayed = selectedKey === replayedEventKey;
+
+  // A replay is a one-shot action for the current detail selection. Closing
+  // the pane or selecting another event restores the action for that detail.
+  useEffect(() => {
+    setReplayedEventKey(null);
+  }, [selectedKey]);
+
   // The detail pane leaves a compact triage list. Keep the columns needed to
   // identify and compare events; the complete row remains in Display when the
   // pane closes, and every field remains available in the pane itself.
@@ -852,10 +861,11 @@ export function Events({
   });
 
   const replay = useMutation({
-    mutationFn: (envelope: unknown) => api.replay(envelope),
-    onSuccess: (data) => {
+    mutationFn: (event: AdmittedEvent) => api.replay(event.envelope),
+    onSuccess: (data, event) => {
       queryClient.invalidateQueries();
       setConfirmReplay(false);
+      setReplayedEventKey(keyOf(event));
       notify(
         data.duplicate
           ? `Duplicate event ${data.eventId}`
@@ -990,10 +1000,14 @@ export function Events({
               },
             ]
           : []),
-        {
-          label: `Replay ${sel.eventId} through intake…`,
-          run: () => setConfirmReplay(true),
-        },
+        ...(replayed
+          ? []
+          : [
+              {
+                label: `Replay ${sel.eventId} through intake…`,
+                run: () => setConfirmReplay(true),
+              },
+            ]),
         {
           label: `Trigger ${sel.type} again (new event id)…`,
           run: () =>
@@ -1013,6 +1027,7 @@ export function Events({
     sel ? keyOf(sel) : null,
     canRequeue,
     connected,
+    replayed,
     onJumpChain,
     onJumpRun,
     onJumpProposal,
@@ -1547,7 +1562,7 @@ export function Events({
                   </Button>
                 )}
                 <Button
-                  disabled={!connected || replay.isPending}
+                  disabled={!connected || replay.isPending || replayed}
                   onClick={() => setConfirmReplay(true)}
                 >
                   Replay…
@@ -1740,8 +1755,8 @@ export function Events({
             <Button onClick={() => setConfirmReplay(false)}>Cancel</Button>
             <Button
               variant="primary"
-              disabled={!connected || replay.isPending}
-              onClick={() => replay.mutate(sel.envelope)}
+              disabled={!connected || replay.isPending || replayed}
+              onClick={() => replay.mutate(sel)}
             >
               Replay
             </Button>
