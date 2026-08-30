@@ -242,6 +242,30 @@ describe("serve command", () => {
     expect(chainsRan).toBe(true);
   });
 
+  test("tick sweeps stale notify-log markers on the hourly GC cadence", async () => {
+    const { tick, PRUNE_INTERVAL_MS } = await import("../cli.mjs");
+    const { loadRegistry } = await import("../lib/registry.mjs");
+    const { ensureNotifyLog } = await import("../lib/notify.mjs");
+    const db = openDb(":memory:");
+    const now = Date.now();
+    ensureNotifyLog(db);
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES ('human_needed', 'test/resolved-event', 'old marker', ?)`,
+    ).run(new Date(now - 15 * 24 * 60 * 60 * 1000).toISOString());
+
+    await tick({
+      db,
+      registry: loadRegistry(),
+      policyVersion: "git:test",
+      now,
+      lastPrune: now - PRUNE_INTERVAL_MS - 1,
+      subsystems: { notify: () => {} },
+    });
+
+    expect(db.query("SELECT COUNT(*) AS n FROM notify_log").get().n).toBe(0);
+  });
+
   test("tick with FACTORY_EVENT_NOTIFY=1 pushes a human_needed park through the stub notifier exactly once", async () => {
     const { delivery } = await runNotifierDeliveryCase();
     expect(delivery.error).toBeNull();

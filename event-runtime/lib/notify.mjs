@@ -29,7 +29,7 @@
  */
 import { spawn } from "node:child_process";
 import { createInboxItem, deliverInboxItem } from "./inbox.mjs";
-import { txImmediate } from "./db.mjs";
+import { tx, txImmediate } from "./db.mjs";
 import { templateFor } from "./decision-templates.mjs";
 import { proposalSubject } from "./proposal-subject.mjs";
 import { notifyCommand as resolveNotifyCommand } from "../../lib/notify.mjs";
@@ -85,6 +85,53 @@ const KIND_HUMAN_NEEDED = "human_needed";
 const DEDUP_PROPOSAL_TTL = "proposal_ttl";
 const KIND_DECISION_NEEDED = "decision_needed";
 const KIND_PROPOSAL_EXPIRED = "proposal_expired";
+export const DEFAULT_NOTIFY_LOG_RETENTION_DAYS = 14;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Remove expired dedup markers only after their referent can no longer notify.
+ * Open proposals and still-parked events retain their markers regardless of
+ * age, preserving the once-only push guarantee.
+ */
+export function sweepNotifyLog(
+  db,
+  { retentionDays = DEFAULT_NOTIFY_LOG_RETENTION_DAYS, now = Date.now() } = {},
+) {
+  if (!Number.isFinite(retentionDays) || retentionDays <= 0) {
+    throw new Error("retentionDays must be a positive number of days");
+  }
+  ensureNotifyLog(db);
+  const cutoff = new Date(now - retentionDays * DAY_MS).toISOString();
+  return tx(
+    db,
+    () =>
+      db
+        .query(
+          `DELETE FROM notify_log
+         WHERE sent_at < ?
+           AND (
+             (kind = ? AND NOT EXISTS (
+               SELECT 1 FROM events
+               WHERE notify_log.target = events.source || '/' || events.event_id
+                 AND events.status = 'human_needed'
+             ))
+             OR
+             (kind IN (?, ?, ?) AND NOT EXISTS (
+               SELECT 1 FROM proposals
+               WHERE proposals.id = notify_log.target
+                 AND proposals.status = 'open'
+             ))
+           )`,
+        )
+        .run(
+          cutoff,
+          KIND_HUMAN_NEEDED,
+          DEDUP_PROPOSAL_TTL,
+          KIND_DECISION_NEEDED,
+          KIND_PROPOSAL_EXPIRED,
+        ).changes,
+  );
+}
 
 function alreadyNotified(db, kind, target) {
   return !!db

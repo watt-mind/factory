@@ -5,11 +5,13 @@ import path from "node:path";
 import { openDb } from "./db.mjs";
 import {
   DEFAULT_NOTIFY_CMD,
+  ensureNotifyLog,
   notifyCommand,
   notifyEnabled,
   notifyPending,
   pendingNotifications,
   sendNotification,
+  sweepNotifyLog,
 } from "./notify.mjs";
 import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
 import { fileURLToPath } from "node:url";
@@ -392,6 +394,50 @@ describe("notify (WM-65)", () => {
       createdAt: new Date(now - 60 * 60_000).toISOString(),
     });
     expect(pendingNotifications(db, { now })).toEqual([]);
+  });
+
+  test("sweeps stale markers for resolved referents but preserves parked-event dedup", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const old = new Date(now - 15 * 24 * 60 * 60 * 1000).toISOString();
+    ensureNotifyLog(db);
+    insertEvent(db, { eventId: "evt-resolved", status: "completed" });
+    insertEvent(db, { eventId: "evt-parked", status: "human_needed" });
+    insertProposal(db, {
+      id: "prop-decided",
+      eventId: "evt-resolved",
+      status: "approved",
+    });
+    insertProposal(db, { id: "prop-open", eventId: "evt-parked" });
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES (?, ?, 'old marker', ?)`,
+    ).run("human_needed", "test/evt-resolved", old);
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES (?, ?, 'old marker', ?)`,
+    ).run("human_needed", "test/evt-parked", old);
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES (?, ?, 'old marker', ?)`,
+    ).run("proposal_ttl", "prop-decided", old);
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES (?, ?, 'old marker', ?)`,
+    ).run("proposal_ttl", "prop-open", old);
+
+    expect(sweepNotifyLog(db, { now })).toBe(2);
+    expect(
+      db.query("SELECT kind, target FROM notify_log ORDER BY target").all(),
+    ).toEqual([
+      { kind: "proposal_ttl", target: "prop-open" },
+      { kind: "human_needed", target: "test/evt-parked" },
+    ]);
+
+    // A sweep must not remove the marker for an eligible park: no duplicate.
+    expect(
+      notifyPending(db, { now, enabled: true, command: "/x/stub" }).sent,
+    ).toEqual([]);
   });
 
   test("a notifier that exits non-zero is recorded on notify_log and logged, not thrown", async () => {

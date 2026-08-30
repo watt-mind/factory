@@ -26,7 +26,7 @@ import {
   planAdmittedEvents,
 } from "../lib/planner.mjs";
 import { resolveChains } from "../lib/chain.mjs";
-import { notifyPending } from "../lib/notify.mjs";
+import { notifyPending, sweepNotifyLog } from "../lib/notify.mjs";
 import { reconcileInbox } from "../lib/inbox.mjs";
 import { loadModelTierMap, loadRegistry } from "../lib/registry.mjs";
 import { applyModelTierCellOverrides } from "../lib/runtime-overrides.mjs";
@@ -188,6 +188,8 @@ export async function tick({
         logLine(
           `artifacts: pruned ${pruned.deleted} orphan(s), freed ${pruned.freedBytes}B`,
         );
+      const swept = sweepNotifyLog(db, { now });
+      if (swept > 0) logLine(`notify: swept ${swept} stale dedup marker(s)`);
     } finally {
       nextPrune = now;
     }
