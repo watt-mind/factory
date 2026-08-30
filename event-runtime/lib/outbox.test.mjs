@@ -32,7 +32,7 @@ describe("publishOutbox", () => {
     expect(seen).toEqual(["a", "b"]);
   });
 
-  test("parks a poisoned row and delivers its successor", () => {
+  test("parks a parse-poisoned row on its first failure and delivers its successor", () => {
     const db = openDb(":memory:");
     db.query(`INSERT INTO outbox (event_json, created_at) VALUES (?, ?)`).run(
       "not JSON",
@@ -40,34 +40,11 @@ describe("publishOutbox", () => {
     );
     seedOutbox(db, "successor");
     const logs = [];
-
-    expect(
-      publishOutbox(db, {
-        sink: () => {
-          throw new Error("should not receive malformed event");
-        },
-        maxAttempts: 2,
-        log: (line) => logs.push(line),
-      }),
-    ).toEqual({ delivered: 0, remaining: 2 });
-    expect(
-      db
-        .query(
-          `SELECT delivery_attempts, delivery_error, published_at
-           FROM outbox WHERE seq = 1`,
-        )
-        .get(),
-    ).toEqual({
-      delivery_attempts: 1,
-      delivery_error: expect.stringContaining("JSON"),
-      published_at: null,
-    });
-
     const seen = [];
+
     expect(
       publishOutbox(db, {
         sink: (event) => seen.push(event.eventId),
-        maxAttempts: 2,
         log: (line) => logs.push(line),
       }),
     ).toEqual({ delivered: 1, remaining: 0 });
@@ -80,7 +57,7 @@ describe("publishOutbox", () => {
         )
         .get(),
     ).toEqual({
-      delivery_attempts: 2,
+      delivery_attempts: 1,
       delivery_error: expect.stringContaining("JSON"),
       published_at: expect.any(String),
     });
@@ -120,7 +97,7 @@ describe("publishOutbox", () => {
     });
   });
 
-  test("retries a transient sink failure before later rows", () => {
+  test("backs off transient sink failures before retrying later rows", () => {
     const db = openDb(":memory:");
     seedOutbox(db, "a");
     seedOutbox(db, "b");
@@ -134,15 +111,62 @@ describe("publishOutbox", () => {
       seen.push(event.eventId);
     };
 
-    expect(publishOutbox(db, { sink })).toEqual({ delivered: 0, remaining: 2 });
+    expect(publishOutbox(db, { sink, now: 0 })).toEqual({
+      delivered: 0,
+      remaining: 2,
+    });
     expect(seen).toEqual([]);
-    expect(publishOutbox(db, { sink })).toEqual({ delivered: 2, remaining: 0 });
+    expect(publishOutbox(db, { sink, now: 4_999 })).toEqual({
+      delivered: 0,
+      remaining: 2,
+    });
+    expect(publishOutbox(db, { sink, now: 5_000 })).toEqual({
+      delivered: 2,
+      remaining: 0,
+    });
     expect(seen).toEqual(["a", "b"]);
+  });
+
+  test("doubles transient retry delays before parking at the attempt limit", () => {
+    const db = openDb(":memory:");
+    seedOutbox(db, "a");
+    const sink = () => {
+      throw new Error("sink down");
+    };
+
+    expect(publishOutbox(db, { sink, now: 0 })).toEqual({
+      delivered: 0,
+      remaining: 1,
+    });
+    expect(publishOutbox(db, { sink, now: 5_000 })).toEqual({
+      delivered: 0,
+      remaining: 1,
+    });
+    expect(publishOutbox(db, { sink, now: 14_999 })).toEqual({
+      delivered: 0,
+      remaining: 1,
+    });
+    expect(publishOutbox(db, { sink, now: 15_000 })).toEqual({
+      delivered: 0,
+      remaining: 0,
+    });
+    expect(
+      db
+        .query(
+          `SELECT delivery_attempts, delivery_error, published_at
+           FROM outbox WHERE seq = 1`,
+        )
+        .get(),
+    ).toEqual({
+      delivery_attempts: 3,
+      delivery_error: "sink down",
+      published_at: expect.any(String),
+    });
   });
 });
 
 describe("outbox retention and drain index", () => {
-  test("retention deletes only published rows outside its bounded window", () => {
+  test("retention deletes only delivered rows outside its bounded window", () => {
     const db = openDb(":memory:");
     const now = 30 * 24 * 60 * 60 * 1000;
     const old = new Date(0).toISOString();
@@ -153,6 +177,10 @@ describe("outbox retention and drain index", () => {
     insert.run('{"eventId":"old"}', old, old);
     insert.run('{"eventId":"recent"}', recent, recent);
     insert.run('{"eventId":"pending"}', old, null);
+    db.query(
+      `INSERT INTO outbox (event_json, created_at, published_at, delivery_error)
+       VALUES (?, ?, ?, ?)`,
+    ).run('{"eventId":"parked"}', old, old, "sink unavailable");
 
     expect(sweepPublishedOutbox(db, { now, retentionDays: 14 })).toBe(1);
     expect(
@@ -162,6 +190,7 @@ describe("outbox retention and drain index", () => {
     ).toEqual([
       { event_json: '{"eventId":"recent"}', published_at: recent },
       { event_json: '{"eventId":"pending"}', published_at: null },
+      { event_json: '{"eventId":"parked"}', published_at: old },
     ]);
   });
 

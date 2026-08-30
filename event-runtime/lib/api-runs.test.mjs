@@ -1547,7 +1547,7 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
     }
   });
 
-  test("journal feed pages by seq and outbox lists published result events", async () => {
+  test("journal feed pages by seq and outbox exposes delivery state", async () => {
     const { db, server, port } = await makeServer();
     const client = apiClient({ port });
     try {
@@ -1580,6 +1580,23 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
       expect(outbox).toHaveLength(1);
       expect(outbox[0].event.type).toBe("factory.status-report.completed");
       expect(outbox[0].published_at).toBeNull(); // no serve loop in this test — sink not run
+      expect(outbox[0]).toMatchObject({
+        deliveryAttempts: 0,
+        deliveryError: null,
+        parked: false,
+      });
+
+      db.query(
+        `UPDATE outbox
+         SET delivery_attempts = 3, delivery_error = ?, published_at = ?
+         WHERE seq = ?`,
+      ).run("sink unavailable", new Date().toISOString(), outbox[0].seq);
+      const parked = (await client.outbox()).outbox[0];
+      expect(parked).toMatchObject({
+        deliveryAttempts: 3,
+        deliveryError: "sink unavailable",
+        parked: true,
+      });
     } finally {
       server.close();
     }

@@ -201,6 +201,12 @@ export function statusView(
   const unpublishedOutbox = db
     .query(`SELECT COUNT(*) AS n FROM outbox WHERE published_at IS NULL`)
     .get().n;
+  const parkedOutbox = db
+    .query(
+      `SELECT COUNT(*) AS n FROM outbox
+       WHERE published_at IS NOT NULL AND delivery_error IS NOT NULL`,
+    )
+    .get().n;
   const deadLettered = db
     .query(
       `SELECT source, event_id, last_plan_error FROM events WHERE status = 'dead_lettered' AND archived_at IS NULL`,
@@ -287,6 +293,7 @@ export function statusView(
       expiredOpenProposals: expiredOpen.map((p) => p.id),
       staleLeases,
       unpublishedOutbox,
+      parkedOutbox,
       deadLettered,
       stalledWorkers: stalled.map((w) => ({
         workerId: w.workerId,
