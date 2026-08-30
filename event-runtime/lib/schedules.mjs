@@ -12,6 +12,8 @@
  */
 import { canonicalJson } from "./canonical.mjs";
 import { admitEvent } from "./intake.mjs";
+import { rejectProposal } from "./proposals.mjs";
+import { getAgent, getEventType } from "./registry.mjs";
 
 export const SCHEDULE_SOURCE = "schedule";
 /** Fields emitDueTicks always stamps itself, overriding a static payload. */
@@ -341,22 +343,54 @@ export function autoApproveScheduled(
   { now = Date.now(), policyVersion } = {},
 ) {
   const approved = [];
+  const expired = [];
   const errors = [];
   const autoLoops = new Map(
     Object.entries(registry.schedules ?? {}).filter(
       ([, s]) => s.enabled && (s.approval ?? "watched") === "auto",
     ),
   );
-  if (autoLoops.size === 0) return { approved, errors };
-
   const rows = db
     .query(
-      `SELECT p.id, e.event_id, e.type, e.envelope_json FROM proposals p
+      `SELECT p.id, p.run_id, p.spec_json, e.event_id, e.type, e.envelope_json FROM proposals p
        JOIN events e ON e.source = p.event_source AND e.event_id = p.event_id
        WHERE p.status = 'open' AND p.decision = 'run' AND e.source = ?`,
     )
     .all(SCHEDULE_SOURCE);
   for (const row of rows) {
+    // A scheduler can outlive an agent/event definition across a registry
+    // deploy. If neither is still registered, no approval path can re-plan
+    // this PROPOSED row. Resolve it once rather than leaving it for every
+    // subsequent serve tick to reconsider.
+    let spec;
+    try {
+      spec = JSON.parse(row.spec_json);
+    } catch {
+      spec = null;
+    }
+    let retiredDefinition = false;
+    if (typeof spec?.agent === "string") {
+      try {
+        getAgent(registry, spec.agent);
+      } catch {
+        retiredDefinition = true;
+      }
+    }
+    if (retiredDefinition && !getEventType(registry, row.type)) {
+      try {
+        rejectProposal(db, row.id, {
+          actor: SCHEDULE_SOURCE,
+          reason: "registry_stale",
+          now,
+          policyVersion,
+        });
+        expired.push({ proposalId: row.id, runId: row.run_id });
+      } catch (err) {
+        errors.push(`registry_stale ${row.id}: ${err.message}`);
+      }
+      continue;
+    }
+
     let envelope;
     try {
       envelope = JSON.parse(row.envelope_json);
@@ -371,6 +405,7 @@ export function autoApproveScheduled(
     // the tick this loop's configuration emits — its event type, its
     // `clock:<loop>:<slot>` identity, and its static payload verbatim.
     if (!matchesConfiguredTick(envelope, row, loop, schedule)) continue;
+    if (autoLoops.size === 0) continue;
     try {
       const outcome = approve(db, registry, row.id, {
         actor: SCHEDULE_SOURCE,
@@ -383,7 +418,7 @@ export function autoApproveScheduled(
       errors.push(`${loop}: ${err.message}`);
     }
   }
-  return { approved, errors };
+  return { approved, expired, errors };
 }
 
 export const DEFAULT_PROPOSALS_PILING_THRESHOLD = 3;

@@ -1949,4 +1949,33 @@ describe("chain auto approval (WM-357)", () => {
     );
     expect(inFlightReads).toBe(1);
   });
+
+  test("a large pending chain backlog is bounded per pass (#1706)", async () => {
+    const db = openDb(":memory:");
+    const backlog = Array.from({ length: 50 }, (_, i) =>
+      dispatchSeed(db, `bounded-${i}`, { ticket: `WM-${17060 + i}` }),
+    );
+    let eligibilityChecks = 0;
+
+    const result = await auto(db, {
+      maxRows: 8,
+      dispatchEligibility: () => {
+        eligibilityChecks += 1;
+        return {
+          ok: false,
+          reason: "registry_stale",
+          evidence: { ticket: { labels: [] }, escalatePathIntersections: [] },
+        };
+      },
+      runtimeGuard: () => null,
+    });
+
+    expect(result.skipped).toBe(42);
+    expect(eligibilityChecks).toBe(8);
+    expect(result.open).toHaveLength(8);
+    expect(
+      db.query(`SELECT COUNT(*) AS n FROM runs WHERE state = 'PROPOSED'`).get()
+        .n,
+    ).toBe(backlog.length);
+  });
 });
