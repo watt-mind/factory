@@ -122,6 +122,21 @@ cleanup_up_daemons() {
   UP_STARTED_LABELS=()
 }
 
+cleanup_up_daemons_on_signal() {
+  # Disable the traps before teardown: cleanup itself awaits processes and must
+  # not recursively re-enter if another signal arrives while it is doing so.
+  trap - INT TERM ERR
+  cleanup_up_daemons
+  exit 130
+}
+
+cleanup_up_daemons_on_error() {
+  local status=$?
+  trap - INT TERM ERR
+  cleanup_up_daemons
+  exit "$status"
+}
+
 die() {
   cleanup_up_daemons
   printf '\033[31merror:\033[0m %s\n' "$*" >&2
@@ -418,6 +433,13 @@ case "$ACTION" in
     # Record what was already running before this invocation starts anything,
     # so a failed `up` can tell its own daemons from the operator's.
     snapshot_up_pidfiles
+    # From here until the ready banner, this invocation may own detached
+    # daemons. Always remove only those daemons if an interrupt or an unchecked
+    # command failure exits the shell early.
+    trap 'cleanup_up_daemons_on_signal' INT TERM
+    trap 'cleanup_up_daemons_on_error' ERR
+
+    command -v curl >/dev/null 2>&1 || die "curl not found — install curl before running factory up"
 
     # Dependency freshness (WM-312). A runtime dependency added to the repo does
     # not exist on the running stack until someone remembers `bun install` after
@@ -542,12 +564,21 @@ case "$ACTION" in
         bun "$REPO/event-runtime/cli.mjs" "${SERVE_ARGS[@]}"
     fi
 
-    # 2. Wait for API to respond
-    for i in $(seq 30); do
-      if curl -sf -m 1 "http://127.0.0.1:$API_PORT/health" >/dev/null 2>&1; then break; fi
+    # 2. Wait for API to respond. A connection-refused curl returns immediately,
+    # so this is a real 60-second wall-clock budget rather than 60 seconds of
+    # connected-request timeouts.
+    API_READY=0
+    for i in $(seq 600); do
+      if curl -sf -m 1 "http://127.0.0.1:$API_PORT/health" >/dev/null 2>&1; then
+        API_READY=1
+        break
+      fi
+      if ! pid_alive "$RUN_DIR/serve.pid"; then
+        die "event runtime exited before becoming healthy on $API_PORT — check logs at $RUN_DIR/serve.log"
+      fi
       sleep 0.1
     done
-    if ! curl -sf -m 1 "http://127.0.0.1:$API_PORT/health" >/dev/null 2>&1; then
+    if [[ "$API_READY" -ne 1 ]]; then
       die "event runtime failed to start on $API_PORT — check logs at $RUN_DIR/serve.log"
     fi
 
@@ -635,6 +666,7 @@ case "$ACTION" in
     printf '  status:  factory events status\n'
     printf '  tail:    factory tail\n'
     printf '  down:    factory down\n\n'
+    trap - INT TERM ERR
     ;;
 
   __supervise-web)
