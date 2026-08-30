@@ -1776,6 +1776,51 @@ describe("approving an expired proposal retargets its item (WM-714)", () => {
     });
     expect(invoked).toBe(1);
   });
+
+  test("a starved approve that loses its claim to a takeover does not retarget", async () => {
+    const db = openDb(":memory:");
+    const { id, approve, applyEffect } = replanned(db);
+    let finishStaleEffect;
+    const stale = decideInboxItem(db, id, approve, {
+      now: 1_000,
+      applyEffect: () =>
+        new Promise((resolve) => {
+          finishStaleEffect = () => resolve(applyEffect());
+        }),
+    });
+    await Promise.resolve();
+
+    // The owner starves past the claim timeout and a retry takes the claim
+    // over, settling the item as a plain approval.
+    const takeoverAt = 1_000 + PENDING_EFFECT_CLAIM_TIMEOUT_MS;
+    const takeover = await retryInboxDecision(db, id, {
+      now: takeoverAt,
+      applyEffect: () => ({ outcome: "applied" }),
+    });
+    expect(takeover.claimLost).toBeUndefined();
+    expect(takeover.item.resolvedAt).toBe(new Date(takeoverAt).toISOString());
+    expect(takeover.item.refs.proposalId).toBe(OLD);
+
+    // The stale owner's re-plan lands late: it must lose, not re-open the item.
+    finishStaleEffect();
+    await expect(stale).resolves.toMatchObject({
+      claimLost: true,
+      effect: { kind: "approve_proposal", outcome: "claim_lost" },
+    });
+    const item = getInboxItem(db, id);
+    expect(item.refs.proposalId).toBe(OLD);
+    expect(item.title).toContain(OLD);
+    expect(item.title).not.toContain(FRESH);
+    expect(item.resolvedAt).toBe(new Date(takeoverAt).toISOString());
+    expect(item.resolvedBy).toBe("operator:approve_proposal");
+    expect(item.response.effect).toMatchObject({
+      outcome: "applied",
+      retryAttempt: 1,
+    });
+    expect(item.response.effect.detail).toBeUndefined();
+    expect(item.responseHistory ?? []).toHaveLength(0);
+    expect(db.query("SELECT COUNT(*) AS n FROM inbox_items").get().n).toBe(1);
+  });
 });
 
 describe("inbox decisions register precedent memos (WM-812)", () => {

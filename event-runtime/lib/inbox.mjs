@@ -663,38 +663,34 @@ function settleInboxDecision(
       effect,
     };
   }
-  const settled =
-    effect.outcome === "applied" && !replanned
-      ? db.query(
-          `UPDATE inbox_items
-       SET response_json = ?,
+  const resolves = effect.outcome === "applied" && !replanned;
+  const settled = db
+    .query(
+      `UPDATE inbox_items
+       SET response_json = ?${
+         resolves
+           ? `,
            resolved_at = COALESCE(resolved_at, ?),
-           resolved_by = COALESCE(resolved_by, ?)
+           resolved_by = COALESCE(resolved_by, ?)`
+           : ""
+       }
        WHERE id = ?
          AND json_extract(response_json, '$.effect.claimedAt') = ?
          AND json_extract(response_json, '$.effect.retryAttempt') = ?`,
-        )
-      : db.query(
-          `UPDATE inbox_items
-           SET response_json = ?
-           WHERE id = ?
-             AND json_extract(response_json, '$.effect.claimedAt') = ?
-             AND json_extract(response_json, '$.effect.retryAttempt') = ?`,
-        );
-  const params = [
-    JSON.stringify(answer),
-    ...(effect.outcome === "applied" && !replanned
-      ? [new Date(now).toISOString(), `operator:${effect.kind}`]
-      : []),
-    id,
-    claimEffect.claimedAt,
-    claimEffect.retryAttempt,
-  ];
-  if (settled.run(...params).changes !== 1)
-    return lostInboxDecisionClaim(db, id, effect);
+    )
+    .run(
+      JSON.stringify(answer),
+      ...(resolves
+        ? [new Date(now).toISOString(), `operator:${effect.kind}`]
+        : []),
+      id,
+      claimEffect.claimedAt,
+      claimEffect.retryAttempt,
+    );
+  if (settled.changes !== 1) return lostInboxDecisionClaim(db, id, effect);
   const item = getInboxItem(db, id);
   let memos = [];
-  if (effect.outcome === "applied" && !replanned) {
+  if (resolves) {
     memos = registerInboxDecisionMemos(db, item, response, {
       now,
       artifactStore,
