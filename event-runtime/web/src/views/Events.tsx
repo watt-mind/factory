@@ -531,15 +531,17 @@ export function Events({
     decisionOf(e, decisions.byId, decisions.byEvent, decisions.runsById);
   const rows: EventFilterRow[] = useMemo(
     () =>
-      (list.data?.pages.flatMap((page) => page.events) ?? []).map((e) => {
-        const d = decisionOf(
-          e,
-          decisions.byId,
-          decisions.byEvent,
-          decisions.runsById,
-        );
-        return d?.reason ? { ...e, decisionReason: d.reason } : e;
-      }),
+      (list.data?.pages ?? [])
+        .flatMap((page) => page?.events ?? [])
+        .map((e) => {
+          const d = decisionOf(
+            e,
+            decisions.byId,
+            decisions.byEvent,
+            decisions.runsById,
+          );
+          return d?.reason ? { ...e, decisionReason: d.reason } : e;
+        }),
     [list.data, decisions],
   );
   const scoped = useMemo(() => {

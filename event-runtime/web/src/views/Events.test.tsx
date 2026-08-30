@@ -489,6 +489,37 @@ describe("Events component harness: cross-tab reveal", () => {
   });
 });
 
+describe("Events component harness: malformed /events pages (#1394)", () => {
+  test("a page without an events key renders the empty state instead of throwing", async () => {
+    await withApi(
+      {
+        events: async () =>
+          ({ nextBefore: null }) as unknown as { events: AdmittedEvent[] },
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { findByText } = renderEvents();
+        expect(await findByText(/No events\./i)).toBeTruthy();
+        expect(await findByText(/0 loaded rows/i)).toBeTruthy();
+      },
+    );
+  });
+
+  test("a bare [] /events response renders the empty state instead of throwing", async () => {
+    await withApi(
+      {
+        events: async () => [] as unknown as { events: AdmittedEvent[] },
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { findByText } = renderEvents();
+        expect(await findByText(/No events\./i)).toBeTruthy();
+        expect(await findByText(/0 loaded rows/i)).toBeTruthy();
+      },
+    );
+  });
+});
+
 describe("Events component harness: facet chips grouping and visual distinction", () => {
   test("renders Type and Source category groups with labels and numerical counts", async () => {
     const e1 = stubEvent("evt_1", "admitted", {
