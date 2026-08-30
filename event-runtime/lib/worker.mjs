@@ -2507,15 +2507,22 @@ export function createReloadWatcher({
 const linearCli = () => path.join(FACTORY_ROOT, "tools", "linear.mjs");
 
 /**
- * Resolve Linear credentials the same way the CLI does: process env first,
- * then the operator's shared env file. The resolved value is copied into the
- * supplied env so every Linear CLI child inherits it; it is never logged.
+ * Resolve Linear credentials from the environment, optionally reading an
+ * explicitly configured env file. Tests and offline runs never read disk for
+ * a key; their children inherit the same offline guard through process.env.
  */
 export function resolveLinearApiKey({
   env = process.env,
-  envFile = path.join(homedir(), "Develop", "hdkiller", ".env"),
+  envFile = env.FACTORY_LINEAR_ENV_FILE,
 } = {}) {
   if (env.LINEAR_API_KEY) return env.LINEAR_API_KEY;
+  if (
+    env.FACTORY_LINEAR_OFFLINE === "1" ||
+    env.NODE_ENV === "test" ||
+    env.BUN_TEST
+  )
+    return null;
+  if (!envFile) return null;
   if (!existsSync(envFile)) return null;
 
   try {
@@ -2544,6 +2551,21 @@ export function runLinearCli(
   args,
   { command = "bun", timeoutMs = workerSubprocessTimeoutMs(), repo } = {},
 ) {
+  // Do not even spawn the tracker CLI in test/offline mode. Besides making the
+  // child inherit tools/ticket.mjs's fetch guard, this makes an omitted test
+  // seam observable before a real executable can escape the test process.
+  if (
+    process.env.FACTORY_LINEAR_ALLOW_NETWORK !== "1" &&
+    (process.env.FACTORY_LINEAR_OFFLINE === "1" ||
+      process.env.NODE_ENV === "test" ||
+      process.env.BUN_TEST)
+  ) {
+    const error = new Error(
+      "linear_offline_guard: tracker CLI spawn is disabled in test/offline mode",
+    );
+    error.code = "linear_offline_guard";
+    throw error;
+  }
   // --repo so ticket.mjs resolves the ticket's OWN control plane. Without it a
   // Linear-repo claim/read runs against the worker cwd's plane (github) and
   // silently no-ops — the claim read-back then reports ticket_claim_lost,

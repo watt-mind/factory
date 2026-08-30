@@ -2,6 +2,7 @@ import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-worker-di
 import "../test-helpers.mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
+import { fakeTrackerCli } from "./test-helpers.mjs";
 import { insideHandoffSandbox } from "./verify.mjs";
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -31,6 +32,7 @@ import {
   releaseClaimLock,
   resolveLinearApiKey,
   retryRun,
+  runLinearCli,
   runOnce,
 } from "./worker.mjs";
 import { liveWorkerLeases } from "../../lib/worker-leases.mjs";
@@ -752,7 +754,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     db.close();
   });
 
-  test("resolves Linear credentials from env first, then the shared env file", () => {
+  test("resolves Linear credentials from env first, then an opt-in env file", () => {
     const dir = tmpDir("evrt-linear-key-");
     const envFile = path.join(dir, ".env");
     writeFileSync(envFile, "OTHER=value\nLINEAR_API_KEY='file-key'\n", "utf8");
@@ -760,9 +762,46 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     const fromEnv = { LINEAR_API_KEY: "process-key" };
     expect(resolveLinearApiKey({ env: fromEnv, envFile })).toBe("process-key");
 
-    const fromFile = {};
-    expect(resolveLinearApiKey({ env: fromFile, envFile })).toBe("file-key");
+    const fromFile = { FACTORY_LINEAR_ENV_FILE: envFile };
+    expect(resolveLinearApiKey({ env: fromFile })).toBe("file-key");
     expect(fromFile.LINEAR_API_KEY).toBe("file-key");
+
+    expect(
+      resolveLinearApiKey({
+        env: { FACTORY_LINEAR_ENV_FILE: envFile, FACTORY_LINEAR_OFFLINE: "1" },
+      }),
+    ).toBeNull();
+  });
+
+  test("offline tests reject a tracker CLI spawn before invoking bun", () => {
+    expect(() => runLinearCli(["get", "WM-501"])).toThrow(
+      "linear_offline_guard",
+    );
+  });
+
+  // Regression for #1816: a real key in the environment must not be enough to
+  // open a connection from a test process. The preloaded guard rejects the
+  // fetch itself, so even an in-process Linear client cannot spend budget.
+  test("a real LINEAR_API_KEY in the test environment never reaches api.linear.app", async () => {
+    const previousKey = process.env.LINEAR_API_KEY;
+    process.env.LINEAR_API_KEY = "lin_api_FAKE_REAL_LOOKING_KEY";
+    try {
+      expect(process.env.FACTORY_LINEAR_OFFLINE).toBe("1");
+      expect(globalThis.fetch.__factoryLinearOfflineGuard).toBe(true);
+      await expect(
+        fetch("https://api.linear.app/graphql", {
+          method: "POST",
+          headers: { Authorization: process.env.LINEAR_API_KEY },
+          body: "{}",
+        }),
+      ).rejects.toThrow("linear_offline_guard");
+      expect(() => runLinearCli(["comment", "WM-501", "handoff"])).toThrow(
+        "linear_offline_guard",
+      );
+    } finally {
+      if (previousKey === undefined) delete process.env.LINEAR_API_KEY;
+      else process.env.LINEAR_API_KEY = previousKey;
+    }
   });
 
   test("missing process credentials never activate the dispatch stub implicitly (WM-533)", async () => {
@@ -871,17 +910,11 @@ describe("execute-side dispatch hardening (WM-115)", () => {
   // handoff comment — fell through to the real tracker CLI. A fake-adapter run
   // then spawned `bun tools/linear.mjs comment` per run: real Linear writes
   // from the test suite, and a wall-clock dependency that timed the burst test
-  // out on CI. Shim `bun` on PATH and assert nothing reaches the tracker CLI.
+  // out on CI. Use the shared fake tracker CLI and assert nothing reaches it.
   test("a partial dispatch override still never reaches the tracker CLI under the fake adapter", async () => {
-    const shimDir = tmpDir("evrt-bun-shim-");
-    const spawnLog = path.join(shimDir, "spawned.log");
-    writeFileSync(
-      path.join(shimDir, "bun"),
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(spawnLog)}\nexit 0\n`,
-      { mode: 0o755 },
-    );
+    const fakeCli = fakeTrackerCli();
     const previousPath = process.env.PATH;
-    process.env.PATH = `${shimDir}:${previousPath}`;
+    process.env.PATH = `${fakeCli.path}:${previousPath}`;
     try {
       const db = openDb(":memory:");
       const spec = queueRun(
@@ -907,10 +940,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
         reasonCode: "ok",
       });
       expect(runState(db, spec.runId)).toBe("COMPLETED");
-      const spawned = existsSync(spawnLog)
-        ? readFileSync(spawnLog, "utf8")
-        : "";
-      expect(spawned).not.toContain("linear.mjs");
+      expect(fakeCli.calls()).not.toContain("linear.mjs");
     } finally {
       process.env.PATH = previousPath;
     }

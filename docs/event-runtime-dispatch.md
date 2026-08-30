@@ -217,6 +217,17 @@ Linear API; a follow-up re-pin of `dispatch@1` plus `verify.mjs`
 `linear_rate_limited` without a contract violation. The planner and
 auto-approval path above is what stops the inbox escalation.
 
+### Linear test/offline guard
+
+`bun test` preloads `FACTORY_LINEAR_OFFLINE=1`, and CI sets it for every job.
+While it is set (or `NODE_ENV=test` / `BUN_TEST` is present),
+`tools/ticket.mjs` rejects any `api.linear.app` fetch with
+`linear_offline_guard` before a connection opens. The guard is inherited by
+spawned tracker CLIs. A deliberately networked integration probe must opt in
+with `FACTORY_LINEAR_ALLOW_NETWORK=1`. Worker credential lookup reads only
+`LINEAR_API_KEY` by default; use `FACTORY_LINEAR_ENV_FILE=/path/to/.env` to
+opt into an env-file fallback. Offline/test mode never reads that file.
+
 ---
 
 ## 3. Capacity: one budget, checked at plan and again at execute
