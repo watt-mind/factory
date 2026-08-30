@@ -33,7 +33,7 @@ export function reapExpiredLeases(db, opts = {}) {
     },
   });
   try {
-    workerPruner(db, opts);
+    workerPruner(db, reapOpts);
   } catch (error) {
     errors.push({ runId: null, stage: "prune_workers", error });
     log(`[reaper] worker prune skipped: ${error?.message ?? String(error)}`);
