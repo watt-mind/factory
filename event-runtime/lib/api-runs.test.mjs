@@ -1490,30 +1490,30 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
 
       const rejectedProposal = await planned("reject-contention");
       const rejectLock = await holdWriteLock(s.db.filename, 6_000);
-      let lockReleasedAt;
-      const lockExited = rejectLock.exited.then((code) => {
-        lockReleasedAt = Date.now();
-        return code;
-      });
+      // Snapshot liveness synchronously, before the probe is issued: the
+      // child's exit is observed through `exitCode`, which Bun updates without
+      // an event-loop turn, so this cannot lag behind the probe start.
+      const lockLiveAtProbeStart = rejectLock.exitCode === null;
       const probeStartedAt = Date.now();
       const err = await rejection(
         s.client.reject(rejectedProposal.id, "locked"),
       );
       const probeFinishedAt = Date.now();
-      expect(await lockExited).toBe(0);
+      expect(await rejectLock.exited).toBe(0);
 
       if (err.status === 409) {
         // A contended runner can be descheduled long enough for the child lock
         // to release before this probe starts. That is a stale-probe outcome,
         // not evidence that the live-lock path failed to return `db_busy`.
-        expect(lockReleasedAt).toBeLessThanOrEqual(probeStartedAt);
+        expect(lockLiveAtProbeStart).toBe(false);
         expect(err.message).toContain("not open");
       } else {
         expect(err.status).toBe(503);
         expect(err.body).toEqual({ error: "db_busy", retryable: true });
-        expect(probeFinishedAt).toBeLessThan(lockReleasedAt);
+        // The lock outlives busy_timeout (5 s), so a live-lock probe must have
+        // spent the whole retry budget before giving up.
+        expect(probeFinishedAt - probeStartedAt).toBeGreaterThan(4_000);
       }
-      expect(probeFinishedAt - probeStartedAt).toBeGreaterThan(4_000);
     },
     loadAdjustedTimeout(20_000),
   );
