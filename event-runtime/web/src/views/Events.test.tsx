@@ -125,13 +125,17 @@ describe("Events component harness: selection & detail view", () => {
         fireEvent.click(r.getByRole("button", { name: "Replay" }));
         await waitFor(() => expect(replay).toHaveBeenCalledTimes(1));
 
-        expect(
-          r.getByRole("button", { name: "Replay…" }).hasAttribute("disabled"),
-        ).toBe(true);
+        const replayedButton = await waitFor(() =>
+          r.getByRole("button", { name: "Replayed" }),
+        );
+        expect(replayedButton.hasAttribute("disabled")).toBe(true);
+        expect(replayedButton.getAttribute("title")).toContain(
+          "Already replayed",
+        );
         expect(r.getByTestId("palette-probe").textContent).not.toContain(
           `Replay ${first.eventId} through intake…`,
         );
-        fireEvent.click(r.getByRole("button", { name: "Replay…" }));
+        fireEvent.click(replayedButton);
         expect(replay).toHaveBeenCalledTimes(1);
 
         r.rerender(
@@ -159,6 +163,50 @@ describe("Events component harness: selection & detail view", () => {
         );
         expect(r.getByTestId("palette-probe").textContent).toContain(
           `Replay ${second.eventId} through intake…`,
+        );
+      },
+    );
+  });
+
+  test("a rejected detail replay keeps the control enabled and surfaces the error", async () => {
+    const replay = mock(async (_envelope: unknown) => {
+      throw new Error("boom");
+    });
+    const event = stubEvent("evt_replay_reject", "admitted");
+
+    await withApi(
+      {
+        events: async () => ({ events: [event] }),
+        replay,
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderEvents({
+          focusEvent: { source: "github", eventId: event.eventId },
+        });
+
+        const detailReplay = await waitFor(() =>
+          r.getByRole("button", { name: "Replay…" }),
+        );
+        fireEvent.click(detailReplay);
+        fireEvent.click(r.getByRole("button", { name: "Replay" }));
+        await waitFor(() => expect(replay).toHaveBeenCalledTimes(1));
+
+        // The dialog stays open with the failure; the confirm stays actionable.
+        await waitFor(() =>
+          expect(r.getAllByText("boom").length).toBeGreaterThan(0),
+        );
+        expect(
+          r.getByRole("button", { name: "Replay" }).hasAttribute("disabled"),
+        ).toBe(false);
+        expect(r.queryByRole("button", { name: "Replayed" })).toBeNull();
+
+        // The detail control is not consumed by a failed attempt.
+        expect(
+          r.getByRole("button", { name: "Replay…" }).hasAttribute("disabled"),
+        ).toBe(false);
+        expect(r.getByTestId("palette-probe").textContent).toContain(
+          `Replay ${event.eventId} through intake…`,
         );
       },
     );

@@ -1563,9 +1563,18 @@ export function Events({
                 )}
                 <Button
                   disabled={!connected || replay.isPending || replayed}
+                  title={
+                    replayed
+                      ? "Already replayed — select another event to replay again"
+                      : undefined
+                  }
                   onClick={() => setConfirmReplay(true)}
                 >
-                  Replay…
+                  {replay.isPending
+                    ? "Replaying…"
+                    : replayed
+                      ? "Replayed"
+                      : "Replay…"}
                 </Button>
                 <Button
                   disabled={!connected}
@@ -1758,7 +1767,11 @@ export function Events({
               disabled={!connected || replay.isPending || replayed}
               onClick={() => replay.mutate(sel)}
             >
-              Replay
+              {replay.isPending
+                ? "Replaying…"
+                : replayed
+                  ? "Replayed"
+                  : "Replay"}
             </Button>
           </div>
         </Dialog>
