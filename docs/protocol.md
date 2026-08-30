@@ -218,8 +218,11 @@ open) and at least every 20 minutes, saying what changed. After 45 minutes
 of silence the ticket is reclaimed.
 
 **Verification is a gate.** Run the ticket's exact Verification Command.
-Never advance state, open a PR, or report success on failing output. Never
-weaken a test to get green.
+For a ticket that changes `event-runtime/web/src/**`, run
+`cd event-runtime/web && bun x tsc --noEmit` before the ticket command as
+well. Prefer `bun x` to `bunx`; the handoff sandbox provides both spellings
+for existing ticket commands. Never advance state, open a PR, or report
+success on failing output. Never weaken a test to get green.
 
 **Mandatory `## Handoff` comment** before moving to `In Review`:
 

@@ -1230,6 +1230,21 @@ function tierEscalationForContinuation(db, runId) {
   };
 }
 
+/** Only diagnostics the next dispatch can act on belong in its continuation. */
+function continuationHandoffFailure(violations) {
+  const failure = (violations ?? []).find((line) =>
+    /^(?:web_build_failed|ticket_verify_failed):/.test(line),
+  );
+  return failure ?? null;
+}
+
+/** Add worker-observed handoff context without mutating the validated spec. */
+export function continuationExecutionInput(input, handoffFailure) {
+  return typeof handoffFailure === "string" && handoffFailure
+    ? { ...input, handoffFailure }
+    : input;
+}
+
 /** Leave a foreign-owned escalation in an explicit terminal projection state. */
 function refuseTierEscalationClaim(db, handoff, reasonCode) {
   if (
@@ -1269,6 +1284,7 @@ export function scheduleTierEscalation(
     now = Date.now(),
     continuationRunId = newRunId(),
     reasonCode,
+    handoffFailure = null,
   } = {},
 ) {
   const rootRunId = failedSpec.rootRunId ?? failedSpec.runId;
@@ -1284,6 +1300,7 @@ export function scheduleTierEscalation(
   const spec = buildEscalatedContinuationSpec(registry, failedSpec, {
     runId: continuationRunId,
     operatorAuthorized: origin?.source === "operator",
+    handoffFailure,
   });
   const at = iso(now);
   const eventId = `tier-escalation:${rootRunId}`;
@@ -2662,7 +2679,12 @@ export async function executeClaimed(
   const repoName = spec.input?.repoPin?.repo ?? spec.input?.repo ?? null;
   const ticketId = spec.input?.ticket ?? null;
   const isWorktree = spec.workspace?.type === "worktree";
-  const worktreeHandoff = tierEscalationForContinuation(db, runId);
+  const tierHandoff = tierEscalationForContinuation(db, runId);
+  const handoffFailure = spec.approvalPolicy?.escalation?.handoffFailure;
+  const worktreeHandoff =
+    tierHandoff && typeof handoffFailure === "string"
+      ? { ...tierHandoff, handoffFailure }
+      : tierHandoff;
 
   let leaseHeartbeat = null;
   let ticketClaimed = false;
@@ -3538,6 +3560,24 @@ export async function executeClaimed(
       throw err;
     }
     workspaceDir = created.dir;
+    // A continuation receives the original schema-validated input, plus this
+    // workspace-local diagnostic. It is deliberately not written into the
+    // RunSpec input: the original ticket event remains immutable and the
+    // closed dispatch input schema need not admit worker-owned context.
+    if (worktreeHandoff?.handoffFailure) {
+      const inputPath = path.join(workspaceDir, "input.json");
+      const executionInput = JSON.parse(readFileSync(inputPath, "utf8"));
+      writeFileSync(
+        inputPath,
+        `${canonicalJson(
+          continuationExecutionInput(
+            executionInput,
+            worktreeHandoff.handoffFailure,
+          ),
+        )}\n`,
+        "utf8",
+      );
+    }
     assertSandboxWorkspaceSupported(workspaceDir, def);
     // Repository checkouts receive instance-local config and integrity
     // baselining. Delegated worktrees already provision their own instance and
@@ -4102,6 +4142,7 @@ export async function executeClaimed(
             policyVersion,
             now: currentNow,
             reasonCode,
+            handoffFailure: continuationHandoffFailure(err.violations),
           });
         }
         return { ok: true, escalation };

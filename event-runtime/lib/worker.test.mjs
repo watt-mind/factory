@@ -72,6 +72,7 @@ import {
   codeStamp,
   codeStampFiles,
   codeStampRoot,
+  continuationExecutionInput,
   createReloadWatcher,
   DEFAULT_MAX_ENVIRONMENT_RETRIES,
   defaultLocksDir,
@@ -2518,6 +2519,23 @@ sh -c 'sleep 5 & wait'
     ).toBe(false);
   });
 
+  test("tier continuation input carries the worker-observed handoff failure verbatim", () => {
+    const handoffFailure = `web_build_failed: ${"TS7053\n".repeat(200)}`.slice(
+      0,
+      2 * 1024,
+    );
+    expect(
+      continuationExecutionInput(
+        { repo: "factory", ticket: "WM-1529" },
+        handoffFailure,
+      ),
+    ).toEqual({
+      repo: "factory",
+      ticket: "WM-1529",
+      handoffFailure,
+    });
+  });
+
   test("tier escalation schedules exactly once and retries projection before the continuation is runnable", () => {
     const databaseFile = path.join(
       tmpDir("tier-escalation-restart-"),
@@ -2552,6 +2570,7 @@ sh -c 'sleep 5 & wait'
       continuationRunId: "run_tier_strong",
       now: T0,
       reasonCode: "contract_violation",
+      handoffFailure: "web_build_failed: src/views/Ticket.tsx: error TS7053",
     });
     db.close();
     db = openDb(databaseFile);
@@ -2580,6 +2599,12 @@ sh -c 'sleep 5 & wait'
       rootRunId: spec.runId,
       escalatedFromRunId: spec.runId,
       modelTier: "strong",
+      approvalPolicy: {
+        escalation: {
+          handoffFailure:
+            "web_build_failed: src/views/Ticket.tsx: error TS7053",
+        },
+      },
     });
     const event = db
       .query(`SELECT * FROM events WHERE source = 'handoff'`)

@@ -26,6 +26,7 @@ import {
   outputTail,
   ownedPathsDeviations,
   HANDOFF_SANDBOX_MARKER,
+  handoffRuntimeBinaries,
   handoffGitMounts,
   handoffSandboxAvailable,
   HANDOFF_SANDBOX_PYTHON,
@@ -1330,6 +1331,15 @@ describe("worktree baseline verification (WM-334)", () => {
       else process.env.FACTORY_REPO_VERIFY_TIMEOUT_MS = previous;
     }
   });
+});
+
+test("handoff sandbox exposes bunx through the Bun executable", () => {
+  const binaries = handoffRuntimeBinaries((name) =>
+    name === "bun" ? Bun.which("bun") : null,
+  );
+  const bun = binaries.find((entry) => entry.name === "bun");
+  const bunx = binaries.find((entry) => entry.name === "bunx");
+  expect(bunx).toEqual({ name: "bunx", executable: bun.executable });
 });
 
 // The workspace directory is agent-writable — the agent authors `result.json`

@@ -255,12 +255,22 @@ sys.exit(1)
 export function insideHandoffSandbox(env = process.env) {
   return env[HANDOFF_SANDBOX_MARKER] === "1";
 }
-export const HANDOFF_RUNTIME_COMMANDS = Object.freeze(["bun", "uv", "pnpm"]);
+export const HANDOFF_RUNTIME_COMMANDS = Object.freeze([
+  "bun",
+  "bunx",
+  "uv",
+  "pnpm",
+]);
 
 /** Non-system package runners mounted as individual, read-only executables. */
 export function handoffRuntimeBinaries(which = (name) => Bun.which(name)) {
+  // Bun's installer commonly provides bunx as a symlink beside bun, but the
+  // handoff guest mounts individual executables rather than the host's bin
+  // directory. Mount the Bun executable under both names when that symlink is
+  // absent so tickets using the legacy spelling do not fail only in the guest.
+  const bun = which("bun");
   return HANDOFF_RUNTIME_COMMANDS.flatMap((name) => {
-    const executable = which(name);
+    const executable = name === "bunx" ? (which(name) ?? bun) : which(name);
     return executable ? [{ name, executable: realpathSync(executable) }] : [];
   });
 }
@@ -1025,6 +1035,7 @@ function matchesRedBaseline(baseline, verifyOutput) {
 
 const REPO_VERIFY_REASON_MAX_LINES = 40;
 const REPO_VERIFY_REASON_MAX_CHARS = 8 * 1024;
+export const HANDOFF_FAILURE_OUTPUT_MAX_CHARS = 2 * 1024;
 // Anchored: a passing test whose *name* mentions "(fail)" must not be reported
 // as the failure (WM-918's own registry test says "reads bun (fail) and ✗").
 const REPO_VERIFY_TEST_FAILURE_LINE = /^\s*(?:\(fail\)|✗)/i;
@@ -1046,6 +1057,15 @@ function boundedDiagnostic(lines) {
     break;
   }
   return excerpt.join("\n");
+}
+
+/** Preserve enough of a handoff red for its one permitted continuation. */
+function handoffFailureOutput(obs) {
+  const output = String(obs?.output ?? "").slice(
+    0,
+    HANDOFF_FAILURE_OUTPUT_MAX_CHARS,
+  );
+  return output || `exit ${obs?.exitCode ?? "unknown"}`;
 }
 
 /**
@@ -1699,7 +1719,7 @@ function verifyCompleted({
       if (!obs.passed) {
         refuse(
           "handoff_verification_failed",
-          `ticket_verify_failed: ${failureWhy(obs)}; sandbox_limits: ${handoffSandboxLimits(obs.sandbox.tmpfsMb)}`,
+          `ticket_verify_failed: ${handoffFailureOutput(obs)}; sandbox_limits: ${handoffSandboxLimits(obs.sandbox.tmpfsMb)}`,
         );
       }
       handoffChecks.push("ticket_verify_passed");
@@ -1732,7 +1752,7 @@ function verifyCompleted({
       if (!obs.passed) {
         refuse(
           "handoff_verification_failed",
-          `web_build_failed: ${failureWhy(obs)}`,
+          `web_build_failed: ${handoffFailureOutput(obs)}`,
         );
       }
       handoffChecks.push("web_build_passed");
