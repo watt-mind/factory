@@ -150,6 +150,15 @@ afterEach(() => {
   cleanup();
 });
 
+// Drives a controlled text input's React `onChange`. Under happy-dom React
+// takes its input-event polyfill path (focus tracking + key events), so a bare
+// `fireEvent.change` never reaches `onChange`; bracket it with focus + keyup.
+function typeInto(element: HTMLElement, value: string): void {
+  fireEvent.focusIn(element);
+  fireEvent.change(element, { target: { value } });
+  fireEvent.keyUp(element);
+}
+
 describe("DecisionCard", () => {
   test("shows the field error for touched empty required text and clears it for meaningful text", () => {
     const view = render(
@@ -169,25 +178,29 @@ describe("DecisionCard", () => {
     const submit = view.getByRole("button", {
       name: "Confirm",
     }) as HTMLButtonElement;
-    expect(view.queryByText("Reason is required.")).toBeNull();
+    // Untouched: no inline hint yet, but the status line still names the gap.
+    expect(reason.hasAttribute("aria-describedby")).toBe(false);
+    expect(reason.hasAttribute("aria-invalid")).toBe(false);
+    expect(view.getByRole("status").textContent).toBe("Reason is required.");
     expect(submit.disabled).toBe(true);
 
     const expectedError = fieldErrors(requiredTextRequest, "confirm", {
       reason: "   ",
     }).reason;
-    fireEvent.input(reason, { target: { value: "   " } });
+    typeInto(reason, "   ");
     const hint = view.getByText(expectedError);
+    expect(view.queryByRole("status")).toBeNull();
     expect(submit.disabled).toBe(true);
     expect(reason.getAttribute("aria-invalid")).toBe("true");
     expect(reason.getAttribute("aria-describedby")).toBe(hint.id);
 
-    fireEvent.input(reason, { target: { value: "Reviewed the scope." } });
+    typeInto(reason, "Reviewed the scope.");
     expect(view.queryByText("Reason is required.")).toBeNull();
     expect(reason.hasAttribute("aria-invalid")).toBe(false);
     expect(reason.hasAttribute("aria-describedby")).toBe(false);
     expect(submit.disabled).toBe(false);
 
-    fireEvent.input(reason, { target: { value: "" } });
+    typeInto(reason, "");
     expect(view.getByText(expectedError)).toBeTruthy();
     expect(submit.disabled).toBe(true);
   });
@@ -213,9 +226,10 @@ describe("DecisionCard", () => {
     fireEvent.click(
       view.getByRole("group", { name: "Options" }).querySelector("button")!,
     );
-    fireEvent.input(view.getByRole("textbox", { name: /Reason/ }), {
-      target: { value: "Reviewed the original question." },
-    });
+    typeInto(
+      view.getByRole("textbox", { name: /Reason/ }),
+      "Reviewed the original question.",
+    );
     fireEvent.click(view.getByRole("button", { name: "Confirm" }));
 
     await waitFor(() =>
@@ -224,7 +238,10 @@ describe("DecisionCard", () => {
     fireEvent.click(
       view.getByRole("group", { name: "Options" }).querySelector("button")!,
     );
-    expect(view.queryByText("Reason is required.")).toBeNull();
+    const reason = view.getByRole("textbox", { name: /Reason/ });
+    expect(reason.hasAttribute("aria-describedby")).toBe(false);
+    expect(reason.hasAttribute("aria-invalid")).toBe(false);
+    expect(view.getByRole("status").textContent).toBe("Reason is required.");
   });
 
   test("renders the §2.1 options recommended-first and gates its fields", () => {

@@ -180,10 +180,14 @@ export function DecisionCard({
   const invalidReason = !selected
     ? "Choose an option to continue."
     : (Object.values(errors)[0] ?? null);
+  // Text-field errors are shown inline once the field is touched; keep them
+  // out of the status line only while that inline hint is actually rendered.
   const statusReason = !selected
     ? invalidReason
     : (visibleFields
-        .filter((field) => field.kind !== "text")
+        .filter(
+          (field) => !(field.kind === "text" && touchedFields.has(field.id)),
+        )
         .map((field) => errors[field.id])
         .find((error) => error !== undefined) ?? null);
 
@@ -681,8 +685,9 @@ function DecisionFieldControl({
     maxLength: field.maxLength,
     "aria-describedby": error ? hintId : undefined,
     "aria-invalid": error ? true : undefined,
-    onInput: (event: React.FormEvent<HTMLInputElement | HTMLTextAreaElement>) =>
-      onChange(event.currentTarget.value),
+    onChange: (
+      event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
+    ) => onChange(event.target.value),
     className: `${controlClass} mt-1`,
   };
   return (
@@ -695,7 +700,11 @@ function DecisionFieldControl({
         <textarea rows={3} {...common} />
       )}
       {error && (
-        <span id={hintId} className="mt-1 block text-[11px] text-(--hue-err)">
+        <span
+          id={hintId}
+          className="mt-1 block text-[11px] text-(--hue-err)"
+          aria-live="polite"
+        >
           {error}
         </span>
       )}
