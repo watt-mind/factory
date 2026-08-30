@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildTicketJourney,
-  formatDuration,
+  formatDurationMs,
   parsePrRef,
   prNumbersIn,
   scanVerdictFor,
@@ -298,8 +298,8 @@ describe("buildTicketJourney concurrent rows", () => {
 
 describe("ticket journey helpers", () => {
   test("formats durations and ticket ids without guessing from prose", () => {
-    expect(formatDuration(3_720_000)).toBe("1h 2m");
-    expect(formatDuration(null)).toBe("—");
+    expect(formatDurationMs(3_720_000)).toBe("1h 2m");
+    expect(formatDurationMs(null)).toBe("—");
     expect(
       ticketIdsIn({ subject: "wm-542", payload: { ticket: "WM-544" } }),
     ).toEqual(["WM-542", "WM-544"]);

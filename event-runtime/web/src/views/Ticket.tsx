@@ -24,7 +24,7 @@ import {
 } from "../hooks";
 import {
   buildTicketJourney,
-  formatDuration,
+  formatDurationMs,
   parsePrRef,
   prHref,
   prNumbersIn,
@@ -65,10 +65,6 @@ import type {
   TicketSummary,
   Worker,
 } from "../types";
-
-type TicketRunWithAttempts = JourneyRun & {
-  attempts?: Array<{ started_at: string | null; lease_owner: string | null }>;
-};
 
 function Metric({ label, value }: { label: string; value: string }) {
   return (
@@ -168,7 +164,7 @@ function TimelineRow({ item, last }: { item: TimelineItem; last: boolean }) {
   return (
     <li className="flex items-start gap-3" data-kind={item.kind}>
       <div className="mono w-16 shrink-0 pt-0.5 text-right text-xs tabular-nums text-(--text-faint)">
-        {item.durationMs == null ? "" : `+${formatDuration(item.durationMs)}`}
+        {item.durationMs == null ? "" : `+${formatDurationMs(item.durationMs)}`}
       </div>
       {item.children?.length ? (
         <details className="min-w-0 flex-1" open>
@@ -184,7 +180,7 @@ function TimelineRow({ item, last }: { item: TimelineItem; last: boolean }) {
                 <span className="mono text-right tabular-nums text-(--text-faint)">
                   {child.durationMs == null
                     ? ""
-                    : `+${formatDuration(child.durationMs)}`}
+                    : `+${formatDurationMs(child.durationMs)}`}
                 </span>
                 <SourceLink item={child}>
                   <span className="inline-flex flex-wrap items-baseline gap-x-2">
@@ -855,7 +851,7 @@ function JourneyLayout({
   detail?: TicketTrackerDetail | null;
   detailPending?: boolean;
   detailError?: string | null;
-  currentRunDetail?: TicketRunWithAttempts | null;
+  currentRunDetail?: JourneyRun | null;
   currentWorker?: Worker | null;
 }) {
   const [tab, setTab] = useState<JourneyTab>("timeline");
@@ -971,7 +967,7 @@ function JourneyLayout({
             <Metric label="total cost" value={cost} />
             <Metric
               label="lead time"
-              value={formatDuration(journey.leadTimeMs)}
+              value={formatDurationMs(journey.leadTimeMs)}
             />
             <Metric label="runs" value={String(journey.runCount)} />
             {!isPr && (
@@ -1097,9 +1093,9 @@ function JourneyLayout({
                       <>
                         {journey.currentRun.runId}
                         {currentRunDetail?.attempts?.at(-1)?.started_at &&
-                          ` · elapsed ${formatDuration(now - Date.parse(currentRunDetail.attempts.at(-1)!.started_at!))}`}
+                          ` · elapsed ${formatDurationMs(now - Date.parse(currentRunDetail.attempts.at(-1)!.started_at!))}`}
                         {currentWorker &&
-                          ` · ${currentWorker.workerId} · ${currentWorker.stale ? `stale · ${formatDuration(now - Date.parse(currentWorker.lastSeen))}` : `heartbeat ${formatDuration(now - Date.parse(currentWorker.lastSeen))} ago`}`}
+                          ` · ${currentWorker.workerId} · ${currentWorker.stale ? `stale · ${formatDurationMs(now - Date.parse(currentWorker.lastSeen))}` : `heartbeat ${formatDurationMs(now - Date.parse(currentWorker.lastSeen))} ago`}`}
                         {!currentWorker &&
                           journey.currentRun.actor &&
                           ` · ${journey.currentRun.actor}`}
@@ -1283,9 +1279,9 @@ export function Ticket({
     detailQuery.data,
   );
   const currentRunDetail =
-    (query.data.runs.find(
+    query.data.runs.find(
       (run) => run.run.runId === journey.currentRun?.runId,
-    ) as TicketRunWithAttempts | undefined) ?? null;
+    ) ?? null;
   const workers = workersQuery.data?.workers ?? [];
   const leaseOwner = currentRunDetail?.attempts?.at(-1)?.lease_owner ?? null;
   const currentWorker =
