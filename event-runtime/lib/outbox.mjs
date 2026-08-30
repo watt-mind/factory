@@ -29,7 +29,7 @@ function retryAtFromFailure(deliveryError) {
 }
 
 export function deliveryErrorMessage(deliveryError) {
-  if (deliveryError === null) return null;
+  if (deliveryError == null) return null;
   try {
     const failure = JSON.parse(deliveryError);
     return typeof failure?.message === "string"

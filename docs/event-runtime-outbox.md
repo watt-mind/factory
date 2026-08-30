@@ -7,7 +7,8 @@ are delivered after that transaction commits. Successful rows are stamped with
 Malformed event JSON is deterministic poison: it is parked on its first
 delivery attempt. Sink failures are treated as transient: retries wait at least
 five seconds and then use exponential backoff before the configured attempt
-limit parks the row. A parked row has both `published_at` and `delivery_error`
+limit parks the row. Delivery is in order, so a backed-off head row delays
+every subsequent row until it is delivered or parked. A parked row has both `published_at` and `delivery_error`
 set. Its error remains available through `GET /outbox` and it is excluded from
 the published-row retention sweep for forensic review.
 

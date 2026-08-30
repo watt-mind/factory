@@ -1586,6 +1586,22 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
         parked: false,
       });
 
+      // Real transient shape written by transientFailure(): a JSON envelope
+      // with the message and the retry deadline, and published_at still null.
+      db.query(
+        `UPDATE outbox
+         SET delivery_attempts = 1, delivery_error = ?, published_at = NULL
+         WHERE seq = ?`,
+      ).run(
+        JSON.stringify({ message: "sink down", retryAt: Date.now() + 5000 }),
+        outbox[0].seq,
+      );
+      expect((await client.outbox()).outbox[0]).toMatchObject({
+        deliveryAttempts: 1,
+        deliveryError: "sink down",
+        parked: false,
+      });
+
       db.query(
         `UPDATE outbox
          SET delivery_attempts = 3, delivery_error = ?, published_at = ?
