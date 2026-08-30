@@ -148,8 +148,24 @@ export function getPoolLines(pool, s) {
   return { line, anomalies };
 }
 
-export async function status(client) {
+export async function status(client, args = []) {
   const s = await client.status();
+  const pool = getPoolLines(readPool(), s);
+  const anomalyLines = [...getAnomalyLines(s), ...pool.anomalies];
+  if (args.includes("--json")) {
+    console.log(
+      JSON.stringify({
+        ...s,
+        inFlight: {
+          admittedNotPlanned: s.events?.admitted ?? 0,
+          queued: s.runs?.byState?.QUEUED ?? 0,
+          running: s.runs?.byState?.RUNNING ?? 0,
+        },
+        anomalies: anomalyLines,
+      }),
+    );
+    return anomalyLines;
+  }
   if (s.env) {
     console.log(
       `${pad("env", 11)}${s.env.name}${s.env.adapter ? `   (adapter override: ${s.env.adapter})` : ""}   ${s.env.home}`,
@@ -180,9 +196,7 @@ export async function status(client) {
       console.log(spendLine(`  ${row.agent}`, row));
     }
   }
-  const pool = getPoolLines(readPool(), s);
   if (pool.line) console.log(pool.line);
-  const anomalyLines = [...getAnomalyLines(s), ...pool.anomalies];
   if (anomalyLines.length === 0) console.log(`${pad("anomalies", 11)}none`);
   else
     for (const line of anomalyLines)
@@ -190,6 +204,6 @@ export async function status(client) {
   return anomalyLines;
 }
 
-export default function statusCommand() {
-  return withClient(status);
+export default function statusCommand(args) {
+  return withClient((client) => status(client, args));
 }
