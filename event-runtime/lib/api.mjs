@@ -188,17 +188,30 @@ export function createApi({
     cachedArtifactInventoryAt = 0;
   }
 
+  function sameArtifactShaSet(previous, current) {
+    if (previous.length !== current.length) return false;
+    const seen = new Set(previous.map((entry) => entry.sha256));
+    return current.every((entry) => seen.has(entry.sha256));
+  }
+
   function getArtifactPage(options, nowMs) {
     const storeRoot = artifactsRoot(env?.home);
     const resultsRowid =
       db.query(`SELECT MAX(rowid) AS rowid FROM results`).get().rowid ?? 0;
     const resultsChanged = resultsRowid !== cachedArtifactResultsRowid;
-    const inventoryChanged =
+    const inventoryStale =
       resultsChanged ||
       !cachedArtifactInventory ||
       nowMs - cachedArtifactInventoryAt >= storeStatsTtlMs;
-    if (inventoryChanged) {
-      cachedArtifactInventory = buildArtifactInventory(storeRoot);
+    let inventoryChanged = false;
+    if (inventoryStale) {
+      const inventory = buildArtifactInventory(storeRoot);
+      // A TTL refresh that finds the same blob set leaves the reference
+      // index valid: only a changed sha set can add or drop references.
+      inventoryChanged =
+        !cachedArtifactInventory ||
+        !sameArtifactShaSet(cachedArtifactInventory, inventory);
+      cachedArtifactInventory = inventory;
       cachedArtifactInventoryAt = nowMs;
     }
     if (resultsChanged || inventoryChanged || !cachedArtifactReferences) {

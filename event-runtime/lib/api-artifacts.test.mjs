@@ -98,6 +98,9 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
 
     let indexBuilds = 0;
     const indexedHashes = [];
+    // Frozen clock: the 10 s inventory TTL must not lapse mid-test on a
+    // loaded runner, or the rebuild count below would drift.
+    const frozenNowMs = Date.parse("2026-01-02T03:04:05.000Z");
     const server = startApi({
       db,
       registry,
@@ -105,6 +108,7 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       policyVersion: PV,
       port: 0,
       env: { name: "test", home, adapter: "fake" },
+      now: () => frozenNowMs,
       buildArtifactReferenceIndex(currentDb, inventory) {
         indexBuilds += 1;
         const index = artifactReferenceIndex(currentDb, inventory);
