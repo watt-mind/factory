@@ -9,7 +9,12 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { App, listSelectionPath, navIsCurrent } from "./App";
+import {
+  App,
+  listSelectionPath,
+  navIsCurrent,
+  ticketJourneyChunk,
+} from "./App";
 import { api, ApiError } from "./api";
 import { goPrefix } from "./goSequence";
 import { refetchIntervals } from "./hooks";
@@ -1059,8 +1064,12 @@ describe("ticket journey navigation (WM-595)", () => {
   });
 });
 
-describe("ticket journey chunk loading", () => {
-  test("warns instead of leaking an unhandled rejection when the journey chunk is stale", async () => {
+describe("ticket journey chunk loading (WM-1367)", () => {
+  const realLoad = ticketJourneyChunk.load;
+
+  async function withCapturedWarnings(
+    run: (warn: ReturnType<typeof mock>) => Promise<void>,
+  ) {
     const warn = mock(() => {});
     const originalWarn = console.warn;
     const rejections: PromiseRejectionEvent[] = [];
@@ -1069,27 +1078,61 @@ describe("ticket journey chunk loading", () => {
 
     console.warn = warn;
     window.addEventListener("unhandledrejection", onUnhandledRejection);
-    mock.module("./subjectJourney", () => {
-      return {
-        installTicketJourneyLinks: () => {
-          throw new Error("stale journey chunk");
-        },
-      };
-    });
-
     try {
-      renderApp();
-      await waitFor(() => {
-        expect(warn).toHaveBeenCalledWith(
-          "ticket journey chunk import failed",
-          expect.any(Error),
-        );
-      });
+      await run(warn);
       expect(rejections).toHaveLength(0);
     } finally {
       console.warn = originalWarn;
       window.removeEventListener("unhandledrejection", onUnhandledRejection);
+      ticketJourneyChunk.load = realLoad;
     }
+  }
+
+  test("warns instead of leaking an unhandled rejection when the dynamic import itself rejects", async () => {
+    // A stale deploy: the chunk URL baked into the shell is gone, so the
+    // dynamic import rejects before any module code runs.
+    ticketJourneyChunk.load = () =>
+      Promise.reject(
+        new TypeError("Failed to fetch dynamically imported module"),
+      );
+
+    await withCapturedWarnings(async (warn) => {
+      renderApp();
+      await waitFor(() => {
+        expect(warn).toHaveBeenCalledWith(
+          "ticket journey chunk import failed",
+          expect.any(TypeError),
+        );
+      });
+      expect(warn).not.toHaveBeenCalledWith(
+        "ticket journey links failed to install",
+        expect.anything(),
+      );
+    });
+  });
+
+  test("logs a genuine install-time throw under its own message, not as a chunk failure", async () => {
+    mock.module("./subjectJourney", () => {
+      return {
+        installTicketJourneyLinks: () => {
+          throw new Error("install exploded");
+        },
+      };
+    });
+
+    await withCapturedWarnings(async (warn) => {
+      renderApp();
+      await waitFor(() => {
+        expect(warn).toHaveBeenCalledWith(
+          "ticket journey links failed to install",
+          expect.any(Error),
+        );
+      });
+      expect(warn).not.toHaveBeenCalledWith(
+        "ticket journey chunk import failed",
+        expect.anything(),
+      );
+    });
   });
 });
 
