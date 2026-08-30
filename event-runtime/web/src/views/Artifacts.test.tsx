@@ -277,7 +277,9 @@ describe("Artifacts inventory (WM-207)", () => {
     });
     fireEvent.click(view.getByRole("tab", { name: "Orphans 28" }));
     changeControlledInput(
-      view.getByRole("combobox", { name: "Search artifacts" }),
+      view.getByRole("combobox", {
+        name: "Search artifacts",
+      }) as HTMLInputElement,
       "reporter@1",
     );
 
