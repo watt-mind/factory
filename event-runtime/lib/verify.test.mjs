@@ -16,6 +16,8 @@ import { getAgent, loadRegistry } from "./registry.mjs";
 import { execFileSync } from "node:child_process";
 import {
   ContractViolation,
+  HANDOFF_FAILURE_OUTPUT_MAX_CHARS,
+  handoffFailureOutput,
   HANDOFF_HOST_ENV,
   HANDOFF_SANDBOX_INIT,
   HANDOFF_SANDBOX_SETUP,
@@ -26,6 +28,7 @@ import {
   outputTail,
   ownedPathsDeviations,
   HANDOFF_SANDBOX_MARKER,
+  handoffRuntimeBinaries,
   handoffGitMounts,
   handoffSandboxAvailable,
   HANDOFF_SANDBOX_PYTHON,
@@ -1332,6 +1335,15 @@ describe("worktree baseline verification (WM-334)", () => {
   });
 });
 
+test("handoff sandbox exposes bunx through the Bun executable", () => {
+  const binaries = handoffRuntimeBinaries((name) =>
+    name === "bun" ? Bun.which("bun") : null,
+  );
+  const bun = binaries.find((entry) => entry.name === "bun");
+  const bunx = binaries.find((entry) => entry.name === "bunx");
+  expect(bunx).toEqual({ name: "bunx", executable: bun.executable });
+});
+
 // The workspace directory is agent-writable — the agent authors `result.json`
 // there. Trusting a `.worktree.json` found next to it let an agent hand the
 // gate its own activation flag, its own "repo verify" command and its own
@@ -1502,6 +1514,63 @@ describe("evidence retention (OPS-206)", () => {
     } catch (err) {
       expect(err.violations[0]).toStartWith("evidence_too_large:");
     }
+  });
+});
+
+describe("handoff failure diagnostics (#1529)", () => {
+  test("a passing bun test that dies on a missing bunx keeps the fatal tail line", () => {
+    const passes = Array.from(
+      { length: 120 },
+      (_, index) => `(pass) verify > case ${index} handles an error path`,
+    ).join("\n");
+    const output = `${passes}\n\n 120 pass\n 0 fail\nRan 120 tests across 3 files. [1.20s]\n\x1b[31mbash: line 1: bunx: command not found\x1b[0m\n`;
+    const why = handoffFailureOutput({
+      passed: false,
+      exitCode: 127,
+      timedOut: false,
+      output,
+    });
+    expect(why.length).toBeLessThanOrEqual(HANDOFF_FAILURE_OUTPUT_MAX_CHARS);
+    expect(why).toContain("bunx: command not found");
+    expect(why).not.toContain("\x1b[");
+  });
+
+  test("timeouts, explicit failures, and silent exits keep the curated reason", () => {
+    expect(
+      handoffFailureOutput(
+        { passed: false, exitCode: null, timedOut: true, output: "x" },
+        { timeoutMs: 1234 },
+      ),
+    ).toBe("timed out after 1234ms");
+    expect(
+      handoffFailureOutput({
+        passed: false,
+        exitCode: 1,
+        timedOut: false,
+        output: "(pass) a\n(fail) b\n 1 pass\n 1 fail\n",
+      }),
+    ).toBe("(fail) b\n 1 fail");
+    expect(
+      handoffFailureOutput({
+        passed: false,
+        exitCode: 9,
+        timedOut: false,
+        output: "   \n",
+      }),
+    ).toBe("exit 9");
+  });
+
+  test("oversized diagnostics are bounded from the tail", () => {
+    const output = `${"src/views/Ticket.tsx(12,34): error TS7053: element implicitly has an any type because expression cannot index noise\n".repeat(200)}src/views/Ticket.tsx: error TS2322 last\n`;
+    const why = handoffFailureOutput({
+      passed: false,
+      exitCode: 2,
+      timedOut: false,
+      output,
+    });
+    expect(why.length).toBeLessThanOrEqual(HANDOFF_FAILURE_OUTPUT_MAX_CHARS);
+    expect(why.startsWith("…")).toBe(true);
+    expect(why.endsWith("error TS2322 last")).toBe(true);
   });
 });
 

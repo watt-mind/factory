@@ -74,6 +74,13 @@ new ticket.
    draft with the observed output quoted, and returns the ticket to Todo +
    `ai:agent-ready`. Your report is not the evidence, the output is — and
    the worker reads the exit code itself.
+   When the diff touches `event-runtime/web/src/**`, run
+   `cd event-runtime/web && bun x tsc --noEmit` (equivalently,
+   `cd event-runtime/web && bunx tsc --noEmit`; the handoff sandbox provides
+   both spellings) and the ticket command before writing the Handoff. If
+   `input.json` includes `handoffFailure`, treat that exact prior
+   `web_build_failed` or `ticket_verify_failed` diagnostic as the first thing
+   to fix; do not repeat a handoff that already named its failure.
 4. **Run the UX gate when required.** A critique is required when the change
    introduces or materially changes a user-completable flow, interaction,
    state transition, error/recovery path, responsive layout, authentication,

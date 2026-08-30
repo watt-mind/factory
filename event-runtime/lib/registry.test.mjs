@@ -349,8 +349,12 @@ describe("registry", () => {
     // against live PR evidence, and returns stable `branch_in_flight:` /
     // `branch_moved:` summary prefixes; merge-fix.json is re-pinned. Prompt
     // text only.
+    // Regenerated (CLNT-123): dispatch now requires web TypeScript checking,
+    // documents the legacy bunx handoff alias, and receives bounded handoff
+    // diagnostics. Prompt pin only — the definition remains provenance-safe.
+    // Digest recomputed after merging #1521/#1445 (registry inputs).
     const expected =
-      "sha256:a59770c105431644d5c8aa00ceba315ad57c20adf83d8244363bc4ccc9fbc44a";
+      "sha256:d76cb32235a6dd2d26ddcf8106d3ddc41183728d25a90e6f22f808d2c53e94bb";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -626,8 +630,11 @@ describe("registry", () => {
     // Regenerated (#1324): dispatch.md includes the factory Prettier handoff
     // check, so its prompt pin legitimately moved; `pack` remains
     // non-enumerable.
+    // Regenerated (CLNT-123): dispatch prompt pin moved for the web typecheck
+    // and bounded handoff-failure continuation instructions; `pack` remains
+    // non-enumerable.
     expect(computeDefHash(def)).toBe(
-      "sha256:64692fdaf524fb0e54e8d2156bcf9a3bfe3356c663ce6a7b83910a9043b6314e",
+      "sha256:440db0b0151fee722647bc17ea2808976c65558e50d36fec0a02cdd754843c88",
     );
   });
 
