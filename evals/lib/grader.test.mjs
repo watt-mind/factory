@@ -10,9 +10,17 @@ function fakeChild() {
   child.stdout.setEncoding = () => {};
   child.stderr.setEncoding = () => {};
   child.signals = [];
-  child.kill = (signal) => {
+  // Records every process-group signal instead of letting the shared helper
+  // reach process.kill(-pid, …) — a fake pid must never signal a live group.
+  child.killFn = (pid, signal) => {
+    expect(pid).toBe(-child.pid);
     child.signals.push(signal);
     child.emit("signal", signal);
+  };
+  child.kill = (signal) => {
+    throw new Error(
+      `child.kill(${signal}) must not be reached: killFn was injected`,
+    );
   };
   return child;
 }
@@ -34,6 +42,7 @@ function graderCall(child, options = {}) {
     timeoutMs: 10,
     budgetUsd: 1,
     killGraceMs: 10,
+    killFn: child.killFn,
     spawnFn: () => child,
     ...options,
   });
@@ -58,7 +67,9 @@ describe("grader process termination", () => {
     controller.abort();
 
     await waitForSignal(child, "SIGKILL");
+    // Abort and timeout both escalate, yet exactly one TERM and one KILL land.
     expect(child.signals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(child.signals).toHaveLength(2);
 
     child.emit("close", 1);
     await pending;

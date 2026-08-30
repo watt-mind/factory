@@ -119,6 +119,7 @@ export function callClaude({
   allowedTools = [],
   disallowedTools = [],
   killGraceMs = KILL_GRACE_MS,
+  killFn = process.kill,
   spawnFn = spawn,
   env = process.env,
   signal,
@@ -164,7 +165,10 @@ export function callClaude({
     let timedOut = false;
     let cancelTermination = null;
     const escalate = () => {
-      cancelTermination ??= killProcessGroup(child, { killGraceMs });
+      cancelTermination ??= killProcessGroup(child, {
+        killGraceMs,
+        kill: killFn,
+      });
     };
     const termTimer = setTimeout(() => {
       timedOut = true;
