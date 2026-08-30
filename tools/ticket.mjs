@@ -103,6 +103,9 @@ export async function transitionThenComment(cp, key, state, options, comment) {
  *
  * The control plane may return `warnings` (a follow-up board write failed, or
  * the key matched a closed issue) and `reused` (no new issue was created).
+ * A reused issue that already has a board Status keeps it instead of applying
+ * the requested state (including `Done`); the preserved value is returned as
+ * `status`. A reuse with no board item is still assigned the requested state.
  * Warnings flip the structured result to `ok: false` and set a non-zero exit
  * code: the issue exists, but callers must not mistake it for a complete
  * filing. The result stays available for recovery either way.

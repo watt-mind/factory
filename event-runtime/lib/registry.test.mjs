@@ -31,6 +31,7 @@ import {
 import { computeDefHash } from "./receipts.mjs";
 import { updateHarnessPins } from "./pins.mjs";
 import { validate } from "./schema.mjs";
+import { DISPATCH_CLASS_AGENT_IDS } from "./proposal-subject.mjs";
 
 /** Copy the real registry into a temp root so tests can corrupt it safely. */
 function tempRegistry(root = tmpDir("event-registry-")) {
@@ -123,6 +124,12 @@ const PI_TIERS = {
 };
 
 describe("registry", () => {
+  test("every dispatch-class agent id resolves to a loaded registry definition", () => {
+    const registry = loadRegistry();
+    const ids = new Set([...registry.agents.values()].map((def) => def.id));
+    for (const id of DISPATCH_CLASS_AGENT_IDS) expect(ids).toContain(id);
+  });
+
   test("loads the committed registry (pins verified)", () => {
     const registry = loadRegistry();
     const def = getAgent(registry, "factory-status-report@1");

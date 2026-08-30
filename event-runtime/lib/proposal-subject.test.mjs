@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+  DISPATCH_CLASS_AGENT_IDS,
   agentFamily,
   agentVerb,
+  isDispatchClassAgent,
   primaryInput,
   proposalDecisionContext,
   proposalQuestion,
@@ -18,6 +20,15 @@ const dispatchSpec = {
   model: "cursor-grok-4.6-high",
   input: { ticket: "WM-862", repo: "factory" },
 };
+
+describe("dispatch-class agents", () => {
+  test("matches only explicitly-listed ids and their versioned refs", () => {
+    expect([...DISPATCH_CLASS_AGENT_IDS]).toEqual(["dispatch"]);
+    expect(isDispatchClassAgent("dispatch")).toBe(true);
+    expect(isDispatchClassAgent("dispatch@1")).toBe(true);
+    expect(isDispatchClassAgent("dispatch-hotfix@1")).toBe(false);
+  });
+});
 
 describe("proposalSubject (WM-897)", () => {
   test("delegates to the view subject when the agent's sidecar defines one", () => {

@@ -139,6 +139,118 @@ export function createShutdownController({
   };
 }
 
+/**
+ * Create the per-job runner separately from the supervisor setup so its
+ * in-flight reservation and gate behaviour can be exercised without a TTY.
+ */
+export function createJobRunner({
+  running,
+  probe,
+  spawnCommand,
+  commandFor,
+  shouldProbeGate,
+  log = console.log,
+  clock = () => new Date().toTimeString().slice(0, 8),
+  c = {
+    dim: (s) => s,
+    bold: (s) => s,
+    red: (s) => s,
+    green: (s) => s,
+    yellow: (s) => s,
+    cyan: (s) => s,
+  },
+  refreshTitle = () => {},
+  onCompleted = () => {},
+  onFailed = () => {},
+}) {
+  return async function runJob(job) {
+    if (running.has(job.name)) {
+      log(
+        `${c.dim(clock())} ${c.yellow("skip")}  ${job.name} — previous run still going`,
+      );
+      return;
+    }
+
+    // Reserve the job before its (potentially slow) gate probe. This includes
+    // the probe in the no-overlap guarantee rather than just the spawned job.
+    running.add(job.name);
+    refreshTitle();
+    try {
+      // A gate is what makes frequent polling affordable: checking costs one
+      // cheap query, spawning an agent costs budget. Exit 0 = work exists,
+      // 1 = idle, anything else is surfaced rather than silently skipped.
+      if (job.gate_command && shouldProbeGate) {
+        const { code, out } = await probe(job.gate_command);
+        if (code === 1) {
+          log(
+            `${c.dim(clock())} ${c.dim("idle")}  ${job.name} ${c.dim(`— ${out.split("\n").pop() || "nothing to do"}`)}`,
+          );
+          return;
+        }
+        if (code !== 0) {
+          onFailed();
+          log(
+            `${c.dim(clock())} ${c.red("GATE FAIL")} ${job.name} ${c.dim(`exit ${code}: ${out.split("\n").pop()}`)}`,
+          );
+          return;
+        }
+        log(
+          `${c.dim(clock())} ${c.green("gate")}  ${job.name} ${c.dim(out.split("\n").pop() || "")}`,
+        );
+      }
+
+      const cmd = commandFor(job);
+      const started = Date.now();
+      log(
+        `${c.dim(clock())} ${c.cyan("start")} ${c.bold(job.name)} ${c.dim(cmd)}`,
+      );
+
+      const code = await new Promise((resolve, reject) => {
+        const child = spawnCommand(cmd);
+        const prefix = c.dim("  │ ");
+        const pipe = (stream, color) => {
+          let buf = "";
+          stream.on("data", (data) => {
+            buf += data.toString();
+            const lines = buf.split("\n");
+            buf = lines.pop();
+            for (const line of lines)
+              log(prefix + (color ? color(line) : line));
+          });
+          stream.on("end", () => {
+            if (buf.trim()) log(prefix + (color ? color(buf) : buf));
+          });
+        };
+        pipe(child.stdout);
+        pipe(child.stderr, c.red);
+        child.once("error", reject);
+        child.once("close", resolve);
+      });
+
+      const secs = ((Date.now() - started) / 1000).toFixed(1);
+      if (code === 0) {
+        onCompleted();
+        log(
+          `${c.dim(clock())} ${c.green("done")}  ${job.name} ${c.dim(`(${secs}s)`)}`,
+        );
+      } else {
+        onFailed();
+        log(
+          `${c.dim(clock())} ${c.red("FAIL")}  ${job.name} ${c.dim(`exit ${code}, ${secs}s`)}`,
+        );
+      }
+    } catch (error) {
+      onFailed();
+      log(
+        `${c.dim(clock())} ${c.red("GATE FAIL")} ${job.name} ${c.dim(error instanceof Error ? error.message : String(error))}`,
+      );
+    } finally {
+      running.delete(job.name);
+      refreshTitle();
+    }
+  };
+}
+
 export async function main(argv = process.argv.slice(2)) {
   const has = (flag) => argv.includes(flag);
   const val = (flag) => {
@@ -271,88 +383,24 @@ ${c.dim("not this supervisor — see deploy/gen.mjs.")}
     });
   }
 
-  async function runJob(job) {
-    if (running.has(job.name)) {
-      console.log(
-        `${c.dim(clock())} ${c.yellow("skip")}  ${job.name} — previous run still going`,
-      );
-      return;
-    }
-
-    // A gate is what makes frequent polling affordable: checking costs one cheap
-    // query, spawning an agent costs budget. Exit 0 = work exists, 1 = idle,
-    // anything else = a real error worth surfacing rather than silently skipping.
-    if (job.gate_command && APPLY) {
-      const { code, out } = await probe(job.gate_command);
-      if (code === 1) {
-        console.log(
-          `${c.dim(clock())} ${c.dim("idle")}  ${job.name} ${c.dim(`— ${out.split("\n").pop() || "nothing to do"}`)}`,
-        );
-        return;
-      }
-      if (code !== 0) {
-        failed++;
-        console.log(
-          `${c.dim(clock())} ${c.red("GATE FAIL")} ${job.name} ${c.dim(`exit ${code}: ${out.split("\n").pop()}`)}`,
-        );
-        return;
-      }
-      console.log(
-        `${c.dim(clock())} ${c.green("gate")}  ${job.name} ${c.dim(out.split("\n").pop() || "")}`,
-      );
-    }
-
-    running.add(job.name);
-    refreshTitle();
-    const cmd = commandFor(job);
-    const started = Date.now();
-    console.log(
-      `${c.dim(clock())} ${c.cyan("start")} ${c.bold(job.name)} ${c.dim(cmd)}`,
-    );
-
-    return new Promise((resolve) => {
-      const child = children.track(
+  const runJob = createJobRunner({
+    running,
+    probe,
+    spawnCommand: (cmd) =>
+      children.track(
         spawn("/bin/bash", ["-lc", cmd], {
           cwd: ROOT,
           stdio: ["ignore", "pipe", "pipe"],
         }),
-      );
-      const prefix = c.dim("  │ ");
-      const pipe = (stream, color) => {
-        let buf = "";
-        stream.on("data", (data) => {
-          buf += data.toString();
-          const lines = buf.split("\n");
-          buf = lines.pop();
-          for (const line of lines)
-            console.log(prefix + (color ? color(line) : line));
-        });
-        stream.on("end", () => {
-          if (buf.trim()) console.log(prefix + (color ? color(buf) : buf));
-        });
-      };
-      pipe(child.stdout);
-      pipe(child.stderr, c.red);
-
-      child.on("close", (code) => {
-        running.delete(job.name);
-        refreshTitle();
-        const secs = ((Date.now() - started) / 1000).toFixed(1);
-        if (code === 0) {
-          completed++;
-          console.log(
-            `${c.dim(clock())} ${c.green("done")}  ${job.name} ${c.dim(`(${secs}s)`)}`,
-          );
-        } else {
-          failed++;
-          console.log(
-            `${c.dim(clock())} ${c.red("FAIL")}  ${job.name} ${c.dim(`exit ${code}, ${secs}s`)}`,
-          );
-        }
-        resolve();
-      });
-    });
-  }
+      ),
+    commandFor,
+    shouldProbeGate: APPLY,
+    clock,
+    c,
+    refreshTitle,
+    onCompleted: () => completed++,
+    onFailed: () => failed++,
+  });
 
   const timers = [];
   const shutdown = createShutdownController({

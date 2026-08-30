@@ -1,3 +1,5 @@
+import { isDispatchClassAgent } from "./proposal-subject.mjs";
+
 const DURATIONS_MS = Object.freeze({
   "15m": 15 * 60_000,
   "1h": 60 * 60_000,
@@ -554,7 +556,7 @@ export function modelTierEconomicsView(
     if (
       typeof run.modelTier === "string" &&
       typeof run.agent === "string" &&
-      run.agent.startsWith("dispatch@") &&
+      isDispatchClassAgent(run.agent) &&
       (!entry.dispatch || run.createdAt < entry.dispatch.createdAt)
     ) {
       entry.dispatch = run;
