@@ -15,10 +15,12 @@ import {
   closeSync,
   existsSync,
   mkdtempSync,
+  mkdirSync,
   openSync,
   readFileSync,
   realpathSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -101,11 +103,14 @@ export class ContractViolation extends Error {
  * `event-runtime/web/src/**`, and compares the diff with the ticket's Owned
  * Paths — and authors the Verification line itself.
  */
+/** The host could not restore dependencies before entering the offline guest. */
+export const HANDOFF_DEPENDENCIES_MISSING = "handoff_dependencies_missing";
 export const HANDOFF_REASON_CODES = new Set([
   "handoff_verification_failed",
   "handoff_verification_unspecified",
   "handoff_owned_paths_violation",
   "handoff_pr_form_invalid",
+  HANDOFF_DEPENDENCIES_MISSING,
 ]);
 export const HANDOFF_TAIL_LINES = 40;
 /** reasonCode the worker stamps on a result.json it synthesized itself (#1592). */
@@ -130,6 +135,7 @@ export const HANDOFF_GUEST_PATH =
 /** Where the verified worktree is mounted inside the chroot. */
 export const HANDOFF_GUEST_WORKSPACE = "/workspace";
 export const DEFAULT_HANDOFF_SANDBOX_TMPFS_MB = 1024;
+export const DEFAULT_HANDOFF_DEPENDENCY_TIMEOUT_MS = 180_000;
 export const HANDOFF_SANDBOX_NAMESPACES = Object.freeze([
   "user",
   "mount",
@@ -1096,6 +1102,16 @@ function boundedTail(text, maxChars = HANDOFF_FAILURE_OUTPUT_MAX_CHARS) {
   return `…${text.slice(-(maxChars - 1))}`;
 }
 
+/** Missing modules in the guest prove the host worktree was not installable. */
+export function handoffFailureReasonCode(obs) {
+  const output = stripAnsi(obs?.output);
+  return /(?:Cannot find package ['"][^'"]+['"](?: from |$)|error:\s*Cannot find module\b)/i.test(
+    output,
+  )
+    ? HANDOFF_DEPENDENCIES_MISSING
+    : "handoff_verification_failed";
+}
+
 /**
  * Preserve enough of a handoff red for its one permitted continuation. Same
  * curated diagnostic as the repository verification reason (timeout, then
@@ -1110,6 +1126,123 @@ export function handoffFailureOutput(obs, { timeoutMs } = {}) {
     repoVerifyFailureExcerpt(obs?.output) ||
     stripAnsi(obs?.output).trimEnd().slice(-HANDOFF_FAILURE_OUTPUT_MAX_CHARS);
   return boundedTail(curated.trim()) || `exit ${obs?.exitCode ?? "unknown"}`;
+}
+
+function defaultDependencyInstaller({ cwd, timeoutMs }) {
+  // Source the worker checkout's helper, never the agent-writable worktree.
+  // This retains the same global Bun-cache lock and SQLITE_BUSY retry policy
+  // used while materializing worktrees without granting ticket code host-shell
+  // execution before the handoff sandbox is active.
+  const helper = path.resolve(import.meta.dir, "../../bin/worktree-common.sh");
+  const result = spawnSync(
+    "/bin/bash",
+    ["-c", 'source "$1"; locked_bun_install "$2"', "--", helper, cwd],
+    {
+      encoding: "utf8",
+      timeout: timeoutMs,
+      env: {
+        ...process.env,
+        FACTORY_LOCK_MAX_WAIT: String(
+          Math.min(120, Math.floor(timeoutMs / 1000)),
+        ),
+      },
+    },
+  );
+  return {
+    passed: result.status === 0 && !result.error,
+    exitCode: result.status,
+    timedOut: result.error?.code === "ETIMEDOUT",
+    output: `${result.stdout ?? ""}${result.stderr ?? ""}`.trim(),
+  };
+}
+
+/**
+ * Restore stale worktree dependencies before any handoff command enters the
+ * no-network namespace. The stamp is owned by this preflight: Bun itself does
+ * not provide a stable cross-version lockfile marker.
+ */
+export function preflightHandoffDependencies({
+  worktreePath,
+  needsWebBuild = false,
+  installer = defaultDependencyInstaller,
+  timeoutMs = DEFAULT_HANDOFF_DEPENDENCY_TIMEOUT_MS,
+}) {
+  const directories = [worktreePath];
+  if (needsWebBuild)
+    directories.push(path.join(worktreePath, HANDOFF_WEB_BUILD_DIR));
+  const details = [];
+  const started = Date.now();
+
+  for (const directory of directories) {
+    const packageJson = path.join(directory, "package.json");
+    const lockfile = path.join(directory, "bun.lock");
+    if (!existsSync(packageJson) || !existsSync(lockfile)) continue;
+
+    const nodeModules = path.join(directory, "node_modules");
+    const stamp = path.join(nodeModules, ".bun-lock-sha");
+    const lockHash = sha256Hex(readFileSync(lockfile));
+    let stampedHash = null;
+    try {
+      stampedHash = readFileSync(stamp, "utf8").trim();
+    } catch {
+      // Missing or unreadable stamps are stale dependencies, never a pass.
+    }
+    if (existsSync(nodeModules) && stampedHash === lockHash) {
+      details.push({
+        dir: path.relative(worktreePath, directory) || ".",
+        installed: false,
+        ms: 0,
+      });
+      continue;
+    }
+
+    const installStarted = Date.now();
+    let observation;
+    try {
+      observation = installer({
+        command: "bun install --frozen-lockfile",
+        cwd: directory,
+        timeoutMs,
+      });
+    } catch (err) {
+      observation = {
+        passed: false,
+        exitCode: null,
+        output: `installer error: ${err?.message ?? String(err)}`,
+      };
+    }
+    const ms = Date.now() - installStarted;
+    const detail = {
+      dir: path.relative(worktreePath, directory) || ".",
+      installed: Boolean(observation?.passed),
+      ms,
+    };
+    details.push(detail);
+    if (!observation?.passed) {
+      return {
+        passed: false,
+        installed: false,
+        ms: Date.now() - started,
+        dirs: details,
+        failed: {
+          ...detail,
+          output: handoffFailureOutput(observation, { timeoutMs }),
+        },
+      };
+    }
+
+    // An installer can succeed without making node_modules itself (for
+    // example, a mocked no-op). The stamp is only meaningful alongside it.
+    mkdirSync(nodeModules, { recursive: true });
+    writeFileSync(stamp, `${lockHash}\n`, "utf8");
+  }
+
+  return {
+    passed: true,
+    installed: details.some((detail) => detail.installed),
+    ms: Date.now() - started,
+    dirs: details,
+  };
 }
 
 /**
@@ -1170,6 +1303,8 @@ export function verifyResult({
   extraArtifacts = [],
   worktreeRecord = null,
   verifyTimeoutMs = repoVerifyTimeoutMs(),
+  runHandoffCommandFn = runHandoffCommand,
+  dependencyInstaller = defaultDependencyInstaller,
 }) {
   let raw;
   try {
@@ -1203,6 +1338,8 @@ export function verifyResult({
     extraArtifacts,
     worktreeRecord,
     verifyTimeoutMs,
+    runHandoffCommandFn,
+    dependencyInstaller,
   });
 }
 
@@ -1602,6 +1739,8 @@ function verifyCompleted({
   extraArtifacts = [],
   worktreeRecord = null,
   verifyTimeoutMs,
+  runHandoffCommandFn,
+  dependencyInstaller,
 }) {
   if (candidate.artifact === undefined)
     throw new ContractViolation(["missing_artifact"]);
@@ -1697,7 +1836,7 @@ function verifyCompleted({
     // PR or returns the ticket over it.
     const runHandoffStep = (options) => {
       try {
-        return runHandoffCommand(options);
+        return runHandoffCommandFn(options);
       } catch (err) {
         if (err instanceof SandboxUnavailable) {
           refuse(HANDOFF_SANDBOX_UNAVAILABLE, err.message);
@@ -1717,6 +1856,32 @@ function verifyCompleted({
       refuse(
         "handoff_verification_unspecified",
         "handoff_verification_unspecified: the ticket has no parseable `## Verification Command` and the repo declares no `verify:` command",
+      );
+    }
+
+    // The guest has no network and receives only this worktree as a mount.
+    // Compute the diff first so a pending web build gets its own dependency
+    // preflight, then restore both directories before any sandboxed command.
+    handoff.diff = changedFilesSince({
+      worktreePath,
+      base: worktreeRecord.base ?? null,
+    });
+    const files = handoff.diff.files ?? [];
+    const needsWebBuild =
+      files.some((file) => file.startsWith(HANDOFF_WEB_SRC_PREFIX)) &&
+      existsSync(
+        path.join(worktreePath, HANDOFF_WEB_BUILD_DIR, "package.json"),
+      );
+    handoff.dependencies = preflightHandoffDependencies({
+      worktreePath,
+      needsWebBuild,
+      installer: dependencyInstaller,
+    });
+    if (!handoff.dependencies.passed) {
+      const failed = handoff.dependencies.failed;
+      refuse(
+        HANDOFF_DEPENDENCIES_MISSING,
+        `${HANDOFF_DEPENDENCIES_MISSING}: ${failed.dir}: ${failed.output}`,
       );
     }
 
@@ -1765,8 +1930,9 @@ function verifyCompleted({
       obs.source = "ticket";
       handoff.verification = obs;
       if (!obs.passed) {
+        const reasonCode = handoffFailureReasonCode(obs);
         refuse(
-          "handoff_verification_failed",
+          reasonCode,
           `ticket_verify_failed: ${handoffWhy(obs)}; sandbox_limits: ${handoffSandboxLimits(obs.sandbox.tmpfsMb)}`,
         );
       }
@@ -1775,19 +1941,9 @@ function verifyCompleted({
       handoff.verification = handoff.repoVerify;
     }
 
-    // 3. What the PR actually carries.
-    handoff.diff = changedFilesSince({
-      worktreePath,
-      base: worktreeRecord.base ?? null,
-    });
-    const files = handoff.diff.files ?? [];
-
-    // 4. tsc + vite for anything under event-runtime/web/src/** — the check
+    // 3. tsc + vite for anything under event-runtime/web/src/** — the check
     //    #593 failed on, regardless of what the ticket's command covers.
-    if (
-      files.some((file) => file.startsWith(HANDOFF_WEB_SRC_PREFIX)) &&
-      existsSync(path.join(worktreePath, HANDOFF_WEB_BUILD_DIR, "package.json"))
-    ) {
+    if (needsWebBuild) {
       const obs = runHandoffStep({
         command: HANDOFF_WEB_BUILD_COMMAND,
         cwd: path.join(worktreePath, HANDOFF_WEB_BUILD_DIR),
@@ -1806,7 +1962,7 @@ function verifyCompleted({
       handoffChecks.push("web_build_passed");
     }
 
-    // 5. Owned Paths conformance: listed always; refused under strict.
+    // 4. Owned Paths conformance: listed always; refused under strict.
     if (handoff.diff.ok && ownedPathsKnown) {
       handoff.ownedPathsDeviations = ownedPathsDeviations(files, ownedPaths);
       if (handoff.ownedPathsDeviations.length === 0) {

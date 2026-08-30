@@ -16,7 +16,10 @@ import { getAgent, loadRegistry } from "./registry.mjs";
 import { execFileSync } from "node:child_process";
 import {
   ContractViolation,
+  HANDOFF_DEPENDENCIES_MISSING,
   HANDOFF_FAILURE_OUTPUT_MAX_CHARS,
+  HANDOFF_REASON_CODES,
+  handoffFailureReasonCode,
   handoffFailureOutput,
   HANDOFF_HOST_ENV,
   HANDOFF_SANDBOX_INIT,
@@ -1320,6 +1323,156 @@ describe("worktree baseline verification (WM-334)", () => {
       "ticket_verify_covered_by_repo_verify",
     );
     expect(existsSync(path.join(dir, ".verify.ticket.log"))).toBe(false);
+  });
+
+  test("missing dependencies install before the injected step-1 sandbox runner", () => {
+    const { dir, record } = worktreeWorkspace("step-1", null);
+    writeFileSync(
+      path.join(record.path, "package.json"),
+      '{"name":"fixture"}\n',
+    );
+    writeFileSync(path.join(record.path, "bun.lock"), "fixture-lock\n");
+    const calls = [];
+    const out = verifyResult({
+      spec: dispatchSpec,
+      def: dispatchDef,
+      registry,
+      workspaceDir: dir,
+      attempt: 1,
+      worktreeRecord: record,
+      dependencyInstaller: (options) => {
+        calls.push({ kind: "install", ...options });
+        return { passed: true, exitCode: 0, output: "installed" };
+      },
+      runHandoffCommandFn: (options) => {
+        calls.push({ kind: "spawn", command: options.command });
+        return {
+          passed: true,
+          exitCode: 0,
+          output: "ok",
+          sandbox: { tmpfsMb: 1024 },
+        };
+      },
+    });
+
+    expect(out.kind).toBe("completed");
+    expect(calls).toEqual([
+      expect.objectContaining({
+        kind: "install",
+        command: "bun install --frozen-lockfile",
+        cwd: record.path,
+      }),
+      { kind: "spawn", command: "step-1" },
+    ]);
+    expect(out.handoff.dependencies).toMatchObject({ installed: true });
+  });
+
+  test("a failed dependency install refuses before either sandbox verification step", () => {
+    const { dir, record } = worktreeWorkspace("step-1", null);
+    writeFileSync(
+      path.join(record.path, "package.json"),
+      '{"name":"fixture"}\n',
+    );
+    writeFileSync(path.join(record.path, "bun.lock"), "fixture-lock\n");
+    let spawned = 0;
+
+    try {
+      verifyResult({
+        spec: dispatchSpec,
+        def: dispatchDef,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+        worktreeRecord: record,
+        dependencyInstaller: () => ({
+          passed: false,
+          exitCode: 1,
+          output: "network unavailable",
+        }),
+        runHandoffCommandFn: () => {
+          spawned += 1;
+          return { passed: true, exitCode: 0, output: "unexpected" };
+        },
+      });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.reasonCode).toBe(HANDOFF_DEPENDENCIES_MISSING);
+      expect(err.violations[0]).toContain("network unavailable");
+    }
+    expect(spawned).toBe(0);
+  });
+
+  test("a matching node_modules lock stamp does not reinstall", () => {
+    const { dir, record } = worktreeWorkspace("step-1", null);
+    const lock = "fixture-lock\n";
+    writeFileSync(
+      path.join(record.path, "package.json"),
+      '{"name":"fixture"}\n',
+    );
+    writeFileSync(path.join(record.path, "bun.lock"), lock);
+    mkdirSync(path.join(record.path, "node_modules"));
+    writeFileSync(
+      path.join(record.path, "node_modules", ".bun-lock-sha"),
+      `${sha256Hex(lock)}\n`,
+    );
+    let installs = 0;
+    const out = verifyResult({
+      spec: dispatchSpec,
+      def: dispatchDef,
+      registry,
+      workspaceDir: dir,
+      attempt: 1,
+      worktreeRecord: record,
+      dependencyInstaller: () => {
+        installs += 1;
+        return { passed: true, exitCode: 0, output: "unexpected" };
+      },
+      runHandoffCommandFn: () => ({
+        passed: true,
+        exitCode: 0,
+        output: "ok",
+        sandbox: { tmpfsMb: 1024 },
+      }),
+    });
+
+    expect(out.kind).toBe("completed");
+    expect(installs).toBe(0);
+    expect(out.handoff.dependencies).toMatchObject({ installed: false });
+  });
+
+  test("missing package output is an environment dependency failure", () => {
+    expect(HANDOFF_REASON_CODES.has(HANDOFF_DEPENDENCIES_MISSING)).toBe(true);
+    expect(
+      handoffFailureReasonCode({
+        output: "Cannot find package 'prettier' from registry.mjs",
+      }),
+    ).toBe(HANDOFF_DEPENDENCIES_MISSING);
+    expect(
+      handoffFailureReasonCode({ output: "error: Cannot find module 'x'" }),
+    ).toBe(HANDOFF_DEPENDENCIES_MISSING);
+
+    const { dir, record } = worktreeWorkspace(null, null);
+    record.handoff = { verificationCommand: "ticket-step" };
+    try {
+      verifyResult({
+        spec: dispatchSpec,
+        def: dispatchDef,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+        worktreeRecord: record,
+        runHandoffCommandFn: () => ({
+          passed: false,
+          exitCode: 1,
+          output: "Cannot find package 'prettier' from registry.mjs",
+          sandbox: { tmpfsMb: 1024 },
+        }),
+      });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err.reasonCode).toBe(HANDOFF_DEPENDENCIES_MISSING);
+    }
   });
 
   test("a ticket-step failure names its sandbox limits", () => {
