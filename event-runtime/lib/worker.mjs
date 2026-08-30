@@ -4405,84 +4405,96 @@ export function releaseStalledWorkerLease(
  */
 export function reapExpiredLeases(
   db,
-  { now = () => Date.now(), policyVersion = "unknown" } = {},
+  {
+    now = () => Date.now(),
+    policyVersion = "unknown",
+    onError = (error) => console.error(`[worker] ${error}`),
+  } = {},
 ) {
   const currentNow = resolveNow(now);
-  return txImmediate(db, () => {
-    const rows = db
-      .query(
-        `SELECT r.run_id, r.attempts, r.spec_json, r.state FROM runs r
-         JOIN attempts a ON a.run_id = r.run_id AND a.attempt = r.attempts
-         WHERE r.state IN ('LEASED', 'RUNNING', 'VERIFYING') AND a.lease_expires_at < ?`,
-      )
-      .all(iso(currentNow));
-    for (const row of rows) {
-      const spec = JSON.parse(row.spec_json);
-      const decision = retryDecision(db, row.run_id, spec, "lease_expired", {
-        includeCurrentFailure: true,
+  const rows = db
+    .query(
+      `SELECT r.run_id, r.attempts, r.spec_json, r.state FROM runs r
+       JOIN attempts a ON a.run_id = r.run_id AND a.attempt = r.attempts
+       WHERE r.state IN ('LEASED', 'RUNNING', 'VERIFYING') AND a.lease_expires_at < ?`,
+    )
+    .all(iso(currentNow));
+  let reaped = 0;
+
+  for (const row of rows) {
+    try {
+      txImmediate(db, () => {
+        const spec = JSON.parse(row.spec_json);
+        const decision = retryDecision(db, row.run_id, spec, "lease_expired", {
+          includeCurrentFailure: true,
+        });
+        const failureReason = terminalFailureReason(decision, "lease_expired");
+
+        // VERIFYING cannot transition directly to QUEUED; record its failure first.
+        if (row.state === "VERIFYING") {
+          transition(db, {
+            runId: row.run_id,
+            to: "FAILED",
+            actor: "reaper",
+            reason: failureReason,
+            attempt: row.attempts,
+            policyVersion,
+            now: currentNow,
+          });
+        }
+        finishAttempt(
+          db,
+          row.run_id,
+          row.attempts,
+          "FAILED",
+          "lease_expired",
+          currentNow,
+        );
+        if (decision.retry) {
+          transition(db, {
+            runId: row.run_id,
+            to: "QUEUED",
+            actor: "reaper",
+            reason: `retry:${decision.cause}`,
+            attempt: row.attempts,
+            policyVersion,
+            now: currentNow,
+          });
+          return;
+        }
+
+        // LEASED has no direct FAILED edge; advance through RUNNING only when
+        // the environment retry ceiling is exhausted and the run must terminate.
+        if (row.state === "LEASED") {
+          transition(db, {
+            runId: row.run_id,
+            to: "RUNNING",
+            actor: "reaper",
+            reason: failureReason,
+            attempt: row.attempts,
+            policyVersion,
+            now: currentNow,
+          });
+        }
+        if (row.state !== "VERIFYING") {
+          transition(db, {
+            runId: row.run_id,
+            to: "FAILED",
+            actor: "reaper",
+            reason: failureReason,
+            attempt: row.attempts,
+            policyVersion,
+            now: currentNow,
+          });
+        }
       });
-      const failureReason = terminalFailureReason(decision, "lease_expired");
-
-      // VERIFYING cannot transition directly to QUEUED; record its failure first.
-      if (row.state === "VERIFYING") {
-        transition(db, {
-          runId: row.run_id,
-          to: "FAILED",
-          actor: "reaper",
-          reason: failureReason,
-          attempt: row.attempts,
-          policyVersion,
-          now: currentNow,
-        });
-      }
-      finishAttempt(
-        db,
-        row.run_id,
-        row.attempts,
-        "FAILED",
-        "lease_expired",
-        currentNow,
-      );
-      if (decision.retry) {
-        transition(db, {
-          runId: row.run_id,
-          to: "QUEUED",
-          actor: "reaper",
-          reason: `retry:${decision.cause}`,
-          attempt: row.attempts,
-          policyVersion,
-          now: currentNow,
-        });
-        continue;
-      }
-
-      // LEASED has no direct FAILED edge; advance through RUNNING only when
-      // the environment retry ceiling is exhausted and the run must terminate.
-      if (row.state === "LEASED") {
-        transition(db, {
-          runId: row.run_id,
-          to: "RUNNING",
-          actor: "reaper",
-          reason: failureReason,
-          attempt: row.attempts,
-          policyVersion,
-          now: currentNow,
-        });
-      }
-      if (row.state !== "VERIFYING") {
-        transition(db, {
-          runId: row.run_id,
-          to: "FAILED",
-          actor: "reaper",
-          reason: failureReason,
-          attempt: row.attempts,
-          policyVersion,
-          now: currentNow,
-        });
-      }
+      reaped += 1;
+    } catch (err) {
+      onError(`expired lease ${row.run_id}: ${err?.message ?? String(err)}`);
     }
-    return rows.length;
-  });
+  }
+
+  return reaped;
 }
 
 /** Claim and execute one run, or return a typed refusal/null without execution. */

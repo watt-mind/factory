@@ -89,7 +89,7 @@ describe("reaper (OPS-416)", () => {
     expect(runState(db, spec.runId)).toBe("VERIFYING");
 
     const reaped = reapExpiredLeases(db, { now: T0, policyVersion: "test" });
-    expect(reaped).toBe(1);
+    expect(reaped).toEqual({ reaped: 1, errors: [] });
     expect(runState(db, spec.runId)).toBe("QUEUED");
 
     const events = db
@@ -118,7 +118,7 @@ describe("reaper (OPS-416)", () => {
     expect(runState(db, spec.runId)).toBe("VERIFYING");
 
     const reaped = reapExpiredLeases(db, { now: T0, policyVersion: "test" });
-    expect(reaped).toBe(1);
+    expect(reaped).toEqual({ reaped: 1, errors: [] });
     expect(runState(db, spec.runId)).toBe("FAILED");
 
     const attempt = db
@@ -126,6 +126,31 @@ describe("reaper (OPS-416)", () => {
       .get(spec.runId);
     expect(attempt.terminal_state).toBe("FAILED");
     expect(attempt.reason_code).toBe("lease_expired");
+  });
+
+  test("continues reaping and pruning when one expired lease has corrupt spec JSON", () => {
+    const db = openDb(":memory:");
+    const corrupt = makeSpec({ maxAttempts: 2 });
+    const healthy = makeSpec({ maxAttempts: 2 });
+    setupVerifyingRun(db, corrupt, { now: T0, expired: true });
+    setupVerifyingRun(db, healthy, { now: T0, expired: true });
+    db.query(`UPDATE runs SET spec_json = '{' WHERE run_id = ?`).run(
+      corrupt.runId,
+    );
+
+    registerWorker(db, { workerId: "stale", now: T0 - 48 * 60 * 60 * 1000 });
+    deregisterWorker(db, "stale", { now: T0 - 30 * 60 * 60 * 1000 });
+
+    const result = reapExpiredLeases(db, { now: T0, policyVersion: "test" });
+
+    expect(result.reaped).toBe(1);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain(corrupt.runId);
+    expect(runState(db, corrupt.runId)).toBe("VERIFYING");
+    expect(runState(db, healthy.runId)).toBe("QUEUED");
+    expect(
+      listWorkers(db, { now: T0 }).map((worker) => worker.workerId),
+    ).not.toContain("stale");
   });
 
   test("cancelRun from VERIFYING transitions cleanly to FAILED without 409", () => {

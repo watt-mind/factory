@@ -10,9 +10,13 @@ import { reapExpiredLeases as reapLeases } from "./worker.mjs";
 import { pruneWorkers } from "./workers.mjs";
 
 export function reapExpiredLeases(db, opts = {}) {
-  const reaped = reapLeases(db, opts);
+  const errors = [];
+  const reaped = reapLeases(db, {
+    ...opts,
+    onError: (error) => errors.push(error),
+  });
   pruneWorkers(db, opts);
-  return reaped;
+  return { reaped, errors };
 }
 
 export { pruneWorkers };
