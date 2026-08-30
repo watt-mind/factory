@@ -116,8 +116,25 @@ After changing the workflow:
 1. Require all checks on the PR itself to pass:
 
    ```bash
-   gh pr checks <PR> --watch --fail-fast
+   # --workflow ci.yml: without it the newest run of ANY workflow (CLA,
+   # Security, Browser E2E) is returned and its verdict is not CI's. The run
+   # can lag the push, so retry briefly instead of failing on the first miss.
+   run_id=""
+   for i in $(seq 8); do
+     run_id="$(gh run list --workflow ci.yml --commit <sha> --json databaseId --limit 1 --jq '.[0].databaseId // empty')"
+     test -n "$run_id" && break
+     sleep 15
+   done
+   test -n "$run_id" || { echo "no CI workflow run found for this commit" >&2; exit 1; }
+   gh run watch "$run_id" --exit-status --interval 60
+   gh api "repos/{owner}/{repo}/commits/<sha>/check-runs" \
+     --jq '.check_runs[] | select(.status != "completed" or (.conclusion | IN("success","neutral","skipped") | not)) | .name' \
+     | grep -q . && { echo "not every check-run on <sha> is green" >&2; exit 1; }
    ```
+
+   This uses the REST API. `gh pr checks <PR> --watch --interval 60` is the
+   minimum only when its GraphQL-backed fallback is unavoidable; it otherwise
+   polls GraphQL every 10 seconds by default.
 
 2. After merge, inspect develop runs and confirm five consecutive green runs, including a period when at least three PR workflows were queued concurrently:
 

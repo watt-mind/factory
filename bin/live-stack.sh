@@ -21,8 +21,15 @@
 #                                # (<log>.1 .. <log>.N); default 3, minimum 1
 #   FACTORY_LOG_ROTATE_INTERVAL  # seconds between size checks while the stack is
 #                                # up (web supervisor tick); default 300
+#   FACTORY_API_READY_TIMEOUT    # seconds `up` waits for the runtime /health
+#                                # endpoint before tearing its daemons down;
+#                                # default 60
 #
-set -euo pipefail
+# -E: `up` installs an ERR trap that tears down the daemons it started. Without
+# errexit-trace the trap is not inherited by functions or command substitutions,
+# so a `set -e` abort inside ensure_deps/spawn_daemon_tracked would exit the
+# shell with the trap never having fired.
+set -eEuo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/worktree-common.sh"
 
@@ -122,6 +129,21 @@ cleanup_up_daemons() {
   UP_STARTED_LABELS=()
 }
 
+cleanup_up_daemons_on_signal() {
+  # Disable the traps before teardown: cleanup itself awaits processes and must
+  # not recursively re-enter if another signal arrives while it is doing so.
+  trap - INT TERM ERR
+  cleanup_up_daemons
+  exit 130
+}
+
+cleanup_up_daemons_on_error() {
+  local status=$?
+  trap - INT TERM ERR
+  cleanup_up_daemons
+  exit "$status"
+}
+
 die() {
   cleanup_up_daemons
   printf '\033[31merror:\033[0m %s\n' "$*" >&2
@@ -154,6 +176,7 @@ LOG_ROTATE_BYTES="${FACTORY_LOG_ROTATE_BYTES:-52428800}"
 LOG_KEEP="${FACTORY_LOG_KEEP:-3}"
 LOG_ROTATE_INTERVAL="${FACTORY_LOG_ROTATE_INTERVAL:-300}"
 LOG_ROTATE_MIN_BYTES=1048576
+API_READY_TIMEOUT="${FACTORY_API_READY_TIMEOUT:-60}"
 
 # Reject knob values before anything touches a log. A threshold below 1 MiB
 # would rotate on nearly every tick (and lose the log's recent tail every time);
@@ -418,6 +441,13 @@ case "$ACTION" in
     # Record what was already running before this invocation starts anything,
     # so a failed `up` can tell its own daemons from the operator's.
     snapshot_up_pidfiles
+    # From here until the ready banner, this invocation may own detached
+    # daemons. Always remove only those daemons if an interrupt or an unchecked
+    # command failure exits the shell early.
+    trap 'cleanup_up_daemons_on_signal' INT TERM
+    trap 'cleanup_up_daemons_on_error' ERR
+
+    command -v curl >/dev/null 2>&1 || die "curl not found — install curl before running factory up"
 
     # Dependency freshness (WM-312). A runtime dependency added to the repo does
     # not exist on the running stack until someone remembers `bun install` after
@@ -542,13 +572,24 @@ case "$ACTION" in
         bun "$REPO/event-runtime/cli.mjs" "${SERVE_ARGS[@]}"
     fi
 
-    # 2. Wait for API to respond
-    for i in $(seq 30); do
-      if curl -sf -m 1 "http://127.0.0.1:$API_PORT/health" >/dev/null 2>&1; then break; fi
+    # 2. Wait for API to respond. The budget is wall-clock, not an attempt
+    # count: a connection-refused curl returns instantly, while a bound socket
+    # whose /health stalls eats the full `-m 1` per attempt — counting attempts
+    # would make the latter wait ~10x longer than the former.
+    API_READY=0
+    API_WAIT_STARTED=$SECONDS
+    while (( SECONDS - API_WAIT_STARTED < API_READY_TIMEOUT )); do
+      if curl -sf -m 1 "http://127.0.0.1:$API_PORT/health" >/dev/null 2>&1; then
+        API_READY=1
+        break
+      fi
+      if ! pid_alive "$RUN_DIR/serve.pid"; then
+        die "event runtime exited before becoming healthy on $API_PORT — check logs at $RUN_DIR/serve.log"
+      fi
       sleep 0.1
     done
-    if ! curl -sf -m 1 "http://127.0.0.1:$API_PORT/health" >/dev/null 2>&1; then
-      die "event runtime failed to start on $API_PORT — check logs at $RUN_DIR/serve.log"
+    if [[ "$API_READY" -ne 1 ]]; then
+      die "event runtime failed to start on $API_PORT within ${API_READY_TIMEOUT}s — check logs at $RUN_DIR/serve.log"
     fi
 
     # 3. Start or verify worker
@@ -635,6 +676,7 @@ case "$ACTION" in
     printf '  status:  factory events status\n'
     printf '  tail:    factory tail\n'
     printf '  down:    factory down\n\n'
+    trap - INT TERM ERR
     ;;
 
   __supervise-web)
