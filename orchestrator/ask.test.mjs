@@ -617,7 +617,7 @@ test("a failing section carries its error and never renders as empty", async () 
 
   const text = formatAsk(doc);
   expect(text).toContain("unavailable — factory: control plane unreachable");
-  expect(text).not.toContain("no dispatchable tickets");
+  expect(text).not.toContain("no eligible tickets");
   expect(text).not.toContain("nothing claimed");
   expect(text).not.toContain("nothing held");
 });
@@ -727,7 +727,7 @@ test("--section returns only the named sections", async () => {
   for (const absent of ["inflight", "recent", "noop", "spend"])
     expect(doc[absent]).toBeUndefined();
   const text = formatAsk(doc);
-  expect(text).toContain("QUEUE");
+  expect(text).toContain("QUEUE — eligible (1)");
   expect(text).not.toContain("RECENT RUNS");
 });
 

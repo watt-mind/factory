@@ -25,6 +25,7 @@ import {
   deregisterWorker,
   heartbeat,
   registerWorker,
+  satisfiesPlacement,
 } from "../lib/workers.mjs";
 import { fail, flagValue, log } from "./shared.mjs";
 
@@ -40,6 +41,7 @@ import { fail, flagValue, log } from "./shared.mjs";
  * claiming correct; Postgres is what remote nodes need, not this.
  *
  *   bun event-runtime/cli.mjs work [--label k=v ...] [--adapter-override fake] [--poll-ms 500]
+ *                                 [--skip-report-ms 60000]
  *                                 [--reload-on-change]
  */
 export default async function work(args) {
@@ -47,6 +49,14 @@ export default async function work(args) {
   const pollMs = Number(flagValue(args, "--poll-ms") ?? 500);
   if (!Number.isInteger(pollMs) || pollMs < 25 || pollMs > 5_000) {
     fail("work: --poll-ms must be an integer between 25 and 5000");
+  }
+  const skipReportMs = Number(
+    flagValue(args, "--skip-report-ms") ??
+      process.env.FACTORY_WORKER_SKIP_REPORT_MS ??
+      60_000,
+  );
+  if (!Number.isInteger(skipReportMs) || skipReportMs < pollMs) {
+    fail("work: --skip-report-ms must be an integer no smaller than --poll-ms");
   }
   const drainTimeoutSeconds = Number(flagValue(args, "--drain-timeout") ?? 60);
   if (
@@ -129,6 +139,106 @@ export default async function work(args) {
 
   let draining = false;
   let inFlight = null;
+  let idleSince = null;
+  let lastSkipInspectionAt = null;
+  const reportedSkips = new Map();
+
+  // Keep this exactly aligned with claimNext: a run in this window is QUEUED
+  // but intentionally not available to this worker yet. This poll-loop query
+  // is diagnostic only, so the claim transaction stays cheap under a queue of
+  // unsatisfiable placements.
+  const claimBackoff =
+    /^(?:claim_lock_contention:\d+|dispatch_gate_transient:[^:]+:\d+):backoff_(\d+)ms$/;
+
+  function inspectSkippedQueuedRuns(now) {
+    const candidates = db
+      .query(
+        `SELECT r.run_id, r.spec_json, le.reason AS queue_reason, le.at AS queued_at
+           FROM runs r
+           JOIN lifecycle_events le ON le.seq = (
+             SELECT MAX(latest.seq) FROM lifecycle_events latest WHERE latest.run_id = r.run_id
+           )
+          WHERE r.state = 'QUEUED'
+          ORDER BY r.created_at, r.run_id`,
+      )
+      .all();
+    const checkoutVersion = checkoutPolicyVersion();
+
+    return candidates.flatMap((candidate) => {
+      const spec = JSON.parse(candidate.spec_json);
+      const backoff = claimBackoff.exec(candidate.queue_reason ?? "");
+      if (backoff) {
+        const until = Date.parse(candidate.queued_at) + Number(backoff[1]);
+        if (until > now) {
+          return [
+            {
+              runId: candidate.run_id,
+              definition: spec.agent,
+              reason: `backoff_until:${new Date(until).toISOString()}`,
+            },
+          ];
+        }
+      }
+
+      if (!satisfiesPlacement(labels, spec.placement)) {
+        const [key, value] = Object.entries(spec.placement).find(
+          ([placementKey, placementValue]) =>
+            String(labels[placementKey]) !== String(placementValue),
+        );
+        return [
+          {
+            runId: candidate.run_id,
+            definition: spec.agent,
+            reason: `placement_unsatisfied:${key}=${value}`,
+          },
+        ];
+      }
+
+      // An adapter allow-list is not a reported reason in this ticket, but
+      // preserve claimNext's ordering so an unavailable adapter is not
+      // misdiagnosed as a registry mismatch below.
+      if (!adapterOverride && !adapterNames.includes(spec.adapter)) return [];
+
+      if (pv && (spec.promptVersion !== pv || spec.policyVersion !== pv)) {
+        return [
+          {
+            runId: candidate.run_id,
+            definition: spec.agent,
+            reason: `registry_stale:spec=${spec.promptVersion}/${spec.policyVersion}:worker=${pv}:checkout=${checkoutVersion}`,
+          },
+        ];
+      }
+      return [];
+    });
+  }
+
+  function reportSkippedQueuedRuns(now) {
+    const skipped = inspectSkippedQueuedRuns(now);
+    lastSkipInspectionAt = now;
+    const present = new Set(
+      skipped.map(({ runId, reason }) => `${runId}\u0000${reason}`),
+    );
+    for (const key of reportedSkips.keys()) {
+      if (!present.has(key)) reportedSkips.delete(key);
+    }
+    for (const entry of skipped) {
+      const key = `${entry.runId}\u0000${entry.reason}`;
+      if (now - (reportedSkips.get(key) ?? -Infinity) < skipReportMs) continue;
+      log(`skipped ${JSON.stringify(entry)}`);
+      reportedSkips.set(key, now);
+    }
+  }
+
+  function reportSkipsWhenDue(now) {
+    idleSince ??= now;
+    if (
+      now - idleSince >= pollMs &&
+      (lastSkipInspectionAt === null ||
+        now - lastSkipInspectionAt >= skipReportMs)
+    ) {
+      reportSkippedQueuedRuns(now);
+    }
+  }
 
   // Dev live-reload (WM-213). Off unless asked for: a production worker must
   // never decide on its own that it is out of date.
@@ -220,19 +330,26 @@ export default async function work(args) {
           ...(adapterOverride ? { adapterOverride } : {}),
         });
         if (!claim) {
+          reportSkipsWhenDue(Date.now());
           await new Promise((resolve) => setTimeout(resolve, pollMs));
           continue;
         }
         if (claim.refused) {
-          log(
-            `refused ${claim.runId} (${claim.reasonCode}, retryable): worker registry ${claim.workerRegistryVersion}, checkout registry ${claim.checkoutRegistryVersion}, run prompt ${claim.spec.promptVersion}, run policy ${claim.spec.policyVersion}`,
-          );
+          if (claim.reloadRequired)
+            log(
+              `refused ${claim.runId} (${claim.reasonCode}, retryable): worker registry ${claim.workerRegistryVersion}, checkout registry ${claim.checkoutRegistryVersion}, run prompt ${claim.spec.promptVersion}, run policy ${claim.spec.policyVersion}`,
+            );
           if (claim.reloadRequired)
             return finish("registry_stale", CODE_RELOAD_EXIT);
+          reportSkipsWhenDue(Date.now());
           await new Promise((resolve) => setTimeout(resolve, pollMs));
           continue;
         }
         inFlight = claim.runId;
+        idleSince = null;
+        for (const key of reportedSkips.keys()) {
+          if (key.startsWith(`${claim.runId}\u0000`)) reportedSkips.delete(key);
+        }
         workerHeartbeat({ state: "busy", runId: claim.runId });
         log(
           `claimed ${claim.runId} attempt ${claim.attempt} (${claim.spec.agent})`,

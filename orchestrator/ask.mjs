@@ -669,11 +669,11 @@ export function formatAsk(doc) {
   if (doc.queue) {
     const repoW = columnWidth(doc.queue.rows, "repo", 6, 16);
     const idW = columnWidth(doc.queue.rows, "identifier", 8, 26);
-    lines.push(`\nQUEUE — dispatchable now (${count(doc.queue)})`);
+    lines.push(`\nQUEUE — eligible (${count(doc.queue)})`);
     renderRows(
       lines,
       doc.queue,
-      "no dispatchable tickets",
+      "no eligible tickets",
       (r) =>
         `  ${pad(r.repo, repoW)}  ${pad(r.identifier, idW)}  ${pad(r.priority == null ? "p-" : `p${r.priority}`, 3)}  ${oneLine(r.title, 60)}`,
     );
