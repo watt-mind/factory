@@ -2,6 +2,7 @@ import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-cli-serve-tes
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createServer } from "node:http";
+import { connect } from "node:net";
 import path from "node:path";
 import {
   existsSync,
@@ -13,6 +14,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { API_HOST } from "../lib/config.mjs";
+import {
+  CLOSE_CONNECTIONS_AFTER_MS,
+  CONNECTOR_STOP_TIMEOUT_MS,
+  HARD_EXIT_MS,
+  serveLockPath,
+  stopBounded,
+} from "./serve.mjs";
 import { openDb } from "../lib/db.mjs";
 import { freePort } from "../lib/test-helpers-timing.mjs";
 import {
@@ -94,12 +102,74 @@ function connectorFixture({
   );
   writeFileSync(path.join(extension, "connector.mjs"), connectorSource);
   mkdirSync(path.join(root, "config"), { recursive: true });
+  // A literal, minimal policy: the fixture must never inherit the checkout's
+  // config/policy.yaml, which is instance configuration on the operator box
+  // and is absent in a fresh worktree.
   writeFileSync(
     path.join(root, "config", "policy.yaml"),
-    `${readFileSync(path.join(path.dirname(path.dirname(CLI)), "config", "policy.yaml"), "utf8").trim()}\nextensions:\n  - path: ${JSON.stringify(extension)}\n`,
+    [
+      "packs: []",
+      "models:",
+      "  claude: { strong: default, standard: sonnet, light: haiku }",
+      "  pi: { strong: pi-strong, standard: pi-standard, light: pi-light }",
+      "  agy: { strong: agy, standard: agy, light: agy }",
+      "  cursor: { strong: cursor, standard: cursor, light: cursor }",
+      "extensions:",
+      `  - path: ${JSON.stringify(extension)}`,
+      "",
+    ].join("\n"),
   );
   return root;
 }
+
+/** Serve child with captured output, in the shape `waitFor` expects. */
+function spawnServeBox(args, env) {
+  const child = spawnTracked("bun", [CLI, "serve", ...args], {
+    env: { ...process.env, ...env },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let out = "";
+  child.stdout.on("data", (b) => {
+    out += b;
+  });
+  child.stderr.on("data", (b) => {
+    out += b;
+  });
+  return {
+    child,
+    get out() {
+      return out;
+    },
+  };
+}
+
+/**
+ * Open a raw HTTP/1.1 keep-alive connection to the control API and leave it
+ * idle, the way curl loops and the web UI do. `server.close` alone never
+ * completes while such a socket exists.
+ */
+async function openKeepAlive(port) {
+  const socket = connect({ host: API_HOST, port: Number(port) });
+  await new Promise((resolve, reject) => {
+    socket.once("connect", resolve);
+    socket.once("error", reject);
+  });
+  socket.write(
+    `GET /health HTTP/1.1\r\nHost: ${API_HOST}\r\nConnection: keep-alive\r\n\r\n`,
+  );
+  await new Promise((resolve) => socket.once("data", resolve));
+  socket.on("error", () => {});
+  return socket;
+}
+
+const HANGING_CONNECTOR = `export const id = "factory/test-connector:test";
+export default async function start() {
+  return {
+    stop() { return new Promise(() => {}); },
+    health() { return { ok: true }; },
+  };
+}
+`;
 
 describe("serve command", () => {
   test("serve --watch re-execs under bun --watch and binds", async () => {
@@ -209,49 +279,93 @@ describe("serve command", () => {
   test("SIGTERM closes the server when a connector stop never resolves", async () => {
     const home = tmpDir("evrt-serve-hanging-stop-");
     const port = freePort();
-    const root = connectorFixture({
-      connectorSource: `export const id = "factory/test-connector:test";
-export default async function start() {
-  return {
-    stop() { return new Promise(() => {}); },
-    health() { return { ok: true }; },
-  };
-}
-`,
+    const root = connectorFixture({ connectorSource: HANGING_CONNECTOR });
+    const box = spawnServeBox(["--port", port], {
+      FACTORY_EVENT_HOME: home,
+      FACTORY_EVENT_ENV: "live",
+      FACTORY_REPOS_ROOT: root,
     });
-    const child = spawnTracked("bun", [CLI, "serve", "--port", port], {
-      env: {
-        ...process.env,
-        FACTORY_EVENT_HOME: home,
-        FACTORY_EVENT_ENV: "live",
-        FACTORY_REPOS_ROOT: root,
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let out = "";
-    child.stdout.on("data", (b) => {
-      out += b;
-    });
-    child.stderr.on("data", (b) => {
-      out += b;
-    });
-    const box = {
-      child,
-      get out() {
-        return out;
-      },
-    };
+    const { child } = box;
     try {
       expect(await waitFor(box, "control API on", 8000)).toBe(true);
       const started = Date.now();
       child.kill("SIGTERM");
-      expect((await exitOf(child, 3500)).code).toBe(0);
-      expect(Date.now() - started).toBeLessThan(3500);
-      expect(out).toContain("connector stop: timed out after 2000ms");
+      expect((await exitOf(child, HARD_EXIT_MS)).code).toBe(0);
+      expect(Date.now() - started).toBeLessThan(HARD_EXIT_MS);
+      expect(box.out).toContain(
+        `connector stop: timed out after ${CONNECTOR_STOP_TIMEOUT_MS}ms`,
+      );
+      expect(box.out).not.toContain("shutdown exceeded");
     } finally {
       if (child.exitCode == null) child.kill("SIGKILL");
       await exitOf(child);
     }
+  });
+
+  test("SIGTERM with an idle keep-alive client exits inside the supervisor grace and releases the lock after the port (#1585)", async () => {
+    // `await_daemon` SIGKILLs 3 s after SIGTERM. A keep-alive socket keeps
+    // `server.close` from ever calling back, so before #1585 the hard exit
+    // (3 s) tied the kill and the lock file was left to the kernel.
+    const home = tmpDir("evrt-serve-keepalive-");
+    const port = freePort();
+    const root = connectorFixture({ connectorSource: HANGING_CONNECTOR });
+    const box = spawnServeBox(["--port", port], {
+      FACTORY_EVENT_HOME: home,
+      FACTORY_EVENT_ENV: "live",
+      FACTORY_REPOS_ROOT: root,
+    });
+    const { child } = box;
+    const lockFile = serveLockPath(home);
+    let socket = null;
+    try {
+      expect(await waitFor(box, "control API on", 8000)).toBe(true);
+      expect(existsSync(lockFile)).toBe(true);
+      socket = await openKeepAlive(port);
+      const started = Date.now();
+      child.kill("SIGTERM");
+      const exit = await exitOf(child, HARD_EXIT_MS);
+      const elapsed = Date.now() - started;
+      expect(exit).toEqual({ code: 0, signal: null });
+      expect(elapsed).toBeLessThan(HARD_EXIT_MS);
+      // The graceful path ran to completion: close called back, so the lock
+      // went after the socket — not through the hard-exit backstop.
+      expect(box.out).not.toContain("shutdown exceeded");
+      expect(existsSync(lockFile)).toBe(false);
+      const probe = createServer();
+      await new Promise((resolve, reject) => {
+        probe.once("error", reject);
+        probe.listen(Number(port), API_HOST, resolve);
+      });
+      await new Promise((resolve) => probe.close(resolve));
+    } finally {
+      socket?.destroy();
+      if (child.exitCode == null) child.kill("SIGKILL");
+      await exitOf(child);
+    }
+  });
+
+  test("a shutdown step that never settles is bounded to its budget", async () => {
+    // The planner thread stop and the connector stop share one budget and run
+    // concurrently; a hung `worker.terminate()` must return inside it so the
+    // whole sequence (stops + close) stays under HARD_EXIT_MS.
+    expect(CONNECTOR_STOP_TIMEOUT_MS + CLOSE_CONNECTIONS_AFTER_MS).toBeLessThan(
+      HARD_EXIT_MS,
+    );
+    expect(HARD_EXIT_MS).toBeLessThan(3_000);
+    const started = Date.now();
+    await Promise.all([
+      stopBounded("planner stop", () => new Promise(() => {}), 200),
+      stopBounded("connector stop", () => new Promise(() => {}), 200),
+    ]);
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeGreaterThanOrEqual(150);
+    expect(elapsed).toBeLessThan(400);
+    // A throwing stop is logged, not propagated.
+    await stopBounded(
+      "planner stop",
+      () => Promise.reject(new Error("x")),
+      200,
+    );
   });
 
   test("a busy port is named, not a silent exit 1 (WM-1037)", async () => {
