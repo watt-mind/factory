@@ -4,8 +4,11 @@
  * The operator approves a specific immutable spec, not a summary of one — and
  * a proposal that sat past its TTL is never executed as-is. Approval after
  * expiry re-plans against current state: an identical fresh spec runs, a
- * different one supersedes the stale proposal with a new open one. Stale
- * intent can therefore never execute silently, which is the §15 exit
+ * different one supersedes the stale proposal with a new open one. The
+ * re-plan carries the stored approvalPolicy, modelTier, model,
+ * configSnapshot (when present), and idempotencyKey, so expiry cannot shed
+ * plan-time dispatch authorization, model routing, or a run generation key.
+ * Stale intent can therefore never execute silently, which is the §15 exit
  * criterion this module owns.
  */
 import { canonicalJson, hashJson } from "./canonical.mjs";
@@ -75,6 +78,23 @@ function loadEnvelope(db, proposal) {
       `proposal ${proposal.id} references missing event (${proposal.event_source}, ${proposal.event_id})`,
     );
   return JSON.parse(event.envelope_json);
+}
+
+/**
+ * Plan-time-only values are not recoverable from the event envelope. Keep the
+ * values recorded in the approved proposal when TTL expiry rebuilds its spec.
+ */
+function ttlReplanOptions(spec) {
+  return {
+    approvalPolicy: spec.approvalPolicy ?? null,
+    ...(Object.hasOwn(spec, "modelTier")
+      ? { modelTierOverride: spec.modelTier }
+      : {}),
+    ...(Object.hasOwn(spec, "model") ? { modelOverride: spec.model } : {}),
+    ...(Object.hasOwn(spec, "configSnapshot")
+      ? { configSnapshot: spec.configSnapshot }
+      : {}),
+  };
 }
 
 function approveRun(
@@ -166,12 +186,26 @@ export function approveProposal(
       throw new Error(
         `proposal ${id} expired and event type ${envelope.type} is no longer registered`,
       );
-    const fresh = buildRunSpec(registry, envelope, mapping, {
-      runId: proposal.run_id,
-      policyVersion,
-      adapterOverride,
-      now,
-    });
+    const storedSpec = JSON.parse(proposal.spec_json);
+    const fresh = {
+      ...buildRunSpec(registry, envelope, mapping, {
+        runId: proposal.run_id,
+        policyVersion,
+        adapterOverride,
+        now,
+        ...ttlReplanOptions(storedSpec),
+      }),
+      // configSnapshot can affect planning and is itself part of specs that
+      // explicitly pin it. Keep the pin in the rebuilt spec as well as
+      // supplying it to buildRunSpec above.
+      ...(Object.hasOwn(storedSpec, "configSnapshot")
+        ? { configSnapshot: storedSpec.configSnapshot }
+        : {}),
+      // A run is its existing idempotency generation, not a new family
+      // member. Reapply the stored key after buildRunSpec derives its normal
+      // declaration key.
+      idempotencyKey: storedSpec.idempotencyKey,
+    };
     const freshHash = hashJson(fresh);
     if (freshHash === proposal.spec_hash) {
       return approveRun(db, proposal, envelope, {
