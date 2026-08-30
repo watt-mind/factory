@@ -1090,13 +1090,14 @@ describe("recent-ticket index (WM-821)", () => {
       expect(errBody.error).toBe("invalid_since");
 
       // Verify invalid limit returns 422
-      const resInvalidLimit = await fetch(s.url("/tickets?limit=abc"));
-      expect(resInvalidLimit.status).toBe(422);
-      expect((await resInvalidLimit.json()).error).toBe("invalid_limit");
-
-      const resNegativeLimit = await fetch(s.url("/tickets?limit=-5"));
-      expect(resNegativeLimit.status).toBe(422);
-      expect((await resNegativeLimit.json()).error).toBe("invalid_limit");
+      for (const limit of ["abc", "0", "201"]) {
+        const response = await fetch(s.url(`/tickets?limit=${limit}`));
+        expect(response.status).toBe(422);
+        expect(await response.json()).toMatchObject({
+          error: "invalid_limit",
+          message: "limit must be an integer between 1 and 200",
+        });
+      }
 
       // Verify alternative valid duration units (1w, 24h, 30m, 60s, ISO string)
       const resWeek = await fetch(s.url("/tickets?since=1w"));
@@ -1534,7 +1535,7 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
     }
   });
 
-  test("journal and outbox bound malformed limits and normalize journal cursors", async () => {
+  test("journal and outbox reject malformed limits and journal cursors", async () => {
     const s = await makeServer();
     try {
       const insertJournal = s.db.query(
@@ -1555,33 +1556,25 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
         }
       })();
 
-      for (const path of ["/journal?limit=-1", "/outbox?limit=-1"]) {
-        const response = await fetch(s.url(path));
-        expect(response.status).toBe(200);
-        const body = await response.json();
-        expect(body.entries ?? body.outbox).toHaveLength(1);
+      for (const endpoint of ["/journal", "/outbox"]) {
+        for (const limit of ["abc", "0", "501"]) {
+          const response = await fetch(s.url(`${endpoint}?limit=${limit}`));
+          expect(response.status).toBe(422);
+          expect(await response.json()).toMatchObject({
+            error: "invalid_limit",
+            message: "limit must be an integer between 1 and 500",
+          });
+        }
       }
 
-      for (const path of ["/journal?limit=999", "/outbox?limit=999"]) {
-        const response = await fetch(s.url(path));
-        expect(response.status).toBe(200);
-        const body = await response.json();
-        expect(body.entries ?? body.outbox).toHaveLength(500);
+      for (const since of ["not-a-cursor", "-1"]) {
+        const response = await fetch(s.url(`/journal?since=${since}`));
+        expect(response.status).toBe(422);
+        expect(await response.json()).toMatchObject({
+          error: "invalid_since",
+          message: expect.any(String),
+        });
       }
-
-      const journalFallback = await fetch(s.url("/journal?limit=abc"));
-      expect(journalFallback.status).toBe(200);
-      expect((await journalFallback.json()).entries).toHaveLength(100);
-
-      const outboxFallback = await fetch(s.url("/outbox?limit=abc"));
-      expect(outboxFallback.status).toBe(200);
-      expect((await outboxFallback.json()).outbox).toHaveLength(50);
-
-      const normalizedSince = await fetch(
-        s.url("/journal?since=not-a-cursor&limit=500"),
-      );
-      expect(normalizedSince.status).toBe(200);
-      expect((await normalizedSince.json()).entries).toHaveLength(500);
     } finally {
       s.close();
     }
@@ -1769,6 +1762,27 @@ describe("run trace surfacing (OPS-295)", () => {
       expect(rest.head).toBe(rest.entries.at(-1).seq);
       expect(rest.entries[0].attempt).toBe(1);
       expect(typeof rest.entries[0].ts).toBe("string");
+
+      for (const limit of ["abc", "0", "501"]) {
+        const response = await fetch(
+          `http://127.0.0.1:${port}/runs/${summary.runId}/trace?limit=${limit}`,
+        );
+        expect(response.status).toBe(422);
+        expect(await response.json()).toMatchObject({
+          error: "invalid_limit",
+          message: "limit must be an integer between 1 and 500",
+        });
+      }
+      for (const since of ["abc", "-1"]) {
+        const response = await fetch(
+          `http://127.0.0.1:${port}/runs/${summary.runId}/trace?since=${since}`,
+        );
+        expect(response.status).toBe(422);
+        expect(await response.json()).toMatchObject({
+          error: "invalid_since",
+          message: expect.any(String),
+        });
+      }
 
       // Caught up: since=head → no entries, head unchanged.
       const done = await client.trace(summary.runId, { since: rest.head });

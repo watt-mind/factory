@@ -70,7 +70,14 @@ describe("human inbox API (WM-285)", () => {
       ).json();
       expect(second.items).toHaveLength(1);
       expect(second.nextBefore).toBeNull();
-      expect((await fetch(s.url("/inbox?limit=201"))).status).toBe(422);
+      for (const limit of ["abc", "0", "201"]) {
+        const response = await fetch(s.url(`/inbox?limit=${limit}`));
+        expect(response.status).toBe(422);
+        expect(await response.json()).toMatchObject({
+          error: "invalid_limit",
+          message: "limit must be an integer between 1 and 200",
+        });
+      }
     } finally {
       s.close();
     }

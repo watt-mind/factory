@@ -1,4 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { retriggerEnvelope } from "../templates";
@@ -454,9 +459,14 @@ export function Events({
   const [confirmReplay, setConfirmReplay] = useState(false);
 
   const fetchAll = context.kind === "repo";
-  const list = useQuery({
+  const list = useInfiniteQuery({
     queryKey: ["events", fetchAll ? "all" : tab],
-    queryFn: () => api.events(fetchAll || tab === "all" ? undefined : tab),
+    queryFn: ({ pageParam }) =>
+      api.events(fetchAll || tab === "all" ? undefined : tab, {
+        before: pageParam,
+      }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.nextBefore ?? undefined,
     ...refetchIntervals.primary,
   });
   const statusQ = useQuery({
@@ -521,15 +531,17 @@ export function Events({
     decisionOf(e, decisions.byId, decisions.byEvent, decisions.runsById);
   const rows: EventFilterRow[] = useMemo(
     () =>
-      (list.data?.events ?? []).map((e) => {
-        const d = decisionOf(
-          e,
-          decisions.byId,
-          decisions.byEvent,
-          decisions.runsById,
-        );
-        return d?.reason ? { ...e, decisionReason: d.reason } : e;
-      }),
+      (list.data?.pages ?? [])
+        .flatMap((page) => page?.events ?? [])
+        .map((e) => {
+          const d = decisionOf(
+            e,
+            decisions.byId,
+            decisions.byEvent,
+            decisions.runsById,
+          );
+          return d?.reason ? { ...e, decisionReason: d.reason } : e;
+        }),
     [list.data, decisions],
   );
   const scoped = useMemo(() => {
@@ -1042,6 +1054,14 @@ export function Events({
                 rows naming this repo.
               </p>
             )}
+            <p className="mb-3 text-[11px] text-(--text-faint)">
+              {rows.length} loaded {rows.length === 1 ? "row" : "rows"}
+              {list.hasNextPage && " · more events available"}. Facet counts
+              reflect loaded rows.
+              {fetchAll
+                ? " Status-tab counts reflect loaded rows."
+                : " Status-tab counts reflect all available events."}
+            </p>
 
             {(types.length > 1 || sources.length > 1) && (
               <div className="mb-2 flex min-w-0 items-center gap-x-4 whitespace-nowrap text-[11px]">
@@ -1412,6 +1432,20 @@ export function Events({
               range={[windowStart, windowEnd, tokens.length]}
               move={moveWindow}
             />
+            {list.hasNextPage && (
+              <tr>
+                <td colSpan={listCols.length}>
+                  <Button
+                    onClick={() => list.fetchNextPage()}
+                    disabled={list.isFetchingNextPage}
+                  >
+                    {list.isFetchingNextPage
+                      ? "Loading older events…"
+                      : "Older events"}
+                  </Button>
+                </td>
+              </tr>
+            )}
             {visible.length === 0 && (
               <ListEmpty
                 colSpan={listCols.length}

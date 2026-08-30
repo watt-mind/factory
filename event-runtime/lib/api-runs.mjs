@@ -19,6 +19,11 @@ import {
   retryRun,
 } from "./worker.mjs";
 import { proposalSubject } from "./proposal-subject.mjs";
+import {
+  ApiParameterError,
+  parseListLimit,
+  parseNonNegativeSince,
+} from "./api-params.mjs";
 
 export const MAX_EXTENSION_SECONDS = 3600;
 
@@ -1709,21 +1714,6 @@ function outboxView(db, limit) {
     }));
 }
 
-function journalLimit(url, defaultLimit) {
-  const rawLimit = url.searchParams.get("limit");
-  if (rawLimit === null || rawLimit.trim() === "") return defaultLimit;
-  const limit = Number(rawLimit);
-  if (!Number.isInteger(limit)) return defaultLimit;
-  return Math.max(1, Math.min(limit, 500));
-}
-
-function journalSince(url) {
-  const since = Number(url.searchParams.get("since") ?? 0);
-  if (!Number.isFinite(since)) return 0;
-  const normalized = Math.floor(since);
-  return Number.isSafeInteger(normalized) ? Math.max(0, normalized) : 0;
-}
-
 export function observedModelFromTranscript(head) {
   if (typeof head !== "string" || head === "") return null;
   const lines = head.split("\n");
@@ -1893,14 +1883,29 @@ export async function handleRunApiRoute({
   }
 
   if (route === "GET /journal") {
-    const since = journalSince(url);
-    const limit = journalLimit(url, 100);
-    return send(200, journalView(db, since, limit));
+    try {
+      return send(
+        200,
+        journalView(
+          db,
+          parseNonNegativeSince(url),
+          parseListLimit(url, { defaultLimit: 100, maxLimit: 500 }),
+        ),
+      );
+    } catch (err) {
+      if (err instanceof ApiParameterError) return send(422, err.body);
+      throw err;
+    }
   }
 
   if (route === "GET /outbox") {
-    const limit = journalLimit(url, 50);
-    return send(200, { outbox: outboxView(db, limit) });
+    try {
+      const limit = parseListLimit(url, { defaultLimit: 50, maxLimit: 500 });
+      return send(200, { outbox: outboxView(db, limit) });
+    } catch (err) {
+      if (err instanceof ApiParameterError) return send(422, err.body);
+      throw err;
+    }
   }
 
   if (route === "POST /events/requeue" || route === "POST /events/archive") {
@@ -2042,23 +2047,13 @@ export async function handleRunApiRoute({
 
   if (route === "GET /tickets") {
     const since = url.searchParams.get("since") ?? undefined;
-    const limitParam = url.searchParams.get("limit");
     const repo = url.searchParams.get("repo") ?? undefined;
-    let limit = 50;
-    if (limitParam !== null && limitParam !== undefined && limitParam !== "") {
-      const parsedLimit = Number(limitParam);
-      if (!Number.isInteger(parsedLimit) || parsedLimit <= 0) {
-        return send(422, {
-          error: "invalid_limit",
-          message: "limit must be a positive integer",
-        });
-      }
-      limit = Math.min(parsedLimit, 200);
-    }
     try {
+      const limit = parseListLimit(url, { defaultLimit: 50, maxLimit: 200 });
       const tickets = ticketIndexView(db, { since, limit, repo, nowMs });
       return send(200, { tickets });
     } catch (err) {
+      if (err instanceof ApiParameterError) return send(422, err.body);
       if (err instanceof ListQueryError) return send(422, err.body);
       throw err;
     }
@@ -2189,15 +2184,18 @@ export async function handleRunApiRoute({
     if (!db.query(`SELECT run_id FROM runs WHERE run_id = ?`).get(runId)) {
       return send(404, { error: `unknown run ${runId}` });
     }
-    const since = Number(url.searchParams.get("since") ?? 0);
-    const limit = Math.min(Number(url.searchParams.get("limit") ?? 100), 500);
-    return send(
-      200,
-      traceOf(db, runId, {
-        since: Number.isFinite(since) ? since : 0,
-        limit: Number.isFinite(limit) ? limit : 100,
-      }),
-    );
+    try {
+      return send(
+        200,
+        traceOf(db, runId, {
+          since: parseNonNegativeSince(url),
+          limit: parseListLimit(url, { defaultLimit: 100, maxLimit: 500 }),
+        }),
+      );
+    } catch (err) {
+      if (err instanceof ApiParameterError) return send(422, err.body);
+      throw err;
+    }
   }
 
   const runGet = url.pathname.match(/^\/runs\/([^/]+)$/);
