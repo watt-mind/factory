@@ -278,6 +278,22 @@ rl.on("line", (line) => {
     }
     currentPromptId = msg.id;
     handlePrompt(msg.params.sessionId).catch((err) => {
+      // GH-1099: a fixture setup error used to be converted only to JSON-RPC,
+      // then hidden by the later missing-PID assertion. Preserve it where the
+      // parent test can include the original Darwin spawn/write failure.
+      if (process.env.ACP_FAKE_ERROR_FILE) {
+        try {
+          writeFileSync(
+            process.env.ACP_FAKE_ERROR_FILE,
+            err?.stack ?? String(err),
+            "utf8",
+          );
+        } catch (recordError) {
+          process.stderr.write(
+            \`failed to record ACP fixture error: \${recordError?.stack ?? recordError}\\noriginal error: \${err?.stack ?? err}\\n\`,
+          );
+        }
+      }
       send({
         jsonrpc: "2.0",
         id: msg.id,
@@ -911,31 +927,41 @@ describe("execute against a fake ACP agent", () => {
     expect(outcome.exitCode).toBeNull();
   });
 
-  test("a child that ignores SIGTERM is SIGKILLed after the grace", async () => {
-    const workspaceDir = ws();
-    const started = Date.now();
-    const outcome = await run(workspaceDir, {
-      behavior: "ignore_sigterm",
-      timeoutMs: 200,
-      killGraceMs: 150,
-    });
-    const elapsed = Date.now() - started;
-    expect(outcome.timedOut).toBe(true);
-    expect(outcome.exitCode).toBeNull();
-    // TERM at 200 ms is ignored; only the KILL escalation settles the run.
-    expect(elapsed).toBeGreaterThanOrEqual(300);
-    expect(elapsed).toBeLessThan(4000);
-  });
+  // GH-1099: Bun on Darwin applies TERM's default disposition to this fixture
+  // despite its JS SIGTERM listener, so Darwin cannot portably simulate a
+  // TERM-ignoring process. Other platforms retain the real escalation check.
+  test.skipIf(process.platform === "darwin")(
+    "a child that ignores SIGTERM is SIGKILLed after the grace",
+    async () => {
+      const workspaceDir = ws();
+      const started = Date.now();
+      const outcome = await run(workspaceDir, {
+        behavior: "ignore_sigterm",
+        timeoutMs: 200,
+        killGraceMs: 150,
+      });
+      const elapsed = Date.now() - started;
+      expect(outcome.timedOut).toBe(true);
+      expect(outcome.exitCode).toBeNull();
+      // TERM at 200 ms is ignored; only the KILL escalation settles the run.
+      expect(elapsed).toBeGreaterThanOrEqual(300);
+      expect(elapsed).toBeLessThan(4000);
+    },
+  );
 
   const testProcessGroup = process.platform === "win32" ? test.skip : test;
   testProcessGroup("timeout kills a long-lived grandchild", async () => {
     const workspaceDir = ws();
     const pidFile = path.join(workspaceDir, "grandchild.pid");
+    const fixtureErrorFile = path.join(workspaceDir, "grandchild-error.txt");
     const pending = run(workspaceDir, {
       behavior: "spawn_grandchild",
       timeoutMs: 400,
       killGraceMs: 200,
-      env: { ACP_FAKE_GRANDCHILD_PID: pidFile },
+      env: {
+        ACP_FAKE_GRANDCHILD_PID: pidFile,
+        ACP_FAKE_ERROR_FILE: fixtureErrorFile,
+      },
     });
     let pid = null;
     for (let i = 0; i < 200; i += 1) {
@@ -945,6 +971,21 @@ describe("execute against a fake ACP agent", () => {
         break;
       }
       await new Promise((r) => setTimeout(r, 10));
+    }
+    if (pid === null) {
+      let outcomeError = null;
+      try {
+        await pending;
+      } catch (error) {
+        outcomeError = error;
+      }
+      const fixtureError = existsSync(fixtureErrorFile)
+        ? readFileSync(fixtureErrorFile, "utf8")
+        : "fixture wrote no diagnostic";
+      throw new Error(
+        `ACP grandchild fixture did not write ${pidFile}: ${fixtureError}`,
+        { cause: outcomeError },
+      );
     }
     expect(pid).toBeGreaterThan(0);
     const outcome = await pending;
