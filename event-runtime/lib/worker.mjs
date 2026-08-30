@@ -100,6 +100,28 @@ const HARNESS_UNKNOWN_CODES = Object.freeze({
   subagents: "harness_unknown_subagent",
 });
 
+function retireMissingPinnedMemo(db, input, error, now) {
+  const match = /^artifact ([a-f0-9]{64}) is not in the store$/.exec(
+    error?.message ?? "",
+  );
+  const sha256 = match?.[1];
+  if (
+    !sha256 ||
+    !input?.memoPin?.entries?.some((entry) => entry?.sha256 === sha256)
+  ) {
+    return false;
+  }
+  return (
+    db
+      .query(
+        `UPDATE memos
+         SET retired_at = ?, retired_reason = 'artifact_missing'
+         WHERE sha256 = ? AND retired_at IS NULL`,
+      )
+      .run(now, sha256).changes > 0
+  );
+}
+
 // schedule.yaml is deliberately absent. Unlike repos/policy — pure instance
 // state a delegated checkout needs verbatim — the schedule overlay layers on
 // top of the branch's tracked kernel schedules (event-runtime/schedules.json).
@@ -3079,7 +3101,7 @@ export async function executeClaimed(
   };
 
   /** Terminal failure-shaped write: classify, finalize, and budget any retry atomically. */
-  const failTerminal = (to, journalReason, reasonCode) =>
+  const failTerminal = (to, journalReason, reasonCode, beforeTerminal) =>
     txImmediate(db, () => {
       const currentNow = nowFn();
       if (!assertCurrentToken(db, runId, fencingToken)) {
@@ -3092,6 +3114,7 @@ export async function executeClaimed(
         });
         return { fenced: true };
       }
+      beforeTerminal?.(currentNow);
       const expectFrom = db
         .query(`SELECT state FROM runs WHERE run_id = ?`)
         .get(runId)?.state;
@@ -4869,7 +4892,15 @@ export async function executeClaimed(
     let res;
     let terminalError;
     try {
-      res = failTerminal("FAILED", journalReason, reasonCode);
+      res = failTerminal(
+        "FAILED",
+        journalReason,
+        reasonCode,
+        isInputArtifactMissing
+          ? (currentNow) =>
+              retireMissingPinnedMemo(db, spec.input, err, currentNow)
+          : undefined,
+      );
     } catch (err) {
       terminalError = recordTerminalError("failTerminal", err);
     }

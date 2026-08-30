@@ -24,9 +24,9 @@ Prefer removing the need over documenting the workaround. An env var or a script
 
 **Seen:** `sleep 150; gh pr checks 166`, `sleep 180; echo done`, `sleep 60; echo done` across multiple runs. Still ×20 in the 697-run window (Aug 2026 retro) — includes runs from before the harness block landed; watch the next window.
 
-A fixed sleep is a guess: too long wastes wall clock in a process holding a concurrency slot, too short means a re-poll. `gh pr checks <PR> --watch --fail-fast` returns the moment checks settle and exits non-zero on the first failure.
+A fixed sleep is a guess: too long wastes wall clock in a process holding a concurrency slot, too short means a re-poll. Select the pushed SHA's CI workflow with `gh run list --workflow ci.yml --commit <sha>`, wait with `gh run watch <run-id> --exit-status --interval 60`, and assert every check run is green via the REST check-runs endpoint.
 
-**Fix:** rule added to `shared/floor.md` (§Waiting). Verified `--watch`, `--fail-fast` and `-i` exist in gh 2.97. factory-ticket.md documents that sleep-polling is blocked by the harness (a blocked tool call kills the run).
+**Fix:** rule added to `shared/floor.md` (§Waiting). The REST workflow selector and `gh run watch --exit-status --interval 60` avoid the shared GraphQL budget. factory-ticket.md documents that sleep-polling is blocked by the harness (a blocked tool call kills the run).
 
 **Status:** fixed in the floor + harness block — if sleeps persist in _new_ transcripts after Aug 2026, the next step is a `scripts/wait-for-ci.sh` wrapper agents must call.
 

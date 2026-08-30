@@ -5,6 +5,7 @@ import {
   admitEvent,
   admitExternalEvent,
   admitSignedEvent,
+  githubIntakeView,
   verifyWebhook,
 } from "./intake.mjs";
 import { loadRegistry } from "./registry.mjs";
@@ -348,5 +349,79 @@ describe("admitEvent", () => {
       "occurredAt: clock tick slot cannot be in the future",
     );
     expect(db.query(`SELECT COUNT(*) AS n FROM events`).get().n).toBe(0);
+  });
+});
+
+describe("githubIntakeView", () => {
+  const STALE_AFTER = 1000;
+  function seed(db, admittedAt) {
+    db.query(
+      `INSERT INTO events (source, event_id, type, subject, occurred_at, received_at,
+         correlation_id, causation_id, envelope_json, payload_hash, admitted_at)
+       VALUES ('github', 'd-1', 'github.issues.labeled', 'watt-mind/factory',
+         ?1, ?1, 'd-1', NULL, '{}', 'hash', ?1)`,
+    ).run(admittedAt);
+  }
+
+  test("configured intake with no admission is not stale", () => {
+    const db = openDb(":memory:");
+    expect(
+      githubIntakeView(db, {
+        nowMs: NOW,
+        configured: true,
+        staleAfterMs: STALE_AFTER,
+      }),
+    ).toMatchObject({
+      configured: true,
+      lastAdmittedAt: null,
+      ageMs: null,
+      stale: false,
+      staleAfterMs: STALE_AFTER,
+    });
+  });
+
+  test("unconfigured intake is never stale, even with an old admission", () => {
+    const db = openDb(":memory:");
+    seed(db, new Date(NOW - 10 * STALE_AFTER).toISOString());
+    expect(
+      githubIntakeView(db, {
+        nowMs: NOW,
+        configured: false,
+        staleAfterMs: STALE_AFTER,
+      }),
+    ).toMatchObject({ configured: false, stale: false });
+  });
+
+  test("stale flips exactly at the >= boundary", () => {
+    const db = openDb(":memory:");
+    seed(db, new Date(NOW - STALE_AFTER).toISOString());
+    const at = githubIntakeView(db, {
+      nowMs: NOW,
+      configured: true,
+      staleAfterMs: STALE_AFTER,
+    });
+    expect(at).toMatchObject({ ageMs: STALE_AFTER, stale: true });
+    const under = githubIntakeView(db, {
+      nowMs: NOW - 1,
+      configured: true,
+      staleAfterMs: STALE_AFTER,
+    });
+    expect(under).toMatchObject({ ageMs: STALE_AFTER - 1, stale: false });
+  });
+
+  test("malformed admitted_at yields a null age and is not stale", () => {
+    const db = openDb(":memory:");
+    seed(db, "not-a-timestamp");
+    expect(
+      githubIntakeView(db, {
+        nowMs: NOW,
+        configured: true,
+        staleAfterMs: STALE_AFTER,
+      }),
+    ).toMatchObject({
+      lastAdmittedAt: "not-a-timestamp",
+      ageMs: null,
+      stale: false,
+    });
   });
 });

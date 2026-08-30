@@ -122,10 +122,10 @@ test -n "$run_id" || { echo "no CI workflow run found for this commit" >&2; exit
 gh run watch "$run_id" --exit-status --interval 60
 ```
 
-`gh run list` and `gh run watch` use GitHub's REST API. Do not default to
-`gh pr checks <PR> --watch --interval 60`: it polls GraphQL every 10 seconds
-by default and can exhaust the shared GraphQL budget. If it is unavoidable,
-`--interval 60` or greater is mandatory. A green `gh run watch` covers one
+`gh run list` and `gh run watch` use GitHub's REST API. Do not default to the
+GraphQL-backed `gh pr checks` waiter: it polls every 10 seconds by default and
+can exhaust the shared GraphQL budget. If that fallback is unavoidable, use an
+interval of at least 60 seconds. A green `gh run watch` covers one
 workflow; before a merge that must be fully green, assert every check-run on
 the commit is completed and successful via REST
 (`gh api repos/<owner>/<repo>/commits/<sha>/check-runs`).
@@ -140,7 +140,7 @@ for i in $(seq 60); do curl -sf localhost:4222 >/dev/null && break; sleep 2; don
 
 **Never end your turn while background jobs are running.** Subagents must not park mid-flow or yield prematurely while waiting for slow commands, test suites, or background sub-processes. When an agent yields without active foreground execution, the orchestrator cannot distinguish between an agent legitimately waiting on slow work, an agent stalled needing a nudge, or an agent finished but under-reporting. Block on readiness (e.g. `gh run watch <run-id> --exit-status --interval 60`, `wait <pid>`, or bounded polling) until the work is complete before completing your turn.
 
-**GitHub Actions secondary rate limits.** Avoid rapid, unthrottled polling of GitHub's Actions and jobs APIs (e.g. tight loops calling `gh run view` or `gh api`). Aggressive polling triggers GitHub's secondary rate limits and blocks the harness. Prefer the REST-backed `gh run watch <run-id> --exit-status --interval 60`; `gh pr checks <PR> --watch --interval 60` or greater is the minimum only when that GraphQL-backed fallback is unavoidable.
+**GitHub Actions secondary rate limits.** Avoid rapid, unthrottled polling of GitHub's Actions and jobs APIs (e.g. tight loops calling `gh run view` or `gh api`). Aggressive polling triggers GitHub's secondary rate limits and blocks the harness. Prefer the REST-backed `gh run watch <run-id> --exit-status --interval 60`; the GraphQL-backed PR-check fallback must use an interval of at least 60 seconds when unavoidable.
 
 **Session scratchpad isolation.** Never use generic shared filenames (such as `pr-body.md` or `scratch/critique.json`) across concurrent tasks. Reviewer, implementer, and critic agents operating in shared session scratchpads must namespace all temporary files by ticket ID or session identifier (e.g. `pr-body-<TICKET-ID>.md`, `<TICKET-ID>-critique.json`) to prevent cross-agent collisions and silent overwrites.
 

@@ -2,6 +2,8 @@
 import {
   admitExternalEvent,
   admitSignedEvent,
+  githubIntakeView,
+  recordGitHubWebhookRejection,
   translateGitHubEvent,
   verifyGitHubWebhook,
   verifyWebhook,
@@ -403,12 +405,17 @@ export async function handleIntakeApiRoute({
   if (route === "GET /health") {
     const tickStats =
       typeof getTickStats === "function" ? getTickStats() : null;
+    const githubIntake = githubIntakeView(db, {
+      nowMs,
+      configured: Boolean(githubSecret),
+    });
     return send(200, {
       ok: true,
       policyVersion,
       env,
       webhookSecret: secret ? "set" : "absent",
       githubWebhookSecret: githubSecret ? "set" : "absent",
+      githubIntake,
       tick: {
         lastMs: tickStats?.lastMs ?? 0,
         overruns: tickStats?.overruns ?? 0,
@@ -455,7 +462,10 @@ export async function handleIntakeApiRoute({
       signature: req.headers["x-hub-signature-256"],
       secret: githubSecret,
     });
-    if (!verdict.ok) return send(401, { error: verdict.reason });
+    if (!verdict.ok) {
+      recordGitHubWebhookRejection();
+      return send(401, { error: verdict.reason });
+    }
     const parsed = parseJson(raw);
     if (parsed.error) return send(422, { errors: [parsed.error] });
     let repoRegistry;
