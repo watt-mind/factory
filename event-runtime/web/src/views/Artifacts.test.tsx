@@ -459,13 +459,8 @@ describe("Artifacts inventory (WM-207)", () => {
         message: `artifact line ${index}`,
       })),
     });
-    const intervalSpy = jest.spyOn(globalThis, "setInterval");
-    let tick: (() => void) | undefined;
-    intervalSpy.mockImplementation((callback, delay, ...args) => {
-      if (delay === 1_000 && typeof callback === "function")
-        tick = () => callback(...args);
-      return 0 as unknown as ReturnType<typeof setInterval>;
-    });
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date("2026-08-30T00:00:00.000Z"));
     const formatContent = mock(formattedContent);
     globalThis.fetch = mock(
       async () => new Response(raw, { status: 200 }),
@@ -477,18 +472,12 @@ describe("Artifacts inventory (WM-207)", () => {
       await view.findByRole("region", { name: "Artifact content" });
       expect(formatContent).toHaveBeenCalledTimes(1);
 
-      expect(typeof tick).toBe("function");
-      const realDateNow = Date.now;
-      Date.now = () => realDateNow() + 1_000;
-      try {
-        act(() => (tick as () => void)());
-      } finally {
-        Date.now = realDateNow;
-      }
+      act(() => jest.advanceTimersByTime(1_000));
 
       expect(formatContent).toHaveBeenCalledTimes(1);
     } finally {
-      intervalSpy.mockRestore();
+      cleanup();
+      jest.useRealTimers();
     }
   });
 
