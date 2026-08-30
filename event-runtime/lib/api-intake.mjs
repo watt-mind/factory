@@ -364,6 +364,12 @@ function admit(
   const outcome = admitEnvelope(db, registry, parsed.value, {
     now: nowMs,
   });
+  if (outcome.conflict) {
+    return send(409, {
+      error: "payload_mismatch",
+      eventId: parsed.value.eventId,
+    });
+  }
   if (!outcome.admitted && !outcome.duplicate)
     return send(422, { errors: outcome.errors });
   // Respond first, then plan off the response path (WM-1162).
