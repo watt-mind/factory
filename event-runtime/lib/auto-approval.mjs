@@ -58,6 +58,10 @@ export const CHAIN_AUTO_APPROVAL_ACTOR = "chain-auto-approval";
 export const HANDOFF_AUTO_APPROVAL_REASON =
   "auto_approved:handoff-dispatch-policy@1";
 export const HANDOFF_AUTO_APPROVAL_ACTOR = "handoff-auto-approval";
+// A serve tick runs every second. Keep the chain pass deliberately small so a
+// backlog (especially one pinned to a retired registry) cannot monopolize the
+// control plane before fresh proposals get a turn.
+export const DEFAULT_MAX_CHAIN_AUTO_APPROVALS_PER_TICK = 8;
 const NEVER_AUTO_APPROVE = new Set(["factory.ship-apply.requested"]);
 
 function policyPath(root = reposRoot()) {
@@ -942,7 +946,7 @@ const PASSES = new WeakMap();
  * the rest of the pass; `serve` awaits it. The Promise never rejects — every
  * fault is a typed reason on the proposal or an `errors` entry.
  *
- * @returns {Promise<{ approved: Array<{ proposalId: string, runId: string }>, open: Array<{ proposalId: string, reason: string }>, errors: Array<{ proposalId: string|null, reason: string, message: string }> }>}
+ * @returns {Promise<{ approved: Array<{ proposalId: string, runId: string }>, open: Array<{ proposalId: string, reason: string }>, errors: Array<{ proposalId: string|null, reason: string, message: string }>, skipped: number }>}
  */
 export function autoApproveChains(db, registry, options = {}) {
   const state = PASSES.get(db) ?? { tail: null };
@@ -987,6 +991,7 @@ async function runPass(
     runtimeGuardOptions = {},
     hooks = defaultHookRegistry(),
     hookTimeoutMs,
+    maxRows = DEFAULT_MAX_CHAIN_AUTO_APPROVALS_PER_TICK,
   } = {},
   marker = { settled: false },
 ) {
@@ -995,11 +1000,26 @@ async function runPass(
     const approved = [];
     const open = [];
     const errors = [];
+    const limit =
+      Number.isInteger(maxRows) && maxRows > 0
+        ? maxRows
+        : DEFAULT_MAX_CHAIN_AUTO_APPROVALS_PER_TICK;
+    let skipped = 0;
     // One in-flight read per repo for the whole pass, shared across every
     // proposal's eligibility recheck (#1064).
     const passDispatch = withPassInFlightCache(dispatch);
     let rows;
     try {
+      const pending = db
+        .query(
+          `SELECT COUNT(*) AS n
+           FROM proposals p
+           JOIN events e ON e.source = p.event_source AND e.event_id = p.event_id
+          WHERE p.status = 'open' AND p.decision = 'run'
+            AND e.source IN ('chain', 'handoff')`,
+        )
+        .get().n;
+      skipped = Math.max(0, pending - limit);
       rows = db
         .query(
           `SELECT p.id, p.run_id, p.event_source, p.event_id, p.spec_json AS proposal_spec_json, p.spec_hash AS proposal_spec_hash,
@@ -1010,16 +1030,17 @@ async function runPass(
          JOIN runs r ON r.run_id = p.run_id
         WHERE p.status = 'open' AND p.decision = 'run'
           AND e.source IN ('chain', 'handoff')
-        ORDER BY p.created_at, p.rowid`,
+        ORDER BY p.created_at, p.rowid
+        LIMIT ?`,
         )
-        .all();
+        .all(limit);
     } catch (err) {
       errors.push({
         proposalId: null,
         reason: "pass_failed",
         message: String(err?.message ?? err),
       });
-      return { approved, open, errors };
+      return { approved, open, errors, skipped };
     }
 
     for (const row of rows) {
@@ -1092,7 +1113,7 @@ async function runPass(
         });
       }
     }
-    return { approved, open, errors };
+    return { approved, open, errors, skipped };
   } finally {
     marker.settled = true;
   }
