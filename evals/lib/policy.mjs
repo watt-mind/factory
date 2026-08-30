@@ -132,7 +132,20 @@ export function parseIndentedMap(text) {
     ) {
       continue;
     }
-    if (/^\s*-/.test(line)) continue;
+    if (/^\s*-/.test(line)) {
+      // A sequence directly under a map key turns that key into a list, so
+      // callers expecting a map can tell "sequence" apart from "empty map".
+      const top = stack[stack.length - 1];
+      if (
+        top.key !== undefined &&
+        !top.blockScalar &&
+        Object.keys(top.node).length === 0 &&
+        raw.search(/\S|$/) > top.indent
+      ) {
+        top.parent[top.key] = [];
+      }
+      continue;
+    }
     const match = /^(\s*)([A-Za-z0-9_.-]+):\s*(.*)$/.exec(line);
     if (!match) continue;
     const [, pad, key, rest] = match;
@@ -143,10 +156,12 @@ export function parseIndentedMap(text) {
     if (rest.trim() === "") {
       const node = {};
       parent[key] = node;
-      stack.push({ indent, node });
+      stack.push({ indent, node, key, parent });
     } else {
       parent[key] = unquote(rest);
-      if (/^[|>][+-]?$/.test(rest.trim())) {
+      // Block scalar header: `|`/`>` with optional chomping (`+`/`-`) and
+      // explicit indentation (`|2`, `>2-`, `|-2`) indicators, either order.
+      if (/^[|>](?:[+-]?\d?|\d?[+-]?)$/.test(rest.trim())) {
         stack.push({ indent, node: parent, blockScalar: true });
       }
     }
@@ -192,7 +207,9 @@ function readLimits(stanza, file) {
     stanza?.limits !== undefined &&
     !recognizedKeys.some((key) => limits[key] !== undefined)
   ) {
-    throw new EvalConfigError(`${file}: evals.limits must be a map`);
+    throw new EvalConfigError(
+      `${file}: evals.limits has no recognized keys (expected: ${recognizedKeys.join(", ")})`,
+    );
   }
   const pick = (key, fallback) =>
     limits[key] === undefined

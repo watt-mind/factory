@@ -667,6 +667,41 @@ describe("the grader pin", () => {
     expect(policy.problem).toContain("evals.grader.model is not set");
   });
 
+  test("block scalars with explicit indentation indicators are skipped too", () => {
+    const policy = loadEvalPolicy({
+      root: "/nowhere",
+      file: "/nowhere/config/policy.yaml",
+      text: `evals:
+  note: |2
+    grader:
+      model: evil-judge
+  other: >2-
+    limits:
+      case_timeout_seconds: 1
+`,
+    });
+    expect(policy.grader).toBeNull();
+    expect(policy.problem).toContain("evals.grader.model is not set");
+    expect(policy.limits.caseTimeoutSeconds).not.toBe(1);
+  });
+
+  test("a limits map with no recognized keys is named as such", () => {
+    expect(() =>
+      loadEvalPolicy({
+        root: "/nowhere",
+        file: "/nowhere/config/policy.yaml",
+        text: `evals:
+  grader:
+    model: claude-sonnet-4-6
+  limits:
+    case_timeout_secs: 10
+`,
+      }),
+    ).toThrow(
+      "/nowhere/config/policy.yaml: evals.limits has no recognized keys (expected: case_timeout_seconds, case_budget_usd, total_seconds, total_budget_usd)",
+    );
+  });
+
   test("a limits sequence is rejected instead of falling back to defaults", () => {
     expect(() =>
       loadEvalPolicy({
