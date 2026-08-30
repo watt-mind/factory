@@ -12,14 +12,36 @@ export const DETACHED_SPAWN_OPTIONS = Object.freeze({ detached: true });
  */
 export function boundedTranscriptStream(
   filePath,
-  { maxBytes = transcriptMaxBytes(), onTruncated } = {},
+  {
+    maxBytes = transcriptMaxBytes(),
+    onTruncated,
+    createDestination = createWriteStream,
+  } = {},
 ) {
   const limit =
     Number.isSafeInteger(maxBytes) && maxBytes >= 0
       ? maxBytes
       : transcriptMaxBytes();
-  const destination = createWriteStream(filePath);
-  destination.on("error", () => {});
+  const destination = createDestination(filePath);
+  let destinationFailed = false;
+  destination.on("error", () => {
+    // Capture is best-effort. In particular, ENOSPC must not leave a pending
+    // write waiting forever for a drain event that can no longer happen.
+    destinationFailed = true;
+  });
+
+  const writeDestination = (chunk, callback) => {
+    if (destinationFailed || destination.destroyed) {
+      callback();
+      return;
+    }
+    destination.write(chunk, (error) => {
+      if (error) destinationFailed = true;
+      // A transcript failure must not backpressure the child. Keep the outer
+      // writable healthy so stdout continues to drain through process exit.
+      callback();
+    });
+  };
 
   let bytes = 0;
   let truncated = false;
@@ -36,30 +58,36 @@ export function boundedTranscriptStream(
       const remaining = limit - bytes;
       if (source.byteLength <= remaining) {
         bytes += source.byteLength;
-        if (destination.write(source)) callback();
-        else destination.once("drain", callback);
+        writeDestination(source, callback);
         return;
       }
 
-      if (remaining > 0) destination.write(source.subarray(0, remaining));
       bytes += Math.max(remaining, 0);
       truncated = true;
-      destination.write(
+      const marker = Buffer.from(
         `\n${JSON.stringify({
           type: "factory",
           subtype: "transcript_truncated",
           bytes,
         })}\n`,
       );
+      const stored =
+        remaining > 0
+          ? Buffer.concat([source.subarray(0, remaining), marker])
+          : marker;
       try {
         onTruncated?.({ bytes });
       } catch {
         // Trace reporting is observational; continue draining stdout.
       }
-      callback();
+      writeDestination(stored, callback);
     },
     final(callback) {
-      destination.end(callback);
+      if (destinationFailed || destination.destroyed) {
+        callback();
+        return;
+      }
+      destination.end(() => callback());
     },
     destroy(error, callback) {
       destination.destroy();

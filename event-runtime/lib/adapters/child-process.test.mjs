@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { Writable } from "node:stream";
 import { finished } from "node:stream/promises";
 import { tmpDir } from "../../test-support/tmp.mjs?file=event-runtime-lib-adapters-child-process-test-mjs";
 import {
@@ -131,5 +132,26 @@ describe("child process helpers", () => {
 
     expect(transcript.truncated).toBe(false);
     expect(readFileSync(transcriptPath, "utf8")).toBe(output);
+  });
+
+  test("keeps draining when the transcript destination fails", async () => {
+    const destination = new Writable({
+      highWaterMark: 1,
+      write(_chunk, _encoding, callback) {
+        callback(new Error("disk full"));
+      },
+    });
+    destination.on("error", () => {});
+    const transcript = boundedTranscriptStream("unused", {
+      maxBytes: 64,
+      createDestination: () => destination,
+    });
+
+    transcript.write("first chunk");
+    transcript.write("output after destination failure");
+    transcript.end();
+    await finished(transcript);
+
+    expect(transcript.destroyed).toBe(true);
   });
 });
