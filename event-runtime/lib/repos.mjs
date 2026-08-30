@@ -208,11 +208,13 @@ const TOOLCHAIN_PROBE_TIMEOUT_MS = 10_000;
 const TOOLCHAIN_EXECUTABLE = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
 
 /**
- * One comparator of a semver range: an optional operator followed by a
- * partial version (`>=22`, `^1.2.3`, `1.x`, `*`).
+ * One constrained comparator of a semver range: an optional operator followed
+ * by a numeric or numeric-leading partial version (`>=22`, `^1.2.3`, `1.x`).
+ * The canonical whole-range wildcard (`*`) is handled separately so wildcard
+ * lookalikes cannot accidentally become always-pass constraints.
  */
 const SEMVER_COMPARATOR =
-  /^(?:[<>]=?|=|\^|~)?v?(?:\d+|[xX*])(?:\.(?:\d+|[xX*]))?(?:\.(?:\d+|[xX*]))?(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+  /^(?:[<>]=?|=|\^|~)?v?\d+(?:\.(?:\d+|[xX*]))?(?:\.(?:\d+|[xX*]))?(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 /**
  * Whether a string is a semver range this implementation will evaluate.
@@ -231,15 +233,34 @@ export function isToolchainConstraint(constraint) {
   // with the odd spelling.
   const trimmed = constraint.trim().replace(/([<>]=?|=|\^|~)\s+/g, "$1");
   if (!trimmed) return false;
+  // Deliberate policy: `*` means the executable must exist but any parsed
+  // version passes. It is the only accepted spelling of a whole-range
+  // wildcard; keeping it out of SEMVER_COMPARATOR rejects Bun's always-pass
+  // interpretations of `<*`, `X`, `v*`, `*.2.3`, and similar lookalikes.
+  if (trimmed === "*") return true;
   for (const clause of trimmed.split("||")) {
     const tokens = clause.trim().split(/\s+/).filter(Boolean);
     if (!tokens.length) return false;
     // `A - B` hyphen range: exactly two comparators around a lone hyphen.
     if (tokens.includes("-")) {
       if (tokens.length !== 3 || tokens[1] !== "-") return false;
+      // Hyphen endpoints are versions, not comparator expressions.
+      if (/^[<>=^~]/.test(tokens[0]) || /^[<>=^~]/.test(tokens[2])) {
+        return false;
+      }
       if (!SEMVER_COMPARATOR.test(tokens[0])) return false;
       if (!SEMVER_COMPARATOR.test(tokens[2])) return false;
       continue;
+    }
+    // Toolchain policy admits a single version/comparator or a conventional
+    // two-sided comparator set. Bare token lists and three-way sets are easy
+    // to misread and have surprising cross-engine semantics.
+    if (tokens.length > 2) return false;
+    if (
+      tokens.length === 2 &&
+      !tokens.every((token) => /^(?:[<>]=?|=|\^|~)/.test(token))
+    ) {
+      return false;
     }
     if (!tokens.every((token) => SEMVER_COMPARATOR.test(token))) return false;
   }
@@ -305,7 +326,7 @@ function normalizeToolchain(raw, repoName, file) {
     seen.add(executable);
     if (!isToolchainConstraint(rawConstraint)) {
       throw new RepoError(
-        `${file}: repo ${repoName} toolchain constraint for ${JSON.stringify(executable)} must be a semver range, got ${JSON.stringify(rawConstraint)}`,
+        `${file}: repo ${repoName} toolchain constraint for ${JSON.stringify(executable)} must be a semver range ("*" is the only canonical any-version form), got ${JSON.stringify(rawConstraint)}`,
       );
     }
     toolchain.push({ executable, constraint: rawConstraint.trim() });

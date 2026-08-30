@@ -125,6 +125,45 @@ describe("POST /schedules/:loop/run (OPS-401)", () => {
     expect(body.decision).toBe("run");
   });
 
+  test("rejects manual fire when the configured cadence is invalid", async () => {
+    const every = "not-a-cadence";
+    const invalidCadenceRegistry = {
+      ...registry,
+      schedules: {
+        ...registry.schedules,
+        reaper: { ...registry.schedules.reaper, every },
+      },
+    };
+    const invalidCadenceServer = await makeServer({
+      registry: invalidCadenceRegistry,
+    });
+    try {
+      const schedules = await fetch(invalidCadenceServer.url("/schedules"));
+      const view = (await schedules.json()).schedules.find(
+        (schedule) => schedule.loop === "reaper",
+      );
+      const before = invalidCadenceServer.db
+        .query(`SELECT COUNT(*) AS n FROM events`)
+        .get().n;
+
+      const res = await fetch(
+        invalidCadenceServer.url("/schedules/reaper/run"),
+        { method: "POST" },
+      );
+
+      expect(res.status).toBe(422);
+      expect(await res.json()).toEqual({
+        error: `schedule reaper: invalid cadence '${every}': ${view.error}`,
+      });
+      expect(
+        invalidCadenceServer.db.query(`SELECT COUNT(*) AS n FROM events`).get()
+          .n,
+      ).toBe(before);
+    } finally {
+      invalidCadenceServer.close();
+    }
+  });
+
   test("manual merge trigger propagates selected PR numbers into the immutable event and planned input", async () => {
     // Planning commits the run before the API sends its response, so a returned
     // runId guarantees read-after-write. Keep this schedule-input test isolated

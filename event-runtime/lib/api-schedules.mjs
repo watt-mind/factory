@@ -92,8 +92,10 @@ export async function handleScheduleApiRoute({
     let cadenceSeconds;
     try {
       cadenceSeconds = parseCadence(schedule.every);
-    } catch {
-      // Cadence might have parse error in bad config.
+    } catch (err) {
+      return send(422, {
+        error: `schedule ${loop}: invalid cadence '${schedule.every}': ${err.message}`,
+      });
     }
     const isoNow = new Date(nowMs).toISOString();
     let eventId = `manual:${loop}:${isoNow}`;

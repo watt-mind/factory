@@ -4,7 +4,7 @@ import { artifactHead } from "./api-artifacts.mjs";
 import { DEFAULT_MAX_IN_FLIGHT, FACTORY_ROOT } from "./config.mjs";
 import { STALE_SCAN_MS, loadLinearSupply } from "./linear.mjs";
 import { loadRepos, RepoError } from "./repos.mjs";
-import { runUsage } from "./db.mjs";
+import { isBusyError, runUsage } from "./db.mjs";
 import { hookDecisionsFor } from "./hooks.mjs";
 import { IllegalTransition, lifecycleOf } from "./lifecycle.mjs";
 import { archiveDeadLetteredEvent, requeueEvent } from "./planner.mjs";
@@ -1790,6 +1790,8 @@ export async function handleRunApiRoute({
       });
       return send(200, { rejected: true, runId: outcome.runId });
     } catch (err) {
+      if (verb === "approve" && isBusyError(err))
+        return send(503, { error: "db_busy", retryable: true });
       const status = String(err.message).startsWith("unknown proposal")
         ? 404
         : 409;

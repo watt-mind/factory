@@ -322,7 +322,7 @@ export function itemView(row) {
 function inboxExpiredPredicate(item = "i") {
   return `(${item}.kind = 'proposal_expired' OR EXISTS (
     SELECT 1 FROM proposals p
-     WHERE p.id = json_extract(${item}.refs_json, '$.proposalId')
+     WHERE p.id = ${item}.proposal_id
        AND p.status = 'open'
        AND p.ttl_seconds > 0
        AND unixepoch(p.created_at) + p.ttl_seconds <= unixepoch()
@@ -434,8 +434,8 @@ export function createInboxItem(
       db.query(
         `INSERT INTO inbox_items
            (id, kind, severity, title, body, refs_json, source, created_at,
-            delivery_json, decision_json, dedupe_key, waiters_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, '[]')`,
+            proposal_id, delivery_json, decision_json, dedupe_key, waiters_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, '[]')`,
       ).run(
         id,
         kind,
@@ -445,6 +445,7 @@ export function createInboxItem(
         JSON.stringify(refs),
         source,
         createdAt,
+        refs.proposalId ?? null,
         decision === null ? null : JSON.stringify(decision),
         dedupeKey,
       );
@@ -558,12 +559,13 @@ function retargetInboxDecision(db, id, answer, proposalId, { now }) {
       : row.title;
   db.query(
     `UPDATE inbox_items
-     SET refs_json = ?, decision_json = ?, dedupe_key = ?, delivery_json = ?,
+     SET refs_json = ?, proposal_id = ?, decision_json = ?, dedupe_key = ?, delivery_json = ?,
          title = ?,
          response_json = NULL, decided_at = NULL, decided_by = NULL
      WHERE id = ?`,
   ).run(
     JSON.stringify(nextRefs),
+    proposalId,
     JSON.stringify(request),
     retargetedDedupeKey(db, row, previousProposalId, proposalId),
     JSON.stringify({
@@ -1079,9 +1081,9 @@ function bindProposalToItem(db, id, proposalId) {
      SET refs_json = json_set(
        CASE WHEN json_valid(refs_json) THEN refs_json ELSE '{}' END,
        '$.proposalId', ?
-     )
+     ), proposal_id = ?
      WHERE id = ? AND resolved_at IS NULL`,
-  ).run(proposalId, id);
+  ).run(proposalId, proposalId, id);
   return getInboxItem(db, id);
 }
 
@@ -1197,24 +1199,14 @@ function completedShipProposal(db, proposalId) {
   );
 }
 
-function laterCiSuccess(db, row, refs) {
+function laterCiSuccess(row, refs, candidates) {
   const pr = prNumber(refs.pr);
   if (!refs.repo || !pr) return false;
-  const events = db
-    .query(
-      `SELECT subject, envelope_json FROM events
-       WHERE source = 'github'
-         AND type = 'factory.merge.requested'
-         AND admitted_at > ?
-       ORDER BY admitted_at, rowid`,
-    )
-    .all(row.created_at);
-  return events.some((event) => {
-    const envelope = parseObject(event.envelope_json);
-    const payload = envelope.payload;
+  return candidates.some(({ admittedAt, subject, payload }) => {
+    if (admittedAt <= row.created_at) return false;
     if (!payload || typeof payload !== "object" || Array.isArray(payload))
       return false;
-    const repo = payload.repo ?? event.subject;
+    const repo = payload.repo ?? subject;
     return (
       repo === refs.repo &&
       Array.isArray(payload.prNumbers) &&
@@ -1311,6 +1303,34 @@ export function reconcileInbox(
      ORDER BY created_at, rowid`,
     )
     .all();
+  const ciRows = rows.filter((row) => row.kind === "CI RED");
+  const earliestCiCreatedAt = ciRows.reduce(
+    (earliest, row) =>
+      earliest === null || row.created_at < earliest
+        ? row.created_at
+        : earliest,
+    null,
+  );
+  const mergeRequestedCandidates =
+    earliestCiCreatedAt === null
+      ? []
+      : db
+          .query(
+            `SELECT admitted_at, subject, envelope_json FROM events
+             WHERE source = 'github'
+               AND type = 'factory.merge.requested'
+               AND admitted_at > ?
+             ORDER BY admitted_at, rowid`,
+          )
+          .all(earliestCiCreatedAt)
+          .map((event) => {
+            const envelope = parseObject(event.envelope_json);
+            return {
+              admittedAt: event.admitted_at,
+              subject: event.subject,
+              payload: envelope.payload,
+            };
+          });
   const linearRows = [];
   for (const row of rows) {
     // Pending decisions are not skipped: once the referent stops waiting the
@@ -1332,7 +1352,8 @@ export function reconcileInbox(
           refs.proposalId = proposalId;
         }
       }
-      if (laterCiSuccess(db, row, refs)) resolvedBy = "auto:ci_green";
+      if (laterCiSuccess(row, refs, mergeRequestedCandidates))
+        resolvedBy = "auto:ci_green";
     } else if (row.kind === "RC READY") {
       if (refs.proposalId && completedShipProposal(db, refs.proposalId))
         resolvedBy = "auto:ship_completed";

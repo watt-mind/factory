@@ -184,10 +184,10 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     migrated.close();
   });
 
-  test("tier escalation handoffs reach schema 15 from a fresh and from a v14 database", () => {
-    expect(CURRENT_SCHEMA_VERSION).toBe(15);
+  test("tier escalation handoffs, inbox proposal IDs and lookup indexes reach schema 17 from a fresh and from a v14 database", () => {
+    expect(CURRENT_SCHEMA_VERSION).toBe(17);
     const fresh = openDb(freshFile());
-    expect(getSchemaVersion(fresh)).toBe(15);
+    expect(getSchemaVersion(fresh)).toBe(17);
     fresh.close();
 
     // #1230 (#1197) owns migration 14 and lands first; a database already at
@@ -197,9 +197,9 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     migrateDb(at14, { targetVersion: 13 });
     at14.exec("PRAGMA user_version = 14;");
     migrateDb(at14);
-    expect(getSchemaVersion(at14)).toBe(15);
+    expect(getSchemaVersion(at14)).toBe(17);
     migrateDb(at14);
-    expect(getSchemaVersion(at14)).toBe(15);
+    expect(getSchemaVersion(at14)).toBe(17);
     expect(
       at14
         .query(
@@ -208,6 +208,44 @@ describe("schema migration runner and assertions (OPS-415)", () => {
         .get()?.name,
     ).toBe("tier_escalations");
     at14.close();
+  });
+
+  test("inbox proposal ID migration backfills populated v15 rows and indexes the column", () => {
+    const db = new Database(freshFile());
+    migrateDb(db, { targetVersion: 15 });
+    db.query(
+      `INSERT INTO inbox_items (id, kind, title, refs_json, source, created_at)
+       VALUES (?, 'decision_needed', ?, ?, 'cli', '2026-08-30T00:00:00.000Z')`,
+    ).run("with-proposal", "with proposal", '{"proposalId":"proposal-1"}');
+    db.query(
+      `INSERT INTO inbox_items (id, kind, title, refs_json, source, created_at)
+       VALUES (?, 'BLOCKED', ?, ?, 'cli', '2026-08-30T00:00:00.000Z')`,
+    ).run("without-proposal", "without proposal", '{"repo":"factory"}');
+
+    migrateDb(db);
+
+    expect(CURRENT_SCHEMA_VERSION).toBe(17);
+    expect(getSchemaVersion(db)).toBe(17);
+    expect(
+      db
+        .query(
+          `SELECT id, proposal_id FROM inbox_items
+           WHERE id IN ('with-proposal', 'without-proposal') ORDER BY id`,
+        )
+        .all(),
+    ).toEqual([
+      { id: "with-proposal", proposal_id: "proposal-1" },
+      { id: "without-proposal", proposal_id: null },
+    ]);
+    expect(
+      db
+        .query(
+          `SELECT sql FROM sqlite_master
+           WHERE type = 'index' AND name = 'idx_inbox_items_proposal_id'`,
+        )
+        .get()?.sql,
+    ).toContain("inbox_items (proposal_id)");
+    db.close();
   });
 
   test("tier escalation handoffs migrate with unique root and continuation ownership", () => {
@@ -227,6 +265,59 @@ describe("schema migration runner and assertions (OPS-415)", () => {
       ]),
     );
     db.close();
+  });
+
+  test("hot proposal and inbox lookup indexes upgrade an existing database", () => {
+    const file = freshFile();
+    const db = new Database(file);
+    // #1325 owns migration 16 (inbox_proposal_id); a database already at 16
+    // must pick up 17 alone, and the guarded DDL must survive re-running.
+    migrateDb(db, { targetVersion: 16 });
+    expect(getSchemaVersion(db)).toBe(16);
+    db.close();
+
+    const migrated = openDb(file);
+    expect(getSchemaVersion(migrated)).toBe(17);
+    migrateDb(migrated);
+    expect(getSchemaVersion(migrated)).toBe(17);
+    const plans = [
+      [
+        "metrics latest proposal",
+        `SELECT p2.rowid FROM proposals p2
+         WHERE p2.run_id = 'run-1'
+         ORDER BY p2.created_at DESC, p2.rowid DESC LIMIT 1`,
+        "idx_proposals_run_id",
+      ],
+      [
+        "event proposal",
+        `SELECT p2.rowid FROM proposals p2
+         WHERE p2.event_source = 'github' AND p2.event_id = 'event-1'
+         ORDER BY p2.created_at DESC, p2.rowid DESC LIMIT 1`,
+        "idx_proposals_event",
+      ],
+      [
+        "inbox correlation",
+        `SELECT p.id FROM events e
+         JOIN proposals p
+           ON p.event_source = e.source AND p.event_id = e.event_id
+         WHERE e.correlation_id = 'inbox-1'
+         ORDER BY p.created_at DESC, p.rowid DESC LIMIT 1`,
+        "idx_events_correlation",
+      ],
+    ];
+
+    for (const [name, sql, index] of plans) {
+      const detail = migrated
+        .query(`EXPLAIN QUERY PLAN ${sql}`)
+        .all()
+        .map((row) => row.detail)
+        .join("\n");
+      expect(detail, name).toMatch(
+        new RegExp(`USING (?:COVERING )?INDEX ${index}`),
+      );
+      expect(detail, name).not.toMatch(/SCAN (?:p2|p|e)\b/);
+    }
+    migrated.close();
   });
 
   test("metrics indexes migrate onto an existing v2 database (WM-281)", () => {
@@ -312,6 +403,7 @@ describe("schema migration runner and assertions (OPS-415)", () => {
       "dedupe_key",
       "resolved_reason",
       "waiters_json",
+      "proposal_id",
     ]);
     upgraded.close();
   });
@@ -334,7 +426,7 @@ describe("schema migration runner and assertions (OPS-415)", () => {
       .query("PRAGMA table_info(inbox_items)")
       .all()
       .map((row) => row.name);
-    expect(columns.slice(-7)).toEqual([
+    expect(columns.slice(-8)).toEqual([
       "decision_json",
       "response_json",
       "decided_at",
@@ -342,6 +434,7 @@ describe("schema migration runner and assertions (OPS-415)", () => {
       "dedupe_key",
       "resolved_reason",
       "waiters_json",
+      "proposal_id",
     ]);
     expect(
       upgraded.query("SELECT title FROM inbox_items WHERE id = 'legacy'").get()

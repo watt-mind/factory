@@ -10,7 +10,7 @@
  */
 import { canonicalJson, hashJson } from "./canonical.mjs";
 import { DEFAULT_PROPOSAL_TTL_SECONDS } from "./config.mjs";
-import { tx } from "./db.mjs";
+import { tx, txImmediate } from "./db.mjs";
 import { newProposalId } from "./ids.mjs";
 import { runState, transition } from "./lifecycle.mjs";
 import { buildRunSpec } from "./planner.mjs";
@@ -123,7 +123,11 @@ export function approveProposal(
     reason,
   } = {},
 ) {
-  return tx(db, () => {
+  // Take the write lock before reading the proposal. A deferred transaction
+  // reads first and then fails immediately when its later write must upgrade
+  // behind a worker claim; BEGIN IMMEDIATE lets SQLite's busy_timeout wait for
+  // that short-lived claimant transaction instead.
+  return txImmediate(db, () => {
     const proposal = db.query(`SELECT * FROM proposals WHERE id = ?`).get(id);
     if (!proposal) throw new Error(`unknown proposal ${id}`);
     if (proposal.status !== "open")
