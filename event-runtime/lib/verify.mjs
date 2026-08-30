@@ -105,6 +105,7 @@ export const HANDOFF_REASON_CODES = new Set([
   "handoff_verification_failed",
   "handoff_verification_unspecified",
   "handoff_owned_paths_violation",
+  "handoff_pr_form_invalid",
 ]);
 export const HANDOFF_TAIL_LINES = 40;
 export const HANDOFF_WEB_SRC_PREFIX = "event-runtime/web/src/";
@@ -897,17 +898,36 @@ function commandLine(label, obs) {
  */
 export function composeHandoffVerification(handoff) {
   const lines = [HANDOFF_COMMENT_HEADING];
-  if (Number.isInteger(handoff.prNumber) && handoff.prNumber > 0) {
+  const prNumber = handoff.pr?.number ?? handoff.prNumber;
+  if (Number.isInteger(prNumber) && prNumber > 0) {
     // Only a boolean says anything about the PR's draft state: the
     // pr_base_unreadable path never sets prDraft, and the same composer writes
     // the failure comment before the worker drafts the PR.
     const draftState =
-      typeof handoff.prDraft === "boolean"
-        ? handoff.prDraft
+      typeof handoff.pr?.draft === "boolean"
+        ? handoff.pr.draft
           ? "draft"
           : "ready"
-        : "draft state unknown";
-    lines.push(`- PR: #${handoff.prNumber} (${draftState})`);
+        : typeof handoff.prDraft === "boolean"
+          ? handoff.prDraft
+            ? "draft"
+            : "ready"
+          : "draft state unknown";
+    const fixes =
+      typeof handoff.pr?.hasFixesLine === "boolean"
+        ? handoff.pr.hasFixesLine
+          ? "yes"
+          : "no"
+        : "unknown";
+    const runTrailer =
+      typeof handoff.pr?.hasRunTrailer === "boolean"
+        ? handoff.pr.hasRunTrailer
+          ? "yes"
+          : "no"
+        : "unknown";
+    lines.push(
+      `- PR: #${prNumber} (${draftState}) · Fixes: ${fixes} · run trailer: ${runTrailer}`,
+    );
   }
   const primary = handoff.verification;
   if (primary) {
@@ -1599,6 +1619,7 @@ function verifyCompleted({
       github: worktreeRecord.github ?? null,
       prNumber: candidate.artifact?.prNumber ?? null,
       prUrl: candidate.artifact?.prUrl ?? null,
+      runId: spec.runId,
       verification: null,
       repoVerify: null,
       webBuild: null,

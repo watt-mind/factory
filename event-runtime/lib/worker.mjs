@@ -2455,13 +2455,13 @@ function defaultHoldPullRequest({ github, prNumber, body }) {
   return held;
 }
 
-/** Read the live PR base at handoff; dispatch must never rely on GitHub's default branch. */
+/** Read the live PR form at handoff; dispatch must never rely on GitHub's default branch. */
 function defaultFetchHandoffPullRequest({ github, prNumber }) {
   if (!github || !Number.isInteger(prNumber)) {
     throw new Error("handoff PR requires github and a numeric PR number");
   }
   return loadForge().prView(github, prNumber, {
-    fields: ["baseRefName", "isDraft"],
+    fields: ["baseRefName", "body", "isDraft"],
     timeout: workerSubprocessTimeoutMs(),
   });
 }
@@ -2477,7 +2477,11 @@ function handoffPrNumber(handoff) {
  * configured repository base. Kept here, beside the worker's other external
  * handoff effects, so tests can inject the PR read without a live forge.
  */
-function assertHandoffPullRequestBase({ handoff, base, fetchPullRequest }) {
+export function assertHandoffPullRequestBase({
+  handoff,
+  base,
+  fetchPullRequest,
+}) {
   const expected = typeof base === "string" ? base.trim() : "";
   const prNumber = handoffPrNumber(handoff);
   if (!expected || !handoff?.github || !prNumber) {
@@ -2502,7 +2506,20 @@ function assertHandoffPullRequestBase({ handoff, base, fetchPullRequest }) {
   const actual =
     typeof pr?.baseRefName === "string" ? pr.baseRefName.trim() : "";
   handoff.prBase = { expected, actual: actual || null };
-  handoff.prDraft = pr?.isDraft === true;
+  const hasBody = typeof pr?.body === "string";
+  const hasFixesLine = hasBody
+    ? pr.body.split(/\r?\n/).includes(`Fixes ${handoff.ticket}`)
+    : true;
+  const hasRunTrailer = hasBody
+    ? pr.body.split(/\r?\n/).includes(`run:${handoff.runId}`)
+    : true;
+  handoff.pr = {
+    number: prNumber,
+    draft: pr?.isDraft === true,
+    hasFixesLine,
+    hasRunTrailer,
+  };
+  handoff.prDraft = handoff.pr.draft;
   if (!actual) {
     throw new ContractViolation(
       [`pr_base_unreadable: PR #${prNumber} has no baseRefName`],
@@ -2515,6 +2532,14 @@ function assertHandoffPullRequestBase({ handoff, base, fetchPullRequest }) {
         `pr_base_mismatch: PR #${prNumber} targets ${actual}, expected configured base ${expected}`,
       ],
       { reasonCode: "handoff_verification_failed", handoff },
+    );
+  }
+  if (!hasFixesLine) {
+    throw new ContractViolation(
+      [
+        `handoff_pr_form_invalid: PR #${prNumber} is missing Fixes ${handoff.ticket}`,
+      ],
+      { reasonCode: "handoff_pr_form_invalid", handoff },
     );
   }
 }

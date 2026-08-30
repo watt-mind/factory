@@ -64,6 +64,7 @@ import {
   dispatchIdentityEnv,
   acquireClaimLock,
   adapterExecuteTimeoutMs,
+  assertHandoffPullRequestBase,
   cancelRun,
   CLAIM_LOCK_BACKOFF_MAX_MS,
   claimNext,
@@ -4180,6 +4181,64 @@ sh -c 'sleep 5 & wait'
       });
       expect(untouched).toBe(env);
     }
+  });
+
+  test("handoff PR form records draft and body markers, refusing only a missing Fixes line", () => {
+    const base = {
+      github: "watt-mind/factory",
+      prNumber: 77,
+      ticket: "watt-mind/factory#1504",
+      runId: "run-1504",
+    };
+    const valid = { ...base };
+    assertHandoffPullRequestBase({
+      handoff: valid,
+      base: "develop",
+      fetchPullRequest: () => ({
+        baseRefName: "develop",
+        isDraft: false,
+        body: "Fixes watt-mind/factory#1504\n\nImplemented\n\nrun:run-1504",
+      }),
+    });
+    expect(valid.pr).toEqual({
+      number: 77,
+      draft: false,
+      hasFixesLine: true,
+      hasRunTrailer: true,
+    });
+
+    const warningOnly = { ...base };
+    assertHandoffPullRequestBase({
+      handoff: warningOnly,
+      base: "develop",
+      fetchPullRequest: () => ({
+        baseRefName: "develop",
+        isDraft: true,
+        body: "Fixes watt-mind/factory#1504",
+      }),
+    });
+    expect(warningOnly.pr).toMatchObject({
+      draft: true,
+      hasFixesLine: true,
+      hasRunTrailer: false,
+    });
+
+    const missingFixes = { ...base };
+    expect(() =>
+      assertHandoffPullRequestBase({
+        handoff: missingFixes,
+        base: "develop",
+        fetchPullRequest: () => ({
+          baseRefName: "develop",
+          isDraft: false,
+          body: "run:run-1504",
+        }),
+      }),
+    ).toThrow("handoff_pr_form_invalid");
+    expect(missingFixes.pr).toMatchObject({
+      hasFixesLine: false,
+      hasRunTrailer: true,
+    });
   });
 
   test("worker preserves push credentials for mutating runs and strips them for non-mutating runs (WM-128)", async () => {
