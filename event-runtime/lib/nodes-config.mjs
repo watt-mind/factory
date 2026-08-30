@@ -5,6 +5,9 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { FACTORY_ROOT } from "./config.mjs";
 
+export const DEFAULT_REMOTE_WORKER_REPO_URL =
+  "https://github.com/watt-mind/factory.git";
+
 export class NodeConfigError extends Error {
   constructor(message) {
     super(message);
@@ -36,6 +39,7 @@ export function expandHome(p, home = process.env.HOME) {
  *   port: number,
  *   factoryRoot: string,
  *   branch: string,
+ *   repoUrl: string,
  *   env: Record<string, string | number>,
  *   labels: Record<string, string>,
  *   adapters: string[]
@@ -105,6 +109,8 @@ export function loadNodesConfig({
       ? String(rawNode.factory_root).trim()
       : "~/Develop/factory";
     const branch = rawNode.branch ? String(rawNode.branch).trim() : "master";
+    const repoUrl =
+      String(rawNode.repo_url ?? "").trim() || DEFAULT_REMOTE_WORKER_REPO_URL;
 
     const env =
       rawNode.env && typeof rawNode.env === "object" ? { ...rawNode.env } : {};
@@ -124,6 +130,7 @@ export function loadNodesConfig({
       port,
       factoryRoot,
       branch,
+      repoUrl,
       env,
       labels,
       adapters,
