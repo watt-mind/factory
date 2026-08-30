@@ -15,7 +15,7 @@
  */
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import {
   DEFAULT_MAX_IN_FLIGHT,
@@ -68,6 +68,14 @@ const IN_REPO_CONFIG_SCHEMA_PATH = new URL(
   import.meta.url,
 );
 let inRepoConfigSchema;
+const inRepoConfigCache = new Map();
+const ignoredInRepoConfigWarnings = new Map();
+
+/** Clear in-repo config and warning caches, primarily for isolated tests. */
+export function resetInRepoConfigCache() {
+  inRepoConfigCache.clear();
+  ignoredInRepoConfigWarnings.clear();
+}
 
 function repoConfigSchema() {
   if (inRepoConfigSchema) return inRepoConfigSchema;
@@ -115,43 +123,81 @@ function validateInRepoConfigSemantics(config, file) {
  * null; malformed or ambiguous declarations fail closed before host overlay.
  */
 export function loadInRepoConfig(repoRoot = process.cwd()) {
-  const files = IN_REPO_CONFIG_PATHS.map((relative) =>
-    path.join(repoRoot, relative),
-  ).filter((file) => existsSync(file));
+  const candidates = IN_REPO_CONFIG_PATHS.map((relative) => {
+    const file = path.resolve(repoRoot, relative);
+    const stat = statSync(file, { throwIfNoEntry: false });
+    if (!stat) {
+      inRepoConfigCache.delete(file);
+      return null;
+    }
+    return { file, mtimeMs: stat.mtimeMs, size: stat.size };
+  });
+  const files = candidates.filter(Boolean);
+  const fingerprint = candidates
+    .map((candidate) =>
+      candidate
+        ? `${candidate.file}:${candidate.mtimeMs}:${candidate.size}`
+        : "missing",
+    )
+    .join("|");
   if (files.length === 0) return null;
   if (files.length > 1) {
-    throw new RepoError(
+    const error = new RepoError(
       `${repoRoot}: both .factory.yaml and .factory/config.yaml exist; keep exactly one in-repo config`,
     );
+    error.inRepoConfigFingerprint = fingerprint;
+    throw error;
   }
 
-  const file = files[0];
-  let parsed;
+  const { file, mtimeMs, size } = files[0];
+  const cached = inRepoConfigCache.get(file);
+  if (cached?.mtimeMs === mtimeMs && cached.size === size) {
+    if (cached.error) throw cached.error;
+    return cached.config;
+  }
+
   try {
-    parsed = Bun.YAML.parse(readFileSync(file, "utf8"));
+    const parsed = Bun.YAML.parse(readFileSync(file, "utf8"));
+    const hostOwned = IN_REPO_HOST_OWNED_KEYS.filter((key) =>
+      hasOwn(parsed, key),
+    );
+    if (hostOwned.length > 0) {
+      throw new RepoError(
+        `${file}: in-repo config may not set host-owned ${hostOwned
+          .map((key) => `"${key}"`)
+          .join(
+            ", ",
+          )}; the host repos.yaml owns ${IN_REPO_HOST_OWNED_KEYS.join(", ")}`,
+      );
+    }
+    const result = validate(repoConfigSchema(), parsed);
+    if (!result.valid) {
+      throw new RepoError(
+        `${file}: invalid factory.repo/v1 config: ${result.errors.join("; ")}`,
+      );
+    }
+    validateInRepoConfigSemantics(parsed, file);
+    inRepoConfigCache.set(file, { mtimeMs, size, config: parsed });
+    return parsed;
   } catch (error) {
-    throw new RepoError(`${file}: invalid YAML: ${error.message}`);
+    const wrapped =
+      error instanceof RepoError
+        ? error
+        : new RepoError(`${file}: invalid YAML: ${error.message}`);
+    wrapped.inRepoConfigFingerprint = fingerprint;
+    inRepoConfigCache.set(file, { mtimeMs, size, error: wrapped });
+    throw wrapped;
   }
-  const hostOwned = IN_REPO_HOST_OWNED_KEYS.filter((key) =>
-    hasOwn(parsed, key),
+}
+
+function warnInRepoConfigIgnored(repoName, error) {
+  const key = `${repoName}\u0000${error.message}`;
+  const fingerprint = error.inRepoConfigFingerprint;
+  if (ignoredInRepoConfigWarnings.get(key) === fingerprint) return;
+  ignoredInRepoConfigWarnings.set(key, fingerprint);
+  console.warn(
+    `warning: repo ${repoName}: in-repo config ignored, host config applies: ${error.message}`,
   );
-  if (hostOwned.length > 0) {
-    throw new RepoError(
-      `${file}: in-repo config may not set host-owned ${hostOwned
-        .map((key) => `"${key}"`)
-        .join(
-          ", ",
-        )}; the host repos.yaml owns ${IN_REPO_HOST_OWNED_KEYS.join(", ")}`,
-    );
-  }
-  const result = validate(repoConfigSchema(), parsed);
-  if (!result.valid) {
-    throw new RepoError(
-      `${file}: invalid factory.repo/v1 config: ${result.errors.join("; ")}`,
-    );
-  }
-  validateInRepoConfigSemantics(parsed, file);
-  return parsed;
 }
 
 /**
@@ -1124,9 +1170,7 @@ export function loadRepos({ root = reposRoot() } = {}) {
       inRepoConfig = loadInRepoConfig(expandHome(hostEntry.path));
     } catch (err) {
       if (!(err instanceof RepoError)) throw err;
-      console.warn(
-        `warning: repo ${hostEntry.name}: in-repo config ignored, host config applies: ${err.message}`,
-      );
+      warnInRepoConfigIgnored(hostEntry.name, err);
     }
     const entry = mergeRepoConfig(hostEntry, inRepoConfig);
     let maxInFlight = null;
