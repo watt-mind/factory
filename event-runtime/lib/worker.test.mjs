@@ -80,6 +80,7 @@ import {
   codeStampRoot,
   continuationExecutionInput,
   continuationHandoffFailure,
+  escalationHandoffFailure,
   createReloadWatcher,
   DEFAULT_MAX_ENVIRONMENT_RETRIES,
   defaultLocksDir,
@@ -1296,22 +1297,24 @@ sh -c 'sleep 5 & wait'
     });
     expect(recovered.candidate).toMatchObject({
       reasonCode: "worker_recovered_missing_result",
-      artifact: {
-        outcome: "PR_OPEN",
-        prNumber: 1533,
-        headSha,
-      },
+      artifact: { outcome: "PR_OPEN", prNumber: 1533 },
+      evidence: { headSha },
     });
+    // The synthesized artifact must satisfy the registered dispatch-result
+    // schema (additionalProperties: false) — no cloned, widened definition.
+    expect(recovered.candidate.artifact).not.toHaveProperty("headSha");
+    expect(recovered).not.toHaveProperty("definition");
     const verified = verifyResult({
       spec,
-      def: recovered.definition,
+      def,
       registry,
       workspaceDir,
       attempt: 1,
       worktreeRecord: {},
     });
     expect(verified.kind).toBe("completed");
-    expect(verified.result.artifact.headSha).toBe(headSha);
+    expect(verified.result.artifact.headSha).toBeUndefined();
+    expect(verified.result.evidence.headSha).toBe(headSha);
 
     for (const { error, findPullRequest, body, recoveredHeadSha = headSha } of [
       { error: missing, findPullRequest: () => null, body: "## Handoff" },
@@ -2672,6 +2675,37 @@ sh -c 'sleep 5 & wait'
         continuationHandoffFailure(missingResultReason),
       ).handoffFailure,
     ).toBe(missingResultReason);
+  });
+
+  test("a handoff_verification_failed run hands its web_build_failed line to the continuation", () => {
+    const violations = [
+      "owned_paths_violation: docs/x.md",
+      "web_build_failed: src/views/Ticket.tsx: error TS7053",
+    ];
+    const error = new ContractViolation(violations, {
+      reasonCode: "handoff_verification_failed",
+    });
+    const failureReason = `handoff_verification_failed: ${violations.join(", ")}`;
+    // The composed reason is prefixed, so the anchored matcher cannot see the
+    // diagnostic in it; the worker must hand over the raw violations instead.
+    expect(continuationHandoffFailure(failureReason)).toBeNull();
+    expect(escalationHandoffFailure(error, failureReason)).toBe(
+      "web_build_failed: src/views/Ticket.tsx: error TS7053",
+    );
+    const missingResultReason =
+      "contract_violation: missing_result: expected /tmp/run/result.json; agent stdout/stderr (last 2 KB): text";
+    expect(
+      escalationHandoffFailure(
+        new ContractViolation(["missing_result"]),
+        missingResultReason,
+      ),
+    ).toBe(missingResultReason);
+    expect(
+      escalationHandoffFailure(
+        new ContractViolation(["missing_artifact"]),
+        "contract_violation: missing_artifact",
+      ),
+    ).toBeNull();
   });
 
   test("tier continuation input carries the worker-observed handoff failure verbatim", () => {

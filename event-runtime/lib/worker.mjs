@@ -1260,6 +1260,19 @@ export function continuationHandoffFailure(violations) {
   return failure ?? null;
 }
 
+/**
+ * Pick the continuation's handoff failure from a verification failure. The
+ * matcher anchors each violation at its start, so the composed
+ * `<reasonCode>: ...` failure reason (`handoff_verification_failed: web_build_failed: ...`)
+ * would defeat it; only the `missing_result` diagnostic lives in that string.
+ */
+export function escalationHandoffFailure(error, failureReason) {
+  const violations = Array.isArray(error?.violations) ? error.violations : [];
+  const missingResult =
+    violations.length === 1 && violations[0] === "missing_result";
+  return continuationHandoffFailure(missingResult ? failureReason : violations);
+}
+
 /** Add worker-observed handoff context without mutating the validated spec. */
 export function continuationExecutionInput(input, handoffFailure) {
   return typeof handoffFailure === "string" && handoffFailure
@@ -1464,23 +1477,13 @@ function missingResultFailure(workspaceDir) {
   return `missing_result: expected ${resultPath}; agent stdout/stderr (last 2 KB): ${tail || "(no captured output)"}`;
 }
 
-function recoveredDispatchDefinition(def) {
-  return {
-    ...def,
-    outputSchema: {
-      ...def.outputSchema,
-      properties: {
-        ...def.outputSchema.properties,
-        headSha: { type: "string", pattern: "^[0-9a-f]{40}$" },
-      },
-    },
-  };
-}
-
 /**
  * Recover the one contract failure whose durable work may already be complete.
  * The finder resolves the branch from the checkout; the PR read then proves
  * the agent reached its final Handoff before the worker authors result.json.
+ * The artifact stays inside the registered `factory.dispatch-result/v1`
+ * schema (`additionalProperties: false`); the observed head SHA is carried as
+ * top-level evidence so the real definition verifies the synthesized result.
  */
 export function recoverMissingDispatchResult({
   error,
@@ -1544,7 +1547,6 @@ export function recoverMissingDispatchResult({
       ticket: spec.input?.ticket,
       prUrl: listed.url,
       prNumber,
-      headSha,
       verification: {
         command: verificationCommand,
         passed: true,
@@ -1554,6 +1556,7 @@ export function recoverMissingDispatchResult({
         "Worker recovered an open PR after the agent omitted result.json",
     },
     evidence: {
+      headSha,
       commands: [
         `git -C ${worktreeRecord.path} branch --show-current`,
         `forge.prList(open, headRefName)`,
@@ -1566,7 +1569,7 @@ export function recoverMissingDispatchResult({
     `${JSON.stringify(candidate, null, 2)}\n`,
     "utf8",
   );
-  return { candidate, definition: recoveredDispatchDefinition(def) };
+  return { candidate };
 }
 
 export function defaultProjectTierEscalation({
@@ -4243,7 +4246,7 @@ export async function executeClaimed(
         try {
           verified = verifyResult({
             spec,
-            def: recovered.definition,
+            def,
             registry,
             workspaceDir,
             attempt,
@@ -4276,6 +4279,10 @@ export async function executeClaimed(
         activeError.violations[0] === "missing_result"
           ? `${reasonCode}: ${missingResultFailure(workspaceDir)}`
           : `${reasonCode}: ${activeError.violations.join(", ")}`;
+      const continuationFailure = escalationHandoffFailure(
+        activeError,
+        failureReason,
+      );
       const handoff = activeError.handoff ?? null;
       const handoffBody = handoff
         ? `${composeHandoffVerification(handoff)}\n\n**Result:** run ${runId} FAILED \`${reasonCode}\` — ${activeError.violations.join("; ")}`
@@ -4402,7 +4409,7 @@ export async function executeClaimed(
             policyVersion,
             now: currentNow,
             reasonCode,
-            handoffFailure: continuationHandoffFailure(failureReason),
+            handoffFailure: continuationFailure,
           });
         }
         return { ok: true, escalation };
