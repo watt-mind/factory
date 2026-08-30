@@ -76,7 +76,11 @@ afterEach(() => {
 function renderArtifacts(
   onJumpRun = mock(() => {}),
   initialFilters: ArtifactFilters = { kind: null, orphan: null, search: "" },
-  seed: { items?: ArtifactInventoryItem[]; agents?: unknown[] } = {},
+  seed: {
+    items?: ArtifactInventoryItem[];
+    agents?: unknown[];
+    nextBefore?: string | null;
+  } = {},
   onOpenFull = mock(() => {}),
 ) {
   const client = new QueryClient({
@@ -84,7 +88,18 @@ function renderArtifacts(
       queries: { retry: false, refetchInterval: false, staleTime: Infinity },
     },
   });
-  client.setQueryData(["artifacts"], { artifacts: seed.items ?? ITEMS });
+  client.setQueryData(
+    [
+      "artifacts",
+      initialFilters.kind,
+      initialFilters.orphan,
+      initialFilters.search,
+    ],
+    {
+      artifacts: seed.items ?? ITEMS,
+      nextBefore: seed.nextBefore,
+    },
+  );
   if (seed.agents)
     client.setQueryData(["agents"], {
       agents: seed.agents,
@@ -244,6 +259,140 @@ describe("Artifacts inventory (WM-207)", () => {
     const grid = view.getByRole("grid");
     expect(within(grid).queryByText("aaaaaaaaaaaa")).toBeNull();
     expect(within(grid).queryByText("cccccccccccc")).toBeNull();
+  });
+
+  test("requests the active kind, orphan, and search filters", async () => {
+    const requests: string[] = [];
+    globalThis.fetch = mock(async (input: string | URL | Request) => {
+      requests.push(String(input));
+      return new Response(JSON.stringify({ artifacts: ITEMS }), {
+        status: 200,
+      });
+    }) as unknown as typeof fetch;
+    const view = renderArtifacts();
+    await waitFor(() => expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy());
+
+    fireEvent.change(view.getByRole("combobox", { name: "Artifact kind" }), {
+      target: { value: "report" },
+    });
+    fireEvent.click(view.getByRole("tab", { name: "Orphans 28" }));
+    changeControlledInput(
+      view.getByRole("combobox", {
+        name: "Search artifacts",
+      }) as HTMLInputElement,
+      "reporter@1",
+    );
+
+    await waitFor(() =>
+      expect(requests).toContain(
+        "/api/artifacts?kind=report&orphan=true&search=reporter%401",
+      ),
+    );
+  });
+
+  test("trims the search term before querying the server", async () => {
+    const requests: string[] = [];
+    globalThis.fetch = mock(async (input: string | URL | Request) => {
+      requests.push(String(input));
+      return new Response(JSON.stringify({ artifacts: ITEMS }), {
+        status: 200,
+      });
+    }) as unknown as typeof fetch;
+    const view = renderArtifacts();
+    await waitFor(() => expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy());
+
+    changeControlledInput(
+      view.getByRole("combobox", {
+        name: "Search artifacts",
+      }) as HTMLInputElement,
+      "  reporter@1  ",
+    );
+
+    await waitFor(() =>
+      expect(requests).toContain("/api/artifacts?search=reporter%401"),
+    );
+  });
+
+  test("resolves a deep-linked artifact outside the filtered page", async () => {
+    const requests: string[] = [];
+    const orphanOnly = ITEMS.filter((item) => !item.referenced);
+    globalThis.fetch = mock(async (input: string | URL | Request) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.startsWith("/api/artifacts?")) {
+        const params = new URL(url, "http://localhost").searchParams;
+        const search = params.get("search");
+        const hit = ITEMS.filter((item) => !search || item.sha256 === search);
+        return new Response(JSON.stringify({ artifacts: hit }), {
+          status: 200,
+        });
+      }
+      return new Response(JSON.stringify({ message: "deep" }), {
+        status: 200,
+      });
+    }) as unknown as typeof fetch;
+
+    window.location.hash = `#/artifacts/${"a".repeat(64)}`;
+    const view = renderArtifacts(
+      undefined,
+      { kind: null, orphan: true, search: "" },
+      { items: orphanOnly },
+    );
+
+    const references = await view.findByRole("region", {
+      name: "Artifact run references",
+    });
+    expect(within(references).getByText(/run_12345678/)).toBeTruthy();
+    expect(requests).toContain(
+      `/api/artifacts?search=${"a".repeat(64)}&limit=1`,
+    );
+    expect(view.queryByText(/metadata is unavailable/i)).toBeNull();
+  });
+
+  test("ignores a fallback row whose digest differs from the deep link", async () => {
+    globalThis.fetch = mock(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.startsWith("/api/artifacts?")) {
+        return new Response(JSON.stringify({ artifacts: [ITEMS[1]] }), {
+          status: 200,
+        });
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    window.location.hash = `#/artifacts/${"a".repeat(64)}`;
+    const view = renderArtifacts(
+      undefined,
+      { kind: null, orphan: true, search: "" },
+      { items: [ITEMS[2]] },
+    );
+
+    await view.findByText(/metadata is unavailable/i);
+    expect(view.queryByText(/run_trace/)).toBeNull();
+  });
+
+  test("warns when the server has more artifacts than this page", async () => {
+    const view = renderArtifacts(undefined, undefined, {
+      nextBefore: "older-artifacts",
+    });
+    await waitFor(() => expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy());
+
+    expect(view.getByRole("status").textContent).toMatch(
+      /showing 3 artifacts.*more.*narrow the filter/i,
+    );
+  });
+
+  test("the more-available notice counts the visible rows", async () => {
+    const view = renderArtifacts(
+      undefined,
+      { kind: "report", orphan: null, search: "" },
+      { nextBefore: "older-artifacts" },
+    );
+    await waitFor(() => expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy());
+
+    expect(view.getByRole("status").textContent).toMatch(
+      /showing 1 artifacts?.*more/i,
+    );
   });
 
   test("opens a deep-linked inspector with formatted preview, actions, search, and bidirectional references", async () => {

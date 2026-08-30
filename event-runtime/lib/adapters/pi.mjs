@@ -49,11 +49,11 @@
  * path, so the two cannot drift. See lib/adapters/sandboxed.mjs.
  */
 import { spawn } from "node:child_process";
-import { createWriteStream, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
-import { FACTORY_ROOT } from "../config.mjs";
+import { FACTORY_ROOT, transcriptMaxBytes } from "../config.mjs";
 import { normalizePolicy } from "../sandbox/gondolin.mjs";
 import { PROMPT_SUFFIX, verifiedPrompt } from "./claude.mjs";
 import {
@@ -63,7 +63,11 @@ import {
   RUNTIME_IDENTITY_ENV,
   safeChildEnvironment as sharedSafeChildEnvironment,
 } from "./child-env.mjs";
-import { DETACHED_SPAWN_OPTIONS, killProcessGroup } from "./child-process.mjs";
+import {
+  boundedTranscriptStream,
+  DETACHED_SPAWN_OPTIONS,
+  killProcessGroup,
+} from "./child-process.mjs";
 import {
   guestBinary,
   guestEnvironment,
@@ -430,15 +434,32 @@ export function extractUsage(msg) {
  *
  * @param {import("node:stream").Readable|null} stdout
  */
-function attachOutput({ stdout, workspaceDir, spec, def, onTrace, onUsage }) {
+function attachOutput({
+  stdout,
+  workspaceDir,
+  spec,
+  def,
+  onTrace,
+  onUsage,
+  transcriptMaxBytes: maxTranscriptBytes,
+}) {
   // Capture the CLI's structured output as a runtime artifact, same
   // contract as the claude adapter: NDJSON, one message per line.
-  const transcript = createWriteStream(
+  const transcript = boundedTranscriptStream(
     path.join(workspaceDir, ".transcript.json"),
+    {
+      maxBytes: maxTranscriptBytes,
+      onTruncated: ({ bytes }) =>
+        onTrace?.("lifecycle", { note: "transcript_truncated", bytes }),
+    },
   );
   transcript.on("error", () => {});
   if (stdout) {
     stdout.pipe(transcript);
+  } else {
+    // No stdout means nothing will ever end the transcript; close it now so
+    // execute()'s wait for the stream to finish cannot hang (mirrors acp).
+    transcript.end();
   }
 
   // Live trace: same stdout, line by line. Observational only — a trace
@@ -542,6 +563,7 @@ function attachOutput({ stdout, workspaceDir, spec, def, onTrace, onUsage }) {
       timedOut,
       policyDenials: exitCode === 0 ? [] : policyDenials,
       usage: normalized,
+      ...(transcript.truncated ? { transcriptTruncated: true } : {}),
     };
   };
 
@@ -577,6 +599,7 @@ async function executeSandboxed({
   timeoutMs,
   onTrace,
   onUsage,
+  transcriptMaxBytes: maxTranscriptBytes,
   resume,
   abortSignal,
   runSandbox,
@@ -608,6 +631,7 @@ async function executeSandboxed({
     def,
     onTrace,
     onUsage,
+    transcriptMaxBytes: maxTranscriptBytes,
   });
   const transcriptClosed = new Promise((done) => {
     transcript.on("close", done);
@@ -658,6 +682,7 @@ export async function execute({
   abortSignal,
   signal,
   runSandbox,
+  transcriptMaxBytes: maxTranscriptBytes = transcriptMaxBytes(),
 }) {
   // The sandbox decision comes first, before the host env is assembled or a
   // host CLI is looked for: a sandboxed definition must never reach the host
@@ -670,6 +695,7 @@ export async function execute({
       timeoutMs,
       onTrace,
       onUsage,
+      transcriptMaxBytes: maxTranscriptBytes,
       resume,
       abortSignal: abortSignal ?? signal,
       runSandbox,
@@ -724,6 +750,11 @@ export async function execute({
       def,
       onTrace,
       onUsage,
+      transcriptMaxBytes: maxTranscriptBytes,
+    });
+    const transcriptClosed = new Promise((done) => {
+      transcript.once("close", done);
+      transcript.once("finish", done);
     });
 
     let timedOut = false;
@@ -755,10 +786,11 @@ export async function execute({
       transcript.destroy();
       reject(err);
     });
-    child.on("close", (exitCode) => {
+    child.on("close", async (exitCode) => {
       clearTimeout(termTimer);
       cancelTermination?.();
       if (abortSig) abortSig.removeEventListener?.("abort", onAbort);
+      await transcriptClosed;
       resolve(finish({ exitCode, timedOut }));
     });
   });
