@@ -387,14 +387,29 @@ log(
   `${ciCaptureProposal.runId} → COMPLETED (ci-log-capture@1, emitted ci-log artifact)`,
 );
 
-// Hop 2: ci-doctor@2 (artifacts workspace type with $.artifactHash.ci-log)
-const ciDoctorProposal = await openProposalFor(ciEventId, {
+// Hop 2: ci-doctor@2 (artifacts workspace type with $.artifactHash.ci-log).
+// The chain policy may approve the diagnosis unattended (GH-1727): the
+// proposal is then already decided by the time we see it, so only click
+// through when it is still waiting for a human.
+const ciDoctorProposal = await proposalFor(ciEventId, {
   agent: "ci-doctor@2",
+  status: "all",
 });
-await client.approve(ciDoctorProposal.id);
+let ciDoctorAuto = ciDoctorProposal.status !== "open";
+if (!ciDoctorAuto) {
+  try {
+    await client.approve(ciDoctorProposal.id);
+  } catch (err) {
+    // The chain pass may win the race between our read and our click.
+    const { proposals } = await client.proposals("all");
+    const decided = proposals.find((p) => p.id === ciDoctorProposal.id);
+    if (decided?.status !== "approved") throw err;
+    ciDoctorAuto = true;
+  }
+}
 await runTerminal(ciDoctorProposal.runId, "COMPLETED");
 log(
-  `${ciDoctorProposal.runId} → COMPLETED (ci-doctor@2, verdict FLAKE, artifacts workspace)`,
+  `${ciDoctorProposal.runId} → COMPLETED (ci-doctor@2, verdict FLAKE, artifacts workspace${ciDoctorAuto ? ", auto-approved" : ""})`,
 );
 
 // Hop 3: ci-rerun@1 (command adapter follow-up with causationId)

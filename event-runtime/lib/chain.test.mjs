@@ -1,9 +1,11 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-chain-test-mjs";
-import { describe, expect, test } from "bun:test";
-import { cpSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, test } from "bun:test";
+import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { memoryForge } from "../../lib/forge/memory.mjs";
 import * as fake from "./adapters/fake.mjs";
+import { CHAIN_AUTO_APPROVAL_ACTOR } from "./auto-approval.mjs";
+import { FACTORY_ROOT } from "./config.mjs";
 import {
   admitChainEvent,
   buildChainInput,
@@ -44,7 +46,49 @@ function failedRunEnvelope(overrides = {}) {
   };
 }
 
-function harness() {
+/**
+ * The chain auto-approval allowlist is read from `<reposRoot>/config/policy.yaml`
+ * at plan time (falling back to `config/policy.example.yaml` when the instance
+ * file is absent). Tests must not depend on whichever policy the checkout
+ * happens to carry, so each harness pins FACTORY_REPOS_ROOT to a temp root
+ * whose policy is the shipped example with an explicit allowlist (GH-1727).
+ */
+const CI_DIAGNOSE = "factory.ci-diagnose.requested";
+const envRestores = [];
+
+function chainPolicyRoot(allowed) {
+  const root = tmpDir("evrt-chain-policy-");
+  mkdirSync(path.join(root, "config"));
+  const policy = Bun.YAML.parse(
+    readFileSync(
+      path.join(FACTORY_ROOT, "config", "policy.example.yaml"),
+      "utf8",
+    ),
+  );
+  policy.chain_auto_approval = { allowed_event_types: allowed };
+  // The day-budget guard scans the operator's real ~/.factory/logs; no
+  // budget means no scan, keeping the harness hermetic.
+  delete policy.budget;
+  // YAML is a JSON superset, so the parsed object round-trips as-is.
+  writeFileSync(
+    path.join(root, "config", "policy.yaml"),
+    JSON.stringify(policy, null, 2),
+  );
+  const previous = process.env.FACTORY_REPOS_ROOT;
+  process.env.FACTORY_REPOS_ROOT = root;
+  envRestores.push(() => {
+    if (previous === undefined) delete process.env.FACTORY_REPOS_ROOT;
+    else process.env.FACTORY_REPOS_ROOT = previous;
+  });
+  return root;
+}
+
+afterEach(() => {
+  while (envRestores.length) envRestores.pop()();
+});
+
+function harness({ allowed = [CI_DIAGNOSE] } = {}) {
+  chainPolicyRoot(allowed);
   const dir = tmpDir("evrt-chain-");
   const db = openDb(path.join(dir, "runtime.db"));
   const workspaces = tmpDir("evrt-chain-ws-");
@@ -146,29 +190,92 @@ describe("buildChainInput", () => {
   });
 });
 
+/** Every proposal (any status) whose spec targets `agent`, oldest first. */
+function proposalsForAgent(db, agent) {
+  return db
+    .query(`SELECT * FROM proposals ORDER BY created_at, rowid`)
+    .all()
+    .map((row) => ({
+      ...row,
+      spec: row.spec_json && JSON.parse(row.spec_json),
+    }))
+    .filter((p) => p.spec?.agent === agent);
+}
+
 /**
  * github.workflow-run.failed now lands on ci-log-capture@1, which stores the
  * log as an artifact and chains to ci-doctor@2 (OPS-372). Run that first hop
  * so these tests stay about the *verdict* edges they were written for.
+ *
+ * With `factory.ci-diagnose.requested` allowlisted (the harness default) the
+ * planner's chain pass approves the diagnosis unattended: no operator click,
+ * the run is already QUEUED when planning returns (GH-1727).
  */
 async function throughCapture(h, eventId) {
   const capture = await h.runToCompletion(eventId);
   expect(resolveChains(h.db, registry).emitted).toBe(1);
   planAdmittedEvents(h.db, registry, { policyVersion: PV });
-  const diagnose = openProposals(h.db, {}).find(
-    (p) => p.spec?.agent === "ci-doctor@2",
-  );
-  expect(diagnose).toBeTruthy();
-  const approved = approveProposal(h.db, registry, diagnose.id, {
-    actor: "operator",
-    policyVersion: PV,
-  });
+  expect(
+    openProposals(h.db, {}).find((p) => p.spec?.agent === "ci-doctor@2"),
+  ).toBeUndefined();
+  const [diagnose, ...extra] = proposalsForAgent(h.db, "ci-doctor@2");
+  expect(extra).toEqual([]);
+  expect(diagnose.status).toBe("approved");
+  expect(diagnose.decided_by).toBe(CHAIN_AUTO_APPROVAL_ACTOR);
+  const run = h.db
+    .query(`SELECT state FROM runs WHERE run_id = ?`)
+    .get(diagnose.run_id);
+  expect(["APPROVED", "QUEUED"]).toContain(run.state);
   const summary = await runOnce(h.db, registry, h.adapters, h.workerOpts);
   expect(summary.terminalState).toBe("COMPLETED");
-  return { capture, diagnoseRunId: approved.runId, diagnoseProposal: diagnose };
+  return {
+    capture,
+    diagnoseRunId: diagnose.run_id,
+    diagnoseProposal: diagnose,
+  };
 }
 
 describe("discovered chain: ci-doctor → follow-up (OPS-223)", () => {
+  test("ci-doctor stays a watched proposal when the allowlist omits factory.ci-diagnose.requested", async () => {
+    const h = harness({ allowed: ["factory.work.requested"] });
+    const { db, adapters, workerOpts, runToCompletion } = h;
+    expect(
+      admitEvent(db, registry, failedRunEnvelope({ eventId: "gh-watched-1" }))
+        .admitted,
+    ).toBe(true);
+    await runToCompletion("gh-watched-1");
+    expect(resolveChains(db, registry).emitted).toBe(1);
+    planAdmittedEvents(db, registry, { policyVersion: PV });
+
+    const diagnose = openProposals(db, {}).find(
+      (p) => p.spec?.agent === "ci-doctor@2",
+    );
+    expect(diagnose).toBeTruthy();
+    expect(diagnose.status).toBe("open");
+    expect(diagnose.reason).toBe(
+      "auto_approval_ineligible:run_approval_policy_watched",
+    );
+    expect(diagnose.spec.approvalPolicy).toEqual({
+      source: "chain",
+      mode: "watched",
+      eventType: CI_DIAGNOSE,
+      reason: "event_type_not_allowlisted",
+    });
+    expect(
+      db.query(`SELECT state FROM runs WHERE run_id = ?`).get(diagnose.run_id)
+        .state,
+    ).toBe("PROPOSED");
+
+    // The human click still works exactly as before.
+    const approved = approveProposal(db, registry, diagnose.id, {
+      actor: "operator",
+      policyVersion: PV,
+    });
+    expect(approved.approved).toBe(true);
+    const summary = await runOnce(db, registry, adapters, workerOpts);
+    expect(summary.terminalState).toBe("COMPLETED");
+  });
+
   test("FLAKE verdict chains to a watched ci-rerun proposal with inherited correlation", async () => {
     const h = harness();
     const { db, runToCompletion } = h;
