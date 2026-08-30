@@ -4,8 +4,14 @@ import { events } from "./cli/events.mjs";
 import { inbox as legacyInbox } from "./cli/inbox.mjs";
 import { renderInspect } from "./cli/inspect.mjs";
 import { ps } from "./cli/ps.mjs";
-import { runs } from "./cli/runs.mjs";
+import {
+  RUN_LIST_MAX_PAGES,
+  dispatchOnlyPredicate,
+  runs,
+  runsCommand,
+} from "./cli/runs.mjs";
 import { CLI, freePort, runCli, throwawayRunDir } from "./cli/test-helpers.mjs";
+import { apiClient } from "./lib/client.mjs";
 import { tmpDir } from "./test-support/tmp.mjs?file=event-runtime-cli-test-mjs";
 
 const EXPECTED_COMMANDS = [
@@ -228,6 +234,263 @@ describe("cli routing", () => {
       ["events", "QUEUED"],
     ]);
     expect(lines.join("\n")).toContain("RUNNING");
+  });
+
+  test("runs forwards its agent filter", async () => {
+    const calls = [];
+    const client = {
+      runs: async (options) => {
+        calls.push(options);
+        return { runs: [], nextBefore: null };
+      },
+    };
+    const lines = [];
+    const log = console.log;
+    console.log = (...values) => lines.push(values.join(" "));
+    try {
+      await runs(client, "running", { agent: "dispatch@1" });
+    } finally {
+      console.log = log;
+    }
+    expect(calls).toEqual([
+      { state: "RUNNING", agent: "dispatch@1", limit: 200 },
+    ]);
+    expect(lines).toEqual(["no runs with state RUNNING"]);
+  });
+
+  test("runs excludes agents client-side", async () => {
+    const client = {
+      runs: async () => ({
+        runs: [
+          {
+            runId: "dispatch-run",
+            state: "RUNNING",
+            agent: "dispatch@1",
+            adapter: "cursor",
+            attempts: 1,
+            maxAttempts: 1,
+            updated_at: "now",
+          },
+          {
+            runId: "review-run",
+            state: "RUNNING",
+            agent: "merge-review@1",
+            adapter: "agy",
+            attempts: 1,
+            maxAttempts: 1,
+            updated_at: "now",
+          },
+        ],
+        nextBefore: null,
+      }),
+    };
+    const lines = [];
+    const log = console.log;
+    console.log = (...values) => lines.push(values.join(" "));
+    try {
+      await runs(client, "running", { excludeAgents: ["merge-review@1"] });
+    } finally {
+      console.log = log;
+    }
+    expect(lines.join("\n")).toContain("dispatch-run");
+    expect(lines.join("\n")).not.toContain("review-run");
+  });
+
+  test("runs follows cursors and count writes only the integer", async () => {
+    const calls = [];
+    const client = {
+      runs: async (options) => {
+        calls.push(options);
+        return options.before
+          ? { runs: [{ runId: "run-2" }], nextBefore: null }
+          : {
+              runs: [{ runId: "run-1" }],
+              nextBefore: "cursor-1",
+            };
+      },
+    };
+    const lines = [];
+    const log = console.log;
+    console.log = (...values) => lines.push(values.join(" "));
+    try {
+      await runs(client, "running", { count: true });
+    } finally {
+      console.log = log;
+    }
+    expect(calls).toEqual([
+      { state: "RUNNING", limit: 200 },
+      { state: "RUNNING", limit: 200, before: "cursor-1" },
+    ]);
+    expect(lines).toEqual(["2"]);
+  });
+
+  test("runs command dispatch-only excludes every non-dispatch registry agent", async () => {
+    const calls = [];
+    const client = {
+      agents: async () => ({
+        agents: [
+          { id: "dispatch", ref: "dispatch@1" },
+          { id: "merge-review", ref: "merge-review@1" },
+          { id: "ci-doctor", ref: "ci-doctor@1" },
+        ],
+      }),
+      runs: async (options) => {
+        calls.push(options);
+        return { runs: [], nextBefore: null };
+      },
+    };
+    const lines = [];
+    const log = console.log;
+    console.log = (...values) => lines.push(values.join(" "));
+    try {
+      await runsCommand(["RUNNING", "--dispatch-only", "--count"], client);
+    } finally {
+      console.log = log;
+    }
+    expect(calls).toEqual([{ state: "RUNNING", limit: 200 }]);
+    expect(lines).toEqual(["0"]);
+  });
+
+  test("dispatch-only keeps dispatch agents by id, prefix, or contract and drops unregistered ones", () => {
+    const keep = dispatchOnlyPredicate([
+      { id: "dispatch", ref: "dispatch@1" },
+      { id: "dispatch-hotfix", ref: "dispatch-hotfix@2" },
+      {
+        id: "lander",
+        ref: "lander@1",
+        outputContract: "factory.dispatch-result/v1",
+      },
+      { id: "merge-fix", ref: "merge-fix@1" },
+      { id: "merge-review", ref: "merge-review@1" },
+      { id: "work-scan", ref: "work-scan@1" },
+    ]);
+    const kept = [
+      "dispatch@1",
+      "dispatch-hotfix@2",
+      "lander@1",
+      "worker@1",
+      "dispatch@7",
+    ];
+    const dropped = [
+      "merge-fix@1",
+      "merge-review@1",
+      "work-scan@1",
+      "ci-doctor@1",
+      "retired-agent@1",
+    ];
+    expect(kept.map((agent) => keep({ agent }))).toEqual(kept.map(() => true));
+    expect(dropped.map((agent) => keep({ agent }))).toEqual(
+      dropped.map(() => false),
+    );
+  });
+
+  function captureConsole() {
+    const out = [];
+    const err = [];
+    const log = console.log;
+    const error = console.error;
+    console.log = (...values) => out.push(values.join(" "));
+    console.error = (...values) => err.push(values.join(" "));
+    return {
+      out,
+      err,
+      restore: () => ((console.log = log), (console.error = error)),
+    };
+  }
+
+  test("runs clamps the page size to 200 and stops fetching once --limit is reached", async () => {
+    const calls = [];
+    const client = {
+      runs: async (options) => {
+        calls.push(options);
+        return {
+          runs: [{ runId: `run-${calls.length}` }],
+          nextBefore: `cursor-${calls.length}`,
+        };
+      },
+    };
+    const c = captureConsole();
+    try {
+      await runs(client, "running", { limit: 2 });
+    } finally {
+      c.restore();
+    }
+    expect(calls.map((o) => o.limit)).toEqual([2, 2]);
+    expect(c.out.filter((l) => l.startsWith("run-"))).toHaveLength(2);
+    expect(c.err).toEqual(["... 0+ more rows (truncated)"]);
+
+    calls.length = 0;
+    const big = captureConsole();
+    try {
+      await runs(client, "running", { limit: 5000, count: true });
+    } finally {
+      big.restore();
+    }
+    expect(calls[0].limit).toBe(200);
+    expect(calls).toHaveLength(RUN_LIST_MAX_PAGES);
+  });
+
+  test("runs caps the page walk and breaks on a repeated cursor", async () => {
+    let calls = 0;
+    const endless = {
+      runs: async () => {
+        calls += 1;
+        return { runs: [{ runId: `run-${calls}` }], nextBefore: `c-${calls}` };
+      },
+    };
+    const capped = captureConsole();
+    try {
+      await runs(endless, "running", { count: true });
+    } finally {
+      capped.restore();
+    }
+    expect(calls).toBe(RUN_LIST_MAX_PAGES);
+    expect(capped.out).toEqual([String(RUN_LIST_MAX_PAGES)]);
+    expect(capped.err[0]).toContain("page cap");
+
+    calls = 0;
+    const looping = {
+      runs: async () => {
+        calls += 1;
+        return { runs: [{ runId: `run-${calls}` }], nextBefore: "same" };
+      },
+    };
+    const loop = captureConsole();
+    try {
+      await runs(looping, "running", {});
+    } finally {
+      loop.restore();
+    }
+    expect(calls).toBe(2);
+    expect(loop.err[0]).toContain("repeated");
+    expect(loop.err.at(-1)).toBe("... 0+ more rows (truncated)");
+  });
+
+  test("client.runs accepts options while retaining the state-string form", async () => {
+    const paths = [];
+    const server = Bun.serve({
+      port: Number(freePort()),
+      fetch(request) {
+        paths.push(new URL(request.url).pathname + new URL(request.url).search);
+        return Response.json({ runs: [], nextBefore: null });
+      },
+    });
+    try {
+      const client = apiClient({ port: server.port });
+      await client.runs("RUNNING");
+      await client.runs({
+        state: "RUNNING",
+        agent: "dispatch@1",
+        limit: 20,
+        before: "cursor-1",
+      });
+    } finally {
+      server.stop(true);
+    }
+    expect(paths).toEqual([
+      "/runs?state=RUNNING",
+      "/runs?state=RUNNING&agent=dispatch%401&limit=20&before=cursor-1",
+    ]);
   });
 
   test("registered command set is unchanged", () => {

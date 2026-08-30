@@ -1,22 +1,206 @@
 import { pad, withClient } from "./shared.mjs";
 
-export async function runs(client, stateFilter) {
+/**
+ * `--dispatch-only` allowlist. A run counts as dispatch work when its agent
+ * definition matches any of these, in order:
+ *
+ * 1. its `id` is in DISPATCH_AGENT_IDS (`dispatch`; `worker` is the legacy
+ *    name some fixtures and older registries still use);
+ * 2. its `id` starts with `dispatch-` (repo-local dispatch variants);
+ * 3. its `outputContract` is a dispatch result contract — the registry field
+ *    that actually marks "this agent lands a ticket", so a renamed dispatch
+ *    agent still counts without touching this file.
+ *
+ * Everything else the registry knows (merge-review, merge-fix, ci-doctor,
+ * ci-notify, merge-notify, triage-scan, merge-scan, work-scan, reaper, the
+ * smoke probes, ...) is excluded, and so is any row whose agent is not in the
+ * registry at all: a drain (`until [ "$(factory runs RUNNING --dispatch-only
+ * --count)" = 0 ]`) must not be kept busy by an agent that was since removed.
+ */
+export const DISPATCH_AGENT_IDS = new Set(["dispatch", "worker"]);
+export const DISPATCH_OUTPUT_CONTRACTS = new Set([
+  "factory.dispatch-result/v1",
+]);
+
+/**
+ * Hard limits for the cursor walk. The control API clamps a page to
+ * RUN_LIST_MAX_LIMIT (200, `lib/api-runs.mjs`) and rejects anything larger,
+ * so the CLI never asks for more; MAX_PAGES bounds a runaway walk (a server
+ * that keeps handing out cursors) at 50 x 200 = 10,000 rows.
+ */
+export const RUN_LIST_PAGE_SIZE = 200;
+export const RUN_LIST_MAX_PAGES = 50;
+
+function parsePositiveInteger(value, flag) {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 1) {
+    throw new Error(`${flag} requires a positive integer`);
+  }
+  return number;
+}
+
+export function parseRunsArgs(args) {
+  const options = { excludeAgents: [] };
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg.startsWith("--")) {
+      if (options.state !== undefined)
+        throw new Error(`unexpected runs argument: ${arg}`);
+      options.state = arg;
+      continue;
+    }
+    if (arg === "--dispatch-only") {
+      options.dispatchOnly = true;
+      continue;
+    }
+    if (arg === "--count") {
+      options.count = true;
+      continue;
+    }
+    const value = args[index + 1];
+    if (value === undefined || value.startsWith("--")) {
+      throw new Error(`${arg} requires a value`);
+    }
+    index += 1;
+    if (arg === "--agent") options.agent = value;
+    else if (arg === "--exclude-agent") options.excludeAgents.push(value);
+    else if (arg === "--limit")
+      options.limit = parsePositiveInteger(value, arg);
+    else throw new Error(`unknown runs option: ${arg}`);
+  }
+  return options;
+}
+
+export function isDispatchWorkerAgent(def) {
+  const id = typeof def?.id === "string" ? def.id : "";
+  return (
+    DISPATCH_AGENT_IDS.has(id) ||
+    id.startsWith("dispatch-") ||
+    DISPATCH_OUTPUT_CONTRACTS.has(def?.outputContract)
+  );
+}
+
+/** Agent id of a run row's `agent` ref (`dispatch@1` -> `dispatch`). */
+function agentIdOf(ref) {
+  return typeof ref === "string" ? ref.split("@")[0] : "";
+}
+
+/**
+ * Build the row predicate for `--dispatch-only` from the registry: keep rows
+ * whose agent ref (or bare id) belongs to a dispatch definition, or whose id
+ * is a known dispatch id even when the registry no longer lists it.
+ */
+export function dispatchOnlyPredicate(agents) {
+  const refs = new Set();
+  for (const def of agents ?? []) {
+    if (!isDispatchWorkerAgent(def)) continue;
+    if (typeof def.ref === "string") refs.add(def.ref);
+    if (typeof def.id === "string") refs.add(def.id);
+  }
+  return (row) =>
+    refs.has(row.agent) || isDispatchWorkerAgent({ id: agentIdOf(row.agent) });
+}
+
+export async function runs(client, stateFilter, options = {}) {
   const state = stateFilter?.toUpperCase();
-  const { runs: rows } = await client.runs(state);
-  if (rows.length === 0) {
+  const limit = options.limit ?? null;
+  const pageSize = Math.min(limit ?? RUN_LIST_PAGE_SIZE, RUN_LIST_PAGE_SIZE);
+  const query = {
+    ...(state ? { state } : {}),
+    ...(options.agent ? { agent: options.agent } : {}),
+  };
+  const usesOptions = Boolean(
+    options.agent ||
+    options.limit ||
+    options.count ||
+    options.keep ||
+    (options.excludeAgents?.length ?? 0) > 0,
+  );
+  const excluded = new Set(options.excludeAgents ?? []);
+  const keep = (row) =>
+    !excluded.has(row.agent) && (options.keep ? options.keep(row) : true);
+
+  const filtered = [];
+  const seenCursors = new Set();
+  let before = null;
+  let pages = 0;
+  // True when the server still had rows we did not fetch (cap or --limit).
+  let unfetched = false;
+  while (true) {
+    // Preserve the original string call for state-only programmatic callers.
+    const request =
+      before === null && !usesOptions && !options.agent && state
+        ? state
+        : { ...query, limit: pageSize, ...(before ? { before } : {}) };
+    const page = await client.runs(request);
+    pages += 1;
+    filtered.push(...(page.runs ?? []).filter(keep));
+    const hasNextPage = page.hasNextPage ?? Boolean(page.nextBefore);
+    if (!hasNextPage) break;
+    if (limit !== null && filtered.length >= limit) {
+      unfetched = true;
+      break;
+    }
+    if (pages >= RUN_LIST_MAX_PAGES) {
+      console.error(
+        `... stopped after ${pages} pages (${RUN_LIST_MAX_PAGES} page cap); pass --limit or a narrower filter`,
+      );
+      unfetched = true;
+      break;
+    }
+    if (typeof page.nextBefore !== "string" || page.nextBefore === "") {
+      throw new Error(
+        "runs response has another page but no nextBefore cursor",
+      );
+    }
+    if (seenCursors.has(page.nextBefore)) {
+      console.error(
+        `... stopped: runs cursor ${page.nextBefore} repeated (server paging loop)`,
+      );
+      unfetched = true;
+      break;
+    }
+    seenCursors.add(page.nextBefore);
+    before = page.nextBefore;
+  }
+
+  const visible = limit !== null ? filtered.slice(0, limit) : filtered;
+  const truncated = filtered.length - visible.length;
+  if (options.count) {
+    console.log(visible.length);
+    return;
+  }
+  if (visible.length === 0) {
     console.log(state ? `no runs with state ${state}` : "no runs");
     return;
   }
   console.log(
     `${pad("RUN ID", 42)}${pad("STATE", 12)}${pad("AGENT", 26)}${pad("ADAPTER", 12)}${pad("ATTEMPTS", 10)}${pad("ORIGIN EVENT", 24)}UPDATED`,
   );
-  for (const r of rows) {
+  for (const r of visible) {
     console.log(
       `${pad(r.runId, 42)}${pad(r.state, 12)}${pad(r.agent, 26)}${pad(r.adapter, 12)}${pad(`${r.attempts}/${r.maxAttempts}`, 10)}${pad(r.eventId ?? "-", 24)}${r.updated_at}`,
     );
   }
+  if (truncated > 0 || unfetched) {
+    console.error(
+      `... ${truncated}${unfetched ? "+" : ""} more rows (truncated)`,
+    );
+  }
 }
 
-export default function runsCommand(args) {
-  return withClient((client) => runs(client, args[0]));
+export async function runsCommand(args, injectedClient = null) {
+  const options = parseRunsArgs(args);
+  const execute = async (client) => {
+    if (options.dispatchOnly) {
+      const { agents = [] } = await client.agents();
+      options.keep = dispatchOnlyPredicate(agents);
+    }
+    await runs(client, options.state, options);
+  };
+  return injectedClient ? execute(injectedClient) : withClient(execute);
+}
+
+export default function runsCommandDefault(args) {
+  return runsCommand(args);
 }
