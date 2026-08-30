@@ -384,8 +384,10 @@ describe("registry", () => {
     // schema, contract, route, capability, or model tier changed.
     // Regenerated (#1539): dispatch orders result.json before the final
     // Handoff comment; prompt pin only.
+    // Regenerated (#1500): dispatch.md files out-of-scope follow-ups with
+    // `tools/ticket.mjs file --from <TICKET>`; dispatch.json is re-pinned.
     const expected =
-      "sha256:720af55c39f0287aa93f084f11eb96bc763c934f5cd49cf8f831177aab2a737a";
+      "sha256:df06213a7ce4a24be5218bee31968b4a6b75ca6c7144e218015c5c9b5b8e0ea3";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -666,8 +668,10 @@ describe("registry", () => {
     // non-enumerable.
     // Regenerated (#1539): dispatch orders result.json before the final
     // Handoff comment; `pack` remains non-enumerable.
+    // Regenerated (#1500): dispatch.md instructs `file --from <TICKET>` for
+    // out-of-scope follow-ups; prompt pin only.
     expect(computeDefHash(def)).toBe(
-      "sha256:600c6d9b252f1e775aae23caa838313fbb0308fb22f69d9aea0e6c3e446ab19e",
+      "sha256:bcb2ad73016ca65076edf59034106044e9603c74edcbc007bd8317444e58276e",
     );
   });
 
