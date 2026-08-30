@@ -140,6 +140,9 @@ export function DecisionCard({
   const [values, setValues] = useState<DecisionValues>(() =>
     initialValues(request),
   );
+  const [touchedFields, setTouchedFields] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [pending, setPending] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -158,6 +161,7 @@ export function DecisionCard({
     setCurrentResponse(response);
     setSelected(null);
     setValues(initialValues(request));
+    setTouchedFields(new Set());
     setMessage(null);
   }
 
@@ -176,6 +180,11 @@ export function DecisionCard({
   const invalidReason = !selected
     ? "Choose an option to continue."
     : (Object.values(errors)[0] ?? null);
+  const invalidField = selected
+    ? visibleFields.find((field) => errors[field.id] !== undefined)
+    : undefined;
+  const showInvalidReason =
+    invalidReason !== null && invalidField?.kind !== "text";
 
   const refresh = async (): Promise<InboxItem> => {
     const { item } = await apiCalls.get(itemId);
@@ -231,8 +240,10 @@ export function DecisionCard({
     }
   };
 
-  const update = (id: string, value: unknown) =>
+  const update = (id: string, value: unknown) => {
+    setTouchedFields((previous) => new Set(previous).add(id));
     setValues((previous) => ({ ...previous, [id]: value }));
+  };
 
   // While an undecided card is on screen:
   // - Number keys 1–6 pick options from anywhere in the view (when not editing an input).
@@ -478,6 +489,7 @@ export function DecisionCard({
               key={field.id}
               field={field}
               value={values[field.id]}
+              error={touchedFields.has(field.id) ? errors[field.id] : undefined}
               onChange={(value) => update(field.id, value)}
             />
           ))}
@@ -506,7 +518,7 @@ export function DecisionCard({
             "Choose an option"
           )}
         </Button>
-        {invalidReason && (
+        {showInvalidReason && (
           <span className="text-[11px] text-(--text-faint)" role="status">
             {invalidReason}
           </span>
@@ -527,13 +539,16 @@ export function DecisionCard({
 function DecisionFieldControl({
   field,
   value,
+  error,
   onChange,
 }: {
   field: DecisionField;
   value: unknown;
+  error?: string;
   onChange: (value: unknown) => void;
 }) {
   const required = field.required ? " *" : "";
+  const hintId = `decision-field-${field.id}-error`;
   if (field.kind === "confirm") {
     return (
       <label className="flex cursor-pointer items-start gap-2 text-[12px] text-(--text)">
@@ -662,9 +677,10 @@ function DecisionFieldControl({
     value: typeof value === "string" ? value : "",
     placeholder: field.placeholder,
     maxLength: field.maxLength,
-    onChange: (
-      event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
-    ) => onChange(event.target.value),
+    "aria-describedby": error ? hintId : undefined,
+    "aria-invalid": error ? true : undefined,
+    onInput: (event: React.FormEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+      onChange(event.currentTarget.value),
     className: `${controlClass} mt-1`,
   };
   return (
@@ -675,6 +691,11 @@ function DecisionFieldControl({
         <input type="text" {...common} />
       ) : (
         <textarea rows={3} {...common} />
+      )}
+      {error && (
+        <span id={hintId} className="mt-1 block text-[11px] text-(--hue-err)">
+          {error}
+        </span>
       )}
     </label>
   );

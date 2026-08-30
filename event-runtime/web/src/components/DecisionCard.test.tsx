@@ -69,6 +69,28 @@ const request: DecisionRequest = {
   ],
 };
 
+const requiredTextRequest: DecisionRequest = {
+  schemaVersion: "factory.decision-request/v1",
+  question: "Why should we proceed?",
+  options: [
+    {
+      id: "confirm",
+      label: "Confirm",
+      effect: "dismiss",
+      tone: "primary",
+    },
+  ],
+  fields: [
+    {
+      id: "reason",
+      kind: "text",
+      label: "Reason",
+      required: true,
+      maxLength: 120,
+    },
+  ],
+};
+
 function item(overrides: Partial<InboxItem> = {}): InboxItem {
   return {
     id: "inbox_decision",
@@ -128,6 +150,40 @@ afterEach(() => {
 });
 
 describe("DecisionCard", () => {
+  test("shows an accessible required-text hint after whitespace and clears it for meaningful text", () => {
+    const view = render(
+      <DecisionCard
+        itemId="inbox_required_text"
+        request={requiredTextRequest}
+        apiCalls={apiCalls}
+      />,
+    );
+    fireEvent.click(
+      view.getByRole("group", { name: "Options" }).querySelector("button")!,
+    );
+
+    const reason = view.getByRole("textbox", {
+      name: /Reason/,
+    }) as HTMLInputElement;
+    const submit = view.getByRole("button", {
+      name: "Confirm",
+    }) as HTMLButtonElement;
+    expect(view.queryByText("Reason is required.")).toBeNull();
+    expect(submit.disabled).toBe(true);
+
+    fireEvent.input(reason, { target: { value: "   " } });
+    const hint = view.getByText("Reason is required.");
+    expect(submit.disabled).toBe(true);
+    expect(reason.getAttribute("aria-invalid")).toBe("true");
+    expect(reason.getAttribute("aria-describedby")).toBe(hint.id);
+
+    fireEvent.input(reason, { target: { value: "Reviewed the scope." } });
+    expect(view.queryByText("Reason is required.")).toBeNull();
+    expect(reason.hasAttribute("aria-invalid")).toBe(false);
+    expect(reason.hasAttribute("aria-describedby")).toBe(false);
+    expect(submit.disabled).toBe(false);
+  });
+
   test("renders the §2.1 options recommended-first and gates its fields", () => {
     const view = render(
       <DecisionCard
