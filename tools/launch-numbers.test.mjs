@@ -21,6 +21,35 @@ import {
   weeksUnattended,
 } from "./launch-numbers.mjs";
 
+const ROOT = path.resolve(import.meta.dir, "..");
+
+function runTool(name, args = []) {
+  return Bun.spawnSync({
+    cmd: [process.execPath, path.join(ROOT, "tools", name), ...args],
+    cwd: ROOT,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+}
+
+function output(proc, stream) {
+  return proc[stream]?.toString().trim() ?? "";
+}
+
+test("launch-numbers help prints usage and argument errors exit 2", () => {
+  const help = runTool("launch-numbers.mjs", ["--help"]);
+  expect(help.exitCode).toBe(0);
+  expect(output(help, "stdout")).toStartWith("usage:");
+  expect(output(help, "stderr")).toBe("");
+
+  for (const args of [["--unknown"], ["--since"]]) {
+    const invalid = runTool("launch-numbers.mjs", args);
+    expect(invalid.exitCode).toBe(2);
+    expect(output(invalid, "stderr").split("\n")).toHaveLength(1);
+    expect(output(invalid, "stderr")).toStartWith("usage:");
+  }
+});
+
 const issue = (over = {}) => ({
   identifier: "WM-1",
   createdAt: "2026-08-04T10:00:00.000Z",
