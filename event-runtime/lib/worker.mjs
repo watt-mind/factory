@@ -4472,11 +4472,19 @@ export async function executeClaimed(
         canonicalJson(receipt),
         iso(currentNow),
       );
-      registerMemos(db, runId, result, {
-        now: currentNow,
-        agent: spec.agent,
-        runState: "COMPLETED",
-      });
+      // The accepted result only carries `memos`/`usedMemos`; the pin lives on
+      // the spec, so pass it through or the NULL-verdict `memo_uses` rows for
+      // pinned-but-unmentioned memos (docs §8 trust signal) never land.
+      registerMemos(
+        db,
+        runId,
+        { ...result, memoPin: spec.input?.memoPin },
+        {
+          now: currentNow,
+          agent: spec.agent,
+          runState: "COMPLETED",
+        },
+      );
       persistMergeReviewFromResult(db, {
         spec,
         result,

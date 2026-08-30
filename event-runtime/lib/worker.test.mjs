@@ -807,6 +807,88 @@ sh -c 'sleep 5 & wait'
     db.close();
   });
 
+  test("COMPLETED records a NULL-verdict memo_uses row for a pinned memo the agent never mentions", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const pinnedBytes = JSON.stringify({
+      schemaVersion: "factory.memo/v1",
+      subject: { type: "repo", id: "factory" },
+      kind: "repo-note",
+      claim: { kind: "fact", text: "Pinned but unmentioned memo." },
+      evidence: "worker test",
+      body: "Pinned but unmentioned memo.",
+    });
+    const pinnedSha = createHash("sha256").update(pinnedBytes).digest("hex");
+    const artifactStore = freshRoot();
+    writeFileSync(path.join(artifactStore, pinnedSha), pinnedBytes);
+    const spec = queueRun(
+      db,
+      makeSpec({
+        adapter: "memo-silent",
+        input: {
+          repos: ["factory"],
+          repo: "factory",
+          memoPin: { entries: [{ sha256: pinnedSha }] },
+        },
+      }),
+      now,
+    );
+    const silentAdapter = {
+      async execute({ workspaceDir }) {
+        writeFileSync(
+          path.join(workspaceDir, "result.json"),
+          JSON.stringify({
+            schemaVersion: "factory.agent-result/v1",
+            terminalState: "completed",
+            artifact: {
+              repos: [
+                {
+                  name: "factory",
+                  triage: 0,
+                  agentReady: 0,
+                  inProgress: 0,
+                  blocked: 0,
+                },
+              ],
+              recommendedAction: "wait",
+            },
+          }),
+        );
+        return { exitCode: 0, timedOut: false };
+      },
+    };
+
+    const summary = await runOnce(
+      db,
+      registry,
+      { "memo-silent": silentAdapter },
+      opts({ now: () => Date.now(), artifactStore }),
+    );
+
+    expect(summary.terminalState).toBe("COMPLETED");
+    const accepted = JSON.parse(
+      db
+        .query(`SELECT result_json FROM results WHERE run_id = ?`)
+        .get(spec.runId).result_json,
+    );
+    expect(accepted.usedMemos ?? []).toEqual([]);
+    expect(
+      db
+        .query(
+          `SELECT sha256, run_id, verdict, run_state FROM memo_uses WHERE run_id = ?`,
+        )
+        .all(spec.runId),
+    ).toEqual([
+      {
+        sha256: pinnedSha,
+        run_id: spec.runId,
+        verdict: null,
+        run_state: "COMPLETED",
+      },
+    ]);
+    db.close();
+  });
+
   test("memo registration failure rolls back the accepted result transaction", async () => {
     const db = openDb(":memory:");
     const now = Date.now();
