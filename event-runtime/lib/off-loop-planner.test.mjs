@@ -8,7 +8,10 @@ import path from "node:path";
 import { mkdirSync, rmSync } from "node:fs";
 
 test("planning runs off the HTTP event loop: /health p95 < 500ms while 10 events plan back-to-back (WM-1208)", async () => {
-  const envDir = path.join(tmpdir(), `off-loop-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const envDir = path.join(
+    tmpdir(),
+    `off-loop-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  );
   mkdirSync(envDir, { recursive: true });
   const dbFile = path.join(envDir, "runtime.db");
   const db = openDb(dbFile);
@@ -95,8 +98,12 @@ test("planning runs off the HTTP event loop: /health p95 < 500ms while 10 events
     const p95Index = Math.floor(latencies.length * 0.95);
     const p95Latency = latencies[p95Index];
 
-    console.log(`[off-loop-planner] 50 concurrent /health requests during planning:`);
-    console.log(`  min: ${latencies[0].toFixed(2)}ms | p50: ${latencies[Math.floor(latencies.length * 0.5)].toFixed(2)}ms | p95: ${p95Latency.toFixed(2)}ms | max: ${latencies[latencies.length - 1].toFixed(2)}ms`);
+    console.log(
+      `[off-loop-planner] 50 concurrent /health requests during planning:`,
+    );
+    console.log(
+      `  min: ${latencies[0].toFixed(2)}ms | p50: ${latencies[Math.floor(latencies.length * 0.5)].toFixed(2)}ms | p95: ${p95Latency.toFixed(2)}ms | max: ${latencies[latencies.length - 1].toFixed(2)}ms`,
+    );
 
     expect(p95Latency).toBeLessThan(500);
 

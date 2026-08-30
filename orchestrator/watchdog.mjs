@@ -138,8 +138,7 @@ export async function controlApi(
 export function controlApiFailureCode(err) {
   if (err?.code === "API_UNAUTHORIZED" || err?.status === 401)
     return "API_UNAUTHORIZED";
-  if (err?.code === "API_LOCKED" || err?.status === 503)
-    return "API_LOCKED";
+  if (err?.code === "API_LOCKED" || err?.status === 503) return "API_LOCKED";
   if (
     err?.name === "TimeoutError" ||
     err?.name === "AbortError" ||

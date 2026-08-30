@@ -8,7 +8,10 @@ import path from "node:path";
 import http from "node:http";
 
 test("tick measures durationMs and per-step timings stepMs (WM-1208)", async () => {
-  const dbFile = path.join(tmpdir(), `tick-guard-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+  const dbFile = path.join(
+    tmpdir(),
+    `tick-guard-${Date.now()}-${Math.random().toString(36).slice(2)}.db`,
+  );
   const db = openDb(dbFile);
   const registry = loadRegistry();
 
@@ -35,7 +38,10 @@ test("tick measures durationMs and per-step timings stepMs (WM-1208)", async () 
 });
 
 test("GET /health exposes tick stats with lastMs and overruns (WM-1208)", async () => {
-  const dbFile = path.join(tmpdir(), `health-tick-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+  const dbFile = path.join(
+    tmpdir(),
+    `health-tick-${Date.now()}-${Math.random().toString(36).slice(2)}.db`,
+  );
   const db = openDb(dbFile);
   const registry = loadRegistry();
 

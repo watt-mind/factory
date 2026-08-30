@@ -231,7 +231,9 @@ export function policyVersion() {
               const sha = readFileSync(refPath, "utf8").trim().slice(0, 8);
               cachedPolicyVersion = `git:${sha}`;
             } else if (existsSync(commonRefPath)) {
-              const sha = readFileSync(commonRefPath, "utf8").trim().slice(0, 8);
+              const sha = readFileSync(commonRefPath, "utf8")
+                .trim()
+                .slice(0, 8);
               cachedPolicyVersion = `git:${sha}`;
             } else {
               const packedPath = path.join(commonGitDir, "packed-refs");

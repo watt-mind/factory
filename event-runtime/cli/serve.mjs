@@ -125,9 +125,8 @@ export async function tick({
   });
 
   await runStep("auto-approve-chains", async () => {
-    const { worktreeDispatchAutoEligibility } = await import(
-      "../lib/planner.mjs"
-    );
+    const { worktreeDispatchAutoEligibility } =
+      await import("../lib/planner.mjs");
     const auto = await autoApproveChains(db, registry, {
       now,
       policyVersion: pv,
@@ -463,7 +462,9 @@ export default async function serve(args) {
     if (busy) {
       tickOverruns++;
       lastOverrunAt = new Date().toISOString();
-      log(`tick skipped: previous tick still in progress (overruns: ${tickOverruns})`);
+      log(
+        `tick skipped: previous tick still in progress (overruns: ${tickOverruns})`,
+      );
       return;
     }
     busy = true;
@@ -570,7 +571,9 @@ export default async function serve(args) {
         : "worker: none in this process — start one with: bun event-runtime/cli.mjs work",
     );
     if (noPlanner) {
-      log("planner: disabled in this process (--no-planner) — run: bun event-runtime/cli.mjs plan");
+      log(
+        "planner: disabled in this process (--no-planner) — run: bun event-runtime/cli.mjs plan",
+      );
     } else {
       log("planner: background worker thread (off HTTP event loop)");
     }

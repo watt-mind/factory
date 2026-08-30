@@ -28,9 +28,15 @@ function traceImports(entrypoints) {
         const resolved = path.resolve(path.dirname(current), specifier);
         if (existsSync(resolved) && !visited.has(resolved)) {
           queue.push(resolved);
-        } else if (existsSync(`${resolved}.mjs`) && !visited.has(`${resolved}.mjs`)) {
+        } else if (
+          existsSync(`${resolved}.mjs`) &&
+          !visited.has(`${resolved}.mjs`)
+        ) {
           queue.push(`${resolved}.mjs`);
-        } else if (existsSync(`${resolved}.js`) && !visited.has(`${resolved}.js`)) {
+        } else if (
+          existsSync(`${resolved}.js`) &&
+          !visited.has(`${resolved}.js`)
+        ) {
           queue.push(`${resolved}.js`);
         }
       }
@@ -42,7 +48,10 @@ function traceImports(entrypoints) {
 
 test("no synchronous subprocess calls on the serve or tick import tree (WM-1208)", () => {
   const readdir = readdirSync(LIB_DIR)
-    .filter((f) => f.startsWith("api-") && f.endsWith(".mjs") && !f.endsWith(".test.mjs"))
+    .filter(
+      (f) =>
+        f.startsWith("api-") && f.endsWith(".mjs") && !f.endsWith(".test.mjs"),
+    )
     .map((f) => path.join(LIB_DIR, f));
 
   const serveRequestAndTickFiles = [

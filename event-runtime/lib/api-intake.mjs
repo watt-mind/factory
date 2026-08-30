@@ -401,7 +401,8 @@ export async function handleIntakeApiRoute({
   parseJson,
 }) {
   if (route === "GET /health") {
-    const tickStats = typeof getTickStats === "function" ? getTickStats() : null;
+    const tickStats =
+      typeof getTickStats === "function" ? getTickStats() : null;
     return send(200, {
       ok: true,
       policyVersion,

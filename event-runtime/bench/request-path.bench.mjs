@@ -16,7 +16,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 
-const ITERATIONS = Number(process.argv.find((a) => a.startsWith("--iterations="))?.split("=")[1] || 50);
+const ITERATIONS = Number(
+  process.argv.find((a) => a.startsWith("--iterations="))?.split("=")[1] || 50,
+);
 const CHECK = process.argv.includes("--check");
 const TOKEN = "bench-control-token";
 
@@ -104,7 +106,16 @@ async function populateProductionShapedDb(dbPath) {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
-  const runStates = ["QUEUED", "LEASED", "RUNNING", "VERIFYING", "COMPLETED", "FAILED", "CANCELLED", "REFUSED"];
+  const runStates = [
+    "QUEUED",
+    "LEASED",
+    "RUNNING",
+    "VERIFYING",
+    "COMPLETED",
+    "FAILED",
+    "CANCELLED",
+    "REFUSED",
+  ];
 
   for (let i = 0; i < 4000; i++) {
     const runId = `run_${String(i).padStart(6, "0")}`;
@@ -112,27 +123,82 @@ async function populateProductionShapedDb(dbPath) {
     const agent = "dispatch@1";
     const spec = JSON.stringify({
       agent,
-      input: { repo: "factory", ticket: `CLNT-${1000 + (i % 500)}`, extra: largeText },
+      input: {
+        repo: "factory",
+        ticket: `CLNT-${1000 + (i % 500)}`,
+        extra: largeText,
+      },
       correlationId: `corr_${i % 100}`,
       labels: { repo: "factory", tier: "fast" },
     });
     const nowIso = new Date(Date.now() - (4000 - i) * 60000).toISOString();
-    const isLeased = state === "LEASED" || state === "RUNNING" || state === "VERIFYING";
+    const isLeased =
+      state === "LEASED" || state === "RUNNING" || state === "VERIFYING";
     const leaseOwner = isLeased ? `worker_${i % 5}` : null;
-    const leaseExpires = isLeased ? new Date(Date.now() + 600000).toISOString() : null;
+    const leaseExpires = isLeased
+      ? new Date(Date.now() + 600000).toISOString()
+      : null;
 
-    insertRun.run(runId, `idem_${runId}`, spec, `hash_${runId}`, state, 1, nowIso, nowIso);
-    insertAttempt.run(runId, 1, 1, leaseOwner, leaseExpires, nowIso, null, state === "COMPLETED" ? "COMPLETED" : null, null, `/tmp/${runId}`);
+    insertRun.run(
+      runId,
+      `idem_${runId}`,
+      spec,
+      `hash_${runId}`,
+      state,
+      1,
+      nowIso,
+      nowIso,
+    );
+    insertAttempt.run(
+      runId,
+      1,
+      1,
+      leaseOwner,
+      leaseExpires,
+      nowIso,
+      null,
+      state === "COMPLETED" ? "COMPLETED" : null,
+      null,
+      `/tmp/${runId}`,
+    );
 
-    insertLifecycle.run(runId, null, "QUEUED", "planner", null, 1, `corr_${i % 100}`, null, "git:bench", nowIso, `hash_lc_${i}`);
+    insertLifecycle.run(
+      runId,
+      null,
+      "QUEUED",
+      "planner",
+      null,
+      1,
+      `corr_${i % 100}`,
+      null,
+      "git:bench",
+      nowIso,
+      `hash_lc_${i}`,
+    );
     if (state !== "QUEUED") {
-      insertLifecycle.run(runId, "QUEUED", "LEASED", "worker", null, 1, `corr_${i % 100}`, null, "git:bench", nowIso, `hash_lc_leased_${i}`);
+      insertLifecycle.run(
+        runId,
+        "QUEUED",
+        "LEASED",
+        "worker",
+        null,
+        1,
+        `corr_${i % 100}`,
+        null,
+        "git:bench",
+        nowIso,
+        `hash_lc_leased_${i}`,
+      );
     }
     if (state === "COMPLETED" || state === "FAILED") {
       insertResult.run(
         runId,
         1,
-        JSON.stringify({ ok: state === "COMPLETED", summary: "done", output: largeText }),
+        JSON.stringify({
+          ok: state === "COMPLETED",
+          summary: "done",
+          output: largeText,
+        }),
         `art_${i}`,
         `ev_${i}`,
         JSON.stringify({ verified: true, testsPassed: 42 }),
@@ -154,7 +220,7 @@ async function populateProductionShapedDb(dbPath) {
 
   for (let i = 0; i < 1000; i++) {
     const propId = `prop_${String(i).padStart(6, "0")}`;
-    const status = i < 100 ? "open" : (i % 2 === 0 ? "approved" : "rejected");
+    const status = i < 100 ? "open" : i % 2 === 0 ? "approved" : "rejected";
     const spec = JSON.stringify({
       agent: "dispatch@1",
       input: { repo: "factory", ticket: `CLNT-${2000 + i}`, extra: largeText },
@@ -210,7 +276,8 @@ async function populateProductionShapedDb(dbPath) {
 }
 
 function computePercentiles(samples) {
-  if (samples.length === 0) return { min: 0, p50: 0, p95: 0, p99: 0, max: 0, mean: 0 };
+  if (samples.length === 0)
+    return { min: 0, p50: 0, p95: 0, p99: 0, max: 0, mean: 0 };
   const sorted = [...samples].sort((a, b) => a - b);
   const sum = sorted.reduce((a, b) => a + b, 0);
   return {
@@ -302,8 +369,12 @@ async function main() {
     "/metrics",
   ];
 
-  console.log(`\n### Benchmark Results (n=${ITERATIONS} requests per endpoint)\n`);
-  console.log("| Endpoint | min (ms) | p50 (ms) | p95 (ms) | p99 (ms) | max (ms) | mean (ms) | Status (<100ms p95) |");
+  console.log(
+    `\n### Benchmark Results (n=${ITERATIONS} requests per endpoint)\n`,
+  );
+  console.log(
+    "| Endpoint | min (ms) | p50 (ms) | p95 (ms) | p99 (ms) | max (ms) | mean (ms) | Status (<100ms p95) |",
+  );
   console.log("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |");
 
   let allPassed = true;
@@ -316,10 +387,12 @@ async function main() {
       if (!passed) allPassed = false;
       results.push({ ep, stats, passed });
       console.log(
-        `| \`${ep}\` | ${stats.min.toFixed(2)} | ${stats.p50.toFixed(2)} | **${stats.p95.toFixed(2)}** | ${stats.p99.toFixed(2)} | ${stats.max.toFixed(2)} | ${stats.mean.toFixed(2)} | ${passed ? "PASS" : "FAIL"} |`
+        `| \`${ep}\` | ${stats.min.toFixed(2)} | ${stats.p50.toFixed(2)} | **${stats.p95.toFixed(2)}** | ${stats.p99.toFixed(2)} | ${stats.max.toFixed(2)} | ${stats.mean.toFixed(2)} | ${passed ? "PASS" : "FAIL"} |`,
       );
     } catch (err) {
-      console.log(`| \`${ep}\` | ERROR: ${err.message} | - | - | - | - | - | FAIL |`);
+      console.log(
+        `| \`${ep}\` | ERROR: ${err.message} | - | - | - | - | - | FAIL |`,
+      );
       allPassed = false;
     }
   }
@@ -328,7 +401,9 @@ async function main() {
   db.close();
   rmSync(tempDir, { recursive: true, force: true });
 
-  console.log(`\nOverall benchmark verdict: ${allPassed ? "PASS (all GET handlers p95 < 100ms)" : "FAIL"}\n`);
+  console.log(
+    `\nOverall benchmark verdict: ${allPassed ? "PASS (all GET handlers p95 < 100ms)" : "FAIL"}\n`,
+  );
 
   if (CHECK && !allPassed) {
     process.exit(1);

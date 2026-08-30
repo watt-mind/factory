@@ -77,11 +77,15 @@ export function loadNodesConfig({
 
   for (const [name, rawNode] of Object.entries(nodes)) {
     if (!rawNode || typeof rawNode !== "object") {
-      throw new NodeConfigError(`Node "${name}" configuration must be an object`);
+      throw new NodeConfigError(
+        `Node "${name}" configuration must be an object`,
+      );
     }
 
     if (!rawNode.host || typeof rawNode.host !== "string") {
-      throw new NodeConfigError(`Node "${name}" is missing required field "host"`);
+      throw new NodeConfigError(
+        `Node "${name}" is missing required field "host"`,
+      );
     }
 
     const host = rawNode.host.trim();
@@ -91,7 +95,9 @@ export function loadNodesConfig({
 
     const port = rawNode.port ? Number(rawNode.port) : 22;
     if (isNaN(port) || port < 1 || port > 65535) {
-      throw new NodeConfigError(`Node "${name}" has invalid SSH port: ${rawNode.port}`);
+      throw new NodeConfigError(
+        `Node "${name}" has invalid SSH port: ${rawNode.port}`,
+      );
     }
 
     const user = rawNode.user ? String(rawNode.user).trim() : null;
