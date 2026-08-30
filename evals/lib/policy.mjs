@@ -126,6 +126,12 @@ export function parseIndentedMap(text) {
   for (const raw of String(text ?? "").split(/\r?\n/)) {
     const line = stripComment(raw);
     if (line.trim() === "") continue;
+    if (
+      stack[stack.length - 1].blockScalar &&
+      raw.search(/\S|$/) > stack[stack.length - 1].indent
+    ) {
+      continue;
+    }
     if (/^\s*-/.test(line)) continue;
     const match = /^(\s*)([A-Za-z0-9_.-]+):\s*(.*)$/.exec(line);
     if (!match) continue;
@@ -140,6 +146,9 @@ export function parseIndentedMap(text) {
       stack.push({ indent, node });
     } else {
       parent[key] = unquote(rest);
+      if (/^[|>][+-]?$/.test(rest.trim())) {
+        stack.push({ indent, node: parent, blockScalar: true });
+      }
     }
   }
   return root;
@@ -171,6 +180,18 @@ function positiveNumber(raw, where) {
 function readLimits(stanza, file) {
   const limits = stanza?.limits ?? {};
   if (typeof limits !== "object" || Array.isArray(limits)) {
+    throw new EvalConfigError(`${file}: evals.limits must be a map`);
+  }
+  const recognizedKeys = [
+    "case_timeout_seconds",
+    "case_budget_usd",
+    "total_seconds",
+    "total_budget_usd",
+  ];
+  if (
+    stanza?.limits !== undefined &&
+    !recognizedKeys.some((key) => limits[key] !== undefined)
+  ) {
     throw new EvalConfigError(`${file}: evals.limits must be a map`);
   }
   const pick = (key, fallback) =>
@@ -237,25 +258,28 @@ export function loadEvalPolicy({
         : DEFAULT_MODEL,
   };
   const graderModel = stanza?.grader?.model;
-  if (typeof graderModel !== "string" || graderModel.trim() === "") {
+  const normalizedGraderModel =
+    typeof graderModel === "string" ? graderModel.trim() : "";
+  if (
+    normalizedGraderModel === "" ||
+    normalizedGraderModel === DEFAULT_MODEL ||
+    normalizedGraderModel === "null" ||
+    normalizedGraderModel === "~"
+  ) {
+    const reason =
+      normalizedGraderModel === ""
+        ? "is not set"
+        : `is ${JSON.stringify(normalizedGraderModel)} — the grader must name a model, so that changing it is reviewable`;
     return {
       ...base,
       subject,
       limits,
-      problem: `${policyFile}: evals.grader.model is not set`,
-    };
-  }
-  if (graderModel.trim() === DEFAULT_MODEL) {
-    return {
-      ...base,
-      subject,
-      limits,
-      problem: `${policyFile}: evals.grader.model is "${DEFAULT_MODEL}" — the grader must name a model, so that changing it is reviewable`,
+      problem: `${policyFile}: evals.grader.model ${reason}`,
     };
   }
   return {
     file: policyFile,
-    grader: { model: graderModel.trim() },
+    grader: { model: normalizedGraderModel },
     subject,
     limits,
     problem: null,

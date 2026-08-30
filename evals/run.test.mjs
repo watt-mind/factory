@@ -20,7 +20,7 @@ import {
   parseCliJson,
   parseVerdict,
 } from "./lib/grader.mjs";
-import { loadEvalPolicy } from "./lib/policy.mjs";
+import { loadEvalPolicy, requirePin } from "./lib/policy.mjs";
 import { compareRuns } from "./lib/results.mjs";
 
 const EVALS_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -652,6 +652,49 @@ describe("the grader pin", () => {
     expect(policy.grader).toBeNull();
     expect(policy.problem).toContain("must name a model");
   });
+
+  test("block-scalar bodies are skipped instead of becoming policy keys", () => {
+    const policy = loadEvalPolicy({
+      root: "/nowhere",
+      file: "/nowhere/config/policy.yaml",
+      text: `evals:
+  note: |
+    grader:
+      model: evil-judge
+`,
+    });
+    expect(policy.grader).toBeNull();
+    expect(policy.problem).toContain("evals.grader.model is not set");
+  });
+
+  test("a limits sequence is rejected instead of falling back to defaults", () => {
+    expect(() =>
+      loadEvalPolicy({
+        root: "/nowhere",
+        file: "/nowhere/config/policy.yaml",
+        text: `evals:
+  grader:
+    model: claude-sonnet-4-6
+  limits:
+    - case_timeout_seconds: 10
+`,
+      }),
+    ).toThrow("/nowhere/config/policy.yaml: evals.limits must be a map");
+  });
+
+  test.each(["null", "~"])(
+    "YAML %s is not accepted as a grader model",
+    (model) => {
+      const policy = loadEvalPolicy({
+        root: "/nowhere",
+        file: "/nowhere/config/policy.yaml",
+        text: `evals:\n  grader:\n    model: ${model}\n`,
+      });
+      expect(policy.grader).toBeNull();
+      expect(policy.problem).toContain("must name a model");
+      expect(() => requirePin(policy)).toThrow(/Add this stanza/);
+    },
+  );
 
   test("an absent stanza is reported, never guessed at", () => {
     const policy = loadEvalPolicy({
