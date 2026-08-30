@@ -30,6 +30,7 @@ import {
 } from "./registry.mjs";
 import { computeDefHash } from "./receipts.mjs";
 import { updateHarnessPins } from "./pins.mjs";
+import { validate } from "./schema.mjs";
 
 /** Copy the real registry into a temp root so tests can corrupt it safely. */
 function tempRegistry(root = tmpDir("event-registry-")) {
@@ -196,6 +197,37 @@ describe("registry", () => {
     );
   });
 
+  test("merge-agent documented result envelopes validate their registered artifact schemas", () => {
+    const expectedCompletedExamples = new Map([
+      ["merge-fix@1", 2],
+      ["merge-review@1", 1],
+      ["merge-notify@1", 1],
+    ]);
+
+    for (const [ref, expectedCount] of expectedCompletedExamples) {
+      const def = getAgent(loadRegistry(), ref);
+      const examples = [
+        ...readFileSync(def.promptPath, "utf8").matchAll(
+          /```json\n([\s\S]*?)\n```/g,
+        ),
+      ]
+        .map(([, source]) => JSON.parse(source))
+        .filter((example) => example.terminalState === "completed");
+
+      expect(examples).toHaveLength(expectedCount);
+      for (const example of examples) {
+        expect(validate(loadRegistry().schemas.agentResult, example)).toEqual({
+          valid: true,
+          errors: [],
+        });
+        expect(validate(def.outputSchema, example.artifact)).toEqual({
+          valid: true,
+          errors: [],
+        });
+      }
+    }
+  });
+
   test("zero-pack merged-view digest matches the develop baseline", () => {
     // Regenerate with registryDigest(loadRegistry({ packRoots: [] })) on develop.
     // The serializer omits only WM-470's new pack provenance and normalizes
@@ -307,8 +339,11 @@ describe("registry", () => {
     // the configured handoff gate includes Prettier after the unit and emit
     // checks; dispatch.json is re-pinned. Prompt text only — no schema,
     // contract, route, capability, or model tier changed.
+    // Regenerated (#1521): merge-fix now documents the required outer result
+    // wrapper; merge-review and merge-notify document the same artifact
+    // nesting, and all three agent definitions are re-pinned.
     const expected =
-      "sha256:9478df60d64bd504a50935c322760df759dc0055dd3b781f06a0a7165f1c6172";
+      "sha256:20c93306632dc7ca3d92c6d03648e2ce441d03ffe791522f3c5365b9519822de";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
