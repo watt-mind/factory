@@ -487,6 +487,114 @@ registry. Proposal/run-spec mismatches and expired proposals fail closed.
 particular, their watched/human-only controls remain structurally unchanged;
 this policy does not implement autonomous merge work.
 
+#### Ineligibility reasons
+
+When the runtime leaves a proposal open it records
+`auto_approval_ineligible:<reason>`. These are the typed reasons an operator
+can use to fix the input or policy and then wait for the next pass; they are
+not approval decisions. Dynamic forms below use their literal prefix from
+`event-runtime/lib/auto-approval.mjs` followed by the value shown in angle
+brackets.
+
+**Policy**
+
+| Reason                            | What unblocks it                                                                 |
+| --------------------------------- | -------------------------------------------------------------------------------- |
+| `policy_missing`                  | Restore `config/policy.yaml`.                                                    |
+| `policy_invalid`                  | Repair the malformed chain auto-approval policy.                                 |
+| `policy_contains_forbidden_event` | Remove an unsupported or permanently watched event from the allowlist.           |
+| `merge_policy_invalid`            | Supply valid merge fix rounds, auto-merge bases, and owners.                     |
+| `policy_unknown`                  | Load a policy which supplies a typed refusal reason.                             |
+| `event_type_not_allowlisted`      | Add the supported event type to the explicit allowlist, or use watched approval. |
+
+**Capacity**
+
+| Reason                           | What unblocks it                                            |
+| -------------------------------- | ----------------------------------------------------------- |
+| `runtime_policy_unavailable`     | Restore a readable runtime policy.                          |
+| `budget_exhausted`               | Replenish or raise the applicable budget.                   |
+| `budget_check_failed`            | Repair the budget checker or its policy data.               |
+| `worker_cap_policy_invalid`      | Configure a positive integer worker cap.                    |
+| `worker_cap_full`                | Wait for a worker to finish or raise the cap deliberately.  |
+| `circuit_breaker_policy_invalid` | Configure a positive integer environment-failure threshold. |
+| `circuit_breaker_tripped`        | Investigate and clear the consecutive environment failures. |
+| `runtime_guard_failed`           | Repair the runtime guard failure before retrying.           |
+
+**Proposal integrity**
+
+| Reason                            | What unblocks it                                                    |
+| --------------------------------- | ------------------------------------------------------------------- |
+| `proposal_expired`                | Create and review a fresh proposal.                                 |
+| `proposal_unparseable`            | Recreate the proposal with valid JSON.                              |
+| `proposal_run_spec_mismatch`      | Replan so proposal and run spec are identical.                      |
+| `proposal_hash_mismatch`          | Recreate the proposal and run spec with matching hashes.            |
+| `proposal_agent_mismatch`         | Replan for the agent registered for the event type.                 |
+| `proposal_input_mismatch:<field>` | Replan with the event payload value copied into the proposal input. |
+| `run_spec_unparseable`            | Recreate the run with a valid immutable spec.                       |
+
+**Dispatch recheck**
+
+| Reason                                                 | What unblocks it                                                                                                              |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| `dispatch_recheck_unavailable`                         | Restore the dispatch eligibility checker.                                                                                     |
+| `dispatch_recheck_deferred`                            | Wait for the Linear rate-limit window, then let the next pass recheck.                                                        |
+| `dispatch_recheck_failed:<message>`                    | Fix the failing dispatch-control-plane call described by the clipped message.                                                 |
+| `dispatch_ineligible:<reason>`                         | Satisfy the current dispatch refusal (for example Todo, unassigned, ready, lease, or path requirements) and replan if needed. |
+| `dispatch_ineligible:approval_policy_missing_evidence` | Replan with immutable dispatch evidence in the approval policy.                                                               |
+| `dispatch_ineligible:evidence_changed_since_plan`      | Replan after the current dispatch evidence stabilizes.                                                                        |
+| `dispatch_ineligible:escalate_paths_intersect`         | Obtain watched/human handling for the escalated path; it cannot be auto-approved.                                             |
+
+**Chain edge**
+
+| Reason                                | What unblocks it                                                       |
+| ------------------------------------- | ---------------------------------------------------------------------- |
+| `chain_causation_missing`             | Emit the event with its predecessor run ID as causation.               |
+| `chain_predecessor_or_result_missing` | Persist the predecessor's approved proposal and result.                |
+| `chain_predecessor_not_completed`     | Wait for the predecessor run to complete.                              |
+| `chain_predecessor_unparseable`       | Repair the predecessor spec or result JSON.                            |
+| `chain_edge_not_registered`           | Declare the emitted edge in the predecessor's registry definition.     |
+| `chain_command_edge_payload_mismatch` | Re-emit the command edge using the immutable predecessor input fields. |
+
+**Merge-fix and merge barrier**
+
+| Reason                                                      | What unblocks it                                                          |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `merge_fix_history_unparseable`                             | Repair the recorded earlier merge-fix envelope.                           |
+| `merge_fix_history_invalid`                                 | Repair the earlier merge-fix round number.                                |
+| `merge_fix_round_not_durable`                               | Use the next durable round after an executed fix, within policy.          |
+| `merge_fix_repo_not_allowed`                                | Use a permitted owner and auto-merge base, or take watched review.        |
+| `merge_fix_not_mechanical_or_in_scope`                      | Mark a genuinely mechanical, Owned-Paths-only fix or take watched review. |
+| `merge_fix_round_exhausted`                                 | Stop after the configured number of fix rounds and escalate.              |
+| `merge_fix_owned_paths_missing`                             | Include the non-empty owned-paths declaration.                            |
+| `merge_owner_not_allowed`                                   | Use an allowed repository owner or take watched review.                   |
+| `merge_base_not_allowed`                                    | Target an allowed non-deploy base branch.                                 |
+| `merge_plan_must_name_one_to_batch_prs`                     | Provide one through the configured batch-size number of PRs.              |
+| `merge_review_not_policy_safe`                              | Supply a policy-safe merge review for every planned PR.                   |
+| `merge_barrier_registry_incomplete`                         | Restore the registered merge-apply and landed-verifier agents.            |
+| `merge_barrier_active:<runId>:state=<state>:age=<seconds>s` | Wait for the active merge apply or verifier run to settle.                |
+| `merge_barrier_unverified:<eventId>`                        | Complete the exact verifier for the prior landed event.                   |
+
+**Eligibility and approval execution**
+
+| Reason                               | What unblocks it                                                               |
+| ------------------------------------ | ------------------------------------------------------------------------------ |
+| `event_source_not_unattended`        | Use `chain` or the permitted `handoff` source, otherwise use watched approval. |
+| `handoff_event_type_not_dispatch`    | Use handoff only for `factory.dispatch.requested`.                             |
+| `event_unparseable`                  | Re-emit a valid event envelope.                                                |
+| `run_approval_policy_missing`        | Replan with an immutable approval policy.                                      |
+| `run_approval_policy_source_unknown` | Make the policy source match the event source.                                 |
+| `run_approval_policy_<mode>`         | Set the policy mode to `auto`, or use watched approval.                        |
+| `run_approval_policy_event_mismatch` | Replan with the policy's event type matching the event.                        |
+| `event_human_approval_only`          | Use watched/human approval for the registered event type.                      |
+| `input_schema_invalid`               | Re-emit a payload that satisfies the target agent schema.                      |
+| `triage_action_not_closed`           | Use only actions in the triage agent's closed action registry.                 |
+| `hook_denied:<reason>`               | Address the denying approval hook's reported reason.                           |
+| `approve_hooks_failed`               | Repair the approval hook failure and retry the next pass.                      |
+| `replanned`                          | Review the replacement proposal; it was not auto-approved.                     |
+| `approval_error`                     | Repair the approval write failure before retrying.                             |
+| `pass_failed`                        | Repair the pass-level database/query failure and retry.                        |
+| `pass_row_failed`                    | Repair the malformed proposal row identified by the pass error.                |
+
 ## 8. The §3 boundary, restated item by item
 
 Moved by this design — permitted only through §§2–7 above:

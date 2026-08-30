@@ -236,6 +236,12 @@ Both verbs surface `404` (unknown proposal) and `409` (already decided) as
 inline errors and refetch — a second browser tab or the CLI may have acted
 first.
 
+Both verbs can also return `503 {error:"db_busy", retryable:true}` while
+SQLite is contended. Treat this as a transient transport failure, not as a
+rejection or an already-decided proposal: retain the operator's intended
+action, retry with backoff, then refetch the proposal before showing the final
+outcome.
+
 ### 4.3 Runs — `GET /runs`, `GET /runs/:id`
 
 List with FSM state filter tabs (the `?state=` parameter): run ID, state
