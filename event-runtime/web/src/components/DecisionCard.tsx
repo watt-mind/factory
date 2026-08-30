@@ -681,9 +681,8 @@ function DecisionFieldControl({
     maxLength: field.maxLength,
     "aria-describedby": error ? hintId : undefined,
     "aria-invalid": error ? true : undefined,
-    onChange: (
-      event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
-    ) => onChange(event.target.value),
+    onInput: (event: React.FormEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+      onChange(event.currentTarget.value),
     className: `${controlClass} mt-1`,
   };
   return (
