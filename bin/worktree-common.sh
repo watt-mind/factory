@@ -325,8 +325,15 @@ ticket_slug() {
 # is a torn allocation waiting to happen (#881). For `ABC-123` the slug is the
 # id, so existing Linear ports are unchanged.
 ticket_api_port() {
-  local hash
-  hash=$(printf '%s' "$(ticket_slug "$1")" | cksum | awk '{print $1}')
+  local checksum hash
+  # Do not parse cksum through awk. The handoff sandbox mounts /usr read-only
+  # but deliberately omits /etc; on Debian /usr/bin/awk is an
+  # /etc/alternatives symlink, so the otherwise-pure helper returned no port
+  # while worker verification ran in that boundary. Bash can read cksum's two
+  # fields without awk or /dev/fd-backed process substitution and keeps port
+  # allocation usable in the minimal guest.
+  checksum=$(printf '%s' "$(ticket_slug "$1")" | cksum)
+  hash=${checksum%% *}
   printf '%s' "$((PORT_BASE + 2 * (hash % PORT_SPAN)))"
 }
 
@@ -337,6 +344,109 @@ run_dir() { printf '%s/.factory/run' "$1"; }
 event_home() { printf '%s/.factory/event-runtime' "$1"; }
 
 pid_alive() { [[ -f "$1" ]] && kill -0 "$(cat "$1")" 2>/dev/null; }
+
+# Emit pid, process-group id, and cwd for processes rooted in a worktree. A
+# handoff gate can be killed after it starts a detached fake serve, leaving no
+# pidfile for normal daemon teardown to find. Linux exposes cwd directly via
+# procfs; lsof provides the equivalent on macOS.
+worktree_cwd_processes() { # <worktree>
+  local wt="$1" target proc pid pgid cwd line
+  target=$(cd "$wt" && pwd -P) || return 1
+
+  if [[ -d /proc ]]; then
+    for proc in /proc/[0-9]*; do
+      pid=${proc##*/}
+      cwd=$(readlink "$proc/cwd" 2>/dev/null || true)
+      [[ "$cwd" == "$target" || "$cwd" == "$target"/* ]] || continue
+      pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+      [[ "$pgid" =~ ^[0-9]+$ ]] || continue
+      printf '%s\t%s\t%s\n' "$pid" "$pgid" "$cwd"
+    done
+    return 0
+  fi
+
+  command -v lsof >/dev/null 2>&1 || return 0
+  pid=""
+  cwd=""
+  while IFS= read -r line; do
+    case "$line" in
+      p*) pid=${line#p} ;;
+      n*)
+        cwd=${line#n}
+        [[ "$cwd" == "$target" || "$cwd" == "$target"/* ]] || continue
+        pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+        [[ "$pid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ ]] || continue
+        printf '%s\t%s\t%s\n' "$pid" "$pgid" "$cwd"
+        ;;
+    esac
+  done < <(lsof -a -d cwd -Fn 2>/dev/null)
+}
+
+# Stop processes that would retain a deleted worktree as their cwd. Detached
+# fake serve fixtures lead their own process group, so signal the full group
+# (including descendants); for a shared group, kill only the matching process
+# rather than risking an unrelated caller's shell.
+kill_worktree_cwd_processes() { # <worktree>
+  local wt="$1" own_pgid pid pgid cwd groups="" pids="" group processes
+  local ancestor_pids="" ancestor_pgids="" ancestor ancestor_pgid
+  own_pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)
+  # Teardown is often invoked from inside the worktree it removes (an agent
+  # session or operator shell whose cwd is the checkout). Its ancestors — and
+  # the process groups they lead or belong to — must never be signalled: an
+  # interactive shell ignores SIGTERM, and the SIGKILL escalation below would
+  # otherwise take the caller's terminal with it. A pid that exits mid-walk
+  # (or mid-scan below) makes `ps` fail; under `set -e` that must read as
+  # "unknown", not abort teardown.
+  ancestor=$$
+  while [[ "$ancestor" =~ ^[0-9]+$ && "$ancestor" -gt 1 ]]; do
+    ancestor_pids+=" $ancestor"
+    ancestor_pgid=$(ps -o pgid= -p "$ancestor" 2>/dev/null | tr -d ' ' || true)
+    [[ "$ancestor_pgid" =~ ^[0-9]+$ ]] && ancestor_pgids+=" $ancestor_pgid"
+    ancestor=$(ps -o ppid= -p "$ancestor" 2>/dev/null | tr -d ' ' || true)
+  done
+  processes=$(worktree_cwd_processes "$wt")
+
+  while IFS=$'\t' read -r pid pgid cwd; do
+    [[ "$pid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ ]] || continue
+    # Never signal the teardown shell, the caller's process group, or any
+    # ancestor of this script; they exit naturally once teardown returns.
+    [[ "$pgid" != "$own_pgid" ]] || continue
+    [[ " $ancestor_pids " != *" $pid "* ]] || continue
+    if [[ "$pid" == "$pgid" ]]; then
+      [[ " $ancestor_pgids " != *" $pgid "* ]] || continue
+      [[ " $groups " == *" $pgid "* ]] && continue
+      groups+=" $pgid"
+      info "stopping cwd-bound process group $pgid ($cwd)"
+      kill -TERM -- "-$pgid" 2>/dev/null || true
+    else
+      [[ " $pids " == *" $pid "* ]] && continue
+      pids+=" $pid"
+      info "stopping cwd-bound process $pid ($cwd)"
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done <<<"$processes"
+
+  for group in $groups; do
+    for _ in {1..30}; do
+      kill -0 -- "-$group" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 -- "-$group" 2>/dev/null; then
+      warn "cwd-bound process group $group ignored SIGTERM — killing"
+      kill -KILL -- "-$group" 2>/dev/null || true
+    fi
+  done
+  for pid in $pids; do
+    for _ in {1..30}; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      warn "cwd-bound process $pid ignored SIGTERM — killing"
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
+}
 
 # Spawn a detached daemon in its own process group (setsid) so it survives the
 # parent shell exiting (OPS-306).

@@ -8,6 +8,7 @@ import {
   createHandoffRequest,
   fail,
   handoffErrorBody,
+  printReceipt,
   resolveHandoffRepo,
   sendHandoff,
   validateHandoffRequest,
@@ -359,6 +360,82 @@ describe("forced-command accept server", () => {
     }
   });
 
+  test("preserves an HTTP admission failure cause without response contents", async () => {
+    const fetchImpl = async () =>
+      new Response(JSON.stringify({ error: "runtime unavailable" }), {
+        status: 500,
+      });
+
+    let err;
+    try {
+      await acceptHandoff(JSON.stringify(REQUEST), {
+        repos,
+        secret: "secret",
+        fetchImpl,
+      });
+      expect.unreachable();
+    } catch (caught) {
+      err = caught;
+    }
+
+    const body = handoffErrorBody(err);
+    expect(body.error).toBe("runtime_admission_failed");
+    expect(body.cause).toBeDefined();
+    expect(body.cause).not.toContain("runtime unavailable");
+  });
+
+  test("keeps a malformed admission response's body out of the error cause", async () => {
+    const fetchImpl = async () =>
+      new Response("secret-token-xyz", { status: 200 });
+
+    let err;
+    try {
+      await acceptHandoff(JSON.stringify(REQUEST), {
+        repos,
+        secret: "secret",
+        fetchImpl,
+      });
+      expect.unreachable();
+    } catch (caught) {
+      err = caught;
+    }
+
+    const body = handoffErrorBody(err);
+    expect(body.error).toBe("runtime_admission_failed");
+    expect(body.cause).toBe("Error: invalid JSON body (16 bytes)");
+    expect(JSON.stringify(body)).not.toContain("secret-token-xyz");
+  });
+
+  test("warns when a fresh admission's event cannot be found", async () => {
+    const stderr = [];
+    const fetchImpl = async (_url, options = {}) => {
+      if (options.method === "POST") {
+        return Response.json({
+          admitted: true,
+          duplicate: false,
+          eventId: REQUEST.requestId,
+        });
+      }
+      return Response.json({ events: [], nextBefore: null });
+    };
+    const originalError = console.error;
+    console.error = (line) => stderr.push(line);
+    let receipt;
+    try {
+      receipt = await acceptHandoff(JSON.stringify(REQUEST), {
+        repos,
+        secret: "secret",
+        fetchImpl,
+      });
+    } finally {
+      console.error = originalError;
+    }
+
+    expect(receipt.event).toEqual({ id: REQUEST.requestId, state: "unknown" });
+    expect(receipt.warnings).toEqual(["state_unavailable: event not found"]);
+    expect(stderr).toEqual(receipt.warnings);
+  });
+
   test("rejects a caller-supplied SSH original command", () => {
     expect(() =>
       assertForcedCommandEnvironment({ SSH_ORIGINAL_COMMAND: "uname -a" }),
@@ -368,6 +445,28 @@ describe("forced-command accept server", () => {
 });
 
 describe("handoff SSH client", () => {
+  test("prints receipt warnings next to the event state", () => {
+    const lines = [];
+    printReceipt(
+      {
+        requestId: REQUEST.requestId,
+        duplicate: false,
+        event: { state: "unknown" },
+        warnings: ["state_unavailable: event not found"],
+        proposal: null,
+        run: null,
+        dashboardUrl: null,
+      },
+      (line) => lines.push(line),
+    );
+
+    expect(lines).toEqual([
+      `Handoff admitted: ${REQUEST.requestId}`,
+      "Event: unknown",
+      "Warning: state_unavailable: event not found",
+    ]);
+  });
+
   test("rejects option-like SSH hosts before spawning ssh", async () => {
     let called = false;
     await expect(
@@ -424,5 +523,38 @@ describe("handoff SSH client", () => {
         ssh: async () => ({ exitCode: 0, stdout: "not-json", stderr: "" }),
       }),
     ).rejects.toThrow(/invalid receipt/);
+  });
+
+  test("rejects receipts whose warnings are not short printable strings", async () => {
+    const receipt = (warnings) => ({
+      schemaVersion: "factory.handoff-receipt/v1",
+      requestId: REQUEST.requestId,
+      admitted: true,
+      duplicate: false,
+      event: { id: REQUEST.requestId, state: "unknown" },
+      warnings,
+    });
+    const send = (warnings) =>
+      sendHandoff(REQUEST, {
+        host: "factory-runner",
+        ssh: async () => ({
+          exitCode: 0,
+          stdout: JSON.stringify(receipt(warnings)),
+          stderr: "",
+        }),
+      });
+    for (const bad of [
+      "not-an-array",
+      [42],
+      [""],
+      ["line\nbreak"],
+      ["\x1b[31mred"],
+      ["x".repeat(513)],
+    ]) {
+      await expect(send(bad)).rejects.toThrow(/invalid receipt/);
+    }
+    await expect(send(["state_unavailable: event not found"])).resolves.toEqual(
+      receipt(["state_unavailable: event not found"]),
+    );
   });
 });

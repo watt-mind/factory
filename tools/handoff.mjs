@@ -148,17 +148,27 @@ function validateTicketForRepo(ticket, repo) {
 }
 
 async function responseJson(response, code) {
-  const text = await response.text();
+  let text;
+  try {
+    text = await response.text();
+  } catch (err) {
+    fail(code, `${code}: runtime response could not be read`, err);
+  }
   let body;
   try {
     body = text ? JSON.parse(text) : null;
   } catch {
-    fail(code, `${code}: runtime returned non-JSON`);
+    // Never forward the SyntaxError: engines embed a prefix of the body in it.
+    fail(
+      code,
+      `${code}: runtime returned non-JSON`,
+      new Error(`invalid JSON body (${Buffer.byteLength(text, "utf8")} bytes)`),
+    );
   }
   if (!response.ok) {
     const reason =
       body?.error ?? body?.errors?.join("; ") ?? `HTTP ${response.status}`;
-    fail(code, `${code}: ${reason}`);
+    fail(code, `${code}: ${reason}`, new Error(`HTTP ${response.status}`));
   }
   return body;
 }
@@ -293,6 +303,7 @@ export async function acceptHandoff(
   }
 
   let state = null;
+  let stateLookupFailed = false;
   const warnings = [];
   try {
     state = await runtimeState(
@@ -306,7 +317,13 @@ export async function acceptHandoff(
     // A duplicate must be bound to its original request, so lookup failures
     // fail closed instead of returning a misleading retry receipt.
     if (admission.duplicate) throw err;
+    stateLookupFailed = true;
     const warning = `state_unavailable: ${String(err?.message ?? err)}`;
+    warnings.push(warning);
+    console.error(warning);
+  }
+  if (!state?.event && !admission.duplicate && !stateLookupFailed) {
+    const warning = "state_unavailable: event not found";
     warnings.push(warning);
     console.error(warning);
   }
@@ -342,6 +359,24 @@ export async function acceptHandoff(
   };
 }
 
+const RECEIPT_WARNING_MAX_LENGTH = 512;
+
+function validReceiptWarnings(warnings) {
+  if (warnings === undefined) return true;
+  return (
+    Array.isArray(warnings) &&
+    warnings.length <= 32 &&
+    warnings.every(
+      (warning) =>
+        typeof warning === "string" &&
+        warning.length > 0 &&
+        warning.length <= RECEIPT_WARNING_MAX_LENGTH &&
+        // eslint-disable-next-line no-control-regex
+        !/[\0-\x1f\x7f]/.test(warning),
+    )
+  );
+}
+
 function validReceipt(value, requestId) {
   return Boolean(
     value &&
@@ -351,7 +386,8 @@ function validReceipt(value, requestId) {
     typeof value.admitted === "boolean" &&
     typeof value.duplicate === "boolean" &&
     value.event?.id === requestId &&
-    typeof value.event?.state === "string",
+    typeof value.event?.state === "string" &&
+    validReceiptWarnings(value.warnings),
   );
 }
 
@@ -448,6 +484,20 @@ export function assertForcedCommandEnvironment(env = process.env) {
   }
 }
 
+export function printReceipt(receipt, log = console.log) {
+  const disposition = receipt.duplicate ? "duplicate" : "admitted";
+  log(`Handoff ${disposition}: ${receipt.requestId}`);
+  log(`Event: ${receipt.event.state}`);
+  for (const warning of receipt.warnings ?? []) log(`Warning: ${warning}`);
+  if (receipt.proposal)
+    log(
+      `Proposal: ${receipt.proposal.id} (${receipt.proposal.state ?? "pending"})`,
+    );
+  if (receipt.run)
+    log(`Run: ${receipt.run.id} (${receipt.run.state ?? "pending"})`);
+  if (receipt.dashboardUrl) log(`Dashboard: ${receipt.dashboardUrl}`);
+}
+
 async function main(argv = process.argv.slice(2)) {
   if (argv[0] === "accept") {
     if (argv.length !== 1)
@@ -489,16 +539,7 @@ async function main(argv = process.argv.slice(2)) {
     console.log(JSON.stringify(receipt));
     return;
   }
-  const disposition = receipt.duplicate ? "duplicate" : "admitted";
-  console.log(`Handoff ${disposition}: ${receipt.requestId}`);
-  console.log(`Event: ${receipt.event.state}`);
-  if (receipt.proposal)
-    console.log(
-      `Proposal: ${receipt.proposal.id} (${receipt.proposal.state ?? "pending"})`,
-    );
-  if (receipt.run)
-    console.log(`Run: ${receipt.run.id} (${receipt.run.state ?? "pending"})`);
-  if (receipt.dashboardUrl) console.log(`Dashboard: ${receipt.dashboardUrl}`);
+  printReceipt(receipt);
 }
 
 if (import.meta.main) {
