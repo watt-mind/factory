@@ -293,7 +293,7 @@ export async function tick({
       logLine(`chain approval error: ${e.proposalId}:${e.reason}`);
     if (auto.skipped > 0 || expiredScheduledProposals > 0) {
       logLine(
-        `proposal staleness: skipped ${auto.skipped} pending chain row(s); expired ${expiredScheduledProposals} unreplannable scheduler row(s)`,
+        `proposal staleness: skipped ${auto.skipped} pending chain row(s) (${auto.memoised ?? 0} memoised registry-stale); expired ${expiredScheduledProposals} unreplannable scheduler row(s)`,
       );
     }
   });

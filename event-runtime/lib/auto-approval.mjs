@@ -62,6 +62,11 @@ export const HANDOFF_AUTO_APPROVAL_ACTOR = "handoff-auto-approval";
 // backlog (especially one pinned to a retired registry) cannot monopolize the
 // control plane before fresh proposals get a turn.
 export const DEFAULT_MAX_CHAIN_AUTO_APPROVALS_PER_TICK = 8;
+// A pending row pinned to an older registry version than the one serve runs
+// with re-plans on approval (#1679). When that re-plan leaves it open, nothing
+// about it changes until the registry moves again, so its verdict is held per
+// (run_id, registryVersion) and only revisited this often (#1706).
+export const DEFAULT_STALE_CHAIN_REVISIT_MS = 60_000;
 const NEVER_AUTO_APPROVE = new Set(["factory.ship-apply.requested"]);
 
 function policyPath(root = reposRoot()) {
@@ -934,6 +939,38 @@ function noteOpenReason(db, id, reason) {
 
 /** One pass at a time per database: a floating pass and an awaited one must not interleave. */
 const PASSES = new WeakMap();
+/** Per database: `${run_id}\0${registryVersion}` → held verdict for a registry-stale row (#1706). */
+const STALE_VERDICTS = new WeakMap();
+
+function staleVerdictsFor(db) {
+  let memo = STALE_VERDICTS.get(db);
+  if (!memo) {
+    memo = new Map();
+    STALE_VERDICTS.set(db, memo);
+  }
+  return memo;
+}
+
+/** The registry version a recorded proposal spec pins, or null when unpinned. */
+function pinnedRegistryVersion(specJson) {
+  let spec;
+  try {
+    spec = JSON.parse(specJson);
+  } catch {
+    return null;
+  }
+  for (const value of [spec?.policyVersion, spec?.promptVersion]) {
+    if (typeof value === "string" && value !== "" && value !== "unknown")
+      return value;
+  }
+  return null;
+}
+
+/** True when the row's recorded spec pins a registry version other than serve's. */
+function pinnedToOlderRegistry(row, registryVersion) {
+  const pinned = pinnedRegistryVersion(row.proposal_spec_json);
+  return pinned !== null && pinned !== registryVersion;
+}
 
 /**
  * Recheck and approve the currently open, eligible chain proposals once.
@@ -946,7 +983,13 @@ const PASSES = new WeakMap();
  * the rest of the pass; `serve` awaits it. The Promise never rejects — every
  * fault is a typed reason on the proposal or an `errors` entry.
  *
- * @returns {Promise<{ approved: Array<{ proposalId: string, runId: string }>, open: Array<{ proposalId: string, reason: string }>, errors: Array<{ proposalId: string|null, reason: string, message: string }>, skipped: number }>}
+ * Per tick the pass evaluates at most `maxRows` rows; the rest are counted in
+ * `skipped`. A registry-stale row whose evaluation left it open is memoised per
+ * (run_id, registryVersion) and skipped — without touching the control plane —
+ * until `staleRevisitMs` elapses, the registry version changes, or the row is
+ * re-planned into a fresh proposal (#1706). `memoised` counts those skips.
+ *
+ * @returns {Promise<{ approved: Array<{ proposalId: string, runId: string }>, open: Array<{ proposalId: string, reason: string }>, errors: Array<{ proposalId: string|null, reason: string, message: string }>, skipped: number, memoised: number }>}
  */
 export function autoApproveChains(db, registry, options = {}) {
   const state = PASSES.get(db) ?? { tail: null };
@@ -992,6 +1035,7 @@ async function runPass(
     hooks = defaultHookRegistry(),
     hookTimeoutMs,
     maxRows = DEFAULT_MAX_CHAIN_AUTO_APPROVALS_PER_TICK,
+    staleRevisitMs = DEFAULT_STALE_CHAIN_REVISIT_MS,
   } = {},
   marker = { settled: false },
 ) {
@@ -1004,22 +1048,19 @@ async function runPass(
       Number.isInteger(maxRows) && maxRows > 0
         ? maxRows
         : DEFAULT_MAX_CHAIN_AUTO_APPROVALS_PER_TICK;
+    const revisitMs =
+      Number.isFinite(staleRevisitMs) && staleRevisitMs >= 0
+        ? staleRevisitMs
+        : DEFAULT_STALE_CHAIN_REVISIT_MS;
+    const memo = staleVerdictsFor(db);
     let skipped = 0;
+    let memoised = 0;
+    let evaluated = 0;
     // One in-flight read per repo for the whole pass, shared across every
     // proposal's eligibility recheck (#1064).
     const passDispatch = withPassInFlightCache(dispatch);
     let rows;
     try {
-      const pending = db
-        .query(
-          `SELECT COUNT(*) AS n
-           FROM proposals p
-           JOIN events e ON e.source = p.event_source AND e.event_id = p.event_id
-          WHERE p.status = 'open' AND p.decision = 'run'
-            AND e.source IN ('chain', 'handoff')`,
-        )
-        .get().n;
-      skipped = Math.max(0, pending - limit);
       rows = db
         .query(
           `SELECT p.id, p.run_id, p.event_source, p.event_id, p.spec_json AS proposal_spec_json, p.spec_hash AS proposal_spec_hash,
@@ -1030,20 +1071,51 @@ async function runPass(
          JOIN runs r ON r.run_id = p.run_id
         WHERE p.status = 'open' AND p.decision = 'run'
           AND e.source IN ('chain', 'handoff')
-        ORDER BY p.created_at, p.rowid
-        LIMIT ?`,
+        ORDER BY p.created_at, p.rowid`,
         )
-        .all(limit);
+        .all();
     } catch (err) {
       errors.push({
         proposalId: null,
         reason: "pass_failed",
         message: String(err?.message ?? err),
       });
-      return { approved, open, errors, skipped };
+      return { approved, open, errors, skipped, memoised };
+    }
+
+    // Verdicts for rows that are no longer pending (decided, superseded,
+    // re-planned under a new proposal id) or that were held under another
+    // registry version are dead; drop them so the memo tracks the backlog.
+    const live = new Map(
+      rows.map((row) => [`${row.run_id}\0${resolvedPolicyVersion}`, row.id]),
+    );
+    for (const [key, held] of memo) {
+      if (live.get(key) !== held.proposalId) memo.delete(key);
     }
 
     for (const row of rows) {
+      const memoKey = `${row.run_id}\0${resolvedPolicyVersion}`;
+      const stale = pinnedToOlderRegistry(row, resolvedPolicyVersion);
+      const held = stale ? memo.get(memoKey) : undefined;
+      if (held && held.proposalId === row.id && held.until > now) {
+        skipped += 1;
+        memoised += 1;
+        continue;
+      }
+      if (evaluated >= limit) {
+        skipped += 1;
+        continue;
+      }
+      evaluated += 1;
+      const hold = (reason) => {
+        if (stale)
+          memo.set(memoKey, {
+            proposalId: row.id,
+            reason,
+            until: now + revisitMs,
+          });
+        else memo.delete(memoKey);
+      };
       try {
         const age = now - Date.parse(row.created_at);
         let reason;
@@ -1065,6 +1137,7 @@ async function runPass(
         if (reason) {
           noteOpenReason(db, row.id, reason);
           open.push({ proposalId: row.id, reason });
+          hold(reason);
           continue;
         }
         let guardReason;
@@ -1076,6 +1149,8 @@ async function runPass(
         if (guardReason) {
           noteOpenReason(db, row.id, guardReason);
           open.push({ proposalId: row.id, reason: guardReason });
+          // The guard is a live-capacity answer, not a property of the row.
+          memo.delete(memoKey);
           continue;
         }
         try {
@@ -1096,6 +1171,8 @@ async function runPass(
             noteOpenReason(db, row.id, "replanned");
             open.push({ proposalId: row.id, reason: "replanned" });
           }
+          // Approved, or re-planned into a fresh proposal id: nothing to hold.
+          memo.delete(memoKey);
         } catch (err) {
           const message = String(err?.message ?? err);
           noteOpenReason(db, row.id, "approval_error");
@@ -1104,6 +1181,7 @@ async function runPass(
             reason: "approval_error",
             message,
           });
+          hold("approval_error");
         }
       } catch (err) {
         errors.push({
@@ -1111,9 +1189,10 @@ async function runPass(
           reason: "pass_row_failed",
           message: String(err?.message ?? err),
         });
+        hold("pass_row_failed");
       }
     }
-    return { approved, open, errors, skipped };
+    return { approved, open, errors, skipped, memoised };
   } finally {
     marker.settled = true;
   }
