@@ -21,8 +21,15 @@
 #                                # (<log>.1 .. <log>.N); default 3, minimum 1
 #   FACTORY_LOG_ROTATE_INTERVAL  # seconds between size checks while the stack is
 #                                # up (web supervisor tick); default 300
+#   FACTORY_API_READY_TIMEOUT    # seconds `up` waits for the runtime /health
+#                                # endpoint before tearing its daemons down;
+#                                # default 60
 #
-set -euo pipefail
+# -E: `up` installs an ERR trap that tears down the daemons it started. Without
+# errexit-trace the trap is not inherited by functions or command substitutions,
+# so a `set -e` abort inside ensure_deps/spawn_daemon_tracked would exit the
+# shell with the trap never having fired.
+set -eEuo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/worktree-common.sh"
 
@@ -169,6 +176,7 @@ LOG_ROTATE_BYTES="${FACTORY_LOG_ROTATE_BYTES:-52428800}"
 LOG_KEEP="${FACTORY_LOG_KEEP:-3}"
 LOG_ROTATE_INTERVAL="${FACTORY_LOG_ROTATE_INTERVAL:-300}"
 LOG_ROTATE_MIN_BYTES=1048576
+API_READY_TIMEOUT="${FACTORY_API_READY_TIMEOUT:-60}"
 
 # Reject knob values before anything touches a log. A threshold below 1 MiB
 # would rotate on nearly every tick (and lose the log's recent tail every time);
@@ -564,11 +572,13 @@ case "$ACTION" in
         bun "$REPO/event-runtime/cli.mjs" "${SERVE_ARGS[@]}"
     fi
 
-    # 2. Wait for API to respond. A connection-refused curl returns immediately,
-    # so this is a real 60-second wall-clock budget rather than 60 seconds of
-    # connected-request timeouts.
+    # 2. Wait for API to respond. The budget is wall-clock, not an attempt
+    # count: a connection-refused curl returns instantly, while a bound socket
+    # whose /health stalls eats the full `-m 1` per attempt — counting attempts
+    # would make the latter wait ~10x longer than the former.
     API_READY=0
-    for i in $(seq 600); do
+    API_WAIT_STARTED=$SECONDS
+    while (( SECONDS - API_WAIT_STARTED < API_READY_TIMEOUT )); do
       if curl -sf -m 1 "http://127.0.0.1:$API_PORT/health" >/dev/null 2>&1; then
         API_READY=1
         break
@@ -579,7 +589,7 @@ case "$ACTION" in
       sleep 0.1
     done
     if [[ "$API_READY" -ne 1 ]]; then
-      die "event runtime failed to start on $API_PORT — check logs at $RUN_DIR/serve.log"
+      die "event runtime failed to start on $API_PORT within ${API_READY_TIMEOUT}s — check logs at $RUN_DIR/serve.log"
     fi
 
     # 3. Start or verify worker

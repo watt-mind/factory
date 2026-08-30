@@ -35,7 +35,16 @@ const LIVE_STACK = path.resolve(import.meta.dir, "live-stack.sh");
  */
 const COMMON_STUB = `#!/usr/bin/env bash
 repo_root() { printf '%s' "$FAKE_REPO"; }
-info() { printf '==> %s\\n' "$*"; }
+info() {
+  printf '==> %s\\n' "$*"
+  # A command failing *inside* a helper body under set -e (not a non-zero
+  # return to the caller): the shell aborts here, and the ERR trap must still
+  # run cleanup. The line after the failure is never reached.
+  if [[ -n "\${FAKE_INFO_FAIL_ON:-}" && "$*" == "\${FAKE_INFO_FAIL_ON}"* ]]; then
+    false
+    printf 'unreachable under set -e\\n' >&2
+  fi
+}
 warn() { printf 'warn: %s\\n' "$*" >&2; }
 die() { printf 'error: %s\\n' "$*" >&2; exit 1; }
 pid_alive() {
@@ -171,6 +180,9 @@ if [ "\${FAKE_CURL_SIGNAL_PARENT:-0}" = "1" ] && [ ! -e "\${FAKE_CURL_SIGNAL_MAR
 fi
 if [ -n "\${FAKE_CURL_FAIL_URL:-}" ]; then
   case "$*" in *"$FAKE_CURL_FAIL_URL"*) exit 1 ;; esac
+fi
+if [ -n "\${FAKE_CURL_STALL:-}" ]; then
+  case "$*" in *"/health"*) /bin/sleep "$FAKE_CURL_STALL"; exit 1 ;; esac
 fi
 exit "\${FAKE_CURL_STATUS:-0}"
 `,
@@ -343,6 +355,7 @@ test("failed runtime health cleans up only daemons spawned by this `up`", () => 
       FACTORY_GH_APP_PRIVATE_KEY_PATH: "/tmp/test-key",
       FAKE_CURL_STATUS: "1",
       FAKE_FAST_SLEEP: "1",
+      FACTORY_API_READY_TIMEOUT: "1",
     });
     expect(r.status).not.toBe(0);
     expect(r.stderr).toContain("event runtime failed to start");
@@ -371,6 +384,32 @@ test("runtime health allows a slow bind beyond the former 30-attempt budget", ()
     expect(r.status).toBe(0);
     expect(Number(readFileSync(calls, "utf8"))).toBeGreaterThan(31);
     expect(r.stdout).toContain("ready — live factory stack");
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
+
+test("runtime health is a wall-clock deadline even when /health stalls per attempt", () => {
+  const f = makeFixture();
+  try {
+    // Every probe hangs for a second (a bound socket whose /health never
+    // answers). An attempt-counted loop would wait 600 x 1 s here; the deadline
+    // must cut it off at FACTORY_API_READY_TIMEOUT regardless.
+    const started = Date.now();
+    const r = runStack(f, ["up"], {
+      FAKE_CURL_STALL: "1",
+      FACTORY_API_READY_TIMEOUT: "2",
+    });
+    const elapsed = (Date.now() - started) / 1000;
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("event runtime failed to start");
+    expect(r.stderr).toContain("within 2s");
+    // $SECONDS ticks on wall-clock second boundaries, so a 2 s deadline may
+    // expire shortly after 1 s; the upper bound is what the nit is about.
+    expect(elapsed).toBeGreaterThanOrEqual(1);
+    expect(elapsed).toBeLessThan(8);
+    expect(r.spawns).toContain("TERM event runtime");
+    expect(existsSync(path.join(f.runDir, "serve.pid"))).toBe(false);
   } finally {
     f.cleanup();
   }
@@ -409,6 +448,25 @@ test("SIGINT during `up` cleans up pidfiles owned by this invocation", () => {
   }
 });
 
+test("a set -e abort inside a helper still runs the ERR-trap cleanup", () => {
+  const f = makeFixture();
+  try {
+    // The failure happens inside a function body. Without `set -E` the ERR trap
+    // is not inherited there, and the shell would exit leaving serve.pid behind.
+    const r = runStack(f, ["up"], { FAKE_INFO_FAIL_ON: "starting worker" });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).not.toContain("unreachable");
+    expect(r.spawns).toContainEqual(expect.stringContaining("pid=serve.pid"));
+    expect(r.spawns).not.toContainEqual(
+      expect.stringContaining("pid=worker.pid"),
+    );
+    expect(r.spawns).toContain("TERM event runtime");
+    expect(existsSync(path.join(f.runDir, "serve.pid"))).toBe(false);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test("missing curl names the required tool before starting daemons", () => {
   const f = makeFixture();
   try {
@@ -430,6 +488,7 @@ test("failed `up` leaves an already-running daemon alone", () => {
       FAKE_ALIVE: "1",
       FAKE_CURL_STATUS: "1",
       FAKE_FAST_SLEEP: "1",
+      FACTORY_API_READY_TIMEOUT: "1",
     });
     expect(r.status).not.toBe(0);
     expect(r.stdout).toContain("event runtime already running");
