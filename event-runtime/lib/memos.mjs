@@ -6,6 +6,7 @@
  * over the ledger, never a directory listing. There is no write API.
  */
 import {
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -659,6 +660,26 @@ export function sweepMemos(
   return result;
 }
 
+const warnedMissingStores = new Set();
+
+/**
+ * The artifact-missing sweep is only meaningful against a store that exists.
+ * `findArtifact` answers "absent" for every sha when the store root itself is
+ * missing or unreadable, so sweeping such a root would retire every live memo
+ * on the subject in one planning pass. Skip the sweep instead and warn once
+ * per root; the memos stay live until the store is back.
+ */
+function artifactStoreSweepable(artifactStore) {
+  if (existsSync(artifactStore)) return true;
+  if (!warnedMissingStores.has(artifactStore)) {
+    warnedMissingStores.add(artifactStore);
+    console.warn(
+      `memos: artifact store ${artifactStore} is missing; skipping artifact_missing sweep`,
+    );
+  }
+  return false;
+}
+
 /**
  * Fold memos on a subject. `live: true` (default) drops superseded, retired,
  * expired, and binding-broken rows. Bindings are compared only against
@@ -708,17 +729,32 @@ export function listMemos(
         ).run(now, ...liveParams, headSha);
       }
 
-      if (artifactStore) {
+      if (artifactStore && artifactStoreSweepable(artifactStore)) {
         const candidates = db
-          .query(`SELECT sha256 FROM memos WHERE ${liveWhere}`)
+          .query(`SELECT * FROM memos WHERE ${liveWhere}`)
           .all(...liveParams);
-        for (const candidate of candidates) {
-          const retirement = retireMemoArtifactMissing(db, candidate.sha256, {
-            artifactStore,
-            now,
-          });
-          if (retirement.retired && typeof onArtifactMissing === "function") {
-            onArtifactMissing(retirement.memo);
+        const missing = candidates.filter(
+          (row) => !findArtifact(artifactStore, row.sha256),
+        );
+        if (missing.length > 0) {
+          db.query(
+            `UPDATE memos SET retired_at = ?, retired_reason = 'artifact_missing'
+             WHERE retired_at IS NULL
+               AND sha256 IN (${missing.map(() => "?").join(", ")})`,
+          ).run(now, ...missing.map((row) => row.sha256));
+          if (typeof onArtifactMissing === "function") {
+            for (const row of missing) {
+              onArtifactMissing(
+                foldMemo(
+                  {
+                    ...row,
+                    retired_at: now,
+                    retired_reason: "artifact_missing",
+                  },
+                  { useful: 0, wrong: 0 },
+                ),
+              );
+            }
           }
         }
       }
