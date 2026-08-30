@@ -41,14 +41,16 @@ isolated worktree for the ticket. This is not a general implementation run.
      expectedRemoteSha=$(git rev-parse "origin/<headRef>")
      ```
 
-     Before editing, inspect the fetched tip's committer email and timestamp.
-     If it was pushed by an actor other than this run (`git config user.email`)
-     within `MERGE_FIX_IN_FLIGHT_MINUTES` (default `10`), do not touch or push
-     the branch. Return the structured no-op reason `branch_in_flight` (with
-     `outcome: "BLOCKED"` under this agent's bounded result contract) instead
-     of racing the active fixer. Treat an unknown actor or timestamp as in
+     Compare `expectedRemoteSha` with the pinned `input.json` `headSha`. Only
+     when they differ, inspect the fetched tip's committer email and timestamp:
+     that difference proves the PR head changed after this run was planned. If
+     the changed tip was pushed by an actor other than this run
+     (`git config user.email`) within `MERGE_FIX_IN_FLIGHT_MINUTES` (default
+     `10`), do not touch or push the branch. Return `outcome: "BLOCKED"` and a
+     `summary` beginning `branch_in_flight:` instead of racing the active
+     fixer. When the head changed, treat an unknown actor or timestamp as in
      flight; validate the optional minute value as a positive integer before
-     using it.
+     using it. Never classify the unchanged pinned head as `branch_in_flight`.
 
      If `expectedRemoteSha` is not an ancestor of local `HEAD`, someone pushed
      commits the worktree does not contain. Rebase local work **on top of** the
@@ -71,10 +73,12 @@ isolated worktree for the ticket. This is not a general implementation run.
      ```
 
      A lease failure means another writer moved the branch after the fetch:
-     make no retry push, return `outcome: "BLOCKED"` with structured reason
-     `branch_moved`, and leave the remote branch untouched. Formatting drift
-     after a rebase is predictable, so never push the rebased branch before
-     this hygiene step.
+     make no retry push, return `outcome: "BLOCKED"` with a `summary` beginning
+     `branch_moved:`, and leave the remote branch untouched. The stable summary
+     prefix is the structured reason because this agent's exact-property
+     result schema has no separate reason field. Formatting drift after a
+     rebase is predictable, so never push the rebased branch before this
+     hygiene step.
 
    - A finding that names an Owned Paths deviation (an expectation outside the
      ticket's paths that the PR's own change invalidated): make that one
