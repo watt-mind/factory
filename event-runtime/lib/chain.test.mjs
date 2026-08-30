@@ -764,6 +764,53 @@ describe("multi-emit chain resolution (WM-119)", () => {
     });
   });
 
+  test("a malformed whenPath records the failing edge instead of silently skipping", () => {
+    const db = openDb(":memory:");
+    const whenPathRegistry = {
+      ...registry,
+      edges: {
+        "when-path-edge@1": {
+          recommendationField: "recommendation",
+          edges: {
+            NEXT: {
+              eventType: "factory.work.requested",
+              input: {},
+              whenPath: "$.artifact.missing",
+            },
+          },
+        },
+      },
+    };
+    seedCompletedRun(db, {
+      runId: "run-malformed-when-path",
+      agent: "when-path-edge@1",
+      input: { repo: "wm/when-path" },
+      artifact: { recommendation: "NEXT" },
+    });
+
+    const outcome = resolveChains(db, whenPathRegistry);
+    expect(outcome.emitted).toBe(0);
+    expect(outcome.skipped).toBe(0);
+    expect(outcome.errors).toEqual([
+      expect.stringMatching(
+        /chain edge "NEXT" whenPath "\$\.artifact\.missing" failed: .*resolves to nothing/,
+      ),
+    ]);
+    expect(resolvedAtOf(db, "run-malformed-when-path")).not.toBeNull();
+    expect(chainResolution(db, "run-malformed-when-path")).toMatchObject({
+      note: "chain_resolved",
+      reason: "invalid_chain_data",
+      error: expect.stringMatching(
+        /chain edge "NEXT" whenPath "\$\.artifact\.missing" failed: .*resolves to nothing/,
+      ),
+    });
+    expect(resolveChains(db, whenPathRegistry)).toEqual({
+      emitted: 0,
+      skipped: 0,
+      errors: [],
+    });
+  });
+
   test("custom eventId templating and perItem mapping overlays", () => {
     const dir = tmpDir("evrt-chain-tmpl-");
     const db = openDb(path.join(dir, "runtime.db"));

@@ -245,14 +245,17 @@ export function resolveChains(
                 }
                 return [key, candidate];
               })
-              .filter(([, candidate]) => {
+              .filter(([key, candidate]) => {
                 if (candidate.whenPath === undefined) return true;
                 try {
                   return (
                     resolvePath(candidate.whenPath, selectionContext) !== null
                   );
-                } catch {
-                  return false;
+                } catch (err) {
+                  throw new ChainTerminalError(
+                    `chain edge "${key}" whenPath "${candidate.whenPath}" failed: ${err.message}`,
+                    err.reason,
+                  );
                 }
               });
           })();
