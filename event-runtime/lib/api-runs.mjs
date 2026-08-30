@@ -1770,11 +1770,14 @@ function observedModelForRun({
   artifactsDir,
   sha256,
   state,
-  readArtifactHead,
+  readArtifactHead = artifactHead,
 }) {
   if (!artifactsDir || !sha256) return null;
   const terminal = TERMINAL_STATES.has(state);
-  if (observedModelCache.has(sha256)) return observedModelCache.get(sha256);
+  // Keyed by store root as well as hash: a test or a relocated store must not
+  // serve an observation read from a different artifacts directory.
+  const cacheKey = `${artifactsDir} ${sha256}`;
+  if (observedModelCache.has(cacheKey)) return observedModelCache.get(cacheKey);
 
   const observedModel = observedModelFromTranscript(
     readArtifactHead(artifactsDir, sha256),
@@ -1785,12 +1788,16 @@ function observedModelForRun({
     if (observedModelCache.size >= OBSERVED_MODEL_CACHE_LIMIT) {
       observedModelCache.delete(observedModelCache.keys().next().value);
     }
-    observedModelCache.set(sha256, observedModel);
+    observedModelCache.set(cacheKey, observedModel);
   }
   return observedModel;
 }
 
-function runView(db, runId, { artifactsDir, registry, readArtifactHead } = {}) {
+function runView(
+  db,
+  runId,
+  { artifactsDir, registry, readArtifactHead = artifactHead } = {},
+) {
   const row = db.query(`SELECT * FROM runs WHERE run_id = ?`).get(runId);
   if (!row) return null;
   const attempts = db
