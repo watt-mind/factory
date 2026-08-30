@@ -28,6 +28,57 @@ function freshRun(db, key = `key-${Math.random()}`) {
   return runId;
 }
 
+function failedRun(
+  db,
+  { runId, idempotencyKey, correlationId, causationId, attempts, maxAttempts },
+) {
+  createRun(db, {
+    runId,
+    idempotencyKey,
+    spec: { maxAttempts },
+    specJson: JSON.stringify({ maxAttempts }),
+    specHash: "sha256:0",
+    actor: "planner",
+    correlationId,
+    causationId,
+    policyVersion: "test",
+  });
+  for (const to of ["APPROVED", "QUEUED", "LEASED", "RUNNING", "FAILED"]) {
+    transition(db, { runId, to, actor: "test" });
+  }
+  db.query(`UPDATE runs SET attempts = ? WHERE run_id = ?`).run(
+    attempts,
+    runId,
+  );
+}
+
+function completedRun(
+  db,
+  { runId, idempotencyKey, correlationId, causationId },
+) {
+  createRun(db, {
+    runId,
+    idempotencyKey,
+    spec: {},
+    specJson: "{}",
+    specHash: "sha256:0",
+    actor: "planner",
+    correlationId,
+    causationId,
+    policyVersion: "test",
+  });
+  for (const to of [
+    "APPROVED",
+    "QUEUED",
+    "LEASED",
+    "RUNNING",
+    "VERIFYING",
+    "COMPLETED",
+  ]) {
+    transition(db, { runId, to, actor: "test" });
+  }
+}
+
 describe("lifecycle", () => {
   test("createRun persists a normalized ticket subject", () => {
     const db = openDb(":memory:");
@@ -175,6 +226,74 @@ describe("lifecycle", () => {
       causationId: "run_dispatch_1",
     });
     expect(duplicate?.run_id).toBe("run_chain_1");
+  });
+
+  test("resolveIdempotency only coalesces retryable FAILED runs", () => {
+    const db = openDb(":memory:");
+    failedRun(db, {
+      runId: "run_retryable_failed",
+      idempotencyKey: "failed-key-1",
+      correlationId: "lineage-001",
+      causationId: "run_dispatch_1",
+      attempts: 1,
+      maxAttempts: 2,
+    });
+    failedRun(db, {
+      runId: "run_exhausted_failed",
+      idempotencyKey: "failed-key-2",
+      correlationId: "lineage-002",
+      causationId: "run_dispatch_1",
+      attempts: 2,
+      maxAttempts: 2,
+    });
+
+    expect(
+      resolveIdempotency(db, {
+        idempotencyKey: "failed-key-1",
+        correlationId: "lineage-001",
+        causationId: "run_dispatch_2",
+      })?.run_id,
+    ).toBe("run_retryable_failed");
+    expect(
+      resolveIdempotency(db, {
+        idempotencyKey: "failed-key-2",
+        correlationId: "lineage-002",
+        causationId: "run_dispatch_2",
+      }),
+    ).toBeNull();
+    expect(
+      resolveIdempotency(db, {
+        idempotencyKey: "failed-key-2",
+        correlationId: "lineage-002",
+        causationId: "run_dispatch_1",
+      })?.run_id,
+    ).toBe("run_exhausted_failed");
+  });
+
+  test("resolveIdempotency selects a later completed generation over an exhausted FAILED run", () => {
+    const db = openDb(":memory:");
+    failedRun(db, {
+      runId: "run_family_exhausted",
+      idempotencyKey: "family-failed-key",
+      correlationId: "lineage-001",
+      causationId: "run_dispatch_1",
+      attempts: 2,
+      maxAttempts: 2,
+    });
+    completedRun(db, {
+      runId: "run_family_completed",
+      idempotencyKey: "family-failed-key:trigger:second",
+      correlationId: "lineage-001",
+      causationId: "run_dispatch_2",
+    });
+
+    expect(
+      resolveIdempotency(db, {
+        idempotencyKey: "family-failed-key",
+        correlationId: "lineage-001",
+        causationId: "run_dispatch_2",
+      })?.run_id,
+    ).toBe("run_family_completed");
   });
 
   test("lifecycle timestamps are monotonic and distinct across states when clock advances", () => {
