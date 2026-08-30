@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -21,6 +22,21 @@ import {
 
 const ROOT = path.resolve(import.meta.dir, "..");
 const hadLocalReposConfig = existsSync(path.join(ROOT, "config", "repos.yaml"));
+
+function markdownFiles(dir) {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const file = path.join(dir, entry.name);
+    if (entry.isDirectory()) return markdownFiles(file);
+    return entry.isFile() && entry.name.endsWith(".md") ? [file] : [];
+  });
+}
+
+test("shared prompts use REST CI watchers instead of watched PR checks", () => {
+  for (const file of markdownFiles(path.join(ROOT, "shared"))) {
+    const text = readFileSync(file, "utf8");
+    expect(text).not.toMatch(/gh pr checks[\s\S]{0,100}--watch/);
+  }
+});
 
 test("delivered floor documents valid Owned Paths bullets", () => {
   const floor = readFileSync(
