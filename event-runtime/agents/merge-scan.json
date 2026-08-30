@@ -11,31 +11,19 @@
     "scan"
   ],
   "writesResult": true,
-  "workspace": {
-    "type": "ephemeral",
-    "retainOnFailure": true
-  },
-  "capabilities": {
-    "filesystem": "workspace-only",
-    "services": ["gh:read"]
-  },
-  "limits": {
-    "timeout_seconds": 120,
-    "attempts": 1
-  },
+  "workspace": { "type": "ephemeral", "retainOnFailure": true },
+  "capabilities": { "filesystem": "workspace-only", "services": ["gh:read"] },
+  "limits": { "timeout_seconds": 120, "attempts": 1 },
   "mutating": false,
   "memos": [
     {
-      "subject": {
-        "type": "repo",
-        "id": "$.input.repo"
-      },
+      "subject": { "type": "repo", "id": "$.input.repo" },
       "kinds": ["decision"],
       "max": 10
     }
   ],
   "pins": {
-    "agents/merge-scan.md": "sha256:b407f14519ebb7b505ce7ddf80ca7929fe3a25798f3c4f89fd42a5ad6d583931",
+    "agents/merge-scan.md": "sha256:7bd516697f5330f3700f7e5a50ebc20e804b73fbe3a03abb3fcb205e864883a4",
     "schemas/merge-scan.input.json": "sha256:dcd0cf7d2c17ae1142edc93d2e48016c23f824e2447edc4bc929daf89ec9d80b",
     "schemas/merge-scan.output.json": "sha256:e7edeca34a7a702ab35301de599b3a8dcb137e62f33f5a63df399318df04a636"
   }

@@ -407,8 +407,10 @@ describe("registry", () => {
     // `<max_fix_rounds>` instead of hardcoding 2.
     // Regenerated (#1829): dispatch emits a concrete run trailer and rejects
     // the literal environment-variable form during handoff verification.
+    // Regenerated (#1843): merge-scan skips rebase churn for ai:landing and
+    // in-flight/fresh Full verification; merge-fix re-checks that CI guard.
     const expected =
-      "sha256:28c5980c970e233ebefba80b8be53d94a711132b49f9666d5b5aa0b2c20e87db";
+      "sha256:564641dee5b94b51d650f63233c467c12bed227e4a19b34c5f2a3c6dafd90c2c";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -529,6 +531,10 @@ describe("registry", () => {
     );
     expect(flat).toContain("`summary` beginning `branch_in_flight:`");
     expect(flat).toContain("`summary` beginning `branch_moved:`");
+    expect(flat).toContain("Full verification");
+    expect(flat).toContain("`ci_in_flight:`");
+    expect(flat).toContain("`ci_fresh:`");
+    expect(flat).toContain("`ai:landing`");
     expect(flat).toContain("make no retry push");
   });
 
