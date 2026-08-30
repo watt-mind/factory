@@ -64,6 +64,36 @@ describe("shared child environment", () => {
     expect(keySet(outputs.pi)).toEqual(keySet(outputs.claude));
   });
 
+  test("dispatch identity survives extraStrip and FACTORY_ prefix stripping", () => {
+    const supplied = Object.fromEntries(
+      [...DISPATCH_IDENTITY_ENV, "FACTORY_OTHER"].map((key) => [
+        key,
+        `supplied-${key}`,
+      ]),
+    );
+    const output = safeChildEnvironment(
+      supplied,
+      { mutating: false },
+      {
+        factoryRoot: "/factory-root",
+        extraStrip: [...DISPATCH_IDENTITY_ENV],
+        stripPrefixes: ["FACTORY_"],
+      },
+    );
+    for (const key of DISPATCH_IDENTITY_ENV) {
+      expect(output[key]).toBe(`supplied-${key}`);
+    }
+    expect(output.FACTORY_OTHER).toBeUndefined();
+    expect(output.FACTORY_ROOT).toBeUndefined();
+
+    const absent = safeChildEnvironment({}, false, {
+      stripPrefixes: ["FACTORY_"],
+    });
+    for (const key of DISPATCH_IDENTITY_ENV) {
+      expect(absent[key]).toBeUndefined();
+    }
+  });
+
   test("does not grant push credentials to non-boolean mutating values", () => {
     const supplied = Object.fromEntries(
       PUSH_CREDENTIAL_ENV.map((key) => [key, `supplied-${key}`]),

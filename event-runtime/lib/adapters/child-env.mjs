@@ -99,6 +99,12 @@ export function safeChildEnvironment(
       delete childEnv[key];
     }
   }
+  // Dispatch identity is supplied explicitly by the worker from the RunSpec;
+  // re-assert it after the strip loops so an `extraStrip` entry or a
+  // `stripPrefixes: ["FACTORY_"]` adapter cannot silently remove it.
+  for (const key of DISPATCH_IDENTITY_ENV) {
+    if (env[key] !== undefined) childEnv[key] = env[key];
+  }
 
   return childEnv;
 }

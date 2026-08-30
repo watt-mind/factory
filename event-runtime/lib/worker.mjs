@@ -941,6 +941,30 @@ export function tierEscalationEligibility(spec, reasonCode) {
   return { eligible, rootRunId };
 }
 
+/**
+ * Layer the RunSpec-derived dispatch identity onto the adapter environment.
+ *
+ * Any `dispatch@<version>` agent qualifies. Identity keys are only emitted when
+ * the spec actually carries the value, so a spec without a ticket or repo never
+ * exports the literal string "null". Non-dispatch agents get `env` unchanged.
+ */
+export function dispatchIdentityEnv({
+  spec,
+  env = {},
+  runId = null,
+  ticketId = null,
+  repoName = null,
+}) {
+  if (!String(spec?.agent ?? "").startsWith("dispatch@")) return env;
+  const identity = {};
+  if (runId != null && runId !== "") identity.FACTORY_RUN_ID = String(runId);
+  if (ticketId != null && ticketId !== "")
+    identity.FACTORY_TICKET = String(ticketId);
+  if (repoName != null && repoName !== "")
+    identity.FACTORY_REPO = String(repoName);
+  return { ...env, ...identity };
+}
+
 function maxEnvironmentRetries(spec) {
   return Number.isInteger(spec.maxEnvironmentRetries) &&
     spec.maxEnvironmentRetries >= 0
@@ -3582,15 +3606,13 @@ export async function executeClaimed(
       // Dispatch identity comes from the immutable RunSpec, never the ambient
       // worker environment. The adapter's child-environment builder preserves
       // these values while continuing to strip credentials it does not need.
-      const adapterEnv =
-        spec.agent === "dispatch@1"
-          ? {
-              ...env,
-              FACTORY_RUN_ID: runId,
-              FACTORY_TICKET: String(ticketId),
-              FACTORY_REPO: String(repoName),
-            }
-          : env;
+      const adapterEnv = dispatchIdentityEnv({
+        spec,
+        env,
+        runId,
+        ticketId,
+        repoName,
+      });
       outcome = await adapter.execute({
         spec,
         def,

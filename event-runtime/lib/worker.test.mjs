@@ -61,6 +61,7 @@ import { computeDefHash } from "./receipts.mjs";
 import { getAgent, loadRegistry } from "./registry.mjs";
 import { transcriptSessionId } from "./transcripts.mjs";
 import {
+  dispatchIdentityEnv,
   acquireClaimLock,
   adapterExecuteTimeoutMs,
   cancelRun,
@@ -3915,6 +3916,49 @@ sh -c 'sleep 5 & wait'
       now: afterExpiry,
     });
     expect(w1Result.fenced).toBe(true);
+  });
+
+  test("dispatchIdentityEnv omits unset identity keys and gates on the dispatch@ prefix (#1497)", () => {
+    const env = { PATH: "/bin" };
+    const full = dispatchIdentityEnv({
+      spec: { agent: "dispatch@2" },
+      env,
+      runId: "run-1",
+      ticketId: 1497,
+      repoName: "factory",
+    });
+    expect(full).toEqual({
+      PATH: "/bin",
+      FACTORY_RUN_ID: "run-1",
+      FACTORY_TICKET: "1497",
+      FACTORY_REPO: "factory",
+    });
+
+    const partial = dispatchIdentityEnv({
+      spec: { agent: "dispatch@1" },
+      env,
+      runId: "run-2",
+      ticketId: null,
+      repoName: undefined,
+    });
+    expect(partial).toEqual({ PATH: "/bin", FACTORY_RUN_ID: "run-2" });
+    expect("FACTORY_TICKET" in partial).toBe(false);
+    expect("FACTORY_REPO" in partial).toBe(false);
+
+    for (const agent of [
+      "factory-status-report@1",
+      "dispatcher@1",
+      undefined,
+    ]) {
+      const untouched = dispatchIdentityEnv({
+        spec: { agent },
+        env,
+        runId: "run-3",
+        ticketId: "T-1",
+        repoName: "r",
+      });
+      expect(untouched).toBe(env);
+    }
   });
 
   test("worker preserves push credentials for mutating runs and strips them for non-mutating runs (WM-128)", async () => {
