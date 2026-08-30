@@ -34,6 +34,18 @@ import { startPlannerWorker } from "../lib/planner-worker.mjs";
 import { CLI_PATH, fail, flagValue, log } from "./shared.mjs";
 
 export const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+/**
+ * Shutdown budget (#1585). The supervisor (`await_daemon` in
+ * bin/worktree-common.sh) SIGKILLs a serve that has not exited 3 s after
+ * SIGTERM. Everything below must fit inside that window with margin, or the
+ * lock file and the listening port are torn down by the kernel instead of us:
+ * planner stop + connector stop share CONNECTOR_STOP_TIMEOUT_MS, the HTTP
+ * server gets CLOSE_CONNECTIONS_AFTER_MS to drain keep-alive clients, and
+ * HARD_EXIT_MS is the in-process backstop that always wins before the kill.
+ */
+export const CONNECTOR_STOP_TIMEOUT_MS = 1_500;
+export const CLOSE_CONNECTIONS_AFTER_MS = 500;
+export const HARD_EXIT_MS = 2_500;
 
 export const TICK_SUBSYSTEMS = [
   "tick emit",
@@ -50,6 +62,40 @@ export const TICK_SUBSYSTEMS = [
   "GC",
   "chains",
 ];
+
+/**
+ * Await `run()` for at most `timeoutMs`; a rejection or a timeout is logged
+ * under `label` and never propagates. Shutdown steps must be bounded — a step
+ * that never settles would otherwise hand the exit to the supervisor's
+ * SIGKILL.
+ */
+export async function stopBounded(label, run, timeoutMs) {
+  let timeout;
+  await Promise.race([
+    Promise.resolve()
+      .then(run)
+      .catch((err) => log(`${label}: ${err?.message ?? err}`)),
+    new Promise((resolve) => {
+      timeout = setTimeout(() => {
+        log(`${label}: timed out after ${timeoutMs}ms`);
+        resolve();
+      }, timeoutMs);
+    }),
+  ]);
+  clearTimeout(timeout);
+}
+
+/**
+ * Connector implementations are third-party, long-running integrations. A
+ * hung socket close must not prevent `serve` from releasing its HTTP server.
+ */
+function stopConnectorsBounded() {
+  return stopBounded(
+    "connector stop",
+    () => stopConnectors(),
+    CONNECTOR_STOP_TIMEOUT_MS,
+  );
+}
 
 /**
  * One serve-loop pass (OPS-412). Each named subsystem is caught on its own
@@ -542,7 +588,12 @@ export default async function serve(args) {
     } else {
       log(`serve: control API failed to start: ${err?.message ?? err}`);
     }
-    process.exit(1);
+    // Connectors are started before the API binds. A bind failure must give
+    // them the same bounded cleanup as SIGTERM before the process exits.
+    stopConnectorsBounded().finally(() => {
+      releaseServeLock(home);
+      process.exit(1);
+    });
   });
   server.on("listening", () => {
     log(
@@ -578,11 +629,6 @@ export default async function serve(args) {
       log("planner: background worker thread (off HTTP event loop)");
     }
   });
-  server.on("error", (err) => {
-    releaseServeLock(home);
-    fail(`serve: ${err.message}`);
-  });
-
   // The watched loop starts ONLY once the API actually owns its port. A serve
   // that lost the bind race must die, not keep planning and working the same
   // database as the serve that won — that is a second unmanaged worker and a
@@ -602,21 +648,48 @@ export default async function serve(args) {
     stopping = true;
     log(`shutting down (${signal})`);
     if (timer) clearInterval(timer);
-    if (plannerWorker) {
-      try {
-        await plannerWorker.stop();
-      } catch {
-        /* best effort */
-      }
-    }
-    releaseServeLock(home);
-    const finish = () => {
-      server.close(() => process.exit(0));
-      setTimeout(() => process.exit(0), 1000).unref?.();
-    };
-    Promise.resolve(stopConnectors())
-      .catch((err) => log(`connector stop: ${err.message}`))
-      .finally(finish);
+    // Arm this before any cleanup: a connector or the planner thread may
+    // never settle. It sits inside the supervisor's SIGKILL grace so the lock
+    // is released by us, not by a kernel kill; it is longer than the bounded
+    // stops below so `server.close` still gets a chance to release the port.
+    const hardExit = setTimeout(() => {
+      log(`serve: shutdown exceeded ${HARD_EXIT_MS}ms — exiting`);
+      releaseServeLock(home);
+      process.exit(0);
+    }, HARD_EXIT_MS);
+    // The planner thread and the connectors run concurrently under ONE
+    // budget: a hung planner terminate must not push connector cleanup past
+    // the hard exit.
+    await Promise.all([
+      plannerWorker
+        ? stopBounded(
+            "planner stop",
+            () => plannerWorker.stop(),
+            CONNECTOR_STOP_TIMEOUT_MS,
+          )
+        : Promise.resolve(),
+      stopConnectorsBounded(),
+    ]);
+    let closeConnections = null;
+    server.close((err) => {
+      clearTimeout(hardExit);
+      clearTimeout(closeConnections);
+      if (err) log(`serve: control API close failed: ${err.message}`);
+      // Keep the lock while the listening socket exists. The exit hook is a
+      // final safeguard should the hard-exit backstop win this race.
+      releaseServeLock(home);
+      process.exit(err ? 1 : 0);
+    });
+    // `server.close` only fires its callback once every connection is gone;
+    // an HTTP keep-alive client (curl loops, the web UI, a health poller)
+    // keeps its socket open for seconds and would otherwise carry us into the
+    // hard exit. Drop idle sockets now, and any still-active ones shortly
+    // after, so the close can complete.
+    server.closeIdleConnections?.();
+    closeConnections = setTimeout(
+      () => server.closeAllConnections?.(),
+      CLOSE_CONNECTIONS_AFTER_MS,
+    );
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));

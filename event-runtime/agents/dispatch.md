@@ -56,7 +56,8 @@ new ticket.
    and restate your approach as a comment on it.
 2. **Implement in `./repo`**, touching only files matching the ticket's
    `Owned Paths`. Work discovered outside that set becomes a new `Triage`
-   issue (`tools/ticket.mjs file`) — never a widening of this one.
+   issue (`tools/ticket.mjs file --from <TICKET>`) — never a widening of this
+   one.
 3. **Verify** with the ticket's exact `Verification Command` and the repo's
    configured `verify` command, run inside `./repo` on the final tree (after
    your last commit). Run **only** those two worktree gates: do **not** run

@@ -381,12 +381,13 @@ describe("registry", () => {
     // files no issues and that any issue derived from a triaged source ticket
     // is filed with `ticket.mjs file --dedupe-key <source issue id>`;
     // triage-apply.json is re-pinned. Prompt text and its pin only — no
-    // schema, contract, route, capability, or model tier changed. Regenerated
-    // (#1539): dispatch orders result.json before the final Handoff comment;
-    // prompt pin only. Regenerated again for #1581 after dispatch moved its
-    // CI wait guidance to REST.
+    // schema, contract, route, capability, or model tier changed.
+    // Regenerated (#1539): dispatch orders result.json before the final
+    // Handoff comment; prompt pin only.
+    // Regenerated (#1500): dispatch.md files out-of-scope follow-ups with
+    // `tools/ticket.mjs file --from <TICKET>`; dispatch.json is re-pinned.
     const expected =
-      "sha256:d7e3f73d2b8e4dbd1fa1bf678ad15693c9ddaa0058278c47491d348bd76001dc";
+      "sha256:df06213a7ce4a24be5218bee31968b4a6b75ca6c7144e218015c5c9b5b8e0ea3";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -667,8 +668,10 @@ describe("registry", () => {
     // non-enumerable.
     // Regenerated (#1539): dispatch orders result.json before the final
     // Handoff comment; `pack` remains non-enumerable.
+    // Regenerated (#1500): dispatch.md instructs `file --from <TICKET>` for
+    // out-of-scope follow-ups; prompt pin only.
     expect(computeDefHash(def)).toBe(
-      "sha256:ff09b3232e4b4ff20c47c6020dd0b878cb56c7af01d59e78fc30f3331e15fddc",
+      "sha256:bcb2ad73016ca65076edf59034106044e9603c74edcbc007bd8317444e58276e",
     );
   });
 

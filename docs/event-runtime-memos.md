@@ -261,11 +261,13 @@ planning stays offline-cheap and deterministic for a given database state.
 
 ### 3.3 Registration is part of accept, not a separate step
 
-`registerMemos(db, runId, result)` runs inside the same transaction that
-records an accepted result. A run that publishes has its memos live the
-moment its result is durable; a run that fails verification never touches
-the ledger. Registration is idempotent on `sha256`, so a re-published result
-(lease-loss retry) does not double-register.
+`worker.mjs` calls `registerMemos(db, runId, result, { now: currentNow,
+agent: spec.agent, runState: "COMPLETED" })` immediately after `INSERT INTO
+results`, inside the `txImmediate` transaction that accepts a COMPLETED
+result. A run that publishes has its memos live the moment its result is
+durable; a run that fails verification never touches the ledger. Registration
+is idempotent on `sha256`, so a re-published result (lease-loss retry) does
+not double-register.
 
 The runtime is the second producer (§5.2): `decideInboxItem` calls the same
 `registerMemos` with a runtime-authored document and `run_id = NULL`.
