@@ -68,6 +68,7 @@ import {
   HANDOFF_REASON_CODES,
   HANDOFF_SANDBOX_UNAVAILABLE,
   normalizeFailureOutput,
+  RECOVERED_RESULT_REASON,
   verifyResult,
 } from "./verify.mjs";
 import {
@@ -1214,6 +1215,20 @@ function resultArtifactForRun(db, runId) {
   }
 }
 
+function failureReasonCodeForRun(db, runId) {
+  return (
+    db
+      .query(
+        `SELECT reason_code AS reasonCode
+           FROM attempts
+          WHERE run_id = ? AND finished_at IS NOT NULL
+          ORDER BY attempt DESC
+          LIMIT 1`,
+      )
+      .get(runId)?.reasonCode ?? null
+  );
+}
+
 function tierEscalationForContinuation(db, runId) {
   const row = db
     .query(`SELECT * FROM tier_escalations WHERE continuation_run_id = ?`)
@@ -1229,6 +1244,7 @@ function tierEscalationForContinuation(db, runId) {
     sourceWorkspacePath: row.source_workspace_path,
     projectionState: row.projection_state,
     failedRunArtifact: resultArtifactForRun(db, row.failed_run_id),
+    failedRunReasonCode: failureReasonCodeForRun(db, row.failed_run_id),
   };
 }
 
@@ -1452,7 +1468,6 @@ export function defaultFindWorkspacePullRequest({ workspacePath }) {
   );
 }
 
-const RECOVERED_RESULT_REASON = "worker_recovered_missing_result";
 const MISSING_RESULT_OUTPUT_CHARS = 2 * 1024;
 
 function missingResultFailure(workspaceDir) {
@@ -2608,10 +2623,18 @@ export function defaultReconcileVerifiedHandoffTicket({
   }
 }
 
-/** Convert an already-opened PR to draft and say why, so nobody merges a red handoff. */
-function defaultHoldPullRequest({ github, prNumber, body }) {
+/**
+ * Convert an already-opened PR to draft and say why, so nobody merges a red
+ * handoff (merge-apply skips drafts). `forge` is a test seam only.
+ */
+export function defaultHoldPullRequest({
+  github,
+  prNumber,
+  body,
+  forge = null,
+}) {
   if (!github || !Number.isInteger(prNumber)) return false;
-  const forge = loadForge();
+  forge ??= loadForge();
   const opts = { timeout: workerSubprocessTimeoutMs() };
   let held = false;
   try {
@@ -3622,6 +3645,45 @@ export async function executeClaimed(
           return deferred;
         }
         releaseClaimLock(lockFile);
+        // The retained PR was rejected by the failed run's handoff gate and is
+        // still open as a ready (non-draft) PR. Route it to review rather than
+        // silently stranding it behind a refused continuation that cannot
+        // open a second PR — and hold the PR itself (draft + quoted reason)
+        // so the merge stage cannot land it without a fix round. Runs after
+        // the claim lock is released: both are CLI subprocesses.
+        if (
+          gate === "dispatch" &&
+          gateRefusal.reason === "ticket_pr_handoff_verification_failed" &&
+          worktreeHandoff &&
+          assertCurrentToken(db, runId, fencingToken)
+        ) {
+          const heldPr = gateResult.evidence?.escalatedWorkspacePullRequest;
+          const heldPrNumber = Number(heldPr?.number);
+          const failedReason = worktreeHandoff.failedRunReasonCode ?? null;
+          if (Number.isInteger(heldPrNumber) && heldPrNumber > 0) {
+            try {
+              holdPullRequestFn({
+                repo: repoName,
+                github: gateResult.evidence?.repo?.github ?? null,
+                prNumber: heldPrNumber,
+                prUrl: heldPr?.url ?? null,
+                body: `**Result:** run ${worktreeHandoff.failedRunId} FAILED \`${failedReason ?? "handoff_verification_failed"}\` — the tier-${spec.modelTier ?? "escalation"} continuation ${runId} was refused (\`${gateRefusal.reason}\`) because this PR was still open and ready.\n\nConverted to draft by the factory worker: the handoff did not verify. Address the recorded failure before marking it ready for review.`,
+              });
+            } catch {
+              /* intentionally ignored */
+            }
+          }
+          try {
+            reconcileVerifiedHandoffTicketFn({
+              repo: repoName,
+              ticket: ticketId,
+              reason: failedReason,
+              prNumber: Number.isInteger(heldPrNumber) ? heldPrNumber : null,
+            });
+          } catch {
+            /* The continuation refusal remains durable if projection fails. */
+          }
+        }
         if (
           gate === "dispatch" &&
           [
@@ -3629,6 +3691,7 @@ export async function executeClaimed(
             "ticket_escalation_pr_closed",
             "ticket_escalation_pr_read_failed",
             "ticket_pr_already_open",
+            "ticket_pr_handoff_verification_failed",
           ].includes(gateRefusal.reason) &&
           worktreeHandoff
         ) {

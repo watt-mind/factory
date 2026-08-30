@@ -6,6 +6,7 @@
  * over the ledger, never a directory listing. There is no write API.
  */
 import {
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -14,7 +15,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { storeCollected } from "./artifacts.mjs";
+import { findArtifact, storeCollected } from "./artifacts.mjs";
 import { canonicalJson, sha256Hex } from "./canonical.mjs";
 import { artifactsRoot, RUNTIME_ROOT } from "./config.mjs";
 import { loadRepos } from "./repos.mjs";
@@ -541,6 +542,47 @@ function maybeRetireContradicted(db, sha256, now) {
   ).run(now, sha256);
 }
 
+/**
+ * Retire one live memo whose content-addressed blob is absent from the store.
+ * Presence is intentionally the only check here: `materializeArtifact` remains
+ * the integrity boundary that detects and purges a present-but-corrupt blob.
+ *
+ * @returns {{ retired: boolean, memo: object|null }}
+ */
+export function retireMemoArtifactMissing(
+  db,
+  sha256,
+  { artifactStore, now = Date.now() } = {},
+) {
+  const row = db
+    .query(`SELECT * FROM memos WHERE sha256 = ? AND retired_at IS NULL`)
+    .get(sha256);
+  if (!row || !artifactStore || findArtifact(artifactStore, sha256)) {
+    return {
+      retired: false,
+      memo: row ? foldMemo(row, { useful: 0, wrong: 0 }) : null,
+    };
+  }
+  const changed = db
+    .query(
+      `UPDATE memos SET retired_at = ?, retired_reason = 'artifact_missing'
+       WHERE sha256 = ? AND retired_at IS NULL`,
+    )
+    .run(now, sha256).changes;
+  return {
+    retired: changed === 1,
+    memo: foldMemo(
+      {
+        ...row,
+        ...(changed === 1
+          ? { retired_at: now, retired_reason: "artifact_missing" }
+          : {}),
+      },
+      { useful: 0, wrong: 0 },
+    ),
+  };
+}
+
 function usefulCounts(db, hashes) {
   const counts = new Map(hashes.map((sha) => [sha, { useful: 0, wrong: 0 }]));
   if (hashes.length === 0) return counts;
@@ -618,6 +660,26 @@ export function sweepMemos(
   return result;
 }
 
+const warnedMissingStores = new Set();
+
+/**
+ * The artifact-missing sweep is only meaningful against a store that exists.
+ * `findArtifact` answers "absent" for every sha when the store root itself is
+ * missing or unreadable, so sweeping such a root would retire every live memo
+ * on the subject in one planning pass. Skip the sweep instead and warn once
+ * per root; the memos stay live until the store is back.
+ */
+function artifactStoreSweepable(artifactStore) {
+  if (existsSync(artifactStore)) return true;
+  if (!warnedMissingStores.has(artifactStore)) {
+    warnedMissingStores.add(artifactStore);
+    console.warn(
+      `memos: artifact store ${artifactStore} is missing; skipping artifact_missing sweep`,
+    );
+  }
+  return false;
+}
+
 /**
  * Fold memos on a subject. `live: true` (default) drops superseded, retired,
  * expired, and binding-broken rows. Bindings are compared only against
@@ -633,6 +695,8 @@ export function listMemos(
     now = Date.now(),
     descriptionHash,
     headSha,
+    artifactStore,
+    onArtifactMissing,
   } = {},
 ) {
   const normalized = normalizeSubject(subject);
@@ -644,31 +708,62 @@ export function listMemos(
   }
 
   if (live) {
-    const liveWhere = `${where}
+    return db.transaction(() => {
+      const liveWhere = `${where}
       AND superseded_by IS NULL
       AND retired_at IS NULL
       AND (expires_at IS NULL OR expires_at > ?)`;
-    const liveParams = [...params, now];
-    // Match the prior folding behavior: bindings are observed only for rows
-    // that are otherwise live, and description hash wins when both mismatch.
-    if (descriptionHash !== undefined && descriptionHash !== null) {
-      db.query(
-        `UPDATE memos SET retired_at = ?, retired_reason = 'description_hash_mismatch'
+      const liveParams = [...params, now];
+      // Match the prior folding behavior: bindings are observed only for rows
+      // that are otherwise live, and description hash wins when both mismatch.
+      if (descriptionHash !== undefined && descriptionHash !== null) {
+        db.query(
+          `UPDATE memos SET retired_at = ?, retired_reason = 'description_hash_mismatch'
          WHERE ${liveWhere} AND description_hash IS NOT NULL AND description_hash != ?`,
-      ).run(now, ...liveParams, descriptionHash);
-    }
-    if (headSha !== undefined && headSha !== null) {
-      db.query(
-        `UPDATE memos SET retired_at = ?, retired_reason = 'head_sha_mismatch'
+        ).run(now, ...liveParams, descriptionHash);
+      }
+      if (headSha !== undefined && headSha !== null) {
+        db.query(
+          `UPDATE memos SET retired_at = ?, retired_reason = 'head_sha_mismatch'
          WHERE ${liveWhere} AND head_sha IS NOT NULL AND head_sha != ?`,
-      ).run(now, ...liveParams, headSha);
-    }
+        ).run(now, ...liveParams, headSha);
+      }
 
-    const limit =
-      Number.isInteger(max) && max > 0 ? max : LIST_MEMOS_DEFAULT_MAX;
-    const rows = db
-      .query(
-        `SELECT memos.*,
+      if (artifactStore && artifactStoreSweepable(artifactStore)) {
+        const candidates = db
+          .query(`SELECT * FROM memos WHERE ${liveWhere}`)
+          .all(...liveParams);
+        const missing = candidates.filter(
+          (row) => !findArtifact(artifactStore, row.sha256),
+        );
+        if (missing.length > 0) {
+          db.query(
+            `UPDATE memos SET retired_at = ?, retired_reason = 'artifact_missing'
+             WHERE retired_at IS NULL
+               AND sha256 IN (${missing.map(() => "?").join(", ")})`,
+          ).run(now, ...missing.map((row) => row.sha256));
+          if (typeof onArtifactMissing === "function") {
+            for (const row of missing) {
+              onArtifactMissing(
+                foldMemo(
+                  {
+                    ...row,
+                    retired_at: now,
+                    retired_reason: "artifact_missing",
+                  },
+                  { useful: 0, wrong: 0 },
+                ),
+              );
+            }
+          }
+        }
+      }
+
+      const limit =
+        Number.isInteger(max) && max > 0 ? max : LIST_MEMOS_DEFAULT_MAX;
+      const rows = db
+        .query(
+          `SELECT memos.*,
                 SUM(CASE WHEN memo_uses.verdict = 'useful' THEN 1 ELSE 0 END) AS useful_count,
                 SUM(CASE WHEN memo_uses.verdict = 'wrong' THEN 1 ELSE 0 END) AS wrong_count
          FROM memos LEFT JOIN memo_uses ON memo_uses.sha256 = memos.sha256
@@ -676,14 +771,15 @@ export function listMemos(
          GROUP BY memos.sha256
          ORDER BY useful_count DESC, memos.created_at DESC, memos.sha256 DESC
          LIMIT ?`,
-      )
-      .all(...liveParams, limit);
-    return rows.map((row) =>
-      foldMemo(row, {
-        useful: Number(row.useful_count),
-        wrong: Number(row.wrong_count),
-      }),
-    );
+        )
+        .all(...liveParams, limit);
+      return rows.map((row) =>
+        foldMemo(row, {
+          useful: Number(row.useful_count),
+          wrong: Number(row.wrong_count),
+        }),
+      );
+    })();
   }
 
   const rows = db.query(`SELECT * FROM memos WHERE ${where}`).all(...params);

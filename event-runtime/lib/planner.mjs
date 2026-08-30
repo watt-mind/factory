@@ -74,6 +74,7 @@ import { validate } from "./schema.mjs";
 import { inFlightRunsForAgent } from "./schedules.mjs";
 import { resolveInputRef } from "./workspace.mjs";
 import { computeDefHash } from "./receipts.mjs";
+import { HANDOFF_REASON_CODES } from "./verify.mjs";
 import {
   autoApproveChains,
   buildChainApprovalPolicy,
@@ -146,7 +147,13 @@ export function pinMemos(
   db,
   def,
   payload,
-  { now = Date.now(), descriptionHash, headSha } = {},
+  {
+    now = Date.now(),
+    descriptionHash,
+    headSha,
+    artifactStore = artifactsRoot(),
+    onArtifactMissing,
+  } = {},
 ) {
   const declarations = def?.memos;
   if (!Array.isArray(declarations) || declarations.length === 0) return payload;
@@ -170,6 +177,8 @@ export function pinMemos(
         descriptionHash:
           decl.subject.type === "ticket" ? descriptionHash : undefined,
         headSha: decl.subject.type === "repo" ? headSha : undefined,
+        artifactStore,
+        onArtifactMissing,
       },
     );
     for (const row of folded) {
@@ -1219,6 +1228,7 @@ export function worktreeDispatchAutoEligibility(
   const live = countLeases(repo.name);
   evidence.repo = {
     name: repo.name,
+    github: repo.github ?? null,
     team: repo.team ?? null,
     project: repo.project ?? null,
     capLimit: cap,
@@ -1466,6 +1476,10 @@ export function worktreeDispatchAutoEligibility(
     evidence.checks.ticket_escalation_workspace_pr_read = true;
     if (workspacePullRequest && workspacePullRequest.isDraft !== true) {
       evidence.checks.ticket_escalation_workspace_pr_ready = true;
+      if (HANDOFF_REASON_CODES.has(escalatedContinuation.failedRunReasonCode)) {
+        evidence.checks.ticket_escalation_workspace_pr_handoff_failed = true;
+        return refusal("ticket_pr_handoff_verification_failed", evidence);
+      }
       return refusal("ticket_pr_already_open", evidence);
     }
     evidence.checks.ticket_escalation_workspace_pr_ready = false;
@@ -2103,6 +2117,7 @@ export function planEvent(
     artifactStore = artifactsRoot(),
     dispatch = {},
     configSnapshot = null,
+    log = console.log,
   } = {},
 ) {
   // Dispatch gate for tier-2 worktree agents (WM-108), evaluated BEFORE the
@@ -2173,7 +2188,8 @@ export function planEvent(
       resetAt: worktreeEligibility.resetAt ?? null,
     };
   }
-  return txImmediate(db, () => {
+  const missingArtifactRetirements = [];
+  const outcome = txImmediate(db, () => {
     const event = db
       .query(`SELECT * FROM events WHERE source = ? AND event_id = ?`)
       .get(source, eventId);
@@ -2506,6 +2522,8 @@ export function planEvent(
           descriptionHash:
             worktreeEligibility?.evidence?.ticket?.descriptionHash,
           headSha: payload.repoPin?.sha ?? null,
+          artifactStore,
+          onArtifactMissing: (memo) => missingArtifactRetirements.push(memo),
         });
       } catch (err) {
         return humanNeeded(
@@ -2691,6 +2709,23 @@ export function planEvent(
     setEventStatus(db, event, "planned");
     return { decision: "run", proposal, runId };
   });
+  // Emit only after the enclosing planning transaction commits. A later
+  // planning error rolls the retirement back and must not leave a false or
+  // duplicate line in serve.log.
+  for (const memo of missingArtifactRetirements) {
+    const subject = `${memo.subject.type}:${memo.subject.id}`;
+    const producer = memo.inboxItemId
+      ? `inbox_item_id=${memo.inboxItemId}`
+      : `run_id=${memo.runId ?? "null"}`;
+    try {
+      log(
+        `memo retired artifact_missing sha256=${memo.sha256} subject=${subject} ${producer}`,
+      );
+    } catch {
+      // Observability is best-effort after the durable decision is made.
+    }
+  }
+  return outcome;
 }
 
 /**
