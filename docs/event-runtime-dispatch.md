@@ -195,7 +195,7 @@ open chain-dispatch proposal re-ran `fetchTicket` + `fetchViewer` +
 `fetchInFlight` on every tick. Rate-limited outcomes are **retry-later**:
 
 - `tools/linear.mjs` records `X-RateLimit-Requests-*` (falling back to the
-  complexity headers), exposes `factory linear budget`, and exits 3 with
+  complexity headers), exposes `factory ticket budget`, and exits 3 with
   `{rateLimited:true, resetAt}` instead of a generic failure.
 - One planning pass memoizes in-flight issues by team+project for ≤60s and
   per-ticket reads for the run, so ten candidates in one repo do not issue

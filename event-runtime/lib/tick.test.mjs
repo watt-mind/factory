@@ -104,6 +104,47 @@ describe("tick (OPS-412)", () => {
     expect(nextTickResult.lastPrune).toBe(now);
   });
 
+  test("TICK_SUBSYSTEMS lists every executed runStep in order", async () => {
+    const { db } = harness();
+    const ran = [];
+    // Record every runStep lookup, not only names already in TICK_SUBSYSTEMS,
+    // so an unlisted subsystem is caught instead of silently running for real.
+    const subsystems = new Proxy(
+      {},
+      { get: (_target, name) => () => ran.push(String(name)) },
+    );
+
+    await tick({
+      db,
+      registry,
+      policyVersion: "git:test",
+      withWorker: true,
+      subsystems,
+    });
+
+    expect(ran).toEqual(TICK_SUBSYSTEMS);
+  });
+
+  test("tick skips the worker subsystem when withWorker is false", async () => {
+    const { db } = harness();
+    const ran = [];
+    // Record every runStep lookup, not only names already in TICK_SUBSYSTEMS,
+    // so an unlisted subsystem is caught instead of silently running for real.
+    const subsystems = new Proxy(
+      {},
+      { get: (_target, name) => () => ran.push(String(name)) },
+    );
+
+    await tick({
+      db,
+      registry,
+      policyVersion: "git:test",
+      subsystems,
+    });
+
+    expect(ran).toEqual(TICK_SUBSYSTEMS.filter((name) => name !== "worker"));
+  });
+
   for (const failing of TICK_SUBSYSTEMS) {
     test(`a throw in ${failing} does not prevent the others from running`, async () => {
       const { db } = harness();
@@ -125,6 +166,7 @@ describe("tick (OPS-412)", () => {
         now: Date.now(),
         lastPrune: Date.now(),
         policyVersion: "git:test",
+        withWorker: true,
         log: (line) => logs.push(line),
         subsystems,
       });

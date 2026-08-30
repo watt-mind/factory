@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { fetchMetrics, fetchMetricsBreakdown } from "../api";
+import { pollingOptions } from "../hooks";
 import {
   Band,
   ShareBars,
@@ -535,7 +536,7 @@ export function Metrics() {
   const query = useQuery({
     queryKey: ["metrics", window, bucket],
     queryFn: () => fetchMetrics(window, bucket),
-    refetchInterval: 30_000,
+    ...pollingOptions(30_000),
     retry: false,
   });
 
@@ -553,14 +554,14 @@ export function Metrics() {
     queryKey: ["metrics-breakdown", window, "adapter", "runs"],
     queryFn: () => fetchMetricsBreakdown(window, "adapter", "runs", 8),
     enabled: chartsReady,
-    refetchInterval: 30_000,
+    ...pollingOptions(30_000),
     retry: false,
   });
   const modelQuery = useQuery({
     queryKey: ["metrics-breakdown", window, "model", "tokens"],
     queryFn: () => fetchMetricsBreakdown(window, "model", "tokens", 8),
     enabled: chartsReady,
-    refetchInterval: 30_000,
+    ...pollingOptions(30_000),
     retry: false,
   });
   const derived = useMemo(() => {

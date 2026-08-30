@@ -4,7 +4,7 @@ import { artifactHead } from "./api-artifacts.mjs";
 import { DEFAULT_MAX_IN_FLIGHT, FACTORY_ROOT } from "./config.mjs";
 import { STALE_SCAN_MS, loadLinearSupply } from "./linear.mjs";
 import { loadRepos, RepoError } from "./repos.mjs";
-import { isBusyError, runUsage } from "./db.mjs";
+import { isBusyError, retryBusy, runUsage } from "./db.mjs";
 import { hookDecisionsFor } from "./hooks.mjs";
 import { IllegalTransition, lifecycleOf } from "./lifecycle.mjs";
 import { archiveDeadLetteredEvent, requeueEvent } from "./planner.mjs";
@@ -1963,11 +1963,13 @@ export async function handleRunApiRoute({
     const body = parseJson(await readBody(req)).value ?? {};
     try {
       if (verb === "approve") {
-        const outcome = approveProposal(db, registry, id, {
-          actor,
-          now: nowMs,
-          policyVersion,
-        });
+        const outcome = await retryBusy(db, () =>
+          approveProposal(db, registry, id, {
+            actor,
+            now: nowMs,
+            policyVersion,
+          }),
+        );
         if (outcome.approved)
           return send(200, { approved: true, runId: outcome.runId });
         return send(200, {
@@ -1979,15 +1981,17 @@ export async function handleRunApiRoute({
           ),
         });
       }
-      const outcome = rejectProposal(db, id, {
-        actor,
-        reason: body.reason,
-        now: nowMs,
-        policyVersion,
-      });
+      const outcome = await retryBusy(db, () =>
+        rejectProposal(db, id, {
+          actor,
+          reason: body.reason,
+          now: nowMs,
+          policyVersion,
+        }),
+      );
       return send(200, { rejected: true, runId: outcome.runId });
     } catch (err) {
-      if (verb === "approve" && isBusyError(err))
+      if (isBusyError(err))
         return send(503, { error: "db_busy", retryable: true });
       const status = String(err.message).startsWith("unknown proposal")
         ? 404

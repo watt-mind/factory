@@ -10,6 +10,7 @@ import { createElement as h, useEffect, useState } from "react";
 import { api } from "./api";
 import {
   modal,
+  pollingOptions,
   refetchIntervals,
   useHashRoute,
   useListKeys,
@@ -73,11 +74,13 @@ describe("API ETag cache", () => {
 describe("collection refetch intervals", () => {
   test("use a 15 second hidden-tab cadence and keep background polling active", () => {
     const originalHidden = Object.getOwnPropertyDescriptor(document, "hidden");
+    const customCadence = pollingOptions(30_000);
     try {
       Object.defineProperty(document, "hidden", {
         configurable: true,
         value: false,
       });
+      expect(customCadence.refetchInterval()).toBe(30_000);
       expect(refetchIntervals.primary.refetchInterval()).toBe(2_000);
       expect(refetchIntervals.fast.refetchInterval()).toBe(5_000);
       expect(refetchIntervals.secondary.refetchInterval()).toBe(10_000);
@@ -86,6 +89,7 @@ describe("collection refetch intervals", () => {
         configurable: true,
         value: true,
       });
+      expect(customCadence.refetchInterval()).toBe(15_000);
       expect(refetchIntervals.primary.refetchInterval()).toBe(15_000);
       expect(refetchIntervals.fast.refetchInterval()).toBe(15_000);
       expect(refetchIntervals.secondary.refetchInterval()).toBe(15_000);

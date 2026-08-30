@@ -1198,6 +1198,31 @@ describe("worker", () => {
     expect(summary.reasonCode).toBe("contract_violation");
   });
 
+  test("a trace recorder that cannot be prepared degrades to a no-op instead of throwing out of executeClaimed (#1330)", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec());
+    linkEvent(db, spec.runId);
+    db.exec(`DROP TABLE attempt_trace`);
+    const err = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const summary = await runOnce(
+        db,
+        registry,
+        adapters,
+        opts({ artifactStore: freshRoot() }),
+      );
+      expect(summary.terminalState).toBe("COMPLETED");
+      expect(runState(db, spec.runId)).toBe("COMPLETED");
+      expect(
+        err.mock.calls.some((c) =>
+          String(c[0]).includes("trace recorder unavailable"),
+        ),
+      ).toBe(true);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
   test("no-result: FAILED/contract_violation", async () => {
     const db = openDb(":memory:");
     const spec = queueRun(db, makeSpec({ input: { repos: ["no-result"] } }));
@@ -2718,6 +2743,70 @@ describe("worker", () => {
     ).toEqual([{ reason_code: "adapter_error" }, { reason_code: "ok" }]);
   });
 
+  test("adapter failure logs and traces a failTerminal failure", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({ adapter: "throwing" }));
+    const originalQuery = db.query.bind(db);
+    const failingDb = new Proxy(db, {
+      get(target, property) {
+        if (property === "query") {
+          return (sql) => {
+            if (String(sql).includes("UPDATE attempts SET terminal_state")) {
+              throw new Error("finish attempt write failed");
+            }
+            return originalQuery(sql);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const loud = [];
+    const originalConsoleError = console.error;
+    console.error = (...args) => loud.push(args.join(" "));
+    let summary;
+    try {
+      summary = await runOnce(
+        failingDb,
+        registry,
+        {
+          throwing: {
+            async execute() {
+              throw new Error("adapter exploded");
+            },
+          },
+        },
+        opts(),
+      );
+    } finally {
+      console.error = originalConsoleError;
+    }
+
+    expect(summary).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "adapter_error",
+      terminalError: "finish attempt write failed",
+    });
+    expect(loud.join("\n")).toContain(
+      `terminal failTerminal failed for run ${spec.runId} attempt 1: finish attempt write failed`,
+    );
+    expect(
+      db
+        .query(
+          `SELECT kind, payload_json FROM attempt_trace WHERE run_id = ? ORDER BY seq`,
+        )
+        .all(spec.runId)
+        .map((row) => ({ kind: row.kind, ...JSON.parse(row.payload_json) })),
+    ).toContainEqual({
+      kind: "lifecycle",
+      terminalError: true,
+      operation: "failTerminal",
+      runId: spec.runId,
+      attempt: 1,
+      message: "finish attempt write failed",
+    });
+  });
+
   test("SandboxUnsupportedError is fatal and never requeues", async () => {
     const db = openDb(":memory:");
     const unsupportedAdapter = {
@@ -3303,6 +3392,88 @@ describe("worker", () => {
         totalTokens: 11,
       }),
     );
+  });
+
+  test("cancelled attempt reports and traces a finishAttempt failure", async () => {
+    const db = openDb(":memory:");
+    let signalAdapterStarted;
+    const adapterStarted = new Promise((resolve) => {
+      signalAdapterStarted = resolve;
+    });
+    const longRunningAdapter = {
+      execute: ({ abortSignal }) =>
+        new Promise((resolve) => {
+          abortSignal?.addEventListener("abort", () =>
+            resolve({ exitCode: null, timedOut: false }),
+          );
+          signalAdapterStarted();
+        }),
+    };
+    const spec = queueRun(
+      db,
+      makeSpec({ adapter: "long", timeoutSeconds: 30 }),
+    );
+    const originalQuery = db.query.bind(db);
+    const failingDb = new Proxy(db, {
+      get(target, property) {
+        if (property === "query") {
+          return (sql) => {
+            if (String(sql).includes("UPDATE attempts SET terminal_state")) {
+              throw new Error("cancel finish write failed");
+            }
+            return originalQuery(sql);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const loud = [];
+    const originalConsoleError = console.error;
+    console.error = (...args) => loud.push(args.join(" "));
+    let summary;
+    try {
+      const claim = claimNext(db, opts());
+      const execution = executeClaimed(
+        failingDb,
+        registry,
+        { long: longRunningAdapter },
+        claim,
+        opts(),
+      );
+      await adapterStarted;
+      cancelRun(db, spec.runId, {
+        actor: "operator",
+        policyVersion: "test",
+        now: T0,
+      });
+      summary = await execution;
+    } finally {
+      console.error = originalConsoleError;
+    }
+
+    expect(summary).toEqual({
+      cancelled: true,
+      finishError: "cancel finish write failed",
+    });
+    expect(loud.join("\n")).toContain(
+      `terminal finishAttempt failed for run ${spec.runId} attempt 1: cancel finish write failed`,
+    );
+    expect(
+      db
+        .query(
+          `SELECT kind, payload_json FROM attempt_trace WHERE run_id = ? ORDER BY seq`,
+        )
+        .all(spec.runId)
+        .map((row) => ({ kind: row.kind, ...JSON.parse(row.payload_json) })),
+    ).toContainEqual({
+      kind: "lifecycle",
+      terminalError: true,
+      operation: "finishAttempt",
+      runId: spec.runId,
+      attempt: 1,
+      message: "cancel finish write failed",
+    });
   });
 
   test("forceFailRun preserves the LEASED → RUNNING → FAILED journal path", () => {
@@ -5937,6 +6108,89 @@ describe("execute-side dispatch hardening (WM-115)", () => {
         why: "force_failed",
       }),
     ]);
+  });
+
+  test("force-fail reports and traces an unclaim failure", async () => {
+    const db = openDb(":memory:");
+    const lockDir = tmpDir("evrt-force-fail-unclaim-locks-");
+    const leaseDir = tmpDir("evrt-force-fail-unclaim-leases-");
+    let signalAdapterStarted;
+    const adapterStarted = new Promise((resolve) => {
+      signalAdapterStarted = resolve;
+    });
+    const sleepingAdapter = {
+      execute: ({ abortSignal }) =>
+        new Promise((resolve) => {
+          abortSignal?.addEventListener("abort", () =>
+            resolve({ exitCode: null, timedOut: false }),
+          );
+          signalAdapterStarted();
+        }),
+    };
+    const spec = queueRun(
+      db,
+      makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-955" } }),
+    );
+    const o = opts({
+      dispatch: {
+        locksDir: lockDir,
+        leasesDir: leaseDir,
+        fetchTicket: () => readyDispatchTicket("WM-955"),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        claimTicket: () => ({ ok: true }),
+        unclaimTicket: () => {
+          throw new Error("tracker unclaim failed");
+        },
+      },
+    });
+    const loud = [];
+    const originalConsoleError = console.error;
+    console.error = (...args) => loud.push(args.join(" "));
+    let summary;
+    try {
+      const claim = claimNext(db, o);
+      const execution = executeClaimed(
+        db,
+        registry,
+        { fake: sleepingAdapter },
+        claim,
+        o,
+      );
+      await adapterStarted;
+      forceFailRun(db, spec.runId, {
+        actor: "operator",
+        reason: "operator_force_fail",
+        policyVersion: "test",
+        now: T0,
+      });
+      summary = await execution;
+    } finally {
+      console.error = originalConsoleError;
+    }
+
+    expect(summary).toEqual({
+      cancelled: true,
+      unclaimError: "tracker unclaim failed",
+    });
+    expect(loud.join("\n")).toContain(
+      `terminal unclaimTicket failed for run ${spec.runId} attempt 1: tracker unclaim failed`,
+    );
+    expect(
+      db
+        .query(
+          `SELECT kind, payload_json FROM attempt_trace WHERE run_id = ? ORDER BY seq`,
+        )
+        .all(spec.runId)
+        .map((row) => ({ kind: row.kind, ...JSON.parse(row.payload_json) })),
+    ).toContainEqual({
+      kind: "lifecycle",
+      terminalError: true,
+      operation: "unclaimTicket",
+      runId: spec.runId,
+      attempt: 1,
+      message: "tracker unclaim failed",
+    });
   });
 
   // WM-718: at handoff (PR_OPEN) a red repo verify is the handoff gate

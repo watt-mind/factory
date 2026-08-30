@@ -429,14 +429,14 @@ describe("execute with fake binary", () => {
   });
 
   /** Fake agy emitting the line shapes captured from the real CLI (WM-435). */
-  function writeFakeAgy(binDir, lines) {
+  function writeFakeAgy(binDir, lines, beforeOutput = "") {
     const fakeAgy = path.join(binDir, "agy");
     const body = lines
       .map((l) => `echo ${JSON.stringify(JSON.stringify(l))}`)
       .join("\n");
     writeFileSync(
       fakeAgy,
-      `#!/usr/bin/env bash\nif [[ -n "\${FACTORY_TEST_ARGV_FILE:-}" ]]; then printf '%s\\n' "$@" > "$FACTORY_TEST_ARGV_FILE"; fi\n${body}\n`,
+      `#!/usr/bin/env bash\nif [[ -n "\${FACTORY_TEST_ARGV_FILE:-}" ]]; then printf '%s\\n' "$@" > "$FACTORY_TEST_ARGV_FILE"; fi\n${beforeOutput}\n${body}\n`,
       { mode: 0o755 },
     );
     return fakeAgy;
@@ -596,6 +596,104 @@ describe("execute with fake binary", () => {
     // swallow the terminal result's events too.
     expect(attempted).toEqual(["tool_use", "assistant_text", "usage"]);
   });
+
+  test("drains more than a pipe buffer from stderr without timing out", async () => {
+    tmp = tmpDir("agy-test-");
+    const binDir = path.join(tmp, "bin");
+    mkdirSync(binDir, { recursive: true });
+    writeFakeAgy(
+      binDir,
+      [
+        {
+          event: "result",
+          result: {
+            status: "SUCCESS",
+            response: "done",
+            duration_seconds: 0,
+            num_turns: 1,
+            usage: {},
+          },
+        },
+      ],
+      "head -c 70000 /dev/zero | tr '\\0' x >&2",
+    );
+
+    const res = await execute({
+      spec: {},
+      def: { promptText: "Do task" },
+      workspaceDir: tmp,
+      timeoutMs: 2_000,
+      env: { PATH: `${binDir}:${process.env.PATH}` },
+    });
+
+    expect(res).toMatchObject({ exitCode: 0, timedOut: false });
+  }, 5_000);
+
+  test("surfaces a bounded stderr tail in the failure trace", async () => {
+    tmp = tmpDir("agy-test-");
+    const binDir = path.join(tmp, "bin");
+    mkdirSync(binDir, { recursive: true });
+    writeFakeAgy(
+      binDir,
+      [],
+      "head -c 20000 /dev/zero | tr '\\0' x >&2; echo final-stderr >&2; exit 1",
+    );
+
+    const traces = [];
+    const res = await execute({
+      spec: {},
+      def: { promptText: "Do task" },
+      workspaceDir: tmp,
+      env: { PATH: `${binDir}:${process.env.PATH}` },
+      onTrace: (kind, payload) => traces.push({ kind, payload }),
+    });
+
+    expect(res.exitCode).toBe(1);
+    const stderr = readFileSync(path.join(tmp, ".stderr.txt"), "utf8");
+    expect(stderr.length).toBe(16_384);
+    expect(stderr).toEndWith("final-stderr\n");
+    expect(traces).toContainEqual({
+      kind: "lifecycle",
+      payload: { note: "adapter_stderr", text: expect.any(String) },
+    });
+  });
+
+  test("timeout kills the detached process group without orphaning a grandchild", async () => {
+    tmp = tmpDir("agy-test-");
+    const binDir = path.join(tmp, "bin");
+    const pidFile = path.join(tmp, "grandchild.pid");
+    mkdirSync(binDir, { recursive: true });
+    writeFakeAgy(
+      binDir,
+      [],
+      'sleep 30 & echo $! > "$FACTORY_TEST_PID_FILE"; wait',
+    );
+
+    const outcome = await execute({
+      spec: {},
+      def: { promptText: "Do task" },
+      workspaceDir: tmp,
+      timeoutMs: 200,
+      killGraceMs: 200,
+      env: {
+        PATH: `${binDir}:${process.env.PATH}`,
+        FACTORY_TEST_PID_FILE: pidFile,
+      },
+    });
+    expect(outcome.timedOut).toBe(true);
+
+    // Give the kernel a brief moment to reap the signalled process group.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(existsSync(pidFile)).toBe(true);
+    const grandchildPid = parseInt(readFileSync(pidFile, "utf8").trim(), 10);
+    let alive = true;
+    try {
+      process.kill(grandchildPid, 0);
+    } catch {
+      alive = false;
+    }
+    expect(alive).toBe(false);
+  }, 10_000);
 });
 
 describe("FACTORY_ROOT injection (WM-433 parity with pi)", () => {

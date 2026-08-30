@@ -1263,6 +1263,21 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
     expect(again.message).toContain("not open");
   });
 
+  test("reject an open proposal → run CANCELLED", async () => {
+    const prop = await planned("rej-1");
+    const rejected = await s.client.reject(prop.id, "not today");
+    expect(rejected.rejected).toBe(true);
+
+    const run = await s.client.run(prop.runId);
+    expect(run.run.state).toBe("CANCELLED");
+    expect(run.lifecycle.at(-1).reason).toBe("proposal_rejected");
+    expect(run.lifecycle.at(-1).actor).toBe("operator");
+
+    const rejectAgain = await rejection(s.client.reject(prop.id, "again"));
+    expect(rejectAgain.status).toBe(409);
+    expect(rejectAgain.message).toContain("not open");
+  });
+
   test("approval waits for a worker write lock and returns db_busy after its timeout", async () => {
     const waiting = await planned("approve-waits-for-lock");
     const lock = await holdWriteLock(s.db.filename, 75);
@@ -1279,6 +1294,9 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
       cancelled: true,
     });
 
+    // A connection deliberately tuned to fail fast keeps that contract even
+    // though approvals now retry across event-loop turns (#1349): the
+    // lowered busy_timeout bounds the whole retry budget.
     const timedOut = await planned("approve-busy-timeout");
     let timeoutLock;
     try {
@@ -1294,19 +1312,32 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
     expect(await timeoutLock?.exited).toBe(0);
   });
 
-  test("reject an open proposal → run CANCELLED", async () => {
-    const prop = await planned("rej-1");
-    const rejected = await s.client.reject(prop.id, "not today");
-    expect(rejected.rejected).toBe(true);
+  test("contended approvals and rejections yield to /health and return typed db_busy", async () => {
+    const approvedProposal = await planned("approve-contention");
+    const approveLock = await holdWriteLock(s.db.filename, 400);
+    const approval = s.client.approve(approvedProposal.id);
+    await new Promise((resolve) => setImmediate(resolve));
+    const healthStartedAt = Date.now();
+    const health = await fetch(s.url("/health"));
+    expect(health.status).toBe(200);
+    expect(Date.now() - healthStartedAt).toBeLessThan(500);
+    expect(await approval).toEqual({
+      approved: true,
+      runId: approvedProposal.runId,
+    });
+    expect(await approveLock.exited).toBe(0);
+    expect(
+      await s.client.cancel(approvedProposal.runId, "test cleanup"),
+    ).toEqual({ cancelled: true });
 
-    const run = await s.client.run(prop.runId);
-    expect(run.run.state).toBe("CANCELLED");
-    expect(run.lifecycle.at(-1).reason).toBe("proposal_rejected");
-    expect(run.lifecycle.at(-1).actor).toBe("operator");
-
-    const rejectAgain = await rejection(s.client.reject(prop.id, "again"));
-    expect(rejectAgain.status).toBe(409);
-    expect(rejectAgain.message).toContain("not open");
+    const rejectedProposal = await planned("reject-contention");
+    const rejectLock = await holdWriteLock(s.db.filename, 6_000);
+    const startedAt = Date.now();
+    const err = await rejection(s.client.reject(rejectedProposal.id, "locked"));
+    expect(err.status).toBe(503);
+    expect(err.body).toEqual({ error: "db_busy", retryable: true });
+    expect(Date.now() - startedAt).toBeGreaterThan(4_000);
+    expect(await rejectLock.exited).toBe(0);
   });
 
   test("cancel a QUEUED run → 200; cancel again → 409; unknown run → 404", async () => {

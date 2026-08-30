@@ -12,6 +12,27 @@ import path from "node:path";
 
 const FACTORY = path.resolve(import.meta.dir, "factory");
 
+test("factory help documents every dispatcher verb", () => {
+  const source = readFileSync(FACTORY, "utf8");
+  const dispatcher = source.match(/case "\$cmd" in([\s\S]*?)\nesac/);
+  expect(dispatcher).not.toBeNull();
+
+  const verbs = [...dispatcher[1].matchAll(/^ {2}([a-z][a-z-]*)\)/gm)].map(
+    ([, verb]) => verb,
+  );
+  const result = Bun.spawnSync({
+    cmd: ["bash", FACTORY, "help"],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  expect(result.exitCode).toBe(0);
+  const help = result.stdout.toString();
+  for (const verb of verbs) {
+    expect(help).toMatch(new RegExp(`^  ${verb}\\s`, "m"));
+  }
+});
+
 function makeNotifier(dir) {
   const notifier = path.join(dir, "notify_stub.py");
   writeFileSync(
