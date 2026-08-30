@@ -1406,6 +1406,16 @@ describe("recent-ticket index (WM-821)", () => {
       );
       insertEvent.run("stale-event", "WM-1767", at(30), at(30), at(30));
 
+      const eventPlan = s.db
+        .query(
+          `EXPLAIN QUERY PLAN SELECT * FROM events WHERE subject IN (?, ?)`,
+        )
+        .all("WM-1765", "WM-1766")
+        .map((row) => row.detail)
+        .join("\n");
+      expect(eventPlan).toMatch(/USING INDEX idx_events_subject/);
+      expect(eventPlan).not.toMatch(/SCAN events\b/);
+
       const queries = [];
       const observedDb = {
         filename: s.db.filename,
