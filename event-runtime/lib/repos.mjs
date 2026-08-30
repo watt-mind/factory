@@ -13,6 +13,7 @@
  * report-only one, and where its worktrees live (OPS-299).
  */
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import {
@@ -407,6 +408,11 @@ async function defaultWhich(executable) {
   return Bun.which(executable) ?? null;
 }
 
+/** Synchronous counterpart for the planner's deterministic admission path. */
+function defaultWhichSync(executable) {
+  return Bun.which(executable) ?? null;
+}
+
 /**
  * Default probe: run the resolved executable with exactly one argument,
  * `--version`, with no shell and no inherited stdin. This is the only
@@ -434,6 +440,25 @@ async function defaultSpawn(argv) {
       exitCodeResult.status === "fulfilled" ? exitCodeResult.value : null,
     stdout: stdoutResult.status === "fulfilled" ? stdoutResult.value : "",
     stderr: stderrResult.status === "fulfilled" ? stderrResult.value : "",
+  };
+}
+
+/**
+ * Synchronous version probe for planner admission. Keep its result shape
+ * identical to defaultSpawn so both preflight variants produce the same typed
+ * attestation. `spawnSync` enforces the same bounded probe timeout.
+ */
+function defaultSpawnSync(argv) {
+  const result = spawnSync(argv[0], argv.slice(1), {
+    stdio: ["ignore", "pipe", "pipe"],
+    encoding: "utf8",
+    timeout: TOOLCHAIN_PROBE_TIMEOUT_MS,
+  });
+  if (result.error) throw result.error;
+  return {
+    exitCode: result.status,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
   };
 }
 
@@ -610,6 +635,129 @@ export async function preflightToolchain(
   };
 }
 
+/**
+ * Synchronous form of preflightToolchain for the planner. Planning is
+ * deliberately synchronous; returning the same attestation shape keeps the
+ * admission decision typed without turning planEvent into an async API.
+ */
+export function preflightToolchainSync(
+  repo,
+  {
+    node = "local",
+    now = () => new Date(),
+    which = defaultWhichSync,
+    spawn = defaultSpawnSync,
+  } = {},
+) {
+  const toolchain = repo?.toolchain ?? null;
+  const tools = [];
+  const reasons = [];
+
+  for (const { executable, constraint } of toolchain ?? []) {
+    let resolved;
+    try {
+      resolved = which(executable);
+    } catch (error) {
+      const failed = failedToolchainProbe({
+        node,
+        repo: repo.name,
+        executable,
+        constraint,
+        resolved: null,
+        error,
+        detail: "which_failed",
+      });
+      tools.push(failed.tool);
+      reasons.push(failed.reason);
+      continue;
+    }
+    if (!resolved) {
+      tools.push({
+        executable,
+        constraint,
+        resolved: null,
+        observed: null,
+        observedRaw: null,
+        satisfied: false,
+      });
+      reasons.push({
+        reason: REPO_TOOLCHAIN_MISSING,
+        node,
+        repo: repo.name,
+        executable,
+        constraint,
+        observed: null,
+        action: `install ${executable} ${constraint} on ${node}, or drop it from repo ${repo.name}'s toolchain in config/repos.yaml`,
+      });
+      continue;
+    }
+
+    let probe;
+    try {
+      probe = spawn([resolved, TOOLCHAIN_VERSION_ARG]);
+    } catch (error) {
+      const failed = failedToolchainProbe({
+        node,
+        repo: repo.name,
+        executable,
+        constraint,
+        resolved,
+        error,
+        detail: "version_probe_threw",
+      });
+      tools.push(failed.tool);
+      reasons.push(failed.reason);
+      continue;
+    }
+    const { exitCode, stdout, stderr } = probe;
+    const output = stdout?.trim() ? stdout : (stderr ?? "");
+    const observedRaw =
+      output
+        .split("\n")
+        .find((line) => line.trim())
+        ?.trim() ?? null;
+    const observed = exitCode === 0 ? normalizeToolVersion(output) : null;
+    const satisfied = satisfiesConstraint(observed, constraint);
+    tools.push({
+      executable,
+      constraint,
+      resolved,
+      observed,
+      observedRaw,
+      satisfied,
+    });
+    if (satisfied) continue;
+    reasons.push({
+      reason: REPO_TOOLCHAIN_MISMATCH,
+      node,
+      repo: repo.name,
+      executable,
+      constraint,
+      observed,
+      observedRaw,
+      detail:
+        exitCode !== 0
+          ? "version_probe_failed"
+          : observed === null
+            ? "unparseable_version"
+            : "constraint_unsatisfied",
+      action: `make ${executable} ${constraint} the resolved version on ${node} (observed ${observed ?? observedRaw ?? "nothing"}), or relax repo ${repo.name}'s constraint in config/repos.yaml`,
+    });
+  }
+
+  return {
+    repo: repo?.name ?? null,
+    node,
+    implementationVersion: TOOLCHAIN_PREFLIGHT_VERSION,
+    toolchainHash: toolchainHash(toolchain),
+    declared: toolchain !== null,
+    verifiedAt: now().toISOString(),
+    ok: reasons.length === 0,
+    tools,
+    reasons,
+  };
+}
+
 /** Does this attestation still describe this repo on this node, recently enough? */
 export function toolchainAttestationCurrent(
   attestation,
@@ -755,6 +903,45 @@ export async function repoDispatchPreflight(
   const fresh = current
     ? attestation
     : await preflightToolchain(repo, { node, now, which, spawn });
+  return {
+    ...repoReadiness({ repo, attestation: fresh, node, now, maxAgeMs }),
+    attestation: fresh,
+  };
+}
+
+/**
+ * Synchronous dispatch readiness gate for planEvent. It deliberately mirrors
+ * repoDispatchPreflight's return contract so callers can use either boundary
+ * without changing their refusal handling.
+ */
+export function repoDispatchPreflightSync(
+  repo,
+  {
+    node = "local",
+    attestation = null,
+    now = () => new Date(),
+    maxAgeMs = TOOLCHAIN_ATTESTATION_MAX_AGE_MS,
+    which,
+    spawn,
+  } = {},
+) {
+  if (!repo?.toolchain?.length) {
+    return {
+      ready: true,
+      attested: false,
+      reasons: [],
+      refusal: null,
+      attestation: null,
+    };
+  }
+  const { current } = toolchainAttestationCurrent(attestation, repo, {
+    node,
+    now,
+    maxAgeMs,
+  });
+  const fresh = current
+    ? attestation
+    : preflightToolchainSync(repo, { node, now, which, spawn });
   return {
     ...repoReadiness({ repo, attestation: fresh, node, now, maxAgeMs }),
     attestation: fresh,
