@@ -62,9 +62,9 @@ function emitNextScan(db, { repo, finalSha }) {
   }
 }
 
-function blockAll(landed, { finalSha, kind, reason }) {
+function blockAll(landed, { finalSha, kind, reason }, shell = sh) {
   for (const item of landed) {
-    sh("factory", [
+    shell("factory", [
       "linear",
       "state",
       item.ticket,
@@ -74,51 +74,50 @@ function blockAll(landed, { finalSha, kind, reason }) {
       "--remove",
       "ai:needs-review",
     ]);
-    sh("factory", [
+    shell("factory", [
       "linear",
       "comment",
       item.ticket,
       `${kind} after merge ${finalSha}: ${reason}. Branch/worktree preserved; merge barrier remains held.`,
     ]);
-    sh("factory", [
+    shell("factory", [
       "notify",
       `${kind} ${item.ticket}/PR#${item.pr}: ${reason}`,
     ]);
   }
 }
 
-function proveLanded(github, item) {
-  const state = sh("gh", [
-    "pr",
-    "view",
-    String(item.pr),
-    "--repo",
-    github,
-    "--json",
-    "state",
-    "--jq",
-    ".state",
-  ]);
-  const mergeSha = sh("gh", [
-    "pr",
-    "view",
-    String(item.pr),
-    "--repo",
-    github,
-    "--json",
-    "mergeCommit",
-    "--jq",
-    ".mergeCommit.oid",
-  ]);
-  return (
-    (state.stdout || "").trim() === "MERGED" &&
-    (mergeSha.stdout || "").trim() === item.mergeSha
-  );
+function githubUnavailable(action, result) {
+  const detail = (
+    result.stderr ||
+    result.stdout ||
+    "unknown gh failure"
+  ).trim();
+  return `github_unavailable: ${action}: ${detail}`;
 }
 
-function pollWorkflow({ github, workflow, base, sha, requiredChecks }) {
-  for (let i = 0; i < 90; i++) {
-    const runsRaw = sh("gh", [
+export function proveLanded(github, item, shell = sh) {
+  const pull = shell("gh", ["api", `repos/${github}/pulls/${item.pr}`]);
+  if (pull.status !== 0) {
+    throw new Error(githubUnavailable(`read PR ${item.pr}`, pull));
+  }
+  const parsed = JSON.parse(pull.stdout || "{}");
+  return parsed.merged === true && parsed.merge_commit_sha === item.mergeSha;
+}
+
+export function pollWorkflow({
+  github,
+  workflow,
+  base,
+  sha,
+  requiredChecks,
+  shell = sh,
+  pause = wait,
+  attempts = 90,
+}) {
+  let lastGithubFailure = null;
+  for (let i = 0; i < attempts; i++) {
+    const runsRaw = shell("gh", [
       "run",
       "list",
       "--repo",
@@ -136,6 +135,12 @@ function pollWorkflow({ github, workflow, base, sha, requiredChecks }) {
       "--json",
       "databaseId,status,conclusion,headSha,workflowName",
     ]);
+    if (runsRaw.status !== 0) {
+      lastGithubFailure = githubUnavailable("list workflow runs", runsRaw);
+      pause();
+      continue;
+    }
+    lastGithubFailure = null;
     const runs = JSON.parse(runsRaw.stdout || "[]");
     const matching = runs.filter(
       (run) => run.workflowName === workflow && run.headSha === sha,
@@ -147,7 +152,7 @@ function pollWorkflow({ github, workflow, base, sha, requiredChecks }) {
       };
     }
     if (matching.length === 1) {
-      const jobsRaw = sh("gh", [
+      const jobsRaw = shell("gh", [
         "run",
         "view",
         String(matching[0].databaseId),
@@ -156,6 +161,15 @@ function pollWorkflow({ github, workflow, base, sha, requiredChecks }) {
         "--json",
         "jobs",
       ]);
+      if (jobsRaw.status !== 0) {
+        lastGithubFailure = githubUnavailable(
+          `read workflow jobs for run ${matching[0].databaseId}`,
+          jobsRaw,
+        );
+        pause();
+        continue;
+      }
+      lastGithubFailure = null;
       const jobs = parseJobs(jobsRaw.stdout);
       const named = (name) => jobs.filter((job) => job.name === name);
       if (requiredChecks.some((name) => named(name).length > 1)) {
@@ -186,17 +200,27 @@ function pollWorkflow({ github, workflow, base, sha, requiredChecks }) {
         }
       }
     }
-    wait();
+    pause();
   }
+  if (lastGithubFailure) return { ok: false, reason: lastGithubFailure };
   return {
     ok: false,
     reason: `configured ${workflow} workflow and required jobs did not settle at exact merge SHA`,
   };
 }
 
-function pollSmoke({ github, workflow, base, sha }) {
-  for (let i = 0; i < 90; i++) {
-    const runsRaw = sh("gh", [
+export function pollSmoke({
+  github,
+  workflow,
+  base,
+  sha,
+  shell = sh,
+  pause = wait,
+  attempts = 90,
+}) {
+  let lastGithubFailure = null;
+  for (let i = 0; i < attempts; i++) {
+    const runsRaw = shell("gh", [
       "run",
       "list",
       "--repo",
@@ -212,6 +236,15 @@ function pollSmoke({ github, workflow, base, sha }) {
       "--json",
       "databaseId,status,conclusion",
     ]);
+    if (runsRaw.status !== 0) {
+      lastGithubFailure = githubUnavailable(
+        "list smoke workflow runs",
+        runsRaw,
+      );
+      pause();
+      continue;
+    }
+    lastGithubFailure = null;
     const runs = JSON.parse(runsRaw.stdout || "[]");
     if (runs.length > 0 && runs.every((run) => run.status === "completed")) {
       const ok = runs.every((run) =>
@@ -224,16 +257,17 @@ function pollSmoke({ github, workflow, base, sha }) {
             reason: `configured smoke workflow ${workflow} failed at ${sha}`,
           };
     }
-    wait();
+    pause();
   }
+  if (lastGithubFailure) return { ok: false, reason: lastGithubFailure };
   return {
     ok: false,
     reason: `configured smoke workflow ${workflow} did not settle at ${sha}`,
   };
 }
 
-function cleanupItem({ github, repo, factoryRoot, item }) {
-  const remote = sh("gh", [
+function cleanupItem({ github, repo, factoryRoot, item, shell = sh }) {
+  const remote = shell("gh", [
     "api",
     `repos/${github}/git/ref/heads/${item.headRef}`,
     "--jq",
@@ -247,7 +281,7 @@ function cleanupItem({ github, repo, factoryRoot, item }) {
   if ((remote.stdout || "").trim() !== item.headSha) {
     throw new Error("head branch moved; refusing cleanup");
   }
-  const guard = sh(
+  const guard = shell(
     "factory",
     [
       "branch-guard",
@@ -286,7 +320,7 @@ function cleanupItem({ github, repo, factoryRoot, item }) {
       }
     }
   }
-  const del = sh("gh", [
+  const del = shell("gh", [
     "api",
     "-X",
     "DELETE",
@@ -301,6 +335,10 @@ export function runMergeVerify({
   cwd = process.cwd(),
   db = openDb(),
   factoryRoot = FACTORY_ROOT,
+  shell = sh,
+  pause = wait,
+  pollAttempts = 90,
+  repoRecord: configuredRepoRecord,
 } = {}) {
   const input = JSON.parse(readFileSync(path.join(cwd, "input.json"), "utf8"));
   const { repo, github, base, landed, finalSha } = input;
@@ -308,12 +346,13 @@ export function runMergeVerify({
     throw new Error("landed[] is required");
   }
   for (const item of landed) {
-    if (!proveLanded(github, item)) {
+    if (!proveLanded(github, item, shell)) {
       throw new Error("landed PR no longer proves exact merge commit");
     }
   }
 
-  const repoRecord = getRepo(loadRepos({ root: factoryRoot }), repo);
+  const repoRecord =
+    configuredRepoRecord ?? getRepo(loadRepos({ root: factoryRoot }), repo);
   if (!repoRecord.mergeCi) {
     throw new Error("merge_ci workflow/check gate is unavailable");
   }
@@ -323,24 +362,44 @@ export function runMergeVerify({
     base,
     sha: finalSha,
     requiredChecks: repoRecord.mergeCi.requiredChecks,
+    shell,
+    pause,
+    attempts: pollAttempts,
   });
   if (!ci.ok) {
-    blockAll(landed, { finalSha, kind: "CI RED", reason: ci.reason });
+    if (!ci.reason.startsWith("github_unavailable:")) {
+      blockAll(landed, { finalSha, kind: "CI RED", reason: ci.reason }, shell);
+    }
     throw new Error(ci.reason);
   }
 
   const smoke = repoRecord.smokeWorkflow;
   if (smoke) {
-    const smoked = pollSmoke({ github, workflow: smoke, base, sha: finalSha });
+    const smoked = pollSmoke({
+      github,
+      workflow: smoke,
+      base,
+      sha: finalSha,
+      shell,
+      pause,
+      attempts: pollAttempts,
+    });
     if (!smoked.ok) {
-      blockAll(landed, { finalSha, kind: "SMOKE RED", reason: smoked.reason });
+      if (!smoked.reason.startsWith("github_unavailable:")) {
+        blockAll(
+          landed,
+          { finalSha, kind: "SMOKE RED", reason: smoked.reason },
+          shell,
+        );
+      }
       throw new Error(smoked.reason);
     }
   }
 
+  const doneFailures = [];
   for (const item of landed) {
-    cleanupItem({ github, repo, factoryRoot, item });
-    sh("factory", [
+    cleanupItem({ github, repo, factoryRoot, item, shell });
+    const done = shell("factory", [
       "linear",
       "state",
       item.ticket,
@@ -354,6 +413,12 @@ export function runMergeVerify({
       "--remove",
       "ai:in-progress",
     ]);
+    if (done.status !== 0) {
+      const detail = (done.stderr || done.stdout || "unknown failure").trim();
+      const message = `Done transition failed for ${item.ticket}: ${detail}`;
+      console.error(message);
+      doneFailures.push(message);
+    }
   }
   emitNextScan(db, { repo, finalSha });
 
@@ -364,7 +429,10 @@ export function runMergeVerify({
     artifact: {
       command: ["merge-verify.batch"],
       exitCode: 0,
-      outputTail: `verified ${landed.length} landed PR(s) at ${finalSha}`,
+      outputTail: [
+        `verified ${landed.length} landed PR(s) at ${finalSha}`,
+        ...doneFailures,
+      ].join("; "),
     },
     evidence: { commands: ["merge-verify.batch"] },
   };
