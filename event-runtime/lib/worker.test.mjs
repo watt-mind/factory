@@ -61,6 +61,7 @@ import { computeDefHash } from "./receipts.mjs";
 import { getAgent, loadRegistry } from "./registry.mjs";
 import { transcriptSessionId } from "./transcripts.mjs";
 import {
+  dispatchIdentityEnv,
   acquireClaimLock,
   adapterExecuteTimeoutMs,
   cancelRun,
@@ -74,6 +75,7 @@ import {
   createReloadWatcher,
   DEFAULT_MAX_ENVIRONMENT_RETRIES,
   defaultLocksDir,
+  defaultReconcileVerifiedHandoffTicket,
   defaultProjectTierEscalation,
   defaultReturnHandoffTicket,
   defaultUnclaimTicket,
@@ -2642,6 +2644,226 @@ sh -c 'sleep 5 & wait'
     db.close();
   });
 
+  test("tier escalation refuses a continuation when its failed run PR is closed", async () => {
+    const db = openDb(":memory:");
+    const failedRunId = "run_tier_closed_failed";
+    const continuationRunId = "run_tier_closed_continuation";
+    queueRun(
+      db,
+      makeSpec({
+        runId: continuationRunId,
+        agent: "dispatch@1",
+        input: {
+          repo: "factory",
+          ticket: "watt-mind/factory#1499",
+          modelTier: "strong",
+        },
+        workspace: { type: "worktree", checkoutDir: "repo" },
+        outputContract: "factory.dispatch-result/v1",
+        modelTier: "strong",
+      }),
+    );
+    db.query(
+      `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+       VALUES (?, 1, ?, 'sha256:test', '{}', '{}', ?)`,
+    ).run(
+      failedRunId,
+      JSON.stringify({ artifact: { prNumber: 1499 } }),
+      new Date(T0).toISOString(),
+    );
+    db.query(
+      `INSERT INTO tier_escalations
+         (root_run_id, failed_run_id, continuation_run_id, repo, ticket,
+          workspace_path, source_workspace_path, projection_state, created_at)
+       VALUES (?, ?, ?, 'factory', 'watt-mind/factory#1499', '/tmp/checkout', '/tmp/wrapper', 'applied', ?)`,
+    ).run(
+      failedRunId,
+      failedRunId,
+      continuationRunId,
+      new Date(T0).toISOString(),
+    );
+
+    const locksDir = tmpDir("tier-closed-locks-");
+    const leasesDir = tmpDir("tier-closed-leases-");
+    let claims = 0;
+    const summary = await runOnce(
+      db,
+      registry,
+      adapters,
+      opts({
+        dispatch: {
+          locksDir,
+          leasesDir,
+          fetchTicket: () => ({
+            identifier: "watt-mind/factory#1499",
+            state: { name: "In Progress" },
+            assignee: { id: "factory-owner", name: "Factory" },
+            labels: {
+              nodes: [{ name: "ai:in-progress" }, { name: "tier:strong" }],
+            },
+            description: "## Owned Paths\n- event-runtime/lib/worker.mjs\n",
+          }),
+          fetchViewer: () => ({ id: "factory-owner", name: "Factory" }),
+          fetchPullRequest: ({ github, pr }) => {
+            expect(github).toBe("watt-mind/factory");
+            expect(pr).toBe(1499);
+            return { state: "MERGED" };
+          },
+          fetchInFlight: () => [],
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          claimTicket: () => ((claims += 1), { ok: true }),
+        },
+      }),
+    );
+
+    expect(summary).toMatchObject({
+      runId: continuationRunId,
+      terminalState: "REFUSED",
+      reasonCode: "ticket_escalation_pr_closed",
+    });
+    expect(claims).toBe(0);
+    expect(existsSync(dispatchLockPath("factory", locksDir))).toBe(false);
+    expect(
+      db
+        .query(
+          `SELECT projection_state, projection_error FROM tier_escalations WHERE continuation_run_id = ?`,
+        )
+        .get(continuationRunId),
+    ).toEqual({
+      projection_state: "refused",
+      projection_error: "ticket_escalation_pr_closed",
+    });
+    db.close();
+  });
+
+  test("tier escalation requeues a continuation when its failed run PR read fails transiently", async () => {
+    const seedEscalation = (db, failedRunId, continuationRunId) => {
+      queueRun(
+        db,
+        makeSpec({
+          runId: continuationRunId,
+          agent: "dispatch@1",
+          input: {
+            repo: "factory",
+            ticket: "watt-mind/factory#1499",
+            modelTier: "strong",
+          },
+          workspace: { type: "worktree", checkoutDir: "repo" },
+          outputContract: "factory.dispatch-result/v1",
+          modelTier: "strong",
+        }),
+      );
+      db.query(
+        `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+         VALUES (?, 1, ?, 'sha256:test', '{}', '{}', ?)`,
+      ).run(
+        failedRunId,
+        JSON.stringify({ artifact: { prNumber: 1499 } }),
+        new Date(T0).toISOString(),
+      );
+      db.query(
+        `INSERT INTO tier_escalations
+           (root_run_id, failed_run_id, continuation_run_id, repo, ticket,
+            workspace_path, source_workspace_path, projection_state, created_at)
+         VALUES (?, ?, ?, 'factory', 'watt-mind/factory#1499', '/tmp/checkout', '/tmp/wrapper', 'applied', ?)`,
+      ).run(
+        failedRunId,
+        failedRunId,
+        continuationRunId,
+        new Date(T0).toISOString(),
+      );
+    };
+    const escalationRow = (db, continuationRunId) =>
+      db
+        .query(
+          `SELECT projection_state, projection_error FROM tier_escalations WHERE continuation_run_id = ?`,
+        )
+        .get(continuationRunId);
+    const dispatchOpts = (locksDir, leasesDir, claims) => ({
+      locksDir,
+      leasesDir,
+      fetchTicket: () => ({
+        identifier: "watt-mind/factory#1499",
+        state: { name: "In Progress" },
+        assignee: { id: "factory-owner", name: "Factory" },
+        labels: {
+          nodes: [{ name: "ai:in-progress" }, { name: "tier:strong" }],
+        },
+        description: "## Owned Paths\n- event-runtime/lib/worker.mjs\n",
+      }),
+      fetchViewer: () => ({ id: "factory-owner", name: "Factory" }),
+      fetchPullRequest: () => {
+        throw new Error("github_read_failed: rate limited");
+      },
+      fetchInFlight: () => [],
+      countLeases: () => 0,
+      budgetRefusal: () => null,
+      claimTicket: () => ((claims.count += 1), { ok: true }),
+    });
+
+    {
+      const db = openDb(":memory:");
+      const continuationRunId = "run_tier_unreadable_continuation";
+      seedEscalation(db, "run_tier_unreadable_failed", continuationRunId);
+      const locksDir = tmpDir("tier-unreadable-locks-");
+      const leasesDir = tmpDir("tier-unreadable-leases-");
+      const claims = { count: 0 };
+      const summary = await runOnce(
+        db,
+        registry,
+        adapters,
+        opts({ dispatch: dispatchOpts(locksDir, leasesDir, claims) }),
+      );
+      expect(summary).toMatchObject({
+        runId: continuationRunId,
+        terminalState: "QUEUED",
+        reasonCode: "ticket_escalation_pr_read_failed",
+      });
+      expect(summary.requeueAfterMs).toBeGreaterThan(0);
+      expect(claims.count).toBe(0);
+      expect(existsSync(dispatchLockPath("factory", locksDir))).toBe(false);
+      expect(runState(db, continuationRunId)).toBe("QUEUED");
+      expect(escalationRow(db, continuationRunId)).toEqual({
+        projection_state: "applied",
+        projection_error: null,
+      });
+      db.close();
+    }
+
+    {
+      const db = openDb(":memory:");
+      const continuationRunId = "run_tier_exhausted_continuation";
+      seedEscalation(db, "run_tier_exhausted_failed", continuationRunId);
+      const locksDir = tmpDir("tier-exhausted-locks-");
+      const leasesDir = tmpDir("tier-exhausted-leases-");
+      const claims = { count: 0 };
+      const summary = await runOnce(
+        db,
+        registry,
+        adapters,
+        opts({
+          dispatch: {
+            ...dispatchOpts(locksDir, leasesDir, claims),
+            maxTransientGateRequeues: 0,
+          },
+        }),
+      );
+      expect(summary).toMatchObject({
+        runId: continuationRunId,
+        terminalState: "REFUSED",
+        reasonCode: "ticket_escalation_pr_read_failed",
+      });
+      expect(claims.count).toBe(0);
+      expect(existsSync(dispatchLockPath("factory", locksDir))).toBe(false);
+      expect(escalationRow(db, continuationRunId)).toEqual({
+        projection_state: "refused",
+        projection_error: "ticket_escalation_pr_read_failed",
+      });
+      db.close();
+    }
+  });
+
   test("tier escalation projection replaces every tier label and comments both run ids idempotently", () => {
     const calls = [];
     const runCli = (args) => {
@@ -3917,6 +4139,49 @@ sh -c 'sleep 5 & wait'
     expect(w1Result.fenced).toBe(true);
   });
 
+  test("dispatchIdentityEnv omits unset identity keys and gates on the dispatch@ prefix (#1497)", () => {
+    const env = { PATH: "/bin" };
+    const full = dispatchIdentityEnv({
+      spec: { agent: "dispatch@2" },
+      env,
+      runId: "run-1",
+      ticketId: 1497,
+      repoName: "factory",
+    });
+    expect(full).toEqual({
+      PATH: "/bin",
+      FACTORY_RUN_ID: "run-1",
+      FACTORY_TICKET: "1497",
+      FACTORY_REPO: "factory",
+    });
+
+    const partial = dispatchIdentityEnv({
+      spec: { agent: "dispatch@1" },
+      env,
+      runId: "run-2",
+      ticketId: null,
+      repoName: undefined,
+    });
+    expect(partial).toEqual({ PATH: "/bin", FACTORY_RUN_ID: "run-2" });
+    expect("FACTORY_TICKET" in partial).toBe(false);
+    expect("FACTORY_REPO" in partial).toBe(false);
+
+    for (const agent of [
+      "factory-status-report@1",
+      "dispatcher@1",
+      undefined,
+    ]) {
+      const untouched = dispatchIdentityEnv({
+        spec: { agent },
+        env,
+        runId: "run-3",
+        ticketId: "T-1",
+        repoName: "r",
+      });
+      expect(untouched).toBe(env);
+    }
+  });
+
   test("worker preserves push credentials for mutating runs and strips them for non-mutating runs (WM-128)", async () => {
     const db = openDb(":memory:");
     let capturedMutatingEnv = null;
@@ -4000,6 +4265,9 @@ sh -c 'sleep 5 & wait'
     expect(capturedMutatingEnv.SSH_AUTH_SOCK).toBe("/tmp/worker-dispatch.sock");
     expect(capturedMutatingEnv.GITHUB_TOKEN).toBe("ghp_worker_dispatch_token");
     expect(capturedMutatingEnv.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(capturedMutatingEnv.FACTORY_RUN_ID).toBe(mutatingSpec.runId);
+    expect(capturedMutatingEnv.FACTORY_TICKET).toBe("WM-128");
+    expect(capturedMutatingEnv.FACTORY_REPO).toBe("bj29");
 
     // 2. Non-mutating run (factory-status-report@1 has mutating: false)
     const readOnlySpec = queueRun(
@@ -4028,5 +4296,94 @@ sh -c 'sleep 5 & wait'
     expect(capturedReadOnlyEnv.SSH_AUTH_SOCK).toBeUndefined();
     expect(capturedReadOnlyEnv.GITHUB_TOKEN).toBeUndefined();
     expect(capturedReadOnlyEnv.ANTHROPIC_API_KEY).toBeUndefined();
+  });
+
+  describe("defaultReconcileVerifiedHandoffTicket (#1498)", () => {
+    const STATE_ARGS = [
+      "state",
+      "WM-1498",
+      "In Review",
+      "--add",
+      "ai:needs-review",
+      "--remove",
+      "ai:in-progress",
+      "--remove",
+      "ai:agent-ready",
+    ];
+
+    test("moves a Todo handoff to In Review and fixes its dispatch labels", () => {
+      const calls = [];
+      const result = defaultReconcileVerifiedHandoffTicket({
+        repo: "factory",
+        ticket: "WM-1498",
+        fetchTicket: () => ({ state: { name: "Todo" } }),
+        runCli: (args, options) => (calls.push({ args, options }), ""),
+      });
+
+      expect(result).toBe(true);
+      expect(calls).toEqual([
+        { args: STATE_ARGS, options: { repo: "factory" } },
+      ]);
+    });
+
+    test("does not mutate a ticket the agent already put In Review", () => {
+      const calls = [];
+      const result = defaultReconcileVerifiedHandoffTicket({
+        repo: "factory",
+        ticket: "WM-1498",
+        fetchTicket: () => ({ state: { name: "In Review" } }),
+        runCli: (args) => (calls.push(args), ""),
+      });
+
+      expect(result).toBe(false);
+      expect(calls).toHaveLength(0);
+    });
+
+    test("moves an In Progress handoff to In Review", () => {
+      const calls = [];
+      const result = defaultReconcileVerifiedHandoffTicket({
+        repo: "factory",
+        ticket: "WM-1498",
+        fetchTicket: () => ({ state: { name: "In Progress" } }),
+        runCli: (args, options) => (calls.push({ args, options }), ""),
+      });
+
+      expect(result).toBe(true);
+      expect(calls).toEqual([
+        { args: STATE_ARGS, options: { repo: "factory" } },
+      ]);
+    });
+
+    for (const state of ["Blocked", "Done", "Canceled"]) {
+      test(`leaves a ticket a human moved to ${state} mid-run untouched`, () => {
+        const calls = [];
+        const result = defaultReconcileVerifiedHandoffTicket({
+          repo: "factory",
+          ticket: "WM-1498",
+          fetchTicket: () => ({ state: { name: state } }),
+          runCli: (args) => (calls.push(args), ""),
+        });
+
+        expect(result).toBe(false);
+        expect(calls).toHaveLength(0);
+      });
+    }
+
+    test("a false mayMutateClaimedTicket guard makes no reconciliation calls", () => {
+      const calls = [];
+      const result = defaultReconcileVerifiedHandoffTicket({
+        repo: "factory",
+        ticket: "WM-1498",
+        mayMutate: () => false,
+        fetchTicket: () => {
+          calls.push("fetch");
+          return { state: { name: "Todo" } };
+        },
+        runCli: (args) => (calls.push(args), ""),
+      });
+
+      expect(result).toBe(false);
+      expect(calls).toHaveLength(0);
+    });
   });
 });

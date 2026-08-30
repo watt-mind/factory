@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  DISPATCH_IDENTITY_ENV,
   PROVIDER_CREDENTIAL_ENV,
   PUSH_CREDENTIAL_ENV,
   RUNTIME_IDENTITY_ENV,
@@ -28,6 +29,7 @@ describe("shared child environment", () => {
       [
         ...PUSH_CREDENTIAL_ENV,
         ...PROVIDER_CREDENTIAL_ENV,
+        ...DISPATCH_IDENTITY_ENV,
         "ANTIGRAVITY_AGENT",
         "ANTIGRAVITY_LS_ADDRESS",
         "CURSOR_API_ENDPOINT",
@@ -46,6 +48,9 @@ describe("shared child environment", () => {
       for (const key of [...PUSH_CREDENTIAL_ENV, ...PROVIDER_CREDENTIAL_ENV]) {
         expect(output[key]).toBeUndefined();
       }
+      for (const key of DISPATCH_IDENTITY_ENV) {
+        expect(output[key]).toBe(`supplied-${key}`);
+      }
     }
     expect(keySet(outputs.command)).toEqual(
       [...keySet(outputs.claude), ...RUNTIME_IDENTITY_ENV].sort(),
@@ -57,6 +62,36 @@ describe("shared child environment", () => {
       keySet(outputs.claude).filter((key) => key !== "CURSOR_API_ENDPOINT"),
     );
     expect(keySet(outputs.pi)).toEqual(keySet(outputs.claude));
+  });
+
+  test("dispatch identity survives extraStrip and FACTORY_ prefix stripping", () => {
+    const supplied = Object.fromEntries(
+      [...DISPATCH_IDENTITY_ENV, "FACTORY_OTHER"].map((key) => [
+        key,
+        `supplied-${key}`,
+      ]),
+    );
+    const output = safeChildEnvironment(
+      supplied,
+      { mutating: false },
+      {
+        factoryRoot: "/factory-root",
+        extraStrip: [...DISPATCH_IDENTITY_ENV],
+        stripPrefixes: ["FACTORY_"],
+      },
+    );
+    for (const key of DISPATCH_IDENTITY_ENV) {
+      expect(output[key]).toBe(`supplied-${key}`);
+    }
+    expect(output.FACTORY_OTHER).toBeUndefined();
+    expect(output.FACTORY_ROOT).toBeUndefined();
+
+    const absent = safeChildEnvironment({}, false, {
+      stripPrefixes: ["FACTORY_"],
+    });
+    for (const key of DISPATCH_IDENTITY_ENV) {
+      expect(absent[key]).toBeUndefined();
+    }
   });
 
   test("does not grant push credentials to non-boolean mutating values", () => {

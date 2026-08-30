@@ -22,6 +22,7 @@ import {
   policyMergeBatchSize,
   wrapLinearReads,
   worktreeDispatchAutoEligibility,
+  worktreeDispatchGate,
   worktreeMergeFixEligibility,
 } from "./planner.mjs";
 import {
@@ -1301,6 +1302,65 @@ describe("planEvent worktree gate (WM-108)", () => {
         ticket_claim_escalation: true,
       });
       expect(viewerRepos).toEqual(["tiered"]);
+
+      const closedEscalation = {
+        failedRunId: base.runId,
+        continuationRunId: continuation.runId,
+        rootRunId: base.runId,
+        repo: "tiered",
+        ticket: "WM-694",
+        projectionState: "applied",
+        failedRunArtifact: { prNumber: 1499 },
+      };
+      for (const state of ["MERGED", "CLOSED"]) {
+        expect(
+          worktreeDispatchGate(continuation.input, {
+            ...dispatch,
+            escalatedContinuation: closedEscalation,
+            fetchPullRequest: ({ pr }) => ({ state, number: pr }),
+          }),
+        ).toEqual({ decision: "noop", reason: "ticket_escalation_pr_closed" });
+      }
+      // A transient forge failure is reported under its own reason so the
+      // worker can requeue it instead of refusing the continuation for good.
+      const unreadable = worktreeDispatchAutoEligibility(continuation.input, {
+        ...dispatch,
+        escalatedContinuation: closedEscalation,
+        fetchPullRequest: () => {
+          throw new Error("github_read_failed: x");
+        },
+      });
+      expect(unreadable.ok).toBe(false);
+      expect(unreadable.refusal).toMatchObject({
+        reason: "ticket_escalation_pr_read_failed",
+        decision: "noop",
+        detail: "github_read_failed: x",
+      });
+      expect(unreadable.evidence.checks.ticket_escalation_pr_read).toBe(
+        undefined,
+      );
+      expect(
+        worktreeDispatchAutoEligibility(continuation.input, {
+          ...dispatch,
+          escalatedContinuation: closedEscalation,
+          fetchPullRequest: () => ({ state: "OPEN" }),
+        }).ok,
+      ).toBe(true);
+      let readPullRequest = false;
+      expect(
+        worktreeDispatchAutoEligibility(continuation.input, {
+          ...dispatch,
+          escalatedContinuation: {
+            ...closedEscalation,
+            failedRunArtifact: {},
+          },
+          fetchPullRequest: () => {
+            readPullRequest = true;
+            return { state: "CLOSED" };
+          },
+        }).ok,
+      ).toBe(true);
+      expect(readPullRequest).toBe(false);
 
       assigned.assignee = { id: "someone-else", name: "Other" };
       const foreign = worktreeDispatchAutoEligibility(continuation.input, {

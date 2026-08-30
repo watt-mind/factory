@@ -2049,8 +2049,28 @@ describe("handoff verification helpers (WM-718)", () => {
     expect(isBunTestFile("a/b.mjs")).toBe(false);
   });
 
+  test("composeHandoffVerification only qualifies the PR draft state when it is known", () => {
+    const base = { verification: null, repoVerify: null, webBuild: null };
+    expect(
+      composeHandoffVerification({ ...base, prNumber: 7, prDraft: true }),
+    ).toContain("- PR: #7 (draft)");
+    expect(
+      composeHandoffVerification({ ...base, prNumber: 7, prDraft: false }),
+    ).toContain("- PR: #7 (ready)");
+    // pr_base_unreadable never sets prDraft; the worker drafts the PR after
+    // this comment is composed, so "ready" would be a lie.
+    expect(composeHandoffVerification({ ...base, prNumber: 7 })).toContain(
+      "- PR: #7 (draft state unknown)",
+    );
+    expect(
+      composeHandoffVerification({ ...base, prNumber: 7, prDraft: null }),
+    ).toContain("- PR: #7 (draft state unknown)");
+  });
+
   test("composeHandoffVerification is built from observation; the agent's claim is only agent-reported", () => {
     const body = composeHandoffVerification({
+      prNumber: 42,
+      prDraft: true,
       verification: {
         source: "ticket",
         command: "bun test",
@@ -2081,7 +2101,8 @@ describe("handoff verification helpers (WM-718)", () => {
     });
     const lines = body.split("\n");
     expect(lines[0]).toBe("## Handoff verification (worker-observed)");
-    expect(lines[1]).toBe("- Verification: `bun test` — exit 1 (FAIL)");
+    expect(lines[1]).toBe("- PR: #42 (draft)");
+    expect(lines[2]).toBe("- Verification: `bun test` — exit 1 (FAIL)");
     expect(body).toContain("(fail) x > y");
     expect(body).toContain(
       "- Repo verify: `bun test event-runtime/lib` — exit 0 (pass)",

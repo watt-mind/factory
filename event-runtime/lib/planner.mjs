@@ -1151,6 +1151,7 @@ export function worktreeDispatchAutoEligibility(
   {
     fetchTicket = fetchTicketDefault,
     fetchViewer = fetchViewerDefault,
+    fetchPullRequest = fetchPullRequestDefault,
     fetchInFlight = fetchInFlightDefault,
     countLeases = (repoName) => liveWorkerLeases(repoName).length,
     hasTicketLease = (repoName, ticket) =>
@@ -1311,6 +1312,30 @@ export function worktreeDispatchAutoEligibility(
       "noop",
       `tier_escalation_check_failed:${failedEscalationCheck}`,
     );
+  }
+
+  const failedPrNumber = escalatedContinuation?.failedRunArtifact?.prNumber;
+  if (canResumeEscalation && Number.isInteger(failedPrNumber)) {
+    let failedPullRequest;
+    try {
+      failedPullRequest = fetchPullRequest({
+        github: repo.github,
+        pr: failedPrNumber,
+      });
+    } catch (err) {
+      return refusal(
+        "ticket_escalation_pr_read_failed",
+        evidence,
+        "noop",
+        err?.message ?? String(err),
+      );
+    }
+    evidence.escalatedPullRequest = failedPullRequest;
+    evidence.checks.ticket_escalation_pr_read = true;
+    if (["MERGED", "CLOSED"].includes(failedPullRequest?.state)) {
+      return refusal("ticket_escalation_pr_closed", evidence);
+    }
+    evidence.checks.ticket_escalation_pr_active = true;
   }
 
   // A lease-loss retry is the one exception to the ordinary Todo/unassigned

@@ -941,6 +941,30 @@ export function tierEscalationEligibility(spec, reasonCode) {
   return { eligible, rootRunId };
 }
 
+/**
+ * Layer the RunSpec-derived dispatch identity onto the adapter environment.
+ *
+ * Any `dispatch@<version>` agent qualifies. Identity keys are only emitted when
+ * the spec actually carries the value, so a spec without a ticket or repo never
+ * exports the literal string "null". Non-dispatch agents get `env` unchanged.
+ */
+export function dispatchIdentityEnv({
+  spec,
+  env = {},
+  runId = null,
+  ticketId = null,
+  repoName = null,
+}) {
+  if (!String(spec?.agent ?? "").startsWith("dispatch@")) return env;
+  const identity = {};
+  if (runId != null && runId !== "") identity.FACTORY_RUN_ID = String(runId);
+  if (ticketId != null && ticketId !== "")
+    identity.FACTORY_TICKET = String(ticketId);
+  if (repoName != null && repoName !== "")
+    identity.FACTORY_REPO = String(repoName);
+  return { ...env, ...identity };
+}
+
 function maxEnvironmentRetries(spec) {
   return Number.isInteger(spec.maxEnvironmentRetries) &&
     spec.maxEnvironmentRetries >= 0
@@ -1174,6 +1198,20 @@ function originatingEvent(db, runId) {
   );
 }
 
+function resultArtifactForRun(db, runId) {
+  const row = db
+    .query(
+      `SELECT result_json FROM results WHERE run_id = ? ORDER BY attempt DESC LIMIT 1`,
+    )
+    .get(runId);
+  if (!row?.result_json) return null;
+  try {
+    return JSON.parse(row.result_json)?.artifact ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function tierEscalationForContinuation(db, runId) {
   const row = db
     .query(`SELECT * FROM tier_escalations WHERE continuation_run_id = ?`)
@@ -1188,6 +1226,7 @@ function tierEscalationForContinuation(db, runId) {
     workspacePath: row.workspace_path,
     sourceWorkspacePath: row.source_workspace_path,
     projectionState: row.projection_state,
+    failedRunArtifact: resultArtifactForRun(db, row.failed_run_id),
   };
 }
 
@@ -2338,6 +2377,63 @@ export function defaultReturnHandoffTicket({
   }
 }
 
+/**
+ * A verified PR_OPEN must not remain dispatchable when its agent omitted the
+ * final ticket projection. This is deliberately a small, best-effort repair:
+ * the caller owns the claim/fencing guard, while this helper re-reads the
+ * ticket so an agent that already put it In Review receives no duplicate
+ * mutation. Like defaultUnclaimTicket / defaultBlockBaselineTicket it only
+ * touches a ticket still in the dispatch states (Todo, In Progress): a human
+ * who moved it to Blocked / Done / Canceled mid-run keeps that decision, and
+ * a closed GitHub issue is never reopened by the worker.
+ */
+const RECONCILABLE_HANDOFF_STATES = new Set(["Todo", "In Progress"]);
+
+export function defaultReconcileVerifiedHandoffTicket({
+  ticket,
+  repo,
+  fetchTicket,
+  runCli = runLinearCli,
+  mayMutate = () => true,
+}) {
+  try {
+    if (!mayMutate()) return false;
+    const cur =
+      typeof fetchTicket === "function"
+        ? fetchTicket(ticket, repo)
+        : defaultFetchTicket(ticket, repo);
+    if (!cur) return false;
+    const stateName = cur.state?.name;
+    if (stateName === "In Review") return false;
+    if (!RECONCILABLE_HANDOFF_STATES.has(stateName)) {
+      console.error(
+        `[worker] not reconciling verified handoff ticket ${ticket}: state is ${JSON.stringify(stateName ?? null)}, left as-is`,
+      );
+      return false;
+    }
+    runCli(
+      [
+        "state",
+        ticket,
+        "In Review",
+        "--add",
+        "ai:needs-review",
+        "--remove",
+        "ai:in-progress",
+        "--remove",
+        "ai:agent-ready",
+      ],
+      { repo },
+    );
+    return true;
+  } catch (err) {
+    console.error(
+      `[worker] failed to reconcile verified handoff ticket ${ticket}: ${String(err?.message ?? err)}`,
+    );
+    return false;
+  }
+}
+
 /** Convert an already-opened PR to draft and say why, so nobody merges a red handoff. */
 function defaultHoldPullRequest({ github, prNumber, body }) {
   if (!github || !Number.isInteger(prNumber)) return false;
@@ -2365,7 +2461,7 @@ function defaultFetchHandoffPullRequest({ github, prNumber }) {
     throw new Error("handoff PR requires github and a numeric PR number");
   }
   return loadForge().prView(github, prNumber, {
-    fields: ["baseRefName"],
+    fields: ["baseRefName", "isDraft"],
     timeout: workerSubprocessTimeoutMs(),
   });
 }
@@ -2406,6 +2502,7 @@ function assertHandoffPullRequestBase({ handoff, base, fetchPullRequest }) {
   const actual =
     typeof pr?.baseRefName === "string" ? pr.baseRefName.trim() : "";
   handoff.prBase = { expected, actual: actual || null };
+  handoff.prDraft = pr?.isDraft === true;
   if (!actual) {
     throw new ContractViolation(
       [`pr_base_unreadable: PR #${prNumber} has no baseRefName`],
@@ -2603,6 +2700,7 @@ export async function executeClaimed(
       // handoff comment, PR hold, and ticket return.
       commentTicket: () => true,
       returnHandoffTicket: () => true,
+      reconcileVerifiedHandoffTicket: () => false,
       holdPullRequest: () => false,
     };
   } else if (dispatchStubSelected) {
@@ -2615,6 +2713,7 @@ export async function executeClaimed(
     dispatchOpts = {
       commentTicket: () => true,
       returnHandoffTicket: () => true,
+      reconcileVerifiedHandoffTicket: () => false,
       holdPullRequest: () => false,
       ...dispatchOpts,
     };
@@ -2651,6 +2750,13 @@ export async function executeClaimed(
     dispatchOpts?.returnHandoffTicket ??
     ((args) =>
       defaultReturnHandoffTicket({
+        ...args,
+        fetchTicket: dispatchOpts?.fetchTicket,
+      }));
+  const reconcileVerifiedHandoffTicketFn =
+    dispatchOpts?.reconcileVerifiedHandoffTicket ??
+    ((args) =>
+      defaultReconcileVerifiedHandoffTicket({
         ...args,
         fetchTicket: dispatchOpts?.fetchTicket,
       }));
@@ -3256,10 +3362,30 @@ export async function executeClaimed(
         ) {
           return deferTransientGate("owned_paths_unknown");
         }
+        // A forge read failure while checking the failed run's PR is as
+        // transient as a Linear read failure: requeue with backoff instead
+        // of permanently killing the escalation continuation. Only when the
+        // retries are exhausted does the continuation refuse terminally, and
+        // then the tier_escalations row must leave 'applied' with it.
+        if (
+          gate === "dispatch" &&
+          gateRefusal.reason === "ticket_escalation_pr_read_failed" &&
+          worktreeHandoff
+        ) {
+          const deferred = deferTransientGate(gateRefusal.reason);
+          if (deferred?.terminalState === "REFUSED") {
+            refuseTierEscalationClaim(db, worktreeHandoff, gateRefusal.reason);
+          }
+          return deferred;
+        }
         releaseClaimLock(lockFile);
         if (
           gate === "dispatch" &&
-          gateRefusal.reason === "ticket_claimed_by_other" &&
+          [
+            "ticket_claimed_by_other",
+            "ticket_escalation_pr_closed",
+            "ticket_escalation_pr_read_failed",
+          ].includes(gateRefusal.reason) &&
           worktreeHandoff
         ) {
           refuseTierEscalationClaim(db, worktreeHandoff, gateRefusal.reason);
@@ -3579,6 +3705,16 @@ export async function executeClaimed(
 
     let outcome;
     try {
+      // Dispatch identity comes from the immutable RunSpec, never the ambient
+      // worker environment. The adapter's child-environment builder preserves
+      // these values while continuing to strip credentials it does not need.
+      const adapterEnv = dispatchIdentityEnv({
+        spec,
+        env,
+        runId,
+        ticketId,
+        repoName,
+      });
       outcome = await adapter.execute({
         spec,
         def,
@@ -3588,7 +3724,7 @@ export async function executeClaimed(
           spec,
           maxRunMinutes: policyMaxRunMinutes(policyRoot),
         }),
-        env,
+        env: adapterEnv,
         onTrace,
         onUsage,
         resume: created.resume ?? null,
@@ -4133,11 +4269,27 @@ export async function executeClaimed(
     // agent-reported. Best effort — a comment failure never fails a verified
     // run.
     if (verified.handoff && mayMutateClaimedTicket()) {
+      let stateReconciled = false;
+      try {
+        stateReconciled =
+          reconcileVerifiedHandoffTicketFn({
+            repo: repoName,
+            ticket: ticketId,
+            mayMutate: mayMutateClaimedTicket,
+          }) === true;
+      } catch (err) {
+        console.error(
+          `[worker] failed to reconcile verified handoff ticket ${ticketId}: ${String(err?.message ?? err)}`,
+        );
+      }
       try {
         commentTicketFn({
           repo: repoName,
           ticket: ticketId,
-          body: composeHandoffVerification(verified.handoff),
+          body: [
+            composeHandoffVerification(verified.handoff),
+            ...(stateReconciled ? ["- state reconciled by worker"] : []),
+          ].join("\n"),
           handoff: verified.handoff,
         });
       } catch {

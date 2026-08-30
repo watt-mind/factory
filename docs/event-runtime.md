@@ -368,6 +368,16 @@ capabilities. Adapter support is a contract, not a hopeful command-line flag.
 Adapters execute only the registry-verified `promptText` snapshot and refuse
 definitions without it; `promptPath` is provenance, not executable prompt source.
 
+**Dispatch agent environment.** Any `dispatch@<version>` run receives up to
+three RunSpec-derived identity variables: `FACTORY_RUN_ID` (the dispatch run
+ID), `FACTORY_TICKET` (the ticket identifier), and `FACTORY_REPO` (the
+configured repository name). A key is omitted when the spec does not carry the
+value; it is never exported as the string `"null"`. They are set by the worker
+rather than inherited from its ambient environment, so a dispatch prompt can
+bind its PR handoff to the run that owns the worktree. The shared child-env
+builder re-asserts these keys after its credential and prefix strip loops, so
+an adapter's `extraStrip` or `stripPrefixes: ["FACTORY_"]` cannot remove them.
+
 **Artifact-view sidecar (`agents/<name>.view.json`, WM-454).** An optional
 `factory.artifact-view/v1` document beside the definition annotates pointers
 into the output schema with rendering hints ([event-runtime-artifact-views.md](event-runtime-artifact-views.md)
