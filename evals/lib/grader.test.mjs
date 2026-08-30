@@ -10,6 +10,7 @@ import {
   trackProcess,
   trackProcessGroupForPid,
 } from "../../event-runtime/lib/test-helpers-process.mjs";
+import { loadAdjustedTimeout } from "../../event-runtime/lib/test-helpers-timing.mjs";
 
 registerTestProcessCleanup(import.meta.url);
 
@@ -110,9 +111,8 @@ function realFixtureCall({ detached }) {
     setInterval(() => {}, 10000);
   `;
 
-  let child;
   const spawnFn = (_command, _args, options) => {
-    child = spawn(process.execPath, ["-e", fixture], {
+    const child = spawn(process.execPath, ["-e", fixture], {
       ...options,
       detached,
     });
@@ -138,13 +138,13 @@ function realFixtureCall({ detached }) {
       };
 
   return {
-    child,
     pidFile,
     pending: callClaude({
       prompt: "grade this",
       model: "test-model",
       cwd: process.cwd(),
-      timeoutMs: 1000,
+      // Two Bun cold starts race this deadline on a loaded runner.
+      timeoutMs: loadAdjustedTimeout(5000),
       budgetUsd: 1,
       killGraceMs: 100,
       killFn,
@@ -191,7 +191,7 @@ describe("grader process termination", () => {
       expect(outcome.timedOut).toBe(true);
       await waitForProcessExit(grandchildPid);
     },
-    { timeout: 10_000 },
+    { timeout: loadAdjustedTimeout(20_000) },
   );
 
   test(
@@ -206,6 +206,6 @@ describe("grader process termination", () => {
       expect(outcome.timedOut).toBe(true);
       expect(processExists(grandchildPid)).toBe(true);
     },
-    { timeout: 10_000 },
+    { timeout: loadAdjustedTimeout(20_000) },
   );
 });
