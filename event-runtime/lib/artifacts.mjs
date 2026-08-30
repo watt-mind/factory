@@ -485,8 +485,11 @@ export function artifactInventory(storeRoot) {
   for (const sha256 of readdirSync(storeRoot).filter((name) =>
     HEX64.test(name),
   )) {
-    const stat = statSync(path.join(storeRoot, sha256));
-    if (!stat.isFile()) continue;
+    // A concurrent prune may remove the entry between readdir and stat.
+    const stat = statSync(path.join(storeRoot, sha256), {
+      throwIfNoEntry: false,
+    });
+    if (!stat?.isFile()) continue;
     inventory.push({
       sha256,
       sizeBytes: stat.size,
@@ -575,16 +578,17 @@ export function listArtifactPage(
  * `tempBytes`; they are not content-addressed artifacts or orphan candidates.
  */
 export function storeStats(db, storeRoot, { now = Date.now() } = {}) {
+  const referenced = referencedHashes(db);
   if (!existsSync(storeRoot))
     return {
       files: 0,
       bytes: 0,
       orphans: 0,
       orphanBytes: 0,
+      invalidResults: referenced.invalid,
       tempFiles: 0,
       tempBytes: 0,
     };
-  const referenced = referencedHashes(db);
   let files = 0;
   let bytes = 0;
   let orphans = 0;
@@ -616,6 +620,7 @@ export function storeStats(db, storeRoot, { now = Date.now() } = {}) {
     bytes,
     orphans,
     orphanBytes,
+    invalidResults: referenced.invalid,
     tempFiles,
     tempBytes,
     at: new Date(now).toISOString(),

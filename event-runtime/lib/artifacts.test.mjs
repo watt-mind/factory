@@ -59,6 +59,26 @@ describe("artifactPath", () => {
   });
 });
 
+describe("artifactInventory", () => {
+  test("skips an entry that vanishes after the directory is read", () => {
+    const storeRoot = tmp("evrt-inventory-store-");
+    mkdirSync(storeRoot, { recursive: true });
+    const survivingHash = "a".repeat(64);
+    const vanishedHash = "b".repeat(64);
+    writeFileSync(path.join(storeRoot, survivingHash), "survives");
+    // A dangling symlink gives statSync the same ENOENT result as a blob that
+    // a concurrent prune removed after readdirSync returned its name.
+    symlinkSync(
+      path.join(storeRoot, "no-longer-present"),
+      path.join(storeRoot, vanishedHash),
+    );
+
+    expect(artifactInventory(storeRoot).map(({ sha256 }) => sha256)).toEqual([
+      survivingHash,
+    ]);
+  });
+});
+
 describe("findArtifact", () => {
   test("finds artifact when present and returns null when absent or malformed", () => {
     const { storeRoot, hash } = makeStore("test-content");
@@ -636,6 +656,10 @@ describe("store maintenance: referencedHashes, storeStats, pruneArtifacts, pinRu
     const hashes = referencedHashes(db);
     expect(hashes.has(referencedHash)).toBe(true);
     expect(hashes.invalid).toBe(1);
+    expect(storeStats(db, storeRoot)).toMatchObject({
+      orphans: 1,
+      invalidResults: 1,
+    });
     expect(artifactReferenceIndex(db).get(referencedHash)).toEqual([
       expect.objectContaining({ runId: "run_valid", kind: "transcript" }),
     ]);

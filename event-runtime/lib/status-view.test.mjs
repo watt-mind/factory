@@ -82,6 +82,26 @@ describe("statusView outbox counts", () => {
       "GitHub webhook intake is stale (last admission was 86400000ms ago; threshold 43200000ms)",
     );
   });
+
+  test("exposes unparsable result counts with artifact statistics", () => {
+    const db = openDb(":memory:");
+    const view = statusView(db, { schedules: [] }, Date.now(), {
+      getStoreStats: () => ({
+        files: 1,
+        bytes: 1024,
+        orphans: 1,
+        orphanBytes: 1024,
+        invalidResults: 2,
+      }),
+    });
+
+    expect(view.artifacts).toMatchObject({
+      orphans: 1,
+      orphanBytes: 1024,
+      invalidResults: 2,
+    });
+    db.close();
+  });
 });
 
 function seedGithubEvent(db, admittedAt) {

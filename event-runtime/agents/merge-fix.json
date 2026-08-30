@@ -20,7 +20,7 @@
   "limits": { "timeout_seconds": 2700, "attempts": 1, "budget_usd": 15 },
   "mutating": true,
   "pins": {
-    "agents/merge-fix.md": "sha256:abfdf9be239b636bcf825b62b422754ccf6c5b905222d08761dcc40655fe886e",
+    "agents/merge-fix.md": "sha256:42015b3e724645bfa3d445ce85818c692db631595462af4f48ad68267d197ad7",
     "schemas/merge-fix.input.json": "sha256:332e1c82296541678b8f95b49f65fba63a87219315dbfc6b9556cd4d3df9ecbd",
     "schemas/merge-fix.output.json": "sha256:636ab0de7337d7358e47fd95c52abc80eedbebb618a968f9546b67da07150ff3"
   }

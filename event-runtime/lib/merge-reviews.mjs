@@ -46,9 +46,12 @@ const PR_LIST_FIELDS = [
   "body",
   "mergeable",
   "mergeStateStatus",
+  "labels",
 ];
-const PR_VIEW_FIELDS = [...PR_LIST_FIELDS, "labels"];
+const PR_VIEW_FIELDS = PR_LIST_FIELDS;
 const REBASE_FINDING = "rebase_onto_base";
+const FULL_VERIFICATION_CHECK = "Full verification";
+const REBASE_SKIP_FRESH_CI_DEFAULT_MINUTES = 60;
 const IN_FLIGHT_RUN_STATES = [
   "PROPOSED",
   "APPROVED",
@@ -57,7 +60,7 @@ const IN_FLIGHT_RUN_STATES = [
   "RUNNING",
   "VERIFYING",
 ];
-const GITHUB_HOLD_LABELS = new Set(["escalated", "ai:escalated"]);
+const GITHUB_HOLD_LABELS = new Set(["escalated", "ai:escalated", "ai:landing"]);
 
 function iso(now = Date.now()) {
   return new Date(now).toISOString();
@@ -262,7 +265,63 @@ function normalizeListedPr(raw, baseSha, github) {
       typeof raw.mergeStateStatus === "string"
         ? raw.mergeStateStatus.toUpperCase()
         : "",
+    labels: githubLabelsOf(raw),
   };
+}
+
+function rebaseSkipFreshCiMinutes(env = process.env) {
+  const value = Number(env.FACTORY_MERGE_REBASE_SKIP_FRESH_CI_MINUTES);
+  return Number.isInteger(value) && value > 0
+    ? value
+    : REBASE_SKIP_FRESH_CI_DEFAULT_MINUTES;
+}
+
+function fullVerificationRebaseSkip({ forge, github, pr, now }) {
+  if (pr.labels?.some((label) => label.toLowerCase() === "ai:landing")) {
+    return "ai_landing";
+  }
+  if (pr.mergeable === "CONFLICTING") return null;
+
+  let checkRuns;
+  try {
+    checkRuns = JSON.parse(
+      forge.apiRaw(
+        `repos/${github}/commits/${pr.headSha}/check-runs?per_page=100`,
+      ),
+    )?.check_runs;
+  } catch {
+    // Conservative: if the check-run state cannot be read, assume CI may be
+    // in flight rather than rebasing over a potentially live landing run.
+    return "ci_in_flight";
+  }
+  if (!Array.isArray(checkRuns)) return null;
+
+  const fullVerification = checkRuns.filter(
+    (check) => check?.name === FULL_VERIFICATION_CHECK,
+  );
+  if (
+    fullVerification.some((check) => {
+      const status = String(check?.status ?? "").toUpperCase();
+      return status === "IN_PROGRESS" || status === "QUEUED";
+    })
+  ) {
+    return "ci_in_flight";
+  }
+
+  const freshAfter = now - rebaseSkipFreshCiMinutes() * 60 * 1000;
+  if (
+    fullVerification.some((check) => {
+      const completedAt = Date.parse(check?.completed_at ?? "");
+      return (
+        String(check?.conclusion ?? "").toUpperCase() === "SUCCESS" &&
+        Number.isFinite(completedAt) &&
+        completedAt >= freshAfter
+      );
+    })
+  ) {
+    return "ci_fresh";
+  }
+  return null;
 }
 
 function classifySelectedPr(raw, { base, baseSha, github }) {
@@ -521,6 +580,7 @@ export function enumerateMergeScan({
       targets,
       forceReview: true,
       listedCount: targets.length,
+      now,
     });
   }
 
@@ -562,10 +622,12 @@ function assemble({
   wrongBase = [],
   forceReview,
   listedCount,
+  now,
 }) {
   const reviews = [];
   const mergeHits = [];
   const fix = [];
+  const rebaseSkipped = [];
   for (const pr of targets) {
     const hit = lookupMergeReview(db, {
       github,
@@ -586,6 +648,11 @@ function assemble({
       continue;
     }
     if (isBehindOrConflicting(pr, hit)) {
+      const skip = fullVerificationRebaseSkip({ forge, github, pr, now });
+      if (skip) {
+        rebaseSkipped.push({ pr: pr.number, reason: skip });
+        continue;
+      }
       if (
         hasInFlightAgent(db, "merge-fix@1", {
           github,
@@ -637,6 +704,7 @@ function assemble({
       wrongBase,
       forceReview,
       planRequests,
+      rebaseSkipped,
     }),
   };
   const noopReason = noopReasonOf({
@@ -660,6 +728,7 @@ function summaryFor({
   wrongBase = [],
   forceReview,
   planRequests = [],
+  rebaseSkipped = [],
 }) {
   const bits = [];
   if (forceReview) bits.push(`selected scan of ${listedCount} PR(s)`);
@@ -673,6 +742,9 @@ function summaryFor({
   }
   bits.push(`${reviews.length} review(s) to run`);
   if (fix.length > 0) bits.push(`${fix.length} rebase fix(es)`);
+  for (const { pr, reason } of rebaseSkipped) {
+    bits.push(`rebase_skipped:${reason} #${pr}`);
+  }
   if (planRequests.length > 0) bits.push("MERGE hits queued for planning");
   if (plan.length > 0) bits.push(`lowest MERGE candidate is #${plan[0].pr}`);
   return bits.join("; ") + ".";

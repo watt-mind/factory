@@ -105,8 +105,13 @@ function renderArtifacts(
       initialFilters.search,
     ],
     {
-      artifacts: seed.items ?? ITEMS,
-      nextBefore: seed.nextBefore,
+      pages: [
+        {
+          artifacts: seed.items ?? ITEMS,
+          nextBefore: seed.nextBefore,
+        },
+      ],
+      pageParams: [undefined],
     },
   );
   if (seed.agents)
@@ -239,20 +244,24 @@ describe("Artifacts inventory (WM-207)", () => {
   });
 
   test("filters by kind and orphan status facets", async () => {
+    globalThis.fetch = mock(
+      async () =>
+        new Response(JSON.stringify({ artifacts: ITEMS }), { status: 200 }),
+    ) as unknown as typeof fetch;
     const view = renderArtifacts();
     await waitFor(() => expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy());
 
     fireEvent.change(view.getByRole("combobox", { name: "Artifact kind" }), {
       target: { value: "report" },
     });
-    expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy();
+    await waitFor(() => expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy());
     expect(view.queryByText("bbbbbbbbbbbb")).toBeNull();
 
     fireEvent.change(view.getByRole("combobox", { name: "Artifact kind" }), {
       target: { value: "" },
     });
     fireEvent.click(view.getByRole("tab", { name: "Orphans 28" }));
-    expect(view.getByText("cccccccccccc")).toBeTruthy();
+    await waitFor(() => expect(view.getByText("cccccccccccc")).toBeTruthy());
     expect(view.queryByText("aaaaaaaaaaaa")).toBeNull();
   });
 
@@ -381,28 +390,64 @@ describe("Artifacts inventory (WM-207)", () => {
     expect(view.queryByText(/run_trace/)).toBeNull();
   });
 
-  test("warns when the server has more artifacts than this page", async () => {
+  test("reports metadata query failures instead of claiming the artifact was pruned", async () => {
+    window.location.hash = `#/artifacts/${"a".repeat(64)}`;
+    globalThis.fetch = mock(
+      async () => new Response("unavailable", { status: 503 }),
+    ) as unknown as typeof fetch;
+
+    const view = renderArtifacts(undefined, undefined, { items: [] });
+
+    await view.findByText(/could not load artifact metadata/i);
+    expect(view.getByText(/cannot reach the control api/i)).toBeTruthy();
+    expect(view.getByRole("button", { name: "Retry" })).toBeTruthy();
+    expect(view.queryByText(/may have been pruned/i)).toBeNull();
+  });
+
+  test("appends an older artifact page and resets to the first page for a new filter", async () => {
+    const older = {
+      ...ITEMS[2],
+      sha256: "d".repeat(64),
+      references: [
+        {
+          runId: "run_older",
+          kind: "report",
+          agent: "reporter@1",
+          state: "COMPLETED",
+          createdAt: "2026-01-01T03:04:05.000Z",
+        },
+      ],
+    };
+    const requests: string[] = [];
+    globalThis.fetch = mock(async (input: string | URL | Request) => {
+      const url = String(input);
+      requests.push(url);
+      const params = new URL(url, "http://localhost").searchParams;
+      const artifacts = params.get("before") ? [older] : ITEMS;
+      return new Response(
+        JSON.stringify({
+          artifacts,
+          nextBefore: params.get("before") ? null : "older-artifacts",
+        }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+
     const view = renderArtifacts(undefined, undefined, {
       nextBefore: "older-artifacts",
     });
-    await waitFor(() => expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy());
+    await view.findByText("aaaaaaaaaaaa");
+    fireEvent.click(view.getByRole("button", { name: "Load older artifacts" }));
+    await view.findByText("dddddddddddd");
+    expect(requests).toContain("/api/artifacts?before=older-artifacts");
 
-    expect(view.getByRole("status").textContent).toMatch(
-      /showing 3 artifacts.*more.*narrow the filter/i,
+    fireEvent.change(view.getByRole("combobox", { name: "Artifact kind" }), {
+      target: { value: "report" },
+    });
+    await waitFor(() =>
+      expect(requests).toContain("/api/artifacts?kind=report"),
     );
-  });
-
-  test("the more-available notice counts the visible rows", async () => {
-    const view = renderArtifacts(
-      undefined,
-      { kind: "report", orphan: null, search: "" },
-      { nextBefore: "older-artifacts" },
-    );
-    await waitFor(() => expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy());
-
-    expect(view.getByRole("status").textContent).toMatch(
-      /showing 1 artifacts?.*more/i,
-    );
+    expect(view.queryByText("dddddddddddd")).toBeNull();
   });
 
   test("opens a deep-linked inspector with formatted preview, actions, search, and bidirectional references", async () => {

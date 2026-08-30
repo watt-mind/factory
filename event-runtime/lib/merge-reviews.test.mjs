@@ -120,13 +120,21 @@ function insertOpenProposal(db, { id, agent, pr, headSha, github = GITHUB }) {
   ).run(id, `evt-${id}`, runId, spec, `idem-${id}`, now);
 }
 
-function forgeWith(prs, { baseSha = BASE } = {}) {
+function forgeWith(prs, { baseSha = BASE, api = {} } = {}) {
   return memoryForge({
     repos: { [GITHUB]: { prs } },
     api: {
       [`repos/${GITHUB}/git/ref/heads/develop`]: baseSha,
+      ...api,
     },
   });
+}
+
+function checkRunsFor(headSha, checkRuns) {
+  return {
+    [`repos/${GITHUB}/commits/${headSha}/check-runs?per_page=100`]:
+      JSON.stringify({ check_runs: checkRuns }),
+  };
 }
 
 function planItem(prNumber = 12) {
@@ -600,13 +608,16 @@ describe("merge-scan enumerator (WM-936)", () => {
     const result = enumerateMergeScan({
       input: { repo: "factory" },
       db,
-      forge: forgeWith([
-        pr({
-          number: 877,
-          headRefName: "feat/gh-877",
-          mergeStateStatus: "BEHIND",
-        }),
-      ]),
+      forge: forgeWith(
+        [
+          pr({
+            number: 877,
+            headRefName: "feat/gh-877",
+            mergeStateStatus: "BEHIND",
+          }),
+        ],
+        { api: checkRunsFor(HEAD, []) },
+      ),
       repos,
     });
 
@@ -639,7 +650,7 @@ describe("merge-scan enumerator (WM-936)", () => {
           pr({ number: 8, headRefName: "feat/WM-8" }),
           pr({ number: 20, headRefName: "feat/WM-20" }),
         ],
-        { baseSha: BASE2 },
+        { baseSha: BASE2, api: checkRunsFor(HEAD, []) },
       ),
       repos,
     });
@@ -697,14 +708,17 @@ describe("merge-scan enumerator (WM-936)", () => {
     const result = enumerateMergeScan({
       input: { repo: "factory" },
       db,
-      forge: forgeWith([
-        pr({
-          number: 9,
-          headRefName: "feat/WM-9",
-          mergeable: "MERGEABLE",
-          mergeStateStatus: "BEHIND",
-        }),
-      ]),
+      forge: forgeWith(
+        [
+          pr({
+            number: 9,
+            headRefName: "feat/WM-9",
+            mergeable: "MERGEABLE",
+            mergeStateStatus: "BEHIND",
+          }),
+        ],
+        { api: checkRunsFor(HEAD, []) },
+      ),
       repos,
     });
     expect(result.artifact.reviews).toEqual([]);
@@ -715,7 +729,235 @@ describe("merge-scan enumerator (WM-936)", () => {
     expect(result.artifact.recommendation).toBe("FIX");
   });
 
+  test("behind-base hit skips rebase while Full verification is running", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    const result = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith(
+        [
+          pr({
+            number: 9,
+            headRefName: "feat/WM-9",
+            mergeStateStatus: "BEHIND",
+          }),
+        ],
+        {
+          api: checkRunsFor(HEAD, [
+            { name: "Full verification", status: "in_progress" },
+          ]),
+        },
+      ),
+      repos,
+    });
+    expect(result.artifact.fix).toEqual([]);
+    expect(result.artifact.summary).toContain("rebase_skipped:ci_in_flight #9");
+  });
+
+  test("behind-base hit skips rebase when check runs cannot be read", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    // No check-runs API seeded: reading the check-run state throws, and the
+    // scan must conservatively treat CI as possibly in flight.
+    const result = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith([
+        pr({
+          number: 9,
+          headRefName: "feat/WM-9",
+          mergeStateStatus: "BEHIND",
+        }),
+      ]),
+      repos,
+    });
+    expect(result.artifact.fix).toEqual([]);
+    expect(result.artifact.summary).toContain("rebase_skipped:ci_in_flight #9");
+  });
+
+  test("behind-base hit skips rebase after a fresh successful Full verification", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-30T12:00:00Z");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    const result = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith(
+        [
+          pr({
+            number: 9,
+            headRefName: "feat/WM-9",
+            mergeStateStatus: "BEHIND",
+          }),
+        ],
+        {
+          api: checkRunsFor(HEAD, [
+            {
+              name: "Full verification",
+              status: "completed",
+              conclusion: "success",
+              completed_at: "2026-08-30T11:30:00Z",
+            },
+          ]),
+        },
+      ),
+      repos,
+      now,
+    });
+    expect(result.artifact.fix).toEqual([]);
+    expect(result.artifact.summary).toContain("rebase_skipped:ci_fresh #9");
+  });
+
+  test("behind-base hit rebases after stale Full verification", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-30T12:00:00Z");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    const result = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith(
+        [
+          pr({
+            number: 9,
+            headRefName: "feat/WM-9",
+            mergeStateStatus: "BEHIND",
+          }),
+        ],
+        {
+          api: checkRunsFor(HEAD, [
+            {
+              name: "Full verification",
+              status: "completed",
+              conclusion: "success",
+              completed_at: "2026-08-30T10:59:00Z",
+            },
+          ]),
+        },
+      ),
+      repos,
+      now,
+    });
+    expect(result.artifact.fix).toEqual([rebaseItem(9)]);
+  });
+
+  test("fresh-CI window accepts a positive environment override", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-30T12:00:00Z");
+    const previous = process.env.FACTORY_MERGE_REBASE_SKIP_FRESH_CI_MINUTES;
+    process.env.FACTORY_MERGE_REBASE_SKIP_FRESH_CI_MINUTES = "120";
+    try {
+      upsertMergeReview(db, {
+        github: GITHUB,
+        pr: 9,
+        headSha: HEAD,
+        baseSha: BASE,
+        verdict: "MERGE",
+        plan: planItem(9),
+      });
+      const result = enumerateMergeScan({
+        input: { repo: "factory" },
+        db,
+        forge: forgeWith(
+          [
+            pr({
+              number: 9,
+              headRefName: "feat/WM-9",
+              mergeStateStatus: "BEHIND",
+            }),
+          ],
+          {
+            api: checkRunsFor(HEAD, [
+              {
+                name: "Full verification",
+                status: "completed",
+                conclusion: "success",
+                completed_at: "2026-08-30T10:30:00Z",
+              },
+            ]),
+          },
+        ),
+        repos,
+        now,
+      });
+      expect(result.artifact.fix).toEqual([]);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.FACTORY_MERGE_REBASE_SKIP_FRESH_CI_MINUTES;
+      } else {
+        process.env.FACTORY_MERGE_REBASE_SKIP_FRESH_CI_MINUTES = previous;
+      }
+    }
+  });
+
   test("CONFLICTING hit emits rebase without a review", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "FIX",
+      fix: rebaseItem(9, { round: 2 }),
+    });
+    const result = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith(
+        [
+          pr({
+            number: 9,
+            headRefName: "feat/WM-9",
+            mergeable: "CONFLICTING",
+            mergeStateStatus: "DIRTY",
+          }),
+        ],
+        {
+          api: checkRunsFor(HEAD, [
+            { name: "Full verification", status: "in_progress" },
+          ]),
+        },
+      ),
+      repos,
+    });
+    expect(result.artifact.reviews).toEqual([]);
+    expect(result.artifact.fix[0]).toMatchObject({
+      finding: "rebase_onto_base",
+      round: 2,
+      mechanical: true,
+      withinOwnedPaths: true,
+    });
+  });
+
+  test("CONFLICTING hit still emits rebase while Full verification runs", () => {
     const db = openDb(":memory:");
     upsertMergeReview(db, {
       github: GITHUB,
@@ -738,13 +980,34 @@ describe("merge-scan enumerator (WM-936)", () => {
       ]),
       repos,
     });
-    expect(result.artifact.reviews).toEqual([]);
-    expect(result.artifact.fix[0]).toMatchObject({
-      finding: "rebase_onto_base",
-      round: 2,
-      mechanical: true,
-      withinOwnedPaths: true,
+    expect(result.artifact.fix).toHaveLength(1);
+  });
+
+  test("ai:landing PR never emits a rebase item", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
     });
+    const result = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith([
+        pr({
+          number: 9,
+          headRefName: "feat/WM-9",
+          mergeStateStatus: "BEHIND",
+          labels: [{ name: "ai:landing" }],
+        }),
+      ]),
+      repos,
+    });
+    expect(result.artifact.fix).toEqual([]);
+    expect(result.artifact.summary).toContain("rebase_skipped:ai_landing #9");
   });
 
   test("in-flight merge-review at the same head emits no duplicate item", () => {

@@ -301,6 +301,7 @@ export function statusView(
       bytes: store.bytes,
       orphans: store.orphans,
       orphanBytes: store.orphanBytes,
+      invalidResults: store.invalidResults ?? 0,
       ...(store.at ? { at: store.at } : {}),
     },
     // `approve.before` hook decisions in the trailing 24h, by hook id

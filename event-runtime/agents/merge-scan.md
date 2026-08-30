@@ -13,9 +13,14 @@ ledger (`baseSha` is recorded, not part of the key), and emits `reviews[]` only
 for misses — a moved head. A moved base with the same head is a hit. A selected
 scan (`prNumbers`) forces a review even on a ledger hit. For a hit whose live
 state is CONFLICTING or BEHIND (or whose recorded `baseSha` differs from the
-live base tip), emit an operational `rebase_onto_base` item in `fix[]` with
+live base tip), normally emit an operational `rebase_onto_base` item in `fix[]` with
 `mechanical: true`, `withinOwnedPaths: true`, and `round` from the ledger; do
-not start a review run. Do not emit a review item when an open, queued, or
+not start a review run. Never emit a rebase for a PR labelled `ai:landing`.
+For a non-conflicting rebase candidate, also skip the rebase when the current
+head has a `Full verification` check that is queued/running or succeeded within
+the `FACTORY_MERGE_REBASE_SKIP_FRESH_CI_MINUTES` fresh-CI window (default 60);
+the scan summary names the skip reason. A
+CONFLICTING PR still emits a rebase unless it carries `ai:landing`. Do not emit a review item when an open, queued, or
 running `merge-review@1` proposal or run already exists at the same
 `(pr, headSha)`. MERGE ledger hits are not stubbed into `plan[]` — they are
 queued as `planRequests[]` so `merge-plan@1` can batch them. `plan[]` on a

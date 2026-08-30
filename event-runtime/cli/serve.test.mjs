@@ -859,6 +859,39 @@ export default async function start() {
     db.close();
   });
 
+  test("tick warns when unparsable results hold artifact GC", async () => {
+    const { tick } = await import("../cli.mjs");
+    const { loadRegistry } = await import("../lib/registry.mjs");
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-18T14:02:11.000Z");
+    const storeRoot = tmpDir("evrt-gc-held-store-");
+    const orphan = path.join(storeRoot, "c".repeat(64));
+    writeFileSync(orphan, "orphan bytes");
+    const stale = new Date(now - 8 * 24 * 60 * 60 * 1000);
+    utimesSync(orphan, stale, stale);
+    db.query(
+      `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+       VALUES ('invalid-result', 1, '{not json', 'sha256:x', '{}', '{}', ?)`,
+    ).run(new Date(now).toISOString());
+    const logs = [];
+
+    await tick({
+      db,
+      registry: loadRegistry(),
+      now,
+      policyVersion: "git:test",
+      lastPrune: 0,
+      storeRoot,
+      log: (line) => logs.push(line),
+    });
+
+    expect(logs).toContain(
+      "artifacts: GC held — 1 unparsable results row(s); 1 orphan(s) retained",
+    );
+    expect(existsSync(orphan)).toBe(true);
+    db.close();
+  });
+
   test("tick sweeps stale notify-log markers on the hourly GC cadence", async () => {
     const { tick, PRUNE_INTERVAL_MS } = await import("../cli.mjs");
     const { loadRegistry } = await import("../lib/registry.mjs");

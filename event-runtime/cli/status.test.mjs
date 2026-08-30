@@ -192,6 +192,21 @@ describe("status and doctor commands", () => {
     ).toBe(true);
   });
 
+  test("reports an artifact GC hold beside unreferenced artifacts", async () => {
+    const { getAnomalyLines } = await import("../cli.mjs");
+    const lines = getAnomalyLines({
+      artifacts: {
+        orphans: 3,
+        orphanBytes: 2048,
+        invalidResults: 2,
+      },
+    });
+
+    expect(lines).toContain(
+      "unreferenced artifacts: 3 (2048B) — GC held by 2 unparsable result row(s)",
+    );
+  });
+
   test(
     "doctor against a healthy live serve outputs anomalies none and exits 0",
     async () => {
