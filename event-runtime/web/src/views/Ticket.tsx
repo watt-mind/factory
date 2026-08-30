@@ -24,7 +24,6 @@ import {
   prHref,
   prNumbersIn,
   selectPrSource,
-  subjectJourney,
   TICKET_ID_PATTERN,
   overlayTrackerDetail,
   ticketIdsIn,
@@ -35,6 +34,7 @@ import {
   type TicketTrackerDetail,
   type TimelineItem,
 } from "../subjectJourney";
+import * as subjectJourneyModel from "../subjectJourney";
 import { MarkdownView } from "../components/RunTrace";
 import { SupplyStrip, type TicketSupply } from "../components/SupplyStrip";
 import {
@@ -1339,6 +1339,10 @@ const TERMINAL_STATES = new Set([
   "DEAD",
 ]);
 
+// The API caps collection pages at 200. A PR journey needs recent correlated
+// activity, not the entire event journal, so use that bounded newest-first page.
+const PR_JOURNEY_EVENT_LIMIT = 200;
+
 export function PullRequest({
   number,
   onNavigateTicket,
@@ -1352,8 +1356,8 @@ export function PullRequest({
       : null;
   const enabled = pr != null;
   const events = useQuery({
-    queryKey: ["events", "all"],
-    queryFn: () => api.events(),
+    queryKey: ["events", "pr-journey", pr, PR_JOURNEY_EVENT_LIMIT],
+    queryFn: () => api.events(undefined, { limit: PR_JOURNEY_EVENT_LIMIT }),
     enabled,
     ...refetchIntervals.fast,
   });
@@ -1394,11 +1398,11 @@ export function PullRequest({
             runs: runList,
           })
         : [],
-    [pr, events.data, proposals.data, runs.data],
+    [pr, events.dataUpdatedAt, proposals.dataUpdatedAt, runs.dataUpdatedAt],
   );
   const stateById = useMemo(
     () => new Map(runList.map((run) => [run.runId, run.state])),
-    [runs.data],
+    [runs.dataUpdatedAt],
   );
   const details = useQueries({
     queries: candidateIds.map((id) => ({
@@ -1414,12 +1418,52 @@ export function PullRequest({
     })),
   });
   const detailsReady = details.every((query) => query.data || query.isError);
+  // useQueries returns a new array on every render; data timestamps preserve a
+  // stable memo key while still invalidating when any run detail changes.
+  const detailDataKey = details.map((query) => query.dataUpdatedAt).join(",");
   const loadedRuns = useMemo(
     () =>
       details
         .map((query) => query.data)
         .filter((run): run is RunDetail => !!run) as unknown as JourneyRun[],
-    [details],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [candidateIds, detailDataKey],
+  );
+  // Keep these hooks above the loading and invalid-reference branches: React
+  // Query changes those branches as data arrives, but hook order must not.
+  const source = useMemo(
+    () =>
+      selectPrSource(pr ?? 0, {
+        events: eventList as unknown as JourneyEvent[],
+        proposals: proposalList as unknown as JourneyProposal[],
+        runs: loadedRuns,
+        inbox: (inbox.data?.items ?? []).filter((item) => !item.resolvedAt),
+        schedules: schedules.data?.schedules,
+      }),
+    // Query data references and the useQueries result are unstable across
+    // renders. These fetch-generation keys and the PR are the actual inputs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      pr,
+      events.dataUpdatedAt,
+      proposals.dataUpdatedAt,
+      detailDataKey,
+      inbox.dataUpdatedAt,
+      schedules.dataUpdatedAt,
+    ],
+  );
+  const journeyReady =
+    pr != null &&
+    !!events.data &&
+    !!proposals.data &&
+    !!runs.data &&
+    detailsReady;
+  const journey = useMemo(
+    () =>
+      journeyReady
+        ? subjectJourneyModel.subjectJourney("pr", String(pr), source)
+        : null,
+    [journeyReady, pr, source],
   );
 
   if (pr == null) {
@@ -1449,22 +1493,13 @@ export function PullRequest({
       </div>
     );
   }
-  if (!events.data || !proposals.data || !runs.data || !detailsReady) {
+  if (!journeyReady) {
     return (
       <div className="p-8 text-[13px] text-(--text-faint)">
         Loading PR #{pr} journey…
       </div>
     );
   }
-
-  const source = selectPrSource(pr, {
-    events: eventList as unknown as JourneyEvent[],
-    proposals: proposalList as unknown as JourneyProposal[],
-    runs: loadedRuns,
-    inbox: (inbox.data?.items ?? []).filter((item) => !item.resolvedAt),
-    schedules: schedules.data?.schedules,
-  });
-  const journey = subjectJourney("pr", String(pr), source);
   return (
     <JourneyLayout journey={journey} onNavigateTicket={onNavigateTicket} />
   );

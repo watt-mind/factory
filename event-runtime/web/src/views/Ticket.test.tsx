@@ -1,5 +1,5 @@
 import "../test-dom";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, jest, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   cleanup,
@@ -15,6 +15,7 @@ import type {
   TicketJourneySource,
   TicketTrackerDetail,
 } from "../subjectJourney";
+import * as subjectJourneyModel from "../subjectJourney";
 
 const realFetch = globalThis.fetch;
 
@@ -186,6 +187,7 @@ function renderTicket(
 afterEach(() => {
   cleanup();
   globalThis.fetch = realFetch;
+  jest.restoreAllMocks();
 });
 
 describe("Ticket journey view", () => {
@@ -616,6 +618,27 @@ describe("PR journey view", () => {
     ).toBeTruthy();
     // The failed dispatch is context, not one of the PR's own runs.
     expect(view.getByText("2", { selector: "div" })).toBeTruthy();
+  });
+
+  test("derives an unchanged PR journey only once across a rerender", async () => {
+    const data = prData();
+    globalThis.fetch = prFetch(data);
+    const deriveJourney = jest.spyOn(subjectJourneyModel, "subjectJourney");
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, refetchInterval: false } },
+    });
+    const view = render(
+      <QueryClientProvider client={client}>
+        <PullRequest number="541" />
+      </QueryClientProvider>,
+    );
+    await view.findByRole("heading", { name: "#541" });
+    view.rerender(
+      <QueryClientProvider client={client}>
+        <PullRequest number="541" />
+      </QueryClientProvider>,
+    );
+    expect(deriveJourney).toHaveBeenCalledTimes(1);
   });
 
   test("an unknown PR reads as no runtime activity, and a bad reference as an inline error", async () => {
