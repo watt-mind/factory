@@ -307,6 +307,45 @@ test("runWatchdogCheck detects unreachable API as critical", async () => {
   expect(result.issues.some((i) => i.code === "API_DOWN")).toBe(true);
 });
 
+test("runWatchdogCheck reports control API 401 instead of an empty fleet", async () => {
+  const token = "watchdog-control-token";
+  const authorization = [];
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === "/") return new Response("web");
+      authorization.push(req.headers.get("authorization"));
+      if (url.pathname === "/health") return Response.json({ ok: true });
+      return Response.json({ error: "unauthorized" }, { status: 401 });
+    },
+  });
+  const previous = process.env.FACTORY_CONTROL_API_TOKEN;
+  process.env.FACTORY_CONTROL_API_TOKEN = token;
+
+  try {
+    const result = await runWatchdogCheck({
+      port: server.port,
+      webPort: server.port,
+      checkShadowFleet: false,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.issues).toContainEqual(
+      expect.objectContaining({
+        severity: "CRITICAL",
+        code: "API_UNAUTHORIZED",
+      }),
+    );
+    expect(authorization).toEqual(
+      Array(authorization.length).fill(`Bearer ${token}`),
+    );
+  } finally {
+    if (previous === undefined) delete process.env.FACTORY_CONTROL_API_TOKEN;
+    else process.env.FACTORY_CONTROL_API_TOKEN = previous;
+    server.stop(true);
+  }
+});
+
 /* ---------------- idle watchdog (#1063) ---------------- */
 
 const openProposal = (over = {}) => ({

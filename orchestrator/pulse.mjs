@@ -15,7 +15,11 @@ import { homedir } from "node:os";
 import { ROOT } from "../lib/schedule.mjs";
 import { loadControlPlane } from "../lib/control-plane/index.mjs";
 import { loadForge } from "../lib/forge/index.mjs";
-import { fetchRecentSandboxRefusals } from "./watchdog.mjs";
+import {
+  controlApi,
+  controlApiFailureCode,
+  fetchRecentSandboxRefusals,
+} from "./watchdog.mjs";
 
 const c = {
   bold: (s) => `\x1b[1m${s}\x1b[0m`,
@@ -98,19 +102,15 @@ export async function gatherPulse({
 
   // 1. API Health & Status
   try {
-    const healthRes = await fetch(`http://${host}:${port}/health`, {
-      signal: AbortSignal.timeout(3000),
-    });
-    if (healthRes.ok) {
-      const healthJson = await healthRes.json();
-      pulse.stack.api = {
-        ok: true,
-        policyVersion: healthJson.policyVersion,
-        env: healthJson.env?.name,
-      };
-    }
+    const healthJson = await controlApi("/health", { host, port });
+    pulse.stack.api = {
+      ok: true,
+      policyVersion: healthJson.policyVersion,
+      env: healthJson.env?.name,
+    };
   } catch (err) {
-    pulse.stack.api = { ok: false, error: err.message };
+    const code = controlApiFailureCode(err);
+    pulse.stack.api = { ok: false, code, error: `${code}: ${err.message}` };
   }
 
   // 2. Web UI Health
@@ -139,15 +139,9 @@ export async function gatherPulse({
     try {
       const [statusRes, workersRes, runsRes, sandboxRefusals] =
         await Promise.all([
-          fetch(`http://${host}:${port}/status`, {
-            signal: AbortSignal.timeout(3000),
-          }).then((r) => r.json()),
-          fetch(`http://${host}:${port}/workers`, {
-            signal: AbortSignal.timeout(3000),
-          }).then((r) => r.json()),
-          fetch(`http://${host}:${port}/runs?state=RUNNING`, {
-            signal: AbortSignal.timeout(3000),
-          }).then((r) => r.json()),
+          controlApi("/status", { host, port }),
+          controlApi("/workers", { host, port }),
+          controlApi("/runs?state=RUNNING", { host, port }),
           fetchRecentSandboxRefusals({ host, port }),
         ]);
 
@@ -185,8 +179,17 @@ export async function gatherPulse({
         }));
       }
       pulse.runs.sandboxRefusals = sandboxRefusals;
-    } catch {
-      // partial fetch failure handled gracefully
+    } catch (err) {
+      const code = controlApiFailureCode(err);
+      // A failed protected read (auth, control lock, timeout, 5xx) is not an
+      // idle factory. Surface it to the operator instead of leaving the
+      // default empty workers/runs values, keeping what /health told us.
+      pulse.stack.api = {
+        ...pulse.stack.api,
+        ok: false,
+        code,
+        error: `${code}: ${err.message}`,
+      };
     }
   }
 

@@ -90,6 +90,58 @@ export const SANDBOX_REFUSAL_MAX_PAGES = 2;
 export const SANDBOX_REFUSAL_MAX_RUNS = 50;
 export const SANDBOX_REFUSAL_DETAIL_CONCURRENCY = 4;
 export const SANDBOX_REFUSAL_BUDGET_MS = 5_000;
+export const CONTROL_API_TIMEOUT_MS = 3_000;
+
+/**
+ * Read a control-API endpoint with the loopback bearer and a bounded timeout.
+ *
+ * Health checks, pulse, and watchdog must share this rather than treating an
+ * auth response as an empty status payload. Keep the token out of errors: this
+ * function is called from reporting paths whose output reaches operators.
+ */
+export async function controlApi(
+  pathname,
+  {
+    host = "127.0.0.1",
+    port = 7381,
+    method = "GET",
+    body = null,
+    timeoutMs = CONTROL_API_TIMEOUT_MS,
+    fetchFn = fetch,
+  } = {},
+) {
+  const headers = {};
+  const token = process.env.FACTORY_CONTROL_API_TOKEN ?? "";
+  if (token) headers.authorization = `Bearer ${token}`;
+  if (body) headers["content-type"] = "application/json";
+
+  const res = await fetchFn(`http://${host}:${port}${pathname}`, {
+    method,
+    headers,
+    body,
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) {
+    const err = new Error(`${method} ${pathname} → HTTP ${res.status}`);
+    err.status = res.status;
+    err.code =
+      res.status === 401
+        ? "API_UNAUTHORIZED"
+        : res.status === 503
+          ? "API_LOCKED"
+          : "API_ERROR";
+    throw err;
+  }
+  return res.json();
+}
+
+export function controlApiFailureCode(err) {
+  return err?.code === "API_UNAUTHORIZED" || err?.status === 401
+    ? "API_UNAUTHORIZED"
+    : err?.code === "API_LOCKED" || err?.status === 503
+      ? "API_LOCKED"
+      : "API_ERROR";
+}
 
 /**
  * Read recent scan refusals caused by a missing host sandbox capability.
@@ -127,9 +179,11 @@ export async function fetchRecentSandboxRefusals({
     url.searchParams.set("to", new Date(now + 1_000).toISOString());
     url.searchParams.set("limit", String(maxRuns));
     if (before) url.searchParams.set("before", before);
-    const body = await fetchFn(url, {
-      signal: AbortSignal.timeout(3000),
-    }).then((response) => response.json());
+    const body = await controlApi(`${url.pathname}${url.search}`, {
+      host,
+      port,
+      fetchFn,
+    });
     for (const run of body?.runs ?? []) {
       if (!isScanLoopAgent(run.agent)) continue;
       runs.push(run);
@@ -143,10 +197,11 @@ export async function fetchRecentSandboxRefusals({
   const refusals = [];
   let next = 0;
   const readOne = async (run) => {
-    const detail = await fetchFn(
-      `http://${host}:${port}/runs/${encodeURIComponent(run.runId)}`,
-      { signal: AbortSignal.timeout(3000) },
-    ).then((response) => response.json());
+    const detail = await controlApi(`/runs/${encodeURIComponent(run.runId)}`, {
+      host,
+      port,
+      fetchFn,
+    });
     const refusal = [...(detail?.lifecycle ?? [])]
       .reverse()
       .find(
@@ -196,23 +251,14 @@ export async function runWatchdogCheck({
 
   // 1. Control API Health
   try {
-    const res = await fetch(`http://${host}:${port}/health`, {
-      signal: AbortSignal.timeout(3000),
-    });
-    if (res.ok) {
-      metrics.apiOk = true;
-    } else {
-      issues.push({
-        severity: "CRITICAL",
-        code: "API_ERROR",
-        message: `Control API returned HTTP ${res.status}`,
-      });
-    }
+    await controlApi("/health", { host, port });
+    metrics.apiOk = true;
   } catch (err) {
+    const code = controlApiFailureCode(err);
     issues.push({
       severity: "CRITICAL",
-      code: "API_DOWN",
-      message: `Control API on :${port} unreachable: ${err.message}`,
+      code: code === "API_ERROR" && !err?.status ? "API_DOWN" : code,
+      message: `Control API on :${port} unavailable: ${err.message}`,
     });
   }
 
@@ -239,15 +285,9 @@ export async function runWatchdogCheck({
   try {
     const [statusRes, workersRes, runningRes, sandboxRefusals] =
       await Promise.all([
-        fetch(`http://${host}:${port}/status`, {
-          signal: AbortSignal.timeout(3000),
-        }).then((r) => r.json()),
-        fetch(`http://${host}:${port}/workers`, {
-          signal: AbortSignal.timeout(3000),
-        }).then((r) => r.json()),
-        fetch(`http://${host}:${port}/runs?state=RUNNING`, {
-          signal: AbortSignal.timeout(3000),
-        }).then((r) => r.json()),
+        controlApi("/status", { host, port }),
+        controlApi("/workers", { host, port }),
+        controlApi("/runs?state=RUNNING", { host, port }),
         fetchRecentSandboxRefusals({ host, port }),
       ]);
 
@@ -328,9 +368,16 @@ export async function runWatchdogCheck({
       }
     }
   } catch (err) {
+    const code = controlApiFailureCode(err);
     issues.push({
-      severity: "WARNING",
-      code: "STATUS_FETCH_ERROR",
+      severity:
+        code === "API_UNAUTHORIZED" || code === "API_LOCKED"
+          ? "CRITICAL"
+          : "WARNING",
+      code:
+        code === "API_UNAUTHORIZED" || code === "API_LOCKED"
+          ? code
+          : "STATUS_FETCH_ERROR",
       message: `Failed fetching status details: ${err.message}`,
     });
   }
@@ -857,26 +904,6 @@ export async function runIdleWatchdogTick({
 
 /* --- default (live) observations and effects ---------------------------- */
 
-const controlApiToken = () => process.env.FACTORY_CONTROL_API_TOKEN ?? "";
-
-async function controlApi(
-  pathname,
-  { host, port, method = "GET", body = null, timeoutMs = 8000 } = {},
-) {
-  const headers = {};
-  const token = controlApiToken();
-  if (token) headers.authorization = `Bearer ${token}`;
-  if (body) headers["content-type"] = "application/json";
-  const res = await fetch(`http://${host}:${port}${pathname}`, {
-    method,
-    headers,
-    body,
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!res.ok) throw new Error(`${method} ${pathname} → HTTP ${res.status}`);
-  return res.json();
-}
-
 /**
  * Live dependencies for `runIdleWatchdogTick`.
  *
@@ -891,7 +918,8 @@ export function liveIdleWatchdogDeps({
   stateFile = path.join(STATE_DIR, "idle-watchdog.json"),
   logFile = path.join(homedir(), ".factory", "logs", "idle-watchdog.log"),
 } = {}) {
-  const api = (pathname, opts) => controlApi(pathname, { host, port, ...opts });
+  const api = (pathname, opts) =>
+    controlApi(pathname, { host, port, timeoutMs: 8000, ...opts });
   return {
     repo,
     serveOk: async () => {
