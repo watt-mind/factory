@@ -32,6 +32,7 @@ import { harnessGitignoreIsCurrent } from "../lib/factory-gitignore.mjs";
 import {
   normalizeToolchain,
   preflightToolchain,
+  reposRoot,
 } from "../event-runtime/lib/repos.mjs";
 import {
   CHAIN_AUTO_APPROVAL_EVENT_TYPES,
@@ -320,10 +321,13 @@ function forbiddenAllowedEventTypes(root) {
   }
 }
 
-/** Diagnose the instance policy through the runtime's authoritative loader. */
-export function chainAutoApprovalPolicyDiagnostic({
-  root = factoryRoot(),
-} = {}) {
+/**
+ * Diagnose the instance policy through the runtime's authoritative loader.
+ * Defaults to `reposRoot()` (FACTORY_REPOS_ROOT || FACTORY_ROOT) — the same
+ * resolution `loadChainAutoApprovalPolicy()` uses in serve — so the doctor
+ * validates the config/policy.yaml the runtime actually reads.
+ */
+export function chainAutoApprovalPolicyDiagnostic({ root = reposRoot() } = {}) {
   const policy = loadChainAutoApprovalPolicy({ root });
   const label = "chain auto-approval policy";
   if (policy.reason === null) {
@@ -485,7 +489,7 @@ if (import.meta.main) {
   }
 
   {
-    const diagnostic = chainAutoApprovalPolicyDiagnostic({ root: ROOT });
+    const diagnostic = chainAutoApprovalPolicyDiagnostic();
     check(diagnostic.ok, diagnostic.label, diagnostic.detail, diagnostic.fix);
   }
 
