@@ -2,12 +2,11 @@ import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-proposals
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { hashJson } from "./canonical.mjs";
+import { canonicalJson, hashJson } from "./canonical.mjs";
 import { openDb } from "./db.mjs";
 import { admitEvent } from "./intake.mjs";
 import { lifecycleOf, runState } from "./lifecycle.mjs";
 import { planEvent } from "./planner.mjs";
-import { canonicalJson, hashJson } from "./canonical.mjs";
 import { computeDefHash } from "./receipts.mjs";
 import {
   ambiguousOpenProposalRuns,
