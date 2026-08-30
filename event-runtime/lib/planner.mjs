@@ -74,6 +74,7 @@ import { validate } from "./schema.mjs";
 import { inFlightRunsForAgent } from "./schedules.mjs";
 import { resolveInputRef } from "./workspace.mjs";
 import { computeDefHash } from "./receipts.mjs";
+import { HANDOFF_REASON_CODES } from "./verify.mjs";
 import {
   autoApproveChains,
   buildChainApprovalPolicy,
@@ -1466,6 +1467,10 @@ export function worktreeDispatchAutoEligibility(
     evidence.checks.ticket_escalation_workspace_pr_read = true;
     if (workspacePullRequest && workspacePullRequest.isDraft !== true) {
       evidence.checks.ticket_escalation_workspace_pr_ready = true;
+      if (HANDOFF_REASON_CODES.has(escalatedContinuation.failedRunReasonCode)) {
+        evidence.checks.ticket_escalation_workspace_pr_handoff_failed = true;
+        return refusal("ticket_pr_handoff_verification_failed", evidence);
+      }
       return refusal("ticket_pr_already_open", evidence);
     }
     evidence.checks.ticket_escalation_workspace_pr_ready = false;

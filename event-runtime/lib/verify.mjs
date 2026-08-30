@@ -1002,9 +1002,13 @@ export function composeHandoffVerification(handoff) {
   }
   const claim = handoff.agentReported;
   if (claim && (claim.command || claim.output)) {
-    lines.push(
-      `- agent-reported: \`${claim.command ?? "(no command)"}\` — ${claim.passed === true ? "pass" : "not passed"}${claim.output ? `, ${String(claim.output).split("\n").filter(Boolean).slice(-1)[0]}` : ""}`,
-    );
+    if (claim.recovered === true) {
+      lines.push("- agent-reported: recovered — not agent-claimed");
+    } else {
+      lines.push(
+        `- agent-reported: \`${claim.command ?? "(no command)"}\` — ${claim.passed === true ? "pass" : "not passed"}${claim.output ? `, ${String(claim.output).split("\n").filter(Boolean).slice(-1)[0]}` : ""}`,
+      );
+    }
   }
   return lines.filter((line) => line !== null).join("\n");
 }

@@ -3035,6 +3035,98 @@ sh -c 'sleep 5 & wait'
     db.close();
   });
 
+  test("tier escalation routes a handoff-verification PR to merge review", async () => {
+    const db = openDb(":memory:");
+    const failedRunId = "run_tier_verify_failed";
+    const continuationRunId = "run_tier_verify_continuation";
+    queueRun(
+      db,
+      makeSpec({
+        runId: continuationRunId,
+        agent: "dispatch@1",
+        input: {
+          repo: "factory",
+          ticket: "watt-mind/factory#1539",
+          modelTier: "strong",
+        },
+        workspace: { type: "worktree", checkoutDir: "repo" },
+        outputContract: "factory.dispatch-result/v1",
+        modelTier: "strong",
+      }),
+    );
+    db.query(
+      `INSERT INTO attempts (run_id, attempt, fencing_token, finished_at, terminal_state, reason_code)
+       VALUES (?, 1, 1, ?, 'FAILED', 'handoff_verification_failed')`,
+    ).run(failedRunId, new Date(T0).toISOString());
+    db.query(
+      `INSERT INTO tier_escalations
+         (root_run_id, failed_run_id, continuation_run_id, repo, ticket,
+          workspace_path, source_workspace_path, projection_state, created_at)
+       VALUES (?, ?, ?, 'factory', 'watt-mind/factory#1539', '/tmp/checkout', '/tmp/wrapper', 'applied', ?)`,
+    ).run(
+      failedRunId,
+      failedRunId,
+      continuationRunId,
+      new Date(T0).toISOString(),
+    );
+
+    const routed = [];
+    const summary = await runOnce(
+      db,
+      registry,
+      adapters,
+      opts({
+        dispatch: {
+          locksDir: tmpDir("tier-verify-pr-locks-"),
+          leasesDir: tmpDir("tier-verify-pr-leases-"),
+          fetchTicket: () => ({
+            identifier: "watt-mind/factory#1539",
+            state: { name: "In Progress" },
+            assignee: { id: "factory-owner", name: "Factory" },
+            labels: {
+              nodes: [{ name: "ai:in-progress" }, { name: "tier:strong" }],
+            },
+            description: "## Owned Paths\n- event-runtime/lib/worker.mjs\n",
+          }),
+          fetchViewer: () => ({ id: "factory-owner", name: "Factory" }),
+          findWorkspacePullRequest: () => ({
+            number: 1533,
+            state: "OPEN",
+            isDraft: false,
+          }),
+          fetchInFlight: () => [],
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          reconcileVerifiedHandoffTicket: (args) => (routed.push(args), true),
+        },
+      }),
+    );
+
+    expect(summary).toMatchObject({
+      runId: continuationRunId,
+      terminalState: "REFUSED",
+      reasonCode: "ticket_pr_handoff_verification_failed",
+    });
+    expect(routed).toEqual([
+      expect.objectContaining({
+        repo: "factory",
+        ticket: "watt-mind/factory#1539",
+        reason: "handoff_verification_failed",
+      }),
+    ]);
+    expect(
+      db
+        .query(
+          `SELECT projection_state, projection_error FROM tier_escalations WHERE continuation_run_id = ?`,
+        )
+        .get(continuationRunId),
+    ).toEqual({
+      projection_state: "refused",
+      projection_error: "ticket_pr_handoff_verification_failed",
+    });
+    db.close();
+  });
+
   test("tier escalation requeues a continuation when its failed run PR read fails transiently", async () => {
     const seedEscalation = (db, failedRunId, continuationRunId) => {
       queueRun(

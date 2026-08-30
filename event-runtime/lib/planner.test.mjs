@@ -1323,6 +1323,23 @@ describe("planEvent worktree gate (WM-108)", () => {
           }),
         }),
       ).toEqual({ decision: "noop", reason: "ticket_pr_already_open" });
+      expect(
+        worktreeDispatchGate(continuation.input, {
+          ...dispatch,
+          escalatedContinuation: {
+            ...workspaceEscalation,
+            failedRunReasonCode: "handoff_verification_failed",
+          },
+          findWorkspacePullRequest: () => ({
+            number: 1533,
+            state: "OPEN",
+            isDraft: false,
+          }),
+        }),
+      ).toEqual({
+        decision: "noop",
+        reason: "ticket_pr_handoff_verification_failed",
+      });
       for (const pullRequest of [
         { number: 1533, state: "OPEN", isDraft: true },
         null,

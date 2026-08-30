@@ -1213,6 +1213,20 @@ function resultArtifactForRun(db, runId) {
   }
 }
 
+function failureReasonCodeForRun(db, runId) {
+  return (
+    db
+      .query(
+        `SELECT reason_code AS reasonCode
+           FROM attempts
+          WHERE run_id = ? AND finished_at IS NOT NULL
+          ORDER BY attempt DESC
+          LIMIT 1`,
+      )
+      .get(runId)?.reasonCode ?? null
+  );
+}
+
 function tierEscalationForContinuation(db, runId) {
   const row = db
     .query(`SELECT * FROM tier_escalations WHERE continuation_run_id = ?`)
@@ -1228,6 +1242,7 @@ function tierEscalationForContinuation(db, runId) {
     sourceWorkspacePath: row.source_workspace_path,
     projectionState: row.projection_state,
     failedRunArtifact: resultArtifactForRun(db, row.failed_run_id),
+    failedRunReasonCode: failureReasonCodeForRun(db, row.failed_run_id),
   };
 }
 
@@ -3604,6 +3619,28 @@ export async function executeClaimed(
         ) {
           return deferTransientGate("owned_paths_unknown");
         }
+        // The retained PR was rejected by the worker's handoff gate. Route it
+        // to the review label/state rather than silently stranding it behind
+        // a refused continuation that cannot create a second PR.
+        if (
+          gate === "dispatch" &&
+          gateRefusal.reason === "ticket_pr_handoff_verification_failed" &&
+          worktreeHandoff &&
+          assertCurrentToken(db, runId, fencingToken)
+        ) {
+          try {
+            reconcileVerifiedHandoffTicketFn({
+              repo: repoName,
+              ticket: ticketId,
+              reason: worktreeHandoff.failedRunReasonCode,
+              prNumber:
+                gateResult.evidence?.escalatedWorkspacePullRequest?.number ??
+                null,
+            });
+          } catch {
+            /* The continuation refusal remains durable if projection fails. */
+          }
+        }
         // A forge read failure while checking the failed run's PR is as
         // transient as a Linear read failure: requeue with backoff instead
         // of permanently killing the escalation continuation. Only when the
@@ -3628,6 +3665,7 @@ export async function executeClaimed(
             "ticket_escalation_pr_closed",
             "ticket_escalation_pr_read_failed",
             "ticket_pr_already_open",
+            "ticket_pr_handoff_verification_failed",
           ].includes(gateRefusal.reason) &&
           worktreeHandoff
         ) {
@@ -4261,6 +4299,9 @@ export async function executeClaimed(
             });
           }
           verified.result.reasonCode = RECOVERED_RESULT_REASON;
+          if (verified.handoff?.agentReported) {
+            verified.handoff.agentReported.recovered = true;
+          }
           break verificationAttempt;
         } catch (recoveryError) {
           if (!(recoveryError instanceof ContractViolation))

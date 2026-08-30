@@ -2242,6 +2242,20 @@ describe("handoff verification helpers (WM-718)", () => {
     );
   });
 
+  test("composeHandoffVerification does not attribute a worker-recovered result to the agent", () => {
+    const body = composeHandoffVerification({
+      agentReported: {
+        command: "bun test event-runtime/lib/worker.test.mjs",
+        passed: true,
+        output: "worker recovery; normal handoff verification pending",
+        recovered: true,
+      },
+    });
+
+    expect(body).toContain("- agent-reported: recovered — not agent-claimed");
+    expect(body).not.toContain("agent-reported: `bun test");
+  });
+
   test("composeHandoffVerification reports fetched PR form evidence", () => {
     const body = composeHandoffVerification({
       verification: null,
