@@ -1,11 +1,21 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-planner-test-mjs";
 import { describe, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import * as nodeFs from "node:fs";
 import path from "node:path";
 import { canonicalJson, hashBytes, hashJson } from "./canonical.mjs";
-import { DEAD_LETTER_AFTER, DEFAULT_MAX_IN_FLIGHT } from "./config.mjs";
+import {
+  artifactsRoot,
+  DEAD_LETTER_AFTER,
+  DEFAULT_MAX_IN_FLIGHT,
+} from "./config.mjs";
 import { openDb } from "./db.mjs";
 import { admitEvent } from "./intake.mjs";
 import { createRun, lifecycleOf, runState, transition } from "./lifecycle.mjs";
@@ -3351,6 +3361,9 @@ function memoDoc(overrides = {}) {
 
 function acceptMemo(document) {
   const sha256 = memoDigest(document);
+  const store = artifactsRoot();
+  mkdirSync(store, { recursive: true });
+  writeFileSync(path.join(store, sha256), canonicalJson(document));
   return {
     sha256,
     result: { memos: [{ sha256, document }] },
@@ -3644,6 +3657,161 @@ describe("planEvent memoPin (WM-810)", () => {
       );
       const again = pinMemos(db, def, first, { now: NOW + 3600 * 1000 });
       expect(again.memoPin).toEqual(first.memoPin);
+    });
+  });
+
+  test("missing memo artifacts retire once and leave the surviving fold stable", () => {
+    withMemoConfig(() => {
+      const db = openDb(":memory:");
+      const missing = memoDoc({
+        subject: { type: "repo", id: "factory" },
+        kind: "decision",
+        precedentOnly: true,
+        body: "The missing decision.",
+        refs: { inboxItemId: "inbox_missing" },
+        provenance: {
+          runId: null,
+          agent: "runtime:inbox",
+          createdAt: "2026-08-18T14:02:11.000Z",
+        },
+      });
+      const surviving = memoDoc({
+        subject: { type: "repo", id: "factory" },
+        kind: "decision",
+        precedentOnly: true,
+        body: "The surviving decision.",
+        refs: { inboxItemId: "inbox_surviving" },
+        provenance: {
+          runId: null,
+          agent: "runtime:inbox",
+          createdAt: "2026-08-18T14:02:12.000Z",
+        },
+      });
+      const missingAccepted = acceptMemo(missing);
+      const survivingAccepted = acceptMemo(surviving);
+      registerMemos(db, null, missingAccepted.result, { now: NOW });
+      registerMemos(db, null, survivingAccepted.result, { now: NOW });
+      unlinkSync(path.join(artifactsRoot(), missingAccepted.sha256));
+
+      const retired = [];
+      const def = {
+        memos: [
+          {
+            subject: { type: "repo", id: "$.input.repo" },
+            kinds: ["decision"],
+            max: 10,
+          },
+        ],
+      };
+      const first = pinMemos(
+        db,
+        def,
+        { repo: "factory" },
+        { now: NOW, onArtifactMissing: (memo) => retired.push(memo) },
+      );
+      expect(first.memoPin.entries.map((entry) => entry.sha256)).toEqual([
+        survivingAccepted.sha256,
+      ]);
+      expect(retired).toEqual([
+        expect.objectContaining({
+          sha256: missingAccepted.sha256,
+          inboxItemId: "inbox_missing",
+          retiredReason: "artifact_missing",
+          subject: { type: "repo", id: "factory" },
+        }),
+      ]);
+      expect(
+        db
+          .query(
+            `SELECT retired_at, retired_reason FROM memos WHERE sha256 = ?`,
+          )
+          .get(missingAccepted.sha256),
+      ).toEqual({ retired_at: NOW, retired_reason: "artifact_missing" });
+
+      const second = pinMemos(db, def, first, {
+        now: NOW + 1000,
+        onArtifactMissing: (memo) => retired.push(memo),
+      });
+      expect(second.memoPin).toEqual(first.memoPin);
+      expect(retired).toHaveLength(1);
+      db.close();
+    });
+  });
+
+  test("artifact-missing logging waits for the planner transaction to commit", () => {
+    withMemoConfig(() => {
+      const db = openDb(":memory:");
+      const document = memoDoc({
+        subject: { type: "repo", id: "factory" },
+        kind: "decision",
+        precedentOnly: true,
+        body: "Retire only after commit.",
+        refs: { inboxItemId: "inbox_commit" },
+        provenance: {
+          runId: null,
+          agent: "runtime:inbox",
+          createdAt: "2026-08-18T14:02:13.000Z",
+        },
+      });
+      const accepted = acceptMemo(document);
+      registerMemos(db, null, accepted.result, { now: NOW });
+      unlinkSync(path.join(artifactsRoot(), accepted.sha256));
+
+      const memoRegistry = memoReaderRegistry();
+      const def = memoRegistry.agents.get("memo-reader@1");
+      memoRegistry.agents.set("memo-reader@1", {
+        ...def,
+        memos: [
+          {
+            subject: { type: "repo", id: "$.input.repo" },
+            kinds: ["decision"],
+            max: 10,
+          },
+        ],
+      });
+      memoRegistry.eventTypes["test.memo.requested"] = {
+        ...memoRegistry.eventTypes["test.memo.requested"],
+        idempotencyScope: ["invalid-after-memo-fold"],
+      };
+      const ref = admitMemo(db, memoRegistry, {
+        eventId: "memo-rollback-log",
+        correlationId: "memo-rollback-log",
+      });
+      const logs = [];
+      expect(() =>
+        planEvent(db, memoRegistry, ref, {
+          now: NOW,
+          policyVersion: "git:test",
+          log: (line) => logs.push(line),
+        }),
+      ).toThrow(/unknown idempotency scope/);
+      expect(logs).toEqual([]);
+      expect(
+        db
+          .query(`SELECT retired_at FROM memos WHERE sha256 = ?`)
+          .get(accepted.sha256).retired_at,
+      ).toBeNull();
+
+      memoRegistry.eventTypes["test.memo.requested"] = {
+        ...memoRegistry.eventTypes["test.memo.requested"],
+        idempotencyScope: ["inputHash"],
+      };
+      expect(
+        planEvent(db, memoRegistry, ref, {
+          now: NOW + 1,
+          policyVersion: "git:test",
+          log: (line) => logs.push(line),
+        }).decision,
+      ).toBe("run");
+      expect(logs).toEqual([
+        `memo retired artifact_missing sha256=${accepted.sha256} subject=repo:factory inbox_item_id=inbox_commit`,
+      ]);
+      expect(
+        db
+          .query(`SELECT retired_reason FROM memos WHERE sha256 = ?`)
+          .get(accepted.sha256).retired_reason,
+      ).toBe("artifact_missing");
+      db.close();
     });
   });
 

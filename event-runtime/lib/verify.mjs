@@ -108,6 +108,8 @@ export const HANDOFF_REASON_CODES = new Set([
   "handoff_pr_form_invalid",
 ]);
 export const HANDOFF_TAIL_LINES = 40;
+/** reasonCode the worker stamps on a result.json it synthesized itself (#1592). */
+export const RECOVERED_RESULT_REASON = "worker_recovered_missing_result";
 export const HANDOFF_WEB_SRC_PREFIX = "event-runtime/web/src/";
 export const HANDOFF_WEB_BUILD_DIR = "event-runtime/web";
 export const HANDOFF_WEB_BUILD_COMMAND = "bun run build";
@@ -1002,9 +1004,13 @@ export function composeHandoffVerification(handoff) {
   }
   const claim = handoff.agentReported;
   if (claim && (claim.command || claim.output)) {
-    lines.push(
-      `- agent-reported: \`${claim.command ?? "(no command)"}\` — ${claim.passed === true ? "pass" : "not passed"}${claim.output ? `, ${String(claim.output).split("\n").filter(Boolean).slice(-1)[0]}` : ""}`,
-    );
+    if (claim.recovered === true) {
+      lines.push("- agent-reported: recovered — not agent-claimed");
+    } else {
+      lines.push(
+        `- agent-reported: \`${claim.command ?? "(no command)"}\` — ${claim.passed === true ? "pass" : "not passed"}${claim.output ? `, ${String(claim.output).split("\n").filter(Boolean).slice(-1)[0]}` : ""}`,
+      );
+    }
   }
   return lines.filter((line) => line !== null).join("\n");
 }
@@ -1670,6 +1676,9 @@ function verifyCompleted({
             command: claim.command ?? null,
             passed: claim.passed === true,
             output: claim.output ?? null,
+            // Derived from the persisted artifact, never stamped after the
+            // fact: a worker-synthesized result.json is not an agent claim.
+            recovered: candidate.reasonCode === RECOVERED_RESULT_REASON,
           }
         : null,
       ticketVerifyCoveredByRepoVerify: ticketVerifyCoveredByRepoVerify(
