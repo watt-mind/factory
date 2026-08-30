@@ -86,6 +86,7 @@ import {
 } from "./workspace.mjs";
 import { createInboxItem } from "./inbox.mjs";
 import { persistMergeReviewFromResult } from "./merge-reviews.mjs";
+import { registerMemos } from "./memos.mjs";
 import { templateFor } from "./decision-templates.mjs";
 import {
   DETACHED_SPAWN_OPTIONS,
@@ -4662,6 +4663,19 @@ export async function executeClaimed(
         canonicalJson(result.verification),
         canonicalJson(receipt),
         iso(currentNow),
+      );
+      // The accepted result only carries `memos`/`usedMemos`; the pin lives on
+      // the spec, so pass it through or the NULL-verdict `memo_uses` rows for
+      // pinned-but-unmentioned memos (docs §8 trust signal) never land.
+      registerMemos(
+        db,
+        runId,
+        { ...result, memoPin: spec.input?.memoPin },
+        {
+          now: currentNow,
+          agent: spec.agent,
+          runState: "COMPLETED",
+        },
       );
       persistMergeReviewFromResult(db, {
         spec,
