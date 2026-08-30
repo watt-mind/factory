@@ -11,6 +11,16 @@
 #   factory tail                 # tail all live logs (serve.log, worker.log, web.log)
 #   factory tail worker          # tail a specific daemon log
 #   factory logs rotate          # rotate oversized daemon logs now
+#   factory status               # report total bytes held by daemon logs (+ archives)
+#
+# Log rotation knobs (read by `up`, `logs rotate`, and the web supervisor tick):
+#   FACTORY_LOG_ROTATE_BYTES     # rotate a daemon log once it exceeds this many
+#                                # bytes; default 52428800 (50 MiB), minimum
+#                                # 1048576 (1 MiB); 0 disables rotation entirely
+#   FACTORY_LOG_KEEP             # archived generations to retain per log
+#                                # (<log>.1 .. <log>.N); default 3, minimum 1
+#   FACTORY_LOG_ROTATE_INTERVAL  # seconds between size checks while the stack is
+#                                # up (web supervisor tick); default 300
 #
 set -euo pipefail
 
@@ -142,6 +152,28 @@ API_PORT="${FACTORY_EVENT_PORT:-7381}"
 WEB_PORT="${FACTORY_EVENT_WEB_PORT:-7382}"
 LOG_ROTATE_BYTES="${FACTORY_LOG_ROTATE_BYTES:-52428800}"
 LOG_KEEP="${FACTORY_LOG_KEEP:-3}"
+LOG_ROTATE_INTERVAL="${FACTORY_LOG_ROTATE_INTERVAL:-300}"
+LOG_ROTATE_MIN_BYTES=1048576
+
+# Reject knob values before anything touches a log. A threshold below 1 MiB
+# would rotate on nearly every tick (and lose the log's recent tail every time);
+# 0 is the explicit "off" switch rather than a threshold.
+validate_log_knobs() {
+  [[ "$LOG_ROTATE_BYTES" =~ ^[0-9]+$ ]] || die "FACTORY_LOG_ROTATE_BYTES must be a non-negative integer"
+  [[ "$LOG_ROTATE_BYTES" -eq 0 || "$LOG_ROTATE_BYTES" -ge "$LOG_ROTATE_MIN_BYTES" ]] ||
+    die "FACTORY_LOG_ROTATE_BYTES must be 0 (disabled) or at least $LOG_ROTATE_MIN_BYTES bytes (1 MiB)"
+  [[ "$LOG_KEEP" =~ ^[1-9][0-9]*$ ]] || die "FACTORY_LOG_KEEP must be a positive integer"
+  [[ "$LOG_ROTATE_INTERVAL" =~ ^[0-9]+$ ]] || die "FACTORY_LOG_ROTATE_INTERVAL must be a non-negative integer"
+}
+
+# Rotation entry point shared by `up`, `logs rotate`, and the supervisor tick.
+# FACTORY_LOG_ROTATE_BYTES=0 means "never rotate"; everything else defers to
+# rotate_run_logs (worktree-common.sh), which copy-truncates logs with a live
+# owner and renames the rest.
+rotate_stack_logs() {
+  [[ "$LOG_ROTATE_BYTES" -gt 0 ]] || return 0
+  rotate_run_logs "$RUN_DIR" "$LOG_ROTATE_BYTES" "$LOG_KEEP"
+}
 
 # `up` creates these itself once `--dry-run` has had its chance to exit: a dry
 # run must leave no trace on disk.
@@ -377,11 +409,12 @@ case "$ACTION" in
     fi
 
     mkdir -p "$RUN_DIR" "$HOME_DIR"
-    [[ "$LOG_ROTATE_BYTES" =~ ^[0-9]+$ ]] || die "FACTORY_LOG_ROTATE_BYTES must be a non-negative integer"
-    [[ "$LOG_KEEP" =~ ^[1-9][0-9]*$ ]] || die "FACTORY_LOG_KEEP must be a positive integer"
+    validate_log_knobs
     # This happens before any daemon is spawned. Existing live owners keep
     # their inode and are copy-truncated; stopped daemons get a cheap rename.
-    rotate_run_logs "$RUN_DIR" "$LOG_ROTATE_BYTES" "$LOG_KEEP"
+    # The web supervisor repeats the check every LOG_ROTATE_INTERVAL seconds
+    # so a stack left up for days still rotates.
+    rotate_stack_logs
     # Record what was already running before this invocation starts anything,
     # so a failed `up` can tell its own daemons from the operator's.
     snapshot_up_pidfiles
@@ -613,6 +646,13 @@ case "$ACTION" in
     WEB_CHILD_PID=""
     WEB_CHILD_STARTED=0
     WEB_RESTART_DELAY=1
+    # This loop is the stack's only periodic tick, so it also owns in-flight log
+    # rotation: `up` rotates once at start, and a stack left running for days
+    # would otherwise grow its logs without bound. Live owners keep their inode
+    # (copy-truncate), so daemons never notice. Bad knobs stop the supervisor
+    # before it can spawn anything, just as they stop `up`.
+    validate_log_knobs
+    LOG_ROTATE_CHECKED=$(date +%s)
     # A replacement stays in this supervisor's process group rather than being
     # detached. `factory down` can therefore stop the whole group atomically,
     # including a child spawned just before SIGTERM reaches this shell.
@@ -655,6 +695,10 @@ case "$ACTION" in
         printf '%s\n' "$WEB_CHILD_PID" >"$RUN_DIR/web.pid"
       elif [[ "$WEB_CHILD_STARTED" -gt 0 ]] && (( $(date +%s) - WEB_CHILD_STARTED >= 60 )); then
         WEB_RESTART_DELAY=1
+      fi
+      if (( $(date +%s) - LOG_ROTATE_CHECKED >= LOG_ROTATE_INTERVAL )); then
+        rotate_stack_logs
+        LOG_ROTATE_CHECKED=$(date +%s)
       fi
       sleep "${FACTORY_WEB_SUPERVISOR_INTERVAL:-1}"
     done
@@ -769,9 +813,11 @@ case "$ACTION" in
 
   logs)
     [[ "${1:-}" == "rotate" && $# -eq 1 ]] || die "usage: factory logs rotate"
-    [[ "$LOG_ROTATE_BYTES" =~ ^[0-9]+$ ]] || die "FACTORY_LOG_ROTATE_BYTES must be a non-negative integer"
-    [[ "$LOG_KEEP" =~ ^[1-9][0-9]*$ ]] || die "FACTORY_LOG_KEEP must be a positive integer"
-    rotate_run_logs "$RUN_DIR" "$LOG_ROTATE_BYTES" "$LOG_KEEP"
+    validate_log_knobs
+    if [[ "$LOG_ROTATE_BYTES" -eq 0 ]]; then
+      info "log rotation disabled (FACTORY_LOG_ROTATE_BYTES=0); nothing rotated"
+    fi
+    rotate_stack_logs
     printf 'total log bytes: %s\n' "$(run_log_total_bytes "$RUN_DIR")"
     ;;
 

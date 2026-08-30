@@ -499,22 +499,34 @@ run_log_size_bytes() { # <logfile>
 }
 
 rotate_run_log() { # <logfile> <max-bytes> <keep>
-  local logfile="$1" max_bytes="$2" keep="$3" size i mode
+  local logfile="$1" max_bytes="$2" keep="$3" size i mode old suffix
   [[ -f "$logfile" ]] || return 0
   size="$(run_log_size_bytes "$logfile")"
   [[ "$size" =~ ^[0-9]+$ ]] && ((size > max_bytes)) || return 0
 
-  # Keep .1 newest and discard only the oldest retained generation.
-  rm -f "$logfile.$keep"
+  # Keep .1 newest. Prune every generation past <keep>, not just .<keep>: a
+  # lowered FACTORY_LOG_KEEP must not strand .4/.5 archives forever.
+  for old in "$logfile".[0-9]*; do
+    [[ -f "$old" ]] || continue
+    suffix="${old##*.}"
+    [[ "$suffix" =~ ^[0-9]+$ ]] || continue
+    ((suffix >= keep)) && rm -f "$old"
+  done
   for ((i = keep; i > 1; i--)); do
     [[ -f "$logfile.$((i - 1))" ]] && mv -f "$logfile.$((i - 1))" "$logfile.$i"
   done
 
   if run_log_has_live_owner "$logfile"; then
+    # Copy-truncate: the daemon keeps appending to the same inode. Lines written
+    # between the cp and the truncate are lost — acceptable for a diagnostic log.
     cp -f "$logfile" "$logfile.1"
     : >"$logfile"
     mode="copy-truncated live log"
   else
+    # Rename is only safe with no live owner (checked above): a process still
+    # holding the old inode would keep writing to <log>.1 and the fresh <log>
+    # would stay empty. Ownership is inferred from pidfiles, so a daemon that
+    # outlived (or never had) its pidfile is invisible here and gets renamed.
     mv -f "$logfile" "$logfile.1"
     : >"$logfile"
     mode="moved stopped log"

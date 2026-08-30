@@ -118,8 +118,10 @@ test("run log rotation retains bounded generations and copy-truncates a live own
     printf 'one' > "$log.1"
     printf 'two' > "$log.2"
     printf 'three' > "$log.3"
+    printf 'stale' > "$log.4"
+    printf 'staler' > "$log.7"
     rotate_run_log "$log" 1 3 >/dev/null
-    printf 'generations=%s/%s/%s current=%s\\n' "$(cat "$log.1")" "$(cat "$log.2")" "$(cat "$log.3")" "$(wc -c < "$log" | tr -d '[:space:]')"
+    printf 'generations=%s/%s/%s current=%s stale=%s\\n' "$(cat "$log.1")" "$(cat "$log.2")" "$(cat "$log.3")" "$(wc -c < "$log" | tr -d '[:space:]')" "$(ls "$dir" | grep -c 'worker\\.log\\.[4-9]' || true)"
 
     exec 9>> "$log"
     printf 'before' >&9
@@ -130,7 +132,7 @@ test("run log rotation retains bounded generations and copy-truncates a live own
     printf 'live-current=%s archive=%s\\n' "$(cat "$log")" "$(cat "$log.1")"
   `);
   expect(r.status).toBe(0);
-  expect(r.stdout).toContain("generations=new/one/two current=0");
+  expect(r.stdout).toContain("generations=new/one/two current=0 stale=0");
   expect(r.stdout).toContain("live-current=after archive=before");
 });
 
