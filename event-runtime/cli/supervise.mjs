@@ -68,7 +68,7 @@ function writeCrashLoop(file, state) {
   writeFileSync(file, `${JSON.stringify(state)}\n`);
 }
 
-function backoffMs(fastExits) {
+export function crashBackoffMs(fastExits) {
   return Math.min(
     CRASH_BACKOFF_MS * 2 ** (fastExits - CRASH_LOOP_LIMIT),
     CRASH_BACKOFF_MAX_MS,
@@ -304,7 +304,7 @@ export default async function supervise(args) {
 
     const fastExits = (state?.fastExits ?? 0) + 1;
     const nextAttemptAt =
-      fastExits >= CRASH_LOOP_LIMIT ? now + backoffMs(fastExits) : null;
+      fastExits >= CRASH_LOOP_LIMIT ? now + crashBackoffMs(fastExits) : null;
     writeCrashLoop(files.crashLoop, {
       fastExits,
       spawnedAt: null,
