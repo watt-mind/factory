@@ -17,6 +17,7 @@ import {
   rejectProposal,
 } from "./proposals.mjs";
 import { loadRegistry } from "./registry.mjs";
+import { claimNext } from "./worker.mjs";
 
 const registry = loadRegistry();
 const NOW = Date.parse("2026-08-12T10:30:02Z");
@@ -191,6 +192,90 @@ describe("approveProposal within TTL", () => {
     ]);
     expect(journal[1].actor).toBe("operator");
     expect(journal[1].correlation_id).toBe("workflow-01");
+    expect(journal.at(-1).reason).toBe("approved");
+  });
+
+  test("re-plans a stale registry version, then queues the refreshed spec when only its versions changed", () => {
+    const { db, proposal, runId } = planned({}, { policyVersion: "new" });
+    const staleSpec = {
+      ...getProposal(db, proposal.id).spec,
+      promptVersion: "old",
+      policyVersion: "new",
+    };
+    const staleJson = canonicalJson(staleSpec);
+    const staleHash = hashJson(staleSpec);
+    db.query(
+      `UPDATE proposals SET spec_json = ?, spec_hash = ? WHERE id = ?`,
+    ).run(staleJson, staleHash, proposal.id);
+    db.query(
+      `UPDATE runs SET spec_json = ?, spec_hash = ? WHERE run_id = ?`,
+    ).run(staleJson, staleHash, runId);
+
+    const result = approveProposal(db, registry, proposal.id, {
+      actor: "operator",
+      now: NOW + 1000,
+      policyVersion: "new",
+    });
+
+    expect(result).toEqual({ approved: true, runId });
+    expect(runState(db, runId)).toBe("QUEUED");
+    expect(lifecycleOf(db, runId).at(-1).reason).toBe(
+      "approved_after_registry_replan",
+    );
+    for (const specJson of [
+      db.query(`SELECT spec_json FROM runs WHERE run_id = ?`).get(runId)
+        .spec_json,
+      getProposal(db, proposal.id).spec_json,
+    ]) {
+      expect(JSON.parse(specJson)).toMatchObject({
+        promptVersion: "new",
+        policyVersion: "new",
+      });
+    }
+    expect(
+      claimNext(db, {
+        owner: "fresh-worker",
+        now: NOW + 2000,
+        policyVersion: "new",
+        registryVersion: "new",
+      })?.runId,
+    ).toBe(runId);
+  });
+
+  test("supersedes a stale registry version when re-planning changes another field", () => {
+    const { db, proposal, runId } = planned({}, { policyVersion: "new" });
+    const staleSpec = {
+      ...getProposal(db, proposal.id).spec,
+      promptVersion: "new",
+      policyVersion: "old",
+    };
+    const staleJson = canonicalJson(staleSpec);
+    const staleHash = hashJson(staleSpec);
+    db.query(
+      `UPDATE proposals SET spec_json = ?, spec_hash = ? WHERE id = ?`,
+    ).run(staleJson, staleHash, proposal.id);
+    db.query(
+      `UPDATE runs SET spec_json = ?, spec_hash = ? WHERE run_id = ?`,
+    ).run(staleJson, staleHash, runId);
+
+    const result = approveProposal(db, registry, proposal.id, {
+      actor: "operator",
+      now: NOW + 1000,
+      policyVersion: "new",
+      adapterOverride: "claude",
+    });
+
+    expect(result).toMatchObject({ approved: false, replanned: true });
+    expect(result.proposal).toMatchObject({
+      status: "open",
+      reason: "replanned_after_registry_replan",
+      spec: { promptVersion: "new", policyVersion: "new", adapter: "claude" },
+    });
+    expect(getProposal(db, proposal.id)).toMatchObject({
+      status: "superseded",
+      reason: "superseded_by_registry_replan",
+    });
+    expect(runState(db, runId)).toBe("PROPOSED");
   });
 
   test("a registry defHash change supersedes and creates one fresh open proposal", () => {
