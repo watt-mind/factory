@@ -691,6 +691,29 @@ describe("format and lint mechanical merge fixes (WM-769)", () => {
     );
   });
 
+  test("formatted fix comments retain machine markers across multiline HTML bodies", () => {
+    expect(fixPrompt).toContain(
+      "### 🛠️ Factory Merge Auto-Fix (Round <round> of 2)",
+    );
+    expect(fixPrompt).toContain("**Finding:** <finding description>");
+    expect(fixPrompt).toContain("**Changes:** <summary of changes made>");
+    expect(fixPrompt).toContain(
+      "**Commit:** `<oldSha first 7>` → `<newSha first 7>`",
+    );
+    expect(fixPrompt).toContain(
+      "<!-- factory-merge-fix round=<round> finding=<findingHash> old=<oldSha> new=<newSha> -->",
+    );
+    expect(fixPrompt).toContain(
+      "<!-- factory-merge-fix mechanical=format_and_lint finding=<findingHash> old=<oldSha> new=<newSha> -->",
+    );
+    expect(scanPrompt).toMatch(/every complete PR comment body/);
+    expect(scanPrompt).toMatch(
+      /arbitrary multiline Markdown or an HTML comment/,
+    );
+    expect(scanPrompt).toMatch(/legacy bare single-line\s+form/);
+    expect(scanPrompt).toMatch(/do not count it as\s+a round/);
+  });
+
   test("the reviewer emits the distinct mechanical tag for prettier/eslint-only findings", () => {
     expect(reviewerSource).toMatch(
       /verdict `FIX`, canonical\s+finding `format_and_lint`, and tag the finding `mechanical`/,

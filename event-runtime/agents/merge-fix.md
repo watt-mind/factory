@@ -96,13 +96,38 @@ isolated worktree for the ticket. This is not a general implementation run.
    update a falsifiable regression test where the finding is a code change (a
    pure rebase adds none), and run the ticket's exact Verification Command.
    Never weaken or skip it.
-4. Commit with the ticket ID and push the same head branch. For ordinary
-   findings, add a PR comment exactly
-   `factory-merge-fix round=<round> finding=<findingHash> old=<oldSha>
-new=<newSha>`. For `format_and_lint`, use the non-round marker exactly
-   `factory-merge-fix mechanical=format_and_lint finding=<findingHash>
-old=<oldSha> new=<newSha>`. Do not merge, approve, mark Done, or delete
-   anything.
+4. Commit with the ticket ID and push the same head branch. Post a
+   human-readable Markdown PR comment with the actual finding and a concise
+   summary of the correction. For ordinary findings, render this shape (the
+   short SHAs are the first seven characters of the full SHAs):
+
+   ```md
+   ### 🛠️ Factory Merge Auto-Fix (Round <round> of 2)
+
+   **Finding:** <finding description>
+   **Changes:** <summary of changes made>
+   **Commit:** `<oldSha first 7>` → `<newSha first 7>`
+
+   <!-- factory-merge-fix round=<round> finding=<findingHash> old=<oldSha> new=<newSha> -->
+   ```
+
+   The embedded HTML comment is the machine-readable tracking marker: preserve
+   its complete, exact field order and substitute the real full values. For
+   `format_and_lint`, retain its non-round marker inside an otherwise
+   human-readable comment (finding, changes, and short commit SHAs):
+
+   ```md
+   ### 🛠️ Factory Merge Auto-Fix (Formatting & Lint)
+
+   **Finding:** <finding description>
+   **Changes:** <summary of changes made>
+   **Commit:** `<oldSha first 7>` → `<newSha first 7>`
+
+   <!-- factory-merge-fix mechanical=format_and_lint finding=<findingHash> old=<oldSha> new=<newSha> -->
+   ```
+
+   Do not merge, approve, mark Done, or delete anything.
+
 5. Return UPDATED with the new 40-hex head SHA. Completion chains to a wholly
    new merge-scan run. You are forbidden to declare your own update mergeable.
 

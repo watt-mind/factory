@@ -132,15 +132,21 @@ and merge-fix already performs them:
   deviation on the ticket. Being outside scope alone is not a reason to stop.
 
 A FIX may auto-dispatch only when it is mechanical and its next round is at
-most `merge.max_fix_rounds` (2). Read PR comments for
-`factory-merge-fix round=<n> finding=<hash>` markers. Set the next round and
-SHA-256 hash of the exact finding. Exhausted rounds, security findings, and
-genuine product ambiguity are ESCALATE. `format_and_lint` is the deterministic
-exception: its separate
-`factory-merge-fix mechanical=format_and_lint finding=<hash>` marker does not
-consume or increment `max_fix_rounds`; after its fresh verification/CI, scan
-the PR from scratch. In the fast lane, formatting- or eslint-only red means
-auto-fix then re-evaluate every lane criterion, not disqualification.
+most `merge.max_fix_rounds` (2). Parse every complete PR comment body for
+`factory-merge-fix round=<n> finding=<hash>` markers. The marker may appear
+inside arbitrary multiline Markdown or an HTML comment; it need not occupy a
+whole comment body or line. Continue recognizing the legacy bare single-line
+form as well as the formatted embedded form, and count every extracted round
+marker for round counting and loop prevention. Set the next round and SHA-256
+hash of the exact finding. Exhausted rounds, security findings, and genuine
+product ambiguity are ESCALATE. `format_and_lint` is the deterministic
+exception: recognize its separate
+`factory-merge-fix mechanical=format_and_lint finding=<hash>` marker anywhere
+in a complete comment body, including an HTML comment, but do not count it as
+a round. It does not consume or increment `max_fix_rounds`; after its fresh
+verification/CI, scan the PR from scratch. In the fast lane, formatting- or
+eslint-only red means auto-fix then re-evaluate every lane criterion, not
+disqualification.
 
 Fail closed only on what truly cannot be evidenced — GitHub or Linear API
 errors, malformed config, an unresolvable base SHA — and record those as
