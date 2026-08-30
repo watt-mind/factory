@@ -249,13 +249,14 @@ describe("repository management API", () => {
     }
   });
 
-  test("preserves config mode and writes the file resolved by the reader", async () => {
+  test("forks an example fallback into repos.yaml without modifying the example", async () => {
     const { root } = factoryRoot();
     const configDir = path.join(root, "config");
     const local = path.join(configDir, "repos.yaml");
     const example = path.join(configDir, "repos.example.yaml");
     chmodSync(local, 0o600);
     renameSync(local, example);
+    const exampleContents = readFileSync(example, "utf8");
     const api = await server(root);
     try {
       const patched = await api.request("/repos/existing", {
@@ -266,8 +267,8 @@ describe("repository management API", () => {
     } finally {
       api.close();
     }
-    expect(statSync(example).mode & 0o777).toBe(0o600);
-    expect(existsSync(local)).toBe(false);
+    expect(readFileSync(example, "utf8")).toBe(exampleContents);
+    expect(statSync(local).mode & 0o777).toBe(0o600);
     expect(loadRepos({ root }).get("existing")?.maxInFlight).toBe(3);
   });
 
