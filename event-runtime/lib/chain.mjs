@@ -17,7 +17,7 @@
  * watched like any other.
  */
 import { admitEvent } from "./intake.mjs";
-import { tx } from "./db.mjs";
+import { txImmediate } from "./db.mjs";
 
 export const CHAIN_SOURCE = "chain";
 
@@ -486,26 +486,31 @@ export function resolveChains(
       resolvedAt,
       JSON.stringify({ note, ...payload }),
     );
-  tx(db, () => {
-    for (const { row, error } of transient) {
-      const passes = countTransient.get(row.run_id, CHAIN_TRANSIENT_NOTE).n + 1;
-      record(row, CHAIN_TRANSIENT_NOTE, { pass: passes, error });
-      if (passes >= maxTransientPasses) {
-        outcome.errors.push(
-          `chain-${row.run_id}: gave up after ${passes} transient failure(s)`,
-        );
-        resolved.push({
-          row,
-          reason: "chain_gave_up",
-          detail: { passes, error },
-        });
+  try {
+    txImmediate(db, () => {
+      for (const { row, error } of transient) {
+        const passes =
+          countTransient.get(row.run_id, CHAIN_TRANSIENT_NOTE).n + 1;
+        record(row, CHAIN_TRANSIENT_NOTE, { pass: passes, error });
+        if (passes >= maxTransientPasses) {
+          outcome.errors.push(
+            `chain-${row.run_id}: gave up after ${passes} transient failure(s)`,
+          );
+          resolved.push({
+            row,
+            reason: "chain_gave_up",
+            detail: { passes, error },
+          });
+        }
       }
-    }
-    for (const { row, reason, detail } of resolved) {
-      markResolved.run(resolvedAt, row.run_id);
-      record(row, CHAIN_RESOLVED_NOTE, { reason, ...detail });
-    }
-  });
+      for (const { row, reason, detail } of resolved) {
+        markResolved.run(resolvedAt, row.run_id);
+        record(row, CHAIN_RESOLVED_NOTE, { reason, ...detail });
+      }
+    });
+  } catch (err) {
+    outcome.errors.push(`chain-bookkeeping: ${err.message}`);
+  }
   return outcome;
 }
 
