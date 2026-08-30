@@ -253,7 +253,7 @@ export function createApi({
                     message: parsed.error,
                   });
               }
-              result = retryInboxDecision(db, id, {
+              result = await retryInboxDecision(db, id, {
                 now: nowMs,
                 applyEffect,
               });
@@ -264,7 +264,7 @@ export function createApi({
                   error: "invalid_json",
                   message: parsed.error,
                 });
-              result = decideInboxItem(db, id, parsed.value, {
+              result = await decideInboxItem(db, id, parsed.value, {
                 now: nowMs,
                 decidedBy: actor,
                 applyEffect,

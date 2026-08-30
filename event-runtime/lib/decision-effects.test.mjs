@@ -75,7 +75,7 @@ function response(fields = {}) {
 }
 
 describe("runtime decision effects", () => {
-  test("applies dismiss, Linear writes, requeue, approve, and reject through injected transports", () => {
+  test("applies dismiss, Linear writes, requeue, approve, and reject through injected transports", async () => {
     const calls = [];
     const linear = {
       triage: (...args) => calls.push(["triage", ...args]),
@@ -90,12 +90,14 @@ describe("runtime decision effects", () => {
       rejectProposal: (...args) => calls.push(["reject", ...args]),
     };
 
-    expect(applyDecisionEffect(null, item("dismiss"), response())).toEqual({
+    expect(
+      await applyDecisionEffect(null, item("dismiss"), response()),
+    ).toEqual({
       kind: "dismiss",
       outcome: "applied",
     });
     expect(
-      applyDecisionEffect(
+      await applyDecisionEffect(
         null,
         item("send_to_triage"),
         response({ insight: "Needs a tighter scope" }),
@@ -103,7 +105,7 @@ describe("runtime decision effects", () => {
       ),
     ).toEqual({ kind: "send_to_triage", outcome: "applied" });
     expect(
-      applyDecisionEffect(
+      await applyDecisionEffect(
         null,
         item("answer"),
         response({ insight: "Use the existing seam" }),
@@ -111,21 +113,21 @@ describe("runtime decision effects", () => {
       ),
     ).toEqual({ kind: "answer", outcome: "applied" });
     expect(
-      applyDecisionEffect(null, item("requeue"), response(), {
+      await applyDecisionEffect(null, item("requeue"), response(), {
         linear,
         planner,
         now: NOW,
       }),
     ).toEqual({ kind: "requeue", outcome: "applied" });
     expect(
-      applyDecisionEffect(null, item("approve_proposal"), response(), {
+      await applyDecisionEffect(null, item("approve_proposal"), response(), {
         linear,
         planner,
         now: NOW,
       }),
     ).toEqual({ kind: "approve_proposal", outcome: "applied" });
     expect(
-      applyDecisionEffect(
+      await applyDecisionEffect(
         null,
         item("reject_proposal"),
         response({ insight: "Spec is stale" }),
@@ -148,8 +150,8 @@ describe("runtime decision effects", () => {
     });
   });
 
-  test("expired proposal re-plan is applied but requires a second approval", () => {
-    const result = applyDecisionEffect(
+  test("expired proposal re-plan is applied but requires a second approval", async () => {
+    const result = await applyDecisionEffect(
       null,
       item("approve_proposal"),
       response(),
@@ -173,11 +175,11 @@ describe("runtime decision effects", () => {
     });
   });
 
-  test("authorise binds the live description, selected paths, text, and refused run into a new dispatch payload", () => {
+  test("authorise binds the live description, selected paths, text, and refused run into a new dispatch payload", async () => {
     let envelope;
     const decisionItem = item("authorise");
     const refusedInputHash = hashJson({ repo: "factory", ticket: "WM-313" });
-    const result = applyDecisionEffect(
+    const result = await applyDecisionEffect(
       null,
       decisionItem,
       response({ paths: ["b"], insight: "Keep the adapter synchronous" }),
@@ -230,9 +232,9 @@ describe("runtime decision effects", () => {
     expect(hashJson(envelope.payload)).not.toBe(refusedInputHash);
   });
 
-  test("authorise fails closed before admission when Linear has no description", () => {
+  test("authorise fails closed before admission when Linear has no description", async () => {
     let admitted = false;
-    const result = applyDecisionEffect(
+    const result = await applyDecisionEffect(
       null,
       item("authorise"),
       response({ paths: ["a"] }),
@@ -254,7 +256,7 @@ describe("runtime decision effects", () => {
     expect(admitted).toBe(false);
   });
 
-  test("transport failure stays open with the response recorded and retry resolves", () => {
+  test("transport failure stays open with the response recorded and retry resolves", async () => {
     const db = openDb(":memory:");
     const request = {
       schemaVersion: "factory.decision-request/v1",
@@ -278,8 +280,8 @@ describe("runtime decision effects", () => {
       { id: "retry_effect" },
     );
     let fail = true;
-    const applyEffect = (effectDb, effectItem, effectResponse) =>
-      applyDecisionEffect(effectDb, effectItem, effectResponse, {
+    const applyEffect = async (effectDb, effectItem, effectResponse) =>
+      await applyDecisionEffect(effectDb, effectItem, effectResponse, {
         linear: {
           triage: () => {
             if (fail) throw new Error("Linear unavailable");
@@ -289,7 +291,7 @@ describe("runtime decision effects", () => {
         planner: {},
         now: NOW,
       });
-    const first = decideInboxItem(
+    const first = await decideInboxItem(
       db,
       "retry_effect",
       {
@@ -308,7 +310,7 @@ describe("runtime decision effects", () => {
     expect(first.item.response.effect.error).toBe("Linear unavailable");
 
     fail = false;
-    const retried = retryInboxDecision(db, "retry_effect", {
+    const retried = await retryInboxDecision(db, "retry_effect", {
       now: NOW + 1,
       applyEffect,
       artifactStore: null,

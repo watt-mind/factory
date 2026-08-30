@@ -224,7 +224,7 @@ function waiterReferentKey(effectKind, refs) {
   }
 }
 
-function fanOutWaiterEffects(db, item, response, waiters, applyEffect) {
+async function fanOutWaiterEffects(db, item, response, waiters, applyEffect) {
   const option = item.decision?.options?.find(
     (candidate) => candidate.id === response?.optionId,
   );
@@ -254,7 +254,7 @@ function fanOutWaiterEffects(db, item, response, waiters, applyEffect) {
     let effect;
     try {
       effect = normalizeEffect(
-        applyEffect(db, waiterItem, response),
+        await applyEffect(db, waiterItem, response),
         waiterItem,
         response,
       );
@@ -268,9 +268,10 @@ function fanOutWaiterEffects(db, item, response, waiters, applyEffect) {
     waiter.effect = effect;
     outcomes.push({ runId: waiter.runId ?? null, effect });
   }
-  db.query(`UPDATE inbox_items SET waiters_json = ? WHERE id = ?`).run(
-    JSON.stringify(nextWaiters),
-    item.id,
+  txImmediate(db, () =>
+    db
+      .query(`UPDATE inbox_items SET waiters_json = ? WHERE id = ?`)
+      .run(JSON.stringify(nextWaiters), item.id),
   );
   return outcomes;
 }
@@ -665,8 +666,8 @@ function normalizeEffect(effect, item, response) {
   return { ...effect, kind };
 }
 
-/** Validate, record, and apply one response to a stored decision request. */
-function decideInboxItemInTransaction(
+/** Validate and claim one response in a short write transaction. */
+function claimInboxDecisionInTransaction(
   db,
   id,
   response,
@@ -746,53 +747,85 @@ function decideInboxItemInTransaction(
     );
   }
 
-  const item = getInboxItem(db, id);
+  return {
+    item: getInboxItem(db, id),
+    response: storedResponse,
+    waiters: parseWaiters(row.waiters_json),
+  };
+}
+
+async function applyInboxEffect(db, item, response, applyEffect) {
   let effect;
   try {
     effect = normalizeEffect(
-      applyEffect(db, item, storedResponse),
+      await applyEffect(db, item, response),
       item,
-      storedResponse,
+      response,
     );
   } catch (err) {
     effect = normalizeEffect(
       { outcome: "failed", error: err?.message ?? String(err) },
       item,
-      storedResponse,
+      response,
     );
   }
-  const settled = settleInboxDecision(db, id, storedResponse, effect, {
-    now,
-    artifactStore,
-  });
-  const waiters = parseWaiters(row.waiters_json);
+  return effect;
+}
+
+async function settleClaimedInboxDecision(
+  db,
+  { item, response, waiters },
+  effect,
+  { now, applyEffect, artifactStore, recordedEffect = effect },
+) {
+  const settled = txImmediate(db, () =>
+    settleInboxDecision(db, item.id, response, effect, {
+      now,
+      artifactStore,
+      recordedEffect,
+    }),
+  );
   if (
     waiters.length > 0 &&
     settled.effect.outcome === "applied" &&
     settled.effect.detail !== REPLANNED_DETAIL
   ) {
-    settled.waiterEffects = fanOutWaiterEffects(
+    settled.waiterEffects = await fanOutWaiterEffects(
       db,
       settled.item,
-      storedResponse,
+      response,
       waiters,
       applyEffect,
     );
-    settled.item = getInboxItem(db, id);
+    settled.item = getInboxItem(db, item.id);
   }
   return settled;
 }
 
-export function decideInboxItem(db, id, response, options = {}) {
-  // Serialize request claim, effect application, and finalization against
-  // concurrent answers and dedupe supersession on other connections.
-  return txImmediate(db, () =>
-    decideInboxItemInTransaction(db, id, response, options),
+export async function decideInboxItem(db, id, response, options = {}) {
+  const {
+    now = Date.now(),
+    applyEffect = applyDecisionEffect,
+    artifactStore,
+  } = options;
+  const claim = txImmediate(db, () =>
+    claimInboxDecisionInTransaction(db, id, response, options),
   );
+  const effect = await applyInboxEffect(
+    db,
+    claim.item,
+    claim.response,
+    applyEffect,
+  );
+  return settleClaimedInboxDecision(db, claim, effect, {
+    now,
+    applyEffect,
+    artifactStore,
+  });
 }
 
 /** Retry the effect for an answer that was already recorded. */
-function retryInboxDecisionInTransaction(
+function claimInboxDecisionRetryInTransaction(
   db,
   id,
   {
@@ -826,56 +859,69 @@ function retryInboxDecisionInTransaction(
       409,
     );
   }
+  if (!recorded.effect || recorded.effect.outcome === "pending") {
+    throw new InboxDecisionError(
+      "retry_superseded",
+      `inbox item ${id} decision retry was superseded`,
+      409,
+    );
+  }
   const retryAttempt = Number(recorded.effect?.retryAttempt ?? 0) + 1;
   const { effect: _priorEffect, ...response } = recorded;
-  const item = getInboxItem(db, id);
-  let effect;
-  try {
-    effect = normalizeEffect(applyEffect(db, item, response), item, response);
-  } catch (err) {
-    effect = normalizeEffect(
-      { outcome: "failed", error: err?.message ?? String(err) },
-      item,
-      response,
+  const pendingResponse = {
+    ...response,
+    effect: { outcome: "pending", retryAttempt },
+  };
+  const claimed = db
+    .query(
+      `UPDATE inbox_items SET response_json = ? WHERE id = ? AND response_json = ?`,
+    )
+    .run(JSON.stringify(pendingResponse), id, expectedResponseJson);
+  if (claimed.changes !== 1) {
+    throw new InboxDecisionError(
+      "retry_superseded",
+      `inbox item ${id} decision retry was superseded`,
+      409,
     );
   }
-  const settled = settleInboxDecision(db, id, response, effect, {
-    now,
-    recordedEffect: { ...effect, retryAttempt },
-    artifactStore,
-  });
-  const waiters = parseWaiters(row.waiters_json);
-  if (
-    waiters.length > 0 &&
-    settled.effect.outcome === "applied" &&
-    settled.effect.detail !== REPLANNED_DETAIL
-  ) {
-    settled.waiterEffects = fanOutWaiterEffects(
-      db,
-      settled.item,
-      response,
-      waiters,
-      applyEffect,
-    );
-    settled.item = getInboxItem(db, id);
-  }
-  return settled;
+  return {
+    item: getInboxItem(db, id),
+    response,
+    waiters: parseWaiters(row.waiters_json),
+    retryAttempt,
+  };
 }
 
-export function retryInboxDecision(db, id, options = {}) {
+export async function retryInboxDecision(db, id, options = {}) {
   // Capture the exact failed outcome before waiting for the write lock. A
   // concurrent retry increments retryAttempt, so a waiter cannot replay the
   // same effect after that first retry commits; a later deliberate retry can.
   const expectedResponseJson =
     db.query("SELECT response_json FROM inbox_items WHERE id = ?").get(id)
       ?.response_json ?? null;
-  // The same lock prevents two operators from retrying one effect at once.
-  return txImmediate(db, () =>
-    retryInboxDecisionInTransaction(db, id, {
+  const {
+    now = Date.now(),
+    applyEffect = applyDecisionEffect,
+    artifactStore,
+  } = options;
+  const claim = txImmediate(db, () =>
+    claimInboxDecisionRetryInTransaction(db, id, {
       ...options,
       expectedResponseJson,
     }),
   );
+  const effect = await applyInboxEffect(
+    db,
+    claim.item,
+    claim.response,
+    applyEffect,
+  );
+  return settleClaimedInboxDecision(db, claim, effect, {
+    now,
+    applyEffect,
+    artifactStore,
+    recordedEffect: { ...effect, retryAttempt: claim.retryAttempt },
+  });
 }
 
 export function listInboxItems(db, { status = "open" } = {}) {
