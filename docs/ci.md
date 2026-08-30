@@ -54,10 +54,11 @@ and `Full verification`) must conclude `success`. A `cancelled`, `skipped`,
 or `failure` result makes `Verify` fail.
 
 This matters because concurrency cancellation can leave a historical
-`Verify=success` check-run visible for a superseded workflow. The factory
-merge gate rejects cancelled/superseded workflow runs and evaluates the newest
-non-cancelled run for the reviewed head SHA; it never treats that stale check
-as proof that a merge is green.
+`Verify=success` check-run visible for a superseded workflow. The
+merge-proof helper ignores cancelled/superseded runs and requires exactly one
+remaining non-cancelled run for the reviewed head SHA (consumer-side wiring
+tracked in #1553); it never treats that stale check as proof that a merge is
+green.
 
 ## Dependabot dependency policy
 
