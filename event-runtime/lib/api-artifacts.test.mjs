@@ -3,6 +3,7 @@ import {
   trackTmpDir,
 } from "../test-support/tmp.mjs?file=event-runtime-lib-api-artifacts-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { symlinkSync } from "node:fs";
 import { artifactReferenceIndex } from "./artifacts.mjs";
 import { canonicalJson, sha256Hex } from "./canonical.mjs";
 import {
@@ -47,6 +48,42 @@ const makeServer = async (...args) => {
 };
 
 describe("artifact store and agent registry surfacing (OPS-212)", () => {
+  test("GET /artifacts ignores an entry that vanishes during inventory", async () => {
+    const home = tmpDir("evrt-artifact-page-race-");
+    const store = path.join(home, "artifacts");
+    mkdirSync(store, { recursive: true });
+    const survivingHash = "a".repeat(64);
+    const vanishedHash = "b".repeat(64);
+    writeFileSync(path.join(store, survivingHash), "survives", "utf8");
+    // statSync follows this dangling link and observes it as absent, matching
+    // a blob deleted by a concurrent prune after readdirSync.
+    symlinkSync(
+      path.join(store, "no-longer-present"),
+      path.join(store, vanishedHash),
+    );
+
+    const db = openDb(path.join(home, "runtime.db"));
+    const server = startApi({
+      db,
+      registry,
+      secret: SECRET,
+      policyVersion: PV,
+      port: 0,
+      env: { name: "test", home, adapter: "fake" },
+    });
+    await new Promise((resolve) => server.on("listening", resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const response = await fetch(`${base}/artifacts`);
+      expect(response.status).toBe(200);
+      expect(
+        (await response.json()).artifacts.map(({ sha256 }) => sha256),
+      ).toEqual([survivingHash]);
+    } finally {
+      server.close();
+    }
+  });
+
   test("GET /artifacts reuses its index until a new result arrives", async () => {
     const home = tmpDir("evrt-artifact-page-cache-");
     const store = path.join(home, "artifacts");
