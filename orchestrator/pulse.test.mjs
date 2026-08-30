@@ -77,6 +77,15 @@ function linearIssue(number, { ready = false, triage = false } = {}) {
   };
 }
 
+// Bind loopback:0 for an OS-assigned port, then release it immediately so
+// gatherPulse's /health probe hits nothing instead of a live local stack.
+function deadPort() {
+  const probe = Bun.serve({ port: 0, fetch: () => new Response("") });
+  const port = probe.port;
+  probe.stop(true);
+  return port;
+}
+
 test("gatherPulse counts qualifying Linear issues across pages", async () => {
   const firstPage = Array.from({ length: 100 }, (_, index) =>
     linearIssue(index + 1, {
@@ -113,6 +122,7 @@ test("gatherPulse counts qualifying Linear issues across pages", async () => {
   };
 
   const pulse = await gatherPulse({
+    port: deadPort(),
     fetchGitHub: false,
     controlPlane,
   });
@@ -141,6 +151,7 @@ test("gatherPulse marks Linear supply as truncated at the page cap", async () =>
   };
 
   const pulse = await gatherPulse({
+    port: deadPort(),
     fetchGitHub: false,
     controlPlane,
   });
@@ -153,14 +164,8 @@ test("gatherPulse marks Linear supply as truncated at the page cap", async () =>
 test("gatherPulse handles unreachable API gracefully", async () => {
   // A hardcoded port assumes nothing else is listening on it, which a
   // stranger process (or a concurrent worktree) can invalidate (#876).
-  // Bind loopback:0 to get an OS-assigned port, then release it
-  // immediately so it is unreachable when gatherPulse fetches it.
-  const probe = Bun.serve({ port: 0, fetch: () => new Response("") });
-  const port = probe.port;
-  probe.stop(true);
-
   const pulse = await gatherPulse({
-    port,
+    port: deadPort(),
     fetchLinear: false,
     fetchGitHub: false,
   });
