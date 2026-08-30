@@ -281,75 +281,191 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
     .trim()
     .toUpperCase();
   if (!TICKET_ID.test(ticket)) return null;
-
-  const eventRows = db
-    .query(`SELECT * FROM events ORDER BY admitted_at, rowid`)
-    .all();
-  const proposalRows = db
-    .query(`SELECT * FROM proposals ORDER BY created_at, rowid`)
-    .all();
-  const runRows = db
-    .query(`SELECT * FROM runs ORDER BY created_at, rowid`)
-    .all();
-  const resultRows = db.query(`SELECT * FROM results ORDER BY rowid`).all();
-  const resultByRun = new Map();
-  for (const row of resultRows) {
-    const result = parseObject(row.result_json);
-    if (!resultByRun.has(row.run_id)) resultByRun.set(row.run_id, []);
-    resultByRun.get(row.run_id).push(result);
-  }
+  const nowMs = options.nowMs ?? Date.now();
 
   const events = new Set();
   const proposals = new Set();
   const runs = new Set();
-  for (const row of eventRows) {
+
+  // Keep only the small connected component for this ticket in memory. JSON
+  // LIKE is deliberately a broad SQL prefilter: objectNamesTicket below still
+  // checks the parsed, named fields so prose mentioning a ticket is excluded.
+  const ticketLike = `%${ticket}%`;
+  const eventRows = new Map();
+  const proposalRows = new Map();
+  const runRows = new Map();
+  const resultRows = new Map();
+  const eventKey = (row) => `${row.source}\0${row.event_id}`;
+  const addRows = (rows, into, key) => {
+    for (const row of rows) into.set(key(row), row);
+  };
+  const placeholders = (values) => [...values].map(() => "?").join(", ");
+  // Stay well under SQLite's bind-variable cap (999 on older builds) when a
+  // ticket's component grows large; each chunk is one bounded query.
+  const chunked = (values, size = 400) => {
+    const list = [...values];
+    const chunks = [];
+    for (let i = 0; i < list.length; i += size)
+      chunks.push(list.slice(i, i + size));
+    return chunks;
+  };
+
+  const addEvents = (keys) => {
+    const pairs = [...keys]
+      .filter((key) => !eventRows.has(key))
+      .map((key) => key.split("\0"));
+    for (const chunk of chunked(pairs)) {
+      const where = chunk
+        .map(() => "(source = ? AND event_id = ?)")
+        .join(" OR ");
+      addRows(
+        db
+          .query(`SELECT *, rowid AS list_rowid FROM events WHERE ${where}`)
+          .all(...chunk.flat()),
+        eventRows,
+        eventKey,
+      );
+    }
+  };
+  const addRuns = (ids) => {
+    const missing = [...ids].filter((id) => !runRows.has(id));
+    for (const chunk of chunked(missing)) {
+      addRows(
+        db
+          .query(`SELECT * FROM runs WHERE run_id IN (${placeholders(chunk)})`)
+          .all(...chunk),
+        runRows,
+        (row) => row.run_id,
+      );
+    }
+  };
+  const addResults = (ids) => {
+    const missing = [...ids].filter((id) => !resultRows.has(id));
+    for (const chunk of chunked(missing)) {
+      addRows(
+        db
+          .query(
+            `SELECT * FROM results WHERE run_id IN (${placeholders(chunk)})`,
+          )
+          .all(...chunk),
+        resultRows,
+        (row) => `${row.run_id}\0${row.attempt}`,
+      );
+    }
+  };
+  const addProposals = (eventKeys, runIds) => {
+    const byKey = (row) => row.id;
+    for (const chunk of chunked(eventKeys)) {
+      const where = chunk
+        .map(() => "(event_source = ? AND event_id = ?)")
+        .join(" OR ");
+      addRows(
+        db
+          .query(`SELECT *, rowid AS list_rowid FROM proposals WHERE ${where}`)
+          .all(...chunk.flatMap((key) => key.split("\0"))),
+        proposalRows,
+        byKey,
+      );
+    }
+    for (const chunk of chunked(runIds)) {
+      addRows(
+        db
+          .query(
+            `SELECT *, rowid AS list_rowid FROM proposals WHERE run_id IN (${placeholders(chunk)})`,
+          )
+          .all(...chunk),
+        proposalRows,
+        byKey,
+      );
+    }
+  };
+
+  addRows(
+    db
+      .query(
+        `SELECT *, rowid AS list_rowid FROM events
+         WHERE UPPER(subject) = ? OR UPPER(correlation_id) = ? OR UPPER(envelope_json) LIKE ?`,
+      )
+      .all(ticket, ticket, ticketLike),
+    eventRows,
+    eventKey,
+  );
+  addRows(
+    db
+      .query(
+        `SELECT *, rowid AS list_rowid FROM proposals WHERE UPPER(spec_json) LIKE ?`,
+      )
+      .all(ticketLike),
+    proposalRows,
+    (row) => row.id,
+  );
+  addRows(
+    db
+      .query(`SELECT * FROM runs WHERE UPPER(spec_json) LIKE ?`)
+      .all(ticketLike),
+    runRows,
+    (row) => row.run_id,
+  );
+  addRows(
+    db
+      .query(`SELECT * FROM results WHERE UPPER(result_json) LIKE ?`)
+      .all(ticketLike),
+    resultRows,
+    (row) => `${row.run_id}\0${row.attempt}`,
+  );
+
+  for (const row of eventRows.values()) {
     const envelope = parseObject(row.envelope_json);
     if (
       String(row.subject ?? "").toUpperCase() === ticket ||
+      String(row.correlation_id ?? "").toUpperCase() === ticket ||
       objectNamesTicket(envelope, ticket)
     )
-      events.add(`${row.source}\0${row.event_id}`);
+      events.add(eventKey(row));
   }
-  for (const row of proposalRows) {
-    const spec = parseObject(row.spec_json);
-    if (objectNamesTicket(spec.input, ticket)) proposals.add(row.id);
+  for (const row of proposalRows.values()) {
+    if (objectNamesTicket(parseObject(row.spec_json).input, ticket))
+      proposals.add(row.id);
   }
-  for (const row of runRows) {
-    const spec = parseObject(row.spec_json);
-    const results = resultByRun.get(row.run_id) ?? [];
-    if (
-      objectNamesTicket(spec.input, ticket) ||
-      results.some((result) => objectNamesTicket(result, ticket))
-    )
+  for (const row of runRows.values()) {
+    if (objectNamesTicket(parseObject(row.spec_json).input, ticket))
+      runs.add(row.run_id);
+  }
+  for (const row of resultRows.values()) {
+    if (objectNamesTicket(parseObject(row.result_json), ticket))
       runs.add(row.run_id);
   }
 
-  // Link closure catches runs that name only their proposal/event and events
-  // whose payload names only a PR emitted by the original dispatch attempt.
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const row of proposalRows) {
-      const eventKey = `${row.event_source}\0${row.event_id}`;
-      if (
-        proposals.has(row.id) ||
-        events.has(eventKey) ||
-        (row.run_id && runs.has(row.run_id))
-      ) {
-        if (!proposals.has(row.id)) {
+  const closeOverLinks = () => {
+    let changed = true;
+    while (changed) {
+      const before = `${events.size}/${proposals.size}/${runs.size}`;
+      addEvents(events);
+      addProposals(events, runs);
+      addRuns(runs);
+      addResults(runs);
+      for (const row of proposalRows.values()) {
+        const linkedEvent = `${row.event_source}\0${row.event_id}`;
+        if (
+          proposals.has(row.id) ||
+          events.has(linkedEvent) ||
+          (row.run_id && runs.has(row.run_id))
+        ) {
           proposals.add(row.id);
-          changed = true;
-        }
-        if (!events.has(eventKey)) {
-          events.add(eventKey);
-          changed = true;
-        }
-        if (row.run_id && !runs.has(row.run_id)) {
-          runs.add(row.run_id);
-          changed = true;
+          events.add(linkedEvent);
+          if (row.run_id) runs.add(row.run_id);
         }
       }
+      changed = before !== `${events.size}/${proposals.size}/${runs.size}`;
     }
+  };
+  closeOverLinks();
+
+  const resultByRun = new Map();
+  for (const row of resultRows.values()) {
+    const result = parseObject(row.result_json);
+    if (!resultByRun.has(row.run_id)) resultByRun.set(row.run_id, []);
+    resultByRun.get(row.run_id).push(result);
   }
 
   const prRefs = { numbers: new Set(), urls: new Set() };
@@ -358,27 +474,108 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
       collectPrRefs(result, prRefs);
   }
   if (prRefs.numbers.size || prRefs.urls.size) {
-    for (const row of runRows) {
-      const spec = parseObject(row.spec_json);
-      const results = resultByRun.get(row.run_id) ?? [];
-      if (
-        hasPrRef(spec.input, prRefs) ||
-        results.some((result) => hasPrRef(result, prRefs))
-      )
+    // The prefilters compare UPPER(json), so the patterns must be uppercased
+    // too; hasPrRef below still matches the parsed, exact references.
+    const prLike = [...prRefs.urls, ...prRefs.numbers].map(
+      (reference) => `%${String(reference).toUpperCase()}%`,
+    );
+    const where = prLike.map(() => "UPPER(spec_json) LIKE ?").join(" OR ");
+    addRows(
+      db.query(`SELECT * FROM runs WHERE ${where}`).all(...prLike),
+      runRows,
+      (row) => row.run_id,
+    );
+    const resultWhere = prLike
+      .map(() => "UPPER(result_json) LIKE ?")
+      .join(" OR ");
+    addRows(
+      db.query(`SELECT * FROM results WHERE ${resultWhere}`).all(...prLike),
+      resultRows,
+      (row) => `${row.run_id}\0${row.attempt}`,
+    );
+    const eventWhere = prLike
+      .map(() => "UPPER(envelope_json) LIKE ?")
+      .join(" OR ");
+    addRows(
+      db
+        .query(`SELECT *, rowid AS list_rowid FROM events WHERE ${eventWhere}`)
+        .all(...prLike),
+      eventRows,
+      eventKey,
+    );
+    for (const row of runRows.values()) {
+      if (hasPrRef(parseObject(row.spec_json).input, prRefs))
         runs.add(row.run_id);
     }
-    for (const row of eventRows) {
-      if (hasPrRef(parseObject(row.envelope_json), prRefs))
-        events.add(`${row.source}\0${row.event_id}`);
+    for (const row of resultRows.values()) {
+      if (hasPrRef(parseObject(row.result_json), prRefs)) runs.add(row.run_id);
     }
+    for (const row of eventRows.values()) {
+      if (hasPrRef(parseObject(row.envelope_json), prRefs))
+        events.add(eventKey(row));
+    }
+    closeOverLinks();
   }
 
-  const matchedEvents = eventsView(db).events.filter((event) =>
-    events.has(`${event.source}\0${event.eventId}`),
-  );
-  const matchedProposals = proposalHistory(db).proposals.filter((proposal) =>
-    proposals.has(proposal.id),
-  );
+  const latestProposalByEvent = new Map();
+  for (const row of proposalRows.values()) {
+    const key = `${row.event_source}\0${row.event_id}`;
+    const current = latestProposalByEvent.get(key);
+    if (
+      !current ||
+      row.created_at > current.created_at ||
+      (row.created_at === current.created_at &&
+        row.list_rowid > current.list_rowid)
+    )
+      latestProposalByEvent.set(key, row);
+  }
+  const matchedEvents = [...eventRows.values()]
+    .filter((row) => events.has(eventKey(row)))
+    .sort(
+      (a, b) =>
+        b.admitted_at.localeCompare(a.admitted_at) ||
+        b.list_rowid - a.list_rowid,
+    )
+    .map((row) => {
+      const proposal = latestProposalByEvent.get(eventKey(row));
+      const envelope = parseObject(row.envelope_json);
+      return {
+        source: row.source,
+        eventId: row.event_id,
+        type: row.type,
+        subject: row.subject,
+        status: row.status,
+        occurredAt: row.occurred_at,
+        receivedAt: row.received_at,
+        correlationId: row.correlation_id,
+        causationId: row.causation_id,
+        planFailures: row.plan_failures,
+        lastPlanError: row.last_plan_error,
+        admittedAt: row.admitted_at,
+        proposalId: proposal?.id ?? null,
+        runId: proposal?.run_id ?? null,
+        envelope,
+        repos: repoNamesFromInput(envelope.payload),
+      };
+    });
+  const matchedProposals = [...proposalRows.values()]
+    .filter((row) => proposals.has(row.id))
+    .sort(
+      (a, b) =>
+        b.created_at.localeCompare(a.created_at) || b.list_rowid - a.list_rowid,
+    )
+    .map((row) => {
+      const expiresAt =
+        Date.parse(row.created_at) + Number(row.ttl_seconds) * 1000;
+      return proposalView({
+        ...row,
+        expired:
+          row.status === "open" &&
+          Number.isFinite(expiresAt) &&
+          expiresAt < nowMs,
+        spec: row.spec_json ? JSON.parse(row.spec_json) : null,
+      });
+    });
   const matchedRuns = [...runs]
     .map((runId) => runView(db, runId, options))
     .filter(Boolean)
