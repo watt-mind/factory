@@ -21,30 +21,64 @@ import { reposRoot } from "./repos.mjs";
 /** A worker is considered gone if it has not checked in for this long. */
 export const HEARTBEAT_STALE_MS = 90_000;
 
+/** Keep clean shutdowns briefly, but remove them before they bury the fleet. */
+export const STOPPED_WORKER_RETENTION_MS = 60 * 60 * 1000;
+
+/** A non-stopped worker past this age is a dead process, not capacity. */
+export const INACTIVE_WORKER_RETENTION_MS = 6 * 60 * 60 * 1000;
+
 const iso = (now) => new Date(now).toISOString();
+
+const ACTIVE_ATTEMPT_STATES = "'LEASED', 'RUNNING', 'VERIFYING'";
+
+/** Do not discard a registry row while an in-flight attempt still names it. */
+const unleasedWorker = `NOT EXISTS (
+  SELECT 1
+  FROM attempts
+  JOIN runs ON runs.run_id = attempts.run_id
+  WHERE attempts.lease_owner = workers.worker_id
+    AND runs.state IN (${ACTIVE_ATTEMPT_STATES})
+)`;
+
+function pruneHostWorkers(db, { host, workerId, now }) {
+  const inactiveCutoff = iso(now - INACTIVE_WORKER_RETENTION_MS);
+  db.query(
+    `DELETE FROM workers
+     WHERE host = ?
+       AND worker_id != ?
+       AND (state = 'stopped' OR (state != 'stopped' AND last_seen < ?))
+       AND ${unleasedWorker}`,
+  ).run(host, workerId, inactiveCutoff);
+}
 
 export function registerWorker(
   db,
   { workerId, labels = {}, adapters = [], now = Date.now() },
 ) {
   const at = iso(now);
-  db.query(
-    `INSERT INTO workers (worker_id, host, pid, labels_json, adapters, started_at, last_seen, state)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'idle')
-     ON CONFLICT(worker_id) DO UPDATE SET
-       host = excluded.host, pid = excluded.pid, labels_json = excluded.labels_json,
-       adapters = excluded.adapters, last_seen = excluded.last_seen,
-       state = 'idle', stopped_at = NULL`,
-  ).run(
-    workerId,
-    hostname(),
-    process.pid,
-    JSON.stringify(labels),
-    adapters.join(","),
-    at,
-    at,
-  );
-  return { workerId, host: hostname(), pid: process.pid, labels, adapters };
+  const host = hostname();
+  return tx(db, () => {
+    // A clean pool restart deregisters each local worker first. Remove those
+    // obsolete rows as the replacement starts, while retaining active leases.
+    pruneHostWorkers(db, { host, workerId, now });
+    db.query(
+      `INSERT INTO workers (worker_id, host, pid, labels_json, adapters, started_at, last_seen, state)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'idle')
+       ON CONFLICT(worker_id) DO UPDATE SET
+         host = excluded.host, pid = excluded.pid, labels_json = excluded.labels_json,
+         adapters = excluded.adapters, last_seen = excluded.last_seen,
+         state = 'idle', stopped_at = NULL`,
+    ).run(
+      workerId,
+      host,
+      process.pid,
+      JSON.stringify(labels),
+      adapters.join(","),
+      at,
+      at,
+    );
+    return { workerId, host, pid: process.pid, labels, adapters };
+  });
 }
 
 /** Called every loop tick: proof of life, plus what the worker is doing. */
@@ -95,16 +129,28 @@ export function stalledWorkers(db, { now = Date.now() } = {}) {
   return listWorkers(db, { now }).filter((w) => w.stale && w.currentRun);
 }
 
-/** Drop long-stopped workers so the registry reflects the fleet, not history. */
+/** Drop obsolete registry rows while retaining workers that own active leases. */
 export function pruneWorkers(
   db,
-  { olderThanMs = 24 * 60 * 60 * 1000, now = Date.now() } = {},
+  {
+    stoppedOlderThanMs = STOPPED_WORKER_RETENTION_MS,
+    inactiveOlderThanMs = INACTIVE_WORKER_RETENTION_MS,
+    now = Date.now(),
+  } = {},
 ) {
   return tx(db, () => {
-    const cutoff = iso(now - olderThanMs);
+    const stoppedCutoff = iso(now - stoppedOlderThanMs);
+    const inactiveCutoff = iso(now - inactiveOlderThanMs);
     const { changes } = db
-      .query(`DELETE FROM workers WHERE state = 'stopped' AND stopped_at < ?`)
-      .run(cutoff);
+      .query(
+        `DELETE FROM workers
+         WHERE (
+           (state = 'stopped' AND stopped_at < ?)
+           OR (state != 'stopped' AND last_seen < ?)
+         )
+         AND ${unleasedWorker}`,
+      )
+      .run(stoppedCutoff, inactiveCutoff);
     return changes ?? 0;
   });
 }

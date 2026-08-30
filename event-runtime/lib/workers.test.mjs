@@ -219,14 +219,63 @@ describe("worker registry and heartbeats (OPS-233)", () => {
     });
   });
 
-  test("pruning drops long-stopped workers only", () => {
+  test("pruning keeps recent and leased workers while dropping expired rows", () => {
     const d = db();
-    const old = Date.now() - 48 * 60 * 60 * 1000;
-    registerWorker(d, { workerId: "old", now: old });
-    deregisterWorker(d, "old", { now: old });
-    registerWorker(d, { workerId: "live" });
-    expect(pruneWorkers(d)).toBe(1);
-    expect(listWorkers(d).map((w) => w.workerId)).toEqual(["live"]);
+    const now = Date.now();
+    const hour = 60 * 60 * 1000;
+
+    registerWorker(d, { workerId: "old-stopped", now });
+    registerWorker(d, { workerId: "fresh-stopped", now });
+    registerWorker(d, { workerId: "stale-dead", now });
+    registerWorker(d, { workerId: "stale-but-leased", now });
+    deregisterWorker(d, "old-stopped", { now: now - 2 * hour });
+    deregisterWorker(d, "fresh-stopped", { now: now - 30 * 60 * 1000 });
+    heartbeat(d, "stale-dead", { now: now - 7 * hour });
+    heartbeat(d, "stale-but-leased", { now: now - 7 * hour });
+    queueRun(d, { runId: "run_leased" });
+    claimNext(d, {
+      owner: "stale-but-leased",
+      policyVersion: PV,
+      now,
+    });
+
+    expect(pruneWorkers(d, { now })).toBe(2);
+    expect(
+      listWorkers(d, { now })
+        .map((w) => w.workerId)
+        .sort(),
+    ).toEqual(["fresh-stopped", "stale-but-leased"]);
+  });
+
+  test("registering a worker removes obsolete rows from its host", () => {
+    const d = db();
+    const now = Date.now();
+
+    registerWorker(d, { workerId: "previous-pool", now });
+    deregisterWorker(d, "previous-pool", { now });
+    registerWorker(d, { workerId: "new-pool", now: now + 1 });
+
+    expect(listWorkers(d, { now: now + 1 }).map((w) => w.workerId)).toEqual([
+      "new-pool",
+    ]);
+  });
+
+  test("pruning retention windows are configurable", () => {
+    const d = db();
+    const now = Date.now();
+
+    registerWorker(d, { workerId: "stopped", now });
+    registerWorker(d, { workerId: "inactive", now });
+    deregisterWorker(d, "stopped", { now: now - 30 * 60 * 1000 });
+    heartbeat(d, "inactive", { now: now - 2 * 60 * 60 * 1000 });
+
+    expect(
+      pruneWorkers(d, {
+        now,
+        stoppedOlderThanMs: 15 * 60 * 1000,
+        inactiveOlderThanMs: 60 * 60 * 1000,
+      }),
+    ).toBe(2);
   });
 });
 
