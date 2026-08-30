@@ -40,7 +40,8 @@ usage: bun event-runtime/cli.mjs <command>
   doctor                         system health check: anomaly report (exits non-zero on anomalies)
   events [status]                admitted events, optionally filtered by status
   ps [state]                     running event processes/runs (default: RUNNING or LEASED)
-  runs [state]                   runs (optionally filtered by state)
+  runs [state] [--agent ID] [--exclude-agent ID] [--dispatch-only]
+       [--count] [--limit N]     runs; filters, count-only output, and pagination
   proposals                      open proposals with TTL age
   inbox                          open items waiting on the human
   agents                         registered agent definitions and event routing

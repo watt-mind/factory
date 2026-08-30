@@ -132,8 +132,24 @@ export function apiClient({
       call("POST", `/proposals/${encodeURIComponent(id)}/reject`, {
         body: JSON.stringify({ reason }),
       }),
-    runs: (state) =>
-      call("GET", `/runs${state ? `?state=${encodeURIComponent(state)}` : ""}`),
+    /**
+     * List runs. Accept the original state string for existing callers, or an
+     * options object so list clients can carry the API's cursor and filters.
+     */
+    runs: (stateOrOptions) => {
+      const options =
+        typeof stateOrOptions === "string"
+          ? { state: stateOrOptions }
+          : (stateOrOptions ?? {});
+      const query = new URLSearchParams();
+      for (const key of ["state", "agent", "limit", "before"]) {
+        if (options[key] !== undefined && options[key] !== null) {
+          query.set(key, String(options[key]));
+        }
+      }
+      const suffix = query.size > 0 ? `?${query}` : "";
+      return call("GET", `/runs${suffix}`);
+    },
     run: (id) => call("GET", `/runs/${encodeURIComponent(id)}`),
     /**
      * Raw artifact bytes by content address (GET /artifacts/:sha). The route
