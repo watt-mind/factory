@@ -1303,6 +1303,39 @@ describe("planEvent worktree gate (WM-108)", () => {
       });
       expect(viewerRepos).toEqual(["tiered"]);
 
+      const workspaceEscalation = {
+        failedRunId: base.runId,
+        continuationRunId: continuation.runId,
+        rootRunId: base.runId,
+        repo: "tiered",
+        ticket: "WM-694",
+        workspacePath: "/tmp/tiered-checkout",
+        projectionState: "applied",
+      };
+      expect(
+        worktreeDispatchGate(continuation.input, {
+          ...dispatch,
+          escalatedContinuation: workspaceEscalation,
+          findWorkspacePullRequest: () => ({
+            number: 1533,
+            state: "OPEN",
+            isDraft: false,
+          }),
+        }),
+      ).toEqual({ decision: "noop", reason: "ticket_pr_already_open" });
+      for (const pullRequest of [
+        { number: 1533, state: "OPEN", isDraft: true },
+        null,
+      ]) {
+        expect(
+          worktreeDispatchAutoEligibility(continuation.input, {
+            ...dispatch,
+            escalatedContinuation: workspaceEscalation,
+            findWorkspacePullRequest: () => pullRequest,
+          }).ok,
+        ).toBe(true);
+      }
+
       const closedEscalation = {
         failedRunId: base.runId,
         continuationRunId: continuation.runId,
@@ -2690,7 +2723,7 @@ describe("buildRunSpec", () => {
       now: 0,
     });
     expect(canonicalJson(spec)).toBe(
-      '{"adapter":"cursor","agent":"dispatch@1","capabilities":["tracker:write","repo:write","github:write"],"defHash":"sha256:440db0b0151fee722647bc17ea2808976c65558e50d36fec0a02cdd754843c88","idempotencyKey":"dispatch@1:factory.dispatch-result/v1:sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59:dispatch-baseline","input":{"repo":"factory","ticket":"WM-694"},"inputHash":"sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59","maxAttempts":1,"model":"cursor-grok-4.6-high","modelTier":"strong","outputContract":"factory.dispatch-result/v1","policyVersion":"git:test","promptVersion":"git:test","runId":"run_baseline","schemaVersion":"factory.run-spec/v1","timeoutSeconds":5400,"workspace":{"checkoutDir":"repo","retainOnFailure":true,"type":"worktree"}}',
+      '{"adapter":"cursor","agent":"dispatch@1","capabilities":["tracker:write","repo:write","github:write"],"defHash":"sha256:600c6d9b252f1e775aae23caa838313fbb0308fb22f69d9aea0e6c3e446ab19e","idempotencyKey":"dispatch@1:factory.dispatch-result/v1:sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59:dispatch-baseline","input":{"repo":"factory","ticket":"WM-694"},"inputHash":"sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59","maxAttempts":1,"model":"cursor-grok-4.6-high","modelTier":"strong","outputContract":"factory.dispatch-result/v1","policyVersion":"git:test","promptVersion":"git:test","runId":"run_baseline","schemaVersion":"factory.run-spec/v1","timeoutSeconds":5400,"workspace":{"checkoutDir":"repo","retainOnFailure":true,"type":"worktree"}}',
     );
   });
 
