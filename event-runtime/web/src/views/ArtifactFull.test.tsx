@@ -47,18 +47,23 @@ function renderArtifactFull({
   onBack = mock(() => {}),
   onJumpRun = mock(() => {}),
   seed = {},
+  seedArtifacts = true,
 }: {
   digest?: string;
   onBack?: () => void;
   onJumpRun?: (runId: string) => void;
   seed?: { items?: ArtifactInventoryItem[]; agents?: unknown[] };
+  seedArtifacts?: boolean;
 } = {}) {
   const client = new QueryClient({
     defaultOptions: {
       queries: { retry: false, refetchInterval: false, staleTime: Infinity },
     },
   });
-  client.setQueryData(["artifacts"], { artifacts: seed.items ?? ITEMS });
+  if (seedArtifacts)
+    client.setQueryData(["artifact", digest], {
+      artifacts: seed.items ?? ITEMS,
+    });
   if (seed.agents) {
     client.setQueryData(["agents"], {
       agents: seed.agents,
@@ -80,6 +85,36 @@ function renderArtifactFull({
 }
 
 describe("ArtifactFull reader view (WM-828)", () => {
+  test("requests only the selected digest", async () => {
+    const requests: string[] = [];
+    globalThis.fetch = mock(async (input: string | URL | Request) => {
+      requests.push(String(input));
+      return new Response(JSON.stringify({ artifacts: ITEMS }), {
+        status: 200,
+      });
+    }) as unknown as typeof fetch;
+
+    renderArtifactFull({ seedArtifacts: false });
+
+    await waitFor(() =>
+      expect(requests).toContain(`/api/artifacts?search=${SHA_A}&limit=1`),
+    );
+  });
+
+  test("ignores a positional hit whose digest differs from the requested one", async () => {
+    globalThis.fetch = mock(
+      async () => new Response("{}", { status: 200 }),
+    ) as unknown as typeof fetch;
+
+    const view = renderArtifactFull({
+      seed: { items: [{ ...ITEMS[0], sha256: "b".repeat(64) }] },
+    });
+
+    await view.findByRole("button", { name: /← Artifacts/ });
+    expect(view.queryByText("1.0 KB")).toBeNull();
+    expect(view.queryByRole("button", { name: "run_12345678" })).toBeNull();
+  });
+
   test("renders header with back button, kind badges, short digest, size, timestamp, producing run jump link, and copy actions", async () => {
     const raw = JSON.stringify({ summary: "report content", status: "ok" });
     globalThis.fetch = mock(
