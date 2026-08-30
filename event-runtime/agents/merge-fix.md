@@ -4,8 +4,11 @@
 isolated worktree for the ticket. This is not a general implementation run.
 
 1. Read the ticket and all comments. Re-read the PR head/base and required
-   checks. Refuse if head SHA, base SHA, ticket, branch, finding hash, or PR
-   identity moved; stale evidence requires a fresh independent scan.
+   checks. Refuse if the ticket, PR identity, branch, finding hash, or base
+   identity moved. A changed PR head is not by itself a refusal for an
+   operational rebase: handle it with the concurrent-head protocol below so a
+   fixer cannot be erased. Other stale evidence requires a fresh independent
+   scan.
 2. Confirm the finding is mechanical, round is 1 or 2, and no
    security/product/policy judgment is involved. Otherwise move the ticket to
    Blocked, notify when policy requires, and output BLOCKED without editing.
@@ -27,17 +30,52 @@ isolated worktree for the ticket. This is not a general implementation run.
      scan establish green. This deterministic correction does not consume a
      `max_fix_rounds` round.
 
-   - `rebase_onto_base` / `rerun_ci_at_head`: rebase the head branch onto the
-     current base. Resolve conflicts faithfully to both sides, reading the
-     surrounding code; the files git reports as conflicting are in scope for
-     the resolution regardless of the ticket's Owned Paths, because a rebase
-     touches what the base touched. Never `git stash` or `--autostash`. If a
-     hunk is genuinely ambiguous — two real behaviours, no way to keep both —
-     that is the one case to BLOCK with the hunk named. After every rebase,
-     run the same changed-file-only prettier and eslint commands described for
-     `format_and_lint`, then re-run verification and push with
-     `--force-with-lease`. Formatting drift after a rebase is predictable, so
-     never push the rebased branch before this hygiene step.
+   - `rebase_onto_base` / `rerun_ci_at_head`: first fetch both the PR branch
+     and base, record the fetched PR tip as `expectedRemoteSha`, and keep that
+     exact value for the push lease:
+
+     ```sh
+     git fetch --no-tags origin \
+       "+refs/heads/<headRef>:refs/remotes/origin/<headRef>" \
+       "+refs/heads/<base>:refs/remotes/origin/<base>"
+     expectedRemoteSha=$(git rev-parse "origin/<headRef>")
+     ```
+
+     Before editing, inspect the fetched tip's committer email and timestamp.
+     If it was pushed by an actor other than this run (`git config user.email`)
+     within `MERGE_FIX_IN_FLIGHT_MINUTES` (default `10`), do not touch or push
+     the branch. Return the structured no-op reason `branch_in_flight` (with
+     `outcome: "BLOCKED"` under this agent's bounded result contract) instead
+     of racing the active fixer. Treat an unknown actor or timestamp as in
+     flight; validate the optional minute value as a positive integer before
+     using it.
+
+     If `expectedRemoteSha` is not an ancestor of local `HEAD`, someone pushed
+     commits the worktree does not contain. Rebase local work **on top of** the
+     fetched remote branch first (`git rebase "origin/<headRef>"`), then rebase
+     onto `origin/<base>`; never reconstruct the branch by replaying only this
+     run's original dispatch commit. This preserves foreign commits even when
+     the local and remote histories diverged. Resolve conflicts faithfully to
+     both sides, reading the surrounding code; the files git reports as
+     conflicting are in scope for the resolution regardless of the ticket's
+     Owned Paths, because a rebase touches what the base touched. Never stash
+     changes or use `--autostash`. If a hunk is genuinely ambiguous — two real
+     behaviours, no way to keep both — that is the one case to BLOCK with the
+     hunk named. After every rebase, run the same changed-file-only prettier
+     and eslint commands described for `format_and_lint`, then re-run
+     verification. Push exactly once with the fetched-tip lease:
+
+     ```sh
+     git push origin "HEAD:refs/heads/<headRef>" \
+       "--force-with-lease=<headRef>:${expectedRemoteSha}"
+     ```
+
+     A lease failure means another writer moved the branch after the fetch:
+     make no retry push, return `outcome: "BLOCKED"` with structured reason
+     `branch_moved`, and leave the remote branch untouched. Formatting drift
+     after a rebase is predictable, so never push the rebased branch before
+     this hygiene step.
+
    - A finding that names an Owned Paths deviation (an expectation outside the
      ticket's paths that the PR's own change invalidated): make that one
      correction, and record the deviation on the ticket in your comment.

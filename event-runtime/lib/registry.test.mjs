@@ -307,8 +307,11 @@ describe("registry", () => {
     // the configured handoff gate includes Prettier after the unit and emit
     // checks; dispatch.json is re-pinned. Prompt text only — no schema,
     // contract, route, capability, or model tier changed.
+    // Regenerated (#1445): merge-fix.md preserves freshly fetched foreign PR
+    // commits, uses an exact force-with-lease, and returns typed concurrent
+    // branch no-ops; merge-fix.json is re-pinned. Prompt text only.
     const expected =
-      "sha256:9478df60d64bd504a50935c322760df759dc0055dd3b781f06a0a7165f1c6172";
+      "sha256:3317a3c069bbdef2e7c22486ace3f1b7cbaf429e9bc6d6455eb6630caf360dc5";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -401,6 +404,23 @@ describe("registry", () => {
     expect(warnings).toEqual([
       expect.stringContaining("not named in overlay_auto_approve"),
     ]);
+  });
+
+  test("merge-fix rebase instructions preserve concurrent branch commits", () => {
+    const prompt = readFileSync(
+      path.join(RUNTIME_ROOT, "agents", "merge-fix.md"),
+      "utf8",
+    );
+    const flat = prompt.replace(/\s+/g, " ");
+
+    expect(flat).toContain('git rebase "origin/<headRef>"');
+    expect(flat).toContain(
+      '"--force-with-lease=<headRef>:${expectedRemoteSha}"',
+    );
+    expect(flat).toContain("MERGE_FIX_IN_FLIGHT_MINUTES");
+    expect(flat).toContain("branch_in_flight");
+    expect(flat).toContain("branch_moved");
+    expect(flat).toContain("make no retry push");
   });
 
   test("local schedule overlay permits new complete entries and rejects kernel routing changes", () => {
