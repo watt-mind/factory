@@ -4,6 +4,7 @@ import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -14,6 +15,8 @@ import { registerWorker } from "../lib/workers.mjs";
 import {
   crashBackoffMs,
   readPool,
+  spawnDetached,
+  startTickLoop,
   workerPassthroughArgs,
 } from "./supervise.mjs";
 import {
@@ -30,6 +33,7 @@ import {
   seedRun,
   spawnSupervisor,
   spawnWorker,
+  until,
   waitFor,
   registerCliTmpCleanup,
 } from "./test-helpers.mjs";
@@ -79,6 +83,147 @@ describe("supervise (WM-226)", () => {
       expect(runCli(args).status).not.toBe(0);
     }
   });
+
+  test("--once propagates tick failures while daemon ticks are logged on every failure and retried", async () => {
+    const error = new Error("transient failure");
+    expect(() =>
+      startTickLoop(
+        () => {
+          throw error;
+        },
+        { once: true, intervalMs: 10, log: () => {} },
+      ),
+    ).toThrow(error);
+
+    // A permanently broken tick must stay loud: every failing tick logs, with
+    // no `lastHold`-style dedupe, and the interval keeps firing regardless.
+    const lines = [];
+    let calls = 0;
+    const timer = startTickLoop(
+      () => {
+        calls += 1;
+        throw error;
+      },
+      { once: false, intervalMs: 10, log: (line) => lines.push(line) },
+    );
+    try {
+      await until(
+        "the guarded tick to fail at least three times",
+        () => calls >= 3,
+        {
+          timeoutMs: 5_000,
+        },
+      );
+    } finally {
+      clearInterval(timer);
+    }
+    expect(calls).toBeGreaterThanOrEqual(3);
+    expect(lines.length).toBe(calls);
+    expect(new Set(lines)).toEqual(new Set(["tick error: transient failure"]));
+  });
+
+  test("a spawn() that throws closes the log fd and the next tick still runs", async () => {
+    const dir = tmpDir("evrt-pool-spawn-throw-");
+    const logFile = path.join(dir, "worker-1.log");
+    const openFds = () => readdirSync("/proc/self/fd").length;
+    const spawnThrows = () => {
+      throw Object.assign(new Error("spawn EAGAIN"), { code: "EAGAIN" });
+    };
+
+    // The parent's copy of the log fd is closed even when spawn() throws:
+    // fifty failed spawns leave the descriptor table where it started.
+    const before = openFds();
+    for (let i = 0; i < 50; i += 1) {
+      expect(() =>
+        spawnDetached(logFile, ["work"], { cwd: dir, spawn: spawnThrows }),
+      ).toThrow("spawn EAGAIN");
+    }
+    expect(openFds()).toBe(before);
+
+    // Inside the guarded loop the failure is logged and the loop keeps ticking.
+    const lines = [];
+    let calls = 0;
+    const timer = startTickLoop(
+      () => {
+        calls += 1;
+        spawnDetached(logFile, ["work"], { cwd: dir, spawn: spawnThrows });
+      },
+      { once: false, intervalMs: 10, log: (line) => lines.push(line) },
+    );
+    try {
+      await until("the tick to fail at least three times", () => calls >= 3, {
+        timeoutMs: 5_000,
+      });
+    } finally {
+      clearInterval(timer);
+    }
+    expect(openFds()).toBe(before);
+    expect(new Set(lines)).toEqual(new Set(["tick error: spawn EAGAIN"]));
+  });
+
+  test("a transient tick failure is logged and the supervisor keeps ticking", async () => {
+    const home = tmpDir("evrt-pool-tick-error-");
+    const dir = tmpDir("evrt-pool-tick-error-run-");
+    const box = spawnSupervisor(
+      [
+        "--workers",
+        "1:1",
+        "--interval-ms",
+        "100",
+        "--adapter-override",
+        "fake",
+        "--poll-ms",
+        "50",
+      ],
+      { FACTORY_EVENT_HOME: home, FACTORY_RUN_DIR: dir },
+    );
+    try {
+      expect(await waitFor(box, "spawn slot 1")).toBe(true);
+      const worker = readPool(dir).slots[0];
+      const crashLoop = path.join(dir, "worker-1.crash-loop.json");
+      rmSync(crashLoop, { force: true });
+      mkdirSync(crashLoop);
+      process.kill(worker.pid, "SIGKILL");
+      expect(await waitFor(box, "tick error:", 10_000)).toBe(true);
+      // The fault persists across ticks, so the line must repeat — never
+      // deduplicated the way `hold — …` is.
+      await until(
+        "a second failing tick to be logged",
+        () => box.out.split("tick error:").length - 1 >= 2,
+        { timeoutMs: 10_000 },
+      );
+      expect(box.child.exitCode ?? null).toBeNull();
+      expect(existsSync(path.join(dir, "supervisor.pid"))).toBe(true);
+      rmSync(crashLoop, { recursive: true, force: true });
+
+      // With the fault gone the loop must still be live: the slot a failing
+      // tick left behind is reaped and the pool is rebuilt on later ticks.
+      const faultClearedAt = box.out.length;
+      const after = () => box.out.slice(faultClearedAt);
+      const respawned = await until(
+        "a worker to occupy slot 1 after the fault cleared",
+        () => readPool(dir).slots.find((s) => s.n === 1 && s.alive) ?? null,
+        { timeoutMs: 10_000 },
+      );
+      process.kill(respawned.pid, "SIGKILL");
+      await until(
+        "the supervisor to reap the killed slot after the fault cleared",
+        () => after().includes("slot released"),
+        { timeoutMs: 10_000 },
+      );
+      await until(
+        "the supervisor to act on the freed slot after the fault cleared",
+        () => /spawn slot 1|crash-loop slot 1/.test(after()),
+        { timeoutMs: 10_000 },
+      );
+      expect(box.child.exitCode ?? null).toBeNull();
+      expect(existsSync(path.join(dir, "supervisor.pid"))).toBe(true);
+    } finally {
+      await killPool(box, dir);
+      rmSync(home, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   test("rejects unsafe drain timeouts before writing its pidfile", () => {
     for (const value of ["not-a-number", "0", "-1"]) {

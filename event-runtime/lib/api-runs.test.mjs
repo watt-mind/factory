@@ -602,6 +602,41 @@ describe("ticket journey join (WM-595)", () => {
     }
   });
 
+  test("lowercase hyphenated prose never becomes a ticket row", async () => {
+    const nowMs = Date.parse("2026-08-18T12:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      await s.client.replay(
+        envelope({
+          eventId: "prose-noise",
+          subject: "dispatch",
+          occurredAt: "2026-08-18T10:00:00.000Z",
+          payload: {
+            repo: "factory",
+            ticket: "WM-7",
+            nested: { issue: "watt-mind/factory#1572" },
+            note: "hashed with sha-256, encoded utf-8, dated iso-8601",
+          },
+        }),
+      );
+
+      const tickets = ticketIndexView(s.db, { nowMs, since: "14d" }).map(
+        (ticket) => ticket.id,
+      );
+      expect(tickets).toEqual(
+        expect.arrayContaining(["WM-7", "watt-mind/factory#1572"]),
+      );
+      for (const id of tickets) {
+        expect(id).not.toMatch(/^(sha-256|utf-8|iso-8601)$/i);
+      }
+      expect(tickets.filter((id) => /^[a-z]/.test(id))).toEqual([
+        "watt-mind/factory#1572",
+      ]);
+    } finally {
+      s.close();
+    }
+  });
+
   test("GET /runs?ticket= joins explicit ticket activity and PR-linked merge runs", async () => {
     const home = tmpDir("evrt-journey-home-");
     const s = await makeServer({ env: { name: "test", home } });

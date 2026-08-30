@@ -873,7 +873,7 @@ export function parseSinceDuration(since, nowMs = Date.now()) {
 function collectTicketIds(value, targetSet = new Set()) {
   if (!value) return targetSet;
   if (typeof value === "string") {
-    const matches = value.match(/\b([A-Z][A-Z0-9]{1,9}-\d+)\b/gi);
+    const matches = value.match(/\b([A-Z][A-Z0-9]{1,9}-\d+)\b/g);
     if (matches) {
       for (const match of matches) {
         const ticket = normalizeTicketId(match);
