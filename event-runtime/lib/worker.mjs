@@ -3000,16 +3000,17 @@ function escapeRegExp(value) {
 }
 
 /**
- * True when some body line is a `Fixes <ticket>` line (case-insensitive,
- * tolerant of surrounding whitespace and one trailing punctuation mark).
- * Accepts the full `owner/repo#n` form, the short `#n` form when the PR
- * lives in that repository, and Linear ids verbatim. Returns null when the
- * handoff carries no usable ticket, so the caller reports "unknown" rather
- * than probing the body for `Fixes null`.
+ * Finds a valid `Fixes <ticket>` first line (case-insensitive, tolerant of
+ * surrounding whitespace and one trailing punctuation mark), and otherwise
+ * preserves the first Fixes-like line for a corrective violation. Accepts the
+ * full `owner/repo#n` form, the short `#n` form when the PR lives in that
+ * repository, and Linear ids verbatim. Returns null when the handoff carries
+ * no usable ticket, so the caller reports "unknown" rather than probing the
+ * body for `Fixes null`.
  */
-function handoffFixesLinePresent({ lines, ticket, github }) {
+function handoffFixesLine({ lines, ticket, github }) {
   const ref = typeof ticket === "string" ? ticket.trim() : "";
-  if (!ref) return null;
+  if (!ref) return { present: null, malformedLine: null };
   const alternatives = [escapeRegExp(ref)];
   const repoMatch = /^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#([0-9]+)$/.exec(ref);
   if (
@@ -3023,7 +3024,12 @@ function handoffFixesLinePresent({ lines, ticket, github }) {
     `^\\s*fixes\\s+(?:${alternatives.join("|")})\\s*[.,;:]?\\s*$`,
     "i",
   );
-  return lines.some((line) => pattern.test(line));
+  const firstLine = lines[0] ?? "";
+  if (pattern.test(firstLine)) return { present: true, malformedLine: null };
+  return {
+    present: false,
+    malformedLine: lines.find((line) => /^\s*fixes\b/i.test(line)) ?? null,
+  };
 }
 
 /**
@@ -3072,11 +3078,12 @@ export function assertHandoffPullRequestBase({
   const bodyLines = (typeof pr?.body === "string" ? pr.body : "").split(
     /\r?\n/,
   );
-  const hasFixesLine = handoffFixesLinePresent({
+  const fixesLine = handoffFixesLine({
     lines: bodyLines,
     ticket: handoff.ticket,
     github: handoff.github,
   });
+  const hasFixesLine = fixesLine.present;
   const hasRunTrailer =
     typeof handoff.runId === "string" && handoff.runId.trim()
       ? bodyLines.some((line) => line.trim() === `run:${handoff.runId.trim()}`)
@@ -3114,10 +3121,11 @@ export function assertHandoffPullRequestBase({
     );
   }
   if (hasFixesLine === false) {
+    const malformedDetail = fixesLine.malformedLine
+      ? ` has malformed Fixes line ${JSON.stringify(fixesLine.malformedLine)}; expected exactly Fixes ${handoff.ticket}`
+      : ` has no Fixes line for ${handoff.ticket}`;
     throw new ContractViolation(
-      [
-        `handoff_pr_form_invalid: PR #${prNumber} is missing Fixes ${handoff.ticket}`,
-      ],
+      [`handoff_pr_form_invalid: PR #${prNumber}${malformedDetail}`],
       { reasonCode: "handoff_pr_form_invalid", handoff },
     );
   }

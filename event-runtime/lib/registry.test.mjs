@@ -409,8 +409,10 @@ describe("registry", () => {
     // the literal environment-variable form during handoff verification.
     // Regenerated (#1843): merge-scan skips rebase churn for ai:landing and
     // in-flight/fresh Full verification; merge-fix re-checks that CI guard.
+    // Regenerated (#1925): dispatch spells out the exact first-line Fixes
+    // grammar and its prompt pin changes; the registry digest follows it.
     const expected =
-      "sha256:564641dee5b94b51d650f63233c467c12bed227e4a19b34c5f2a3c6dafd90c2c";
+      "sha256:dde1373788b1ecea1e8c11d130c42b0a0fa93ff0df2c9616a50beba6e556c10a";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -703,8 +705,10 @@ describe("registry", () => {
     // prompt pin only, `pack` remains non-enumerable.
     // Regenerated (#1829): dispatch emits the concrete run trailer with printf,
     // so quoted PR-body files cannot leave the environment variable literal.
+    // Regenerated (#1925): dispatch specifies the exact Fixes-line grammar;
+    // its prompt pin legitimately changes while `pack` remains non-enumerable.
     expect(computeDefHash(def)).toBe(
-      "sha256:b629b32521d6f81e9ba798403eeb8db6c7703745e42fd2ffe949d8a52a9d467d",
+      "sha256:c9c95b3482cd08600d034c5524a7dade9330010ef711edfbca35ca161e607628",
     );
   });
 
