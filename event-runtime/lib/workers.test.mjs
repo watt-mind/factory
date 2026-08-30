@@ -296,8 +296,16 @@ describe("worker registry and heartbeats (OPS-233)", () => {
   test("a heartbeat restores a worker pruned while it was suspended", () => {
     const d = db();
     const now = Date.now();
+    const startedAt = now - 8 * 60 * 60 * 1000;
+    const labels = { node: "lab", can: "infra-exec" };
+    const adapters = ["fake", "pi"];
 
-    registerWorker(d, { workerId: "recovered", now });
+    registerWorker(d, {
+      workerId: "recovered",
+      labels,
+      adapters,
+      now: startedAt,
+    });
     heartbeat(d, "recovered", {
       state: "busy",
       runId: "run_recovered",
@@ -309,6 +317,9 @@ describe("worker registry and heartbeats (OPS-233)", () => {
 
     heartbeat(d, "recovered", {
       state: "idle",
+      labels,
+      adapters,
+      startedAt,
       now: now + 1,
     });
     expect(listWorkers(d, { now: now + 1 })).toEqual([
@@ -316,9 +327,28 @@ describe("worker registry and heartbeats (OPS-233)", () => {
         workerId: "recovered",
         state: "idle",
         currentRun: null,
+        labels,
+        adapters,
+        startedAt: new Date(startedAt).toISOString(),
         stale: false,
       }),
     ]);
+  });
+
+  test("pruning stopped workers falls back to last_seen when stopped_at is NULL", () => {
+    const d = db();
+    const now = Date.now();
+
+    registerWorker(d, {
+      workerId: "missing-stop-time",
+      now: now - 2 * 60 * 60 * 1000,
+    });
+    d.query(
+      `UPDATE workers SET state = 'stopped', stopped_at = NULL WHERE worker_id = ?`,
+    ).run("missing-stop-time");
+
+    expect(pruneWorkers(d, { now })).toBe(1);
+    expect(listWorkers(d, { now })).toEqual([]);
   });
 
   test("pruning retention windows are configurable", () => {

@@ -1230,6 +1230,34 @@ function tierEscalationForContinuation(db, runId) {
   };
 }
 
+/**
+ * Only diagnostics the next dispatch can act on belong in its continuation.
+ * Each violation is matched on its own, anchored at its start: a
+ * `repo_verify_failed:` reason that merely quotes a `web_build_failed:` line
+ * inside its output is not a handoff failure, and a pre-joined
+ * `ContractViolation.message` is split back into its lines first.
+ */
+export function continuationHandoffFailure(violations) {
+  const lines = Array.isArray(violations)
+    ? violations
+    : typeof violations === "string"
+      ? violations.split(/;\s+(?=[a-z_]+:)/)
+      : [];
+  const failure = lines.find(
+    (line) =>
+      typeof line === "string" &&
+      /^(?:web_build_failed|ticket_verify_failed):/.test(line),
+  );
+  return failure ?? null;
+}
+
+/** Add worker-observed handoff context without mutating the validated spec. */
+export function continuationExecutionInput(input, handoffFailure) {
+  return typeof handoffFailure === "string" && handoffFailure
+    ? { ...input, handoffFailure }
+    : input;
+}
+
 /** Leave a foreign-owned escalation in an explicit terminal projection state. */
 function refuseTierEscalationClaim(db, handoff, reasonCode) {
   if (
@@ -1269,6 +1297,7 @@ export function scheduleTierEscalation(
     now = Date.now(),
     continuationRunId = newRunId(),
     reasonCode,
+    handoffFailure = null,
   } = {},
 ) {
   const rootRunId = failedSpec.rootRunId ?? failedSpec.runId;
@@ -1284,6 +1313,7 @@ export function scheduleTierEscalation(
   const spec = buildEscalatedContinuationSpec(registry, failedSpec, {
     runId: continuationRunId,
     operatorAuthorized: origin?.source === "operator",
+    handoffFailure,
   });
   const at = iso(now);
   const eventId = `tier-escalation:${rootRunId}`;
@@ -2455,13 +2485,13 @@ function defaultHoldPullRequest({ github, prNumber, body }) {
   return held;
 }
 
-/** Read the live PR base at handoff; dispatch must never rely on GitHub's default branch. */
+/** Read the live PR form at handoff; dispatch must never rely on GitHub's default branch. */
 function defaultFetchHandoffPullRequest({ github, prNumber }) {
   if (!github || !Number.isInteger(prNumber)) {
     throw new Error("handoff PR requires github and a numeric PR number");
   }
   return loadForge().prView(github, prNumber, {
-    fields: ["baseRefName", "isDraft"],
+    fields: ["baseRefName", "body", "isDraft"],
     timeout: workerSubprocessTimeoutMs(),
   });
 }
@@ -2472,12 +2502,47 @@ function handoffPrNumber(handoff) {
   return null;
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * True when some body line is a `Fixes <ticket>` line (case-insensitive,
+ * tolerant of surrounding whitespace and one trailing punctuation mark).
+ * Accepts the full `owner/repo#n` form, the short `#n` form when the PR
+ * lives in that repository, and Linear ids verbatim. Returns null when the
+ * handoff carries no usable ticket, so the caller reports "unknown" rather
+ * than probing the body for `Fixes null`.
+ */
+function handoffFixesLinePresent({ lines, ticket, github }) {
+  const ref = typeof ticket === "string" ? ticket.trim() : "";
+  if (!ref) return null;
+  const alternatives = [escapeRegExp(ref)];
+  const repoMatch = /^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#([0-9]+)$/.exec(ref);
+  if (
+    repoMatch &&
+    typeof github === "string" &&
+    github.trim().toLowerCase() === repoMatch[1].toLowerCase()
+  ) {
+    alternatives.push(`#${repoMatch[2]}`);
+  }
+  const pattern = new RegExp(
+    `^\\s*fixes\\s+(?:${alternatives.join("|")})\\s*[.,;:]?\\s*$`,
+    "i",
+  );
+  return lines.some((line) => pattern.test(line));
+}
+
 /**
  * Fail the handoff closed if GitHub cannot prove that the PR targets the
  * configured repository base. Kept here, beside the worker's other external
  * handoff effects, so tests can inject the PR read without a live forge.
  */
-function assertHandoffPullRequestBase({ handoff, base, fetchPullRequest }) {
+export function assertHandoffPullRequestBase({
+  handoff,
+  base,
+  fetchPullRequest,
+}) {
   const expected = typeof base === "string" ? base.trim() : "";
   const prNumber = handoffPrNumber(handoff);
   if (!expected || !handoff?.github || !prNumber) {
@@ -2502,7 +2567,26 @@ function assertHandoffPullRequestBase({ handoff, base, fetchPullRequest }) {
   const actual =
     typeof pr?.baseRefName === "string" ? pr.baseRefName.trim() : "";
   handoff.prBase = { expected, actual: actual || null };
-  handoff.prDraft = pr?.isDraft === true;
+  // GitHub returns `body: null` for an empty description; treat it as "".
+  const bodyLines = (typeof pr?.body === "string" ? pr.body : "").split(
+    /\r?\n/,
+  );
+  const hasFixesLine = handoffFixesLinePresent({
+    lines: bodyLines,
+    ticket: handoff.ticket,
+    github: handoff.github,
+  });
+  const hasRunTrailer =
+    typeof handoff.runId === "string" && handoff.runId.trim()
+      ? bodyLines.some((line) => line.trim() === `run:${handoff.runId.trim()}`)
+      : null;
+  handoff.pr = {
+    number: prNumber,
+    draft: pr?.isDraft === true,
+    hasFixesLine,
+    hasRunTrailer,
+  };
+  handoff.prDraft = handoff.pr.draft;
   if (!actual) {
     throw new ContractViolation(
       [`pr_base_unreadable: PR #${prNumber} has no baseRefName`],
@@ -2515,6 +2599,14 @@ function assertHandoffPullRequestBase({ handoff, base, fetchPullRequest }) {
         `pr_base_mismatch: PR #${prNumber} targets ${actual}, expected configured base ${expected}`,
       ],
       { reasonCode: "handoff_verification_failed", handoff },
+    );
+  }
+  if (hasFixesLine === false) {
+    throw new ContractViolation(
+      [
+        `handoff_pr_form_invalid: PR #${prNumber} is missing Fixes ${handoff.ticket}`,
+      ],
+      { reasonCode: "handoff_pr_form_invalid", handoff },
     );
   }
 }
@@ -2662,7 +2754,12 @@ export async function executeClaimed(
   const repoName = spec.input?.repoPin?.repo ?? spec.input?.repo ?? null;
   const ticketId = spec.input?.ticket ?? null;
   const isWorktree = spec.workspace?.type === "worktree";
-  const worktreeHandoff = tierEscalationForContinuation(db, runId);
+  const tierHandoff = tierEscalationForContinuation(db, runId);
+  const handoffFailure = spec.approvalPolicy?.escalation?.handoffFailure;
+  const worktreeHandoff =
+    tierHandoff && typeof handoffFailure === "string"
+      ? { ...tierHandoff, handoffFailure }
+      : tierHandoff;
 
   let leaseHeartbeat = null;
   let ticketClaimed = false;
@@ -3538,6 +3635,24 @@ export async function executeClaimed(
       throw err;
     }
     workspaceDir = created.dir;
+    // A continuation receives the original schema-validated input, plus this
+    // workspace-local diagnostic. It is deliberately not written into the
+    // RunSpec input: the original ticket event remains immutable and the
+    // closed dispatch input schema need not admit worker-owned context.
+    if (worktreeHandoff?.handoffFailure) {
+      const inputPath = path.join(workspaceDir, "input.json");
+      const executionInput = JSON.parse(readFileSync(inputPath, "utf8"));
+      writeFileSync(
+        inputPath,
+        `${canonicalJson(
+          continuationExecutionInput(
+            executionInput,
+            worktreeHandoff.handoffFailure,
+          ),
+        )}\n`,
+        "utf8",
+      );
+    }
     assertSandboxWorkspaceSupported(workspaceDir, def);
     // Repository checkouts receive instance-local config and integrity
     // baselining. Delegated worktrees already provision their own instance and
@@ -4102,6 +4217,7 @@ export async function executeClaimed(
             policyVersion,
             now: currentNow,
             reasonCode,
+            handoffFailure: continuationHandoffFailure(err.violations),
           });
         }
         return { ok: true, escalation };

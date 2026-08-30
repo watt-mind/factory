@@ -151,7 +151,7 @@ function emittedKinds(def) {
  */
 export function validateMemo(
   document,
-  { allowProvenance = false, at = "$" } = {},
+  { allowProvenance = false, at = "$", now = Date.now() } = {},
 ) {
   const errors = [];
   if (
@@ -165,6 +165,15 @@ export function validateMemo(
   errors.push(...shape.errors);
   if (!shape.valid) return { valid: false, errors };
 
+  const expiresAt = document.bindings?.expiresAt;
+  if (typeof expiresAt === "string") {
+    const expiresAtMs = Date.parse(expiresAt);
+    if (!Number.isFinite(expiresAtMs)) {
+      errors.push(`${at}.bindings.expiresAt: not a valid time`);
+    } else if (expiresAtMs <= now) {
+      errors.push(`${at}.bindings.expiresAt: already in the past`);
+    }
+  }
   if (hasOwn(document, "provenance") && !allowProvenance) {
     errors.push(`${at}.provenance: agent-supplied provenance is rejected`);
   }
@@ -429,7 +438,7 @@ function collectRegisterEntries(result, { runId, agent, now }) {
 }
 
 function insertMemoRow(db, { sha256, document }, { now }) {
-  const check = validateMemo(document, { allowProvenance: true });
+  const check = validateMemo(document, { allowProvenance: true, now });
   if (!check.valid) {
     throw new Error(
       `memo ${sha256} failed contract: ${check.errors.join("; ")}`,
@@ -941,7 +950,10 @@ export function processResultMemos({
       errors.push(...parsed.errors);
       continue;
     }
-    const check = validateMemo(parsed.document, { allowProvenance: false });
+    const check = validateMemo(parsed.document, {
+      allowProvenance: false,
+      now,
+    });
     if (!check.valid) {
       errors.push(...check.errors);
       continue;

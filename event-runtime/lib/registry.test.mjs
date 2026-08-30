@@ -344,8 +344,17 @@ describe("registry", () => {
     // wrapper; merge-review and merge-notify document the same artifact
     // nesting, and all three agent definitions are re-pinned. Post-review:
     // merge-fix.md drops the bare-artifact twin examples (re-pinned again).
+    // Regenerated (#1445): merge-fix.md preserves freshly fetched foreign PR
+    // commits, uses an exact force-with-lease, compares the pinned headSha
+    // against live PR evidence, and returns stable `branch_in_flight:` /
+    // `branch_moved:` summary prefixes; merge-fix.json is re-pinned. Prompt
+    // text only.
+    // Regenerated (CLNT-123): dispatch now requires web TypeScript checking,
+    // documents the legacy bunx handoff alias, and receives bounded handoff
+    // diagnostics. Prompt pin only — the definition remains provenance-safe.
+    // Digest recomputed after merging #1521/#1445 (registry inputs).
     const expected =
-      "sha256:3da3fdd6554606b51aa8c8c907d0e84fae8e370e0f97c93c2d3234f75af1bdb3";
+      "sha256:d76cb32235a6dd2d26ddcf8106d3ddc41183728d25a90e6f22f808d2c53e94bb";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -438,6 +447,35 @@ describe("registry", () => {
     expect(warnings).toEqual([
       expect.stringContaining("not named in overlay_auto_approve"),
     ]);
+  });
+
+  test("merge-fix rebase instructions preserve concurrent branch commits", () => {
+    const prompt = readFileSync(
+      path.join(RUNTIME_ROOT, "agents", "merge-fix.md"),
+      "utf8",
+    );
+    const flat = prompt.replace(/\s+/g, " ");
+
+    expect(flat).toContain('git rebase "origin/<headRef>"');
+    expect(flat).toContain(
+      '"--force-with-lease=<headRef>:${expectedRemoteSha}"',
+    );
+    expect(flat).toContain("MERGE_FIX_IN_FLIGHT_MINUTES");
+    expect(flat).toContain(
+      "Compare `expectedRemoteSha` with the pinned `input.json` `headSha`",
+    );
+    expect(flat).toContain(
+      "gh pr view <pr> --repo <github> --json headRefOid,updatedAt",
+    );
+    expect(flat).toContain(
+      "do not substitute commit author/committer metadata",
+    );
+    expect(flat).toContain(
+      "Never classify the unchanged pinned head as `branch_in_flight`",
+    );
+    expect(flat).toContain("`summary` beginning `branch_in_flight:`");
+    expect(flat).toContain("`summary` beginning `branch_moved:`");
+    expect(flat).toContain("make no retry push");
   });
 
   test("local schedule overlay permits new complete entries and rejects kernel routing changes", () => {
@@ -592,8 +630,11 @@ describe("registry", () => {
     // Regenerated (#1324): dispatch.md includes the factory Prettier handoff
     // check, so its prompt pin legitimately moved; `pack` remains
     // non-enumerable.
+    // Regenerated (CLNT-123): dispatch prompt pin moved for the web typecheck
+    // and bounded handoff-failure continuation instructions; `pack` remains
+    // non-enumerable.
     expect(computeDefHash(def)).toBe(
-      "sha256:64692fdaf524fb0e54e8d2156bcf9a3bfe3356c663ce6a7b83910a9043b6314e",
+      "sha256:440db0b0151fee722647bc17ea2808976c65558e50d36fec0a02cdd754843c88",
     );
   });
 

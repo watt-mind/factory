@@ -18,7 +18,7 @@ import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
  * state, so a real hang still fails, just not a slow host.
  */
 const EXECUTE_SPAWN_TIMEOUT_MS = loadAdjustedTimeout(5_000);
-import { insideHandoffSandbox } from "./verify.mjs";
+import { composeHandoffVerification, insideHandoffSandbox } from "./verify.mjs";
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
@@ -64,6 +64,7 @@ import {
   dispatchIdentityEnv,
   acquireClaimLock,
   adapterExecuteTimeoutMs,
+  assertHandoffPullRequestBase,
   cancelRun,
   CLAIM_LOCK_BACKOFF_MAX_MS,
   claimNext,
@@ -72,6 +73,8 @@ import {
   codeStamp,
   codeStampFiles,
   codeStampRoot,
+  continuationExecutionInput,
+  continuationHandoffFailure,
   createReloadWatcher,
   DEFAULT_MAX_ENVIRONMENT_RETRIES,
   defaultLocksDir,
@@ -2518,6 +2521,44 @@ sh -c 'sleep 5 & wait'
     ).toBe(false);
   });
 
+  test("continuation handoff failures are matched per violation, anchored at its start", () => {
+    const quoted =
+      "repo_verify_failed: (fail) x\nweb_build_failed: quoted inside output";
+    expect(continuationHandoffFailure([quoted])).toBeNull();
+    expect(
+      continuationHandoffFailure([
+        quoted,
+        "ticket_verify_failed: bunx: command not found; sandbox_limits: tmpfs=1024MiB",
+      ]),
+    ).toBe(
+      "ticket_verify_failed: bunx: command not found; sandbox_limits: tmpfs=1024MiB",
+    );
+    expect(
+      continuationHandoffFailure(
+        "owned_paths_violation: a; web_build_failed: error TS7053",
+      ),
+    ).toBe("web_build_failed: error TS7053");
+    expect(continuationHandoffFailure(undefined)).toBeNull();
+    expect(continuationHandoffFailure([42, null])).toBeNull();
+  });
+
+  test("tier continuation input carries the worker-observed handoff failure verbatim", () => {
+    const handoffFailure = `web_build_failed: ${"TS7053\n".repeat(200)}`.slice(
+      0,
+      2 * 1024,
+    );
+    expect(
+      continuationExecutionInput(
+        { repo: "factory", ticket: "WM-1529" },
+        handoffFailure,
+      ),
+    ).toEqual({
+      repo: "factory",
+      ticket: "WM-1529",
+      handoffFailure,
+    });
+  });
+
   test("tier escalation schedules exactly once and retries projection before the continuation is runnable", () => {
     const databaseFile = path.join(
       tmpDir("tier-escalation-restart-"),
@@ -2552,6 +2593,7 @@ sh -c 'sleep 5 & wait'
       continuationRunId: "run_tier_strong",
       now: T0,
       reasonCode: "contract_violation",
+      handoffFailure: "web_build_failed: src/views/Ticket.tsx: error TS7053",
     });
     db.close();
     db = openDb(databaseFile);
@@ -2580,6 +2622,12 @@ sh -c 'sleep 5 & wait'
       rootRunId: spec.runId,
       escalatedFromRunId: spec.runId,
       modelTier: "strong",
+      approvalPolicy: {
+        escalation: {
+          handoffFailure:
+            "web_build_failed: src/views/Ticket.tsx: error TS7053",
+        },
+      },
     });
     const event = db
       .query(`SELECT * FROM events WHERE source = 'handoff'`)
@@ -4180,6 +4228,170 @@ sh -c 'sleep 5 & wait'
       });
       expect(untouched).toBe(env);
     }
+  });
+
+  test("handoff PR form records draft and body markers, refusing only a missing Fixes line", () => {
+    const base = {
+      github: "watt-mind/factory",
+      prNumber: 77,
+      ticket: "watt-mind/factory#1504",
+      runId: "run-1504",
+    };
+    const valid = { ...base };
+    assertHandoffPullRequestBase({
+      handoff: valid,
+      base: "develop",
+      fetchPullRequest: () => ({
+        baseRefName: "develop",
+        isDraft: false,
+        body: "Fixes watt-mind/factory#1504\n\nImplemented\n\nrun:run-1504",
+      }),
+    });
+    expect(valid.pr).toEqual({
+      number: 77,
+      draft: false,
+      hasFixesLine: true,
+      hasRunTrailer: true,
+    });
+
+    const warningOnly = { ...base };
+    assertHandoffPullRequestBase({
+      handoff: warningOnly,
+      base: "develop",
+      fetchPullRequest: () => ({
+        baseRefName: "develop",
+        isDraft: true,
+        body: "Fixes watt-mind/factory#1504",
+      }),
+    });
+    expect(warningOnly.pr).toMatchObject({
+      draft: true,
+      hasFixesLine: true,
+      hasRunTrailer: false,
+    });
+
+    const missingFixes = { ...base };
+    expect(() =>
+      assertHandoffPullRequestBase({
+        handoff: missingFixes,
+        base: "develop",
+        fetchPullRequest: () => ({
+          baseRefName: "develop",
+          isDraft: false,
+          body: "run:run-1504",
+        }),
+      }),
+    ).toThrow("handoff_pr_form_invalid");
+    expect(missingFixes.pr).toMatchObject({
+      hasFixesLine: false,
+      hasRunTrailer: true,
+    });
+  });
+
+  test("handoff PR Fixes line tolerates the short #n form, case, and trailing punctuation", () => {
+    const base = {
+      github: "watt-mind/factory",
+      prNumber: 77,
+      ticket: "watt-mind/factory#1504",
+      runId: "run-1504",
+    };
+    for (const body of [
+      "Fixes #1504\n\nrun:run-1504",
+      "fixes watt-mind/factory#1504.\n\nrun:run-1504",
+      "  Fixes watt-mind/factory#1504  \r\nrun:run-1504",
+    ]) {
+      const handoff = { ...base };
+      assertHandoffPullRequestBase({
+        handoff,
+        base: "develop",
+        fetchPullRequest: () => ({
+          baseRefName: "develop",
+          isDraft: false,
+          body,
+        }),
+      });
+      expect(handoff.pr).toMatchObject({
+        hasFixesLine: true,
+        hasRunTrailer: true,
+      });
+    }
+
+    // The short form only counts when the PR lives in the ticket's repo, and
+    // a different issue number or a mid-line mention never matches.
+    for (const [github, body] of [
+      ["watt-mind/other", "Fixes #1504"],
+      ["watt-mind/factory", "Fixes #15040"],
+      ["watt-mind/factory", "This Fixes #1504 for real"],
+    ]) {
+      const handoff = { ...base, github };
+      expect(() =>
+        assertHandoffPullRequestBase({
+          handoff,
+          base: "develop",
+          fetchPullRequest: () => ({
+            baseRefName: "develop",
+            isDraft: false,
+            body,
+          }),
+        }),
+      ).toThrow("handoff_pr_form_invalid");
+      expect(handoff.pr.hasFixesLine).toBe(false);
+    }
+
+    const linear = { ...base, ticket: "WM-1234" };
+    assertHandoffPullRequestBase({
+      handoff: linear,
+      base: "develop",
+      fetchPullRequest: () => ({
+        baseRefName: "develop",
+        isDraft: false,
+        body: "Fixes WM-1234",
+      }),
+    });
+    expect(linear.pr.hasFixesLine).toBe(true);
+  });
+
+  test("handoff PR form refuses a null body and reports unknown for a missing ticket or run id", () => {
+    const base = {
+      github: "watt-mind/factory",
+      prNumber: 77,
+      ticket: "watt-mind/factory#1504",
+      runId: "run-1504",
+    };
+    const nullBody = { ...base };
+    expect(() =>
+      assertHandoffPullRequestBase({
+        handoff: nullBody,
+        base: "develop",
+        fetchPullRequest: () => ({
+          baseRefName: "develop",
+          isDraft: false,
+          body: null,
+        }),
+      }),
+    ).toThrow("handoff_pr_form_invalid");
+    expect(nullBody.pr).toMatchObject({
+      hasFixesLine: false,
+      hasRunTrailer: false,
+    });
+
+    const noTicket = { ...base, ticket: null, runId: undefined };
+    assertHandoffPullRequestBase({
+      handoff: noTicket,
+      base: "develop",
+      fetchPullRequest: () => ({
+        baseRefName: "develop",
+        isDraft: false,
+        body: "Fixes null\nrun:undefined",
+      }),
+    });
+    expect(noTicket.pr).toMatchObject({
+      hasFixesLine: null,
+      hasRunTrailer: null,
+    });
+    expect(composeHandoffVerification(noTicket)).toContain(
+      "Fixes: unknown · run trailer: unknown",
+    );
   });
 
   test("worker preserves push credentials for mutating runs and strips them for non-mutating runs (WM-128)", async () => {

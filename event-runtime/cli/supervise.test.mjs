@@ -82,30 +82,42 @@ describe("supervise (WM-226)", () => {
     }
   });
 
-  test("--once propagates tick failures while daemon ticks are logged and retried", () => {
+  test("--once propagates tick failures while daemon ticks are logged on every failure and retried", async () => {
     const error = new Error("transient failure");
     expect(() =>
       startTickLoop(
         () => {
           throw error;
         },
-        { once: true, intervalMs: 100, log: () => {} },
+        { once: true, intervalMs: 10, log: () => {} },
       ),
     ).toThrow(error);
 
+    // A permanently broken tick must stay loud: every failing tick logs, with
+    // no `lastHold`-style dedupe, and the interval keeps firing regardless.
     const lines = [];
+    let calls = 0;
     const timer = startTickLoop(
-      (() => {
-        let calls = 0;
-        return () => {
-          calls += 1;
-          if (calls === 1) throw error;
-        };
-      })(),
-      { once: false, intervalMs: 100, log: (line) => lines.push(line) },
+      () => {
+        calls += 1;
+        throw error;
+      },
+      { once: false, intervalMs: 10, log: (line) => lines.push(line) },
     );
-    clearInterval(timer);
-    expect(lines).toEqual(["tick error: transient failure"]);
+    try {
+      await until(
+        "the guarded tick to fail at least three times",
+        () => calls >= 3,
+        {
+          timeoutMs: 5_000,
+        },
+      );
+    } finally {
+      clearInterval(timer);
+    }
+    expect(calls).toBeGreaterThanOrEqual(3);
+    expect(lines.length).toBe(calls);
+    expect(new Set(lines)).toEqual(new Set(["tick error: transient failure"]));
   });
 
   test("a transient tick failure is logged and the supervisor keeps ticking", async () => {
@@ -132,7 +144,15 @@ describe("supervise (WM-226)", () => {
       mkdirSync(crashLoop);
       process.kill(worker.pid, "SIGKILL");
       expect(await waitFor(box, "tick error:", 10_000)).toBe(true);
+      // The fault persists across ticks, so the line must repeat — never
+      // deduplicated the way `hold — …` is.
+      await until(
+        "a second failing tick to be logged",
+        () => box.out.split("tick error:").length - 1 >= 2,
+        { timeoutMs: 10_000 },
+      );
       expect(box.child.exitCode ?? null).toBeNull();
+      expect(existsSync(path.join(dir, "supervisor.pid"))).toBe(true);
       rmSync(crashLoop, { recursive: true, force: true });
 
       const failedTickAt = box.out.lastIndexOf("tick error:");
@@ -149,6 +169,21 @@ describe("supervise (WM-226)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 30_000);
+
+  test("rejects unsafe drain timeouts before writing its pidfile", () => {
+    for (const value of ["not-a-number", "0", "-1"]) {
+      const dir = tmpDir("evrt-pool-invalid-drain-");
+      const r = runCli(
+        ["supervise", "--workers", "1:1", "--drain-timeout", value, "--once"],
+        { FACTORY_RUN_DIR: dir },
+      );
+      expect(r.status).not.toBe(0);
+      expect(r.all).toContain(
+        "supervise: --drain-timeout must be an integer between 1 and 3600 seconds",
+      );
+      expect(existsSync(path.join(dir, "supervisor.pid"))).toBe(false);
+    }
+  });
 
   test("refuses to be the second supervisor on one run dir — two would orphan each other's workers", () => {
     const dir = tmpDir("evrt-pool-dup-");

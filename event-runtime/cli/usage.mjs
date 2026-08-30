@@ -23,12 +23,16 @@ usage: bun event-runtime/cli.mjs <command>
                                  only between claims (dev; see factory up --dev)
                                  --drain-file exits 0 once that file appears, at
                                  an idle poll boundary — never mid-run (WM-226)
-  supervise [--workers min:max] [--interval-ms N] [--once]
+  supervise [--workers min:max] [--interval-ms N] [--drain-timeout N]
+            [--spawn-grace-ms N] [--once]
                                  worker pool supervisor (WM-226): scales \`work\`
                                  processes between workers.min and workers.max
                                  from config/policy.yaml on observed queue depth.
                                  Scales down by draining, never by signalling a
                                  worker that holds a lease.
+                                 --adapter-override, --poll-ms, --drain-timeout,
+                                 --reload-on-change, and --label worker-shaping
+                                 flags pass through to every worker.
   status                         events, proposals, runs, anomalies
   doctor                         system health check: anomaly report (exits non-zero on anomalies)
   events [status]                admitted events, optionally filtered by status
