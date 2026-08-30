@@ -182,6 +182,9 @@ else
 fi
 
 RUN_DIR="$(run_dir "$WT")"
+# A killed handoff gate can leave a detached fake serve with no pidfile. It
+# still owns this worktree as cwd, so sweep it before removing the checkout.
+kill_worktree_cwd_processes "$WT"
 term_daemon "$RUN_DIR/web.pid" "web server"
 term_daemon "$RUN_DIR/worker.pid" "worker"
 term_daemon "$RUN_DIR/serve.pid" "event runtime"
