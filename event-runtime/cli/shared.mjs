@@ -11,6 +11,25 @@ export function flagValue(args, flag) {
   return i === -1 ? null : args[i + 1];
 }
 
+export const WORKER_POLL_MS_MIN = 25;
+export const WORKER_POLL_MS_MAX = 5_000;
+
+export function validWorkerPollMs(value) {
+  return (
+    Number.isInteger(value) &&
+    value >= WORKER_POLL_MS_MIN &&
+    value <= WORKER_POLL_MS_MAX
+  );
+}
+
+export function parseWorkerLabel(value) {
+  const label = String(value ?? "");
+  const [key, ...rest] = label.split("=");
+  if (!label || label.startsWith("--") || !key || rest.length === 0)
+    return null;
+  return { key, value: rest.join("=") };
+}
+
 export function fail(message) {
   console.error(message);
   process.exit(1);
