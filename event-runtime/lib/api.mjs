@@ -34,7 +34,12 @@ import {
   repoNamesFromInput,
 } from "./api-runs.mjs";
 import { handleScheduleApiRoute } from "./api-schedules.mjs";
-import { storeStats } from "./artifacts.mjs";
+import {
+  artifactInventory,
+  artifactReferenceIndex,
+  listArtifactPage,
+  storeStats,
+} from "./artifacts.mjs";
 import {
   API_HOST,
   DEFAULT_PORT,
@@ -139,6 +144,9 @@ export function createApi({
   // fails closed when this is absent and requires the matching bearer when it
   // is present. Never logged.
   controlApiToken = process.env.FACTORY_CONTROL_API_TOKEN || null,
+  // Injectable only so API tests can count cache rebuilds.
+  buildArtifactReferenceIndex = artifactReferenceIndex,
+  buildArtifactInventory = artifactInventory,
 } = {}) {
   const actor = "operator";
   const registryLoadedAt = new Date(now()).toISOString();
@@ -147,6 +155,10 @@ export function createApi({
     inboxPlanner ?? decisionEffectPlanner(registry, { onEvent, policyVersion });
   let cachedStoreStats = null;
   let cachedStoreStatsAt = 0;
+  let cachedArtifactReferences = null;
+  let cachedArtifactResultsRowid = null;
+  let cachedArtifactInventory = null;
+  let cachedArtifactInventoryAt = 0;
 
   function getStoreStats(nowMs) {
     if (cachedStoreStats && nowMs - cachedStoreStatsAt < storeStatsTtlMs)
@@ -159,6 +171,37 @@ export function createApi({
   function clearStoreStats() {
     cachedStoreStats = null;
     cachedStoreStatsAt = 0;
+  }
+
+  function clearArtifactPage() {
+    cachedArtifactReferences = null;
+    cachedArtifactResultsRowid = null;
+    cachedArtifactInventory = null;
+    cachedArtifactInventoryAt = 0;
+  }
+
+  function getArtifactPage(options, nowMs) {
+    const storeRoot = artifactsRoot(env?.home);
+    const resultsRowid =
+      db.query(`SELECT MAX(rowid) AS rowid FROM results`).get().rowid ?? 0;
+    const resultsChanged = resultsRowid !== cachedArtifactResultsRowid;
+    if (resultsChanged) {
+      cachedArtifactReferences = buildArtifactReferenceIndex(db);
+      cachedArtifactResultsRowid = resultsRowid;
+    }
+    if (
+      resultsChanged ||
+      !cachedArtifactInventory ||
+      nowMs - cachedArtifactInventoryAt >= storeStatsTtlMs
+    ) {
+      cachedArtifactInventory = buildArtifactInventory(storeRoot);
+      cachedArtifactInventoryAt = nowMs;
+    }
+    return listArtifactPage(db, storeRoot, {
+      ...options,
+      references: cachedArtifactReferences,
+      inventory: cachedArtifactInventory,
+    });
   }
 
   return async function handle(req, res) {
@@ -402,6 +445,8 @@ export function createApi({
         const result = await handleArtifactApiRoute({
           ...common,
           clearStoreStats,
+          clearArtifactPage,
+          getArtifactPage,
         });
         if (result !== false) return result;
       }
