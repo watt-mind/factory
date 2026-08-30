@@ -76,9 +76,10 @@ Conversely, what no event type above needs yet — and is therefore explicitly
 deferred, with its trigger named:
 
 - **API-mediated worker claims** — the first _remote_ worker node. The
-  control plane keeps `BEGIN IMMEDIATE` and SQLite behind authenticated
-  `/worker/v1` endpoints; workers receive fencing tokens, never database
-  credentials ([event-runtime-worker-protocol.md](event-runtime-worker-protocol.md)).
+  control plane is planned to keep `BEGIN IMMEDIATE` and SQLite behind
+  authenticated [unbuilt `/worker/v1` endpoints](event-runtime-worker-protocol.md);
+  workers will receive fencing tokens, never database credentials. The linked
+  protocol is still design-only and operator-ratified.
   The former `FOR UPDATE SKIP LOCKED`/shared-Postgres cut-line is rejected and
   superseded (§10).
 - **Declared workflows with `dependsOn` and deterministic joins (§11)** — the
@@ -389,7 +390,7 @@ adapter: the event parks `human_needed` with reason
 `repo_not_allowed: <agent> may not run over <repo> (allowed: …)`, before any
 repo pin, mirror fetch, or worktree materialization happens. The declared
 scope rides in the RunSpec (so the proposal an operator approves names it) and
-is readable in `GET /registry`.
+is readable in `GET /agents` as the `repos` field.
 
 **Model-tier routing (`model_tier`, WM-135).** A definition may declare an
 optional `"model_tier": "strong" | "standard" | "light"` — a statement of
@@ -825,16 +826,17 @@ host-local PIDs, locks, and paths. The physical substrate can start small:
   contention with `BEGIN IMMEDIATE` on claim (the default deferred transaction
   lets two claimers read the same `QUEUED` row before either writes) and
   `busy_timeout` set before `journal_mode`.
-- **Remote workers use the control API, not a shared database** (designed in
+- **Remote workers use the planned, unbuilt control API, not a shared database**
+  (the operator-ratified design is in
   [event-runtime-worker-protocol.md](event-runtime-worker-protocol.md)). This
   is an explicit boundary move and **supersedes this section's former cut-line
   #1**: do not port `db.mjs` to Postgres for distribution and do not put
   `FOR UPDATE SKIP LOCKED` or DB credentials in workers. The server performs
-  the same atomic claim transaction behind `POST /worker/v1/claim`, returns a
-  fencing token, accepts heartbeats and cancellation polling, and publishes a
-  verified result plus outbox event transactionally. Local workers migrate to
-  that API over loopback too, so schema evolution and substrate choice remain
-  control-plane concerns.
+  the same atomic claim transaction behind the planned, unbuilt
+  `POST /worker/v1/claim`, returns a fencing token, accepts heartbeats and
+  cancellation polling, and publishes a verified result plus outbox event
+  transactionally. Local workers migrate to that API over loopback too, so
+  schema evolution and substrate choice remain control-plane concerns.
 - **Remote placement remains earned machinery, not an immediate requirement.**
   Per-node identity, HTTPS, content-addressed artifact ingest, adapters, repo
   mirrors/config, and (for tier-2) worktree coordination must exist before a
