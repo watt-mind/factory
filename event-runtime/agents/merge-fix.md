@@ -65,45 +65,67 @@ BLOCKED.
 
 ## Result contract
 
-Write `result.json` as a completed `factory.agent-result/v1` result whose
-`artifact` conforms to `factory.merge-fix-result/v1`. Both artifacts must
-contain exactly these properties, in this order: `outcome`, `repo`, `ticket`,
-`pr`, `headSha`, `round`, `summary`. Do not add diagnostic properties; put the
-reason or change description in `summary`.
+Write `result.json` as a completed `factory.agent-result/v1` wrapper. Put the
+`factory.merge-fix-result/v1` value under its `artifact` property: the
+registered output schema validates that nested artifact, not the wrapper.
+Both artifacts (the nested `artifact` values in the UPDATED and BLOCKED
+examples) must contain exactly these properties, in this order: `outcome`,
+`repo`, `ticket`, `pr`, `headSha`, `round`, `summary`. Do not put those fields
+beside `schemaVersion`, `terminalState`, or `reasonCode`, and do not add
+diagnostic artifact properties; put the reason or change description in
+`summary`.
 
 Copy `repo`, `ticket`, `pr`, and `round` from `input.json`. Substitute the real
 values for the representative values below.
 
-### UPDATED artifact
+### UPDATED result envelope
 
-Use the new commit SHA that was successfully pushed as `headSha`:
+Emit exactly this wrapper shape (never the bare `artifact` object). Use the new
+commit SHA that was successfully pushed as `artifact.headSha`:
 
 ```json
 {
-  "outcome": "UPDATED",
-  "repo": "factory",
-  "ticket": "WM-500",
-  "pr": 42,
-  "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "round": 1,
-  "summary": "Applied the mechanical correction, verified it, and pushed the updated head."
+  "schemaVersion": "factory.agent-result/v1",
+  "terminalState": "completed",
+  "reasonCode": "ok",
+  "artifact": {
+    "outcome": "UPDATED",
+    "repo": "factory",
+    "ticket": "WM-500",
+    "pr": 42,
+    "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "round": 1,
+    "summary": "Applied the mechanical correction, verified it, and pushed the updated head."
+  },
+  "evidence": {
+    "commands": []
+  }
 }
 ```
 
-### BLOCKED artifact
+### BLOCKED result envelope
 
-Use the pinned `input.json` `headSha` as the required `headSha`, including when
+Emit exactly this wrapper shape (never the bare `artifact` object). Use the
+pinned `input.json` `headSha` as the required `artifact.headSha`, including when
 the live PR head moved. Describe the observed mismatch or other blocking reason
-only in `summary`:
+only in `artifact.summary`:
 
 ```json
 {
-  "outcome": "BLOCKED",
-  "repo": "factory",
-  "ticket": "WM-500",
-  "pr": 42,
-  "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  "round": 1,
-  "summary": "Blocked because the live PR head no longer matches the pinned input head."
+  "schemaVersion": "factory.agent-result/v1",
+  "terminalState": "completed",
+  "reasonCode": "ok",
+  "artifact": {
+    "outcome": "BLOCKED",
+    "repo": "factory",
+    "ticket": "WM-500",
+    "pr": 42,
+    "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "round": 1,
+    "summary": "Blocked because the live PR head no longer matches the pinned input head."
+  },
+  "evidence": {
+    "commands": []
+  }
 }
 ```

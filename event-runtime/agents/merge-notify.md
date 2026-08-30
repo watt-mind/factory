@@ -12,3 +12,35 @@ Pushes the operator notification for an `ESCALATE` recommendation from
 matches `escalate_paths`) needs the human decision, per the notification
 protocol (escalations only, never routine progress). Same shape as
 `ci-notify@1` for `ci-doctor@2`'s TICKET verdict.
+
+## Result envelope
+
+The deterministic command adapter, not this command, writes the completed
+`factory.agent-result/v1` wrapper. Its `artifact` is the
+`factory.command-result/v1` value validated by this definition's registered
+output schema:
+
+```json
+{
+  "schemaVersion": "factory.agent-result/v1",
+  "terminalState": "completed",
+  "reasonCode": "ok",
+  "artifact": {
+    "command": [
+      "factory",
+      "notify",
+      "ESCALATED merge factory: PR needs a human decision"
+    ],
+    "exitCode": 0,
+    "outputTail": "Notification sent."
+  },
+  "evidence": {
+    "command": [
+      "factory",
+      "notify",
+      "ESCALATED merge factory: PR needs a human decision"
+    ],
+    "outputTail": "Notification sent."
+  }
+}
+```

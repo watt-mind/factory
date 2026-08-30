@@ -17,14 +17,10 @@
     "services": ["tracker:write", "repo:write", "github:write"],
     "tools": ["Bash", "Read", "Write", "Edit", "Grep", "Glob"]
   },
-  "limits": {
-    "timeout_seconds": 2700,
-    "attempts": 1,
-    "budget_usd": 15
-  },
+  "limits": { "timeout_seconds": 2700, "attempts": 1, "budget_usd": 15 },
   "mutating": true,
   "pins": {
-    "agents/merge-fix.md": "sha256:c06dba00c6fa4d34fcb97a0adc0fedf3d7f87c94e4535c4acd7afab2427e7b9b",
+    "agents/merge-fix.md": "sha256:807ec05aa55816d61e510726cc911dfb31c13abe6655ca29729529256e624a65",
     "schemas/merge-fix.input.json": "sha256:332e1c82296541678b8f95b49f65fba63a87219315dbfc6b9556cd4d3df9ecbd",
     "schemas/merge-fix.output.json": "sha256:636ab0de7337d7358e47fd95c52abc80eedbebb618a968f9546b67da07150ff3"
   }
