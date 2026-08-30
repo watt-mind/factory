@@ -104,8 +104,9 @@ export function recordGitHubWebhookRejection() {
  * Read-only GitHub intake observability for health and status projections.
  * `lastAdmittedAt` comes from the durable admission ledger; rejected delivery
  * totals are necessarily process-local because untrusted payloads are never
- * persisted as events. A configured intake with no admitted event is stale,
- * which distinguishes it from an intentionally unconfigured intake.
+ * persisted as events. Staleness requires a prior admission: a configured
+ * intake that has never admitted a delivery reports `lastAdmittedAt: null`
+ * and `stale: false`, so a freshly started runtime is not flagged as broken.
  */
 export function githubIntakeView(
   db,
@@ -126,7 +127,7 @@ export function githubIntakeView(
   const ageMs = Number.isNaN(admittedMs)
     ? null
     : Math.max(0, nowMs - admittedMs);
-  const stale = configured && (ageMs === null || ageMs >= staleAfterMs);
+  const stale = configured && ageMs !== null && ageMs >= staleAfterMs;
   return {
     configured,
     lastAdmittedAt,

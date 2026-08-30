@@ -78,7 +78,7 @@ describe("webhook intake (§14)", () => {
       configured: true,
       lastAdmittedAt: null,
       ageMs: null,
-      stale: true,
+      stale: false,
       staleAfterMs: 12 * 60 * 60 * 1000,
     });
   });
@@ -1280,9 +1280,7 @@ describe("missing FACTORY_EVENT_SECRET and FACTORY_GITHUB_WEBHOOK_SECRET visibil
     });
     try {
       const status = await sClean.client.status();
-      expect(status.anomalies.configuration).toEqual([
-        "GitHub webhook intake is stale (no GitHub delivery has been admitted; threshold 43200000ms)",
-      ]);
+      expect(status.anomalies.configuration).toEqual([]);
     } finally {
       sClean.close();
     }
