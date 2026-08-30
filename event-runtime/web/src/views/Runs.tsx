@@ -630,7 +630,7 @@ export function Runs({
   const list = useQuery({
     queryKey: ["runs", fetchAll ? "ALL" : tab, drilldownKey, runCursor],
     queryFn: () =>
-      api.runs(undefined, {
+      api.runs(fetchAll || tab === "ALL" ? undefined : tab, {
         ...(drilldown ?? {}),
         before: runCursor ?? undefined,
       }),
