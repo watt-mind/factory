@@ -1722,8 +1722,12 @@ sh -c 'sleep 5 & wait'
       registry,
       adapters,
       opts({
-        verifyResult: () => {
-          throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        verifyResult: ({ workspaceDir }) => {
+          throw Object.assign(new Error("ENOENT"), {
+            code: "ENOENT",
+            syscall: "realpath",
+            path: path.join(workspaceDir, "worktree"),
+          });
         },
       }),
     );
@@ -1752,6 +1756,62 @@ sh -c 'sleep 5 & wait'
     expect(stored.verification).toMatchObject({
       status: "failed",
       stage: "verification",
+    });
+  });
+
+  test("verifyResult ENOENT outside the run workspace (missing verifier binary) is verification_internal_error, not the environment budget (#1663)", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec());
+    const missingBinary = path.join(
+      path.sep,
+      "nonexistent-gh-1663",
+      "bin",
+      "verifier",
+    );
+    const summary = await runOnce(
+      db,
+      registry,
+      adapters,
+      opts({
+        verifyResult: () => {
+          throw Object.assign(new Error(`ENOENT: ${missingBinary}`), {
+            code: "ENOENT",
+            syscall: "realpath",
+            path: missingBinary,
+          });
+        },
+      }),
+    );
+    expect(summary).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "verification_internal_error",
+    });
+    expect(summary.error.code).toBe("ENOENT");
+    expect(runState(db, spec.runId)).toBe("FAILED");
+    const attemptRow = db
+      .query(
+        `SELECT reason_code FROM attempts WHERE run_id = ? AND attempt = 1`,
+      )
+      .get(spec.runId);
+    expect(attemptRow.reason_code).toBe("verification_internal_error");
+  });
+
+  test("verifyResult ENOENT without a path is verification_internal_error (#1663)", async () => {
+    const db = openDb(":memory:");
+    queueRun(db, makeSpec());
+    const summary = await runOnce(
+      db,
+      registry,
+      adapters,
+      opts({
+        verifyResult: () => {
+          throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        },
+      }),
+    );
+    expect(summary).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "verification_internal_error",
     });
   });
 

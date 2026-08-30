@@ -964,10 +964,26 @@ export function classifyFailureCause(reasonCode) {
   return "fatal";
 }
 
-function verificationInternalReasonCode(err) {
-  return err?.code === "ENOENT"
-    ? HANDOFF_WORKTREE_MISSING
-    : VERIFICATION_INTERNAL_ERROR;
+/**
+ * Only an ENOENT whose target lies inside the run's own workspace (the
+ * delegated worktree or the workspace dir `verifyResult` realpaths) is the
+ * vanished-worktree environment failure. An ENOENT elsewhere — a missing
+ * verifier binary or config — is a harness defect and must not draw on the
+ * environment retry budget.
+ */
+function verificationInternalReasonCode(err, roots = []) {
+  if (err?.code !== "ENOENT") return VERIFICATION_INTERNAL_ERROR;
+  const target = err.path ?? err.dest ?? null;
+  if (typeof target !== "string" || !target) return VERIFICATION_INTERNAL_ERROR;
+  const resolved = path.resolve(target);
+  for (const root of roots) {
+    if (typeof root !== "string" || !root) continue;
+    const rel = path.relative(path.resolve(root), resolved);
+    if (rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))) {
+      return HANDOFF_WORKTREE_MISSING;
+    }
+  }
+  return VERIFICATION_INTERNAL_ERROR;
 }
 
 function verificationInternalErrorPayload(err) {
@@ -3477,7 +3493,10 @@ export async function executeClaimed(
 
   /** Convert a non-ContractViolation verify throw into a terminal FAILED summary. */
   const failVerificationInternal = (err) => {
-    const reasonCode = verificationInternalReasonCode(err);
+    const reasonCode = verificationInternalReasonCode(err, [
+      worktreePath,
+      workspaceDir,
+    ]);
     const error = verificationInternalErrorPayload(err);
     const journalReason = `${reasonCode}: ${error.message}`;
     if (mayMutateClaimedTicket()) {
