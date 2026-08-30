@@ -440,6 +440,57 @@ describe("notify (WM-65)", () => {
     ).toEqual([]);
   });
 
+  test("a recent marker for an already-resolved referent survives the sweep", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const recent = new Date(now - 2 * 24 * 60 * 60 * 1000).toISOString();
+    ensureNotifyLog(db);
+    insertEvent(db, { eventId: "evt-done", status: "completed" });
+    insertProposal(db, {
+      id: "prop-done",
+      eventId: "evt-done",
+      status: "rejected",
+    });
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES (?, ?, 'recent marker', ?)`,
+    ).run("human_needed", "test/evt-done", recent);
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES (?, ?, 'recent marker', ?)`,
+    ).run("proposal_ttl", "prop-done", recent);
+
+    expect(sweepNotifyLog(db, { now })).toBe(0);
+    expect(db.query("SELECT count(*) AS n FROM notify_log").get().n).toBe(2);
+  });
+
+  test("an event id containing '/' still matches its parked event", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const old = new Date(now - 15 * 24 * 60 * 60 * 1000).toISOString();
+    ensureNotifyLog(db);
+    insertEvent(db, {
+      source: "github",
+      eventId: "issue/42/comment",
+      status: "human_needed",
+    });
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES (?, ?, 'old marker', ?)`,
+    ).run("human_needed", "github/issue/42/comment", old);
+
+    expect(sweepNotifyLog(db, { now })).toBe(0);
+  });
+
+  test("sweepNotifyLog rejects a non-positive retention", () => {
+    const db = openDb(":memory:");
+    for (const retentionDays of [0, -1, NaN, Infinity]) {
+      expect(() => sweepNotifyLog(db, { retentionDays })).toThrow(
+        /retentionDays must be a positive number of days/,
+      );
+    }
+  });
+
   test("a notifier that exits non-zero is recorded on notify_log and logged, not thrown", async () => {
     const dir = tmp("evrt-notify-fail-");
     const stub = stubNotifier(dir, { exitCode: 3 });

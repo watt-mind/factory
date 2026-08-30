@@ -29,7 +29,7 @@
  */
 import { spawn } from "node:child_process";
 import { createInboxItem, deliverInboxItem } from "./inbox.mjs";
-import { tx, txImmediate } from "./db.mjs";
+import { txImmediate } from "./db.mjs";
 import { templateFor } from "./decision-templates.mjs";
 import { proposalSubject } from "./proposal-subject.mjs";
 import { notifyCommand as resolveNotifyCommand } from "../../lib/notify.mjs";
@@ -102,7 +102,11 @@ export function sweepNotifyLog(
   }
   ensureNotifyLog(db);
   const cutoff = new Date(now - retentionDays * DAY_MS).toISOString();
-  return tx(
+  // The human_needed target is `${source}/${event_id}`; split it on the
+  // notify_log side so the events probe is plain column equality and can use
+  // the (source, event_id) primary key. Sources never contain '/', event ids
+  // may, hence the split on the first separator.
+  return txImmediate(
     db,
     () =>
       db
@@ -111,9 +115,10 @@ export function sweepNotifyLog(
          WHERE sent_at < ?
            AND (
              (kind = ? AND NOT EXISTS (
-               SELECT 1 FROM events
-               WHERE notify_log.target = events.source || '/' || events.event_id
-                 AND events.status = 'human_needed'
+               SELECT 1 FROM events e
+               WHERE e.source = substr(notify_log.target, 1, instr(notify_log.target, '/') - 1)
+                 AND e.event_id = substr(notify_log.target, instr(notify_log.target, '/') + 1)
+                 AND e.status = 'human_needed'
              ))
              OR
              (kind IN (?, ?, ?) AND NOT EXISTS (
