@@ -17,7 +17,7 @@
  *   bun tools/ticket.mjs detail CLNT-616 -- "## Acceptance criteria\n- [ ] ..."
  *   bun tools/ticket.mjs labels CLNT-616 --add ai:needs-review --remove ai:in-progress
  *   bun tools/ticket.mjs state CLNT-616 "In Review" --add ai:needs-review
- *   bun tools/ticket.mjs file --team CLNT --title "..." --body "..." --type bug
+ *   bun tools/ticket.mjs file --team CLNT --title "..." --body "..." --type bug --dedupe-key "..."
  *   bun tools/ticket.mjs queue --repo bj29
  *   bun tools/ticket.mjs budget
  *   bun tools/ticket.mjs raw '<graphql>' --var key=value
@@ -479,6 +479,7 @@ const VALUE_FLAGS = new Set([
   "area",
   "body",
   "comment",
+  "dedupe-key",
   "label",
   "project",
   "remove",
@@ -709,6 +710,7 @@ const VERBS = {
   async file() {
     const team = flag("team");
     const title = flag("title");
+    const dedupeKey = flag("dedupe-key")?.trim() || undefined;
     if (!team || !title)
       throw new Error(
         `usage: file --team CLNT --title "..." [--body "..."] [--type bug] [--area x] [--source agent] [--todo]`,
@@ -730,11 +732,25 @@ const VERBS = {
       labels: wanted,
       state: stateName,
       projectId: flag("project") || undefined,
+      dedupeKey,
+      // A caller-provided dedupe key is scoped to this exact finding, not just
+      // any historical use of the same key. The control plane then checks the
+      // exact title again after its marker probe.
+      matchTitle: Boolean(dedupeKey),
     });
+    const warnings = Array.isArray(created.warnings)
+      ? created.warnings.filter(Boolean)
+      : [];
     out(
-      { ok: true, ...created },
-      `filed ${created.identifier} in ${stateName}  ${created.url}`,
+      { ok: warnings.length === 0, ...created },
+      warnings.length
+        ? `filed ${created.identifier} in ${stateName}  ${created.url}\nwarning: ${warnings.join("; ")}`
+        : `filed ${created.identifier} in ${stateName}  ${created.url}`,
     );
+    // The issue exists, but callers must not mistake an unboarded issue for a
+    // complete filing. Keep the structured result for recovery while making
+    // the partial write visible to shell callers as well.
+    if (warnings.length) process.exitCode = 1;
   },
 
   async inflight() {
