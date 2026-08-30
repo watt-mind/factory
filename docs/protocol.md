@@ -37,7 +37,7 @@ tracker the factory cannot reach must never be silently read as "no tickets".
 
 | Protocol     | GitHub                                                                                        |
 | :----------- | :-------------------------------------------------------------------------------------------- |
-| `identifier` | `owner/repo#42`                                                                               |
+| `identifier` | `owner/repo#42` or `configured-repo-name#42`                                                  |
 | `team`       | Repository, via `controlPlane.github.teams` (or a key that already looks like `owner/name`)   |
 | `labels`     | Issue labels of the **same spelling**. Writes send the complete resulting set, never a delta. |
 | `assignee`   | Issue assignee. `claim` assigns the `gh` viewer, then **reads the assignee back**.            |
@@ -174,6 +174,19 @@ A ticket is dispatchable only when it carries all five sections:
 A ticket missing a load-bearing section (`Owned Paths` or `Verification
 Command`) is demoted to `Triage`; do not dispatch it. `factory label-guard`
 checks those two mechanically.
+
+When a §5 heading is duplicated (the usual cause: a respec appended with
+`ticket detail`), every reader **unions** the matching blocks in document
+order — dispatch, handoff verification, and the template guard alike, so they
+can never disagree about which copy counts. `Owned Paths` becomes the
+deduplicated union of all blocks (first occurrence keeps its position), so an
+appended respec widens scope to cover the old and the new block and is never
+silently narrower than either. `Verification Command` becomes the distinct
+commands joined with `&&` — all of them must pass. A first-match win is
+deliberately not what happens. `factory ticket detail ISSUE -- "..."` appends
+an idempotent detail block; use `factory ticket detail ISSUE --replace -- "..."`
+to replace the complete description when re-specifying a ticket, which is the
+only way to make a stale block stop counting.
 
 ## 6. Bundles
 
@@ -355,8 +368,11 @@ and its `claim` verb performs the advisory read-back. The authoritative
 concurrency control is the per-repository dispatch lock described in §7.
 
 ```bash
-# Read a ticket.
+# Read a ticket. GitHub Issues accept either the full slug or the configured
+# repository name; both spellings resolve to the full `owner/repo#N` form.
 factory ticket get CLNT-616
+factory ticket get watt-mind/factory#123
+factory ticket get factory#123
 # List its comments.
 factory ticket comments CLNT-616
 # Atomically claim a dispatchable ticket (`--agent` selects the harness).
@@ -369,8 +385,10 @@ factory ticket comment CLNT-616 "..."
 factory ticket triage CLNT-616 --comment "..."
 # Record an answer and return a blocked ticket to Todo when applicable.
 factory ticket answer CLNT-616 "..."
-# Append idempotent Markdown detail to a ticket.
+# Append idempotent Markdown detail to a ticket (the default never replaces).
 factory ticket detail CLNT-616 -- "..."
+# Replace the complete description when re-specifying a ticket.
+factory ticket detail CLNT-616 --replace -- "..."
 # Read or mutate labels (`label` is an alias for `labels`).
 factory ticket labels CLNT-616 --add ai:needs-review --remove ai:in-progress
 factory ticket label CLNT-616

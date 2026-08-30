@@ -5301,3 +5301,32 @@ sh -c 'sleep 5 & wait'
     });
   });
 });
+
+describe("registry reload worker outcomes", () => {
+  test("a queued run whose agent was removed refuses with a typed outcome", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec());
+    const agents = new Map(registry.agents);
+    agents.delete(spec.agent);
+    const summary = await runOnce(
+      db,
+      { ...registry, agents },
+      adapters,
+      opts(),
+    );
+
+    expect(summary).toMatchObject({
+      terminalState: "REFUSED",
+      reasonCode: "agent_unregistered_after_reload",
+    });
+    expect(runState(db, spec.runId)).toBe("REFUSED");
+    expect(
+      lifecycleOf(db, spec.runId)
+        .slice(-2)
+        .map((event) => event.reason),
+    ).toEqual([
+      "failure:fatal:agent_unregistered_after_reload",
+      "failure:fatal:agent_unregistered_after_reload",
+    ]);
+  });
+});

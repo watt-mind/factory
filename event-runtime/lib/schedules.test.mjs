@@ -505,6 +505,46 @@ describe("planning a tick (§5, §6)", () => {
     expect(approval.actor).not.toBe("operator");
   });
 
+  test("a registry-reload replacement cannot be auto-approved in the same pass", () => {
+    const d = db();
+    const registry = withLoop({ approval: "auto" });
+    emitDueTicks(d, registry, { now: at("2026-08-13T21:00:00Z") });
+    planAdmittedEvents(d, registry, { policyVersion: PV });
+    let calls = 0;
+    const replacementApprove = (_db, _registry, id) => {
+      calls += 1;
+      const row = d.query(`SELECT * FROM proposals WHERE id = ?`).get(id);
+      d.query(
+        `INSERT INTO proposals
+           (id, event_source, event_id, run_id, decision, spec_json, spec_hash,
+            idempotency_key, status, reason, created_at, ttl_seconds)
+         VALUES ('prop_registry_replacement', ?, ?, ?, 'run', ?, ?, ?, 'open',
+                 'replanned_after_registry_reload', ?, ?)`,
+      ).run(
+        row.event_source,
+        row.event_id,
+        row.run_id,
+        row.spec_json,
+        row.spec_hash,
+        row.idempotency_key,
+        row.created_at,
+        row.ttl_seconds,
+      );
+      d.query(
+        `UPDATE proposals SET status = 'superseded', reason = 'superseded_by_registry_reload' WHERE id = ?`,
+      ).run(id);
+      return { approved: false, replanned: true };
+    };
+
+    const outcome = autoApproveScheduled(d, registry, replacementApprove, {
+      policyVersion: PV,
+    });
+    expect(calls).toBe(1);
+    expect(outcome.approved).toEqual([]);
+    expect(openProposals(d, {})).toHaveLength(1);
+    expect(openProposals(d, {})[0].id).toBe("prop_registry_replacement");
+  });
+
   test("reserved schedule provenance is refused at the external boundary but the tick loop still admits (#960)", () => {
     const d = db();
     const registry = withLoop({ approval: "auto" });

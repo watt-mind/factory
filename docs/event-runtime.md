@@ -605,6 +605,44 @@ Existing skill text may be read as versioned source material, pinned by the
 factory Git SHA, but event definitions do not enter or modify the emit graph in
 the MVP.
 
+### 6.1 Registry hot reload and last-good operation
+
+`serve` polls the content of `event-runtime/agents/`, `schemas/`,
+`event-types.json`, `edges.json`, `schedules.json`, and the resolved
+`config/policy.yaml` / `config/schedule.yaml`. It loads a candidate registry
+off to the side and calls the registry reference's standalone
+validate-and-swap seam only after the complete candidate passes validation.
+Ticks and HTTP requests take one current-registry snapshot at their boundary;
+connector clients resolve through the same reference. Removing a schedule
+therefore stops later ticks without disturbing the scheduler.
+
+An invalid edit never replaces the active registry. The runtime keeps serving
+the last-good configuration, records `{at,message}` as `GET /health.registry`
+(the `registry` field of `GET /health`), and logs a distinct validation error
+once. The web shell shows both registry reload age and an explicit last-good
+warning. A later valid edit swaps atomically, updates `loadedAt` and `stamp`,
+and clears the warning.
+
+Workers include those same registry and policy inputs in their drain-aware
+content stamp. An idle supervised worker exits with reload code 75; a busy
+worker latches the change, finishes its attempt, and exits at the next idle
+boundary. If an agent was removed while one of its runs remained queued, the
+fresh worker terminates that run as `agent_unregistered_after_reload` before
+creating a workspace or invoking an adapter.
+
+Approval remains approval of an immutable definition. When a proposal's
+stored `defHash` differs from the current agent definition, approval
+supersedes it with `superseded_by_registry_reload` and creates exactly one new
+open proposal from the current registry. Schedule and chain auto-approval use
+the proposals captured at the beginning of their pass, so they cannot approve
+that replacement in the same pass.
+
+Registry data and resolved policy values reload without a process restart.
+Executable JavaScript, adapter/extension modules, connector implementations,
+environment variables, secrets, database settings, and listen addresses still
+require the owning process to restart; worker code changes continue to use the
+same drain-and-exit mechanism above.
+
 ---
 
 ## 7. Workspace model

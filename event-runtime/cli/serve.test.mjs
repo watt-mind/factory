@@ -172,6 +172,56 @@ export default async function start() {
 `;
 
 describe("serve command", () => {
+  test("registry ref swaps atomically and keeps last-good on invalid edits", async () => {
+    const { createRegistryRef } = await import("./serve.mjs");
+    let stamp = "registry:a";
+    let candidate = { name: "a", anomalies: [] };
+    let clock = Date.parse("2026-08-28T10:00:00Z");
+    const logs = [];
+    const ref = createRegistryRef({
+      initial: candidate,
+      load: () => {
+        if (candidate instanceof Error) throw candidate;
+        return candidate;
+      },
+      sourceStamp: () => stamp,
+      now: () => clock,
+      log: (line) => logs.push(line),
+    });
+
+    candidate = { name: "b", anomalies: [] };
+    stamp = "registry:b";
+    clock += 1000;
+    expect(ref.poll()).toMatchObject({ changed: true, swapped: true });
+    expect(ref.current.name).toBe("b");
+    expect(ref.proxy.name).toBe("b");
+    expect(ref.state()).toMatchObject({
+      stamp: "registry:b",
+      loadedAt: "2026-08-28T10:00:01.000Z",
+      lastReloadError: null,
+    });
+
+    candidate = new Error("bad edges");
+    stamp = "registry:bad-1";
+    clock += 1000;
+    expect(ref.poll()).toMatchObject({ changed: true, swapped: false });
+    expect(ref.current.name).toBe("b");
+    expect(ref.state().lastReloadError).toEqual({
+      at: "2026-08-28T10:00:02.000Z",
+      message: "bad edges",
+    });
+    stamp = "registry:bad-2";
+    ref.poll();
+    expect(logs.filter((line) => line.includes("bad edges"))).toHaveLength(1);
+
+    candidate = { name: "c", anomalies: [] };
+    stamp = "registry:c";
+    clock += 1000;
+    ref.poll();
+    expect(ref.current.name).toBe("c");
+    expect(ref.state().lastReloadError).toBeNull();
+  });
+
   test("serve --watch re-execs under bun --watch and binds", async () => {
     const home = tmpDir("evrt-watch-");
     const port = freePort();

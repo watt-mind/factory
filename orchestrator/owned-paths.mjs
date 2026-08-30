@@ -36,22 +36,58 @@ export const REGISTRY_DIGEST_BASELINE_PATH =
   "event-runtime/lib/registry.test.mjs";
 
 /**
+ * Split level 2–4 Markdown headings into their sections.
+ *
+ * Bodies are returned untrimmed (an indented Owned Paths code block must keep
+ * its leading whitespace); callers that gate on "has content" must trim.
+ *
+ * Duplicate headings are UNIONED, never first-match. `ticket detail` appends
+ * by default, so a respec through the CLI leaves two copies of a §5 section
+ * in the body; every §5 reader (dispatch, handoff verification, the template
+ * guard) reads all matching blocks in document order so the appended copy
+ * takes effect instead of being silently ignored. See {@link parseOwnedPaths}
+ * and {@link parseVerificationCommand}.
+ */
+export function ticketSections(description = "") {
+  return String(description ?? "")
+    .split(/^#{2,4}\s+/m)
+    .slice(1)
+    .map((section) => {
+      const nl = section.indexOf("\n");
+      return {
+        heading: (nl === -1 ? section : section.slice(0, nl)).trim(),
+        // Preserve leading indentation: an Owned Paths block may be an
+        // indented Markdown code block, which would stop parsing if trimmed.
+        body: nl === -1 ? "" : section.slice(nl + 1),
+      };
+    });
+}
+
+/** Every ticket section whose heading matches, in document order. */
+export function matchingTicketSections(description = "", matchesHeading) {
+  return ticketSections(description).filter((section) =>
+    matchesHeading(section.heading),
+  );
+}
+
+/**
  * Extract the Owned Paths bullet list (levels 2-4) from a Linear issue description.
+ *
+ * Duplicate `Owned Paths` headings are unioned: every matching block is read,
+ * the paths are deduplicated, and order is first occurrence in the body. A
+ * respec appended with `ticket detail` therefore widens scope to cover both
+ * the old and the new block — never silently narrower than either. With a
+ * single heading the result is byte-identical to reading that block alone.
  * Returns [] when the section is missing or fails to parse — for dispatch,
  * use `effectiveOwnedPaths`, which turns that into "collides with
  * everything" rather than "not dispatchable".
  */
 export function parseOwnedPaths(description = "") {
-  // `split` retains the pre-heading prose as index 0. It cannot be a section,
-  // even when it mentions "Owned Paths", so only inspect heading-led chunks.
-  const section = description
-    .split(/^#{2,4}\s+/m)
-    .slice(1)
-    .find((s) => {
-      const heading = s.split("\n")[0];
-      return /\bOwned Paths\b/i.test(heading);
-    });
-  if (!section) return [];
+  const sections = matchingTicketSections(description, (heading) =>
+    /\bOwned Paths\b/i.test(heading),
+  );
+  if (!sections.length) return [];
+  const body = sections.map((section) => section.body).join("\n");
 
   // Real tickets write this section three different ways — bullet lists, fenced
   // code blocks, and indented code — often mixing them with prose ("Plus, only
@@ -62,7 +98,7 @@ export function parseOwnedPaths(description = "") {
   const out = [];
   let inFence = false;
 
-  for (const raw of section.split("\n").slice(1)) {
+  for (const raw of body.split("\n")) {
     if (/^\s*```/.test(raw)) {
       inFence = !inFence;
       continue;
@@ -99,6 +135,9 @@ export function parseOwnedPaths(description = "") {
           !/\s/.test(s) &&
           (s.includes("/") || s.includes("*") || /\.[a-z0-9]+$/i.test(s)),
       )
+      // Union semantics: a path repeated across duplicate blocks counts once,
+      // keeping its first position.
+      .filter((s, i, all) => all.indexOf(s) === i)
   );
 }
 
@@ -133,17 +172,28 @@ export function effectiveOwnedPaths(description = "") {
  * Returns null when the section is missing or holds nothing runnable; the
  * worker's handoff gate then falls back to the repo's `verify:` command and,
  * absent both, refuses the handoff (fail-closed).
+ *
+ * Duplicate headings follow the same union rule as {@link parseOwnedPaths}:
+ * each block's command is read, duplicates are dropped, and the distinct
+ * commands are joined with ` && ` in document order — "all of these must
+ * pass". A single heading behaves exactly as before.
  */
 export function parseVerificationCommand(description = "") {
-  const section = String(description ?? "")
-    .split(/^#{2,4}\s+/m)
-    .find((s) => {
-      const heading = s.split("\n")[0];
-      return /^Verification(\s+Command)?\s*:?\s*$/i.test(heading.trim());
-    });
-  if (!section) return null;
+  const sections = matchingTicketSections(description, (heading) =>
+    /^Verification(\s+Command)?\s*:?\s*$/i.test(heading.trim()),
+  );
+  if (!sections.length) return null;
+  const commands = [];
+  for (const section of sections) {
+    const command = parseVerificationSection(section.body);
+    if (command && !commands.includes(command)) commands.push(command);
+  }
+  if (!commands.length) return null;
+  return commands.length === 1 ? commands[0] : commands.join(" && ");
+}
 
-  const body = section.split("\n").slice(1);
+function parseVerificationSection(sectionBody) {
+  const body = sectionBody.split("\n");
   const fenced = [];
   let inFence = false;
   let sawFence = false;

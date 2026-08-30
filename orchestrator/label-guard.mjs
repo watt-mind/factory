@@ -27,25 +27,13 @@ import { loadControlPlane } from "../lib/control-plane/index.mjs";
 import { loadRepos } from "../event-runtime/lib/repos.mjs";
 import {
   parseOwnedPaths,
+  ticketSections,
   ownedPathsClosureGaps,
   readPinManifestRequirements,
   formatOwnedPathClosureGaps,
 } from "./owned-paths.mjs";
 
 const AI_AGENT_READY = "ai:agent-ready";
-
-/** Split markdown heading sections (levels 2-4), keyed by heading text and trimmed body. */
-function sections(description = "") {
-  return description
-    .split(/^#{2,4}\s+/m)
-    .slice(1)
-    .map((s) => {
-      const nl = s.indexOf("\n");
-      const heading = (nl === -1 ? s : s.slice(0, nl)).trim();
-      const body = (nl === -1 ? "" : s.slice(nl + 1)).trim();
-      return { heading, body };
-    });
-}
 
 /**
  * Which linear.md §5 sections a description is missing. [] means it passes.
@@ -81,14 +69,18 @@ const NOT_APPLICABLE =
  * variation.
  */
 export function templateGaps(description = "") {
-  const secs = sections(description);
+  // Same duplicate-heading rule as parseOwnedPaths: every matching block
+  // counts, so an appended respec cannot disagree with dispatch about which
+  // copy is authoritative.
+  const secs = ticketSections(description);
   const gaps = [];
 
   // A non-code ticket (deploy/env-var/business change) legitimately has no
   // repo paths -- linear.md's non-code exception applies here too. Accept an
   // explicit "not applicable" declaration in the section body.
-  const owned = secs.find((s) => /\bowned\s+paths\b/i.test(s.heading));
-  const ownedNA = owned && NOT_APPLICABLE.test(owned.body);
+  const ownedNA = secs.some(
+    (s) => /\bowned\s+paths\b/i.test(s.heading) && NOT_APPLICABLE.test(s.body),
+  );
   if (!parseOwnedPaths(description).length && !ownedNA)
     gaps.push("Owned Paths");
 
@@ -101,7 +93,9 @@ export function templateGaps(description = "") {
     return (
       (/\bverification\s+command\b/i.test(s.heading) ||
         /\bevidence\b.*\b(required|line)\b/i.test(s.heading)) &&
-      s.body.length > 0
+      // ticketSections leaves bodies untrimmed; a heading followed only by
+      // blank lines is still a gap.
+      s.body.trim().length > 0
     );
   });
   if (!verified) gaps.push("Verification Command");
@@ -156,14 +150,23 @@ export function ownedPathsClosureGuard(
   }
 }
 
-export async function fetchReadyIssues(repo) {
-  return loadControlPlane().listDispatchable({
+export async function fetchReadyIssues(
+  repo,
+  resolveControlPlane = loadControlPlane,
+) {
+  return resolveControlPlane({ repoName: repo.name }).listDispatchable({
     team: repo.team,
     project: repo.project,
   });
 }
 
-export async function demote(issue, _triageStateId, gaps, apply) {
+export async function demote(
+  issue,
+  repo,
+  gaps,
+  apply,
+  resolveControlPlane = loadControlPlane,
+) {
   if (!apply) return;
 
   const body =
@@ -174,7 +177,7 @@ export async function demote(issue, _triageStateId, gaps, apply) {
     `\n\nMoved back to \`Triage\` and the label was removed so it isn't picked up for dispatch. ` +
     `A triage pass needs to add the missing section(s) before re-labeling \`ai:agent-ready\`.`;
 
-  const cp = loadControlPlane();
+  const cp = resolveControlPlane({ repoName: repo.name });
   await cp.transition(issue.identifier, "Triage", {
     remove: [AI_AGENT_READY],
   });
@@ -253,7 +256,7 @@ export async function main(argv = process.argv.slice(2)) {
 
       if (args.apply) {
         try {
-          await demote(issue, null, gaps, true);
+          await demote(issue, repo, gaps, true);
           console.log(`      -> demoted to Triage, ai:agent-ready removed`);
         } catch (err) {
           console.log(`      ! failed: ${err.message || err}`);
