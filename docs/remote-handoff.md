@@ -19,6 +19,22 @@ The forced-command server rejects unknown fields, malformed IDs, unconfigured re
 
 `handoff` is reserved provenance. Unsigned intake still fails, `/replay` rejects both `handoff` and `chain`, and only authenticated signed `/events` may admit `handoff`. A handoff is unattended, not operator authorization: sensitive/escalated and `escalate_paths` bypasses remain false.
 
+## Worker verification sandbox
+
+Before a handoff result is accepted, its ticket verification command runs in a
+user, mount, PID, and network namespace followed by a chroot. The guest mounts
+the worktree, `/usr`, declared package runners, `proc`, an ephemeral `/tmp`, and
+the four basic device nodes. `/usr`, the worktree, and package runners are
+read-only where the check does not need to write; `/dev` is a tmpfs with only
+`null`, `zero`, `random`, `urandom`, and standard `/dev/fd`, `stdin`, `stdout`,
+and `stderr` links into the guest's `/proc/self/fd`.
+
+Some host executables are managed through `/etc/alternatives`. When that
+directory exists, it alone is bind-mounted read-only so those commands remain
+usable. No other host `/etc` path is mounted: credentials, host identity, and
+machine configuration remain outside the guest. Hosts without
+`/etc/alternatives` omit that optional mount and still create the sandbox.
+
 ## Client SSH alias
 
 Create a dedicated key for this purpose; do not reuse an interactive-login key. No key is committed to Factory. Configure an alias on the client:

@@ -314,6 +314,12 @@ done
 mount --rbind /usr "$root/usr"
 mount --make-rslave "$root/usr"
 mount -o remount,bind,ro "$root/usr"
+if [ -d /etc/alternatives ]; then
+  mkdir -p "$root/etc/alternatives"
+  mount --rbind /etc/alternatives "$root/etc/alternatives"
+  mount --make-rslave "$root/etc/alternatives"
+  mount -o remount,bind,ro "$root/etc/alternatives"
+fi
 mount --rbind "$workspace" "$root/workspace"
 mount --make-rslave "$root/workspace"
 mount -t tmpfs -o mode=1777,size="${"$"}{tmpfs_mb}m" tmpfs "$root/tmp"
@@ -322,6 +328,10 @@ for dev in null zero random urandom; do
   touch "$root/dev/$dev"
   mount --bind "/dev/$dev" "$root/dev/$dev"
 done
+ln -s /proc/self/fd "$root/dev/fd"
+ln -s /proc/self/fd/0 "$root/dev/stdin"
+ln -s /proc/self/fd/1 "$root/dev/stdout"
+ln -s /proc/self/fd/2 "$root/dev/stderr"
 if command -v ip >/dev/null 2>&1; then
   ip link set lo up || echo "handoff-sandbox: loopback stayed down" >&2
 elif command -v ifconfig >/dev/null 2>&1; then
