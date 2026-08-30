@@ -218,7 +218,8 @@ export function ossOnboardingDiagnostics({
  * pass, mismatch, and the undeclared no-block case without touching the
  * host. Repos may be raw YAML entries (map-form `toolchain:`) or
  * `loadRepos()` records; the helper always normalizes first so iterating a
- * map cannot throw.
+ * map cannot throw, and a malformed block becomes a red `toolchain` check
+ * instead of an exception.
  */
 export async function repoToolchainDiagnostics({
   repos = [],
@@ -233,7 +234,21 @@ export async function repoToolchainDiagnostics({
   if (typeof spawn === "function") preflightOpts.spawn = spawn;
 
   for (const repo of repos) {
-    const toolchain = normalizeToolchain(repo?.toolchain, repo?.name, file);
+    // A malformed `toolchain:` block is itself the diagnosis — surface it as
+    // a red check and keep going rather than letting the RepoError kill
+    // doctor with a stack trace before the remaining repos are examined.
+    let toolchain;
+    try {
+      toolchain = normalizeToolchain(repo?.toolchain, repo?.name, file);
+    } catch (err) {
+      diagnostics.push({
+        ok: false,
+        label: "toolchain",
+        detail: err?.message ?? String(err),
+        fix: `fix the toolchain: block for ${repo?.name ?? "this repo"} in ${file}`,
+      });
+      continue;
+    }
     if (!toolchain?.length) continue;
     const attestation = await preflightToolchain(
       { ...repo, toolchain },

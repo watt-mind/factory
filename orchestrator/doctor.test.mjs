@@ -213,6 +213,27 @@ describe("repo toolchain diagnostics (#1097)", () => {
     expect(emptyBlock).toEqual([]);
     expect(probes).toBe(0);
   });
+
+  test("malformed block: yields a red toolchain check instead of throwing", async () => {
+    let probes = 0;
+    const rows = await repoToolchainDiagnostics({
+      repos: [
+        { name: "broken", toolchain: "bun>=1.3" },
+        { name: "fine", toolchain: { bun: ">=1.0" } },
+      ],
+      which: async () => "/opt/bun",
+      spawn: async () => {
+        probes += 1;
+        return { exitCode: 0, stdout: "1.3.14\n", stderr: "" };
+      },
+    });
+    expect(rows[0]).toMatchObject({ ok: false, label: "toolchain" });
+    expect(rows[0].detail).toContain("repo broken toolchain must be a map");
+    expect(rows[0].fix).toContain("broken");
+    // Doctor keeps going: the next repo is still probed.
+    expect(rows[1]).toMatchObject({ ok: true, label: "toolchain bun" });
+    expect(probes).toBe(1);
+  });
 });
 
 describe("bin/chrome-headless.sh", () => {
