@@ -158,6 +158,8 @@ export function createApi({
 } = {}) {
   const actor = "operator";
   const staticRegistryLoadedAt = new Date(now()).toISOString();
+  // GET /artifacts snapshots the inventory for 10 s, so an out-of-band blob
+  // removal can remain listed until that snapshot expires.
   const storeStatsTtlMs = 10_000;
   let cachedStoreStats = null;
   let cachedStoreStatsAt = 0;
@@ -191,17 +193,20 @@ export function createApi({
     const resultsRowid =
       db.query(`SELECT MAX(rowid) AS rowid FROM results`).get().rowid ?? 0;
     const resultsChanged = resultsRowid !== cachedArtifactResultsRowid;
-    if (resultsChanged) {
-      cachedArtifactReferences = buildArtifactReferenceIndex(db);
-      cachedArtifactResultsRowid = resultsRowid;
-    }
-    if (
+    const inventoryChanged =
       resultsChanged ||
       !cachedArtifactInventory ||
-      nowMs - cachedArtifactInventoryAt >= storeStatsTtlMs
-    ) {
+      nowMs - cachedArtifactInventoryAt >= storeStatsTtlMs;
+    if (inventoryChanged) {
       cachedArtifactInventory = buildArtifactInventory(storeRoot);
       cachedArtifactInventoryAt = nowMs;
+    }
+    if (resultsChanged || inventoryChanged || !cachedArtifactReferences) {
+      cachedArtifactReferences = buildArtifactReferenceIndex(
+        db,
+        cachedArtifactInventory,
+      );
+      cachedArtifactResultsRowid = resultsRowid;
     }
     return listArtifactPage(db, storeRoot, {
       ...options,

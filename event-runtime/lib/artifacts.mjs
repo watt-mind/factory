@@ -374,13 +374,22 @@ export function listArtifacts(
   }).artifacts;
 }
 
-/** Build the result-to-artifact reference index used by catalogue pages. */
-export function artifactReferenceIndex(db) {
+/**
+ * Build the result-to-artifact reference index used by catalogue pages.
+ *
+ * Supplying an inventory keeps the retained index bounded by the bytes that
+ * are actually in the store. Run state deliberately is not cached here: it
+ * changes independently of result rows and is resolved for each page read.
+ */
+export function artifactReferenceIndex(db, inventory = null) {
   const references = new Map();
+  const stored = inventory
+    ? new Set(inventory.map(({ sha256 }) => sha256))
+    : null;
   const rows = db
     .query(
       `SELECT results.run_id, results.attempt, results.result_json, results.artifact_hash,
-              runs.spec_json, runs.state, runs.created_at
+              runs.spec_json, runs.created_at
      FROM results
      LEFT JOIN runs ON runs.run_id = results.run_id`,
     )
@@ -401,26 +410,25 @@ export function artifactReferenceIndex(db) {
     }
     for (const entry of result.artifacts ?? []) {
       if (!HEX64.test(entry.sha256 ?? "")) continue;
+      if (stored && !stored.has(entry.sha256)) continue;
       const refs = references.get(entry.sha256) ?? [];
       refs.push({
         runId: row.run_id,
         kind: entry.kind ?? null,
         agent,
-        state: row.state ?? null,
         createdAt: row.created_at ?? null,
       });
       references.set(entry.sha256, refs);
     }
     if (result.artifact !== undefined) {
       const sha256 = resultDigest(result.artifactHash ?? row.artifact_hash);
-      if (sha256) {
+      if (sha256 && (!stored || stored.has(sha256))) {
         const refs = references.get(sha256) ?? [];
         refs.push({
           runId: row.run_id,
           attempt: row.attempt,
           kind: "result",
           agent,
-          state: row.state ?? null,
           createdAt: row.created_at ?? null,
         });
         references.set(sha256, refs);
@@ -428,6 +436,29 @@ export function artifactReferenceIndex(db) {
     }
   }
   return references;
+}
+
+/** Resolve mutable run states for the references shown by a catalogue page. */
+export function artifactReferenceStates(db, references) {
+  const runIds = [
+    ...new Set(
+      [...references.values()].flatMap((refs) =>
+        refs.map(({ runId }) => runId),
+      ),
+    ),
+  ];
+  const states = new Map();
+  // Keep below SQLite's default bound-variable limit for large stores.
+  for (let offset = 0; offset < runIds.length; offset += 500) {
+    const ids = runIds.slice(offset, offset + 500);
+    const placeholders = ids.map(() => "?").join(", ");
+    for (const row of db
+      .query(`SELECT run_id, state FROM runs WHERE run_id IN (${placeholders})`)
+      .all(...ids)) {
+      states.set(row.run_id, row.state);
+    }
+  }
+  return states;
 }
 
 /** Snapshot the artifact files that are currently present in the store. */
@@ -464,11 +495,15 @@ export function listArtifactPage(
 ) {
   const index = references ?? artifactReferenceIndex(db);
   const files = inventory ?? artifactInventory(storeRoot);
+  const states = artifactReferenceStates(db, index);
 
   const term = typeof search === "string" ? search.toLowerCase() : null;
   const catalogue = [];
   for (const file of files) {
-    const refs = index.get(file.sha256) ?? [];
+    const refs = (index.get(file.sha256) ?? []).map((ref) => ({
+      ...ref,
+      state: states.get(ref.runId) ?? null,
+    }));
     const referenced = refs.length > 0;
     if (orphan !== undefined && orphan === referenced) continue;
     if (kind !== undefined && !refs.some((ref) => ref.kind === kind)) continue;

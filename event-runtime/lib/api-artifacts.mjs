@@ -93,6 +93,8 @@ export async function handleArtifactApiRoute({
   getArtifactPage,
 }) {
   if (route === "GET /artifacts") {
+    // The inventory is cached for 10 s, so blobs removed outside this API can
+    // remain visible until its next refresh.
     const orphanParam = url.searchParams.get("orphan");
     let limit;
     let before;
