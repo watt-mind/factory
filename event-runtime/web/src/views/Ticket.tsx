@@ -1493,7 +1493,7 @@ export function PullRequest({
       </div>
     );
   }
-  if (!journeyReady) {
+  if (!journeyReady || journey == null) {
     return (
       <div className="p-8 text-[13px] text-(--text-faint)">
         Loading PR #{pr} journey…
