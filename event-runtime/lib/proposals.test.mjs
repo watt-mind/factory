@@ -175,6 +175,7 @@ describe("approveProposal within TTL", () => {
     const result = approveProposal(db, registry, proposal.id, {
       actor: "operator",
       now: NOW + 60_000,
+      policyVersion: "git:test",
     });
     expect(result).toEqual({ approved: true, runId });
     expect(runState(db, runId)).toBe("QUEUED");
@@ -278,6 +279,83 @@ describe("approveProposal within TTL", () => {
     expect(runState(db, runId)).toBe("PROPOSED");
   });
 
+  test.each([
+    ["omitted", undefined],
+    ["unknown", "unknown"],
+  ])(
+    "a version-pinned spec is replanned when policyVersion is %s, not approved as-is",
+    (_label, policyVersion) => {
+      const { db, proposal, runId } = planned();
+      const recorded = getProposal(db, proposal.id).spec;
+      expect(recorded.promptVersion).toBe("git:test");
+      expect(recorded.policyVersion).toBe("git:test");
+
+      const result = approveProposal(db, registry, proposal.id, {
+        actor: "operator",
+        now: NOW + 1000,
+        ...(policyVersion === undefined ? {} : { policyVersion }),
+      });
+
+      expect(result).toMatchObject({ approved: false, replanned: true });
+      expect(result.proposal.id).not.toBe(proposal.id);
+      expect(result.proposal.status).toBe("open");
+      expect(result.proposal.reason).toBe("replanned_after_registry_replan");
+      expect(getProposal(db, proposal.id)).toMatchObject({
+        status: "superseded",
+        reason: "superseded_by_registry_replan",
+      });
+      expect(runState(db, runId)).toBe("PROPOSED");
+      expect(
+        JSON.parse(
+          db.query(`SELECT spec_json FROM runs WHERE run_id = ?`).get(runId)
+            .spec_json,
+        ),
+      ).not.toMatchObject({
+        promptVersion: "git:test",
+        policyVersion: "git:test",
+      });
+    },
+  );
+
+  test.each([
+    ["omitted", undefined],
+    ["unknown", "unknown"],
+  ])(
+    "a spec without version pins remains approvable when policyVersion is %s",
+    (_label, policyVersion) => {
+      const { db, proposal, runId } = planned();
+      const recorded = getProposal(db, proposal.id).spec;
+      const legacySpec = { ...recorded };
+      delete legacySpec.promptVersion;
+      delete legacySpec.policyVersion;
+      const legacyJson = canonicalJson(legacySpec);
+      const legacyHash = hashJson(legacySpec);
+      db.query(
+        `UPDATE proposals SET spec_json = ?, spec_hash = ? WHERE id = ?`,
+      ).run(legacyJson, legacyHash, proposal.id);
+      db.query(
+        `UPDATE runs SET spec_json = ?, spec_hash = ? WHERE run_id = ?`,
+      ).run(legacyJson, legacyHash, runId);
+
+      const result = approveProposal(db, registry, proposal.id, {
+        actor: "operator",
+        now: NOW + 1000,
+        ...(policyVersion === undefined ? {} : { policyVersion }),
+      });
+
+      expect(result).toEqual({ approved: true, runId });
+      expect(runState(db, runId)).toBe("QUEUED");
+      expect(getProposal(db, proposal.id).status).toBe("approved");
+      expect(lifecycleOf(db, runId).at(-1).reason).toBe("approved");
+      expect(
+        JSON.parse(
+          db.query(`SELECT spec_json FROM runs WHERE run_id = ?`).get(runId)
+            .spec_json,
+        ),
+      ).toEqual(legacySpec);
+    },
+  );
+
   test("a registry defHash change supersedes and creates one fresh open proposal", () => {
     const { db, proposal, runId } = planned();
     const stored = getProposal(db, proposal.id);
@@ -323,11 +401,16 @@ describe("approveProposal within TTL", () => {
 
   test("only open 'run' proposals are approvable", () => {
     const { db, proposal } = planned();
-    approveProposal(db, registry, proposal.id, { actor: "operator", now: NOW });
+    approveProposal(db, registry, proposal.id, {
+      actor: "operator",
+      now: NOW,
+      policyVersion: "git:test",
+    });
     expect(() =>
       approveProposal(db, registry, proposal.id, {
         actor: "operator",
         now: NOW,
+        policyVersion: "git:test",
       }),
     ).toThrow(/not open/);
     expect(() =>
@@ -379,7 +462,11 @@ describe("closeOpenProposalForRun", () => {
 
   test("no-op when the run has no open proposal", () => {
     const { db, proposal, runId } = planned();
-    approveProposal(db, registry, proposal.id, { actor: "operator", now: NOW });
+    approveProposal(db, registry, proposal.id, {
+      actor: "operator",
+      now: NOW,
+      policyVersion: "git:test",
+    });
     expect(
       closeOpenProposalForRun(db, runId, { actor: "operator", now: NOW }),
     ).toEqual({ closed: false });

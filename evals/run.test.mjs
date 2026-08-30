@@ -20,7 +20,7 @@ import {
   parseCliJson,
   parseVerdict,
 } from "./lib/grader.mjs";
-import { loadEvalPolicy, requirePin } from "./lib/policy.mjs";
+import { EvalConfigError, loadEvalPolicy, requirePin } from "./lib/policy.mjs";
 import { compareRuns } from "./lib/results.mjs";
 
 const EVALS_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -548,6 +548,33 @@ describe("--compare", () => {
       expect(report.comparison.added).toEqual(["ticket-spec/green-but-empty"]);
     }));
 
+  test("a passing case present in the previous run and absent from the current one is reported and does not fail the run", () =>
+    withTmpDir("evals-compare-removed-", async (dir) => {
+      const fixture = buildFixture(dir, { cases: twoCases() });
+      const previous = path.join(dir, "previous.json");
+      writeFileSync(
+        previous,
+        JSON.stringify({
+          startedAt: "2026-08-01T00:00:00.000Z",
+          grader: { model: "claude-sonnet-4-6" },
+          cases: [
+            { id: "ticket-spec/hidden-decision", status: "pass" },
+            { id: "ticket-spec/green-but-empty", status: "pass" },
+            { id: "ticket-spec/deleted-case", status: "pass" },
+          ],
+        }),
+      );
+      const result = await run({
+        argv: ["--json", "--compare", previous, "--no-results"],
+        deps: fakeDeps(),
+        ...fixture,
+      });
+      expect(result.code).toBe(EXIT_OK);
+      const report = JSON.parse(result.stdout);
+      expect(report.comparison.removed).toEqual(["ticket-spec/deleted-case"]);
+      expect(report.comparison.regressions).toEqual([]);
+    }));
+
   test("a missing or malformed comparison file is a usage error", () =>
     withTmpDir("evals-compare-bad-", async (dir) => {
       const fixture = buildFixture(dir, { cases: twoCases() });
@@ -739,6 +766,32 @@ describe("the grader pin", () => {
     });
     expect(policy.grader).toBeNull();
     expect(policy.problem).toContain("no `evals:` stanza");
+  });
+
+  test("an EvalConfigError from the policy loader is a usage error", async () => {
+    const result = await run({
+      argv: [],
+      policy: null,
+      deps: fakeDeps(),
+      loadPolicy: () => {
+        throw new EvalConfigError("bad limits");
+      },
+    });
+    expect(result.code).toBe(EXIT_USAGE);
+    expect(result.stderr).toContain("evals: bad limits");
+  });
+
+  test("a non-EvalConfigError from the policy loader is rethrown, not reported as exit 2", async () => {
+    await expect(
+      main({
+        argv: [],
+        stdout: sink(),
+        stderr: sink(),
+        loadPolicy: () => {
+          throw new TypeError("parser exploded");
+        },
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
   });
 });
 

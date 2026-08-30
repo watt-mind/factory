@@ -3,16 +3,21 @@ import {
   cpSync,
   existsSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   mkdirSync,
   writeFileSync,
   renameSync,
+  readdirSync,
+  symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { afterAll, expect, test } from "bun:test";
+import { sha256Hex } from "../event-runtime/lib/canonical.mjs";
 import { until } from "../event-runtime/lib/test-helpers-timing.mjs";
+import { preflightHandoffDependencies } from "../event-runtime/lib/verify.mjs";
 
 const COMMON = path.resolve(import.meta.dir, "worktree-common.sh");
 const WORKTREE_UP = path.resolve(import.meta.dir, "worktree-up.sh");
@@ -1227,5 +1232,220 @@ test("web_build_hash computes deterministic sha1 and changes on file rename or c
     );
   } finally {
     rmSync(mockWebDir, { recursive: true, force: true });
+  }
+});
+
+function mockBunInstallBin(succeed) {
+  const dir = mkdtempSync(path.join(tmpdir(), "mock-bun-install-"));
+  writeFileSync(
+    path.join(dir, "bun"),
+    succeed
+      ? `#!/usr/bin/env bash
+if [[ "$1" == "install" ]]; then
+  mkdir -p node_modules/placeholder
+  exit 0
+fi
+echo "unexpected bun invocation: $*" >&2
+exit 1
+`
+      : `#!/usr/bin/env bash
+if [[ "$1" == "install" ]]; then
+  echo "install failed" >&2
+  exit 1
+fi
+echo "unexpected bun invocation: $*" >&2
+exit 1
+`,
+  );
+  chmodSync(path.join(dir, "bun"), 0o755);
+  return dir;
+}
+
+function bunInstallFixture(lockContents = "fixture-lock\n") {
+  const dir = mkdtempSync(path.join(tmpdir(), "bun-lock-stamp-"));
+  writeFileSync(path.join(dir, "package.json"), '{"name":"fixture"}\n');
+  writeFileSync(path.join(dir, "bun.lock"), lockContents);
+  return dir;
+}
+
+test("locked_bun_install stamps node_modules/.bun-lock-sha after a successful install", () => {
+  const target = bunInstallFixture();
+  const mockBin = mockBunInstallBin(true);
+  const lockDir = path.join(tmpdir(), `bun-lock-${process.pid}-${Date.now()}`);
+  try {
+    const r = sh(`locked_bun_install "${target}"`, {
+      PATH: `${mockBin}:${TEST_PATH}`,
+      FACTORY_LOCK_DIR: lockDir,
+    });
+    expect(r.status).toBe(0);
+    const stamp = path.join(target, "node_modules", ".bun-lock-sha");
+    expect(existsSync(stamp)).toBe(true);
+    expect(readFileSync(stamp, "utf8").trim()).toBe(
+      sha256Hex(readFileSync(path.join(target, "bun.lock"))),
+    );
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
+test("locked_bun_install removes a stale stamp when install fails", () => {
+  const lockContents = "fixture-lock\n";
+  const target = bunInstallFixture(lockContents);
+  mkdirSync(path.join(target, "node_modules"));
+  writeFileSync(
+    path.join(target, "node_modules", ".bun-lock-sha"),
+    `${sha256Hex(lockContents)}\n`,
+  );
+  const mockBin = mockBunInstallBin(false);
+  const lockDir = path.join(
+    tmpdir(),
+    `bun-lock-fail-${process.pid}-${Date.now()}`,
+  );
+  try {
+    const r = sh(`locked_bun_install "${target}"`, {
+      PATH: `${mockBin}:${TEST_PATH}`,
+      FACTORY_LOCK_DIR: lockDir,
+    });
+    expect(r.status).not.toBe(0);
+    expect(existsSync(path.join(target, "node_modules", ".bun-lock-sha"))).toBe(
+      false,
+    );
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
+test("locked_bun_install does not create node_modules when install is a no-op success", () => {
+  const target = bunInstallFixture();
+  const mockBin = mkdtempSync(path.join(tmpdir(), "mock-bun-noop-"));
+  writeFileSync(
+    path.join(mockBin, "bun"),
+    `#!/usr/bin/env bash
+if [[ "$1" == "install" ]]; then
+  exit 0
+fi
+echo "unexpected bun invocation: $*" >&2
+exit 1
+`,
+  );
+  chmodSync(path.join(mockBin, "bun"), 0o755);
+  const lockDir = path.join(
+    tmpdir(),
+    `bun-lock-noop-${process.pid}-${Date.now()}`,
+  );
+  try {
+    const r = sh(`locked_bun_install "${target}"`, {
+      PATH: `${mockBin}:${TEST_PATH}`,
+      FACTORY_LOCK_DIR: lockDir,
+    });
+    expect(r.status).toBe(0);
+    expect(existsSync(path.join(target, "node_modules"))).toBe(false);
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
+// PATH identical to TEST_PATH except that every sha256sum/shasum is hidden,
+// so write_bun_lock_stamp has no hasher to run.
+function pathWithoutShaTools() {
+  const dir = mkdtempSync(path.join(tmpdir(), "no-sha-path-"));
+  const seen = new Set();
+  for (const entry of TEST_PATH.split(":")) {
+    if (!entry || !existsSync(entry)) continue;
+    let names;
+    try {
+      names = readdirSync(entry);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (name === "sha256sum" || name === "shasum" || seen.has(name)) continue;
+      seen.add(name);
+      try {
+        symlinkSync(path.join(entry, name), path.join(dir, name));
+      } catch {
+        // unreadable or racing entry: skip, first-wins semantics preserved
+      }
+    }
+  }
+  return dir;
+}
+
+test("locked_bun_install succeeds without a stamp when no sha256 tool is on PATH", () => {
+  const lockContents = "fixture-lock\n";
+  const target = bunInstallFixture(lockContents);
+  mkdirSync(path.join(target, "node_modules"));
+  // A stale stamp from a previous install must not survive a hasher-less run.
+  writeFileSync(
+    path.join(target, "node_modules", ".bun-lock-sha"),
+    `${sha256Hex("old-lock\n")}\n`,
+  );
+  const mockBin = mockBunInstallBin(true);
+  const noShaPath = pathWithoutShaTools();
+  const lockDir = path.join(
+    tmpdir(),
+    `bun-lock-nosha-${process.pid}-${Date.now()}`,
+  );
+  try {
+    const probe = sh("command -v sha256sum || command -v shasum", {
+      PATH: `${mockBin}:${noShaPath}`,
+    });
+    expect(probe.status).not.toBe(0);
+    const r = sh(`set -e; locked_bun_install "${target}"; echo installed-ok`, {
+      PATH: `${mockBin}:${noShaPath}`,
+      FACTORY_LOCK_DIR: lockDir,
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("installed-ok");
+    expect(r.stderr).toContain("bun lock stamp skipped");
+    expect(existsSync(path.join(target, "node_modules", "placeholder"))).toBe(
+      true,
+    );
+    expect(existsSync(path.join(target, "node_modules", ".bun-lock-sha"))).toBe(
+      false,
+    );
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
+    rmSync(noShaPath, { recursive: true, force: true });
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
+test("preflightHandoffDependencies reports installed:false for a shell-stamped directory", () => {
+  const target = bunInstallFixture();
+  const mockBin = mockBunInstallBin(true);
+  const lockDir = path.join(
+    tmpdir(),
+    `bun-lock-preflight-${process.pid}-${Date.now()}`,
+  );
+  try {
+    const r = sh(`locked_bun_install "${target}"`, {
+      PATH: `${mockBin}:${TEST_PATH}`,
+      FACTORY_LOCK_DIR: lockDir,
+    });
+    expect(r.status).toBe(0);
+
+    let installs = 0;
+    const result = preflightHandoffDependencies({
+      worktreePath: target,
+      installer: () => {
+        installs += 1;
+        return { passed: true, exitCode: 0, output: "unexpected" };
+      },
+    });
+    expect(result.passed).toBe(true);
+    expect(result.installed).toBe(false);
+    expect(installs).toBe(0);
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
+    rmSync(lockDir, { recursive: true, force: true });
   }
 });

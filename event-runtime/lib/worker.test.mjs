@@ -1714,6 +1714,160 @@ sh -c 'sleep 5 & wait'
     expect(summary.reasonCode).toBe("contract_violation");
   });
 
+  test("verifyResult ENOENT on a vanished worktree is FAILED/handoff_worktree_missing, not a LEASED leftover (#1663)", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec());
+    const summary = await runOnce(
+      db,
+      registry,
+      adapters,
+      opts({
+        verifyResult: ({ workspaceDir }) => {
+          throw Object.assign(new Error("ENOENT"), {
+            code: "ENOENT",
+            syscall: "realpath",
+            path: path.join(workspaceDir, "worktree"),
+          });
+        },
+      }),
+    );
+    expect(summary).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "handoff_worktree_missing",
+    });
+    expect(summary.error).toEqual({ code: "ENOENT", message: "ENOENT" });
+    expect(runState(db, spec.runId)).not.toBe("LEASED");
+    const attemptRow = db
+      .query(
+        `SELECT terminal_state, reason_code, finished_at FROM attempts WHERE run_id = ? AND attempt = 1`,
+      )
+      .get(spec.runId);
+    expect(attemptRow.terminal_state).toBe("FAILED");
+    expect(attemptRow.reason_code).toBe("handoff_worktree_missing");
+    expect(attemptRow.finished_at).toBeTruthy();
+    const stored = JSON.parse(
+      db
+        .query(
+          `SELECT result_json, verification_json FROM results WHERE run_id = ?`,
+        )
+        .get(spec.runId).result_json,
+    );
+    expect(stored.error).toEqual({ code: "ENOENT", message: "ENOENT" });
+    expect(stored.verification).toMatchObject({
+      status: "failed",
+      stage: "verification",
+    });
+  });
+
+  test("verifyResult ENOENT outside the run workspace (missing verifier binary) is verification_internal_error, not the environment budget (#1663)", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec());
+    const missingBinary = path.join(
+      path.sep,
+      "nonexistent-gh-1663",
+      "bin",
+      "verifier",
+    );
+    const summary = await runOnce(
+      db,
+      registry,
+      adapters,
+      opts({
+        verifyResult: () => {
+          throw Object.assign(new Error(`ENOENT: ${missingBinary}`), {
+            code: "ENOENT",
+            syscall: "realpath",
+            path: missingBinary,
+          });
+        },
+      }),
+    );
+    expect(summary).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "verification_internal_error",
+    });
+    expect(summary.error.code).toBe("ENOENT");
+    expect(runState(db, spec.runId)).toBe("FAILED");
+    const attemptRow = db
+      .query(
+        `SELECT reason_code FROM attempts WHERE run_id = ? AND attempt = 1`,
+      )
+      .get(spec.runId);
+    expect(attemptRow.reason_code).toBe("verification_internal_error");
+  });
+
+  test("verifyResult ENOENT without a path is verification_internal_error (#1663)", async () => {
+    const db = openDb(":memory:");
+    queueRun(db, makeSpec());
+    const summary = await runOnce(
+      db,
+      registry,
+      adapters,
+      opts({
+        verifyResult: () => {
+          throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        },
+      }),
+    );
+    expect(summary).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "verification_internal_error",
+    });
+  });
+
+  test("verifyResult TypeError is FAILED/verification_internal_error with the message recorded (#1663)", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec());
+    const summary = await runOnce(
+      db,
+      registry,
+      adapters,
+      opts({
+        verifyResult: () => {
+          throw new TypeError("cannot read property of undefined");
+        },
+      }),
+    );
+    expect(summary).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "verification_internal_error",
+    });
+    expect(summary.error.message).toBe("cannot read property of undefined");
+    expect(runState(db, spec.runId)).toBe("FAILED");
+    const stored = JSON.parse(
+      db
+        .query(`SELECT result_json FROM results WHERE run_id = ?`)
+        .get(spec.runId).result_json,
+    );
+    expect(stored.reasonCode).toBe("verification_internal_error");
+    expect(stored.error).toEqual({
+      code: "TypeError",
+      message: "cannot read property of undefined",
+    });
+    expect(stored.verification.stage).toBe("verification");
+  });
+
+  test("verifyResult ContractViolation still follows the existing handoff-failure path (#1663)", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec());
+    const summary = await runOnce(
+      db,
+      registry,
+      adapters,
+      opts({
+        verifyResult: () => {
+          throw new ContractViolation(["missing_result"]);
+        },
+      }),
+    );
+    expect(summary.terminalState).toBe("FAILED");
+    expect(summary.reasonCode).toBe("contract_violation");
+    expect(runState(db, spec.runId)).toBe("FAILED");
+    expect(
+      db.query(`SELECT * FROM results WHERE run_id = ?`).get(spec.runId),
+    ).toBeNull();
+  });
+
   test("a trace recorder that cannot be prepared degrades to a no-op instead of throwing out of executeClaimed (#1330)", async () => {
     const db = openDb(":memory:");
     const spec = queueRun(db, makeSpec());
@@ -3093,6 +3247,9 @@ sh -c 'sleep 5 & wait'
     expect(classifyFailureCause(HANDOFF_DEPENDENCIES_MISSING)).toBe(
       "environment",
     );
+    expect(classifyFailureCause("handoff_worktree_missing")).toBe(
+      "environment",
+    );
     expect(classifyFailureCause("agent_exit_1")).toBe("agent_error");
     expect(classifyFailureCause("contract_violation")).toBe("agent_error");
     for (const reason of [
@@ -3104,6 +3261,7 @@ sh -c 'sleep 5 & wait'
       "agent_definition_mismatch",
       "policy_denied:Bash",
       "workspace_integrity_violation",
+      "verification_internal_error",
     ]) {
       expect(classifyFailureCause(reason)).toBe("fatal");
     }
