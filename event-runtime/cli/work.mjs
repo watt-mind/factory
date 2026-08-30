@@ -48,6 +48,14 @@ export default async function work(args) {
   if (!Number.isInteger(pollMs) || pollMs < 25 || pollMs > 5_000) {
     fail("work: --poll-ms must be an integer between 25 and 5000");
   }
+  const drainTimeoutSeconds = Number(flagValue(args, "--drain-timeout") ?? 60);
+  if (
+    !Number.isInteger(drainTimeoutSeconds) ||
+    drainTimeoutSeconds < 1 ||
+    drainTimeoutSeconds > 3_600
+  ) {
+    fail("work: --drain-timeout must be an integer between 1 and 3600 seconds");
+  }
   // Built-ins first, then allow-listed extensions (lib/extensions.mjs,
   // WM-838) — before toMap(), which is a snapshot. The registry validates the
   // contract and wraps every adapter in the sandbox seam (WM-837); a broken
@@ -260,8 +268,7 @@ export default async function work(args) {
   // SIGKILL, which orphans the agent AND leaves a lying registry row. After
   // the grace period the worker leaves honestly and says what happens next —
   // the lease expires and the reaper requeues the run.
-  const drainTimeoutMs =
-    Number(flagValue(args, "--drain-timeout") ?? 60) * 1000;
+  const drainTimeoutMs = drainTimeoutSeconds * 1000;
   const finish = (reason, code = 0) => {
     clearInterval(beat);
     deregisterWorker(db, workerId);
