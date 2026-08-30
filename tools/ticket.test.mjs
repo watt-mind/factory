@@ -972,6 +972,16 @@ test("unknown GitHub-shaped ticket refs fail before a control-plane transport", 
   expect(result.ghCalls).toBe("");
 });
 
+test("verbs missing the ticket argument report usage before ref normalisation", () => {
+  for (const verb of ["comments", "unclaim", "labels"]) {
+    const result = spawnTicketOutsideRepo([verb]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain(`usage: ${verb} <ISSUE-ID>`);
+    expect(result.stderr).not.toContain("unrecognised ticket ref");
+    expect(result.ghCalls).toBe("");
+  }
+});
+
 test("short configured GitHub refs reach the adapter as full identifiers", () => {
   const result = spawnTicketOutsideRepo(
     ["labels", "factory#7", "--remove", "x"],

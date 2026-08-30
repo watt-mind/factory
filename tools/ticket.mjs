@@ -409,8 +409,8 @@ function configuredGithubTicketRef(ticketArg, registry) {
   const full = ticketArg.match(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#([0-9]+)$/);
   const short = ticketArg.match(/^([A-Za-z0-9_.-]+)#([0-9]+)$/);
   if (!full && !short) return null;
-  const name = (full?.[1] ?? short?.[1]).toLowerCase();
-  const number = full?.[2] ?? short?.[2];
+  const [, rawName, number] = full ?? short;
+  const name = rawName.toLowerCase();
   for (const repo of registry.values()) {
     const matches = full
       ? typeof repo.github === "string" && repo.github.toLowerCase() === name
@@ -422,7 +422,9 @@ function configuredGithubTicketRef(ticketArg, registry) {
 
 /** Return the full GitHub slug, or reject a miss before fallback routing. */
 export function normalizeTicketRef(ticketArg, repos) {
-  const registry = repos ?? getRepos();
+  // Same registry `controlPlane()` binds to, so the ref that passes here is
+  // the ref the adapter is built for.
+  const registry = repos ?? getRepos(instanceConfigRoot());
   const ref = configuredGithubTicketRef(ticketArg, registry);
   if (ref) return ref.identifier;
   if (typeof ticketArg === "string" && /^[^#\s]+#[0-9]+$/.test(ticketArg)) {
@@ -658,8 +660,8 @@ const VERBS = {
   },
 
   async comments() {
+    if (!positional[0]) throw new Error(`usage: comments <ISSUE-ID>`);
     const key = normalizeTicketRef(positional[0]);
-    if (!key) throw new Error(`usage: comments <ISSUE-ID>`);
     const nodes = await controlPlane(key).listComments(key);
     out(nodes, formatComments(nodes));
   },
@@ -680,8 +682,8 @@ const VERBS = {
   },
 
   async unclaim() {
+    if (!positional[0]) throw new Error(`usage: unclaim <ISSUE-ID>`);
     const key = normalizeTicketRef(positional[0]);
-    if (!key) throw new Error(`usage: unclaim <ISSUE-ID>`);
     const cp = controlPlane(key);
     const issue = await cp.getTicket(key);
     const currentNames = (issue.labels ?? []).map((label) => label.name);
@@ -702,10 +704,10 @@ const VERBS = {
   },
 
   async triage() {
-    const key = normalizeTicketRef(positional[0]);
     const comment = flag("comment");
-    if (!key || comment === null)
+    if (!positional[0] || comment === null)
       throw new Error(`usage: triage <ISSUE-ID> --comment "<text>"`);
+    const key = normalizeTicketRef(positional[0]);
     const cp = controlPlane(key);
     await cp.transition(key, "Triage", { remove: ["ai:agent-ready"] });
     if (comment.trim()) await cp.comment(key, comment);
@@ -713,10 +715,10 @@ const VERBS = {
   },
 
   async answer() {
-    const key = normalizeTicketRef(positional[0]);
     const text = positional[1];
-    if (!key || !text)
+    if (!positional[0] || !text)
       throw new Error(`usage: answer <ISSUE-ID> [--] "<text>"`);
+    const key = normalizeTicketRef(positional[0]);
     const cp = controlPlane(key);
     const issue = await cp.getTicket(key);
     if (issue.state?.name?.toLowerCase() === "blocked")
@@ -726,10 +728,10 @@ const VERBS = {
   },
 
   async detail() {
-    const key = normalizeTicketRef(positional[0]);
     const rawDetail = positional[1];
-    if (!key || !rawDetail)
+    if (!positional[0] || !rawDetail)
       throw new Error(`usage: detail <ISSUE-ID> [--] "<markdown>"`);
+    const key = normalizeTicketRef(positional[0]);
     const { appended } = await controlPlane(key).appendDetail(key, rawDetail);
     if (!appended) {
       out(
@@ -745,11 +747,11 @@ const VERBS = {
   },
 
   async labels() {
-    const key = normalizeTicketRef(positional[0]);
-    if (!key)
+    if (!positional[0])
       throw new Error(
         `usage: labels <ISSUE-ID> [--add <label>] [--remove <label>]`,
       );
+    const key = normalizeTicketRef(positional[0]);
     const cp = controlPlane(key);
     const add = flagAll("add"),
       remove = flagAll("remove");
@@ -771,12 +773,11 @@ const VERBS = {
   },
 
   async state() {
-    const key = normalizeTicketRef(positional[0]);
     const wanted = positional[1];
     const add = flagAll("add"),
       remove = flagAll("remove");
     const comment = flag("comment");
-    if (!key)
+    if (!positional[0])
       throw new Error(
         `usage: state <ISSUE-ID> ["<State Name>"] [--add label] [--remove label] [--comment "<text>"]`,
       );
@@ -785,6 +786,7 @@ const VERBS = {
         `usage: state <ISSUE-ID> "<State Name>" [--add label] [--remove label] [--comment "<text>"]`,
       );
     }
+    const key = normalizeTicketRef(positional[0]);
     const cp = controlPlane(key);
     const issue = await cp.getTicket(key);
 
