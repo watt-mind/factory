@@ -7,6 +7,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -65,7 +66,14 @@ function fakeServesRootedAt(cwd) {
       ["-a", "-p", String(pid), "-d", "cwd", "-Fn"],
       { encoding: "utf8" },
     );
-    return lsof.stdout.split("\n").includes(`n${cwd}`);
+    let realCwd = cwd;
+    try {
+      if (existsSync(cwd)) realCwd = realpathSync(cwd);
+    } catch {
+      /* ignore */
+    }
+    const lines = lsof.stdout.split("\n");
+    return lines.includes(`n${cwd}`) || lines.includes(`n${realCwd}`);
   });
 }
 

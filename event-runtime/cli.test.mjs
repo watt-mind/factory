@@ -11,6 +11,7 @@ import { tmpDir } from "./test-support/tmp.mjs?file=event-runtime-cli-test-mjs";
 const EXPECTED_COMMANDS = [
   "serve",
   "work",
+  "plan",
   "supervise",
   "status",
   "doctor",

@@ -28,13 +28,29 @@ import {
 export const modal = { depth: 0 };
 
 const HIDDEN_REFETCH_INTERVAL = 15_000;
+const BUSY_BACKOFF_INTERVAL = 10_000;
+
+let apiBusyBackoff = false;
+
+export function setApiBusyBackoff(busy: boolean) {
+  apiBusyBackoff = busy;
+}
+
+export function isApiBusyBackoff(): boolean {
+  return apiBusyBackoff;
+}
 
 export function pollingOptions(visibleInterval: number) {
   return {
-    refetchInterval: () =>
-      typeof document !== "undefined" && document.hidden
-        ? HIDDEN_REFETCH_INTERVAL
-        : visibleInterval,
+    refetchInterval: () => {
+      if (typeof document !== "undefined" && document.hidden) {
+        return HIDDEN_REFETCH_INTERVAL;
+      }
+      if (apiBusyBackoff) {
+        return Math.max(visibleInterval, BUSY_BACKOFF_INTERVAL);
+      }
+      return visibleInterval;
+    },
     // The interval callback backs hidden tabs off explicitly. Keeping the
     // observer active lets it recompute that cadence after the next tick;
     // TanStack Query's visibility listener refetches active queries as soon

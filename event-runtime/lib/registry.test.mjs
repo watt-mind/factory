@@ -353,10 +353,15 @@ describe("registry", () => {
     // documents the legacy bunx handoff alias, and receives bounded handoff
     // diagnostics. Prompt pin only — the definition remains provenance-safe.
     // Digest recomputed after merging #1521/#1445 (registry inputs).
+    // Regenerated (#1518): triage-apply.md documents that the closed registry
+    // files no issues and that any issue derived from a triaged source ticket
+    // is filed with `ticket.mjs file --dedupe-key <source issue id>`;
+    // triage-apply.json is re-pinned. Prompt text and its pin only — no
+    // schema, contract, route, capability, or model tier changed.
     // Regenerated (#1500): dispatch.md files out-of-scope follow-ups with
     // `tools/ticket.mjs file --from <TICKET>`; dispatch.json is re-pinned.
     const expected =
-      "sha256:4c7f4c2ca9d6b154f70cfad4aa4ecd7dfe1b66d64b8f6c4a560be91a1de3af89";
+      "sha256:f399317c6c22eb602d5f87f54837eb1bf57d8751d6038a81a47e0a6231392f35";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 

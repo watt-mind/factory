@@ -395,17 +395,24 @@ export async function handleIntakeApiRoute({
   repos,
   nowMs,
   onEvent,
+  getTickStats,
   send,
   readBody,
   parseJson,
 }) {
   if (route === "GET /health") {
+    const tickStats =
+      typeof getTickStats === "function" ? getTickStats() : null;
     return send(200, {
       ok: true,
       policyVersion,
       env,
       webhookSecret: secret ? "set" : "absent",
       githubWebhookSecret: githubSecret ? "set" : "absent",
+      tick: {
+        lastMs: tickStats?.lastMs ?? 0,
+        overruns: tickStats?.overruns ?? 0,
+      },
     });
   }
 

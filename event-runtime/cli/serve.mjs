@@ -22,10 +22,6 @@ import { sweepMemos } from "../lib/memos.mjs";
 import { publishOutbox } from "../lib/outbox.mjs";
 import { autoApproveScheduled, emitDueTicks } from "../lib/schedules.mjs";
 import { autoApproveChains } from "../lib/auto-approval.mjs";
-import {
-  worktreeDispatchAutoEligibility,
-  planAdmittedEvents,
-} from "../lib/planner.mjs";
 import { resolveChains } from "../lib/chain.mjs";
 import { notifyPending, sweepNotifyLog } from "../lib/notify.mjs";
 import { reconcileInbox } from "../lib/inbox.mjs";
@@ -33,8 +29,8 @@ import { loadModelTierMap, loadRegistry } from "../lib/registry.mjs";
 import { applyModelTierCellOverrides } from "../lib/runtime-overrides.mjs";
 import { approveProposal } from "../lib/proposals.mjs";
 import { startApi } from "../lib/api.mjs";
-import { runOnce } from "../lib/worker.mjs";
 import { reapExpiredLeases } from "../lib/reaper.mjs";
+import { startPlannerWorker } from "../lib/planner-worker.mjs";
 import { CLI_PATH, fail, flagValue, log } from "./shared.mjs";
 
 export const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
@@ -62,7 +58,7 @@ export const TICK_SUBSYSTEMS = [
  * `subsystems` may replace a step by the names in TICK_SUBSYSTEMS; tests use
  * that to prove isolation. `storeRoot` defaults to `artifactsRoot()`.
  *
- * @returns {{ lastPrune: number }}
+ * @returns {{ lastPrune: number, durationMs: number, stepMs: Record<string, number> }}
  */
 export async function tick({
   db,
@@ -80,12 +76,18 @@ export async function tick({
   announceProposals = () => {},
   announceTransitions = () => {},
   subsystems = {},
+  skipPlan = false,
 } = {}) {
+  const tickStart = Date.now();
+  const stepMs = {};
   const runStep = async (name, fn) => {
+    const start = Date.now();
     try {
       await (subsystems[name] ?? fn)();
     } catch (err) {
       logLine(`tick ${name}: ${err.message}`);
+    } finally {
+      stepMs[name] = Date.now() - start;
     }
   };
 
@@ -99,13 +101,18 @@ export async function tick({
     for (const err of ticks.errors) logLine(`schedule error: ${err}`);
   });
 
-  await runStep("plan", () => {
-    planAdmittedEvents(db, registry, {
-      now,
-      policyVersion: pv,
-      adapterOverride,
+  if (!skipPlan) {
+    const { planAdmittedEvents } = await import("../lib/planner.mjs");
+    await runStep("plan", () => {
+      planAdmittedEvents(db, registry, {
+        now,
+        policyVersion: pv,
+        adapterOverride,
+      });
     });
-  });
+  } else {
+    stepMs["plan"] = 0;
+  }
 
   await runStep("auto-approve", () => {
     const auto = autoApproveScheduled(db, registry, approveProposal, {
@@ -118,6 +125,8 @@ export async function tick({
   });
 
   await runStep("auto-approve-chains", async () => {
+    const { worktreeDispatchAutoEligibility } =
+      await import("../lib/planner.mjs");
     const auto = await autoApproveChains(db, registry, {
       now,
       policyVersion: pv,
@@ -155,6 +164,7 @@ export async function tick({
   });
 
   if (withWorker) {
+    const { runOnce } = await import("../lib/worker.mjs");
     await runStep("worker", async () => {
       await runOnce(db, registry, adapters, {
         workspacesRoot: workspacesRoot(),
@@ -224,7 +234,11 @@ export async function tick({
     for (const err of chains.errors) logLine(`chain error: ${err}`);
   });
 
-  return { lastPrune: nextPrune };
+  return {
+    lastPrune: nextPrune,
+    durationMs: Date.now() - tickStart,
+    stepMs,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -428,12 +442,33 @@ export default async function serve(args) {
   // iterate must not kill a running agent. `--with-worker` restores the old
   // all-in-one behaviour for a quick single-process demo.
   const withWorker = args.includes("--with-worker");
+  const noPlanner = args.includes("--no-planner");
 
   let lastPrune = Date.now();
   let busy = false;
+  let tickOverruns = 0;
+  let lastTickMs = 0;
+  let lastOverrunAt = null;
+
+  function getTickStats() {
+    return {
+      lastMs: lastTickMs,
+      overruns: tickOverruns,
+      ...(lastOverrunAt ? { lastOverrunAt } : {}),
+    };
+  }
+
   async function loopTick() {
-    if (busy) return; // never overlap: planning and (optional) execution share this tick
+    if (busy) {
+      tickOverruns++;
+      lastOverrunAt = new Date().toISOString();
+      log(
+        `tick skipped: previous tick still in progress (overruns: ${tickOverruns})`,
+      );
+      return;
+    }
     busy = true;
+    const start = Date.now();
     try {
       const result = await tick({
         db,
@@ -447,13 +482,33 @@ export default async function serve(args) {
         log,
         announceProposals,
         announceTransitions,
+        skipPlan: !noPlanner,
       });
       lastPrune = result.lastPrune;
+      const duration = Date.now() - start;
+      lastTickMs = duration;
+      if (duration > 1000) {
+        tickOverruns++;
+        lastOverrunAt = new Date().toISOString();
+        log(
+          `tick overrun: ${duration}ms (interval 1000ms, overruns: ${tickOverruns}) — step timings: ${JSON.stringify(result.stepMs)}`,
+        );
+      }
     } catch (err) {
       log(`tick error: ${err.message}`);
     } finally {
       busy = false;
     }
+  }
+
+  let plannerWorker = null;
+  if (!noPlanner) {
+    plannerWorker = startPlannerWorker({
+      eventHome: home,
+      policyVersion: pv,
+      adapterOverride,
+      log,
+    });
   }
 
   const env = {
@@ -467,8 +522,10 @@ export default async function serve(args) {
     policyVersion: pv,
     port,
     env,
+    getTickStats,
     onEvent: (kind) => {
       log(`event ${kind} — planning`);
+      plannerWorker?.wake();
       loopTick();
     },
   });
@@ -513,6 +570,13 @@ export default async function serve(args) {
         ? "worker: in-process (--with-worker) — restarting serve interrupts running agents"
         : "worker: none in this process — start one with: bun event-runtime/cli.mjs work",
     );
+    if (noPlanner) {
+      log(
+        "planner: disabled in this process (--no-planner) — run: bun event-runtime/cli.mjs plan",
+      );
+    } else {
+      log("planner: background worker thread (off HTTP event loop)");
+    }
   });
   server.on("error", (err) => {
     releaseServeLock(home);
@@ -533,11 +597,18 @@ export default async function serve(args) {
   // SIGTERM is what `bun --watch` sends on reload; without a close the next
   // process loses the bind race on 7381.
   let stopping = false;
-  const shutdown = (signal) => {
+  const shutdown = async (signal) => {
     if (stopping) return;
     stopping = true;
     log(`shutting down (${signal})`);
     if (timer) clearInterval(timer);
+    if (plannerWorker) {
+      try {
+        await plannerWorker.stop();
+      } catch {
+        /* best effort */
+      }
+    }
     releaseServeLock(home);
     const finish = () => {
       server.close(() => process.exit(0));

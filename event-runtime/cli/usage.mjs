@@ -23,6 +23,9 @@ usage: bun event-runtime/cli.mjs <command>
                                  only between claims (dev; see factory up --dev)
                                  --drain-file exits 0 once that file appears, at
                                  an idle poll boundary — never mid-run (WM-226)
+  plan [--adapter-override fake] [--poll-ms N] [--once]
+                                 planner daemon: plan admitted events off the
+                                 HTTP event loop into proposals
   supervise [--workers min:max] [--interval-ms N] [--drain-timeout N]
             [--spawn-grace-ms N] [--once]
                                  worker pool supervisor (WM-226): scales \`work\`
@@ -65,5 +68,5 @@ usage: bun event-runtime/cli.mjs <command>
                                  re-pin built-in definitions, or one explicitly named pack;
                                  --check exits non-zero when pins are stale without writing
 
-All commands except serve, work, supervise, and update-pins are clients of the control
+All commands except serve, work, plan, supervise, and update-pins are clients of the control
 API and need serve running on ${API_HOST}:${DEFAULT_PORT} (FACTORY_EVENT_PORT to change).`;

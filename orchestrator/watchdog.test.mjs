@@ -2,6 +2,7 @@ import { test, expect } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import {
+  controlApiFailureCode,
   fetchRecentSandboxRefusals,
   formatWatchdogReport,
   idleApprovalGateReason,
@@ -796,6 +797,72 @@ test("live deps page open proposals newest-first and keep every page", async () 
     expect(rows.map((r) => r.id)).toEqual(["new", "old"]);
     expect(seen).toHaveLength(2);
     expect(seen[1]).toContain("before=cursor1");
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("controlApiFailureCode distinguishes timeouts as API_BUSY", () => {
+  const timeoutErr = new Error("The operation timed out");
+  timeoutErr.name = "TimeoutError";
+  expect(controlApiFailureCode(timeoutErr)).toBe("API_BUSY");
+
+  const abortErr = new Error("The operation was aborted");
+  abortErr.name = "AbortError";
+  expect(controlApiFailureCode(abortErr)).toBe("API_BUSY");
+
+  const unauthErr = new Error("Unauthorized");
+  unauthErr.status = 401;
+  expect(controlApiFailureCode(unauthErr)).toBe("API_UNAUTHORIZED");
+
+  const lockedErr = new Error("Locked");
+  lockedErr.status = 503;
+  expect(controlApiFailureCode(lockedErr)).toBe("API_LOCKED");
+
+  const downErr = new Error("Connection refused");
+  expect(controlApiFailureCode(downErr)).toBe("API_ERROR");
+});
+
+test("runWatchdogCheck classifies tick overruns as TICK_OVERRUNS warning", async () => {
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === "/health") {
+        return Response.json({
+          ok: true,
+          tick: { lastMs: 1450, overruns: 3 },
+        });
+      }
+      if (url.pathname === "/status") {
+        return Response.json({
+          proposals: { open: 0 },
+          runs: { byState: { RUNNING: 0, LEASED: 0 } },
+          workers: { active: 1, total: 1, list: [] },
+          anomalies: {},
+        });
+      }
+      if (url.pathname === "/workers") {
+        return Response.json({ workers: [] });
+      }
+      if (url.pathname === "/runs") {
+        return Response.json({ runs: [] });
+      }
+      return new Response("{}", { status: 200 });
+    },
+  });
+
+  try {
+    const report = await runWatchdogCheck({
+      port: server.port,
+      webPort: server.port,
+      checkShadowFleet: false,
+    });
+    expect(report.metrics.tick).toEqual({ lastMs: 1450, overruns: 3 });
+    const overrunIssue = report.issues.find((i) => i.code === "TICK_OVERRUNS");
+    expect(overrunIssue).toBeDefined();
+    expect(overrunIssue?.severity).toBe("WARNING");
+    expect(overrunIssue?.message).toContain("3 tick overrun(s)");
   } finally {
     server.stop(true);
   }
