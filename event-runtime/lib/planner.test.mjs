@@ -1321,6 +1321,24 @@ describe("planEvent worktree gate (WM-108)", () => {
           }),
         ).toEqual({ decision: "noop", reason: "ticket_escalation_pr_closed" });
       }
+      // A transient forge failure is reported under its own reason so the
+      // worker can requeue it instead of refusing the continuation for good.
+      const unreadable = worktreeDispatchAutoEligibility(continuation.input, {
+        ...dispatch,
+        escalatedContinuation: closedEscalation,
+        fetchPullRequest: () => {
+          throw new Error("github_read_failed: x");
+        },
+      });
+      expect(unreadable.ok).toBe(false);
+      expect(unreadable.refusal).toMatchObject({
+        reason: "ticket_escalation_pr_read_failed",
+        decision: "noop",
+        detail: "github_read_failed: x",
+      });
+      expect(unreadable.evidence.checks.ticket_escalation_pr_read).toBe(
+        undefined,
+      );
       expect(
         worktreeDispatchAutoEligibility(continuation.input, {
           ...dispatch,

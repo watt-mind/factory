@@ -3271,12 +3271,30 @@ export async function executeClaimed(
         ) {
           return deferTransientGate("owned_paths_unknown");
         }
+        // A forge read failure while checking the failed run's PR is as
+        // transient as a Linear read failure: requeue with backoff instead
+        // of permanently killing the escalation continuation. Only when the
+        // retries are exhausted does the continuation refuse terminally, and
+        // then the tier_escalations row must leave 'applied' with it.
+        if (
+          gate === "dispatch" &&
+          gateRefusal.reason === "ticket_escalation_pr_read_failed" &&
+          worktreeHandoff
+        ) {
+          const deferred = deferTransientGate(gateRefusal.reason);
+          if (deferred?.terminalState === "REFUSED") {
+            refuseTierEscalationClaim(db, worktreeHandoff, gateRefusal.reason);
+          }
+          return deferred;
+        }
         releaseClaimLock(lockFile);
         if (
           gate === "dispatch" &&
-          ["ticket_claimed_by_other", "ticket_escalation_pr_closed"].includes(
-            gateRefusal.reason,
-          ) &&
+          [
+            "ticket_claimed_by_other",
+            "ticket_escalation_pr_closed",
+            "ticket_escalation_pr_read_failed",
+          ].includes(gateRefusal.reason) &&
           worktreeHandoff
         ) {
           refuseTierEscalationClaim(db, worktreeHandoff, gateRefusal.reason);

@@ -2735,6 +2735,133 @@ sh -c 'sleep 5 & wait'
     db.close();
   });
 
+  test("tier escalation requeues a continuation when its failed run PR read fails transiently", async () => {
+    const seedEscalation = (db, failedRunId, continuationRunId) => {
+      queueRun(
+        db,
+        makeSpec({
+          runId: continuationRunId,
+          agent: "dispatch@1",
+          input: {
+            repo: "factory",
+            ticket: "watt-mind/factory#1499",
+            modelTier: "strong",
+          },
+          workspace: { type: "worktree", checkoutDir: "repo" },
+          outputContract: "factory.dispatch-result/v1",
+          modelTier: "strong",
+        }),
+      );
+      db.query(
+        `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+         VALUES (?, 1, ?, 'sha256:test', '{}', '{}', ?)`,
+      ).run(
+        failedRunId,
+        JSON.stringify({ artifact: { prNumber: 1499 } }),
+        new Date(T0).toISOString(),
+      );
+      db.query(
+        `INSERT INTO tier_escalations
+           (root_run_id, failed_run_id, continuation_run_id, repo, ticket,
+            workspace_path, source_workspace_path, projection_state, created_at)
+         VALUES (?, ?, ?, 'factory', 'watt-mind/factory#1499', '/tmp/checkout', '/tmp/wrapper', 'applied', ?)`,
+      ).run(
+        failedRunId,
+        failedRunId,
+        continuationRunId,
+        new Date(T0).toISOString(),
+      );
+    };
+    const escalationRow = (db, continuationRunId) =>
+      db
+        .query(
+          `SELECT projection_state, projection_error FROM tier_escalations WHERE continuation_run_id = ?`,
+        )
+        .get(continuationRunId);
+    const dispatchOpts = (locksDir, leasesDir, claims) => ({
+      locksDir,
+      leasesDir,
+      fetchTicket: () => ({
+        identifier: "watt-mind/factory#1499",
+        state: { name: "In Progress" },
+        assignee: { id: "factory-owner", name: "Factory" },
+        labels: {
+          nodes: [{ name: "ai:in-progress" }, { name: "tier:strong" }],
+        },
+        description: "## Owned Paths\n- event-runtime/lib/worker.mjs\n",
+      }),
+      fetchViewer: () => ({ id: "factory-owner", name: "Factory" }),
+      fetchPullRequest: () => {
+        throw new Error("github_read_failed: rate limited");
+      },
+      fetchInFlight: () => [],
+      countLeases: () => 0,
+      budgetRefusal: () => null,
+      claimTicket: () => ((claims.count += 1), { ok: true }),
+    });
+
+    {
+      const db = openDb(":memory:");
+      const continuationRunId = "run_tier_unreadable_continuation";
+      seedEscalation(db, "run_tier_unreadable_failed", continuationRunId);
+      const locksDir = tmpDir("tier-unreadable-locks-");
+      const leasesDir = tmpDir("tier-unreadable-leases-");
+      const claims = { count: 0 };
+      const summary = await runOnce(
+        db,
+        registry,
+        adapters,
+        opts({ dispatch: dispatchOpts(locksDir, leasesDir, claims) }),
+      );
+      expect(summary).toMatchObject({
+        runId: continuationRunId,
+        terminalState: "QUEUED",
+        reasonCode: "ticket_escalation_pr_read_failed",
+      });
+      expect(summary.requeueAfterMs).toBeGreaterThan(0);
+      expect(claims.count).toBe(0);
+      expect(existsSync(dispatchLockPath("factory", locksDir))).toBe(false);
+      expect(runState(db, continuationRunId)).toBe("QUEUED");
+      expect(escalationRow(db, continuationRunId)).toEqual({
+        projection_state: "applied",
+        projection_error: null,
+      });
+      db.close();
+    }
+
+    {
+      const db = openDb(":memory:");
+      const continuationRunId = "run_tier_exhausted_continuation";
+      seedEscalation(db, "run_tier_exhausted_failed", continuationRunId);
+      const locksDir = tmpDir("tier-exhausted-locks-");
+      const leasesDir = tmpDir("tier-exhausted-leases-");
+      const claims = { count: 0 };
+      const summary = await runOnce(
+        db,
+        registry,
+        adapters,
+        opts({
+          dispatch: {
+            ...dispatchOpts(locksDir, leasesDir, claims),
+            maxTransientGateRequeues: 0,
+          },
+        }),
+      );
+      expect(summary).toMatchObject({
+        runId: continuationRunId,
+        terminalState: "REFUSED",
+        reasonCode: "ticket_escalation_pr_read_failed",
+      });
+      expect(claims.count).toBe(0);
+      expect(existsSync(dispatchLockPath("factory", locksDir))).toBe(false);
+      expect(escalationRow(db, continuationRunId)).toEqual({
+        projection_state: "refused",
+        projection_error: "ticket_escalation_pr_read_failed",
+      });
+      db.close();
+    }
+  });
+
   test("tier escalation projection replaces every tier label and comments both run ids idempotently", () => {
     const calls = [];
     const runCli = (args) => {
