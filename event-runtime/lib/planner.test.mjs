@@ -2834,7 +2834,8 @@ describe("planAdmittedEvents", () => {
     );
     writeFileSync(
       policyFile,
-      "concurrency:\n  max_in_flight_per_repo: 5\ndispatch:\n  security_tickets: auto\n  owned_paths_collision: advisory\n",
+      "concurrency:\n  max_in_flight_per_repo: 5\ndispatch:\n  security_tickets: auto\n  owned_paths_collision: advisory\n" +
+        "chain_auto_approval:\n  allowed_event_types: []\n",
     );
     const previous = process.env.FACTORY_REPOS_ROOT;
     process.env.FACTORY_REPOS_ROOT = root;
@@ -2898,7 +2899,6 @@ describe("planAdmittedEvents", () => {
       expect(
         planAdmittedEvents(db, snapshotRegistry, {
           now: NOW,
-          autoApprovalPolicy: { allowed: new Set(), reason: "test" },
           dispatch: {
             countLeases: () => 0,
             budgetRefusal: () => null,
@@ -2913,12 +2913,11 @@ describe("planAdmittedEvents", () => {
           },
         }),
       ).toEqual({ planned: 5, failed: 0, deadLettered: 0 });
-      expect(reads).toEqual(
-        new Map([
-          [reposFile, 1],
-          [policyFile, 1],
-        ]),
-      );
+      // Five candidates used to cost six parses of each file (#1362). The
+      // eligibility path now reads each once; the post-plan auto-approval
+      // pass may read policy.yaml one more time, never once per candidate.
+      expect(reads.get(reposFile)).toBe(1);
+      expect(reads.get(policyFile) ?? 0).toBeLessThanOrEqual(2);
     } finally {
       readSpy.mockRestore();
       if (previous === undefined) delete process.env.FACTORY_REPOS_ROOT;

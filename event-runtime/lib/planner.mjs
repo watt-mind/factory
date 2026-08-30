@@ -1158,7 +1158,7 @@ export function worktreeDispatchAutoEligibility(
         (lease) => String(lease.ticket) === String(ticket),
       ),
     maxInFlightFallback,
-    budgetRefusal,
+    budgetRefusal = defaultBudgetRefusal,
     claimedRetry = null,
     escalatedContinuation = null,
     operatorAuthorized = false,
@@ -1253,9 +1253,7 @@ export function worktreeDispatchAutoEligibility(
 
   let budgetReason;
   try {
-    budgetReason = budgetRefusal
-      ? budgetRefusal()
-      : defaultBudgetRefusal(configRoot, configSnapshot);
+    budgetReason = budgetRefusal(configRoot, configSnapshot);
   } catch {
     budgetReason = "budget_check_failed";
   }
@@ -2781,7 +2779,6 @@ export function planAdmittedEvents(db, registry, opts = {}) {
     policyVersion: opts.policyVersion ?? "unknown",
     dispatchEligibility: worktreeDispatchAutoEligibility,
     dispatch,
-    ...(opts.autoApprovalPolicy ? { policy: opts.autoApprovalPolicy } : {}),
   });
   return { planned, failed, deadLettered };
 }
