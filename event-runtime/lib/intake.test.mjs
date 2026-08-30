@@ -195,7 +195,21 @@ describe("admitEvent", () => {
     expect(result.event.payload_hash.startsWith("sha256:")).toBe(true);
   });
 
-  test("same (source, eventId) delivered twice yields one row and duplicate: true", () => {
+  test("identical same (source, eventId) retry yields one row and duplicate: true", () => {
+    const db = openDb(":memory:");
+    const first = admitEvent(db, registry, envelope(), { now: NOW });
+    const second = admitEvent(db, registry, envelope(), { now: NOW + 5000 });
+    expect(first.admitted).toBe(true);
+    expect(second).toEqual({
+      admitted: false,
+      duplicate: true,
+      event: first.event,
+    });
+    const rows = db.query(`SELECT COUNT(*) AS n FROM events`).get();
+    expect(rows.n).toBe(1);
+  });
+
+  test("same (source, eventId) with a different payload is a conflict without a write", () => {
     const db = openDb(":memory:");
     const first = admitEvent(db, registry, envelope(), { now: NOW });
     const second = admitEvent(
@@ -204,11 +218,13 @@ describe("admitEvent", () => {
       envelope({ payload: { repos: ["different"] } }),
       { now: NOW + 5000 },
     );
+
     expect(first.admitted).toBe(true);
     expect(second).toEqual({
       admitted: false,
-      duplicate: true,
-      event: first.event,
+      duplicate: false,
+      conflict: true,
+      errors: ["eventId: already admitted with a different payload"],
     });
     const rows = db.query(`SELECT COUNT(*) AS n FROM events`).get();
     expect(rows.n).toBe(1);

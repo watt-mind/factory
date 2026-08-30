@@ -246,6 +246,7 @@ export function translateGitHubEvent({
  *
  * @returns {{ admitted: true, duplicate: false, event: object }
  *         | { admitted: false, duplicate: true, event: object }
+ *         | { admitted: false, duplicate: false, conflict: true, errors: string[] }
  *         | { admitted: false, duplicate: false, errors: string[] }}
  */
 /**
@@ -345,10 +346,21 @@ export function admitEvent(db, registry, envelope, { now = Date.now() } = {}) {
   }
 
   return txImmediate(db, () => {
+    const payloadHash = hashJson(stored.payload);
     const existing = db
       .query(`SELECT * FROM events WHERE source = ? AND event_id = ?`)
       .get(stored.source, stored.eventId);
-    if (existing) return { admitted: false, duplicate: true, event: existing };
+    if (existing) {
+      if (existing.payload_hash !== payloadHash) {
+        return {
+          admitted: false,
+          duplicate: false,
+          conflict: true,
+          errors: ["eventId: already admitted with a different payload"],
+        };
+      }
+      return { admitted: false, duplicate: true, event: existing };
+    }
     db.query(
       `INSERT INTO events
          (source, event_id, type, subject, occurred_at, received_at,
@@ -364,7 +376,7 @@ export function admitEvent(db, registry, envelope, { now = Date.now() } = {}) {
       stored.correlationId ?? null,
       stored.causationId ?? null,
       canonicalJson(stored),
-      hashJson(stored.payload),
+      payloadHash,
       receivedAt,
     );
     const event = db

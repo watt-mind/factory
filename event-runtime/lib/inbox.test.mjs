@@ -9,6 +9,7 @@ import {
   bindInboxProposal,
   createInboxItem,
   decideInboxItem,
+  PENDING_EFFECT_CLAIM_TIMEOUT_MS,
   deliverInboxItem,
   getInboxItem,
   inboxCounts,
@@ -482,6 +483,43 @@ describe("human inbox ledger (WM-285)", () => {
     );
   });
 
+  test("whitespace-only required text is rejected before a response is recorded", async () => {
+    const db = openDb(":memory:");
+    const request = decision([
+      { id: "answer", label: "Answer", effect: "answer" },
+    ]);
+    request.fields = [
+      { id: "reply", kind: "text", label: "Reply", required: true },
+    ];
+    createInboxItem(
+      db,
+      {
+        kind: "ESCALATED",
+        title: "answer",
+        refs: { issue: "WM-1" },
+        decision: request,
+      },
+      { id: "whitespace_response" },
+    );
+
+    try {
+      await decideInboxItem(db, "whitespace_response", {
+        schemaVersion: "factory.decision-response/v1",
+        requestHash: decisionRequestHash(request),
+        optionId: "answer",
+        fields: { reply: " \n " },
+      });
+      throw new Error("expected invalid response");
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: "invalid_response",
+        status: 400,
+        errors: ["$.fields.reply: required text must not be empty"],
+      });
+    }
+    expect(getInboxItem(db, "whitespace_response").response).toBeNull();
+  });
+
   test("each failed retry advances a durable attempt token", async () => {
     const db = openDb(":memory:");
     const request = decision([
@@ -569,14 +607,146 @@ describe("human inbox ledger (WM-285)", () => {
         }),
       ).rejects.toMatchObject({ code: "already_decided" });
       await expect(retryInboxDecision(db, "slow_effect")).rejects.toMatchObject(
-        { code: "retry_superseded" },
+        { code: "effect_pending" },
       );
+      expect(getInboxItem(db, "slow_effect").response.effect).toMatchObject({
+        kind: "send_to_triage",
+        outcome: "pending",
+        retryAttempt: 0,
+        claimedAt: expect.any(String),
+      });
 
       await deciding;
+      expect(getInboxItem(db, "slow_effect").response.effect).toEqual({
+        kind: "send_to_triage",
+        outcome: "applied",
+      });
     } finally {
       other.close();
       db.close();
     }
+  });
+
+  test("a retry takes over a pending claim once it is older than the transport timeout", async () => {
+    const db = openDb(":memory:");
+    const request = decision([
+      { id: "triage", label: "Triage", effect: "send_to_triage" },
+    ]);
+    createInboxItem(
+      db,
+      {
+        kind: "ESCALATED",
+        title: "crashed mid-effect",
+        refs: { issue: "WM-1434" },
+        decision: request,
+      },
+      { id: "stale_claim" },
+    );
+    const response = {
+      schemaVersion: "factory.decision-response/v1",
+      requestHash: decisionRequestHash(request),
+      optionId: "triage",
+      fields: {},
+    };
+    // Simulate serve dying between the claim and the settle: the claim commits
+    // and the effect never returns.
+    const crashed = decideInboxItem(db, "stale_claim", response, {
+      now: 1_000,
+      applyEffect: () => new Promise(() => {}),
+    });
+    await Promise.resolve();
+    expect(getInboxItem(db, "stale_claim").response.effect).toMatchObject({
+      outcome: "pending",
+      retryAttempt: 0,
+      claimedAt: new Date(1_000).toISOString(),
+    });
+
+    // Inside the window the claim is still owned.
+    await expect(
+      retryInboxDecision(db, "stale_claim", {
+        now: 1_000 + PENDING_EFFECT_CLAIM_TIMEOUT_MS - 1,
+      }),
+    ).rejects.toMatchObject({ code: "effect_pending", status: 409 });
+    await expect(
+      decideInboxItem(db, "stale_claim", response, { now: 2_000 }),
+    ).rejects.toMatchObject({ code: "already_decided" });
+
+    // Past the window a retry takes the claim over and settles the item.
+    const takeoverAt = 1_000 + PENDING_EFFECT_CLAIM_TIMEOUT_MS;
+    const retried = await retryInboxDecision(db, "stale_claim", {
+      now: takeoverAt,
+      applyEffect: () => ({ outcome: "applied" }),
+    });
+    expect(retried.effect).toEqual({
+      kind: "send_to_triage",
+      outcome: "applied",
+    });
+    expect(retried.item.response.effect).toEqual({
+      kind: "send_to_triage",
+      outcome: "applied",
+      retryAttempt: 1,
+    });
+    expect(retried.item.resolvedAt).toBe(new Date(takeoverAt).toISOString());
+    expect(retried.item.resolvedBy).toBe("operator:send_to_triage");
+    await expect(retryInboxDecision(db, "stale_claim")).rejects.toMatchObject({
+      code: "already_applied",
+    });
+    void crashed;
+  });
+
+  test("a retry claim that dies mid-effect can be taken over as well", async () => {
+    const db = openDb(":memory:");
+    const request = decision([
+      { id: "triage", label: "Triage", effect: "send_to_triage" },
+    ]);
+    createInboxItem(
+      db,
+      {
+        kind: "ESCALATED",
+        title: "crashed mid-retry",
+        refs: { issue: "WM-1434" },
+        decision: request,
+      },
+      { id: "stale_retry_claim" },
+    );
+    await decideInboxItem(
+      db,
+      "stale_retry_claim",
+      {
+        schemaVersion: "factory.decision-response/v1",
+        requestHash: decisionRequestHash(request),
+        optionId: "triage",
+        fields: {},
+      },
+      { now: 1_000, applyEffect: () => ({ outcome: "failed", error: "down" }) },
+    );
+    const crashed = retryInboxDecision(db, "stale_retry_claim", {
+      now: 5_000,
+      applyEffect: () => new Promise(() => {}),
+    });
+    await Promise.resolve();
+    expect(getInboxItem(db, "stale_retry_claim").response.effect).toMatchObject(
+      {
+        outcome: "pending",
+        retryAttempt: 1,
+        claimedAt: new Date(5_000).toISOString(),
+      },
+    );
+    await expect(
+      retryInboxDecision(db, "stale_retry_claim", { now: 6_000 }),
+    ).rejects.toMatchObject({ code: "effect_pending" });
+    const retried = await retryInboxDecision(db, "stale_retry_claim", {
+      now: 5_000 + PENDING_EFFECT_CLAIM_TIMEOUT_MS,
+      applyEffect: () => ({ outcome: "applied" }),
+    });
+    expect(retried.item.response.effect).toMatchObject({
+      outcome: "applied",
+      retryAttempt: 2,
+    });
+    expect(retried.item.resolvedAt).toBe(
+      new Date(5_000 + PENDING_EFFECT_CLAIM_TIMEOUT_MS).toISOString(),
+    );
+    void crashed;
   });
 
   test("kind is closed and rows expose parsed refs/delivery", () => {

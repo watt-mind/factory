@@ -636,6 +636,12 @@ export const api = {
 export const getInboxItem = (id: string) =>
   call<{ item: InboxItem }>("GET", `/inbox/${encodeURIComponent(id)}`);
 
+/**
+ * The effect runs outside the ledger's write lock (#1434): while it is in
+ * flight `item.response.effect.outcome` is `"pending"`, and rows decided before
+ * that window existed carry no `effect` at all. Readers must not assume
+ * `applied`/`failed`; a retry during the window is refused with `effect_pending`.
+ */
 export const decideInboxItem = (id: string, response: DecisionResponseInput) =>
   call<{ item: InboxItem; effect: DecisionEffect }>(
     "POST",

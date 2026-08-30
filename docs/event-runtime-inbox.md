@@ -210,8 +210,30 @@ expected to grow slowly, if at all.
 ## 3. Effects — the runtime owns the verbs
 
 Every option carries exactly one `effect` from this closed set. The renderer
-does not know what an effect does; the API does, and applies it in the same
-transaction that stores the response.
+does not know what an effect does; the API does. Applying it is two short
+write transactions around an unlocked effect, not one transaction:
+
+1. **Claim.** The response is validated and stored with
+   `effect: { kind, outcome: "pending", retryAttempt, claimedAt }`, and
+   `decided_at`/`decided_by` are set. This is the item's observable state for
+   the whole effect window: `GET /inbox/:id` shows `response.effect.outcome
+=== "pending"`, a second `/decide` gets `already_decided`, and
+   `/decide/retry` gets `effect_pending`.
+2. **Effect**, outside the write lock. Effects call the CLI (`tools/linear.mjs`,
+   the planner) and can take up to the 20 s transport timeout; holding the
+   SQLite lock for that starved every other writer (#1434).
+3. **Settle.** The outcome replaces the pending record (`applied` resolves
+   the item, `failed` keeps it open with the error) in a second transaction.
+
+If serve dies between the claim and the settle, the pending record outlives
+it. `/decide/retry` treats a pending claim older than
+`PENDING_EFFECT_CLAIM_TIMEOUT_MS` (60 s, above the transport timeout —
+`event-runtime/lib/inbox.mjs`) as abandoned and takes it over: it re-stamps
+the claim with the next `retryAttempt` and a fresh `claimedAt`, runs the
+effect, and settles. Readers must tolerate `response.effect` being `null`
+(rows decided before this window existed) or `pending`; the web
+`DecisionCard` shows the outcome verbatim and offers retry for anything not
+`applied`.
 
 | Effect             | What the runtime does                                                                                                                                                                                                                                                                | Legal only when the item has            |
 | :----------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------- |
@@ -296,8 +318,8 @@ and the effect returns
 ```
 
 Resolving on that `applied` is what WM-714 fixes. The operator approved a spec
-that is no longer on offer, so the ledger **retargets** the item in the same
-transaction instead:
+that is no longer on offer, so the ledger **retargets** the item in the settle
+transaction (§3) instead:
 
 - `refs.proposalId` becomes `newProposalId`, and the dedupe key follows it
   (`<kind>:<newProposalId>`), so the next producer for the fresh proposal
@@ -472,7 +494,8 @@ API:
 GET  /inbox/:id                → the item, with decision, response, responseHistory
 POST /inbox/:id/decide         → body: factory.decision-response/v1 minus decidedAt
                                   200 { item, effect: { kind, outcome } }
-POST /inbox/:id/decide/retry   → re-run a failed effect with the stored response
+POST /inbox/:id/decide/retry   → re-run a failed effect with the stored response,
+                                  or take over a pending claim abandoned by a crash (§3)
 ```
 
 Decision endpoints return `{ error, message, errors? }`; `errors` is present
@@ -494,6 +517,7 @@ stored response). Otherwise the following
 | `stale_request`    |  409 | The supplied request hash no longer matches the stored decision.                              | `event-runtime/lib/inbox.mjs:decideInboxItemInTransaction`    |
 | `already_decided`  |  409 | An answer was already stored, including a concurrent answer that won the write.               | `event-runtime/lib/inbox.mjs:decideInboxItemInTransaction`    |
 | `retry_superseded` |  409 | A retry's stored response changed while it waited for the transaction lock.                   | `event-runtime/lib/inbox.mjs:retryInboxDecisionInTransaction` |
+| `effect_pending`   |  409 | `retry` targets a claim whose effect is still running (younger than the takeover timeout).    | `event-runtime/lib/inbox.mjs:retryInboxDecisionInTransaction` |
 | `not_decided`      |  409 | `retry` has no durable decision to replay, including after a §3.2 retarget.                   | `event-runtime/lib/inbox.mjs:retryInboxDecisionInTransaction` |
 | `already_applied`  |  409 | `retry` targets an already-resolved item or an effect already recorded as applied.            | `event-runtime/lib/inbox.mjs:retryInboxDecisionInTransaction` |
 | `retarget_failed`  |  500 | An applied re-plan cannot produce a valid replacement decision for the fresh proposal.        | `event-runtime/lib/inbox.mjs:retargetInboxDecision`           |
