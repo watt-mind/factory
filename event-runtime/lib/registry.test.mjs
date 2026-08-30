@@ -405,8 +405,10 @@ describe("registry", () => {
     // and HTML comment bodies; both prompt definitions are registry inputs.
     // Re-pinned (#1700 post-review): merge-fix templates the round cap as
     // `<max_fix_rounds>` instead of hardcoding 2.
+    // Regenerated (#1829): dispatch emits a concrete run trailer and rejects
+    // the literal environment-variable form during handoff verification.
     const expected =
-      "sha256:475609349143157c8b659367addb688b17847ea8218af380de5daba2c3b9059a";
+      "sha256:dbd5426576135c4c20545d719faacd9414ca8ffd1c2cace416f8632865f9cc94";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -693,8 +695,10 @@ describe("registry", () => {
     // waits via REST; prompt pin only, `pack` remains non-enumerable.
     // Regenerated (#1337): dispatch trusts the worker-verified authorisation;
     // prompt pin only, `pack` remains non-enumerable.
+    // Regenerated (#1829): dispatch emits the concrete run trailer with printf,
+    // so quoted PR-body files cannot leave the environment variable literal.
     expect(computeDefHash(def)).toBe(
-      "sha256:779fa866b66dd5422699118041cfa88e1545d4269468ad987d93e6db169265b7",
+      "sha256:5ab07ac3ca2343a57082a2f66835f2480b5d27339e6b8adafff64fb8dccb8d95",
     );
   });
 

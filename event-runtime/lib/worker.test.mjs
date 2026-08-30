@@ -5395,7 +5395,7 @@ sh -c 'sleep 5 & wait'
     }
   });
 
-  test("handoff PR form records draft and body markers, refusing only a missing Fixes line", () => {
+  test("handoff PR form records draft and body markers, refusing malformed markers", () => {
     const base = {
       github: "watt-mind/factory",
       prNumber: 77,
@@ -5417,6 +5417,7 @@ sh -c 'sleep 5 & wait'
       draft: false,
       hasFixesLine: true,
       hasRunTrailer: true,
+      hasUnexpandedRunTrailer: false,
     });
 
     const warningOnly = { ...base };
@@ -5433,6 +5434,7 @@ sh -c 'sleep 5 & wait'
       draft: true,
       hasFixesLine: true,
       hasRunTrailer: false,
+      hasUnexpandedRunTrailer: false,
     });
 
     const missingFixes = { ...base };
@@ -5450,7 +5452,36 @@ sh -c 'sleep 5 & wait'
     expect(missingFixes.pr).toMatchObject({
       hasFixesLine: false,
       hasRunTrailer: true,
+      hasUnexpandedRunTrailer: false,
     });
+  });
+
+  test("handoff PR form rejects literal run trailers when a run ID is set", () => {
+    const base = {
+      github: "watt-mind/factory",
+      prNumber: 77,
+      ticket: "watt-mind/factory#1504",
+      runId: "run-1504",
+    };
+    for (const trailer of ["run:$FACTORY_RUN_ID", "run:${FACTORY_RUN_ID}"]) {
+      const handoff = { ...base };
+      expect(() =>
+        assertHandoffPullRequestBase({
+          handoff,
+          base: "develop",
+          fetchPullRequest: () => ({
+            baseRefName: "develop",
+            isDraft: false,
+            body: `Fixes watt-mind/factory#1504\n\n${trailer}`,
+          }),
+        }),
+      ).toThrow("run_trailer_unexpanded");
+      expect(handoff.pr).toMatchObject({
+        hasFixesLine: true,
+        hasRunTrailer: false,
+        hasUnexpandedRunTrailer: true,
+      });
+    }
   });
 
   test("handoff PR Fixes line tolerates the short #n form, case, and trailing punctuation", () => {
@@ -5478,6 +5509,7 @@ sh -c 'sleep 5 & wait'
       expect(handoff.pr).toMatchObject({
         hasFixesLine: true,
         hasRunTrailer: true,
+        hasUnexpandedRunTrailer: false,
       });
     }
 
@@ -5538,6 +5570,23 @@ sh -c 'sleep 5 & wait'
     expect(nullBody.pr).toMatchObject({
       hasFixesLine: false,
       hasRunTrailer: false,
+      hasUnexpandedRunTrailer: false,
+    });
+
+    const noRunId = { ...base, runId: undefined };
+    assertHandoffPullRequestBase({
+      handoff: noRunId,
+      base: "develop",
+      fetchPullRequest: () => ({
+        baseRefName: "develop",
+        isDraft: false,
+        body: "Fixes watt-mind/factory#1504\nrun:$FACTORY_RUN_ID",
+      }),
+    });
+    expect(noRunId.pr).toMatchObject({
+      hasFixesLine: true,
+      hasRunTrailer: null,
+      hasUnexpandedRunTrailer: null,
     });
 
     const noTicket = { ...base, ticket: null, runId: undefined };
@@ -5553,6 +5602,7 @@ sh -c 'sleep 5 & wait'
     expect(noTicket.pr).toMatchObject({
       hasFixesLine: null,
       hasRunTrailer: null,
+      hasUnexpandedRunTrailer: null,
     });
     expect(composeHandoffVerification(noTicket)).toContain(
       "Fixes: unknown · run trailer: unknown",
