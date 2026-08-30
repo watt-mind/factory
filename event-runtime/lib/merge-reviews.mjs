@@ -290,7 +290,9 @@ function fullVerificationRebaseSkip({ forge, github, pr, now }) {
       ),
     )?.check_runs;
   } catch {
-    return null;
+    // Conservative: if the check-run state cannot be read, assume CI may be
+    // in flight rather than rebasing over a potentially live landing run.
+    return "ci_in_flight";
   }
   if (!Array.isArray(checkRuns)) return null;
 

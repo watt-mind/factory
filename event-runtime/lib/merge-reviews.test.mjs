@@ -608,13 +608,16 @@ describe("merge-scan enumerator (WM-936)", () => {
     const result = enumerateMergeScan({
       input: { repo: "factory" },
       db,
-      forge: forgeWith([
-        pr({
-          number: 877,
-          headRefName: "feat/gh-877",
-          mergeStateStatus: "BEHIND",
-        }),
-      ]),
+      forge: forgeWith(
+        [
+          pr({
+            number: 877,
+            headRefName: "feat/gh-877",
+            mergeStateStatus: "BEHIND",
+          }),
+        ],
+        { api: checkRunsFor(HEAD, []) },
+      ),
       repos,
     });
 
@@ -647,7 +650,7 @@ describe("merge-scan enumerator (WM-936)", () => {
           pr({ number: 8, headRefName: "feat/WM-8" }),
           pr({ number: 20, headRefName: "feat/WM-20" }),
         ],
-        { baseSha: BASE2 },
+        { baseSha: BASE2, api: checkRunsFor(HEAD, []) },
       ),
       repos,
     });
@@ -705,14 +708,17 @@ describe("merge-scan enumerator (WM-936)", () => {
     const result = enumerateMergeScan({
       input: { repo: "factory" },
       db,
-      forge: forgeWith([
-        pr({
-          number: 9,
-          headRefName: "feat/WM-9",
-          mergeable: "MERGEABLE",
-          mergeStateStatus: "BEHIND",
-        }),
-      ]),
+      forge: forgeWith(
+        [
+          pr({
+            number: 9,
+            headRefName: "feat/WM-9",
+            mergeable: "MERGEABLE",
+            mergeStateStatus: "BEHIND",
+          }),
+        ],
+        { api: checkRunsFor(HEAD, []) },
+      ),
       repos,
     });
     expect(result.artifact.reviews).toEqual([]);
@@ -750,6 +756,34 @@ describe("merge-scan enumerator (WM-936)", () => {
           ]),
         },
       ),
+      repos,
+    });
+    expect(result.artifact.fix).toEqual([]);
+    expect(result.artifact.summary).toContain("rebase_skipped:ci_in_flight #9");
+  });
+
+  test("behind-base hit skips rebase when check runs cannot be read", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    // No check-runs API seeded: reading the check-run state throws, and the
+    // scan must conservatively treat CI as possibly in flight.
+    const result = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith([
+        pr({
+          number: 9,
+          headRefName: "feat/WM-9",
+          mergeStateStatus: "BEHIND",
+        }),
+      ]),
       repos,
     });
     expect(result.artifact.fix).toEqual([]);
