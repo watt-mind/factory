@@ -277,6 +277,11 @@ export function PromotionPanel({
   const [repo, setRepo] = useState(defaultRepo);
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
+  useEffect(() => {
+    setRepo(defaultRepo);
+    setSelected(new Set());
+  }, [defaultRepo]);
+
   const preview = useQuery({
     queryKey: ["promotion-preview"],
     queryFn: api.promotionPreview,
