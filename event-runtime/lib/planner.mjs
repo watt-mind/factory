@@ -976,6 +976,13 @@ export function policyDispatchSecurity(root = reposRoot(), snapshot = null) {
   return value === "auto" ? "auto" : DEFAULT_DISPATCH_SECURITY;
 }
 
+/** Whether unattended dispatch admission is temporarily paused by an operator. */
+export const DEFAULT_DISPATCH_PAUSED = false;
+export function policyDispatchPaused(root = reposRoot(), snapshot = null) {
+  const value = loadRuntimePolicy(root, snapshot)?.dispatch?.paused;
+  return value === true ? true : DEFAULT_DISPATCH_PAUSED;
+}
+
 /** Fail-safe merge admission cap when policy is absent or malformed. */
 export const DEFAULT_MAX_CONCURRENT_MERGES = 1;
 
@@ -2320,6 +2327,11 @@ export function planEvent(
         worktreeGateFor(preDef) === "dispatch" &&
         typeof preEnvelope.payload?.repo === "string" &&
         typeof preEnvelope.payload?.ticket === "string" &&
+        !(
+          preEnvelope.type === "factory.dispatch.requested" &&
+          preEnvelope.source !== "operator" &&
+          policyDispatchPaused(undefined, configSnapshot)
+        ) &&
         !repoNotAllowed(preDef, preEnvelope.payload)
       ) {
         if (preEnvelope.type === "factory.dispatch.requested") {
@@ -2436,6 +2448,27 @@ export function planEvent(
     const scopeRefusal = repoNotAllowed(def, envelope.payload);
     if (scopeRefusal)
       return humanNeeded(db, event, scopeRefusal, at, ttlSeconds);
+
+    // A pause is an operator-controlled brake on unattended admission. Keep
+    // operator dispatches available so the operator can still force specific
+    // work while draining, but record every other dispatch as a durable NOOP.
+    if (
+      envelope.type === "factory.dispatch.requested" &&
+      envelope.source !== "operator" &&
+      policyDispatchPaused(undefined, configSnapshot)
+    ) {
+      const proposal = insertProposal(db, {
+        id: newProposalId(),
+        event,
+        decision: "noop",
+        status: "resolved",
+        reason: "dispatch_paused",
+        at,
+        ttlSeconds,
+      });
+      setEventStatus(db, event, "noop", "dispatch_paused");
+      return { decision: "noop", proposal, reason: "dispatch_paused" };
+    }
 
     if (
       envelope.type === "factory.dispatch.requested" &&

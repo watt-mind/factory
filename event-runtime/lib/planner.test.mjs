@@ -29,6 +29,7 @@ import {
   pinMemos,
   planAdmittedEvents,
   planEvent,
+  policyDispatchPaused,
   policyMaxConcurrentMerges,
   policyMergeBatchSize,
   wrapLinearReads,
@@ -1718,6 +1719,61 @@ describe("planEvent worktree gate (WM-108)", () => {
         ).toMatchObject({ decision: "noop", reason: "ticket_security" });
       }
     });
+  });
+
+  test("dispatch.paused noops unattended dispatches but keeps operator dispatch available", () => {
+    const pausedPolicy = "dispatch:\n  paused: true\n";
+    withReposRoot(
+      tierRepo,
+      () => {
+        expect(policyDispatchPaused()).toBe(true);
+        const db = openDb(":memory:");
+        let ticketReads = 0;
+        const dispatch = {
+          ...tierDispatch(),
+          fetchTicket: () => {
+            ticketReads += 1;
+            return tierTicket();
+          },
+        };
+
+        for (const source of ["schedule", "chain"]) {
+          const ref = admit(db, {
+            type: "factory.dispatch.requested",
+            source,
+            eventId: `${source}-paused-dispatch`,
+            correlationId: `${source}-paused-dispatch`,
+            causationId: source === "chain" ? "run-parent" : null,
+            payload: { repo: "tiered", ticket: "WM-694" },
+          });
+          expect(
+            planEvent(db, registry, ref, {
+              now: NOW,
+              policyVersion: "git:test",
+              dispatch,
+            }),
+          ).toMatchObject({ decision: "noop", reason: "dispatch_paused" });
+        }
+        expect(ticketReads).toBe(0);
+
+        const operator = admit(db, {
+          type: "factory.dispatch.requested",
+          source: "operator",
+          eventId: "operator-paused-dispatch",
+          correlationId: "operator-paused-dispatch",
+          payload: { repo: "tiered", ticket: "WM-694" },
+        });
+        expect(
+          planEvent(db, registry, operator, {
+            now: NOW,
+            policyVersion: "git:test",
+            dispatch,
+          }).decision,
+        ).toBe("run");
+        expect(ticketReads).toBe(1);
+      },
+      pausedPolicy,
+    );
   });
 
   test("eligible handoff dispatch pins auto-approval evidence without operator authorization", () => {
