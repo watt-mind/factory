@@ -168,7 +168,7 @@ export function createApi({
   let cachedArtifactResultsRowid = null;
   let cachedArtifactInventory = null;
   let cachedArtifactInventoryAt = 0;
-  const repoApi = createRepoApi({ repos, db });
+  const repoApi = createRepoApi({ repos, db, configRoot });
 
   function getStoreStats(nowMs) {
     if (cachedStoreStats && nowMs - cachedStoreStatsAt < storeStatsTtlMs)

@@ -1,6 +1,31 @@
-/** Runtime-managed repository registry routes. */
-import { existsSync } from "node:fs";
+/**
+ * Runtime-managed repository registry routes (gh-1639).
+ *
+ * The host registry file (`config/repos.yaml`) is the single source of truth:
+ * every mutation is written through to it atomically and validated with the
+ * real loader before it is committed, so a restart sees exactly what the API
+ * reported and an invalid write never reaches disk.
+ */
+import { randomUUID } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import {
+  loadInRepoConfig,
+  loadRepos,
+  RepoError,
+  reposConfigPath,
+  reposRoot,
+  reposView,
+} from "./repos.mjs";
 
 const CONTROL_PLANES = new Set(["github", "linear", "memory"]);
 const ACTIVE_RUN_STATES = ["QUEUED", "LEASED", "RUNNING", "VERIFYING"];
@@ -19,6 +44,17 @@ const PATCH_FIELDS = new Set([
   "controlPlane",
   "runnerLabels",
 ]);
+/** API field → host registry key. */
+const HOST_KEYS = {
+  name: "name",
+  github: "github",
+  path: "path",
+  controlPlane: "control_plane",
+  base: "base",
+  reportOnly: "report_only",
+  maxInFlight: "max_in_flight",
+  runnerLabels: "runner_labels",
+};
 
 function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -85,11 +121,24 @@ function validateFields(value, allowed, required = []) {
   return null;
 }
 
-function hasInRepoConfig(repo) {
-  if (typeof repo.path !== "string") return false;
-  return [".factory.yaml", ".factory/config.yaml"].some((file) =>
-    existsSync(path.join(repo.path, file)),
-  );
+/**
+ * Re-read one checkout's in-repo overlay. The loader is uncached — every
+ * `repos()` call parses `.factory.yaml` afresh — so this is the whole of what
+ * a "sync" can do: read it now and report whether it is being applied.
+ */
+function readOverlay(repo) {
+  if (typeof repo.path !== "string" || !repo.path)
+    return { status: "absent", error: null };
+  try {
+    const config = loadInRepoConfig(repo.path);
+    return config
+      ? { status: "applied", error: null }
+      : { status: "absent", error: null };
+  } catch (err) {
+    if (!(err instanceof RepoError)) throw err;
+    // Mirrors loadRepos: a malformed overlay is ignored, host config applies.
+    return { status: "ignored", error: err.message };
+  }
 }
 
 function repositoryHealth(repo) {
@@ -101,89 +150,196 @@ function repositoryHealth(repo) {
     : { status: "missing_checkout", path: repo.path };
 }
 
-function activeCounts(db) {
-  const counts = new Map();
+/**
+ * Active runs naming this repo, filtered in SQL rather than by parsing every
+ * active spec in JS. A run names its repo the same three ways
+ * `repoNamesFromInput` (api-runs.mjs) recognises: `input.repo`,
+ * `input.repoPin.repo`, and `input.repos[]` entries (string or `{name}`).
+ * `json_valid` guards the JSON functions: a malformed historic spec must not
+ * make the registry unreadable.
+ */
+function activeRunCount(db, name) {
   const placeholders = ACTIVE_RUN_STATES.map(() => "?").join(", ");
-  const rows = db
-    .query(`SELECT spec_json FROM runs WHERE state IN (${placeholders})`)
-    .all(...ACTIVE_RUN_STATES);
-  for (const row of rows) {
-    try {
-      const name = JSON.parse(row.spec_json)?.input?.repo;
-      if (typeof name === "string")
-        counts.set(name, (counts.get(name) ?? 0) + 1);
-    } catch {
-      // A malformed historic run must not make the registry unreadable.
-    }
-  }
-  return counts;
+  const row = db
+    .query(
+      `SELECT COUNT(*) AS n FROM runs
+       WHERE state IN (${placeholders})
+         AND json_valid(spec_json)
+         AND (
+           json_extract(spec_json, '$.input.repo') = ?
+           OR json_extract(spec_json, '$.input.repoPin.repo') = ?
+           OR EXISTS (
+             SELECT 1 FROM json_each(spec_json, '$.input.repos') AS entry
+             WHERE entry.value = ?
+               OR (entry.type = 'object'
+                   AND json_extract(entry.value, '$.name') = ?)
+           )
+         )`,
+    )
+    .get(...ACTIVE_RUN_STATES, name, name, name, name);
+  return row?.n ?? 0;
 }
 
-function response(repo, { dynamic, source, flags, inFlight }) {
-  const effective = { ...repo, ...flags };
-  return {
-    name: effective.name,
-    github: effective.github ?? null,
-    path: effective.path ?? null,
-    controlPlane: effective.controlPlane ?? null,
-    base: effective.base ?? "main",
-    reportOnly: effective.reportOnly === true,
-    maxInFlight: effective.maxInFlight ?? null,
-    runnerLabels: effective.runnerLabels ?? [],
-    configSource: dynamic
-      ? "runtime"
-      : hasInRepoConfig(repo)
-        ? "in-repo"
-        : "host",
-    health: repositoryHealth(effective),
-    inFlight: inFlight ?? 0,
-    sync: source?.syncedAt ?? null,
-  };
+function hostConfigError(message, file) {
+  // The loader names the scratch copy it validated; report the real file.
+  return message.split(file).join("config/repos.yaml");
 }
 
 /**
- * Build the mutable, process-local registry used by the control API. Host
- * entries remain the baseline; runtime additions, removals, and allowed
- * runtime flags are layered over a fresh host read on each request.
+ * Read the effective host registry as raw YAML (the loader's projection drops
+ * keys it does not model, and a write must not lose them).
  */
-export function createRepoApi({ repos, db }) {
-  const additions = new Map();
-  const removals = new Set();
-  const flags = new Map();
+function readHostConfig(root) {
+  const file = reposConfigPath(root);
+  if (!existsSync(file)) return { repos: [] };
+  const parsed = Bun.YAML.parse(readFileSync(file, "utf8"));
+  if (!isObject(parsed))
+    throw new RepoError(`${file}: repos config must be a YAML mapping`);
+  if (parsed.repos === undefined || parsed.repos === null) parsed.repos = [];
+  if (!Array.isArray(parsed.repos))
+    throw new RepoError(`${file}: repos must be a list`);
+  return parsed;
+}
+
+/**
+ * Validate `config` with the real loader, then commit it atomically to the
+ * local `config/repos.yaml` (tmp file + rename). Throws RepoError without
+ * touching the registry when the loader rejects the result.
+ */
+function writeHostConfig(root, config) {
+  const yaml = Bun.YAML.stringify(config, null, 2);
+  const scratch = mkdtempSync(path.join(os.tmpdir(), "factory-repos-"));
+  try {
+    const scratchFile = path.join(scratch, "config", "repos.yaml");
+    mkdirSync(path.dirname(scratchFile), { recursive: true });
+    writeFileSync(scratchFile, yaml);
+    try {
+      loadRepos({ root: scratch });
+    } catch (err) {
+      if (!(err instanceof RepoError)) throw err;
+      throw new RepoError(hostConfigError(err.message, scratchFile));
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+  const target = path.join(root, "config", "repos.yaml");
+  mkdirSync(path.dirname(target), { recursive: true });
+  const tmp = `${target}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmp, yaml);
+    renameSync(tmp, target);
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+
+/**
+ * Build the repository management routes. `repos()` is the loader projection
+ * read per request; `configRoot` is the checkout whose `config/repos.yaml`
+ * mutations are written through to (the same root `repos()` reads).
+ */
+export function createRepoApi({ repos, db, configRoot = reposRoot() }) {
   const syncs = new Map();
 
-  function registry() {
-    const current = new Map(repos());
-    for (const name of removals) current.delete(name);
-    for (const [name, repo] of additions) current.set(name, { ...repo });
-    for (const [name, patch] of flags) {
-      const repo = current.get(name);
-      if (repo) current.set(name, { ...repo, ...patch });
-    }
-    return current;
-  }
-
-  function details(name) {
-    const base = repos();
-    const repo = registry().get(name);
+  function details(
+    name,
+    { current = repos(), host = readHostConfig(configRoot), counts } = {},
+  ) {
+    const repo = current.get(name);
     if (!repo) return null;
-    const inFlight = activeCounts(db).get(name) ?? 0;
-    return response(repo, {
-      dynamic: additions.has(name),
-      source: syncs.get(name),
-      flags: flags.get(name) ?? {},
+    const entry =
+      host.repos.find((candidate) => candidate?.name === name) ?? {};
+    let inFlight = counts?.get(name);
+    if (inFlight === undefined) {
+      inFlight = activeRunCount(db, name);
+      counts?.set(name, inFlight);
+    }
+    const overlay = readOverlay(repo);
+    return {
+      name: repo.name,
+      github: repo.github ?? null,
+      path: repo.path ?? null,
+      controlPlane: repo.controlPlane ?? null,
+      base: repo.base ?? "main",
+      reportOnly: repo.reportOnly === true,
+      maxInFlight: repo.maxInFlight ?? null,
+      runnerLabels: Array.isArray(entry.runner_labels)
+        ? [...entry.runner_labels]
+        : [],
+      configSource: overlay.status === "applied" ? "in-repo" : "host",
+      overlay,
+      health: repositoryHealth(repo),
       inFlight,
-      host: base.get(name),
-    });
+      sync: syncs.get(name) ?? null,
+    };
   }
 
-  async function handle({ route, req, url, send, parseJson, readBody }) {
-    if (route === "GET /repos") {
-      // Keep the established collection projection byte-compatible; the
-      // existing registry handler supplies it below. Per-repository GET adds
-      // operational state without widening that public inventory response.
-      return false;
+  function collection() {
+    const current = repos();
+    const host = readHostConfig(configRoot);
+    const counts = new Map();
+    return {
+      // The established inventory projection, unchanged for its consumers.
+      repos: reposView(current),
+      details: [...current.keys()].map((name) =>
+        details(name, { current, host, counts }),
+      ),
+    };
+  }
+
+  function commit(send, mutate) {
+    let config;
+    try {
+      config = readHostConfig(configRoot);
+      mutate(config);
+      writeHostConfig(configRoot, config);
+    } catch (err) {
+      if (!(err instanceof RepoError)) throw err;
+      return send(422, { error: err.message });
     }
+    return null;
+  }
+
+  async function register({ req, send, parseJson, readBody }) {
+    const parsed = parseJson(await readBody(req));
+    if (parsed.error) return send(422, { error: "invalid_json" });
+    const error = validateFields(parsed.value, REGISTRATION_FIELDS, [
+      "name",
+      "github",
+    ]);
+    if (error) return send(422, { error });
+    const { name } = parsed.value;
+    if (repos().has(name))
+      return send(409, { error: `repo ${name} is already registered` });
+    const entry = {};
+    for (const [field, key] of Object.entries(HOST_KEYS)) {
+      if (Object.hasOwn(parsed.value, field)) entry[key] = parsed.value[field];
+    }
+    const failed = commit(send, (config) => {
+      if (config.repos.some((candidate) => candidate?.name === name))
+        throw new RepoError(`repo ${name} is already registered`);
+      config.repos.push(entry);
+    });
+    if (failed) return failed;
+    return send(201, { repo: details(name) });
+  }
+
+  async function handle(context) {
+    try {
+      return await routes(context);
+    } catch (err) {
+      // OPS-212/OPS-346: a missing or malformed repos.yaml is named, not
+      // flattened into a bare internal_error.
+      if (err instanceof RepoError)
+        return context.send(500, { error: err.message });
+      throw err;
+    }
+  }
+
+  async function routes({ route, req, url, send, parseJson, readBody }) {
+    if (route === "GET /repos") return send(200, collection());
+    if (route === "POST /repos")
+      return register({ req, send, parseJson, readBody });
 
     const match = url.pathname.match(/^\/repos\/([^/]+)(?:\/(sync))?$/);
     if (!match) return false;
@@ -197,25 +353,16 @@ export function createRepoApi({ repos, db }) {
         : send(404, { error: `unknown repo ${name}` });
     }
 
-    if (req.method === "POST" && !action && url.pathname === "/repos") {
-      return false;
-    }
-
     if (req.method === "POST" && action === "sync") {
-      const repo = registry().get(name);
+      const repo = repos().get(name);
       if (!repo) return send(404, { error: `unknown repo ${name}` });
-      // `repos()` is deliberately read on every request. Calling it here
-      // re-fetches the in-repo overlay before recording the invalidation.
-      repos();
-      syncs.set(name, {
-        syncedAt: new Date().toISOString(),
-        invalidated: true,
-      });
-      return send(200, { repo: details(name), invalidated: true });
+      const overlay = readOverlay(repo);
+      syncs.set(name, { syncedAt: new Date().toISOString(), overlay });
+      return send(200, { repo: details(name), overlay, refreshed: true });
     }
 
     if (req.method === "PATCH" && !action) {
-      if (!registry().has(name))
+      if (!repos().has(name))
         return send(404, { error: `unknown repo ${name}` });
       const parsed = parseJson(await readBody(req));
       if (parsed.error) return send(422, { error: "invalid_json" });
@@ -223,57 +370,39 @@ export function createRepoApi({ repos, db }) {
       if (error) return send(422, { error });
       if (Object.keys(parsed.value).length === 0)
         return send(422, { error: "at least one runtime flag is required" });
-      flags.set(name, { ...(flags.get(name) ?? {}), ...parsed.value });
+      const failed = commit(send, (config) => {
+        const entry = config.repos.find(
+          (candidate) => candidate?.name === name,
+        );
+        if (!entry) throw new RepoError(`repo ${name} is not in the registry`);
+        for (const [field, value] of Object.entries(parsed.value)) {
+          entry[HOST_KEYS[field]] = value;
+        }
+      });
+      if (failed) return failed;
       return send(200, { repo: details(name) });
     }
 
     if (req.method === "DELETE" && !action) {
-      if (!registry().has(name))
+      if (!repos().has(name))
         return send(404, { error: `unknown repo ${name}` });
-      const inFlight = activeCounts(db).get(name) ?? 0;
+      const inFlight = activeRunCount(db, name);
       if (inFlight > 0)
         return send(409, {
           error: `repo ${name} has ${inFlight} active run(s)`,
         });
-      additions.delete(name);
-      flags.delete(name);
+      const failed = commit(send, (config) => {
+        config.repos = config.repos.filter(
+          (candidate) => candidate?.name !== name,
+        );
+      });
+      if (failed) return failed;
       syncs.delete(name);
-      if (repos().has(name)) removals.add(name);
       return send(200, { deleted: name });
     }
 
     return false;
   }
 
-  async function register({ req, send, parseJson, readBody }) {
-    const parsed = parseJson(await readBody(req));
-    if (parsed.error) return send(422, { error: "invalid_json" });
-    const error = validateFields(parsed.value, REGISTRATION_FIELDS, [
-      "name",
-      "github",
-    ]);
-    if (error) return send(422, { error });
-    const { name } = parsed.value;
-    if (registry().has(name))
-      return send(409, { error: `repo ${name} is already registered` });
-    removals.delete(name);
-    additions.set(name, {
-      name,
-      github: parsed.value.github,
-      path: parsed.value.path ?? null,
-      controlPlane: parsed.value.controlPlane ?? null,
-      base: parsed.value.base ?? "main",
-      reportOnly: parsed.value.reportOnly === true,
-      maxInFlight: parsed.value.maxInFlight ?? null,
-    });
-    return send(201, { repo: details(name) });
-  }
-
-  return {
-    repos: registry,
-    handle: async (context) => {
-      if (context.route === "POST /repos") return register(context);
-      return handle(context);
-    },
-  };
+  return { repos, handle };
 }
