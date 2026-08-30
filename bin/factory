@@ -112,8 +112,30 @@ case "$cmd" in
       for _a in "$@"; do
         [[ "$_a" != "--web" && "$_a" != "--all" ]] && _args+=("$_a")
       done
+      _web_pid=""
+      _runtime_pid=""
+      _cleanup_serve() {
+        local _status=$?
+        trap - EXIT INT TERM
+        for _pid in "$_runtime_pid" "$_web_pid"; do
+          [[ -n "$_pid" ]] && kill -TERM "$_pid" 2>/dev/null || true
+        done
+        for _pid in "$_runtime_pid" "$_web_pid"; do
+          [[ -n "$_pid" ]] && wait "$_pid" 2>/dev/null || true
+        done
+        exit "$_status"
+      }
+      trap _cleanup_serve EXIT
+      trap 'exit 130' INT
+      trap 'exit 143' TERM
       bun "$ROOT/event-runtime/web/serve.mjs" &
-      exec bun "$ROOT/event-runtime/cli.mjs" serve "${_args[@]}"
+      _web_pid=$!
+      bun "$ROOT/event-runtime/cli.mjs" serve "${_args[@]}" &
+      _runtime_pid=$!
+      _runtime_status=0
+      wait "$_runtime_pid" || _runtime_status=$?
+      _runtime_pid=""
+      exit "$_runtime_status"
     else
       run_bun event-runtime/cli.mjs serve "$@"
     fi

@@ -1,7 +1,9 @@
 import { test, expect } from "bun:test";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -11,6 +13,46 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 const FACTORY = path.resolve(import.meta.dir, "factory");
+
+function makeServeFixture() {
+  const root = mkdtempSync(path.join(tmpdir(), "factory-serve-"));
+  const webDir = path.join(root, "event-runtime", "web");
+  mkdirSync(path.join(root, "bin"), { recursive: true });
+  mkdirSync(webDir, { recursive: true });
+  copyFileSync(FACTORY, path.join(root, "bin", "factory"));
+  writeFileSync(
+    path.join(webDir, "serve.mjs"),
+    `import { writeFileSync } from "node:fs";
+writeFileSync(process.env.WEB_STARTED, String(process.pid));
+process.on("SIGTERM", () => {
+  writeFileSync(process.env.WEB_STOPPED, "stopped");
+  process.exit(0);
+});
+setInterval(() => {}, 1_000);
+`,
+  );
+  writeFileSync(
+    path.join(root, "event-runtime", "cli.mjs"),
+    `if (process.env.RUNTIME_EXIT_CODE)
+  process.exit(Number(process.env.RUNTIME_EXIT_CODE));
+process.on("SIGTERM", () => process.exit(0));
+setInterval(() => {}, 1_000);
+`,
+  );
+  return {
+    root,
+    cleanup: () => rmSync(root, { recursive: true, force: true }),
+  };
+}
+
+async function waitForFile(file) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (existsSync(file)) return true;
+    await Bun.sleep(25);
+  }
+  return false;
+}
 
 test("factory help documents every dispatcher verb", () => {
   const source = readFileSync(FACTORY, "utf8");
@@ -30,6 +72,62 @@ test("factory help documents every dispatcher verb", () => {
   const help = result.stdout.toString();
   for (const verb of verbs) {
     expect(help).toMatch(new RegExp(`^  ${verb}\\s`, "m"));
+  }
+});
+
+test("factory serve --web stops the web server when the runtime receives SIGTERM", async () => {
+  const fixture = makeServeFixture();
+  const webStarted = path.join(fixture.root, "web-started");
+  const webStopped = path.join(fixture.root, "web-stopped");
+  let webPid = null;
+  const proc = Bun.spawn({
+    cmd: ["bash", path.join(fixture.root, "bin", "factory"), "serve", "--web"],
+    stdout: "pipe",
+    stderr: "pipe",
+    env: {
+      ...process.env,
+      WEB_STARTED: webStarted,
+      WEB_STOPPED: webStopped,
+    },
+  });
+  try {
+    expect(await waitForFile(webStarted)).toBe(true);
+    webPid = Number(readFileSync(webStarted, "utf8"));
+
+    proc.kill("SIGTERM");
+    await proc.exited;
+
+    expect(existsSync(webStopped)).toBe(true);
+    expect(
+      Bun.spawnSync({ cmd: ["kill", "-0", String(webPid)] }).exitCode,
+    ).not.toBe(0);
+  } finally {
+    proc.kill("SIGTERM");
+    await proc.exited;
+    if (Number.isInteger(webPid) && webPid > 0)
+      Bun.spawnSync({ cmd: ["kill", "-TERM", String(webPid)] });
+    fixture.cleanup();
+  }
+}, 10_000);
+
+test("factory serve --web propagates the runtime exit code", () => {
+  const fixture = makeServeFixture();
+  try {
+    const result = Bun.spawnSync({
+      cmd: [
+        "bash",
+        path.join(fixture.root, "bin", "factory"),
+        "serve",
+        "--web",
+      ],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, RUNTIME_EXIT_CODE: "23" },
+    });
+
+    expect(result.exitCode).toBe(23);
+  } finally {
+    fixture.cleanup();
   }
 });
 
