@@ -1537,7 +1537,7 @@ export function scheduleTierEscalation(
 
 const TIER_ESCALATION_COMMENT_MARKER = "factory:tier-escalation:";
 
-export function defaultFindWorkspacePullRequest({ workspacePath }) {
+export function defaultFindWorkspacePullRequest({ workspacePath, forge }) {
   if (!workspacePath) return null;
   const branch = execFileSync(
     "git",
@@ -1545,7 +1545,7 @@ export function defaultFindWorkspacePullRequest({ workspacePath }) {
     { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
   ).trim();
   if (!branch) return null;
-  const pullRequest = loadForge()
+  const pullRequest = (forge ?? loadForge())
     .prList(null, {
       cwd: workspacePath,
       state: "open",
@@ -1557,18 +1557,30 @@ export function defaultFindWorkspacePullRequest({ workspacePath }) {
 
   // A local branch alone is not resumable evidence. Confirm that this exact
   // head exists at origin before producing the BLOCKED recovery artifact.
-  const remote = execFileSync(
-    "git",
-    [
-      "-C",
-      workspacePath,
-      "ls-remote",
-      "--heads",
-      "origin",
-      `refs/heads/${branch}`,
-    ],
-    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-  ).trim();
+  // A hung or failing ls-remote must not wedge recovery: bound it like the
+  // prList call above and treat any failure as "no pushed branch".
+  let remote;
+  try {
+    remote = execFileSync(
+      "git",
+      [
+        "-C",
+        workspacePath,
+        "ls-remote",
+        "--heads",
+        "origin",
+        `refs/heads/${branch}`,
+      ],
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: workerSubprocessTimeoutMs(),
+        killSignal: "SIGKILL",
+      },
+    ).trim();
+  } catch {
+    return null;
+  }
   return remote ? { pushedBranch: branch } : null;
 }
 

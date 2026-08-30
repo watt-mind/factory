@@ -86,6 +86,7 @@ import {
   escalationHandoffFailure,
   createReloadWatcher,
   DEFAULT_MAX_ENVIRONMENT_RETRIES,
+  defaultFindWorkspacePullRequest,
   defaultLocksDir,
   defaultReconcileVerifiedHandoffTicket,
   defaultHoldPullRequest,
@@ -5887,5 +5888,66 @@ describe("registry reload worker outcomes", () => {
       "failure:fatal:agent_unregistered_after_reload",
       "failure:fatal:agent_unregistered_after_reload",
     ]);
+  });
+});
+
+describe("defaultFindWorkspacePullRequest", () => {
+  const gitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: "t",
+    GIT_AUTHOR_EMAIL: "t@example.com",
+    GIT_COMMITTER_NAME: "t",
+    GIT_COMMITTER_EMAIL: "t@example.com",
+  };
+  const git = (cwd, ...args) =>
+    execFileSync("git", ["-C", cwd, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: gitEnv,
+    });
+
+  function seedWorkspace(branch) {
+    const workspacePath = tmpDir("evrt-find-pr-workspace-");
+    git(workspacePath, "init", "-q", "-b", "main");
+    writeFileSync(path.join(workspacePath, "seed.txt"), "seed\n");
+    git(workspacePath, "add", "seed.txt");
+    git(workspacePath, "commit", "-q", "-m", "seed");
+    git(workspacePath, "checkout", "-q", "-b", branch);
+    return workspacePath;
+  }
+
+  test("reports a branch that exists at origin as pushed", () => {
+    const branch = "feat/gh-1870-pushed";
+    const workspacePath = seedWorkspace(branch);
+    const origin = tmpDir("evrt-find-pr-origin-");
+    git(origin, "init", "-q", "--bare");
+    git(workspacePath, "remote", "add", "origin", origin);
+    git(workspacePath, "push", "-q", "origin", branch);
+
+    const found = defaultFindWorkspacePullRequest({
+      workspacePath,
+      forge: { prList: () => [] },
+    });
+    expect(found).toEqual({ pushedBranch: branch });
+  });
+
+  test("treats a failing ls-remote as no pushed branch (WM-1870 review)", () => {
+    const workspacePath = seedWorkspace("feat/gh-1870-unreachable");
+    // Unreachable origin: ls-remote exits non-zero. The finder must swallow
+    // the failure (bounded, SIGKILL on timeout) instead of throwing out of
+    // missing-result recovery.
+    git(
+      workspacePath,
+      "remote",
+      "add",
+      "origin",
+      path.join(workspacePath, "no-such-origin"),
+    );
+    expect(
+      defaultFindWorkspacePullRequest({
+        workspacePath,
+        forge: { prList: () => [] },
+      }),
+    ).toBeNull();
   });
 });
