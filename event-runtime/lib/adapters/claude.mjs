@@ -24,10 +24,10 @@
  * the pi path did not have to solve.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { createWriteStream, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
-import { FACTORY_ROOT } from "../config.mjs";
+import { FACTORY_ROOT, transcriptMaxBytes } from "../config.mjs";
 import { DEFAULT_MODEL } from "../registry.mjs";
 import {
   BASE_INHERITED_ENV,
@@ -36,7 +36,11 @@ import {
   RUNTIME_IDENTITY_ENV,
   safeChildEnvironment,
 } from "./child-env.mjs";
-import { DETACHED_SPAWN_OPTIONS, killProcessGroup } from "./child-process.mjs";
+import {
+  boundedTranscriptStream,
+  DETACHED_SPAWN_OPTIONS,
+  killProcessGroup,
+} from "./child-process.mjs";
 export {
   BASE_INHERITED_ENV,
   PROVIDER_CREDENTIAL_ENV,
@@ -426,6 +430,7 @@ export async function execute({
   resume = null,
   abortSignal,
   signal,
+  transcriptMaxBytes: maxTranscriptBytes = transcriptMaxBytes(),
 }) {
   // First, before the prompt is read or the env assembled: a sandboxed
   // definition never reaches the host spawn below (WM-313).
@@ -463,8 +468,13 @@ export async function execute({
     // what the agent reported long after the workspace is gone. With
     // stream-json the artifact is NDJSON, one message per line — consumers
     // stream bytes, none parses it as a single JSON document.
-    const transcript = createWriteStream(
+    const transcript = boundedTranscriptStream(
       path.join(workspaceDir, ".transcript.json"),
+      {
+        maxBytes: maxTranscriptBytes,
+        onTruncated: ({ bytes }) =>
+          onTrace?.("lifecycle", { note: "transcript_truncated", bytes }),
+      },
     );
     transcript.on("error", () => {});
     // Child close only says its stdio handles are closed; the file stream may
@@ -617,6 +627,7 @@ export async function execute({
         exitCode,
         timedOut,
         policyDenials: exitCode === 0 ? [] : policyDenials,
+        ...(transcript.truncated ? { transcriptTruncated: true } : {}),
       });
     });
   });

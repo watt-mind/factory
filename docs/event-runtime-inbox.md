@@ -472,10 +472,41 @@ API:
 GET  /inbox/:id                → the item, with decision, response, responseHistory
 POST /inbox/:id/decide         → body: factory.decision-response/v1 minus decidedAt
                                   200 { item, effect: { kind, outcome } }
-                                  400 invalid response · 404 · 409 stale_request | already_decided
 POST /inbox/:id/decide/retry   → re-run a failed effect with the stored response
-                                  409 not_decided after a §3.2 retarget
 ```
+
+Decision endpoints return `{ error, message, errors? }`; `errors` is present
+only when validation supplies individual errors. The routes return
+`invalid_json` (400) when the request body does not parse as JSON
+(`event-runtime/lib/api.mjs:createApi`): `/decide` always parses the body, so
+an empty body is also `invalid_json`; `/decide/retry` only validates a
+non-empty body (an empty body is accepted, and the retry always re-runs the
+stored response). Otherwise the following
+`InboxDecisionError` codes are the complete decision/retry vocabulary:
+
+<!-- inbox-decision-errors:start -->
+
+| Code               | HTTP | Trigger                                                                                       | Source                                                        |
+| :----------------- | ---: | :-------------------------------------------------------------------------------------------- | :------------------------------------------------------------ |
+| `not_found`        |  404 | The inbox item id does not exist.                                                             | `event-runtime/lib/inbox.mjs:decisionRow`                     |
+| `decision_missing` |  400 | `decide` targets an item without a decision request.                                          | `event-runtime/lib/inbox.mjs:decideInboxItemInTransaction`    |
+| `invalid_response` |  400 | The decision response is not an object or fails request validation; validation adds `errors`. | `event-runtime/lib/inbox.mjs:decideInboxItemInTransaction`    |
+| `stale_request`    |  409 | The supplied request hash no longer matches the stored decision.                              | `event-runtime/lib/inbox.mjs:decideInboxItemInTransaction`    |
+| `already_decided`  |  409 | An answer was already stored, including a concurrent answer that won the write.               | `event-runtime/lib/inbox.mjs:decideInboxItemInTransaction`    |
+| `retry_superseded` |  409 | A retry's stored response changed while it waited for the transaction lock.                   | `event-runtime/lib/inbox.mjs:retryInboxDecisionInTransaction` |
+| `not_decided`      |  409 | `retry` has no durable decision to replay, including after a §3.2 retarget.                   | `event-runtime/lib/inbox.mjs:retryInboxDecisionInTransaction` |
+| `already_applied`  |  409 | `retry` targets an already-resolved item or an effect already recorded as applied.            | `event-runtime/lib/inbox.mjs:retryInboxDecisionInTransaction` |
+| `retarget_failed`  |  500 | An applied re-plan cannot produce a valid replacement decision for the fresh proposal.        | `event-runtime/lib/inbox.mjs:retargetInboxDecision`           |
+
+<!-- inbox-decision-errors:end -->
+
+`effect.detail` is optional. Its current vocabulary is `dispatched` or
+`already_admitted` for an `authorise` effect
+(`event-runtime/lib/decision-effects.mjs:authorise`),
+`replanned_awaiting_approval` when approval opens a fresh proposal
+(`event-runtime/lib/decision-effects.mjs:applyDecisionEffect`), and
+`shared_referent` for a waiter that shares an applied decision
+(`event-runtime/lib/inbox.mjs:fanOutWaiterEffects`).
 
 `ack` and `resolve` remain for items without a decision and for the
 `factory notify` family. An item with a decision cannot be `resolve`d
@@ -483,6 +514,12 @@ without deciding — that would recreate the "seen ≠ acted" hole this closes;
 `dismiss` is always offered instead. `POST /inbox` accepts an optional
 `decision` and validates it, so `factory notify` and future producers can
 attach one.
+
+For `POST /inbox/:id/ack` and `POST /inbox/:id/resolve`,
+`event-runtime/lib/api-inbox.mjs:handleInboxApiRoute` maps malformed JSON,
+non-object bodies, and invalid or missing `reason` values to 422; an unknown
+inbox item to 404; and lifecycle conflicts (already resolved or resolving an
+undecided decision item) to 409.
 
 CLI: `cli.mjs inbox` lists; `cli.mjs decide <itemId> <optionId> [--field
 k=v…]` posts through the same route. Not a second implementation.

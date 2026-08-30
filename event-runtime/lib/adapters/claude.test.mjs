@@ -905,6 +905,42 @@ if (behavior === "emit_denial_then_recovery") {
     );
   });
 
+  test("caps the transcript and reports truncation without blocking child exit", async () => {
+    const workspaceDir = ws();
+    const traceEvents = [];
+
+    const outcome = await execute({
+      spec: defaultSpec,
+      def: defaultDef,
+      workspaceDir,
+      timeoutMs: 5000,
+      transcriptMaxBytes: 64,
+      env: {
+        PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
+        FACTORY_TEST_BEHAVIOR: "large_transcript",
+      },
+      onTrace: (kind, payload) => traceEvents.push({ kind, payload }),
+    });
+
+    expect(outcome.transcriptTruncated).toBe(true);
+    expect(
+      traceEvents.some(
+        (event) =>
+          event.kind === "lifecycle" &&
+          event.payload.note === "transcript_truncated" &&
+          event.payload.bytes === 64,
+      ),
+    ).toBe(true);
+    expect(
+      readFileSync(path.join(workspaceDir, ".transcript.json")).byteLength,
+    ).toBeLessThanOrEqual(
+      64 +
+        Buffer.byteLength(
+          '\n{"type":"factory","subtype":"transcript_truncated","bytes":64}\n',
+        ),
+    );
+  });
+
   test("nonzero exit code propagates and timedOut is false", async () => {
     const workspaceDir = ws();
     const outcome = await execute({
