@@ -238,13 +238,13 @@ the ticket, and refuse (`reasonCode: "needs_human"`). Those diffs are never
 landed without a human.
 
 If the input carries `humanDecision.authorisation` for this ticket, the
-operator has already seen that escalation. Compare
-`authorisation.descriptionHash` with the SHA-256 of the ticket's current
-description. If it matches, proceed only inside `authorisation.paths` (and the
-ticket's Owned Paths), and quote the authorisation's inbox item id and
-`decidedAt` in the PR body. If it does not match, refuse with a fresh decision
-request whose `context` says the ticket changed after approval; never reuse an
-authorisation for a different ticket description.
+operator has already seen that escalation. The worker verifies it against the
+current ticket before this agent runs and sets `authorisation.verified: true`.
+Trust that runtime-owned field and **never recompute the description hash**.
+Proceed only when `verified` is `true`, stay inside `authorisation.paths` (and
+the ticket's Owned Paths), and quote the authorisation's inbox item id and
+`decidedAt` in the PR body. An unverified authorisation is invalid runtime input,
+not permission to proceed.
 
 If `memos.json` holds a `decision` memo on this subject, the operator has
 ruled on a related question before. **Cite it** — item id, decided-at,

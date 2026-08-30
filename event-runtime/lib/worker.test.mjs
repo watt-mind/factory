@@ -118,6 +118,7 @@ import {
   runLinearCli,
   runOnce,
   ticketHandoffContext,
+  verifyHumanDecisionAuthorisation,
 } from "./worker.mjs";
 import {
   liveWorkerLeases,
@@ -150,6 +151,161 @@ registerTestProcessCleanup(import.meta.url);
 let seq = 0;
 
 describe("worker", () => {
+  test("authorisation verification is a no-op when no decision is present", () => {
+    const input = { repo: "factory", ticket: "WM-1337" };
+    let reads = 0;
+
+    expect(
+      verifyHumanDecisionAuthorisation(input, {
+        fetchTicket: () => ((reads += 1), null),
+      }),
+    ).toEqual({ ok: true, input, ticket: null });
+    expect(reads).toBe(0);
+  });
+
+  test("authorisation verification refuses a trailing-newline description hash before dispatch", () => {
+    const description =
+      "## Owned Paths\n- event-runtime/lib/worker.mjs\n- docs/event-runtime-inbox.md\n";
+    const result = verifyHumanDecisionAuthorisation(
+      {
+        repo: "factory",
+        ticket: "WM-1337",
+        humanDecision: {
+          authorisation: {
+            descriptionHash: hashBytes(`${description}\n`),
+            paths: [
+              "event-runtime/lib/worker.mjs",
+              "docs/event-runtime-inbox.md",
+            ],
+          },
+        },
+      },
+      { fetchTicket: () => ({ description }) },
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      refusal: { reason: "authorisation_stale:description" },
+    });
+  });
+
+  test("a stale authorisation is refused by the worktree gate before the adapter runs", async () => {
+    const db = openDb(":memory:");
+    const description =
+      "## Owned Paths\n- event-runtime/lib/worker.mjs\n- docs/event-runtime-inbox.md\n";
+    const spec = queueRun(
+      db,
+      makeSpec({
+        agent: "dispatch@1",
+        input: {
+          repo: "factory",
+          ticket: "watt-mind/factory#1337",
+          humanDecision: {
+            authorisation: {
+              descriptionHash: hashBytes(`${description}\n`),
+              paths: [
+                "event-runtime/lib/worker.mjs",
+                "docs/event-runtime-inbox.md",
+              ],
+            },
+          },
+        },
+        workspace: { type: "worktree", checkoutDir: "repo" },
+        outputContract: "factory.dispatch-result/v1",
+      }),
+    );
+    let executions = 0;
+    const summary = await runOnce(
+      db,
+      registry,
+      {
+        fake: {
+          ...fake,
+          execute: async () => {
+            executions += 1;
+            return { exitCode: 0, timedOut: false };
+          },
+        },
+      },
+      opts({
+        dispatch: {
+          locksDir: tmpDir("authorisation-locks-"),
+          leasesDir: tmpDir("authorisation-leases-"),
+          fetchTicket: () => ({ description }),
+        },
+      }),
+    );
+
+    expect(summary).toMatchObject({
+      runId: spec.runId,
+      terminalState: "REFUSED",
+      reasonCode: "authorisation_stale:description",
+    });
+    expect(executions).toBe(0);
+    db.close();
+  });
+
+  test("authorisation verification marks a canonical, path-complete decision verified", () => {
+    const description =
+      "## Owned Paths\n- event-runtime/lib/worker.mjs\n- docs/event-runtime-inbox.md\n";
+    const authorisation = {
+      descriptionHash: hashBytes(description),
+      paths: [
+        "event-runtime/lib/worker.mjs",
+        "docs/event-runtime-inbox.md",
+        "event-runtime/lib/worker.test.mjs",
+      ],
+    };
+    const input = {
+      repo: "factory",
+      ticket: "WM-1337",
+      humanDecision: { inboxItemId: "inbox_1337", authorisation },
+    };
+
+    expect(
+      verifyHumanDecisionAuthorisation(input, {
+        fetchTicket: () => ({ description }),
+      }),
+    ).toEqual({
+      ok: true,
+      ticket: { description },
+      input: {
+        ...input,
+        humanDecision: {
+          ...input.humanDecision,
+          authorisation: { ...authorisation, verified: true },
+        },
+      },
+    });
+    expect(authorisation.verified).toBeUndefined();
+  });
+
+  test("authorisation verification refuses paths narrower than ticket ownership", () => {
+    const description =
+      "## Owned Paths\n- event-runtime/lib/worker.mjs\n- docs/event-runtime-inbox.md\n";
+    const result = verifyHumanDecisionAuthorisation(
+      {
+        repo: "factory",
+        ticket: "WM-1337",
+        humanDecision: {
+          authorisation: {
+            descriptionHash: hashBytes(description),
+            paths: ["event-runtime/lib/worker.mjs"],
+          },
+        },
+      },
+      { fetchTicket: () => ({ description }) },
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      refusal: {
+        reason: "authorisation_stale:paths",
+        detail: expect.stringContaining("docs/event-runtime-inbox.md"),
+      },
+    });
+  });
+
   test("materialized harness entries record hashes for every copied file", () => {
     const factoryRoot = tmpDir("evrt-harness-source-");
     const workspaceDir = tmpDir("evrt-harness-workspace-");

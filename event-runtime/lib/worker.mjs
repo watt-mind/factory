@@ -2530,6 +2530,71 @@ export function ticketHandoffContext(
   }
 }
 
+/**
+ * Verify an operator authorisation against one canonical ticket read.
+ *
+ * This is worker-owned execution context, not a mutation of the immutable
+ * RunSpec: only the input.json materialized for the model receives `verified`.
+ * Returning the ticket lets the ordinary dispatch gate consume the same read,
+ * so the two pre-model checks cannot disagree because the body changed between
+ * fetches.
+ */
+export function verifyHumanDecisionAuthorisation(
+  input,
+  { fetchTicket = defaultFetchTicket } = {},
+) {
+  const authorisation = input?.humanDecision?.authorisation;
+  if (!authorisation) return { ok: true, input, ticket: null };
+
+  const ticket = fetchTicket(input?.ticket, input?.repo);
+  const description = ticket?.description;
+  if (
+    typeof description !== "string" ||
+    authorisation.descriptionHash !== hashBytes(description)
+  ) {
+    return {
+      ok: false,
+      refusal: {
+        decision: "human_needed",
+        reason: "authorisation_stale:description",
+        detail:
+          "operator authorisation does not match the canonical hashBytes of the current ticket description",
+      },
+      evidence: { ticket },
+    };
+  }
+
+  const authorisedPaths = new Set(
+    Array.isArray(authorisation.paths) ? authorisation.paths : [],
+  );
+  const missingPaths = parseOwnedPaths(description).filter(
+    (ownedPath) => !authorisedPaths.has(ownedPath),
+  );
+  if (missingPaths.length > 0) {
+    return {
+      ok: false,
+      refusal: {
+        decision: "human_needed",
+        reason: "authorisation_stale:paths",
+        detail: `operator authorisation does not cover ticket Owned Paths: ${missingPaths.join(", ")}`,
+      },
+      evidence: { ticket, missingPaths },
+    };
+  }
+
+  return {
+    ok: true,
+    ticket,
+    input: {
+      ...input,
+      humanDecision: {
+        ...input.humanDecision,
+        authorisation: { ...authorisation, verified: true },
+      },
+    },
+  };
+}
+
 function defaultCommentTicket({ ticket, body, repo }) {
   runLinearCli(["comment", ticket, body], { repo });
   return true;
@@ -2944,6 +3009,7 @@ export async function executeClaimed(
       )
       .get(runId, attempt)?.lease_owner ?? "worker";
   const retain = spec.workspace?.retainOnFailure === true;
+  let executionInput = spec.input;
   let workspaceDir = null;
   let checkoutPath = null;
   let worktreePath = null;
@@ -3646,38 +3712,54 @@ export async function executeClaimed(
           if (worktreeHandoff?.projectionState === "pending") {
             return deferTransientGate("tier_escalation_projection_pending");
           }
-          gateResult = worktreeDispatchAutoEligibility(spec.input, {
-            ...(dispatchOpts ?? {}),
-            claimedRetry: claimedRetryFor(db, runId, attempt),
-            escalatedContinuation: worktreeHandoff,
-            hasTicketLease:
-              dispatchOpts?.hasTicketLease ??
-              ((repo, ticket) =>
-                liveWorkerLeases(repo, { dir: leasesDir }).some(
-                  (lease) => String(lease.ticket) === String(ticket),
-                )),
-            // Match the planner's operator-only bypass from the immutable
-            // proposal that admitted this run. Never trust caller options here:
-            // chain and schedule runs must keep the security/escalation gate.
-            //
-            // A spec field alone can never carry this authorisation: chain and
-            // schedule runs inherit approvalPolicy (dispatchEvidence included,
-            // via stableChainApprovalPolicyForHash) from the dispatch they
-            // descend from, so trusting `dispatchEvidence.checks
-            // .operator_authorized` would hand every descendant of one operator
-            // dispatch a permanent ai:escalated/security bypass. The escalation
-            // claim is only believed when the durable tier_escalations row read
-            // for THIS run authenticates it as the continuation of the exact
-            // failed run the spec names.
-            operatorAuthorized:
-              originatingEvent(db, runId)?.source === "operator" ||
-              (worktreeHandoff?.projectionState === "applied" &&
-                spec.approvalPolicy?.escalation?.operatorAuthorized === true &&
-                spec.approvalPolicy.escalation.failedRunId ===
-                  worktreeHandoff.failedRunId &&
-                spec.approvalPolicy.escalation.rootRunId ===
-                  worktreeHandoff.rootRunId),
-          });
+          const authorisationGate = verifyHumanDecisionAuthorisation(
+            spec.input,
+            { fetchTicket: fetchTicketFn },
+          );
+          if (!authorisationGate.ok) {
+            gateResult = authorisationGate;
+          } else {
+            executionInput = authorisationGate.input;
+            gateResult = worktreeDispatchAutoEligibility(executionInput, {
+              ...(dispatchOpts ?? {}),
+              // When an authorisation is present, both deterministic
+              // verification and ordinary eligibility must use one ticket
+              // snapshot. A later post-claim read still catches changes.
+              ...(authorisationGate.ticket
+                ? { fetchTicket: () => authorisationGate.ticket }
+                : {}),
+              claimedRetry: claimedRetryFor(db, runId, attempt),
+              escalatedContinuation: worktreeHandoff,
+              hasTicketLease:
+                dispatchOpts?.hasTicketLease ??
+                ((repo, ticket) =>
+                  liveWorkerLeases(repo, { dir: leasesDir }).some(
+                    (lease) => String(lease.ticket) === String(ticket),
+                  )),
+              // Match the planner's operator-only bypass from the immutable
+              // proposal that admitted this run. Never trust caller options here:
+              // chain and schedule runs must keep the security/escalation gate.
+              //
+              // A spec field alone can never carry this authorisation: chain and
+              // schedule runs inherit approvalPolicy (dispatchEvidence included,
+              // via stableChainApprovalPolicyForHash) from the dispatch they
+              // descend from, so trusting `dispatchEvidence.checks
+              // .operator_authorized` would hand every descendant of one operator
+              // dispatch a permanent ai:escalated/security bypass. The escalation
+              // claim is only believed when the durable tier_escalations row read
+              // for THIS run authenticates it as the continuation of the exact
+              // failed run the spec names.
+              operatorAuthorized:
+                originatingEvent(db, runId)?.source === "operator" ||
+                (worktreeHandoff?.projectionState === "applied" &&
+                  spec.approvalPolicy?.escalation?.operatorAuthorized ===
+                    true &&
+                  spec.approvalPolicy.escalation.failedRunId ===
+                    worktreeHandoff.failedRunId &&
+                  spec.approvalPolicy.escalation.rootRunId ===
+                    worktreeHandoff.rootRunId),
+            });
+          }
         }
       } catch (err) {
         if (
@@ -3898,7 +3980,7 @@ export async function executeClaimed(
         root: workspacesRoot,
         runId,
         attempt,
-        input: spec.input,
+        input: executionInput,
         workspace: spec.workspace,
         artifactStore,
         adapter: adapterKey,
