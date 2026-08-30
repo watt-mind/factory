@@ -464,6 +464,7 @@ describe("dispatch e2e: propose → approve → execute → receipt (WM-108)", (
   test("an approved dispatch run builds the worktree by delegation, completes, and tears it down", async () => {
     const db = openDb(path.join(tmpDir("evrt-dispatch-db-"), "runtime.db"));
     const workspaces = tmpDir("evrt-dispatch-ws-");
+    const trackerCalls = [];
     fixtures.push(path.dirname(db.filename ?? workspaces), workspaces);
 
     admitEvent(
@@ -508,7 +509,19 @@ describe("dispatch e2e: propose → approve → execute → receipt (WM-108)", (
         workspacesRoot: workspaces,
         owner: "w-test",
         policyVersion: PV,
-        dispatch: openWorld(),
+        // The verified PR handoff performs tracker state/comment projections.
+        // Keep this end-to-end worker test hermetic and make both projections
+        // explicit rather than falling through to the real tracker CLI.
+        dispatch: openWorld({
+          reconcileVerifiedHandoffTicket: ({ ticket }) => {
+            trackerCalls.push(`state ${ticket} In Review`);
+            return true;
+          },
+          commentTicket: ({ ticket }) => {
+            trackerCalls.push(`comment ${ticket}`);
+            return true;
+          },
+        }),
       },
     );
 
@@ -518,6 +531,7 @@ describe("dispatch e2e: propose → approve → execute → receipt (WM-108)", (
     expect(calls()).toContain("up WM-501");
     expect(calls()).toContain("down WM-501"); // torn down on completion
     expect(existsSync(path.join(wtRoot, "WM-501"))).toBe(false);
+    expect(trackerCalls).toEqual(["state WM-501 In Review", "comment WM-501"]);
 
     const row = db
       .query(`SELECT result_json, receipt_json FROM results WHERE run_id = ?`)

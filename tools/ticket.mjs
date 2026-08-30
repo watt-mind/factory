@@ -145,6 +145,34 @@ const CACHE_DIR = path.join(homedir(), ".factory/cache/linear");
 const BUDGET_FILE = "budget.json";
 const LINEAR_API_HOST = "api.linear.app";
 
+/**
+ * Test processes must never spend the operator's shared Linear budget. The
+ * explicit allow escape hatch exists for the rare integration probe and is
+ * deliberately inherited by CLI children through their environment.
+ */
+export function linearNetworkIsOffline(env = process.env) {
+  if (env.FACTORY_LINEAR_ALLOW_NETWORK === "1") return false;
+  return (
+    env.FACTORY_LINEAR_OFFLINE === "1" ||
+    env.NODE_ENV === "test" ||
+    Boolean(env.BUN_TEST)
+  );
+}
+
+export class LinearOfflineGuardError extends Error {
+  constructor() {
+    super("linear_offline_guard: Linear network access is disabled");
+    this.name = "LinearOfflineGuardError";
+    this.code = "linear_offline_guard";
+  }
+}
+
+export function assertLinearNetworkAllowed(url, env = process.env) {
+  if (String(url).includes(LINEAR_API_HOST) && linearNetworkIsOffline(env)) {
+    throw new LinearOfflineGuardError();
+  }
+}
+
 /** Distinct from generic CLI failure (exit 1) so planners can retry-later. */
 export const LINEAR_RATE_LIMIT_EXIT = 3;
 export const LINEAR_REQUESTS_LIMIT = 2500;
@@ -309,6 +337,7 @@ export function installLinearBudgetCapture() {
   fetchHookInstalled = true;
   globalThis.fetch = async function linearBudgetFetch(input, init) {
     const url = String(input?.url ?? input);
+    assertLinearNetworkAllowed(url);
     const res = await originalFetch(input, init);
     if (url.includes(LINEAR_API_HOST)) recordLinearBudgetFromResponse(res);
     return res;

@@ -24,6 +24,10 @@
 #   FACTORY_API_READY_TIMEOUT    # seconds `up` waits for the runtime /health
 #                                # endpoint before tearing its daemons down;
 #                                # default 60
+#   FACTORY_WORKER_READY_TIMEOUT # seconds `up` confirms a newly started worker
+#                                # (and pool supervisor, when configured) stays
+#                                # alive before declaring the stack ready;
+#                                # default 5
 #   FACTORY_POOL_DRAIN_TIMEOUT   # seconds `down` lets a supervised worker pool
 #                                # drain before ordinary teardown; default 180
 #   FACTORY_WEB_SUPERVISOR_INTERVAL  # seconds between web supervisor ticks;
@@ -181,13 +185,14 @@ LOG_KEEP="${FACTORY_LOG_KEEP:-3}"
 LOG_ROTATE_INTERVAL="${FACTORY_LOG_ROTATE_INTERVAL:-300}"
 LOG_ROTATE_MIN_BYTES=1048576
 API_READY_TIMEOUT="${FACTORY_API_READY_TIMEOUT:-60}"
+WORKER_READY_TIMEOUT="${FACTORY_WORKER_READY_TIMEOUT:-5}"
 POOL_DRAIN_TIMEOUT="${FACTORY_POOL_DRAIN_TIMEOUT:-180}"
 WEB_SUPERVISOR_INTERVAL="${FACTORY_WEB_SUPERVISOR_INTERVAL:-1}"
 
 # These values feed shell arithmetic and sleep below. Validate them before an
 # action can snapshot, spawn, or signal a daemon so malformed environment
 # overrides leave an existing stack untouched.
-# The two timeouts accept 0 (an immediate deadline: no wait, then the usual
+# The three timeouts accept 0 (an immediate deadline: no wait, then the usual
 # teardown / fall-through); the supervisor interval must stay positive because
 # it is the sleep between ticks.
 validate_timing_knobs() {
@@ -195,6 +200,8 @@ validate_timing_knobs() {
     die "FACTORY_POOL_DRAIN_TIMEOUT must be a non-negative integer"
   [[ "$API_READY_TIMEOUT" =~ ^(0|[1-9][0-9]*)$ ]] ||
     die "FACTORY_API_READY_TIMEOUT must be a non-negative integer"
+  [[ "$WORKER_READY_TIMEOUT" =~ ^(0|[1-9][0-9]*)$ ]] ||
+    die "FACTORY_WORKER_READY_TIMEOUT must be a non-negative integer"
   [[ "$WEB_SUPERVISOR_INTERVAL" =~ ^([1-9][0-9]*(\.[0-9]+)?|0\.[0-9]*[1-9][0-9]*)$ ]] ||
     die "FACTORY_WEB_SUPERVISOR_INTERVAL must be a positive number"
 }
@@ -217,6 +224,30 @@ validate_log_knobs() {
 rotate_stack_logs() {
   [[ "$LOG_ROTATE_BYTES" -gt 0 ]] || return 0
   rotate_run_logs "$RUN_DIR" "$LOG_ROTATE_BYTES" "$LOG_KEEP"
+}
+
+worker_startup_failed() { # <message>
+  warn "worker startup failed; tail of $RUN_DIR/worker.log:"
+  tail -n 50 "$RUN_DIR/worker.log" >&2 || true
+  die "$1 — check logs at $RUN_DIR/worker.log"
+}
+
+wait_for_worker_ready() {
+  local started
+  started=$SECONDS
+  while true; do
+    if ! pid_alive "$RUN_DIR/worker.pid"; then
+      worker_startup_failed "worker exited during startup"
+    fi
+    if [[ "$POOL" -eq 1 ]] && ! pid_alive "$RUN_DIR/supervisor.pid"; then
+      if (( SECONDS - started >= WORKER_READY_TIMEOUT )); then
+        worker_startup_failed "worker pool supervisor did not start within ${WORKER_READY_TIMEOUT}s"
+      fi
+    elif (( SECONDS - started >= WORKER_READY_TIMEOUT )); then
+      return 0
+    fi
+    sleep 0.1
+  done
 }
 
 # Validate before actions touch disk or daemon lifecycle state. `up` validates
@@ -630,6 +661,7 @@ case "$ACTION" in
       spawn_daemon_tracked "worker" "$RUN_DIR/worker.pid" "$RUN_DIR/worker.log" "$REPO" \
         env FACTORY_EVENT_HOME="$HOME_DIR" FACTORY_EVENT_PORT="$API_PORT" \
         "${WORKER_ARGS[@]}"
+      wait_for_worker_ready
     fi
 
     # 4. Start or verify web server

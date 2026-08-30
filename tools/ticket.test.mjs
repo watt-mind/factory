@@ -41,6 +41,8 @@ import {
   instanceConfigRoot,
   InstanceConfigMissingError,
   __resetLinearReposCache,
+  assertLinearNetworkAllowed,
+  linearNetworkIsOffline,
 } from "./ticket.mjs";
 
 const LABELS = [
@@ -52,6 +54,21 @@ const LABELS = [
   { id: "l-area", name: "area:api" },
   { id: "l-review", name: "ai:needs-review" },
 ];
+
+test("the Linear offline guard rejects api.linear.app before fetch", () => {
+  expect(linearNetworkIsOffline({ FACTORY_LINEAR_OFFLINE: "1" })).toBe(true);
+  expect(() =>
+    assertLinearNetworkAllowed("https://api.linear.app/graphql", {
+      FACTORY_LINEAR_OFFLINE: "1",
+    }),
+  ).toThrow("linear_offline_guard");
+  expect(() =>
+    assertLinearNetworkAllowed("https://api.linear.app/graphql", {
+      FACTORY_LINEAR_OFFLINE: "1",
+      FACTORY_LINEAR_ALLOW_NETWORK: "1",
+    }),
+  ).not.toThrow();
+});
 
 // ------------------------------------------------------------ label math ---
 test("adding a label KEEPS the labels already on the ticket", () => {
