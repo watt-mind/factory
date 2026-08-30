@@ -20,8 +20,7 @@ function wait() {
   spawnSync("sleep", ["10"]);
 }
 
-function parseJobs(stdout) {
-  const parsed = JSON.parse(stdout || "[]");
+function parseJobs(parsed) {
   if (Array.isArray(parsed)) return parsed;
   return Array.isArray(parsed?.jobs) ? parsed.jobs : [];
 }
@@ -87,13 +86,63 @@ function blockAll(landed, { finalSha, kind, reason }, shell = sh) {
   }
 }
 
-function githubUnavailable(action, result) {
+function githubFailureDetail(action, result) {
   const detail = (
     result.stderr ||
     result.stdout ||
     "unknown gh failure"
   ).trim();
-  return `github_unavailable: ${action}: ${detail}`;
+  return `${action}: ${detail}`;
+}
+
+function githubUnavailable(action, result) {
+  return `github_unavailable: ${githubFailureDetail(action, result)}`;
+}
+
+/**
+ * Parse a status-0 gh JSON body. A truncated or non-JSON body is a transport
+ * failure like any other: returned as `{ failure }` instead of thrown raw.
+ */
+function parseGhJson(action, result, fallback) {
+  try {
+    return { value: JSON.parse(result.stdout || fallback) };
+  } catch (err) {
+    const detail = `${err.message || err}`;
+    return {
+      failure: githubUnavailable(`${action}`, {
+        stderr: `unparseable JSON response (${detail})`,
+      }),
+    };
+  }
+}
+
+/**
+ * Counts transport failures across one polling window so a flaky API that
+ * merely happens to succeed on the final poll is still reported as
+ * github_unavailable rather than as a settle failure.
+ */
+function transportWindow() {
+  let polls = 0;
+  let failed = 0;
+  let last = null;
+  return {
+    poll() {
+      polls += 1;
+    },
+    fail(reason) {
+      failed += 1;
+      last = reason;
+      return reason;
+    },
+    unsettled(reason) {
+      if (failed === 0) return { ok: false, reason };
+      const detail = last.replace(/^github_unavailable: /, "");
+      return {
+        ok: false,
+        reason: `github_unavailable: ${reason} (${failed} of ${polls} polls failed: ${detail})`,
+      };
+    },
+  };
 }
 
 export function proveLanded(github, item, shell = sh) {
@@ -101,7 +150,12 @@ export function proveLanded(github, item, shell = sh) {
   if (pull.status !== 0) {
     throw new Error(githubUnavailable(`read PR ${item.pr}`, pull));
   }
-  const parsed = JSON.parse(pull.stdout || "{}");
+  const { value: parsed, failure } = parseGhJson(
+    `read PR ${item.pr}`,
+    pull,
+    "{}",
+  );
+  if (failure) throw new Error(failure);
   return parsed.merged === true && parsed.merge_commit_sha === item.mergeSha;
 }
 
@@ -115,8 +169,9 @@ export function pollWorkflow({
   pause = wait,
   attempts = 90,
 }) {
-  let lastGithubFailure = null;
+  const window = transportWindow();
   for (let i = 0; i < attempts; i++) {
+    window.poll();
     const runsRaw = shell("gh", [
       "run",
       "list",
@@ -136,12 +191,17 @@ export function pollWorkflow({
       "databaseId,status,conclusion,headSha,workflowName",
     ]);
     if (runsRaw.status !== 0) {
-      lastGithubFailure = githubUnavailable("list workflow runs", runsRaw);
+      window.fail(githubUnavailable("list workflow runs", runsRaw));
       pause();
       continue;
     }
-    lastGithubFailure = null;
-    const runs = JSON.parse(runsRaw.stdout || "[]");
+    const runsParsed = parseGhJson("list workflow runs", runsRaw, "[]");
+    if (runsParsed.failure) {
+      window.fail(runsParsed.failure);
+      pause();
+      continue;
+    }
+    const runs = runsParsed.value;
     const matching = runs.filter(
       (run) => run.workflowName === workflow && run.headSha === sha,
     );
@@ -161,16 +221,19 @@ export function pollWorkflow({
         "--json",
         "jobs",
       ]);
+      const jobsAction = `read workflow jobs for run ${matching[0].databaseId}`;
       if (jobsRaw.status !== 0) {
-        lastGithubFailure = githubUnavailable(
-          `read workflow jobs for run ${matching[0].databaseId}`,
-          jobsRaw,
-        );
+        window.fail(githubUnavailable(jobsAction, jobsRaw));
         pause();
         continue;
       }
-      lastGithubFailure = null;
-      const jobs = parseJobs(jobsRaw.stdout);
+      const jobsParsed = parseGhJson(jobsAction, jobsRaw, "[]");
+      if (jobsParsed.failure) {
+        window.fail(jobsParsed.failure);
+        pause();
+        continue;
+      }
+      const jobs = parseJobs(jobsParsed.value);
       const named = (name) => jobs.filter((job) => job.name === name);
       if (requiredChecks.some((name) => named(name).length > 1)) {
         return {
@@ -202,11 +265,9 @@ export function pollWorkflow({
     }
     pause();
   }
-  if (lastGithubFailure) return { ok: false, reason: lastGithubFailure };
-  return {
-    ok: false,
-    reason: `configured ${workflow} workflow and required jobs did not settle at exact merge SHA`,
-  };
+  return window.unsettled(
+    `configured ${workflow} workflow and required jobs did not settle at exact merge SHA`,
+  );
 }
 
 export function pollSmoke({
@@ -218,8 +279,9 @@ export function pollSmoke({
   pause = wait,
   attempts = 90,
 }) {
-  let lastGithubFailure = null;
+  const window = transportWindow();
   for (let i = 0; i < attempts; i++) {
+    window.poll();
     const runsRaw = shell("gh", [
       "run",
       "list",
@@ -237,15 +299,17 @@ export function pollSmoke({
       "databaseId,status,conclusion",
     ]);
     if (runsRaw.status !== 0) {
-      lastGithubFailure = githubUnavailable(
-        "list smoke workflow runs",
-        runsRaw,
-      );
+      window.fail(githubUnavailable("list smoke workflow runs", runsRaw));
       pause();
       continue;
     }
-    lastGithubFailure = null;
-    const runs = JSON.parse(runsRaw.stdout || "[]");
+    const runsParsed = parseGhJson("list smoke workflow runs", runsRaw, "[]");
+    if (runsParsed.failure) {
+      window.fail(runsParsed.failure);
+      pause();
+      continue;
+    }
+    const runs = runsParsed.value;
     if (runs.length > 0 && runs.every((run) => run.status === "completed")) {
       const ok = runs.every((run) =>
         ["success", "neutral", "skipped"].includes(run.conclusion),
@@ -259,11 +323,9 @@ export function pollSmoke({
     }
     pause();
   }
-  if (lastGithubFailure) return { ok: false, reason: lastGithubFailure };
-  return {
-    ok: false,
-    reason: `configured smoke workflow ${workflow} did not settle at ${sha}`,
-  };
+  return window.unsettled(
+    `configured smoke workflow ${workflow} did not settle at ${sha}`,
+  );
 }
 
 function cleanupItem({ github, repo, factoryRoot, item, shell = sh }) {
