@@ -338,8 +338,28 @@ export async function main(argv = process.argv.slice(2)) {
   // claim loop: a failed host constraint must consume neither a tracker query
   // nor a dispatch slot. `preflightDispatchRepo` also converts map-form YAML
   // toolchain declarations into the canonical array expected by the gate.
-  const { repo, gate: toolchainGate } =
-    await preflightDispatchRepo(configuredRepo);
+  //
+  // Only the gate is taken from the preflight. The normalized registry entry
+  // it resolves is camelCase (`worktreeUp`, `worktreeRoot`, ...); everything
+  // below reads the raw scheduler entry's snake_case fields (`worktree_up`,
+  // `max_in_flight`, ...), so rebinding `repo` here would silently break
+  // worktree creation for every dispatch.
+  const repo = configuredRepo;
+  let toolchainGate;
+  try {
+    ({ gate: toolchainGate } = await preflightDispatchRepo(configuredRepo));
+  } catch (err) {
+    // A registry that cannot resolve the repo (repos-root mismatch, malformed
+    // toolchain, ...) is a refusal, not a crash: say why and exit 2 like every
+    // other pre-claim gate, before any tracker query or claim.
+    if (err?.name === "RepoError") {
+      console.error(
+        `${configuredRepo.name}: dispatch refused — ${err.message}`,
+      );
+      process.exit(2);
+    }
+    throw err;
+  }
   if (!toolchainGate.ready) {
     const reasonCodes = toolchainGate.reasons
       .map((reason) => reason.reason)
