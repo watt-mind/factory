@@ -37,18 +37,23 @@ const unleasedWorker = `NOT EXISTS (
   FROM attempts
   JOIN runs ON runs.run_id = attempts.run_id
   WHERE attempts.lease_owner = workers.worker_id
+    AND attempts.attempt = runs.attempts
     AND runs.state IN (${ACTIVE_ATTEMPT_STATES})
 )`;
 
 function pruneHostWorkers(db, { host, workerId, now }) {
+  const stoppedCutoff = iso(now - STOPPED_WORKER_RETENTION_MS);
   const inactiveCutoff = iso(now - INACTIVE_WORKER_RETENTION_MS);
   db.query(
     `DELETE FROM workers
      WHERE host = ?
        AND worker_id != ?
-       AND (state = 'stopped' OR (state != 'stopped' AND last_seen < ?))
+       AND (
+         (state = 'stopped' AND stopped_at < ?)
+         OR (state != 'stopped' AND last_seen < ?)
+       )
        AND ${unleasedWorker}`,
-  ).run(host, workerId, inactiveCutoff);
+  ).run(host, workerId, stoppedCutoff, inactiveCutoff);
 }
 
 export function registerWorker(
@@ -87,9 +92,21 @@ export function heartbeat(
   workerId,
   { state = "idle", runId = null, now = Date.now() } = {},
 ) {
+  const at = iso(now);
+  const { changes } = db
+    .query(
+      `UPDATE workers SET last_seen = ?, state = ?, current_run = ? WHERE worker_id = ?`,
+    )
+    .run(at, state, runId, workerId);
+  if (changes) return;
+
   db.query(
-    `UPDATE workers SET last_seen = ?, state = ?, current_run = ? WHERE worker_id = ?`,
-  ).run(iso(now), state, runId, workerId);
+    `INSERT INTO workers (worker_id, host, pid, labels_json, adapters, started_at, last_seen, state, current_run)
+     VALUES (?, ?, ?, '{}', '', ?, ?, ?, ?)
+     ON CONFLICT(worker_id) DO UPDATE SET
+       last_seen = excluded.last_seen, state = excluded.state,
+       current_run = excluded.current_run`,
+  ).run(workerId, hostname(), process.pid, at, at, state, runId);
 }
 
 /** Clean exit: recorded, so a stopped worker is distinguishable from a dead one. */

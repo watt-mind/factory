@@ -247,16 +247,77 @@ describe("worker registry and heartbeats (OPS-233)", () => {
     ).toEqual(["fresh-stopped", "stale-but-leased"]);
   });
 
-  test("registering a worker removes obsolete rows from its host", () => {
+  test("pruning correlates a lease with its run's current attempt", () => {
+    const d = db();
+    const now = Date.now();
+    const hour = 60 * 60 * 1000;
+
+    registerWorker(d, { workerId: "dead-first-attempt", now });
+    queueRun(d, { runId: "retried-run" });
+    d.query(
+      `UPDATE runs SET state = 'RUNNING', attempts = 2 WHERE run_id = ?`,
+    ).run("retried-run");
+    d.query(
+      `INSERT INTO attempts (run_id, attempt, fencing_token, lease_owner)
+       VALUES (?, ?, ?, ?), (?, ?, ?, ?)`,
+    ).run(
+      "retried-run",
+      1,
+      1,
+      "dead-first-attempt",
+      "retried-run",
+      2,
+      2,
+      "current-worker",
+    );
+    heartbeat(d, "dead-first-attempt", { now: now - 7 * hour });
+
+    expect(pruneWorkers(d, { now })).toBe(1);
+    expect(listWorkers(d, { now })).toEqual([]);
+  });
+
+  test("registering a worker retains recently stopped host rows", () => {
     const d = db();
     const now = Date.now();
 
-    registerWorker(d, { workerId: "previous-pool", now });
-    deregisterWorker(d, "previous-pool", { now });
+    registerWorker(d, { workerId: "recently-stopped", now });
+    registerWorker(d, { workerId: "expired-stopped", now });
+    deregisterWorker(d, "recently-stopped", { now });
+    deregisterWorker(d, "expired-stopped", { now: now - 2 * 60 * 60 * 1000 });
     registerWorker(d, { workerId: "new-pool", now: now + 1 });
 
-    expect(listWorkers(d, { now: now + 1 }).map((w) => w.workerId)).toEqual([
-      "new-pool",
+    expect(
+      listWorkers(d, { now: now + 1 })
+        .map((w) => w.workerId)
+        .sort(),
+    ).toEqual(["new-pool", "recently-stopped"]);
+  });
+
+  test("a heartbeat restores a worker pruned while it was suspended", () => {
+    const d = db();
+    const now = Date.now();
+
+    registerWorker(d, { workerId: "recovered", now });
+    heartbeat(d, "recovered", {
+      state: "busy",
+      runId: "run_recovered",
+      now: now - 7 * 60 * 60 * 1000,
+    });
+
+    expect(pruneWorkers(d, { now })).toBe(1);
+    expect(listWorkers(d, { now })).toEqual([]);
+
+    heartbeat(d, "recovered", {
+      state: "idle",
+      now: now + 1,
+    });
+    expect(listWorkers(d, { now: now + 1 })).toEqual([
+      expect.objectContaining({
+        workerId: "recovered",
+        state: "idle",
+        currentRun: null,
+        stale: false,
+      }),
     ]);
   });
 
