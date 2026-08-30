@@ -11,6 +11,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { loadControlPlane } from "../../lib/control-plane/index.mjs";
 import { hashJson } from "./canonical.mjs";
+import { ApiParameterError } from "./api-params.mjs";
 import {
   decisionRequestHash,
   validateDecisionRequest,
@@ -1025,7 +1026,12 @@ export function listInboxPage(
   db,
   { status = "open", limit = 100, before = null } = {},
 ) {
-  if (!STATUSES.has(status)) throw new Error(`unknown inbox status: ${status}`);
+  if (!STATUSES.has(status)) {
+    throw new ApiParameterError(
+      "invalid_status",
+      `unknown inbox status: ${status}`,
+    );
+  }
   const where = {
     open: "resolved_at IS NULL AND acked_at IS NULL",
     acked: "resolved_at IS NULL AND acked_at IS NOT NULL",

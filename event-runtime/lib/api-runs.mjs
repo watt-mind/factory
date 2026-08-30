@@ -218,7 +218,16 @@ function eventsView(
   };
 }
 
-const TICKET_ID = /^[A-Z][A-Z0-9]{1,9}-\d+$/;
+const LINEAR_TICKET_ID = /^[A-Z][A-Z0-9]{1,9}-\d+$/;
+const GITHUB_TICKET_ID = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[1-9][0-9]{0,9}$/;
+
+function normalizeTicketId(value) {
+  const ticket = String(value ?? "").trim();
+  const linear = ticket.toUpperCase();
+  if (LINEAR_TICKET_ID.test(linear)) return linear;
+  if (GITHUB_TICKET_ID.test(ticket)) return ticket.toLowerCase();
+  return null;
+}
 
 function objectNamesTicket(value, ticket) {
   if (!value || typeof value !== "object") return false;
@@ -226,9 +235,9 @@ function objectNamesTicket(value, ticket) {
     return value.some((entry) => objectNamesTicket(entry, ticket));
   for (const [key, entry] of Object.entries(value)) {
     if (
-      /^(ticket|ticketId|issue|issueId|linearId)$/i.test(key) &&
+      /^(ticket|ticketId|issue|issueId|linearId|subject)$/i.test(key) &&
       typeof entry === "string" &&
-      entry.toUpperCase() === ticket
+      normalizeTicketId(entry) === ticket
     )
       return true;
     if (entry && typeof entry === "object" && objectNamesTicket(entry, ticket))
@@ -297,10 +306,8 @@ function namedString(values, names) {
  * event/proposal/run ids and PR references emitted by dispatch/merge results.
  */
 export function ticketJourneyView(db, rawTicket, options = {}) {
-  const ticket = String(rawTicket ?? "")
-    .trim()
-    .toUpperCase();
-  if (!TICKET_ID.test(ticket)) return null;
+  const ticket = normalizeTicketId(rawTicket);
+  if (!ticket) return null;
   const nowMs = options.nowMs ?? Date.now();
 
   const events = new Set();
@@ -311,7 +318,8 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
   // LIKE is deliberately a broad prefilter for legacy event/proposal/result
   // payloads and direct runs that named their ticket only in a nested input
   // field. Newer runs also carry a normalized, indexed subject.
-  const ticketLike = `%${ticket}%`;
+  const ticketQuery = ticket.toUpperCase();
+  const ticketLike = `%${ticketQuery}%`;
   const eventRows = new Map();
   const proposalRows = new Map();
   const runRows = new Map();
@@ -407,7 +415,7 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
         `SELECT *, rowid AS list_rowid FROM events
          WHERE UPPER(subject) = ? OR UPPER(correlation_id) = ? OR UPPER(envelope_json) LIKE ?`,
       )
-      .all(ticket, ticket, ticketLike),
+      .all(ticketQuery, ticketQuery, ticketLike),
     eventRows,
     eventKey,
   );
@@ -422,8 +430,10 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
   );
   addRows(
     db
-      .query(`SELECT * FROM runs WHERE subject = ? OR UPPER(spec_json) LIKE ?`)
-      .all(ticket, ticketLike),
+      .query(
+        `SELECT * FROM runs WHERE UPPER(subject) = ? OR UPPER(spec_json) LIKE ?`,
+      )
+      .all(ticketQuery, ticketLike),
     runRows,
     (row) => row.run_id,
   );
@@ -438,8 +448,8 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
   for (const row of eventRows.values()) {
     const envelope = parseObject(row.envelope_json);
     if (
-      String(row.subject ?? "").toUpperCase() === ticket ||
-      String(row.correlation_id ?? "").toUpperCase() === ticket ||
+      normalizeTicketId(row.subject) === ticket ||
+      normalizeTicketId(row.correlation_id) === ticket ||
       objectNamesTicket(envelope, ticket)
     )
       events.add(eventKey(row));
@@ -450,7 +460,7 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
   }
   for (const row of runRows.values()) {
     if (
-      String(row.subject ?? "").toUpperCase() === ticket ||
+      normalizeTicketId(row.subject) === ticket ||
       objectNamesTicket(parseObject(row.spec_json).input, ticket)
     )
       runs.add(row.run_id);
@@ -697,10 +707,8 @@ async function ticketDetailControlPlane(override) {
  * Linear request storm.
  */
 export async function ticketDetailView(rawTicket, options = {}) {
-  const ticket = String(rawTicket ?? "")
-    .trim()
-    .toUpperCase();
-  if (!TICKET_ID.test(ticket)) return { error: "invalid_ticket" };
+  const ticket = normalizeTicketId(rawTicket);
+  if (!ticket) return { error: "invalid_ticket" };
 
   const nowMs = options.nowMs ?? Date.now();
   const cacheKey = ticket;
@@ -867,7 +875,10 @@ function collectTicketIds(value, targetSet = new Set()) {
   if (typeof value === "string") {
     const matches = value.match(/\b([A-Z][A-Z0-9]{1,9}-\d+)\b/g);
     if (matches) {
-      for (const m of matches) targetSet.add(m.toUpperCase());
+      for (const match of matches) {
+        const ticket = normalizeTicketId(match);
+        if (ticket) targetSet.add(ticket);
+      }
     }
     return targetSet;
   }
@@ -878,11 +889,11 @@ function collectTicketIds(value, targetSet = new Set()) {
   if (typeof value === "object") {
     for (const [key, entry] of Object.entries(value)) {
       if (
-        /^(ticket|ticketId|issue|issueId|linearId)$/i.test(key) &&
+        /^(ticket|ticketId|issue|issueId|linearId|subject)$/i.test(key) &&
         typeof entry === "string" &&
-        TICKET_ID.test(entry.trim().toUpperCase())
+        normalizeTicketId(entry)
       ) {
-        targetSet.add(entry.trim().toUpperCase());
+        targetSet.add(normalizeTicketId(entry));
       }
       collectTicketIds(entry, targetSet);
     }
@@ -945,11 +956,8 @@ export function ticketIndexView(db, options = {}) {
   // Collect candidate ticket IDs across all entities
   const allTicketIds = new Set();
   for (const row of eventRows) {
-    if (
-      row.subject &&
-      TICKET_ID.test(String(row.subject).trim().toUpperCase())
-    ) {
-      allTicketIds.add(String(row.subject).trim().toUpperCase());
+    if (normalizeTicketId(row.subject)) {
+      allTicketIds.add(normalizeTicketId(row.subject));
     }
     const env = parseObject(row.envelope_json);
     collectTicketIds(env, allTicketIds);
@@ -980,7 +988,7 @@ export function ticketIndexView(db, options = {}) {
     for (const row of eventRows) {
       const envelope = parseObject(row.envelope_json);
       if (
-        String(row.subject ?? "").toUpperCase() === ticket ||
+        normalizeTicketId(row.subject) === ticket ||
         objectNamesTicket(envelope, ticket)
       ) {
         events.add(`${row.source}\0${row.event_id}`);
@@ -2077,7 +2085,9 @@ export async function handleRunApiRoute({
       controlPlane,
     });
     if (result.error === "invalid_ticket") {
-      return send(422, { error: "ticket must look like WM-123" });
+      return send(422, {
+        error: "ticket must look like WM-123 or owner/repo#123",
+      });
     }
     if (result.error === "not_found") {
       return send(404, { error: result.message });
@@ -2128,7 +2138,10 @@ export async function handleRunApiRoute({
     const ticket = url.searchParams.get("ticket");
     if (ticket) {
       const journey = ticketJourneyView(db, ticket, { artifactsDir });
-      if (!journey) return send(422, { error: "ticket must look like WM-123" });
+      if (!journey)
+        return send(422, {
+          error: "ticket must look like WM-123 or owner/repo#123",
+        });
       return send(200, journey);
     }
     try {
