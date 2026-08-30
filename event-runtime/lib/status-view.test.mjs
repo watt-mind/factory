@@ -3,6 +3,21 @@ import { openDb } from "./db.mjs";
 import { statusView } from "./status-view.mjs";
 
 describe("statusView outbox counts", () => {
+  test("publishes whether an operator has paused unattended dispatch", () => {
+    const db = openDb(":memory:");
+
+    expect(
+      statusView(db, { schedules: [] }, Date.now(), {
+        dispatchPaused: () => true,
+      }).policy,
+    ).toEqual({ dispatchPaused: true });
+    expect(
+      statusView(db, { schedules: [] }, Date.now(), {
+        dispatchPaused: () => false,
+      }).policy,
+    ).toEqual({ dispatchPaused: false });
+  });
+
   test("reports parked rows separately from unpublished rows", () => {
     const db = openDb(":memory:");
     const now = Date.now();
@@ -66,6 +81,26 @@ describe("statusView outbox counts", () => {
     expect(configured.anomalies.configuration).toContain(
       "GitHub webhook intake is stale (last admission was 86400000ms ago; threshold 43200000ms)",
     );
+  });
+
+  test("exposes unparsable result counts with artifact statistics", () => {
+    const db = openDb(":memory:");
+    const view = statusView(db, { schedules: [] }, Date.now(), {
+      getStoreStats: () => ({
+        files: 1,
+        bytes: 1024,
+        orphans: 1,
+        orphanBytes: 1024,
+        invalidResults: 2,
+      }),
+    });
+
+    expect(view.artifacts).toMatchObject({
+      orphans: 1,
+      orphanBytes: 1024,
+      invalidResults: 2,
+    });
+    db.close();
   });
 });
 

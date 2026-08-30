@@ -48,8 +48,9 @@ export function getAnomalyLines(s) {
   if (a.unreferencedArtifacts > 0) {
     anomalyLines.push(`unreferenced artifacts: ${a.unreferencedArtifacts}`);
   } else if (s?.artifacts?.orphans > 0) {
+    const heldBy = s.artifacts.invalidResults ?? 0;
     anomalyLines.push(
-      `unreferenced artifacts: ${s.artifacts.orphans} (${s.artifacts.orphanBytes ?? 0}B)`,
+      `unreferenced artifacts: ${s.artifacts.orphans} (${s.artifacts.orphanBytes ?? 0}B)${heldBy > 0 ? ` — GC held by ${heldBy} unparsable result row(s)` : ""}`,
     );
   }
   if (Array.isArray(a.orphanedWorkspaces)) {
@@ -152,7 +153,11 @@ export function getPoolLines(pool, s) {
 export async function status(client, args = []) {
   const s = await client.status();
   const pool = getPoolLines(readPool(), s);
-  const anomalyLines = [...getAnomalyLines(s), ...pool.anomalies];
+  const anomalyLines = [
+    ...getAnomalyLines(s),
+    ...(s?.policy?.dispatchPaused ? ["dispatch_paused"] : []),
+    ...pool.anomalies,
+  ];
   if (args.includes("--json")) {
     console.log(
       JSON.stringify({
@@ -181,6 +186,11 @@ export async function status(client, args = []) {
       "dead_lettered",
     ]),
   );
+  if (s?.policy?.dispatchPaused) {
+    console.log(
+      `${pad("dispatch", 11)}PAUSED (config/policy.yaml dispatch.paused)`,
+    );
+  }
   console.log(countLine("proposals", s.proposals, ["open", "expired"]));
   if (s.inbox) console.log(countLine("inbox", s.inbox, ["open", "acked"]));
   const states = Object.keys(s.runs.byState);
