@@ -377,6 +377,198 @@ export function chainAutoApprovalPolicyDiagnostic({ root = reposRoot() } = {}) {
   };
 }
 
+const GH_APP_DAEMON =
+  /(?:^|[\s/])gh-app-auth\.mjs(?=\s|$).*?(?:^|\s)--daemon(?:\s|$)/;
+const SERVE_ENTRYPOINT =
+  /event-runtime\/cli\.mjs(?=\s|$).*?(?:^|\s)serve(?:\s|$)/;
+
+function defaultProcessTable() {
+  const result = spawnSync("ps", ["-axo", "pid=,command="], {
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    return {
+      ok: false,
+      detail: String(result.stderr ?? "unable to inspect process table").trim(),
+      processes: [],
+    };
+  }
+  return {
+    ok: true,
+    processes: String(result.stdout ?? "")
+      .split("\n")
+      .map((line) => line.trim().match(/^(\d+)\s+(.+)$/))
+      .filter(Boolean)
+      .map(([, pid, command]) => ({ pid: Number(pid), command })),
+  };
+}
+
+function defaultProcessProbe(pid) {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if (error?.code === "ESRCH") return { alive: false };
+    if (error?.code !== "EPERM") {
+      return { alive: false, detail: error?.message ?? String(error) };
+    }
+  }
+
+  try {
+    return {
+      alive: true,
+      command: readFileSync(`/proc/${pid}/cmdline`, "utf8").replaceAll(
+        "\0",
+        " ",
+      ),
+    };
+  } catch {
+    const result = spawnSync("ps", ["-p", String(pid), "-o", "command="], {
+      encoding: "utf8",
+    });
+    return {
+      alive: true,
+      command: String(result.stdout ?? "").trim(),
+    };
+  }
+}
+
+/**
+ * Reports the two daemons that make a local factory stack usable. Process and
+ * pidfile probes are injectable so a test never has to manufacture a real
+ * daemon or rely on the host's /proc implementation.
+ */
+export function stackDaemonDiagnostics({
+  env = process.env,
+  runDir = env.FACTORY_RUN_DIR || path.join(homedir(), ".factory", "run"),
+  listProcesses = defaultProcessTable,
+  readPidFile = (file) => readFileSync(file, "utf8"),
+  probeProcess = defaultProcessProbe,
+} = {}) {
+  const appConfigured = Boolean(
+    env.FACTORY_GH_APP_ID &&
+    env.FACTORY_GH_APP_INSTALLATION_ID &&
+    env.FACTORY_GH_APP_PRIVATE_KEY_PATH,
+  );
+  const diagnostics = [];
+
+  let table;
+  try {
+    table = listProcesses();
+  } catch (error) {
+    table = {
+      ok: false,
+      detail: error?.message ?? String(error),
+      processes: [],
+    };
+  }
+  const processes = Array.isArray(table) ? table : (table?.processes ?? []);
+  const processTableOk = Array.isArray(table) || table?.ok !== false;
+  const ghAppDaemons = processes.filter(({ command }) =>
+    GH_APP_DAEMON.test(String(command ?? "")),
+  );
+  if (!processTableOk) {
+    diagnostics.push({
+      ok: appConfigured ? false : "warn",
+      label: "gh-app-auth daemon",
+      detail: `cannot inspect process table${table?.detail ? ` — ${table.detail}` : ""}`,
+      fix: "restore process-table access, then run `factory doctor` again",
+    });
+  } else if (ghAppDaemons.length > 1) {
+    diagnostics.push({
+      ok: false,
+      label: "gh-app-auth daemon",
+      detail: `duplicate daemons — found ${ghAppDaemons.length} (${ghAppDaemons.map(({ pid }) => pid).join(", ")})`,
+      fix: "stop duplicate gh-app-auth.mjs --daemon processes, leaving exactly one",
+    });
+  } else if (ghAppDaemons.length === 1) {
+    diagnostics.push({
+      ok: true,
+      label: "gh-app-auth daemon",
+      detail: `one daemon running (pid ${ghAppDaemons[0].pid})`,
+      fix: null,
+    });
+  } else if (appConfigured) {
+    diagnostics.push({
+      ok: false,
+      label: "gh-app-auth daemon",
+      detail: "GitHub App auth is configured but no daemon is running",
+      fix: "run `factory up` to start gh-app-auth.mjs --daemon",
+    });
+  } else {
+    diagnostics.push({
+      ok: "warn",
+      label: "gh-app-auth daemon",
+      detail: "not applicable — GitHub App auth is not configured",
+      fix: null,
+    });
+  }
+
+  const servePidFile = path.join(runDir, "serve.pid");
+  let pidText;
+  try {
+    pidText = readPidFile(servePidFile);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      diagnostics.push({
+        ok: "warn",
+        label: "serve.pid identity",
+        detail:
+          "not applicable — no serve.pid; stack is not running on this machine",
+        fix: null,
+      });
+      return diagnostics;
+    }
+    diagnostics.push({
+      ok: false,
+      label: "serve.pid identity",
+      detail: `cannot read ${servePidFile} — ${error?.message ?? String(error)}`,
+      fix: "repair or remove the unreadable serve.pid, then run `factory up`",
+    });
+    return diagnostics;
+  }
+
+  const pid = Number(String(pidText).trim());
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    diagnostics.push({
+      ok: false,
+      label: "serve.pid identity",
+      detail: `stale serve.pid — invalid PID ${JSON.stringify(String(pidText).trim())}`,
+      fix: "remove the stale serve.pid and run `factory up`",
+    });
+    return diagnostics;
+  }
+
+  let probe;
+  try {
+    probe = probeProcess(pid);
+  } catch (error) {
+    probe = { alive: false, detail: error?.message ?? String(error) };
+  }
+  if (!probe?.alive) {
+    diagnostics.push({
+      ok: false,
+      label: "serve.pid identity",
+      detail: `stale serve.pid — PID ${pid} is not running${probe?.detail ? ` (${probe.detail})` : ""}`,
+      fix: "remove the stale serve.pid and run `factory up`",
+    });
+  } else if (!SERVE_ENTRYPOINT.test(String(probe.command ?? ""))) {
+    diagnostics.push({
+      ok: false,
+      label: "serve.pid identity",
+      detail: `recycled serve.pid — PID ${pid} belongs to ${probe.command || "an unidentifiable process"}`,
+      fix: "remove the recycled serve.pid and run `factory up`",
+    });
+  } else {
+    diagnostics.push({
+      ok: true,
+      label: "serve.pid identity",
+      detail: `PID ${pid} is event-runtime/cli.mjs serve`,
+      fix: null,
+    });
+  }
+  return diagnostics;
+}
+
 const ROOT = factoryRoot();
 installLinearBudgetCapture();
 const argv = process.argv.slice(2);
@@ -444,6 +636,10 @@ if (import.meta.main) {
     controlPlaneKind,
     linearConfigured: Boolean(key),
   })) {
+    check(diagnostic.ok, diagnostic.label, diagnostic.detail, diagnostic.fix);
+  }
+
+  for (const diagnostic of stackDaemonDiagnostics()) {
     check(diagnostic.ok, diagnostic.label, diagnostic.detail, diagnostic.fix);
   }
 
