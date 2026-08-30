@@ -100,6 +100,7 @@ import {
   extendRunDeadline,
   forceFailRun,
   HarnessMaterializeError,
+  HANDOFF_FORGE_UNAVAILABLE,
   humanDecisionAuthorisationGate,
   LEASE_GRACE_SECONDS,
   policyMaxRunMinutes,
@@ -2054,6 +2055,50 @@ sh -c 'sleep 5 & wait'
     expect(verified.result.artifact.headSha).toBeUndefined();
     expect(verified.result.evidence.headSha).toBe(headSha);
 
+    rmSync(path.join(workspaceDir, "result.json"), { force: true });
+    const pushedNoPr = recoverMissingDispatchResult({
+      error: missing,
+      spec,
+      def,
+      workspaceDir,
+      worktreeRecord: { ...worktreeRecord, base: "develop" },
+      findPullRequest: () => ({ pushedBranch: "feat/gh-1539" }),
+    });
+    expect(pushedNoPr).toMatchObject({ retainWorkspace: true });
+    expect(pushedNoPr.candidate).toMatchObject({
+      reasonCode: "pushed_branch_no_pr",
+      artifact: {
+        outcome: "BLOCKED",
+        prUrl: null,
+        prNumber: null,
+        verification: { command: null, passed: false },
+      },
+      evidence: {
+        branch: "feat/gh-1539",
+        resumeCommand: expect.stringContaining("gh pr create --base develop"),
+      },
+    });
+    expect(pushedNoPr.candidate.artifact.summary).toContain(
+      "gh pr create --base develop",
+    );
+
+    expect(() =>
+      recoverMissingDispatchResult({
+        error: missing,
+        spec,
+        def,
+        workspaceDir,
+        worktreeRecord,
+        findPullRequest: () => {
+          const rateLimit = new Error("rate limited");
+          rateLimit.code = "forge_rate_limited";
+          throw rateLimit;
+        },
+      }),
+    ).toThrow(
+      expect.objectContaining({ reasonCode: HANDOFF_FORGE_UNAVAILABLE }),
+    );
+
     for (const { error, findPullRequest, body, recoveredHeadSha = headSha } of [
       { error: missing, findPullRequest: () => null, body: "## Handoff" },
       { error: missing, findPullRequest: () => openPr, body: "Fixes #1539" },
@@ -3321,6 +3366,7 @@ sh -c 'sleep 5 & wait'
     expect(classifyFailureCause("handoff_worktree_missing")).toBe(
       "environment",
     );
+    expect(classifyFailureCause(HANDOFF_FORGE_UNAVAILABLE)).toBe("environment");
     expect(classifyFailureCause("agent_exit_1")).toBe("agent_error");
     expect(classifyFailureCause("contract_violation")).toBe("agent_error");
     for (const reason of [
