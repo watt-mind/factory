@@ -269,6 +269,52 @@ describe("Ticket journey view", () => {
     expect(current.textContent).toContain("stale · 5m");
   });
 
+  test("prefers the lease owner over a worker whose stale currentRun still points at the run", async () => {
+    const runId = "run_ticket_lease_owner";
+    const data = source();
+    const live = run(runId, new Date(Date.now() - 2 * 60_000).toISOString());
+    live.run.state = "RUNNING";
+    live.lifecycle[1] = { ...live.lifecycle[1], to_state: "RUNNING" };
+    (live as JourneyRun & { attempts: unknown[] }).attempts = [
+      {
+        started_at: new Date(Date.now() - 2 * 60_000).toISOString(),
+        lease_owner: "worker_lease_owner",
+      },
+    ];
+    data.runs = [live];
+    const base = {
+      host: "test",
+      pid: 1,
+      labels: {},
+      adapters: [],
+      state: "busy" as const,
+      startedAt: new Date().toISOString(),
+      stoppedAt: null,
+    };
+    const view = renderTicket(data, undefined, [
+      {
+        ...base,
+        workerId: "worker_stale_claim",
+        currentRun: runId,
+        lastSeen: new Date(Date.now() - 5 * 60_000).toISOString(),
+        stale: true,
+      },
+      {
+        ...base,
+        workerId: "worker_lease_owner",
+        currentRun: runId,
+        lastSeen: new Date(Date.now() - 10_000).toISOString(),
+        stale: false,
+      },
+    ]);
+    await view.findByRole("heading", { name: "WM-542" });
+    const current = view.getByText("Current run / worker")
+      .nextElementSibling as HTMLElement;
+    expect(current.textContent).toContain("worker_lease_owner");
+    expect(current.textContent).not.toContain("worker_stale_claim");
+    expect(current.textContent).toMatch(/heartbeat 1?0s ago/);
+  });
+
   test("renders a two-run journey, PR, aggregates, timeline sources, and current-state block", async () => {
     const view = renderTicket(source());
     await view.findByRole("heading", { name: "WM-542" });

@@ -528,30 +528,32 @@ export function RunFull({
             )}
             {inflight && d && (
               <>
-                <span
-                  aria-label="In-flight run status"
-                  className="mr-1 inline-flex flex-wrap items-center gap-1 text-[12px] text-(--text-dim) tabular-nums"
-                >
-                  {elapsed && <span>Elapsed {elapsed}</span>}
-                  {elapsed && (lease || worker) && <span>·</span>}
-                  {lease && <span>{lease}</span>}
-                  {lease && worker && <span>·</span>}
-                  {worker && (
-                    <>
-                      <span>{worker.workerId}</span>
-                      <span>·</span>
-                      <span>
-                        heartbeat {formatRelative(worker.lastSeen, now)}
-                      </span>
-                      {worker.stale && (
-                        <StateBadge
-                          state="stale"
-                          hues={{ stale: "var(--hue-err)" }}
-                        />
-                      )}
-                    </>
-                  )}
-                </span>
+                {(elapsed || lease || worker) && (
+                  <span
+                    aria-label="In-flight run status"
+                    className="mr-1 inline-flex flex-wrap items-center gap-1 text-[12px] text-(--text-dim) tabular-nums"
+                  >
+                    {elapsed && <span>Elapsed {elapsed}</span>}
+                    {elapsed && (lease || worker) && <span>·</span>}
+                    {lease && <span>{lease}</span>}
+                    {lease && worker && <span>·</span>}
+                    {worker && (
+                      <>
+                        <span>{worker.workerId}</span>
+                        <span>·</span>
+                        <span>
+                          heartbeat {formatRelative(worker.lastSeen, now)}
+                        </span>
+                        {worker.stale && (
+                          <StateBadge
+                            state="stale"
+                            hues={{ stale: "var(--hue-err)" }}
+                          />
+                        )}
+                      </>
+                    )}
+                  </span>
+                )}
                 <span
                   className="mr-1 text-[12px] text-(--text-dim) tabular-nums"
                   title="Current execution deadline. The sidebar budget meter preserves the original approved RunSpec; its lease clock reflects extensions."

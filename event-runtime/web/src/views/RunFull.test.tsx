@@ -178,6 +178,28 @@ describe("RunFull header (WM-193)", () => {
     );
   });
 
+  test("omits the in-flight status span when elapsed, lease, and worker are all unknown", async () => {
+    const runId = "run_inflight_empty";
+    const detail = createRunDetailFixture({
+      run: { runId, state: "RUNNING" } as RunDetail["run"],
+      attempts: [],
+    });
+    await withApi(
+      {
+        run: async () => detail,
+        runs: async () => ({
+          runs: [createRunListItemFixture({ runId, state: "RUNNING" })],
+        }),
+        workers: async () => ({ workers: [] }),
+      },
+      async () => {
+        const view = renderRunFull(runId);
+        await waitFor(() => view.getByText(/Remaining/));
+        expect(view.queryByLabelText("In-flight run status")).toBeNull();
+      },
+    );
+  });
+
   test("keeps run identity and actions without duplicating sidebar metadata", async () => {
     const runId = "run_clean_header";
     const detail = createRunDetailFixture({

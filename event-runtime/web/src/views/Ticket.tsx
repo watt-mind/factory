@@ -1281,12 +1281,18 @@ export function Ticket({
     (query.data.runs.find(
       (run) => run.run.runId === journey.currentRun?.runId,
     ) as TicketRunWithAttempts | undefined) ?? null;
+  const workers = workersQuery.data?.workers ?? [];
+  const leaseOwner = currentRunDetail?.attempts?.at(-1)?.lease_owner ?? null;
   const currentWorker =
-    (workersQuery.data?.workers ?? []).find(
+    (leaseOwner
+      ? workers.find((worker) => worker.workerId === leaseOwner)
+      : undefined) ??
+    workers.find(
       (worker) =>
-        worker.workerId === currentRunDetail?.attempts?.at(-1)?.lease_owner ||
-        worker.currentRun === journey.currentRun?.runId,
-    ) ?? null;
+        journey.currentRun?.runId != null &&
+        worker.currentRun === journey.currentRun.runId,
+    ) ??
+    null;
   return (
     <JourneyLayout
       journey={journey}
