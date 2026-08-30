@@ -12,7 +12,7 @@ import {
 import path from "node:path";
 import { openDb } from "../lib/db.mjs";
 import { registerWorker } from "../lib/workers.mjs";
-import {
+import supervise, {
   crashBackoffMs,
   readPool,
   spawnDetached,
@@ -84,8 +84,8 @@ describe("supervise (WM-226)", () => {
     }
   });
 
-  test("--once propagates tick failures while daemon ticks are logged on every failure and retried", async () => {
-    const error = new Error("transient failure");
+  test("--once propagates tick failures while daemon ticks log non-Error throws and retry", async () => {
+    const error = "transient failure";
     expect(() =>
       startTickLoop(
         () => {
@@ -161,7 +161,7 @@ describe("supervise (WM-226)", () => {
     expect(new Set(lines)).toEqual(new Set(["tick error: spawn EAGAIN"]));
   });
 
-  test("a transient tick failure is logged and the supervisor keeps ticking", async () => {
+  test("an unwritable primary crash-loop file uses its fallback and keeps the supervisor live", async () => {
     const home = tmpDir("evrt-pool-tick-error-");
     const dir = tmpDir("evrt-pool-tick-error-run-");
     const box = spawnSupervisor(
@@ -184,36 +184,16 @@ describe("supervise (WM-226)", () => {
       rmSync(crashLoop, { force: true });
       mkdirSync(crashLoop);
       process.kill(worker.pid, "SIGKILL");
-      expect(await waitFor(box, "tick error:", 10_000)).toBe(true);
-      // The fault persists across ticks, so the line must repeat — never
-      // deduplicated the way `hold — …` is.
+      expect(
+        await waitFor(
+          box,
+          "crash-loop state for slot 1 could not be saved",
+          10_000,
+        ),
+      ).toBe(true);
       await until(
-        "a second failing tick to be logged",
-        () => box.out.split("tick error:").length - 1 >= 2,
-        { timeoutMs: 10_000 },
-      );
-      expect(box.child.exitCode ?? null).toBeNull();
-      expect(existsSync(path.join(dir, "supervisor.pid"))).toBe(true);
-      rmSync(crashLoop, { recursive: true, force: true });
-
-      // With the fault gone the loop must still be live: the slot a failing
-      // tick left behind is reaped and the pool is rebuilt on later ticks.
-      const faultClearedAt = box.out.length;
-      const after = () => box.out.slice(faultClearedAt);
-      const respawned = await until(
-        "a worker to occupy slot 1 after the fault cleared",
+        "a replacement worker after the crash-loop write fails",
         () => readPool(dir).slots.find((s) => s.n === 1 && s.alive) ?? null,
-        { timeoutMs: 10_000 },
-      );
-      process.kill(respawned.pid, "SIGKILL");
-      await until(
-        "the supervisor to reap the killed slot after the fault cleared",
-        () => after().includes("slot released"),
-        { timeoutMs: 10_000 },
-      );
-      await until(
-        "the supervisor to act on the freed slot after the fault cleared",
-        () => /spawn slot 1|crash-loop slot 1/.test(after()),
         { timeoutMs: 10_000 },
       );
       expect(box.child.exitCode ?? null).toBeNull();
@@ -224,6 +204,69 @@ describe("supervise (WM-226)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 30_000);
+
+  test("preserves a failed fast exit before release so the next decision backs off", async () => {
+    const home = tmpDir("evrt-pool-crash-fallback-home-");
+    const dir = tmpDir("evrt-pool-crash-fallback-run-");
+    const before = Date.now();
+    const oldHome = process.env.FACTORY_EVENT_HOME;
+    const oldRunDir = process.env.FACTORY_RUN_DIR;
+    process.env.FACTORY_EVENT_HOME = home;
+    process.env.FACTORY_RUN_DIR = dir;
+    writeFileSync(path.join(dir, "worker-1.pid"), "2147483646\n");
+    writeFileSync(
+      path.join(dir, "worker-1.crash-loop.json"),
+      JSON.stringify({
+        fastExits: 2,
+        spawnedAt: before,
+        workerId: "fast-exit-worker",
+        nextAttemptAt: null,
+        loggedRetryAt: null,
+      }),
+    );
+
+    try {
+      await supervise(["--workers", "1:1", "--once"], {
+        writeCrashLoop: () => {
+          throw "injected crash-loop write failure";
+        },
+      });
+      const state = JSON.parse(
+        readFileSync(
+          path.join(dir, "worker-1.crash-loop.fallback.json"),
+          "utf8",
+        ),
+      );
+      expect(state.fastExits).toBe(3);
+      expect(state.nextAttemptAt).toBeGreaterThan(before);
+      expect(existsSync(path.join(dir, "worker-1.pid"))).toBe(false);
+      expect(readPool(dir).slots[0]).toMatchObject({
+        crashLoops: 3,
+        nextAttemptAt: state.nextAttemptAt,
+      });
+    } finally {
+      if (oldHome === undefined) delete process.env.FACTORY_EVENT_HOME;
+      else process.env.FACTORY_EVENT_HOME = oldHome;
+      if (oldRunDir === undefined) delete process.env.FACTORY_RUN_DIR;
+      else process.env.FACTORY_RUN_DIR = oldRunDir;
+      rmSync(home, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the supervise process exits non-zero when its single tick throws", () => {
+    const dir = tmpDir("evrt-pool-once-tick-throw-");
+    try {
+      writeFileSync(path.join(dir, "worker-1.pid"), "2147483646\n");
+      mkdirSync(path.join(dir, "worker-1.crash-loop.json"));
+      const result = runCli(["supervise", "--workers", "1:1", "--once"], {
+        FACTORY_RUN_DIR: dir,
+      });
+      expect(result.status).not.toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   test("rejects unsafe drain timeouts before writing its pidfile", () => {
     for (const value of ["not-a-number", "0", "-1"]) {
