@@ -4,6 +4,7 @@ import {
 } from "../test-support/tmp.mjs?file=event-runtime-lib-api-registry-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
+  CONTROL_TOKEN,
   GH_SECRET,
   PV,
   SECRET,
@@ -54,7 +55,7 @@ const makeServer = async (...args) => {
 describe("agent and repository registry surfacing (OPS-212)", () => {
   test("GET /agents exposes definitions, prompt text, schemas, pins, and routing", async () => {
     const { server, port } = await makeServer();
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       const { agents: defs, contracts } = await client.agents();
       const def = defs.find((d) => d.ref === "factory-status-report@1");
@@ -107,7 +108,7 @@ describe("agent and repository registry surfacing (OPS-212)", () => {
     const { server, port, close } = await makeServer({
       repos: () => loadRepos({ root }),
     });
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       const { repos: rows } = await client.repos();
       expect(rows.map((r) => r.name)).toEqual(["dispatchable", "watched"]);
@@ -148,6 +149,7 @@ describe("agent and repository registry surfacing (OPS-212)", () => {
         hasWorktreeDown: true,
         hasWorktreeWarm: false,
         verify: null,
+        toolchain: null,
       });
       expect(rows[1]).toMatchObject({
         reportOnly: true,
@@ -234,7 +236,7 @@ describe("agent and repository registry surfacing (OPS-212)", () => {
         };
       },
     });
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       const body = await client.janitor("dispatchable");
       expect(body.actor).toBe("operator");
@@ -274,7 +276,7 @@ describe("agent and repository registry surfacing (OPS-212)", () => {
         };
       },
     });
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       const body = await client.janitor("dispatchable", { apply: true });
       expect(body.apply).toBe(true);
