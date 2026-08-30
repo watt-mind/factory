@@ -141,6 +141,10 @@ describe("factory.repo/v1 in-repo configuration", () => {
         "duplicate merge checks",
         "schemaVersion: factory.repo/v1\nmerge_ci:\n  workflow: CI\n  required_checks: [Verify, Verify]\n",
       ],
+      [
+        "non-finite security version",
+        "schemaVersion: factory.repo/v1\nsecurity:\n  python_version: .inf\n",
+      ],
     ];
     for (const [, yaml] of invalidCases) {
       const root = repositoryRoot(".factory.yaml", yaml);
@@ -179,6 +183,39 @@ describe("factory.repo/v1 in-repo configuration", () => {
       escalate_paths: ["ops/**", "src/auth/**", "payments/**"],
       worktree_up: "bin/up.sh",
       worktree_down: "bin/down.sh",
+    });
+  });
+
+  test("worktree omission inherits host scripts while null clears them", () => {
+    const host = {
+      worktree_root: "/tmp/worktrees",
+      worktree_up: "host-up.sh",
+      worktree_down: "host-down.sh",
+      worktree_warm: "host-warm.sh",
+    };
+
+    expect(mergeRepoConfig(host, { schemaVersion: "factory.repo/v1" })).toEqual(
+      host,
+    );
+    expect(
+      mergeRepoConfig(host, {
+        schemaVersion: "factory.repo/v1",
+        worktree: null,
+      }),
+    ).toEqual({
+      worktree_root: "/tmp/worktrees",
+      worktree_up: null,
+      worktree_down: null,
+      worktree_warm: null,
+    });
+    expect(
+      mergeRepoConfig(host, {
+        schemaVersion: "factory.repo/v1",
+        worktree: { up: null },
+      }),
+    ).toEqual({
+      ...host,
+      worktree_up: null,
     });
   });
 

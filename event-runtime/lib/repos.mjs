@@ -74,6 +74,15 @@ function validateInRepoConfigSemantics(config, file) {
   normalizeOwnedPathsPolicy(config.owned_paths_policy, "in-repo config", file);
   normalizeSecurity(config.security, "in-repo config", file);
 
+  if (
+    typeof config.security?.python_version === "number" &&
+    !Number.isFinite(config.security.python_version)
+  ) {
+    throw new RepoError(
+      `${file}: in-repo config security.python_version must be finite`,
+    );
+  }
+
   if (config.merge_ci !== undefined && config.merge_ci !== null) {
     const { workflow, required_checks: requiredChecks } = config.merge_ci;
     if (new Set(requiredChecks).size !== requiredChecks.length) {
@@ -161,7 +170,14 @@ export function mergeRepoConfig(hostConfig, inRepoConfig) {
     }
   }
 
-  if (worktree && typeof worktree === "object") {
+  if (hasOwn(inRepoConfig, "worktree") && worktree === null) {
+    // An omitted worktree block inherits the host lifecycle. Explicit null is
+    // an overlay value like the other nullable portable fields: it removes
+    // every inherited lifecycle script without affecting host worktree_root.
+    merged.worktree_up = null;
+    merged.worktree_down = null;
+    merged.worktree_warm = null;
+  } else if (worktree && typeof worktree === "object") {
     for (const [nested, flat] of [
       ["up", "worktree_up"],
       ["down", "worktree_down"],
