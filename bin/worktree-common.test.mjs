@@ -187,7 +187,7 @@ function runWorktreeUp(fixture, ticket) {
   );
 }
 
-function delayedHealthFixture() {
+function delayedHealthFixture({ webNeverBinds = false } = {}) {
   const fixture = worktreeUpFixture();
   const fakeBun = path.join(fixture.mockBin, "bun");
   mkdirSync(path.join(fixture.root, "event-runtime", "web"), {
@@ -219,6 +219,23 @@ function delayedHealthFixture() {
   ]) {
     writeFileSync(path.join(fixture.root, "event-runtime", "web", file), "\n");
   }
+  if (webNeverBinds) {
+    writeFileSync(
+      path.join(fixture.root, "event-runtime", "web", "serve.mjs"),
+      [
+        'import { writeFileSync } from "node:fs";',
+        "writeFileSync(process.env.FAKE_WEB_PID_FILE, String(process.pid));",
+        "setInterval(() => {}, 1 << 30);",
+      ].join("\n"),
+    );
+  }
+  const webBunCases = webNeverBinds
+    ? `
+  "run build:fast") mkdir -p dist; exit 0 ;;
+`
+    : `
+  "run build:fast") exit 1 ;;
+`;
   writeFileSync(
     fakeBun,
     `#!/usr/bin/env bash
@@ -226,7 +243,7 @@ set -euo pipefail
 case "${"${1:-}"} ${"${2:-}"}" in
   "--eval "|"-e ") exec "$REAL_BUN" "$@" ;;
   "install "*) exit 0 ;;
-  "run build:fast") exit 1 ;;
+${webBunCases}
   "event-runtime/cli.mjs serve")
     exec "$REAL_BUN" --eval '
       const delay = Number(Bun.env.FAKE_HEALTH_DELAY_MS ?? 2000);
@@ -283,6 +300,18 @@ function stopFixtureDaemons(fixture) {
     } catch {
       // A failed bring-up cleans up daemons itself; absent pidfiles are normal.
     }
+  }
+}
+
+function daemonPidAlive(worktree, daemon) {
+  try {
+    const pid = Number(
+      readFileSync(path.join(worktree, ".factory", "run", `${daemon}.pid`)),
+    );
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -1180,13 +1209,28 @@ test("worktree-up fails closed when a matching remote branch diverged after a st
   }
 });
 
-test("worktree timeout settings reject non-positive integer values", () => {
+test("worktree timeout settings default only when unset and reject malformed values", () => {
+  const unset = sh(
+    "unset FACTORY_WORKTREE_HEALTH_TIMEOUT_S; validate_worktree_timeout FACTORY_WORKTREE_HEALTH_TIMEOUT_S 55",
+  );
+  expect(unset.status).toBe(0);
+  expect(unset.stdout.trim().split("\n").at(-1)).toBe("55");
+
+  const padded = sh(
+    "FACTORY_WORKTREE_HEALTH_TIMEOUT_S=07; validate_worktree_timeout FACTORY_WORKTREE_HEALTH_TIMEOUT_S 55",
+  );
+  expect(padded.status).toBe(0);
+  expect(padded.stdout.trim().split("\n").at(-1)).toBe("7");
+
   for (const [name, value] of [
+    ["FACTORY_WORKTREE_HEALTH_TIMEOUT_S", ""],
     ["FACTORY_WORKTREE_HEALTH_TIMEOUT_S", "0"],
-    ["FACTORY_WORKTREE_HEALTH_TIMEOUT_S", "nope"],
+    ["FACTORY_WORKTREE_HEALTH_TIMEOUT_S", "abc"],
     ["FACTORY_WORKTREE_WEB_TIMEOUT_S", "-1"],
   ]) {
-    const r = sh("true", { [name]: value });
+    const r = sh(
+      `export ${name}=${JSON.stringify(value)}; validate_worktree_timeout ${name} 55`,
+    );
     expect(r.status).not.toBe(0);
     expect(r.stderr).toContain("worktree_bad_timeout:");
     expect(r.stderr).toContain(name);
@@ -1204,6 +1248,53 @@ test("worktree-up uses the elapsed health budget for delayed serve startup", () 
 
     const defaultBudget = runDelayedHealthWorktreeUp(fixture, 55, true);
     expect(defaultBudget.status).toBe(0);
+  } finally {
+    stopFixtureDaemons(fixture);
+    rmSync(fixture.root, { recursive: true, force: true });
+    rmSync(fixture.worktrees, { recursive: true, force: true });
+    rmSync(fixture.mockBin, { recursive: true, force: true });
+  }
+});
+
+test("worktree-up times out a live web daemon that never binds and tears down all daemons", () => {
+  const fixture = delayedHealthFixture({ webNeverBinds: true });
+  const webPidFile = path.join(fixture.root, "web-daemon.pid");
+  const worktree = path.join(fixture.worktrees, "WM-1763");
+  try {
+    const started = Date.now();
+    const result = command(
+      ["bash", "bin/worktree-up.sh", "WM-1763", "--no-seed"],
+      fixture.root,
+      {
+        FACTORY_WT_ROOT: fixture.worktrees,
+        FACTORY_LOCK_DIR: path.join(fixture.root, ".locks", "bun-install"),
+        FACTORY_PORT_RESERVATION_ROOT: path.join(
+          fixture.root,
+          ".locks",
+          "ports",
+        ),
+        FACTORY_WORKTREE_HEALTH_TIMEOUT_S: "5",
+        FACTORY_WORKTREE_WEB_TIMEOUT_S: "1",
+        FAKE_HEALTH_DELAY_MS: "0",
+        FAKE_WEB_PID_FILE: webPidFile,
+        REAL_BUN: process.execPath,
+        PATH: `${fixture.mockBin}:${TEST_PATH}`,
+      },
+    );
+    // The whole worktree-up run (bun install, daemon spawn, health probe) is
+    // wrapped here; only the web bind wait is bounded by the 1s budget, so
+    // leave generous headroom for a loaded CI box.
+    expect(Date.now() - started).toBeLessThanOrEqual(15_000);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("did not bind reserved port");
+    expect(result.stderr).toContain("budget 1s");
+    expect(readFileSync(webPidFile, "utf8").trim()).toMatch(/^\d+$/);
+    for (const daemon of ["serve", "worker", "web"]) {
+      expect(daemonPidAlive(worktree, daemon)).toBe(false);
+      expect(
+        existsSync(path.join(worktree, ".factory", "run", `${daemon}.pid`)),
+      ).toBe(false);
+    }
   } finally {
     stopFixtureDaemons(fixture);
     rmSync(fixture.root, { recursive: true, force: true });

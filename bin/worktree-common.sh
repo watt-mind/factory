@@ -171,7 +171,7 @@ warn() { printf '\033[33mwarn:\033[0m %s\n' "$*" >&2; }
 # and shared by every invocation mode before any worktree side effects begin.
 validate_worktree_timeout() { # <environment variable name> <default>
   local name="$1" default="$2" value
-  value="${!name:-$default}"
+  value="${!name-$default}"
   [[ "$value" =~ ^[0-9]+$ && "$value" =~ [1-9] ]] \
     || die "worktree_bad_timeout: $name must be a positive integer (got '$value')"
   printf '%d\n' "$((10#$value))"
