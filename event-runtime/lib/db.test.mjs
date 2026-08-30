@@ -336,8 +336,8 @@ describe("schema migration runner and assertions (OPS-415)", () => {
 
     migrateDb(db);
 
-    expect(CURRENT_SCHEMA_VERSION).toBe(17);
-    expect(getSchemaVersion(db)).toBe(17);
+    expect(CURRENT_SCHEMA_VERSION).toBe(18);
+    expect(getSchemaVersion(db)).toBe(18);
     expect(
       db
         .query(
@@ -383,15 +383,16 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     const file = freshFile();
     const db = new Database(file);
     // #1325 owns migration 16 (inbox_proposal_id); a database already at 16
-    // must pick up 17 alone, and the guarded DDL must survive re-running.
+    // must pick up later migrations, and the guarded DDL must survive
+    // re-running.
     migrateDb(db, { targetVersion: 16 });
     expect(getSchemaVersion(db)).toBe(16);
     db.close();
 
     const migrated = openDb(file);
-    expect(getSchemaVersion(migrated)).toBe(17);
+    expect(getSchemaVersion(migrated)).toBe(18);
     migrateDb(migrated);
-    expect(getSchemaVersion(migrated)).toBe(17);
+    expect(getSchemaVersion(migrated)).toBe(18);
     const plans = [
       [
         "metrics latest proposal",
