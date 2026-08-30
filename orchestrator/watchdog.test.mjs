@@ -312,6 +312,136 @@ test("runWatchdogCheck surfaces sandbox-unavailable scan refusals", async () => 
   }
 });
 
+async function runWatchdogWithInFlightRuns({
+  leased = [],
+  running = [],
+  verifying = [],
+  queued = 0,
+} = {}) {
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === "/" || url.pathname === "/health") {
+        return Response.json({ ok: true });
+      }
+      if (url.pathname === "/status") {
+        return Response.json({ runs: { byState: { QUEUED: queued } } });
+      }
+      if (url.pathname === "/workers") {
+        return Response.json({
+          workers: [{ workerId: "worker_1", state: "idle" }],
+        });
+      }
+      if (url.pathname === "/runs") {
+        const byState = {
+          LEASED: leased,
+          RUNNING: running,
+          VERIFYING: verifying,
+        };
+        return Response.json({
+          runs: byState[url.searchParams.get("state")] ?? [],
+        });
+      }
+      return new Response("not found", { status: 404 });
+    },
+  });
+
+  try {
+    return await runWatchdogCheck({
+      port: server.port,
+      webPort: server.port,
+      stuckMinutes: 45,
+      checkShadowFleet: false,
+    });
+  } finally {
+    server.stop(true);
+  }
+}
+
+test("runWatchdogCheck detects a stale VERIFYING run", async () => {
+  const result = await runWatchdogWithInFlightRuns({
+    verifying: [
+      {
+        runId: "run_verifying",
+        agent: "dispatch@1",
+        state: "VERIFYING",
+        created_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+        updated_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      },
+    ],
+  });
+
+  expect(result.metrics.runningRuns).toBe(1);
+  expect(result.issues).toContainEqual(
+    expect.objectContaining({
+      severity: "CRITICAL",
+      code: "WEDGED_RUN",
+      message: expect.stringContaining("in VERIFYING"),
+    }),
+  );
+});
+
+test("runWatchdogCheck detects a stale LEASED run", async () => {
+  const result = await runWatchdogWithInFlightRuns({
+    leased: [
+      {
+        runId: "run_leased",
+        agent: "dispatch@1",
+        state: "LEASED",
+        created_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+        updated_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      },
+    ],
+  });
+
+  expect(result.issues).toContainEqual(
+    expect.objectContaining({
+      severity: "CRITICAL",
+      code: "WEDGED_RUN",
+      message: expect.stringContaining("in LEASED"),
+    }),
+  );
+});
+
+test("runWatchdogCheck ignores a fresh VERIFYING run", async () => {
+  const result = await runWatchdogWithInFlightRuns({
+    verifying: [
+      {
+        runId: "run_fresh_verifying",
+        agent: "dispatch@1",
+        state: "VERIFYING",
+        created_at: new Date(Date.now() - 60 * 1000).toISOString(),
+        updated_at: new Date(Date.now() - 60 * 1000).toISOString(),
+      },
+    ],
+  });
+
+  expect(result.issues.some((issue) => issue.code === "WEDGED_RUN")).toBe(
+    false,
+  );
+});
+
+test("runWatchdogCheck does not report IDLE_STALL with a VERIFYING run", async () => {
+  const result = await runWatchdogWithInFlightRuns({
+    queued: 1,
+    verifying: [
+      {
+        runId: "run_verifying",
+        agent: "dispatch@1",
+        state: "VERIFYING",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    ],
+  });
+
+  expect(result.metrics.runningRuns).toBe(1);
+  expect(result.issues.some((issue) => issue.code === "IDLE_STALL")).toBe(
+    false,
+  );
+});
+
 test("runWatchdogCheck detects unreachable API as critical", async () => {
   // A hardcoded port assumes nothing else is listening on it, which a
   // stranger process (or a concurrent worktree) can invalidate (#876).
