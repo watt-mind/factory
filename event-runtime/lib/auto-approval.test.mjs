@@ -216,6 +216,17 @@ const auto = (db, options = {}) => {
   });
 };
 
+async function captureConsoleErrors(fn) {
+  const originalConsoleError = console.error;
+  const errors = [];
+  console.error = (...args) => errors.push(args.join(" "));
+  try {
+    return { value: await fn(), errors };
+  } finally {
+    console.error = originalConsoleError;
+  }
+}
+
 const independentMergeRegistry = ({
   independent = true,
   selectors = {},
@@ -509,6 +520,51 @@ describe("chain auto approval (WM-357)", () => {
     });
   });
 
+  test("invalid chain policy logs and clips its parse failure", async () => {
+    await withTmpDir("factory-auto-approval-", async (root) => {
+      mkdirSync(path.join(root, "config"));
+      writeFileSync(
+        path.join(root, "config", "policy.yaml"),
+        "chain_auto_approval: [",
+      );
+
+      const { value: loaded, errors } = await captureConsoleErrors(() =>
+        loadChainAutoApprovalPolicy({ root }),
+      );
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toStartWith("policy_invalid: ");
+      expect(loaded.reason).toBe(
+        `policy_invalid:${errors[0]
+          .slice("policy_invalid: ".length)
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 180)}`,
+      );
+    });
+  });
+
+  test("invalid runtime policy logs and clips its parse failure", async () => {
+    await withTmpDir("factory-auto-approval-", async (root) => {
+      mkdirSync(path.join(root, "config"));
+      writeFileSync(path.join(root, "config", "policy.yaml"), "workers: [");
+      const db = openDb(":memory:");
+      const candidate = seed(db, { id: "invalid-runtime-policy" });
+
+      const { errors } = await captureConsoleErrors(() =>
+        auto(db, { runtimeGuardOptions: { root } }),
+      );
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toStartWith("runtime_policy_unavailable: ");
+      expect(reasonOf(db, candidate.id)).toBe(
+        `auto_approval_ineligible:runtime_policy_unavailable:${errors[0]
+          .slice("runtime_policy_unavailable: ".length)
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 180)}`,
+      );
+    });
+  });
+
   test("ci-doctor diagnoses can be explicitly auto-approved by chain policy", () => {
     withTmpDir("factory-auto-approval-", (root) => {
       mkdirSync(path.join(root, "config"));
@@ -698,6 +754,41 @@ describe("chain auto approval (WM-357)", () => {
     expect(openProposals(guardedDb, {})[0].reason).toContain(
       "circuit_breaker_tripped",
     );
+  });
+
+  test("hook and runtime guard failures log and retain their diagnostics", async () => {
+    const hookDb = openDb(":memory:");
+    const hookCandidate = seed(hookDb, { id: "hook-diagnostic" });
+    const hookRegistry = { ...registry, agents: new Map() };
+    const missingAgent = registry.eventTypes["factory.work.requested"].agent;
+    const hookFailure = await captureConsoleErrors(() =>
+      auto(hookDb, {
+        approvalRegistry: hookRegistry,
+        runtimeGuard: () => null,
+      }),
+    );
+    expect(reasonOf(hookDb, hookCandidate.id)).toBe(
+      `auto_approval_ineligible:approve_hooks_failed:unregistered agent ${missingAgent}`,
+    );
+    expect(hookFailure.errors).toEqual([
+      `approve_hooks_failed: unregistered agent ${missingAgent}`,
+    ]);
+
+    const guardDb = openDb(":memory:");
+    const guardCandidate = seed(guardDb, { id: "guard-diagnostic" });
+    const guardFailure = await captureConsoleErrors(() =>
+      auto(guardDb, {
+        runtimeGuard: () => {
+          throw new Error("worker capacity lookup failed");
+        },
+      }),
+    );
+    expect(reasonOf(guardDb, guardCandidate.id)).toBe(
+      "auto_approval_ineligible:runtime_guard_failed:worker capacity lookup failed",
+    );
+    expect(guardFailure.errors).toEqual([
+      "runtime_guard_failed: worker capacity lookup failed",
+    ]);
   });
 
   test("dispatch.paused skips open chain proposals and resumes them after it clears", async () => {
