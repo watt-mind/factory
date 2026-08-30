@@ -359,7 +359,7 @@ test("file surfaces control-plane warnings: warning line, ok:false, exit 1", asy
       "watt-mind/factory#42 exists, but a follow-up write failed: boom",
     ],
   });
-  const before = process.exitCode;
+  const before = process.exitCode ?? 0;
   try {
     await fileTicket(
       cp,
@@ -387,7 +387,9 @@ test("file sets process.exitCode=1 on warnings by default", async () => {
     url: "u",
     warnings: ["off the board"],
   });
-  const before = process.exitCode;
+  // Bun ignores `process.exitCode = undefined`, so restore to a number: a
+  // stale 1 here would make the whole suite exit non-zero with 0 failures.
+  const before = process.exitCode ?? 0;
   try {
     process.exitCode = 0;
     await fileTicket(
