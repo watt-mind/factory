@@ -14,6 +14,7 @@ import {
   pruneArtifacts,
 } from "./artifacts.mjs";
 import { artifactsRoot } from "./config.mjs";
+import { ApiParameterError, parseListLimit } from "./api-params.mjs";
 
 /** Crude but honest content-type: render text in the browser, download the rest. */
 function looksLikeText(file) {
@@ -67,13 +68,12 @@ export async function handleArtifactApiRoute({
     ) {
       return send(422, { error: "orphan must be true or false" });
     }
-    const limitParam = url.searchParams.get("limit");
-    const limit = limitParam === null ? 100 : Number(limitParam);
-    if (
-      limit !== undefined &&
-      (!Number.isInteger(limit) || limit < 1 || limit > 500)
-    ) {
-      return send(422, { error: "limit must be an integer between 1 and 500" });
+    let limit;
+    try {
+      limit = parseListLimit(url, { defaultLimit: 100, maxLimit: 500 });
+    } catch (err) {
+      if (err instanceof ApiParameterError) return send(422, err.body);
+      throw err;
     }
     const rawBefore = url.searchParams.get("before");
     let before = null;

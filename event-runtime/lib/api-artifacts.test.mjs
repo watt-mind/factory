@@ -148,7 +148,14 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       expect(secondPage.artifacts).toHaveLength(1);
       expect(secondPage.nextBefore).toBeNull();
       expect((await fetch(`${base}/artifacts?orphan=maybe`)).status).toBe(422);
-      expect((await fetch(`${base}/artifacts?limit=0`)).status).toBe(422);
+      for (const limit of ["abc", "0", "501"]) {
+        const response = await fetch(`${base}/artifacts?limit=${limit}`);
+        expect(response.status).toBe(422);
+        expect(await response.json()).toMatchObject({
+          error: "invalid_limit",
+          message: "limit must be an integer between 1 and 500",
+        });
+      }
 
       const dry = await fetch(`${base}/artifacts/prune`, {
         method: "POST",
