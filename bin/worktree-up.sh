@@ -513,6 +513,23 @@ else
     env FACTORY_EVENT_HOME="$HOME_DIR" FACTORY_EVENT_PORT="$API_PORT" \
     bun event-runtime/cli.mjs work ${ADAPTER_ARGS[@]+"${ADAPTER_ARGS[@]}"}
   STARTED_WORKER=1
+
+  # spawn_daemon only proves that bun reported a pid. Keep the newly started
+  # worker under observation briefly so an immediate boot failure cannot make
+  # a ready worktree advertise a dead worker.pid. Existing workers deliberately
+  # bypass this check because this invocation did not start them.
+  WORKER_WAIT_STARTED=$SECONDS
+  while :; do
+    if ! pid_alive "$RUN_DIR/worker.pid"; then
+      dump_daemon_log "$RUN_DIR/worker.log" "worker"
+      die "worker died during startup — see $RUN_DIR/worker.log"
+    fi
+    WORKER_WAIT_ELAPSED=$((SECONDS - WORKER_WAIT_STARTED))
+    if (( WORKER_WAIT_ELAPSED >= WORKTREE_WORKER_GRACE_S )); then
+      break
+    fi
+    sleep 0.1
+  done
 fi
 
 if [[ "$WEB_AVAILABLE" -eq 1 ]]; then

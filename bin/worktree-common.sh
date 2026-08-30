@@ -167,7 +167,7 @@ info() { printf '\033[36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33mwarn:\033[0m %s\n' "$*" >&2; }
 
 # Bring-up waits are host-dependent: first boot migrations and validation can
-# take substantially longer than a warmed runtime. Keep the two budgets typed
+# take substantially longer than a warmed runtime. Keep the startup budgets typed
 # and shared by every invocation mode before any worktree side effects begin.
 validate_worktree_timeout() { # <environment variable name> <default>
   local name="$1" default="$2" value
@@ -178,6 +178,7 @@ validate_worktree_timeout() { # <environment variable name> <default>
 }
 
 WORKTREE_HEALTH_TIMEOUT_S="$(validate_worktree_timeout FACTORY_WORKTREE_HEALTH_TIMEOUT_S 55)"
+WORKTREE_WORKER_GRACE_S="$(validate_worktree_timeout FACTORY_WORKTREE_WORKER_GRACE_S 1)"
 WORKTREE_WEB_TIMEOUT_S="$(validate_worktree_timeout FACTORY_WORKTREE_WEB_TIMEOUT_S 5)"
 
 # Resolve a path without requiring its final component to exist. GNU `realpath

@@ -205,7 +205,10 @@ function runWorktreeUp(fixture, ticket) {
   );
 }
 
-function delayedHealthFixture({ webNeverBinds = false } = {}) {
+function delayedHealthFixture({
+  webNeverBinds = false,
+  workerExitsImmediately = false,
+} = {}) {
   const fixture = worktreeUpFixture();
   const fakeBun = path.join(fixture.mockBin, "bun");
   mkdirSync(path.join(fixture.root, "event-runtime", "web"), {
@@ -254,6 +257,9 @@ function delayedHealthFixture({ webNeverBinds = false } = {}) {
     : `
   "run build:fast") exit 1 ;;
 `;
+  const workerBunCase = workerExitsImmediately
+    ? '"event-runtime/cli.mjs work") exit 1 ;;'
+    : '"event-runtime/cli.mjs work") exec "$REAL_BUN" --eval \'setInterval(() => {}, 1 << 30)\' ;;';
   writeFileSync(
     fakeBun,
     `#!/usr/bin/env bash
@@ -273,7 +279,7 @@ ${webBunCases}
       setInterval(() => {}, 1 << 30);
     '
     ;;
-  "event-runtime/cli.mjs work") exec "$REAL_BUN" --eval 'setInterval(() => {}, 1 << 30)' ;;
+  ${workerBunCase}
   *) exec "$REAL_BUN" "$@" ;;
 esac
 `,
@@ -1244,6 +1250,7 @@ test("worktree timeout settings default only when unset and reject malformed val
     ["FACTORY_WORKTREE_HEALTH_TIMEOUT_S", ""],
     ["FACTORY_WORKTREE_HEALTH_TIMEOUT_S", "0"],
     ["FACTORY_WORKTREE_HEALTH_TIMEOUT_S", "abc"],
+    ["FACTORY_WORKTREE_WORKER_GRACE_S", "0"],
     ["FACTORY_WORKTREE_WEB_TIMEOUT_S", "-1"],
   ]) {
     const r = sh(
@@ -1266,6 +1273,37 @@ test("worktree-up uses the elapsed health budget for delayed serve startup", () 
 
     const defaultBudget = runDelayedHealthWorktreeUp(fixture, 55, true);
     expect(defaultBudget.status).toBe(0);
+  } finally {
+    stopFixtureDaemons(fixture);
+    rmSync(fixture.root, { recursive: true, force: true });
+    rmSync(fixture.worktrees, { recursive: true, force: true });
+    rmSync(fixture.mockBin, { recursive: true, force: true });
+  }
+});
+
+test("worktree-up rejects an immediately dead worker", () => {
+  const failedFixture = delayedHealthFixture({ workerExitsImmediately: true });
+  const failedWorktree = path.join(failedFixture.worktrees, "WM-1763");
+  try {
+    const failed = runDelayedHealthWorktreeUp(failedFixture, 5);
+    expect(failed.status).not.toBe(0);
+    expect(failed.stderr).toContain("worker died during startup");
+    for (const daemon of ["serve", "web"]) {
+      expect(daemonPidAlive(failedWorktree, daemon)).toBe(false);
+    }
+  } finally {
+    stopFixtureDaemons(failedFixture);
+    rmSync(failedFixture.root, { recursive: true, force: true });
+    rmSync(failedFixture.worktrees, { recursive: true, force: true });
+    rmSync(failedFixture.mockBin, { recursive: true, force: true });
+  }
+});
+
+test("worktree-up accepts a worker that survives the startup grace", () => {
+  const fixture = delayedHealthFixture();
+  try {
+    const result = runDelayedHealthWorktreeUp(fixture, 5);
+    expect(result.status).toBe(0);
   } finally {
     stopFixtureDaemons(fixture);
     rmSync(fixture.root, { recursive: true, force: true });
