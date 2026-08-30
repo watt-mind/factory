@@ -2,7 +2,6 @@ import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-api-repos
 import { describe, expect, test } from "bun:test";
 import {
   chmodSync,
-  existsSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -10,6 +9,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import {
+  HostConfigConflictError,
+  readHostConfig,
+  writeHostConfig,
+} from "./api-repos.mjs";
 import { makeServer } from "./api-test-helpers.mjs";
 import { loadRepos, reposView } from "./repos.mjs";
 
@@ -249,13 +253,14 @@ describe("repository management API", () => {
     }
   });
 
-  test("preserves config mode and writes the file resolved by the reader", async () => {
+  test("forks an example fallback into repos.yaml without modifying the example", async () => {
     const { root } = factoryRoot();
     const configDir = path.join(root, "config");
     const local = path.join(configDir, "repos.yaml");
     const example = path.join(configDir, "repos.example.yaml");
     chmodSync(local, 0o600);
     renameSync(local, example);
+    const exampleContents = readFileSync(example, "utf8");
     const api = await server(root);
     try {
       const patched = await api.request("/repos/existing", {
@@ -266,8 +271,8 @@ describe("repository management API", () => {
     } finally {
       api.close();
     }
-    expect(statSync(example).mode & 0o777).toBe(0o600);
-    expect(existsSync(local)).toBe(false);
+    expect(readFileSync(example, "utf8")).toBe(exampleContents);
+    expect(statSync(local).mode & 0o777).toBe(0o600);
     expect(loadRepos({ root }).get("existing")?.maxInFlight).toBe(3);
   });
 
@@ -275,46 +280,14 @@ describe("repository management API", () => {
     const { root } = factoryRoot();
     const file = path.join(root, "config", "repos.yaml");
     const contents = readFileSync(file, "utf8");
-    const ready = path.join(root, "external-writer-ready");
-    const writer = Bun.spawn(
-      [
-        process.execPath,
-        "-e",
-        `import { renameSync, writeFileSync } from "node:fs";
-         const [file, contents, ready] = process.argv.slice(1);
-         const tmp = file + ".external-writer";
-         const until = Date.now() + 2000;
-         writeFileSync(tmp, contents);
-         renameSync(tmp, file);
-         writeFileSync(ready, "ready");
-         while (Date.now() < until) {
-           writeFileSync(tmp, contents);
-           renameSync(tmp, file);
-         }`,
-        file,
-        contents,
-        ready,
-      ],
-      { stdout: "ignore", stderr: "ignore" },
+    const config = readHostConfig(root);
+    writeFileSync(file, contents + "\n# external edit\n");
+    expect(() => writeHostConfig(root, config)).toThrow(
+      HostConfigConflictError,
     );
-    const api = await server(root);
-    try {
-      for (let attempts = 0; !existsSync(ready); attempts += 1) {
-        if (attempts === 10_000)
-          throw new Error("external writer did not start");
-        await new Promise(setImmediate);
-      }
-      const patched = await api.request("/repos/existing", {
-        method: "PATCH",
-        body: JSON.stringify({ maxInFlight: 3 }),
-      });
-      expect(patched.status).toBe(409);
-      expect((await patched.json()).error).toContain("changed while");
-    } finally {
-      api.close();
-      writer.kill();
-      await writer.exited;
-    }
+    expect(() => writeHostConfig(root, config)).toThrow(
+      "config/repos.yaml changed while this request was pending; retry the request",
+    );
   });
 
   test("sync re-reads the in-repo overlay and reports whether it applies", async () => {
