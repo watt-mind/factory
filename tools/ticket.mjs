@@ -25,6 +25,10 @@
  *   bun tools/ticket.mjs budget
  *   bun tools/ticket.mjs raw '<graphql>' --var key=value
  *
+ * Linear network safety: requests are blocked when `FACTORY_LINEAR_OFFLINE=1`,
+ * `NODE_ENV=test`, or `BUN_TEST` is set. For a deliberate integration probe,
+ * set `FACTORY_LINEAR_ALLOW_NETWORK=1` on that command to opt in explicitly.
+ *
  * WHY THIS EXISTS, given a perfectly good Linear MCP. (These reasons are
  * Linear-specific and still true; they are why the factory does not depend on
  * that connector, not a claim that the tracker is always Linear.)
@@ -151,26 +155,45 @@ const LINEAR_API_HOST = "api.linear.app";
  * deliberately inherited by CLI children through their environment.
  */
 export function linearNetworkIsOffline(env = process.env) {
-  if (env.FACTORY_LINEAR_ALLOW_NETWORK === "1") return false;
-  return (
-    env.FACTORY_LINEAR_OFFLINE === "1" ||
-    env.NODE_ENV === "test" ||
-    Boolean(env.BUN_TEST)
-  );
+  return linearOfflineGuardTrigger(env) !== null;
 }
 
+/** Return the exact environment setting which enabled the offline guard. */
+export function linearOfflineGuardTrigger(env = process.env) {
+  if (env.FACTORY_LINEAR_ALLOW_NETWORK === "1") return null;
+  if (env.FACTORY_LINEAR_OFFLINE === "1") return "FACTORY_LINEAR_OFFLINE=1";
+  if (env.NODE_ENV === "test") return "NODE_ENV=test";
+  if (env.BUN_TEST) return `BUN_TEST=${env.BUN_TEST}`;
+  return null;
+}
+
+/** Dedicated refusal distinct from generic CLI failure and rate limiting. */
+export const LINEAR_OFFLINE_GUARD_EXIT = 4;
+
 export class LinearOfflineGuardError extends Error {
-  constructor() {
-    super("linear_offline_guard: Linear network access is disabled");
+  constructor(trigger) {
+    super(
+      `linear_offline_guard: Linear network access is disabled by ${trigger}; set FACTORY_LINEAR_ALLOW_NETWORK=1 to allow Linear network access`,
+    );
     this.name = "LinearOfflineGuardError";
     this.code = "linear_offline_guard";
+    this.exitCode = LINEAR_OFFLINE_GUARD_EXIT;
   }
 }
 
 export function assertLinearNetworkAllowed(url, env = process.env) {
-  if (String(url).includes(LINEAR_API_HOST) && linearNetworkIsOffline(env)) {
-    throw new LinearOfflineGuardError();
+  const trigger = linearOfflineGuardTrigger(env);
+  if (String(url).includes(LINEAR_API_HOST) && trigger) {
+    throw new LinearOfflineGuardError(trigger);
   }
+}
+
+/** Adapters may preserve the operator-facing message but not error fields. */
+export function isLinearOfflineGuardError(err) {
+  return (
+    err?.code === "linear_offline_guard" ||
+    String(err?.message ?? "").startsWith("linear_offline_guard:")
+  );
 }
 
 /** Distinct from generic CLI failure (exit 1) so planners can retry-later. */
@@ -1083,7 +1106,11 @@ export async function main() {
       process.exit(LINEAR_RATE_LIMIT_EXIT);
     }
     console.error(`ticket ${verb}: ${e.message}`);
-    process.exit(e.exitCode ?? 1);
+    process.exit(
+      isLinearOfflineGuardError(e)
+        ? LINEAR_OFFLINE_GUARD_EXIT
+        : (e.exitCode ?? 1),
+    );
   }
 }
 

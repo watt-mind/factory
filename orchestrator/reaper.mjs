@@ -43,7 +43,10 @@ import { loadRepos } from "../event-runtime/lib/repos.mjs";
 import { dbPath } from "../event-runtime/lib/config.mjs";
 import { HEARTBEAT_STALE_MS } from "../event-runtime/lib/workers.mjs";
 import { ticketSlug } from "../lib/ticket-slug.mjs";
-import { parseRateLimitReset } from "../tools/ticket.mjs";
+import {
+  assertLinearNetworkAllowed,
+  parseRateLimitReset,
+} from "../tools/ticket.mjs";
 
 export const REAPER_LOG_DIR = path.join(homedir(), ".factory/logs");
 
@@ -209,6 +212,9 @@ export async function gql(
         ? { retries: 5, signal: retriesOrOptions }
         : (retriesOrOptions ?? {});
   const { retries = 5, signal } = options;
+  // This must precede credential loading: offline/test invocations should
+  // explain the deterministic network refusal, not report a missing key.
+  assertLinearNetworkAllowed(LINEAR_API_URL);
   const apiKey = getApiKey();
   const headers = {
     "Content-Type": "application/json",
@@ -254,6 +260,7 @@ export async function gql(
       return data.data || {};
     } catch (err) {
       if (signal?.aborted) throw abortReason(signal);
+      if (err?.code === "linear_offline_guard") throw err;
       if (err?.rateLimited) throw err;
       if (
         attempt < retries - 1 &&

@@ -222,11 +222,14 @@ auto-approval path above is what stops the inbox escalation.
 `bun test` preloads `FACTORY_LINEAR_OFFLINE=1`, and CI sets it for every job.
 While it is set (or `NODE_ENV=test` / `BUN_TEST` is present),
 `tools/ticket.mjs` rejects any `api.linear.app` fetch with
-`linear_offline_guard` before a connection opens. The guard is inherited by
-spawned tracker CLIs. A deliberately networked integration probe must opt in
-with `FACTORY_LINEAR_ALLOW_NETWORK=1`. Worker credential lookup reads only
-`LINEAR_API_KEY` by default; use `FACTORY_LINEAR_ENV_FILE=/path/to/.env` to
-opt into an env-file fallback. Offline/test mode never reads that file.
+`linear_offline_guard` before a connection opens. The refusal identifies the
+setting that enabled it and exits with status 4. To deliberately run a Linear
+integration probe, set `FACTORY_LINEAR_ALLOW_NETWORK=1` on that command; this
+explicit escape hatch overrides the offline/test guard. The guard is inherited
+by spawned tracker CLIs, runs before credential lookup, and is never retried.
+Worker credential lookup reads only `LINEAR_API_KEY` by default; use
+`FACTORY_LINEAR_ENV_FILE=/path/to/.env` to opt into an env-file fallback.
+Offline/test mode never reads that file.
 
 ---
 
