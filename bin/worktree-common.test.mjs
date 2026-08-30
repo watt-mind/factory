@@ -8,6 +8,8 @@ import {
   mkdirSync,
   writeFileSync,
   renameSync,
+  readdirSync,
+  symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -1345,6 +1347,73 @@ exit 1
   } finally {
     rmSync(target, { recursive: true, force: true });
     rmSync(mockBin, { recursive: true, force: true });
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
+// PATH identical to TEST_PATH except that every sha256sum/shasum is hidden,
+// so write_bun_lock_stamp has no hasher to run.
+function pathWithoutShaTools() {
+  const dir = mkdtempSync(path.join(tmpdir(), "no-sha-path-"));
+  const seen = new Set();
+  for (const entry of TEST_PATH.split(":")) {
+    if (!entry || !existsSync(entry)) continue;
+    let names;
+    try {
+      names = readdirSync(entry);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (name === "sha256sum" || name === "shasum" || seen.has(name)) continue;
+      seen.add(name);
+      try {
+        symlinkSync(path.join(entry, name), path.join(dir, name));
+      } catch {
+        // unreadable or racing entry: skip, first-wins semantics preserved
+      }
+    }
+  }
+  return dir;
+}
+
+test("locked_bun_install succeeds without a stamp when no sha256 tool is on PATH", () => {
+  const lockContents = "fixture-lock\n";
+  const target = bunInstallFixture(lockContents);
+  mkdirSync(path.join(target, "node_modules"));
+  // A stale stamp from a previous install must not survive a hasher-less run.
+  writeFileSync(
+    path.join(target, "node_modules", ".bun-lock-sha"),
+    `${sha256Hex("old-lock\n")}\n`,
+  );
+  const mockBin = mockBunInstallBin(true);
+  const noShaPath = pathWithoutShaTools();
+  const lockDir = path.join(
+    tmpdir(),
+    `bun-lock-nosha-${process.pid}-${Date.now()}`,
+  );
+  try {
+    const probe = sh("command -v sha256sum || command -v shasum", {
+      PATH: `${mockBin}:${noShaPath}`,
+    });
+    expect(probe.status).not.toBe(0);
+    const r = sh(`set -e; locked_bun_install "${target}"; echo installed-ok`, {
+      PATH: `${mockBin}:${noShaPath}`,
+      FACTORY_LOCK_DIR: lockDir,
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("installed-ok");
+    expect(r.stderr).toContain("bun lock stamp skipped");
+    expect(existsSync(path.join(target, "node_modules", "placeholder"))).toBe(
+      true,
+    );
+    expect(existsSync(path.join(target, "node_modules", ".bun-lock-sha"))).toBe(
+      false,
+    );
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
+    rmSync(noShaPath, { recursive: true, force: true });
     rmSync(lockDir, { recursive: true, force: true });
   }
 });
