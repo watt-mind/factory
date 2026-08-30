@@ -693,7 +693,7 @@ describe("format and lint mechanical merge fixes (WM-769)", () => {
 
   test("formatted fix comments retain machine markers across multiline HTML bodies", () => {
     expect(fixPrompt).toContain(
-      "### 🛠️ Factory Merge Auto-Fix (Round <round> of 2)",
+      "### 🛠️ Factory Merge Auto-Fix (Round <round> of <max_fix_rounds>)",
     );
     expect(fixPrompt).toContain("**Finding:** <finding description>");
     expect(fixPrompt).toContain("**Changes:** <summary of changes made>");

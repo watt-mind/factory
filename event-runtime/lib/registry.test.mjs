@@ -396,8 +396,10 @@ describe("registry", () => {
     // Regenerated (#1700): merge-fix comments now pair human-readable Markdown
     // with embedded machine markers, and merge-review scans formatted multiline
     // and HTML comment bodies; both prompt definitions are registry inputs.
+    // Re-pinned (#1700 post-review): merge-fix templates the round cap as
+    // `<max_fix_rounds>` instead of hardcoding 2.
     const expected =
-      "sha256:a33e9b245e302890182c7a99f1dd13feb75ccc85d4b33f101518c2cc8510c88c";
+      "sha256:475609349143157c8b659367addb688b17847ea8218af380de5daba2c3b9059a";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 

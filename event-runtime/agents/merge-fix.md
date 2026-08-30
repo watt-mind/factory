@@ -102,7 +102,7 @@ isolated worktree for the ticket. This is not a general implementation run.
    short SHAs are the first seven characters of the full SHAs):
 
    ```md
-   ### 🛠️ Factory Merge Auto-Fix (Round <round> of 2)
+   ### 🛠️ Factory Merge Auto-Fix (Round <round> of <max_fix_rounds>)
 
    **Finding:** <finding description>
    **Changes:** <summary of changes made>
@@ -111,7 +111,9 @@ isolated worktree for the ticket. This is not a general implementation run.
    <!-- factory-merge-fix round=<round> finding=<findingHash> old=<oldSha> new=<newSha> -->
    ```
 
-   The embedded HTML comment is the machine-readable tracking marker: preserve
+   `<max_fix_rounds>` is the configured `merge.max_fix_rounds` cap (the same
+   value merge-review enforces; default 2), never a hardcoded number. The
+   embedded HTML comment is the machine-readable tracking marker: preserve
    its complete, exact field order and substitute the real full values. For
    `format_and_lint`, retain its non-round marker inside an otherwise
    human-readable comment (finding, changes, and short commit SHAs):
