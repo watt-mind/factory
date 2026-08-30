@@ -24,6 +24,37 @@ const spec = (input) => ({ input });
 const ws = () => tmpDir("evrt-cmd-");
 const REAPER_SCRIPT = path.join(FACTORY_ROOT, "orchestrator", "reaper.mjs");
 
+async function waitForPidExit(pid, { timeoutMs, stepMs }) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error?.code === "ESRCH") return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, stepMs));
+  }
+
+  throw new Error(`pid ${pid} did not exit within ${timeoutMs}ms`);
+}
+
+// The grandchild pid file must APPEAR before the group is torn down; a test
+// that skips the liveness assertion because the file never showed up would
+// pass vacuously. Poll for it with a bounded deadline instead.
+async function waitForPidFile(pidFile, { timeoutMs, stepMs }) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(pidFile)) {
+      const raw = readFileSync(pidFile, "utf8").trim();
+      const pid = parseInt(raw, 10);
+      if (Number.isInteger(pid) && pid > 0) return pid;
+    }
+    await new Promise((resolve) => setTimeout(resolve, stepMs));
+  }
+  throw new Error(`pid file ${pidFile} did not appear within ${timeoutMs}ms`);
+}
+
 describe("resolveTemplate", () => {
   test("substitutes placeholders inside argv elements", () => {
     expect(
@@ -338,27 +369,24 @@ writeFileSync("result.json", JSON.stringify({
     const pidFile = path.join(workspaceDir, "grandchild.pid");
     // sh spawns background sleep and writes its pid, then waits
     const script = `sh -c 'sleep 30 & echo $! > "${pidFile}"; wait'`;
-    const outcome = await execute({
+    const runPromise = execute({
       spec: spec({}),
       def: def(["sh", "-c", script]),
       workspaceDir,
-      timeoutMs: 200,
+      timeoutMs: 1000,
     });
+
+    // The grandchild must be running before the timeout fires, otherwise
+    // there is nothing for the group kill to prove.
+    const grandchildPid = await waitForPidFile(pidFile, {
+      timeoutMs: 800,
+      stepMs: 20,
+    });
+    expect(() => process.kill(grandchildPid, 0)).not.toThrow();
+
+    const outcome = await runPromise;
     expect(outcome.timedOut).toBe(true);
-
-    // Give the kernel a brief moment to finish reaping signals
-    await new Promise((r) => setTimeout(r, 100));
-
-    if (existsSync(pidFile)) {
-      const grandchildPid = parseInt(readFileSync(pidFile, "utf8").trim(), 10);
-      let alive = true;
-      try {
-        process.kill(grandchildPid, 0);
-      } catch {
-        alive = false;
-      }
-      expect(alive).toBe(false);
-    }
+    await waitForPidExit(grandchildPid, { timeoutMs: 5000, stepMs: 50 });
   }, 10_000);
 
   test("abortSignal terminates process group immediately (OPS-411)", async () => {
@@ -375,23 +403,17 @@ writeFileSync("result.json", JSON.stringify({
       abortSignal: ac.signal,
     });
 
-    // Abort after 200ms
-    setTimeout(() => ac.abort(), 200);
+    // Abort only once the grandchild is provably alive.
+    const grandchildPid = await waitForPidFile(pidFile, {
+      timeoutMs: 5000,
+      stepMs: 20,
+    });
+    expect(() => process.kill(grandchildPid, 0)).not.toThrow();
+    ac.abort();
 
     const outcome = await runPromise;
     expect(outcome.timedOut).toBe(false);
-
-    await new Promise((r) => setTimeout(r, 100));
-    if (existsSync(pidFile)) {
-      const grandchildPid = parseInt(readFileSync(pidFile, "utf8").trim(), 10);
-      let alive = true;
-      try {
-        process.kill(grandchildPid, 0);
-      } catch {
-        alive = false;
-      }
-      expect(alive).toBe(false);
-    }
+    await waitForPidExit(grandchildPid, { timeoutMs: 5000, stepMs: 50 });
   }, 10_000);
 });
 

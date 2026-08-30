@@ -321,6 +321,7 @@ export function buildRunSpec(
     approvalPolicy = null,
     modelTierOverride,
     modelOverride,
+    configSnapshot = null,
   } = {},
 ) {
   const def = getAgent(registry, mapping.agent);
@@ -341,7 +342,13 @@ export function buildRunSpec(
   // would now admit. Scoped to work-scan to keep every other agent's input —
   // and thus its idempotency key — untouched.
   if (mapping.agent?.startsWith("work-scan") && payload?.repo) {
-    payload = { ...payload, dispatchSecurity: policyDispatchSecurity() };
+    payload = {
+      ...payload,
+      dispatchSecurity: policyDispatchSecurity(
+        configSnapshot?.root ?? reposRoot(),
+        configSnapshot,
+      ),
+    };
   }
   const inputHash = hashJson(payload);
   const placement = def.placement ?? mapping.placement ?? undefined;
@@ -618,9 +625,11 @@ function fetchTicketDefault(ticketId, repo) {
   }
 }
 
-function fetchViewerDefault(repoName) {
+function fetchViewerDefault(repoName, configSnapshot = null) {
   try {
-    const repo = repoName ? getRepo(loadRepos(), repoName) : null;
+    const repo = repoName
+      ? getRepo(snapshotRepos(configSnapshot), repoName)
+      : null;
     // GitHub App installation identities are not assignable users. The
     // GitHub control plane's claim uses the ambient `gh auth` user as the
     // lock owner, so resume checks must read that same identity via /user.
@@ -786,18 +795,46 @@ function fetchInFlightDefault(repoConfig) {
   }
 }
 
-function policyMaxInFlight(root = reposRoot()) {
-  const file = resolveConfigPath("policy", { root });
-  if (!existsSync(file)) return DEFAULT_MAX_IN_FLIGHT;
-  try {
-    const value = Bun.YAML.parse(readFileSync(file, "utf8"))?.concurrency
-      ?.max_in_flight_per_repo;
-    return typeof value === "number" && Number.isFinite(value) && value > 0
-      ? value
-      : DEFAULT_MAX_IN_FLIGHT;
-  } catch {
-    return DEFAULT_MAX_IN_FLIGHT;
+/**
+ * The serve loop evaluates every admitted event in one tick. Keep the mutable
+ * config view consistent within that tick and avoid re-parsing both YAML files
+ * for every dispatch candidate. Direct callers deliberately retain the old
+ * root-default path by omitting this snapshot.
+ */
+export function policySnapshot(root = reposRoot()) {
+  const policyFile = resolveConfigPath("policy", { root });
+  let policy = null;
+  if (existsSync(policyFile)) {
+    try {
+      const parsed = Bun.YAML.parse(readFileSync(policyFile, "utf8"));
+      policy = parsed && typeof parsed === "object" ? parsed : null;
+    } catch {
+      // Existing policy helpers fail safe on malformed policy. Preserve that
+      // behavior in the shared snapshot rather than making a whole tick fail.
+    }
   }
+
+  let repos = null;
+  let reposError = null;
+  try {
+    repos = loadRepos({ root });
+  } catch (err) {
+    reposError = err;
+  }
+  return { root, policyFile, policy, repos, reposError };
+}
+
+function snapshotRepos(snapshot) {
+  if (snapshot?.reposError) throw snapshot.reposError;
+  return snapshot?.repos ?? loadRepos();
+}
+
+function policyMaxInFlight(root = reposRoot(), snapshot = null) {
+  const value = loadRuntimePolicy(root, snapshot)?.concurrency
+    ?.max_in_flight_per_repo;
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : DEFAULT_MAX_IN_FLIGHT;
 }
 
 /**
@@ -810,16 +847,10 @@ function policyMaxInFlight(root = reposRoot()) {
  * for conflicts that mostly never materialized.
  */
 export const DEFAULT_OWNED_PATHS_COLLISION = "strict";
-export function policyOwnedPathsCollision(root = reposRoot()) {
-  const file = resolveConfigPath("policy", { root });
-  if (!existsSync(file)) return DEFAULT_OWNED_PATHS_COLLISION;
-  try {
-    const value = Bun.YAML.parse(readFileSync(file, "utf8"))?.dispatch
-      ?.owned_paths_collision;
-    return value === "advisory" ? "advisory" : DEFAULT_OWNED_PATHS_COLLISION;
-  } catch {
-    return DEFAULT_OWNED_PATHS_COLLISION;
-  }
+export function policyOwnedPathsCollision(root = reposRoot(), snapshot = null) {
+  const value = loadRuntimePolicy(root, snapshot)?.dispatch
+    ?.owned_paths_collision;
+  return value === "advisory" ? "advisory" : DEFAULT_OWNED_PATHS_COLLISION;
 }
 
 /**
@@ -832,16 +863,9 @@ export function policyOwnedPathsCollision(root = reposRoot()) {
  * `escalate_paths` sensitive-file gate is unaffected and still applies.
  */
 export const DEFAULT_DISPATCH_SECURITY = "excluded";
-export function policyDispatchSecurity(root = reposRoot()) {
-  const file = resolveConfigPath("policy", { root });
-  if (!existsSync(file)) return DEFAULT_DISPATCH_SECURITY;
-  try {
-    const value = Bun.YAML.parse(readFileSync(file, "utf8"))?.dispatch
-      ?.security_tickets;
-    return value === "auto" ? "auto" : DEFAULT_DISPATCH_SECURITY;
-  } catch {
-    return DEFAULT_DISPATCH_SECURITY;
-  }
+export function policyDispatchSecurity(root = reposRoot(), snapshot = null) {
+  const value = loadRuntimePolicy(root, snapshot)?.dispatch?.security_tickets;
+  return value === "auto" ? "auto" : DEFAULT_DISPATCH_SECURITY;
 }
 
 /** Fail-safe merge admission cap when policy is absent or malformed. */
@@ -924,7 +948,23 @@ export function inFlightDispatchForTicket(db, payload) {
   return inFlightRunForTicket(db, "dispatch@1", payload);
 }
 
-function loadRepoEscalatePaths(repoName, root = reposRoot()) {
+function loadRepoEscalatePaths(repoName, root = reposRoot(), snapshot = null) {
+  if (snapshot) {
+    let repo;
+    try {
+      repo = getRepo(snapshotRepos(snapshot), repoName);
+    } catch (err) {
+      throw new RepoError(
+        `${reposConfigPath(root)}: cannot verify escalate_paths: ${err.message}`,
+      );
+    }
+    if (!Array.isArray(repo.escalatePaths)) {
+      throw new RepoError(
+        `${reposConfigPath(root)}: repo ${repoName} must declare escalate_paths as an array (use [] only when deliberately empty)`,
+      );
+    }
+    return [...new Set(repo.escalatePaths.map((item) => item.trim()))];
+  }
   const file = reposConfigPath(root);
   if (!existsSync(file)) {
     throw new RepoError(
@@ -963,7 +1003,8 @@ function loadRepoEscalatePaths(repoName, root = reposRoot()) {
   return [...new Set(escalate.map((item) => item.trim()))];
 }
 
-function loadRuntimePolicy(root = reposRoot()) {
+function loadRuntimePolicy(root = reposRoot(), snapshot = null) {
+  if (snapshot) return snapshot.policy;
   const file = resolveConfigPath("policy", { root });
   if (!existsSync(file)) return null;
   try {
@@ -974,8 +1015,8 @@ function loadRuntimePolicy(root = reposRoot()) {
   }
 }
 
-function defaultBudgetRefusal() {
-  const policy = loadRuntimePolicy();
+function defaultBudgetRefusal(root = reposRoot(), snapshot = null) {
+  const policy = loadRuntimePolicy(root, snapshot);
   if (!policy) return "budget_policy_unavailable";
   return budgetExhausted(policy) ? "budget_exhausted" : null;
 }
@@ -1029,9 +1070,12 @@ function evidenceTicket(ticket, ticketId) {
  * lookup time. GitHub is the parser-bearing plane today, so use the same
  * parser its adapter uses rather than duplicating a narrower regex here.
  */
-function invalidTicketIdentifierReason(repo, ticket) {
+function invalidTicketIdentifierReason(repo, ticket, snapshot = null) {
   const controlPlane =
-    repo.controlPlane ?? loadRuntimePolicy()?.controlPlane?.kind ?? "linear";
+    repo.controlPlane ??
+    loadRuntimePolicy(snapshot?.root ?? reposRoot(), snapshot)?.controlPlane
+      ?.kind ??
+    "linear";
   if (controlPlane !== "github") return null;
   try {
     parseIssueIdentifier(ticket, repo.github ?? undefined);
@@ -1119,8 +1163,10 @@ export function worktreeDispatchAutoEligibility(
     escalatedContinuation = null,
     operatorAuthorized = false,
     now = Date.now(),
+    configSnapshot = null,
   } = {},
 ) {
+  const configRoot = configSnapshot?.root ?? reposRoot();
   const evidence = {
     checkedAt: new Date(resolveNow(now)).toISOString(),
     repo: {},
@@ -1136,12 +1182,15 @@ export function worktreeDispatchAutoEligibility(
   evidence.checks.operator_authorized = operatorAuthorized === true;
   let repo;
   try {
-    repo = getRepo(loadRepos(), payload?.repo);
+    repo = getRepo(snapshotRepos(configSnapshot), payload?.repo);
   } catch (err) {
     evidence.checks.repo_found = false;
     return refusal(`repo_unknown: ${err.message}`, evidence, "human_needed");
   }
-  const cap = repo.maxInFlight ?? maxInFlightFallback ?? policyMaxInFlight();
+  const cap =
+    repo.maxInFlight ??
+    maxInFlightFallback ??
+    policyMaxInFlight(configRoot, configSnapshot);
   const live = countLeases(repo.name);
   evidence.repo = {
     name: repo.name,
@@ -1165,6 +1214,7 @@ export function worktreeDispatchAutoEligibility(
   const invalidTicketIdentifier = invalidTicketIdentifierReason(
     repo,
     payload?.ticket,
+    configSnapshot,
   );
   if (invalidTicketIdentifier) {
     evidence.checks.ticket_identifier_parseable = false;
@@ -1203,7 +1253,7 @@ export function worktreeDispatchAutoEligibility(
 
   let budgetReason;
   try {
-    budgetReason = budgetRefusal();
+    budgetReason = budgetRefusal(configRoot, configSnapshot);
   } catch {
     budgetReason = "budget_check_failed";
   }
@@ -1287,7 +1337,7 @@ export function worktreeDispatchAutoEligibility(
           : null,
       );
     }
-    const viewer = fetchViewer(payload?.repo);
+    const viewer = fetchViewer(payload?.repo, configSnapshot);
     const viewerOwnsClaim = Boolean(
       viewer?.id && String(ticket.assignee.id) === String(viewer.id),
     );
@@ -1423,7 +1473,10 @@ export function worktreeDispatchAutoEligibility(
   // merge lane refuses to merge a security PR (merge-plan §escalation), so this
   // only ever produces a PR held for human merge — never an auto-merge — and
   // the escalate_paths sensitive-file gate below still guards touched files.
-  evidence.checks.security_dispatch_mode = policyDispatchSecurity();
+  evidence.checks.security_dispatch_mode = policyDispatchSecurity(
+    configRoot,
+    configSnapshot,
+  );
   if (
     isSecurityTicket &&
     !evidence.checks.operator_authorized &&
@@ -1444,7 +1497,7 @@ export function worktreeDispatchAutoEligibility(
   evidence.inFlight = inFlight
     .filter((issue) => String(issue.identifier) !== String(payload?.ticket))
     .map(evidenceInFlight);
-  const collisionMode = policyOwnedPathsCollision();
+  const collisionMode = policyOwnedPathsCollision(configRoot, configSnapshot);
   evidence.checks.owned_paths_collision_mode = collisionMode;
   const inFlightPaths = evidence.inFlight.flatMap((issue) => issue.ownedPaths);
   if (pathsCollide(evidence.ticket.ownedPaths, inFlightPaths)) {
@@ -1486,7 +1539,11 @@ export function worktreeDispatchAutoEligibility(
     evidence.checks.owned_paths_disjoint = true;
   }
   try {
-    evidence.repo.escalatePaths = loadRepoEscalatePaths(repo.name);
+    evidence.repo.escalatePaths = loadRepoEscalatePaths(
+      repo.name,
+      configRoot,
+      configSnapshot,
+    );
   } catch (err) {
     evidence.checks.escalate_paths = { verified: false };
     return refusal(
@@ -1970,6 +2027,7 @@ export function planEvent(
     adapterOverride,
     artifactStore = artifactsRoot(),
     dispatch = {},
+    configSnapshot = null,
   } = {},
 ) {
   // Dispatch gate for tier-2 worktree agents (WM-108), evaluated BEFORE the
@@ -2006,6 +2064,7 @@ export function planEvent(
             {
               ...dispatch,
               operatorAuthorized: preEnvelope.source === "operator",
+              configSnapshot,
             },
           );
         } catch (err) {
@@ -2459,6 +2518,7 @@ export function planEvent(
               // Remote handoff is unattended. Only a durable operator event
               // may exercise the sensitive/escalate-path bypass.
               operatorAuthorized: false,
+              configSnapshot,
             });
         if (!result?.ok) {
           return humanNeeded(
@@ -2503,6 +2563,7 @@ export function planEvent(
         approvalPolicy,
         modelTierOverride,
         modelOverride: overlayModel,
+        configSnapshot,
       }),
       idempotencyKey,
     };
@@ -2640,7 +2701,8 @@ export function planAdmittedEvents(db, registry, opts = {}) {
     .all();
   const cache = opts.linearReadCache ?? createLinearReadCache();
   const dispatch = wrapLinearReads(opts.dispatch ?? {}, cache, opts.now);
-  const planOpts = { ...opts, dispatch };
+  const configSnapshot = opts.configSnapshot ?? policySnapshot();
+  const planOpts = { ...opts, dispatch, configSnapshot };
   let planned = 0;
   let failed = 0;
   let deadLettered = 0;

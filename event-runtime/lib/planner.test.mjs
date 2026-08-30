@@ -1,7 +1,8 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-planner-test-mjs";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import * as nodeFs from "node:fs";
 import path from "node:path";
 import { canonicalJson, hashBytes, hashJson } from "./canonical.mjs";
 import { DEAD_LETTER_AFTER, DEFAULT_MAX_IN_FLIGHT } from "./config.mjs";
@@ -2819,6 +2820,111 @@ describe("planEvent runtime overlay (WM-887)", () => {
 });
 
 describe("planAdmittedEvents", () => {
+  test("snapshots policy.yaml and repos.yaml once for a multi-candidate dispatch tick (GH-1362)", () => {
+    const root = tmpDir("evrt-plan-config-snapshot-");
+    const configDir = path.join(root, "config");
+    mkdirSync(configDir, { recursive: true });
+    const reposFile = path.join(configDir, "repos.yaml");
+    const policyFile = path.join(configDir, "policy.yaml");
+    writeFileSync(
+      reposFile,
+      `repos:\n  - name: snapshotted\n    path: /tmp/nowhere\n    base: develop\n` +
+        `    team: WM\n    project: Factory\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+        `    worktree_root: /tmp/worktrees\n    escalate_paths: []\n`,
+    );
+    writeFileSync(
+      policyFile,
+      "concurrency:\n  max_in_flight_per_repo: 5\ndispatch:\n  security_tickets: auto\n  owned_paths_collision: advisory\n" +
+        "chain_auto_approval:\n  allowed_event_types: []\n",
+    );
+    const previous = process.env.FACTORY_REPOS_ROOT;
+    process.env.FACTORY_REPOS_ROOT = root;
+    const reads = new Map();
+    const realReadFileSync = nodeFs.readFileSync;
+    const readSpy = spyOn(nodeFs, "readFileSync").mockImplementation(
+      (file, ...args) => {
+        const filename = String(file);
+        if (filename === reposFile || filename === policyFile) {
+          reads.set(filename, (reads.get(filename) ?? 0) + 1);
+        }
+        return realReadFileSync(file, ...args);
+      },
+    );
+    try {
+      const snapshotRegistry = {
+        ...registry,
+        agents: new Map(registry.agents),
+        eventTypes: { ...registry.eventTypes },
+      };
+      snapshotRegistry.eventTypes["test.config-snapshot.requested"] = {
+        agent: "test-config-snapshot@1",
+        adapter: "claude",
+        idempotencyScope: ["inputHash"],
+      };
+      snapshotRegistry.agents.set("test-config-snapshot@1", {
+        id: "test-config-snapshot",
+        version: 1,
+        ref: "test-config-snapshot@1",
+        output_contract: "factory.test/v1",
+        workspace: { type: "worktree" },
+        capabilities: { services: [] },
+        limits: { timeout_seconds: 60, attempts: 1 },
+        mutating: true,
+        inputSchema: {
+          type: "object",
+          required: ["repo", "ticket"],
+          properties: {
+            repo: { type: "string" },
+            ticket: { type: "string" },
+          },
+        },
+      });
+      const db = openDb(":memory:");
+      for (let i = 1; i <= 5; i++) {
+        expect(
+          admitEvent(
+            db,
+            snapshotRegistry,
+            envelope({
+              type: "test.config-snapshot.requested",
+              eventId: `snapshot-candidate-${i}`,
+              correlationId: `snapshot-candidate-${i}`,
+              payload: { repo: "snapshotted", ticket: `WM-${13620 + i}` },
+            }),
+            { now: NOW },
+          ).admitted,
+        ).toBe(true);
+      }
+
+      expect(
+        planAdmittedEvents(db, snapshotRegistry, {
+          now: NOW,
+          dispatch: {
+            countLeases: () => 0,
+            budgetRefusal: () => null,
+            fetchTicket: (ticket) => ({
+              identifier: ticket,
+              state: { name: "Todo" },
+              assignee: null,
+              labels: { nodes: [{ name: "ai:agent-ready" }] },
+              description: "## Owned Paths\n- event-runtime/lib/planner.mjs\n",
+            }),
+            fetchInFlight: () => [],
+          },
+        }),
+      ).toEqual({ planned: 5, failed: 0, deadLettered: 0 });
+      // Five candidates used to cost six parses of each file (#1362). The
+      // eligibility path now reads each once; the post-plan auto-approval
+      // pass may read policy.yaml one more time, never once per candidate.
+      expect(reads.get(reposFile)).toBe(1);
+      expect(reads.get(policyFile) ?? 0).toBeLessThanOrEqual(2);
+    } finally {
+      readSpy.mockRestore();
+      if (previous === undefined) delete process.env.FACTORY_REPOS_ROOT;
+      else process.env.FACTORY_REPOS_ROOT = previous;
+    }
+  });
+
   test("records and logs a typed reason for a nooped dispatch", () => {
     const root = tmpDir("evrt-plan-noop-");
     mkdirSync(path.join(root, "config"), { recursive: true });
