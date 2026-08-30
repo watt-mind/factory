@@ -38,6 +38,7 @@ import {
   RUNTIME_IDENTITY_ENV,
   safeChildEnvironment as sharedSafeChildEnvironment,
 } from "./child-env.mjs";
+import { DETACHED_SPAWN_OPTIONS, killProcessGroup } from "./child-process.mjs";
 import { refuseSandbox } from "./sandboxed.mjs";
 
 export {
@@ -76,23 +77,7 @@ export const HARNESS_LAYOUT = Object.freeze({
 export const KILL_GRACE_MS = 30_000;
 
 /** Terminate a detached CLI and every subprocess it started (WM-263). */
-export function killProcessGroup(
-  child,
-  signal = "SIGTERM",
-  kill = process.kill,
-) {
-  const pid = child?.pid;
-  if (!pid) return;
-  try {
-    kill(-pid, signal);
-  } catch {
-    try {
-      child.kill(signal);
-    } catch {
-      // already terminated
-    }
-  }
-}
+export { killProcessGroup };
 
 const TEXT_PREVIEW_CHARS = 4000;
 
@@ -321,7 +306,7 @@ export async function execute({
       cwd: workspaceDir,
       env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
-      detached: true,
+      ...DETACHED_SPAWN_OPTIONS,
     });
 
     const transcript = createWriteStream(
@@ -405,26 +390,17 @@ export async function execute({
     }
 
     let timedOut = false;
-    let killTimer = null;
+    let cancelTermination = null;
+    const terminate = () => {
+      cancelTermination ??= killProcessGroup(child, { killGraceMs });
+    };
     const termTimer = setTimeout(() => {
       timedOut = true;
-      killProcessGroup(child, "SIGTERM");
-      killTimer = setTimeout(
-        () => killProcessGroup(child, "SIGKILL"),
-        killGraceMs,
-      );
-      killTimer.unref?.();
+      terminate();
     }, timeoutMs);
 
     const onAbort = () => {
-      killProcessGroup(child, "SIGTERM");
-      if (!killTimer) {
-        killTimer = setTimeout(
-          () => killProcessGroup(child, "SIGKILL"),
-          killGraceMs,
-        );
-        killTimer.unref?.();
-      }
+      terminate();
     };
     const abortSig = abortSignal ?? signal;
     if (abortSig) {
@@ -437,14 +413,14 @@ export async function execute({
 
     child.on("error", (err) => {
       clearTimeout(termTimer);
-      if (killTimer) clearTimeout(killTimer);
+      cancelTermination?.();
       if (abortSig) abortSig.removeEventListener?.("abort", onAbort);
       transcript.destroy();
       reject(err);
     });
     child.on("close", async (exitCode) => {
       clearTimeout(termTimer);
-      if (killTimer) clearTimeout(killTimer);
+      cancelTermination?.();
       if (abortSig) abortSig.removeEventListener?.("abort", onAbort);
       try {
         onUsage?.({

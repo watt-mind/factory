@@ -35,6 +35,7 @@ import {
   RUNTIME_IDENTITY_ENV,
   safeChildEnvironment as sharedSafeChildEnvironment,
 } from "./child-env.mjs";
+import { DETACHED_SPAWN_OPTIONS, killProcessGroup } from "./child-process.mjs";
 import { runSandboxed, sandboxRequested } from "./sandboxed.mjs";
 
 /** This adapter executes inside the VM when a definition asks (WM-185). */
@@ -108,20 +109,6 @@ export function resolveTemplate(template, input) {
       return String(value);
     }),
   );
-}
-
-function killProcessGroup(child, signal = "SIGTERM") {
-  const pid = child?.pid;
-  if (!pid) return;
-  try {
-    process.kill(-pid, signal);
-  } catch {
-    try {
-      child.kill(signal);
-    } catch {
-      // already terminated
-    }
-  }
 }
 
 /**
@@ -241,7 +228,7 @@ export async function execute({
       cwd: workspaceDir,
       env: safeChildEnvironment(env, def),
       stdio: ["ignore", "pipe", "pipe"],
-      detached: true,
+      ...DETACHED_SPAWN_OPTIONS,
     });
 
     let output = "";
@@ -260,24 +247,19 @@ export async function execute({
     child.stderr.on("data", collect);
 
     let timedOut = false;
-    let killTimer = null;
+    let cancelTermination = null;
+    const terminate = () => {
+      cancelTermination ??= killProcessGroup(child, {
+        killGraceMs: KILL_GRACE_MS,
+      });
+    };
     const termTimer = setTimeout(() => {
       timedOut = true;
-      killProcessGroup(child, "SIGTERM");
-      killTimer = setTimeout(
-        () => killProcessGroup(child, "SIGKILL"),
-        KILL_GRACE_MS,
-      );
+      terminate();
     }, timeoutMs);
 
     const onAbort = () => {
-      killProcessGroup(child, "SIGTERM");
-      if (!killTimer) {
-        killTimer = setTimeout(
-          () => killProcessGroup(child, "SIGKILL"),
-          KILL_GRACE_MS,
-        );
-      }
+      terminate();
     };
     const abortSig = abortSignal ?? signal;
     if (abortSig) {
@@ -290,14 +272,14 @@ export async function execute({
 
     child.on("error", (err) => {
       clearTimeout(termTimer);
-      if (killTimer) clearTimeout(killTimer);
+      cancelTermination?.();
       if (abortSig) abortSig.removeEventListener?.("abort", onAbort);
       reject(err);
     });
 
     child.on("close", (exitCode) => {
       clearTimeout(termTimer);
-      if (killTimer) clearTimeout(killTimer);
+      cancelTermination?.();
       if (abortSig) abortSig.removeEventListener?.("abort", onAbort);
       if (exitCode === 0 && !timedOut) {
         const write = () => {
