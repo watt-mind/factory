@@ -780,6 +780,20 @@ export interface EnvIdentity {
   adapter: string | null;
 }
 
+export interface RegistryHealth {
+  loadedAt: string;
+  stamp: string | null;
+  lastReloadError: { at: string; message: string } | null;
+}
+
+export interface HealthView {
+  ok: boolean;
+  policyVersion: string;
+  env: EnvIdentity;
+  tick?: { lastMs: number; overruns: number };
+  registry: RegistryHealth | null;
+}
+
 /** A registered scheduler loop that has missed ticks or errored (§9). */
 export interface StoppedSchedule {
   loop: string;

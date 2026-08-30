@@ -73,6 +73,17 @@ type NavBadge = {
   title?: string;
 };
 
+function reloadAge(loadedAt?: string) {
+  if (!loadedAt) return null;
+  const elapsed = Math.max(0, Date.now() - Date.parse(loadedAt));
+  if (!Number.isFinite(elapsed)) return null;
+  const seconds = Math.floor(elapsed / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h`;
+}
+
 function NavCount({ id, badge }: { id: string; badge: NavBadge }) {
   return (
     <span
@@ -339,6 +350,8 @@ export function App() {
   // than !connected, so an in-flight /health never flashes an outage.
   const healthPending = health.isPending;
   const healthFailed = !connected && !healthPending;
+  const registryHealth = health.data?.registry;
+  const registryReloadAge = reloadAge(registryHealth?.loadedAt);
 
   useEffect(() => {
     if (health.data?.tick?.overruns && health.data.tick.overruns > 0) {
@@ -833,6 +846,24 @@ export function App() {
               </div>
             </div>
           )}
+          {connected && registryHealth?.lastReloadError && (
+            <div
+              role="alert"
+              className="shrink-0 border-b px-4 py-2 text-[12px]"
+              style={{
+                color: "var(--hue-err)",
+                background:
+                  "color-mix(in oklch, var(--hue-err) 10%, transparent)",
+                borderColor:
+                  "color-mix(in oklch, var(--hue-err) 35%, var(--border))",
+              }}
+            >
+              Registry reload failed — running last-good configuration.{" "}
+              <span className="mono">
+                {registryHealth.lastReloadError.message}
+              </span>
+            </div>
+          )}
           <div
             data-testid="view-slot"
             className="flex min-h-0 flex-1 flex-col overflow-hidden"
@@ -878,6 +909,14 @@ export function App() {
               <span>
                 connected ·{" "}
                 <span className="mono">{health.data?.policyVersion}</span>
+                {registryReloadAge && (
+                  <span
+                    className="ml-1 text-(--text-faint)"
+                    title={`Registry ${registryHealth?.stamp ?? "unknown stamp"} loaded ${registryHealth?.loadedAt}`}
+                  >
+                    · registry {registryReloadAge} ago
+                  </span>
+                )}
                 {liveWorkers !== null && (
                   <span
                     className="ml-1"

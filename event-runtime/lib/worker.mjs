@@ -2173,8 +2173,35 @@ export function checkoutPolicyVersion(repoRoot = FACTORY_ROOT) {
   }
 }
 
-/** What "the worker's code" is: everything the claim loop actually executes. */
-export const CODE_STAMP_PATHS = ["event-runtime/lib", "event-runtime/cli.mjs"];
+/**
+ * Data that changes the meaning of a planned run.  Keep this separate from
+ * the executable paths so callers that add another code directory cannot
+ * accidentally drop the registry inputs from the worker stamp.
+ */
+export const REGISTRY_STAMP_PATHS = [
+  "event-runtime/agents",
+  "event-runtime/schemas",
+  "event-runtime/event-types.json",
+  "event-runtime/edges.json",
+  "event-runtime/schedules.json",
+];
+
+/** The effective local config, including the clean-checkout example fallback. */
+export function resolvedRegistryConfigPaths(repoRoot = codeStampRoot()) {
+  return ["policy", "schedule"].map((name) => {
+    const local = `config/${name}.yaml`;
+    return existsSync(path.join(repoRoot, local))
+      ? local
+      : `config/${name}.example.yaml`;
+  });
+}
+
+/** What "the worker's code" is: executable code plus resolved registry data. */
+export const CODE_STAMP_PATHS = [
+  "event-runtime/lib",
+  "event-runtime/cli.mjs",
+  ...REGISTRY_STAMP_PATHS,
+];
 
 /** Re-stamping cadence. The poll loop is faster (500ms) and must not re-hash twice a second. */
 export const RELOAD_CHECK_INTERVAL_MS = 1_000;
@@ -2209,7 +2236,14 @@ export function codeStampFiles(
   paths = CODE_STAMP_PATHS,
 ) {
   const files = [];
-  for (const rel of paths) {
+  // cli/work.mjs adds event-runtime/cli to the executable set.  Always union
+  // the registry inputs so that older/custom call sites cannot create a
+  // code-only watcher which would execute stale definitions.
+  for (const rel of new Set([
+    ...paths,
+    ...REGISTRY_STAMP_PATHS,
+    ...resolvedRegistryConfigPaths(repoRoot),
+  ])) {
     const abs = path.join(repoRoot, rel);
     let st;
     try {
@@ -2223,17 +2257,9 @@ export function codeStampFiles(
   return files.map((f) => path.relative(repoRoot, f)).sort();
 }
 
-function gitHead(repoRoot) {
-  const result = spawnSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], {
-    encoding: "utf8",
-    timeout: workerSubprocessTimeoutMs(),
-  });
-  return result.status === 0 ? result.stdout.trim().slice(0, 12) : "nogit";
-}
-
 /**
- * A short, stable identity for the code this worker is running: HEAD plus a
- * content hash of the stamp paths.
+ * A short, stable identity for the code and registry data this worker is
+ * running: a content hash of the stamp paths.
  *
  * Contents, not mtimes — a `git checkout` that rewrites a file back to what it
  * already was must NOT bounce the worker, and an uncommitted edit must, which
@@ -2255,7 +2281,9 @@ export function codeStamp(
     }
     hash.update("\0");
   }
-  return `${gitHead(repoRoot)}:${hash.digest("hex").slice(0, 12)}`;
+  // Do not include HEAD: committing an unrelated README must not bounce every
+  // worker when none of the bytes it executes or resolves changed.
+  return `files:${hash.digest("hex").slice(0, 12)}`;
 }
 
 /**
@@ -3345,6 +3373,27 @@ export async function executeClaimed(
     });
     if (started?.fenced) {
       return { fenced: true };
+    }
+
+    // A registry reload can remove an agent after its proposal was approved.
+    // Refuse the already-queued run before any dispatch claim, workspace, or
+    // adapter side effect.  This is an expected data change, not a loader
+    // crash and not a retryable execution failure.
+    if (!def) {
+      const refusedRes = refuseTerminal(
+        "agent_unregistered_after_reload",
+        ["registry_reload"],
+        { causeTyped: true },
+      );
+      stopCancellationMonitor();
+      if (refusedRes?.fenced) return { fenced: true };
+      return {
+        runId,
+        attempt,
+        terminalState: "REFUSED",
+        reasonCode: "agent_unregistered_after_reload",
+        receipt: refusedRes?.receipt,
+      };
     }
 
     const adapterKey = adapterOverride ?? spec.adapter;

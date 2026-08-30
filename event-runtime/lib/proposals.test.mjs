@@ -2,11 +2,12 @@ import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-proposals
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { hashJson } from "./canonical.mjs";
+import { canonicalJson, hashJson } from "./canonical.mjs";
 import { openDb } from "./db.mjs";
 import { admitEvent } from "./intake.mjs";
 import { lifecycleOf, runState } from "./lifecycle.mjs";
 import { planEvent } from "./planner.mjs";
+import { computeDefHash } from "./receipts.mjs";
 import {
   ambiguousOpenProposalRuns,
   approveProposal,
@@ -190,6 +191,49 @@ describe("approveProposal within TTL", () => {
     ]);
     expect(journal[1].actor).toBe("operator");
     expect(journal[1].correlation_id).toBe("workflow-01");
+  });
+
+  test("a registry defHash change supersedes and creates one fresh open proposal", () => {
+    const { db, proposal, runId } = planned();
+    const stored = getProposal(db, proposal.id);
+    const pinnedSpec = {
+      ...stored.spec,
+      defHash: computeDefHash(registry.agents.get(stored.spec.agent)),
+    };
+    const pinnedJson = canonicalJson(pinnedSpec);
+    const pinnedHash = hashJson(pinnedSpec);
+    db.query(
+      `UPDATE proposals SET spec_json = ?, spec_hash = ? WHERE id = ?`,
+    ).run(pinnedJson, pinnedHash, proposal.id);
+    db.query(
+      `UPDATE runs SET spec_json = ?, spec_hash = ? WHERE run_id = ?`,
+    ).run(pinnedJson, pinnedHash, runId);
+    const agents = new Map(registry.agents);
+    const previous = agents.get(pinnedSpec.agent);
+    agents.set(pinnedSpec.agent, {
+      ...previous,
+      description: `${previous.description ?? ""} reloaded`,
+    });
+    const current = { ...registry, agents };
+
+    const result = approveProposal(db, current, proposal.id, {
+      actor: "operator",
+      now: NOW + 1000,
+      policyVersion: "git:test",
+    });
+    expect(result).toMatchObject({
+      approved: false,
+      replanned: true,
+      registryReloaded: true,
+    });
+    expect(result.proposal.id).not.toBe(proposal.id);
+    expect(result.proposal.reason).toBe("replanned_after_registry_reload");
+    expect(getProposal(db, proposal.id)).toMatchObject({
+      status: "superseded",
+      reason: "superseded_by_registry_reload",
+    });
+    expect(openProposals(db, { now: NOW + 1000 })).toHaveLength(1);
+    expect(runState(db, runId)).toBe("PROPOSED");
   });
 
   test("only open 'run' proposals are approvable", () => {

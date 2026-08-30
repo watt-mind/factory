@@ -401,6 +401,7 @@ export async function handleIntakeApiRoute({
   send,
   readBody,
   parseJson,
+  registryHealth,
 }) {
   if (route === "GET /health") {
     const tickStats =
@@ -415,6 +416,7 @@ export async function handleIntakeApiRoute({
       env,
       webhookSecret: secret ? "set" : "absent",
       githubWebhookSecret: githubSecret ? "set" : "absent",
+      registry: registryHealth ?? null,
       githubIntake,
       tick: {
         lastMs: tickStats?.lastMs ?? 0,
