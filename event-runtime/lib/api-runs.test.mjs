@@ -1567,7 +1567,7 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
     }
   });
 
-  test("journal feed pages by seq and outbox lists published result events", async () => {
+  test("journal feed pages by seq and outbox exposes delivery state", async () => {
     const { db, server, port } = await makeServer();
     const client = apiClient({ port });
     try {
@@ -1600,6 +1600,51 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
       expect(outbox).toHaveLength(1);
       expect(outbox[0].event.type).toBe("factory.status-report.completed");
       expect(outbox[0].published_at).toBeNull(); // no serve loop in this test — sink not run
+      expect(outbox[0]).toMatchObject({
+        deliveryAttempts: 0,
+        deliveryError: null,
+        parked: false,
+      });
+
+      // Real transient shape written by transientFailure(): a JSON envelope
+      // with the message and the retry deadline, and published_at still null.
+      db.query(
+        `UPDATE outbox
+         SET delivery_attempts = 1, delivery_error = ?, published_at = NULL
+         WHERE seq = ?`,
+      ).run(
+        JSON.stringify({ message: "sink down", retryAt: Date.now() + 5000 }),
+        outbox[0].seq,
+      );
+      expect((await client.outbox()).outbox[0]).toMatchObject({
+        deliveryAttempts: 1,
+        deliveryError: "sink down",
+        parked: false,
+      });
+
+      db.query(
+        `UPDATE outbox
+         SET delivery_attempts = 3, delivery_error = ?, published_at = ?
+         WHERE seq = ?`,
+      ).run("sink unavailable", new Date().toISOString(), outbox[0].seq);
+      const parked = (await client.outbox()).outbox[0];
+      expect(parked).toMatchObject({
+        deliveryAttempts: 3,
+        deliveryError: "sink unavailable",
+        parked: true,
+      });
+
+      db.query(
+        `UPDATE outbox
+         SET event_json = ?, delivery_attempts = 1, delivery_error = ?
+         WHERE seq = ?`,
+      ).run("not JSON", "Unexpected token", outbox[0].seq);
+      expect((await client.outbox()).outbox[0]).toMatchObject({
+        event: { raw: "not JSON" },
+        deliveryAttempts: 1,
+        deliveryError: "Unexpected token",
+        parked: true,
+      });
     } finally {
       server.close();
     }

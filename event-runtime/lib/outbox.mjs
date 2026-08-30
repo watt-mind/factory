@@ -12,7 +12,33 @@ import { tx } from "./db.mjs";
 export const DEFAULT_OUTBOX_RETENTION_DAYS = 14;
 export const DEFAULT_OUTBOX_BATCH_SIZE = 500;
 export const DEFAULT_OUTBOX_MAX_ATTEMPTS = 3;
+export const DEFAULT_OUTBOX_RETRY_BASE_MS = 5_000;
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+function transientFailure(message, retryAt) {
+  return JSON.stringify({ message, retryAt });
+}
+
+function retryAtFromFailure(deliveryError) {
+  try {
+    const failure = JSON.parse(deliveryError);
+    return Number.isFinite(failure?.retryAt) ? failure.retryAt : null;
+  } catch {
+    return null;
+  }
+}
+
+export function deliveryErrorMessage(deliveryError) {
+  if (deliveryError == null) return null;
+  try {
+    const failure = JSON.parse(deliveryError);
+    return typeof failure?.message === "string"
+      ? failure.message
+      : deliveryError;
+  } catch {
+    return deliveryError;
+  }
+}
 
 /** Delete published rows older than the configured retention window. */
 export function sweepPublishedOutbox(
@@ -29,7 +55,9 @@ export function sweepPublishedOutbox(
       db
         .query(
           `DELETE FROM outbox
-           WHERE published_at IS NOT NULL AND published_at < ?`,
+           WHERE published_at IS NOT NULL
+             AND delivery_error IS NULL
+             AND published_at < ?`,
         )
         .run(cutoff).changes,
   );
@@ -38,13 +66,15 @@ export function sweepPublishedOutbox(
 /**
  * Deliver one bounded batch of unpublished outbox events to
  * `sink(envelope, row)` in insertion order. Each successful delivery is
- * stamped. Failures retry in order until `maxAttempts`; the final failure is
- * parked, logged, and allows the following row to proceed.
+ * stamped. Invalid JSON is deterministic poison and parks immediately. Sink
+ * failures retry in order with exponential backoff until `maxAttempts`; the
+ * final failure is parked, logged, and allows the following row to proceed.
  *
- * Published rows are pruned only after delivery, retaining a configurable
- * bounded window. Unpublished rows are never eligible for pruning.
+ * Delivered rows without a delivery error are pruned after a configurable
+ * bounded window. Unpublished and parked rows are never eligible for pruning.
  *
- * @returns {{ delivered: number, remaining: number }} rows delivered and still pending
+ * @returns {{ delivered: number, remaining: number }} delivered rows and every
+ * unpublished row still pending, including rows delayed by retry backoff
  */
 export function publishOutbox(
   db,
@@ -54,6 +84,7 @@ export function publishOutbox(
     retentionDays = DEFAULT_OUTBOX_RETENTION_DAYS,
     batchSize = DEFAULT_OUTBOX_BATCH_SIZE,
     maxAttempts = DEFAULT_OUTBOX_MAX_ATTEMPTS,
+    retryBaseMs = DEFAULT_OUTBOX_RETRY_BASE_MS,
     log = () => {},
   } = {},
 ) {
@@ -63,10 +94,18 @@ export function publishOutbox(
   if (!Number.isInteger(maxAttempts) || maxAttempts <= 0) {
     throw new Error("maxAttempts must be a positive integer");
   }
+  if (
+    !Number.isFinite(retryBaseMs) ||
+    retryBaseMs < DEFAULT_OUTBOX_RETRY_BASE_MS
+  ) {
+    throw new Error(
+      `retryBaseMs must be at least ${DEFAULT_OUTBOX_RETRY_BASE_MS} milliseconds`,
+    );
+  }
 
   const rows = db
     .query(
-      `SELECT seq, event_json, delivery_attempts
+      `SELECT seq, event_json, delivery_attempts, delivery_error
        FROM outbox
        WHERE published_at IS NULL
        ORDER BY seq
@@ -75,8 +114,32 @@ export function publishOutbox(
     .all(batchSize);
   let delivered = 0;
   for (const row of rows) {
+    const retryAt = retryAtFromFailure(row.delivery_error);
+    if (retryAt !== null && retryAt > now) break;
+
+    let envelope;
     try {
-      sink(JSON.parse(row.event_json), row);
+      envelope = JSON.parse(row.event_json);
+    } catch (error) {
+      const message = String(error?.message ?? error);
+      tx(db, () => {
+        db.query(
+          `UPDATE outbox
+           SET delivery_attempts = ?, delivery_error = ?, published_at = ?
+           WHERE seq = ?`,
+        ).run(
+          row.delivery_attempts + 1,
+          message,
+          new Date(now).toISOString(),
+          row.seq,
+        );
+      });
+      log(`outbox poison seq=${row.seq}: ${message}`);
+      continue;
+    }
+
+    try {
+      sink(envelope, row);
       tx(db, () => {
         db.query(
           `UPDATE outbox
@@ -98,7 +161,12 @@ export function publishOutbox(
            WHERE seq = ?`,
         ).run(
           attempts,
-          message,
+          parked
+            ? message
+            : transientFailure(
+                message,
+                now + retryBaseMs * 2 ** (attempts - 1),
+              ),
           parked ? 1 : 0,
           new Date(now).toISOString(),
           row.seq,

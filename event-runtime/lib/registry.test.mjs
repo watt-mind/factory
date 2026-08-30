@@ -30,6 +30,7 @@ import {
 } from "./registry.mjs";
 import { computeDefHash } from "./receipts.mjs";
 import { updateHarnessPins } from "./pins.mjs";
+import { validate } from "./schema.mjs";
 
 /** Copy the real registry into a temp root so tests can corrupt it safely. */
 function tempRegistry(root = tmpDir("event-registry-")) {
@@ -196,6 +197,38 @@ describe("registry", () => {
     );
   });
 
+  test("merge-agent documented result envelopes validate their registered artifact schemas", () => {
+    const expectedCompletedExamples = new Map([
+      ["merge-fix@1", 2],
+      ["merge-review@1", 1],
+      ["merge-notify@1", 1],
+    ]);
+
+    const registry = loadRegistry();
+    for (const [ref, expectedCount] of expectedCompletedExamples) {
+      const def = getAgent(registry, ref);
+      const examples = [
+        ...readFileSync(def.promptPath, "utf8").matchAll(
+          /```json\n([\s\S]*?)\n```/g,
+        ),
+      ]
+        .map(([, source]) => JSON.parse(source))
+        .filter((example) => example.terminalState === "completed");
+
+      expect(examples).toHaveLength(expectedCount);
+      for (const example of examples) {
+        expect(validate(registry.schemas.agentResult, example)).toEqual({
+          valid: true,
+          errors: [],
+        });
+        expect(validate(def.outputSchema, example.artifact)).toEqual({
+          valid: true,
+          errors: [],
+        });
+      }
+    }
+  });
+
   test("zero-pack merged-view digest matches the develop baseline", () => {
     // Regenerate with registryDigest(loadRegistry({ packRoots: [] })) on develop.
     // The serializer omits only WM-470's new pack provenance and normalizes
@@ -307,11 +340,21 @@ describe("registry", () => {
     // the configured handoff gate includes Prettier after the unit and emit
     // checks; dispatch.json is re-pinned. Prompt text only — no schema,
     // contract, route, capability, or model tier changed.
+    // Regenerated (#1521): merge-fix now documents the required outer result
+    // wrapper; merge-review and merge-notify document the same artifact
+    // nesting, and all three agent definitions are re-pinned. Post-review:
+    // merge-fix.md drops the bare-artifact twin examples (re-pinned again).
+    // Regenerated (#1445): merge-fix.md preserves freshly fetched foreign PR
+    // commits, uses an exact force-with-lease, compares the pinned headSha
+    // against live PR evidence, and returns stable `branch_in_flight:` /
+    // `branch_moved:` summary prefixes; merge-fix.json is re-pinned. Prompt
+    // text only.
     // Regenerated (CLNT-123): dispatch now requires web TypeScript checking,
     // documents the legacy bunx handoff alias, and receives bounded handoff
     // diagnostics. Prompt pin only — the definition remains provenance-safe.
+    // Digest recomputed after merging #1521/#1445 (registry inputs).
     const expected =
-      "sha256:e31bc9ba173425dd295a42a67e24265cb9cea891131927a8a8ae53e37fd25d6d";
+      "sha256:d76cb32235a6dd2d26ddcf8106d3ddc41183728d25a90e6f22f808d2c53e94bb";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -404,6 +447,35 @@ describe("registry", () => {
     expect(warnings).toEqual([
       expect.stringContaining("not named in overlay_auto_approve"),
     ]);
+  });
+
+  test("merge-fix rebase instructions preserve concurrent branch commits", () => {
+    const prompt = readFileSync(
+      path.join(RUNTIME_ROOT, "agents", "merge-fix.md"),
+      "utf8",
+    );
+    const flat = prompt.replace(/\s+/g, " ");
+
+    expect(flat).toContain('git rebase "origin/<headRef>"');
+    expect(flat).toContain(
+      '"--force-with-lease=<headRef>:${expectedRemoteSha}"',
+    );
+    expect(flat).toContain("MERGE_FIX_IN_FLIGHT_MINUTES");
+    expect(flat).toContain(
+      "Compare `expectedRemoteSha` with the pinned `input.json` `headSha`",
+    );
+    expect(flat).toContain(
+      "gh pr view <pr> --repo <github> --json headRefOid,updatedAt",
+    );
+    expect(flat).toContain(
+      "do not substitute commit author/committer metadata",
+    );
+    expect(flat).toContain(
+      "Never classify the unchanged pinned head as `branch_in_flight`",
+    );
+    expect(flat).toContain("`summary` beginning `branch_in_flight:`");
+    expect(flat).toContain("`summary` beginning `branch_moved:`");
+    expect(flat).toContain("make no retry push");
   });
 
   test("local schedule overlay permits new complete entries and rejects kernel routing changes", () => {

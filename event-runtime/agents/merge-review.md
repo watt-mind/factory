@@ -157,7 +157,8 @@ head/base SHA, and exact head branch. A moved SHA requires a new review.
 
 `./result.json` must always be a `factory.agent-result/v1` wrapper. On a
 completed review, put the complete `factory.merge-review/v1` artifact under
-`artifact`, never at the wrapper root:
+`artifact`, never at the wrapper root; the registered output schema validates
+that nested artifact:
 
 ```json
 {

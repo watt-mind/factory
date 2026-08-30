@@ -306,6 +306,10 @@ export interface OutboxRow {
   event: Record<string, unknown>;
   created_at: string;
   published_at: string | null;
+  /** Present on runtimes that expose delivery state. */
+  deliveryAttempts?: number;
+  deliveryError?: string | null;
+  parked?: boolean;
 }
 
 export interface LifecycleEvent {
@@ -829,6 +833,8 @@ export interface StatusView {
     expiredOpenProposals: string[];
     staleLeases: number;
     unpublishedOutbox: number;
+    /** Present on runtimes that report terminal outbox delivery failures. */
+    parkedOutbox?: number;
     deadLettered: {
       source: string;
       eventId: string;

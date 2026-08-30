@@ -3,6 +3,7 @@ import { ControlPlaneError } from "../../lib/control-plane/types.mjs";
 import { artifactHead } from "./api-artifacts.mjs";
 import { DEFAULT_MAX_IN_FLIGHT, FACTORY_ROOT } from "./config.mjs";
 import { STALE_SCAN_MS, loadLinearSupply } from "./linear.mjs";
+import { deliveryErrorMessage } from "./outbox.mjs";
 import { loadRepos, RepoError } from "./repos.mjs";
 import { isBusyError, retryBusy, runUsage } from "./db.mjs";
 import { hookDecisionsFor } from "./hooks.mjs";
@@ -1721,15 +1722,29 @@ function journalView(db, since, limit) {
 function outboxView(db, limit) {
   return db
     .query(
-      `SELECT seq, event_json, created_at, published_at FROM outbox ORDER BY seq DESC LIMIT ?`,
+      `SELECT seq, event_json, created_at, published_at, delivery_attempts, delivery_error
+       FROM outbox ORDER BY seq DESC LIMIT ?`,
     )
     .all(limit)
-    .map((row) => ({
-      seq: row.seq,
-      event: JSON.parse(row.event_json),
-      created_at: row.created_at,
-      published_at: row.published_at,
-    }));
+    .map((row) => {
+      let event;
+      try {
+        event = JSON.parse(row.event_json);
+      } catch {
+        // Parse-poison rows are intentionally retained for inspection. Keep
+        // one malformed row from making the entire outbox endpoint fail.
+        event = { raw: row.event_json };
+      }
+      return {
+        seq: row.seq,
+        event,
+        created_at: row.created_at,
+        published_at: row.published_at,
+        deliveryAttempts: row.delivery_attempts,
+        deliveryError: deliveryErrorMessage(row.delivery_error),
+        parked: row.published_at !== null && row.delivery_error !== null,
+      };
+    });
 }
 
 export function observedModelFromTranscript(head) {
