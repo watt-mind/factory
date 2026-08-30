@@ -102,10 +102,12 @@ CREATE TABLE IF NOT EXISTS results (
 );
 
 CREATE TABLE IF NOT EXISTS outbox (
-  seq           INTEGER PRIMARY KEY AUTOINCREMENT,
-  event_json    TEXT NOT NULL,
-  created_at    TEXT NOT NULL,
-  published_at  TEXT
+  seq               INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_json        TEXT NOT NULL,
+  created_at        TEXT NOT NULL,
+  published_at      TEXT,
+  delivery_attempts INTEGER NOT NULL DEFAULT 0,
+  delivery_error    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS workers (
@@ -505,6 +507,26 @@ export const MIGRATIONS = [
         CREATE INDEX IF NOT EXISTS idx_events_correlation
           ON events (correlation_id);
       `);
+    },
+  },
+  {
+    version: 18,
+    name: "outbox_delivery_failures",
+    up(db) {
+      const columns = new Set(
+        db
+          .query(`PRAGMA table_info(outbox)`)
+          .all()
+          .map((row) => row.name),
+      );
+      if (!columns.has("delivery_attempts")) {
+        db.exec(
+          `ALTER TABLE outbox ADD COLUMN delivery_attempts INTEGER NOT NULL DEFAULT 0;`,
+        );
+      }
+      if (!columns.has("delivery_error")) {
+        db.exec(`ALTER TABLE outbox ADD COLUMN delivery_error TEXT;`);
+      }
     },
   },
 ];

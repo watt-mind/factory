@@ -283,22 +283,35 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     migrated.close();
   });
 
-  test("tier escalation handoffs, inbox proposal IDs and lookup indexes reach schema 17 from a fresh and from a v14 database", () => {
-    expect(CURRENT_SCHEMA_VERSION).toBe(17);
+  test("tier escalation handoffs, inbox proposal IDs and lookup indexes reach schema 18 from a fresh and from a v14 database", () => {
+    expect(CURRENT_SCHEMA_VERSION).toBe(18);
     const fresh = openDb(freshFile());
-    expect(getSchemaVersion(fresh)).toBe(17);
+    expect(getSchemaVersion(fresh)).toBe(18);
+    expect(
+      fresh
+        .query(`PRAGMA table_info(outbox)`)
+        .all()
+        .map((row) => row.name),
+    ).toEqual(expect.arrayContaining(["delivery_attempts", "delivery_error"]));
     fresh.close();
 
     // #1230 (#1197) owns migration 14 and lands first; a database already at
-    // 14 must pick up 15 alone, and the guarded DDL must survive re-running.
+    // 14 must pick up later migrations, and the guarded DDL must survive
+    // re-running.
     const file = freshFile();
     const at14 = new Database(file);
     migrateDb(at14, { targetVersion: 13 });
     at14.exec("PRAGMA user_version = 14;");
     migrateDb(at14);
-    expect(getSchemaVersion(at14)).toBe(17);
+    expect(getSchemaVersion(at14)).toBe(18);
+    expect(
+      at14
+        .query(`PRAGMA table_info(outbox)`)
+        .all()
+        .map((row) => row.name),
+    ).toEqual(expect.arrayContaining(["delivery_attempts", "delivery_error"]));
     migrateDb(at14);
-    expect(getSchemaVersion(at14)).toBe(17);
+    expect(getSchemaVersion(at14)).toBe(18);
     expect(
       at14
         .query(

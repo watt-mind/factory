@@ -10,6 +10,8 @@
 import { tx } from "./db.mjs";
 
 export const DEFAULT_OUTBOX_RETENTION_DAYS = 14;
+export const DEFAULT_OUTBOX_BATCH_SIZE = 500;
+export const DEFAULT_OUTBOX_MAX_ATTEMPTS = 3;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** Delete published rows older than the configured retention window. */
@@ -34,14 +36,15 @@ export function sweepPublishedOutbox(
 }
 
 /**
- * Deliver every unpublished outbox event to `sink(envelope, row)` in insertion
- * order, stamping each row after a successful delivery. Stops at the first
- * sink failure (order preserved for the retry).
+ * Deliver one bounded batch of unpublished outbox events to
+ * `sink(envelope, row)` in insertion order. Each successful delivery is
+ * stamped. Failures retry in order until `maxAttempts`; the final failure is
+ * parked, logged, and allows the following row to proceed.
  *
  * Published rows are pruned only after delivery, retaining a configurable
  * bounded window. Unpublished rows are never eligible for pruning.
  *
- * @returns {number} rows delivered
+ * @returns {{ delivered: number, remaining: number }} rows delivered and still pending
  */
 export function publishOutbox(
   db,
@@ -49,24 +52,65 @@ export function publishOutbox(
     sink,
     now = Date.now(),
     retentionDays = DEFAULT_OUTBOX_RETENTION_DAYS,
+    batchSize = DEFAULT_OUTBOX_BATCH_SIZE,
+    maxAttempts = DEFAULT_OUTBOX_MAX_ATTEMPTS,
+    log = () => {},
   } = {},
 ) {
+  if (!Number.isInteger(batchSize) || batchSize <= 0) {
+    throw new Error("batchSize must be a positive integer");
+  }
+  if (!Number.isInteger(maxAttempts) || maxAttempts <= 0) {
+    throw new Error("maxAttempts must be a positive integer");
+  }
+
   const rows = db
     .query(
-      `SELECT seq, event_json FROM outbox WHERE published_at IS NULL ORDER BY seq`,
+      `SELECT seq, event_json, delivery_attempts
+       FROM outbox
+       WHERE published_at IS NULL
+       ORDER BY seq
+       LIMIT ?`,
     )
-    .all();
+    .all(batchSize);
   let delivered = 0;
   for (const row of rows) {
-    sink(JSON.parse(row.event_json), row);
-    tx(db, () => {
-      db.query(`UPDATE outbox SET published_at = ? WHERE seq = ?`).run(
-        new Date(now).toISOString(),
-        row.seq,
-      );
-    });
-    delivered += 1;
+    try {
+      sink(JSON.parse(row.event_json), row);
+      tx(db, () => {
+        db.query(
+          `UPDATE outbox
+           SET published_at = ?, delivery_error = NULL
+           WHERE seq = ?`,
+        ).run(new Date(now).toISOString(), row.seq);
+      });
+      delivered += 1;
+    } catch (error) {
+      const attempts = row.delivery_attempts + 1;
+      const parked = attempts >= maxAttempts;
+      const message = String(error?.message ?? error);
+      tx(db, () => {
+        db.query(
+          `UPDATE outbox
+           SET delivery_attempts = ?,
+               delivery_error = ?,
+               published_at = CASE WHEN ? THEN ? ELSE published_at END
+           WHERE seq = ?`,
+        ).run(
+          attempts,
+          message,
+          parked ? 1 : 0,
+          new Date(now).toISOString(),
+          row.seq,
+        );
+      });
+      if (!parked) break;
+      log(`outbox poison seq=${row.seq}: ${message}`);
+    }
   }
   sweepPublishedOutbox(db, { retentionDays, now });
-  return delivered;
+  const remaining = db
+    .query(`SELECT COUNT(*) AS n FROM outbox WHERE published_at IS NULL`)
+    .get().n;
+  return { delivered, remaining };
 }

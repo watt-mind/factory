@@ -177,6 +177,7 @@ export async function tick({
           `result event ${e.type} (${e.eventId}) artifact ${e.payload?.artifactHash ?? "-"}`,
         ),
       now,
+      log: logLine,
     });
   });
 

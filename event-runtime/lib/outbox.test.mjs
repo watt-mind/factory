@@ -20,30 +20,124 @@ describe("publishOutbox", () => {
     seedOutbox(db, "a");
     seedOutbox(db, "b");
     const seen = [];
-    expect(publishOutbox(db, { sink: (e) => seen.push(e.eventId) })).toBe(2);
+    expect(publishOutbox(db, { sink: (e) => seen.push(e.eventId) })).toEqual({
+      delivered: 2,
+      remaining: 0,
+    });
     expect(seen).toEqual(["a", "b"]);
-    expect(publishOutbox(db, { sink: (e) => seen.push(e.eventId) })).toBe(0);
+    expect(publishOutbox(db, { sink: (e) => seen.push(e.eventId) })).toEqual({
+      delivered: 0,
+      remaining: 0,
+    });
     expect(seen).toEqual(["a", "b"]);
   });
 
-  test("a sink failure leaves the row unpublished for redelivery", () => {
+  test("parks a poisoned row and delivers its successor", () => {
     const db = openDb(":memory:");
-    seedOutbox(db, "a");
-    expect(() =>
+    db.query(`INSERT INTO outbox (event_json, created_at) VALUES (?, ?)`).run(
+      "not JSON",
+      new Date(0).toISOString(),
+    );
+    seedOutbox(db, "successor");
+    const logs = [];
+
+    expect(
       publishOutbox(db, {
         sink: () => {
-          throw new Error("sink down");
+          throw new Error("should not receive malformed event");
         },
+        maxAttempts: 2,
+        log: (line) => logs.push(line),
       }),
-    ).toThrow("sink down");
+    ).toEqual({ delivered: 0, remaining: 2 });
     expect(
       db
-        .query(`SELECT COUNT(*) AS n FROM outbox WHERE published_at IS NULL`)
-        .get().n,
-    ).toBe(1);
+        .query(
+          `SELECT delivery_attempts, delivery_error, published_at
+           FROM outbox WHERE seq = 1`,
+        )
+        .get(),
+    ).toEqual({
+      delivery_attempts: 1,
+      delivery_error: expect.stringContaining("JSON"),
+      published_at: null,
+    });
+
     const seen = [];
-    expect(publishOutbox(db, { sink: (e) => seen.push(e.eventId) })).toBe(1);
-    expect(seen).toEqual(["a"]);
+    expect(
+      publishOutbox(db, {
+        sink: (event) => seen.push(event.eventId),
+        maxAttempts: 2,
+        log: (line) => logs.push(line),
+      }),
+    ).toEqual({ delivered: 1, remaining: 0 });
+    expect(seen).toEqual(["successor"]);
+    expect(
+      db
+        .query(
+          `SELECT delivery_attempts, delivery_error, published_at
+           FROM outbox WHERE seq = 1`,
+        )
+        .get(),
+    ).toEqual({
+      delivery_attempts: 2,
+      delivery_error: expect.stringContaining("JSON"),
+      published_at: expect.any(String),
+    });
+    expect(logs).toEqual([expect.stringContaining("outbox poison seq=1")]);
+  });
+
+  test("caps each call at its batch size and reports pending rows", () => {
+    const db = openDb(":memory:");
+    seedOutbox(db, "a");
+    seedOutbox(db, "b");
+    seedOutbox(db, "c");
+    const seen = [];
+
+    expect(
+      publishOutbox(db, {
+        sink: (event) => seen.push(event.eventId),
+        batchSize: 2,
+      }),
+    ).toEqual({ delivered: 2, remaining: 1 });
+    expect(seen).toEqual(["a", "b"]);
+    expect(
+      publishOutbox(db, {
+        sink: (event) => seen.push(event.eventId),
+        batchSize: 2,
+      }),
+    ).toEqual({ delivered: 1, remaining: 0 });
+    expect(seen).toEqual(["a", "b", "c"]);
+  });
+
+  test("uses a default batch size of 500", () => {
+    const db = openDb(":memory:");
+    for (let i = 0; i < 501; i += 1) seedOutbox(db, String(i));
+
+    expect(publishOutbox(db, { sink: () => {} })).toEqual({
+      delivered: 500,
+      remaining: 1,
+    });
+  });
+
+  test("retries a transient sink failure before later rows", () => {
+    const db = openDb(":memory:");
+    seedOutbox(db, "a");
+    seedOutbox(db, "b");
+    const seen = [];
+    let fail = true;
+    const sink = (event) => {
+      if (fail) {
+        fail = false;
+        throw new Error("sink down");
+      }
+      seen.push(event.eventId);
+    };
+
+    expect(publishOutbox(db, { sink })).toEqual({ delivered: 0, remaining: 2 });
+    expect(seen).toEqual([]);
+    expect(publishOutbox(db, { sink })).toEqual({ delivered: 2, remaining: 0 });
+    expect(seen).toEqual(["a", "b"]);
   });
 });
 
@@ -101,7 +195,7 @@ describe("outbox retention and drain index", () => {
         sink: (event) => seen.push(event.eventId),
         now: 24 * 60 * 60 * 1000,
       }),
-    ).toBe(1);
+    ).toEqual({ delivered: 1, remaining: 0 });
     expect(seen).toEqual(["pending"]);
   });
 });
