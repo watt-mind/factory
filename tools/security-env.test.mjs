@@ -5,7 +5,11 @@ const ROOT = path.resolve(import.meta.dir, "..");
 
 function run(args) {
   return Bun.spawnSync({
-    cmd: [process.execPath, path.join(ROOT, "tools", "security-env.mjs"), ...args],
+    cmd: [
+      process.execPath,
+      path.join(ROOT, "tools", "security-env.mjs"),
+      ...args,
+    ],
     cwd: ROOT,
     stdout: "pipe",
     stderr: "pipe",
