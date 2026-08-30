@@ -397,6 +397,45 @@ describe("factory.repo/v1 in-repo configuration", () => {
     expect(warnings[0]).toMatch(/host-owned "security"/);
     expect(warnings[1]).toMatch(/host-owned "security"/);
   });
+
+  test("loadRepos evicts removed repos from in-repo config and warning caches", () => {
+    const brokenYaml = "schemaVersion: factory.repo/v1\nsecurity: null\n";
+    const broken = repositoryRoot(".factory.yaml", brokenYaml);
+    const root = factoryRoot(`repos:
+  - name: broken
+    path: ${broken}
+`);
+    const warnings = [];
+    const originalWarn = console.warn;
+    const originalParse = Bun.YAML.parse;
+    let configParses = 0;
+    console.warn = (...args) => warnings.push(args.join(" "));
+    Bun.YAML.parse = (source, ...args) => {
+      if (source === brokenYaml) configParses += 1;
+      return originalParse(source, ...args);
+    };
+
+    try {
+      loadRepos({ root });
+      writeFileSync(path.join(root, "config", "repos.yaml"), "repos: []\n");
+      loadRepos({ root });
+      writeFileSync(
+        path.join(root, "config", "repos.yaml"),
+        `repos:
+  - name: broken
+    path: ${broken}
+`,
+      );
+      loadRepos({ root });
+    } finally {
+      Bun.YAML.parse = originalParse;
+      console.warn = originalWarn;
+      resetInRepoConfigCache();
+    }
+
+    expect(configParses).toBe(2);
+    expect(warnings).toHaveLength(2);
+  });
 });
 
 // One fully configured dispatch target and one report-only repo with nothing

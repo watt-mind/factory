@@ -263,6 +263,7 @@ describe("repo toolchain diagnostics (#1097)", () => {
 });
 
 describe("stack daemon diagnostics (#1868)", () => {
+  const root = "/factory/stack";
   const appEnv = {
     FACTORY_GH_APP_ID: "123",
     FACTORY_GH_APP_INSTALLATION_ID: "456",
@@ -273,9 +274,12 @@ describe("stack daemon diagnostics (#1868)", () => {
     error.code = "ENOENT";
     throw error;
   };
+  const pidFileFor = (pid) => (file) =>
+    file.endsWith("gh-app-auth.pid") ? `${pid}\n` : absentPidFile();
 
   test("fails when configured App auth has no daemon", () => {
     const rows = stackDaemonDiagnostics({
+      root,
       env: appEnv,
       listProcesses: () => [],
       readPidFile: absentPidFile,
@@ -294,16 +298,27 @@ describe("stack daemon diagnostics (#1868)", () => {
     });
   });
 
-  test("accepts exactly one gh-app-auth daemon from the process table", () => {
+  test("ignores a foreign daemon when this stack's pidfile owns a healthy daemon", () => {
     const rows = stackDaemonDiagnostics({
+      root,
       env: appEnv,
       listProcesses: () => [
         {
           pid: 41,
-          command: "bun /repo/lib/control-plane/gh-app-auth.mjs --daemon",
+          command:
+            "bun /factory/stack/lib/control-plane/gh-app-auth.mjs --daemon",
+        },
+        {
+          pid: 42,
+          command:
+            "bun /factory/other/lib/control-plane/gh-app-auth.mjs --daemon",
         },
       ],
-      readPidFile: absentPidFile,
+      readPidFile: pidFileFor(41),
+      probeProcess: (pid) => ({
+        alive: true,
+        command: `bun ${pid === 41 ? root : "/factory/other"}/lib/control-plane/gh-app-auth.mjs --daemon`,
+      }),
     });
     expect(rows.find((row) => row.label === "gh-app-auth daemon")).toEqual({
       ok: true,
@@ -313,20 +328,69 @@ describe("stack daemon diagnostics (#1868)", () => {
     });
   });
 
-  test("fails on duplicate gh-app-auth daemons even without App configuration", () => {
+  test("fails when a foreign daemon exists but this stack's daemon is missing", () => {
     const rows = stackDaemonDiagnostics({
-      env: {},
+      root,
+      env: appEnv,
       listProcesses: () => [
         {
           pid: 41,
-          command: "bun /repo/lib/control-plane/gh-app-auth.mjs --daemon",
-        },
-        {
-          pid: 42,
-          command: "bun /repo/lib/control-plane/gh-app-auth.mjs --daemon",
+          command:
+            "bun /factory/other/lib/control-plane/gh-app-auth.mjs --daemon",
         },
       ],
       readPidFile: absentPidFile,
+    });
+    expect(rows.find((row) => row.label === "gh-app-auth daemon")).toEqual({
+      ok: false,
+      label: "gh-app-auth daemon",
+      detail: "GitHub App auth is configured but no daemon is running",
+      fix: "run `factory up` to start gh-app-auth.mjs --daemon",
+    });
+  });
+
+  test("fails when this stack's daemon pidfile points at another process", () => {
+    const rows = stackDaemonDiagnostics({
+      root,
+      env: appEnv,
+      listProcesses: () => [],
+      readPidFile: pidFileFor(41),
+      probeProcess: () => ({
+        alive: true,
+        command: "bun unrelated-worker.mjs",
+      }),
+    });
+    expect(
+      rows.find((row) => row.label === "gh-app-auth daemon"),
+    ).toMatchObject({
+      ok: false,
+      detail:
+        "recycled gh-app-auth.pid — PID 41 belongs to bun unrelated-worker.mjs",
+    });
+  });
+
+  test("fails on duplicate gh-app-auth daemons serving this stack", () => {
+    const rows = stackDaemonDiagnostics({
+      root,
+      env: appEnv,
+      listProcesses: () => [
+        {
+          pid: 41,
+          command:
+            "bun /factory/stack/lib/control-plane/gh-app-auth.mjs --daemon",
+        },
+        {
+          pid: 42,
+          command:
+            "bun /factory/stack/lib/control-plane/gh-app-auth.mjs --daemon",
+        },
+      ],
+      readPidFile: pidFileFor(41),
+      probeProcess: () => ({
+        alive: true,
+        command:
+          "bun /factory/stack/lib/control-plane/gh-app-auth.mjs --daemon",
+      }),
     });
     expect(
       rows.find((row) => row.label === "gh-app-auth daemon"),

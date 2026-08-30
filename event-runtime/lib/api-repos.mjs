@@ -200,16 +200,23 @@ function hostConfigError(message, file) {
   return message.split(file).join("config/repos.yaml");
 }
 
+function localReposConfigPath(root) {
+  return path.join(root, "config", "repos.yaml");
+}
+
 /**
  * Read the effective host registry as raw YAML (the loader's projection drops
- * keys it does not model, and a write must not lose them).
+ * keys it does not model, and a write must not lose them). A read that falls
+ * back to the tracked example still records the local path as its write
+ * target: mutations explicitly fork the example into operator-owned config.
  */
 function readHostConfig(root) {
   const file = reposConfigPath(root);
+  const target = localReposConfigPath(root);
   if (!existsSync(file)) {
     const parsed = { repos: [] };
     Object.defineProperty(parsed, HOST_CONFIG_SNAPSHOT, {
-      value: { file, contents: null, stat: null },
+      value: { file, target, contents: null, stat: null },
     });
     return parsed;
   }
@@ -221,7 +228,7 @@ function readHostConfig(root) {
   if (!Array.isArray(parsed.repos))
     throw new RepoError(`${file}: repos must be a list`);
   Object.defineProperty(parsed, HOST_CONFIG_SNAPSHOT, {
-    value: { file, contents, stat: statSync(file) },
+    value: { file, target, contents, stat: statSync(file) },
   });
   return parsed;
 }
@@ -230,13 +237,16 @@ function hostConfigUnchanged(snapshot) {
   if (!snapshot?.stat) return !existsSync(snapshot?.file);
   if (!existsSync(snapshot.file)) return false;
   const current = statSync(snapshot.file);
-  return (
+  const sourceUnchanged =
     readFileSync(snapshot.file, "utf8") === snapshot.contents &&
     current.dev === snapshot.stat.dev &&
     current.ino === snapshot.stat.ino &&
     current.size === snapshot.stat.size &&
     current.mtimeMs === snapshot.stat.mtimeMs &&
-    current.ctimeMs === snapshot.stat.ctimeMs
+    current.ctimeMs === snapshot.stat.ctimeMs;
+  return (
+    sourceUnchanged &&
+    (snapshot?.target === snapshot?.file || !existsSync(snapshot?.target))
   );
 }
 
@@ -270,7 +280,12 @@ function writeHostConfig(root, config) {
     rmSync(scratch, { recursive: true, force: true });
   }
   const snapshot = config[HOST_CONFIG_SNAPSHOT];
-  const target = snapshot?.file ?? reposConfigPath(root);
+  const target = snapshot?.target ?? localReposConfigPath(root);
+  if (snapshot?.file && snapshot.file !== target) {
+    console.warn(
+      `warning: ${snapshot.file} is an example fallback; writing registry changes to ${target}`,
+    );
+  }
   mkdirSync(path.dirname(target), { recursive: true });
   const tmp = `${target}.${process.pid}.${randomUUID()}.tmp`;
   let fd = null;
@@ -468,3 +483,5 @@ export function createRepoApi({ repos, db, configRoot = reposRoot() }) {
 
   return { repos, handle };
 }
+
+export { HostConfigConflictError, readHostConfig, writeHostConfig };
