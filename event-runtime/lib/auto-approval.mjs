@@ -692,6 +692,26 @@ function durableFixRoundReason(db, candidate, input, policy) {
   // re-emits every tick), REFUSED execute-time refusals (pr moved, ticket
   // state) and CANCELLED stale-pinned runs do not consume the budget
   // (2026-08-18: counting them exhausted max_fix_rounds before any fix ran).
+  // Do not decode every historical merge-fix envelope on each approval tick.
+  // The indexed event type/source predicate and payload prefilter leave JS to
+  // parse only entries for this exact PR, and the cap means a full history
+  // cannot make this lookup unbounded.
+  const malformed = db
+    .query(
+      `SELECT e.event_id FROM events e
+       WHERE e.source = 'chain'
+         AND e.type = 'factory.merge-fix.requested'
+         AND e.event_id != ?
+         AND json_valid(e.envelope_json) = 0
+       LIMIT ?`,
+    )
+    .all(candidate.event_id, cap);
+  for (const row of malformed) {
+    console.warn(
+      `Skipping malformed merge-fix history envelope for event ${row.event_id}`,
+    );
+  }
+
   const rows = db
     .query(
       `SELECT e.event_id, e.envelope_json, r.state FROM events e
@@ -701,16 +721,29 @@ function durableFixRoundReason(db, candidate, input, policy) {
          AND e.type = 'factory.merge-fix.requested'
          AND p.decision = 'run'
          AND r.state IN ('QUEUED','LEASED','RUNNING','VERIFYING','COMPLETED','FAILED')
-         AND e.event_id != ?`,
+         AND e.event_id != ?
+         AND CASE WHEN json_valid(e.envelope_json)
+                  THEN json_extract(e.envelope_json, '$.payload.repo') END = ?
+         AND CASE WHEN json_valid(e.envelope_json)
+                  THEN json_extract(e.envelope_json, '$.payload.github') END = ?
+         AND CASE WHEN json_valid(e.envelope_json)
+                  THEN json_extract(e.envelope_json, '$.payload.pr') END = ?
+       LIMIT ?`,
     )
-    .all(candidate.event_id);
+    .all(candidate.event_id, input.repo, input.github, input.pr, cap);
   let executed = 0;
   for (const row of rows) {
     let payload;
     try {
       payload = JSON.parse(row.envelope_json)?.payload;
     } catch {
-      return "merge_fix_history_unparseable";
+      // json_valid above makes this defensive path exceptional (for example,
+      // a driver decode failure), but one corrupt history row must not block
+      // every later merge-fix candidate.
+      console.warn(
+        `Skipping unreadable merge-fix history envelope for event ${row.event_id}`,
+      );
+      continue;
     }
     if (
       payload?.repo === input.repo &&

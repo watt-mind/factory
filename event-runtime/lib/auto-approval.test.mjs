@@ -1415,6 +1415,84 @@ describe("chain auto approval (WM-357)", () => {
     }
   });
 
+  test("a malformed merge-fix history envelope is warned about but does not poison another PR", async () => {
+    const db = openDb(":memory:");
+    const fixInput = {
+      repo: "factory",
+      github: "watt-mind/factory",
+      base: "develop",
+      pr: 430,
+      headSha: "a".repeat(40),
+      baseSha: "b".repeat(40),
+      headRef: "feat/WM-430",
+      ticket: "WM-430",
+      finding: "mechanical in-scope fix",
+      findingHash: "c".repeat(64),
+      round: 1,
+      mechanical: true,
+      withinOwnedPaths: true,
+      ownedPaths: ["event-runtime/lib/auto-approval.mjs"],
+    };
+    const predecessorArtifact = {
+      recommendation: "FIX",
+      repo: fixInput.repo,
+      github: fixInput.github,
+      base: fixInput.base,
+      plan: [],
+      fix: [fixInput],
+      escalate: [],
+      summary: "selected mechanical fix",
+    };
+    const malformed = seed(db, {
+      id: "malformed-fix-history",
+      type: "factory.merge-fix.requested",
+      input: { ...fixInput, pr: 429, ticket: "WM-429" },
+      predecessorAgent: "merge-scan@2",
+      predecessorArtifact: {
+        ...predecessorArtifact,
+        fix: [{ ...fixInput, pr: 429, ticket: "WM-429" }],
+      },
+      predecessorInput: { repo: "factory" },
+    });
+    db.query(
+      `UPDATE events SET envelope_json = '{not-json' WHERE event_id = ?`,
+    ).run(`event-${malformed.id}`);
+    const candidate = seed(db, {
+      id: "candidate-after-malformed-history",
+      type: "factory.merge-fix.requested",
+      input: fixInput,
+      predecessorAgent: "merge-scan@2",
+      predecessorArtifact,
+      predecessorInput: { repo: "factory" },
+    });
+
+    const warnings = [];
+    const warn = console.warn;
+    console.warn = (...args) => warnings.push(args.join(" "));
+    try {
+      const result = await auto(db, {
+        policy: {
+          ...policy,
+          maxFixRounds: 2,
+          autoMergeBase: new Set(["develop"]),
+          autoMergeOwners: new Set(["watt-mind"]),
+        },
+        runtimeGuard: () => null,
+      });
+      expect(result.approved).toContainEqual({
+        proposalId: candidate.id,
+        runId: candidate.runId,
+      });
+    } finally {
+      console.warn = warn;
+    }
+
+    expect(runState(db, candidate.runId)).toBe("QUEUED");
+    expect(warnings).toContain(
+      "Skipping malformed merge-fix history envelope for event event-malformed-fix-history",
+    );
+  });
+
   test("an independent recommendation edge with an empty selector remains watched", async () => {
     const db = openDb(":memory:");
     const escalation = seed(db, {
