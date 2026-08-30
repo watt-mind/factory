@@ -358,7 +358,7 @@ worktree_cwd_processes() { # <worktree>
       pid=${proc##*/}
       cwd=$(readlink "$proc/cwd" 2>/dev/null || true)
       [[ "$cwd" == "$target" || "$cwd" == "$target"/* ]] || continue
-      pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+      pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
       [[ "$pgid" =~ ^[0-9]+$ ]] || continue
       printf '%s\t%s\t%s\n' "$pid" "$pgid" "$cwd"
     done
@@ -374,7 +374,7 @@ worktree_cwd_processes() { # <worktree>
       n*)
         cwd=${line#n}
         [[ "$cwd" == "$target" || "$cwd" == "$target"/* ]] || continue
-        pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+        pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)
         [[ "$pid" =~ ^[0-9]+$ && "$pgid" =~ ^[0-9]+$ ]] || continue
         printf '%s\t%s\t%s\n' "$pid" "$pgid" "$cwd"
         ;;
@@ -389,18 +389,20 @@ worktree_cwd_processes() { # <worktree>
 kill_worktree_cwd_processes() { # <worktree>
   local wt="$1" own_pgid pid pgid cwd groups="" pids="" group processes
   local ancestor_pids="" ancestor_pgids="" ancestor ancestor_pgid
-  own_pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ')
+  own_pgid=$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)
   # Teardown is often invoked from inside the worktree it removes (an agent
   # session or operator shell whose cwd is the checkout). Its ancestors — and
   # the process groups they lead or belong to — must never be signalled: an
   # interactive shell ignores SIGTERM, and the SIGKILL escalation below would
-  # otherwise take the caller's terminal with it.
+  # otherwise take the caller's terminal with it. A pid that exits mid-walk
+  # (or mid-scan below) makes `ps` fail; under `set -e` that must read as
+  # "unknown", not abort teardown.
   ancestor=$$
   while [[ "$ancestor" =~ ^[0-9]+$ && "$ancestor" -gt 1 ]]; do
     ancestor_pids+=" $ancestor"
-    ancestor_pgid=$(ps -o pgid= -p "$ancestor" 2>/dev/null | tr -d ' ')
+    ancestor_pgid=$(ps -o pgid= -p "$ancestor" 2>/dev/null | tr -d ' ' || true)
     [[ "$ancestor_pgid" =~ ^[0-9]+$ ]] && ancestor_pgids+=" $ancestor_pgid"
-    ancestor=$(ps -o ppid= -p "$ancestor" 2>/dev/null | tr -d ' ')
+    ancestor=$(ps -o ppid= -p "$ancestor" 2>/dev/null | tr -d ' ' || true)
   done
   processes=$(worktree_cwd_processes "$wt")
 

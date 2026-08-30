@@ -1554,11 +1554,12 @@ test("worktree-down CLI argument parsing error paths", () => {
   }
 });
 
-test("worktree-down refuses dirty worktree without --force and cleans up with --force", () => {
+test("worktree-down refuses dirty worktree without --force, leaves cwd-bound processes alone, and cleans up with --force", async () => {
   if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-down-dirty-"));
   const ticketId = makeTestTicket("DIRTY");
   const expectedPath = path.join(tempWtRoot, ticketId);
+  let fakeServe;
 
   try {
     // 1. Create worktree
@@ -1581,7 +1582,27 @@ test("worktree-down refuses dirty worktree without --force and cleans up with --
       "uncommitted work",
     );
 
-    // 3. Attempt teardown without --force -> should fail and preserve worktree
+    // 3. Park a detached cwd-bound process in the worktree — the shape of an
+    //    orphaned fake serve. A refused teardown keeps the checkout, so it
+    //    must keep this process too: the cwd sweep (#1379) runs only on the
+    //    removal path, after the dirty check.
+    fakeServe = spawn("bash", ["-c", "while :; do sleep 1; done"], {
+      cwd: expectedPath,
+      detached: process.platform !== "win32",
+      stdio: "ignore",
+    });
+    let fakeExit = null;
+    fakeServe.once("exit", (code, signal) => {
+      fakeExit = { code, signal };
+    });
+    const readyDeadline = Date.now() + 5_000;
+    while (Date.now() < readyDeadline) {
+      if (cwdForPid(fakeServe.pid) === expectedPath) break;
+      await Bun.sleep(10);
+    }
+    expect(cwdForPid(fakeServe.pid)).toBe(expectedPath);
+
+    // 4. Attempt teardown without --force -> should fail and preserve worktree
     const downDirty = Bun.spawnSync({
       cmd: ["bash", DOWN, ticketId],
       stdout: "pipe",
@@ -1592,9 +1613,16 @@ test("worktree-down refuses dirty worktree without --force and cleans up with --
     expect(downDirty.stderr.toString()).toContain(
       "has uncommitted changes — commit/stash them, or re-run with --force",
     );
+    expect(`${downDirty.stdout}${downDirty.stderr}`).not.toContain(
+      "stopping cwd-bound",
+    );
     expect(existsSync(expectedPath)).toBe(true);
+    await Bun.sleep(100);
+    expect(fakeExit).toBeNull();
+    expect(cwdForPid(fakeServe.pid)).toBe(expectedPath);
 
-    // 4. Teardown with --force -> should succeed and remove worktree
+    // 5. Teardown with --force -> should succeed, sweep the orphan, and
+    //    remove the worktree
     const downForce = Bun.spawnSync({
       cmd: ["bash", DOWN, ticketId, "--force"],
       stdout: "pipe",
@@ -1603,7 +1631,18 @@ test("worktree-down refuses dirty worktree without --force and cleans up with --
     });
     expect(downForce.exitCode).toBe(0);
     expect(existsSync(expectedPath)).toBe(false);
+    expect(`${downForce.stdout}${downForce.stderr}`).toContain(
+      `stopping cwd-bound process group ${fakeServe.pid}`,
+    );
   } finally {
+    if (fakeServe) {
+      try {
+        if (process.platform === "win32") fakeServe.kill("SIGKILL");
+        else process.kill(-fakeServe.pid, "SIGKILL");
+      } catch {
+        /* teardown already killed it */
+      }
+    }
     rmSync(tempWtRoot, { recursive: true, force: true });
     Bun.spawnSync({ cmd: ["git", "branch", "-D", `feat/${ticketId}`] });
   }
