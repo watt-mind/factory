@@ -7,22 +7,7 @@ import {
   resolveTimeoutMs,
 } from "./dispatch.mjs";
 
-const REPO_ROOT = new URL("..", import.meta.url).pathname;
 const DISPATCH = path.join(import.meta.dir, "dispatch.mjs");
-
-async function dispatch(env) {
-  const proc = Bun.spawn(["bun", "tools/dispatch.mjs", "triage", "--json"], {
-    cwd: REPO_ROOT,
-    env: { ...process.env, ...env },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  return {
-    exitCode: await proc.exited,
-    stdout: await new Response(proc.stdout).text(),
-    stderr: await new Response(proc.stderr).text(),
-  };
-}
 
 test("defaults to the standard event-runtime port", () => {
   expect(DEFAULT_PORT).toBe(7381);
@@ -34,34 +19,45 @@ test("FACTORY_EVENT_PORT overrides the default port", () => {
 });
 
 test("FACTORY_DISPATCH_TIMEOUT_MS overrides the default timeout", () => {
+  expect(DEFAULT_TIMEOUT_MS).toBe(30_000);
   expect(resolveTimeoutMs({})).toBe(DEFAULT_TIMEOUT_MS);
   expect(resolveTimeoutMs({ FACTORY_DISPATCH_TIMEOUT_MS: "1234" })).toBe(1234);
+  expect(resolveTimeoutMs({ FACTORY_DISPATCH_TIMEOUT_MS: "nope" })).toBe(
+    DEFAULT_TIMEOUT_MS,
+  );
+  expect(resolveTimeoutMs({ FACTORY_DISPATCH_TIMEOUT_MS: "0" })).toBe(
+    DEFAULT_TIMEOUT_MS,
+  );
 });
 
-test("sends the bearer only when FACTORY_CONTROL_API_TOKEN is set", async () => {
-  const authorizations = [];
+test("dispatch sends FACTORY_CONTROL_API_TOKEN as a bearer", async () => {
+  const token = "dispatch-control-token";
+  let authorization;
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
-    fetch(req) {
-      authorizations.push(req.headers.get("authorization"));
-      return Response.json({ eventId: "event-1" });
+    fetch(request) {
+      authorization = request.headers.get("authorization");
+      return Response.json({ admitted: true, eventId: "dispatch-test" });
     },
   });
-
   try {
-    const withToken = await dispatch({
-      FACTORY_EVENT_PORT: String(server.port),
-      FACTORY_CONTROL_API_TOKEN: "dispatch-test-token",
+    const child = Bun.spawn(["bun", DISPATCH, "status", "--json"], {
+      env: {
+        ...process.env,
+        FACTORY_EVENT_PORT: String(server.port),
+        FACTORY_CONTROL_API_TOKEN: token,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
     });
-    expect(withToken.exitCode).toBe(0);
-
-    const withoutToken = await dispatch({
-      FACTORY_EVENT_PORT: String(server.port),
-      FACTORY_CONTROL_API_TOKEN: "",
-    });
-    expect(withoutToken.exitCode).toBe(0);
-    expect(authorizations).toEqual(["Bearer dispatch-test-token", null]);
+    const [exitCode, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stderr).text(),
+    ]);
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+    expect(authorization).toBe(`Bearer ${token}`);
   } finally {
     server.stop(true);
   }
@@ -102,24 +98,31 @@ test.each([
   },
 );
 
-test("fails fast with the request path and configured timeout", async () => {
+test("dispatch fails fast with the request path and configured timeout", async () => {
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
-    fetch() {
-      return new Promise(() => {});
-    },
+    fetch: () => new Promise(() => {}),
   });
-
   try {
-    const result = await dispatch({
-      FACTORY_EVENT_PORT: String(server.port),
-      FACTORY_DISPATCH_TIMEOUT_MS: "50",
+    const child = Bun.spawn(["bun", DISPATCH, "status", "--json"], {
+      env: {
+        ...process.env,
+        FACTORY_EVENT_PORT: String(server.port),
+        FACTORY_CONTROL_API_TOKEN: "dispatch-secret-token",
+        FACTORY_DISPATCH_TIMEOUT_MS: "50",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
     });
-    expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain(
-      "control API request to /replay timed out after 50ms",
-    );
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(exitCode).toBe(1);
+    expect(stderr).toMatch(/control API request to \/\S+ timed out after 50ms/);
+    expect(`${stdout}${stderr}`).not.toContain("dispatch-secret-token");
   } finally {
     server.stop(true);
   }
