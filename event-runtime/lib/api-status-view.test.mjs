@@ -378,6 +378,7 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
     heartbeat(db, "w-busy-1", {
       state: "busy",
       runId: "run-busy-1",
+      skipped: [{ runId: "run-skipped-1", reason: "label_mismatch" }],
       now: nowMs,
     });
     registerWorker(db, {
@@ -417,6 +418,12 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
         expect(typeof w.labels).toBe("object");
         expect(w.labels).not.toBeNull();
         expect(Array.isArray(w.adapters)).toBe(true);
+        expect(Array.isArray(w.skipped)).toBe(true);
+        for (const entry of w.skipped) {
+          expect(Object.keys(entry).sort()).toEqual(["reason", "runId"]);
+          expect(typeof entry.runId).toBe("string");
+          expect(typeof entry.reason).toBe("string");
+        }
         expect(["idle", "busy", "stopped"]).toContain(w.state);
         expect(w.currentRun === null || typeof w.currentRun === "string").toBe(
           true,
@@ -432,6 +439,7 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
       const idle = workers.find((w) => w.workerId === "w-idle-1");
       expect(idle.labels).toEqual({ role: "worker", node: "lab-1" });
       expect(idle.adapters).toEqual(["claude", "fake"]);
+      expect(idle.skipped).toEqual([]);
       expect(idle.state).toBe("idle");
       expect(idle.currentRun).toBeNull();
       expect(idle.stale).toBe(false);
@@ -440,6 +448,9 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
       const busy = workers.find((w) => w.workerId === "w-busy-1");
       expect(busy.state).toBe("busy");
       expect(busy.currentRun).toBe("run-busy-1");
+      expect(busy.skipped).toEqual([
+        { runId: "run-skipped-1", reason: "label_mismatch" },
+      ]);
       expect(busy.stale).toBe(false);
 
       const stale = workers.find((w) => w.workerId === "w-stale-1");
