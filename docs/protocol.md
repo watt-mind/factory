@@ -37,7 +37,7 @@ tracker the factory cannot reach must never be silently read as "no tickets".
 
 | Protocol     | GitHub                                                                                        |
 | :----------- | :-------------------------------------------------------------------------------------------- |
-| `identifier` | `owner/repo#42`                                                                               |
+| `identifier` | `owner/repo#42` or `configured-repo-name#42`                                                  |
 | `team`       | Repository, via `controlPlane.github.teams` (or a key that already looks like `owner/name`)   |
 | `labels`     | Issue labels of the **same spelling**. Writes send the complete resulting set, never a delta. |
 | `assignee`   | Issue assignee. `claim` assigns the `gh` viewer, then **reads the assignee back**.            |
@@ -355,8 +355,11 @@ and its `claim` verb performs the advisory read-back. The authoritative
 concurrency control is the per-repository dispatch lock described in §7.
 
 ```bash
-# Read a ticket.
+# Read a ticket. GitHub Issues accept either the full slug or the configured
+# repository name; both spellings resolve to the full `owner/repo#N` form.
 factory ticket get CLNT-616
+factory ticket get watt-mind/factory#123
+factory ticket get factory#123
 # List its comments.
 factory ticket comments CLNT-616
 # Atomically claim a dispatchable ticket (`--agent` selects the harness).

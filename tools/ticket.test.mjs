@@ -34,6 +34,7 @@ import {
   closureCheckMessages,
   resolveRepoName,
   resolveRepoNameFromTicket,
+  normalizeTicketRef,
   resolveRepoNameForFile,
   instanceConfigRoot,
   InstanceConfigMissingError,
@@ -781,10 +782,25 @@ test("resolveRepoNameFromTicket: case-insensitive on the github slug", () => {
   );
 });
 
+test("resolveRepoNameFromTicket: configured repository names resolve case-insensitively", () => {
+  expect(resolveRepoNameFromTicket("factory#7", GH975_REPOS)).toBe("factory");
+  expect(resolveRepoNameFromTicket("Factory#7", GH975_REPOS)).toBe("factory");
+});
+
+test("normalizeTicketRef: both configured GitHub spellings use the full slug", () => {
+  expect(normalizeTicketRef("factory#7", GH975_REPOS)).toBe(
+    "watt-mind/factory#7",
+  );
+  expect(normalizeTicketRef("Watt-Mind/Factory#7", GH975_REPOS)).toBe(
+    "watt-mind/factory#7",
+  );
+});
+
 test("resolveRepoNameFromTicket: linear-style and bare ids resolve nothing", () => {
   expect(resolveRepoNameFromTicket("WM-123", GH975_REPOS)).toBeNull();
   expect(resolveRepoNameFromTicket("975", GH975_REPOS)).toBeNull();
   expect(resolveRepoNameFromTicket(undefined, GH975_REPOS)).toBeNull();
+  expect(resolveRepoNameFromTicket("nope#7", GH975_REPOS)).toBeNull();
 });
 
 test("resolveRepoNameForFile: --from chooses its GitHub repo and refuses an ambiguous workspace", () => {
@@ -840,7 +856,7 @@ test("resolveRepoNameForFile: a Linear-style --from falls through to cwd instead
  * Linear key leaks in: each route therefore ends in a deterministic, offline
  * failure that identifies which control plane was reached.
  */
-function spawnFileOutsideRepo(args, { controlPlane } = {}) {
+function spawnTicketOutsideRepo(args, { controlPlane } = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), "ticket-file-route-"));
   const workspace = path.join(root, "workspace");
   const bin = path.join(root, "bin");
@@ -887,7 +903,7 @@ function spawnFileOutsideRepo(args, { controlPlane } = {}) {
         delete env[name];
     }
     const result = Bun.spawnSync({
-      cmd: ["bun", path.join(cliRoot, "tools", "ticket.mjs"), "file", ...args],
+      cmd: ["bun", path.join(cliRoot, "tools", "ticket.mjs"), ...args],
       cwd: workspace,
       env,
       stdout: "pipe",
@@ -902,6 +918,9 @@ function spawnFileOutsideRepo(args, { controlPlane } = {}) {
     rmSync(root, { recursive: true, force: true });
   }
 }
+
+const spawnFileOutsideRepo = (args, options) =>
+  spawnTicketOutsideRepo(["file", ...args], options);
 
 test("file refuses an unresolvable workspace with both routing flags", () => {
   const result = spawnFileOutsideRepo(["--title", "finding"]);
@@ -943,6 +962,24 @@ test("file without --title reports usage before any routing", () => {
   expect(result.exitCode).toBe(1);
   expect(result.stderr).toContain("usage: file --title");
   expect(result.stderr).not.toContain("--repo <name> or --from <owner/repo#N>");
+});
+
+test("unknown GitHub-shaped ticket refs fail before a control-plane transport", () => {
+  const result = spawnTicketOutsideRepo(["labels", "nope#7", "--remove", "x"]);
+  expect(result.exitCode).toBe(2);
+  expect(result.stderr).toContain('unrecognised ticket ref "nope#7"');
+  expect(result.stderr).toContain("<owner>/<repo>#N or <repo-name>#N");
+  expect(result.ghCalls).toBe("");
+});
+
+test("short configured GitHub refs reach the adapter as full identifiers", () => {
+  const result = spawnTicketOutsideRepo(
+    ["labels", "factory#7", "--remove", "x"],
+    { controlPlane: "github" },
+  );
+  expect(result.exitCode).toBe(1);
+  expect(result.ghCalls).toContain("repos/watt-mind/factory/issues/7");
+  expect(result.ghCalls).not.toContain("factory#7");
 });
 
 // ----------------------------------- instance config resolution (GH-975) ---
