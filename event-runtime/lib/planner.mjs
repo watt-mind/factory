@@ -2106,6 +2106,15 @@ function coalesceWebhookMergeRequest(
   };
 }
 
+const HUMAN_NEEDED_BODY_HASH_MARKER = /\[dispatch_ticket_body_hash:([^\]]+)\]/;
+
+function proposalExpiredAt(proposal, at) {
+  return (
+    Date.parse(at) - Date.parse(proposal.created_at) >
+    Number(proposal.ttl_seconds) * 1000
+  );
+}
+
 function humanNeededReasonPrefix(reason) {
   return String(reason).split(":", 1)[0];
 }
@@ -2151,17 +2160,29 @@ function humanNeeded(db, event, reason, at, ttlSeconds, ticketContext = null) {
         reasonPrefix,
       );
     const hashMarker = `[dispatch_ticket_body_hash:${ticketContext.descriptionHash}]`;
-    const current = matching.find((proposal) =>
-      String(proposal.reason ?? "").includes(hashMarker),
+    // Expiry is derived from created_at + ttl_seconds (nothing writes
+    // status='expired'), so an aged-out open row is not current: the unchanged
+    // ticket must be re-proposed once its earlier question has expired.
+    const current = matching.find(
+      (proposal) =>
+        !proposalExpiredAt(proposal, at) &&
+        String(proposal.reason ?? "").includes(hashMarker),
     );
     const stale = matching.filter((proposal) => proposal.id !== current?.id);
     for (const proposal of stale) {
+      const previousMarker = String(proposal.reason ?? "").match(
+        HUMAN_NEEDED_BODY_HASH_MARKER,
+      );
+      const supersedeReason =
+        previousMarker && previousMarker[1] !== ticketContext.descriptionHash
+          ? "superseded_by_ticket_body_change"
+          : "superseded_by_replan";
       db.query(
         `UPDATE proposals
          SET status = 'superseded', decided_at = ?, decided_by = ?,
-             reason = 'superseded_by_ticket_body_change'
+             reason = ?
          WHERE id = ?`,
-      ).run(at, "planner", proposal.id);
+      ).run(at, "planner", supersedeReason, proposal.id);
     }
     if (current) {
       const noopReason = `human_needed_already_open:${current.id}`;

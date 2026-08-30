@@ -1218,9 +1218,12 @@ describe("planEvent worktree gate (WM-108)", () => {
       expect(changed.proposal.id).not.toBe(first.proposal.id);
       expect(
         db
-          .query(`SELECT status FROM proposals WHERE id = ?`)
-          .get(first.proposal.id).status,
-      ).toBe("superseded");
+          .query(`SELECT status, reason FROM proposals WHERE id = ?`)
+          .get(first.proposal.id),
+      ).toEqual({
+        status: "superseded",
+        reason: "superseded_by_ticket_body_change",
+      });
     });
   });
 
@@ -1232,7 +1235,7 @@ describe("planEvent worktree gate (WM-108)", () => {
     withReposRoot(unconfiguredRepo, () => {
       const db = openDb(":memory:");
       const dispatch = tierDispatch();
-      const plan = (eventId) => {
+      const plan = (eventId, now = NOW) => {
         const ref = admit(db, {
           type: "test.worktree.requested",
           eventId,
@@ -1240,7 +1243,7 @@ describe("planEvent worktree gate (WM-108)", () => {
           payload: { repo: "unconfigured", ticket: "WM-694" },
         });
         return planEvent(db, syntheticRegistry(), ref, {
-          now: NOW,
+          now,
           dispatch,
         });
       };
@@ -1257,7 +1260,7 @@ describe("planEvent worktree gate (WM-108)", () => {
       });
 
       let active = first.proposal;
-      for (const status of ["approved", "rejected", "expired"]) {
+      for (const status of ["approved", "rejected"]) {
         db.query(`UPDATE proposals SET status = ? WHERE id = ?`).run(
           status,
           active.id,
@@ -1266,6 +1269,23 @@ describe("planEvent worktree gate (WM-108)", () => {
         expect(fresh.decision).toBe("human_needed");
         active = fresh.proposal;
       }
+
+      // Nothing writes status='expired': expiry is derived from
+      // created_at + ttl_seconds. An open row that aged out must not
+      // suppress the unchanged ticket's next question.
+      const ttlMs = Number(active.ttl_seconds) * 1000;
+      expect(plan("unconfigured-within-ttl", NOW + ttlMs)).toEqual({
+        decision: "noop",
+        reason: `human_needed_already_open:${active.id}`,
+      });
+      const afterExpiry = plan("unconfigured-expired", NOW + ttlMs + 1000);
+      expect(afterExpiry.decision).toBe("human_needed");
+      expect(afterExpiry.proposal.id).not.toBe(active.id);
+      expect(
+        db
+          .query(`SELECT status, reason FROM proposals WHERE id = ?`)
+          .get(active.id),
+      ).toEqual({ status: "superseded", reason: "superseded_by_replan" });
     });
   });
 
