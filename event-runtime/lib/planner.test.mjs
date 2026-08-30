@@ -2232,6 +2232,115 @@ describe("planEvent worktree gate (WM-108)", () => {
     );
   });
 
+  test("factory dispatch refuses a missing toolchain before ticket reads and memoizes the typed proposal", () => {
+    const toolchainRepo = tierRepo + `    toolchain:\n      uv: ">=0.5"\n`;
+    withReposRoot(toolchainRepo, () => {
+      const db = openDb(":memory:");
+      const calls = [];
+      const toolchain = {
+        cache: new Map(),
+        which: (executable) => {
+          calls.push(executable);
+          return null;
+        },
+      };
+      const plan = (eventId) => {
+        const ref = admit(db, {
+          type: "factory.dispatch.requested",
+          eventId,
+          correlationId: eventId,
+          payload: { repo: "tiered", ticket: "WM-694" },
+        });
+        return planEvent(db, registry, ref, { now: NOW, toolchain });
+      };
+
+      const first = plan("toolchain-missing-first");
+      const second = plan("toolchain-missing-second");
+      expect(first).toMatchObject({
+        decision: "human_needed",
+        reason: "toolchain_unsatisfied:uv",
+      });
+      expect(second).toMatchObject({
+        decision: "human_needed",
+        reason: "toolchain_unsatisfied:uv",
+      });
+      expect(calls).toEqual(["uv"]);
+      expect(first.proposal.reason).toContain("repo_toolchain_missing");
+      expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(0);
+    });
+  });
+
+  test("factory dispatch probes a satisfied declared toolchain and plans normally", () => {
+    const toolchainRepo = tierRepo + `    toolchain:\n      bun: ">=1.3 <2"\n`;
+    withReposRoot(toolchainRepo, () => {
+      const db = openDb(":memory:");
+      const ref = admit(db, {
+        type: "factory.dispatch.requested",
+        eventId: "toolchain-satisfied",
+        correlationId: "toolchain-satisfied",
+        payload: { repo: "tiered", ticket: "WM-694" },
+      });
+      const outcome = planEvent(db, registry, ref, {
+        now: NOW,
+        dispatch: tierDispatch(),
+        toolchain: {
+          cache: new Map(),
+          which: () => "/opt/bin/bun",
+          spawn: () => ({ exitCode: 0, stdout: "1.3.14\n", stderr: "" }),
+        },
+      });
+      expect(outcome.decision).toBe("run");
+    });
+  });
+
+  test("factory dispatch skips probing when the repo declares no toolchain", () => {
+    withReposRoot(tierRepo, () => {
+      const db = openDb(":memory:");
+      const ref = admit(db, {
+        type: "factory.dispatch.requested",
+        eventId: "toolchain-undeclared",
+        correlationId: "toolchain-undeclared",
+        payload: { repo: "tiered", ticket: "WM-694" },
+      });
+      const outcome = planEvent(db, registry, ref, {
+        now: NOW,
+        dispatch: tierDispatch(),
+        toolchain: {
+          cache: new Map(),
+          which: () => {
+            throw new Error("undeclared toolchain must not probe");
+          },
+        },
+      });
+      expect(outcome.decision).toBe("run");
+    });
+  });
+
+  test("factory dispatch for a repo missing from config/repos.yaml → human_needed repo_unknown", () => {
+    withReposRoot(tierRepo, () => {
+      const db = openDb(":memory:");
+      const ref = admit(db, {
+        type: "factory.dispatch.requested",
+        eventId: "toolchain-repo-unknown",
+        correlationId: "toolchain-repo-unknown",
+        payload: { repo: "ghost", ticket: "WM-694" },
+      });
+      const outcome = planEvent(db, registry, ref, {
+        now: NOW,
+        dispatch: tierDispatch(),
+        toolchain: {
+          cache: new Map(),
+          which: () => {
+            throw new Error("unknown repo must not probe");
+          },
+        },
+      });
+      expect(outcome.decision).toBe("human_needed");
+      expect(outcome.reason).toMatch(/^repo_unknown: /);
+      expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(0);
+    });
+  });
+
   test("a repo missing from config/repos.yaml → human_needed repo_unknown", () => {
     withReposRoot(
       `repos:\n  - name: real\n    path: /tmp/nowhere\n    base: develop\n`,

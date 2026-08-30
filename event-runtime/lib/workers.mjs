@@ -127,20 +127,30 @@ export function heartbeat(
     runId = null,
     labels = {},
     adapters = [],
-    skipped = [],
+    skipped,
     now = Date.now(),
     startedAt = now,
   } = {},
 ) {
   const at = iso(now);
-  const normalizedSkipped = normalizeSkipped(skipped);
+  const normalizedSkipped =
+    skipped === undefined ? undefined : normalizeSkipped(skipped);
   const { changes } = db
     .query(
       `UPDATE workers
-          SET last_seen = ?, state = ?, current_run = ?, skipped_json = ?
+          SET last_seen = ?, state = ?, current_run = ?,
+              skipped_json = COALESCE(?, skipped_json)
         WHERE worker_id = ?`,
     )
-    .run(at, state, runId, JSON.stringify(normalizedSkipped), workerId);
+    .run(
+      at,
+      state,
+      runId,
+      normalizedSkipped === undefined
+        ? null
+        : JSON.stringify(normalizedSkipped),
+      workerId,
+    );
   if (changes) return;
 
   db.query(
@@ -155,7 +165,7 @@ export function heartbeat(
     process.pid,
     JSON.stringify(labels),
     adapters.join(","),
-    JSON.stringify(normalizedSkipped),
+    JSON.stringify(normalizedSkipped ?? []),
     iso(startedAt),
     at,
     state,

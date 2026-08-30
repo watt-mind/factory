@@ -190,7 +190,7 @@ describe("worker registry and heartbeats (OPS-233)", () => {
     expect(w.stale).toBe(false); // stopped is not stale — it left on purpose
   });
 
-  test("heartbeats persist skipped-run diagnostics and clear them when omitted", () => {
+  test("heartbeats preserve omitted skipped diagnostics and clear them explicitly", () => {
     const d = db();
     registerWorker(d, { workerId: "w1" });
     const skipped = [
@@ -200,7 +200,14 @@ describe("worker registry and heartbeats (OPS-233)", () => {
     heartbeat(d, "w1", { skipped });
     expect(listWorkers(d)[0].skipped).toEqual(skipped);
 
-    heartbeat(d, "w1");
+    heartbeat(d, "w1", { state: "busy", runId: "run_busy" });
+    expect(listWorkers(d)[0]).toMatchObject({
+      state: "busy",
+      currentRun: "run_busy",
+      skipped,
+    });
+
+    heartbeat(d, "w1", { skipped: [] });
     expect(listWorkers(d)[0].skipped).toEqual([]);
   });
 

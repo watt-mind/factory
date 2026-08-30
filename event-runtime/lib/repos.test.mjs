@@ -15,6 +15,7 @@ import {
   loadRepos,
   normalizeToolVersion,
   preflightToolchain,
+  preflightToolchainSync,
   proveMergeChecks,
   REPO_ATTESTATION_STALE,
   REPO_TOOLCHAIN_MISMATCH,
@@ -22,6 +23,7 @@ import {
   RepoError,
   findRepoForPath,
   repoDispatchPreflight,
+  repoDispatchPreflightSync,
   repoReadiness,
   reposView,
   resolvePromotionTarget,
@@ -1239,6 +1241,35 @@ describe("readiness: a repo is ready only on a current, passing attestation", ()
 });
 
 describe("repoDispatchPreflight is the gate dispatch consults before claiming", () => {
+  test("the synchronous planner variant returns the same typed failed result", () => {
+    const repo = repoWith(`    toolchain:\n      uv: ">=0.5"\n`);
+    const whichCalls = [];
+    const spawnCalls = [];
+    const gate = repoDispatchPreflightSync(repo, {
+      node: "planner",
+      now,
+      which: (executable) => {
+        whichCalls.push(executable);
+        return null;
+      },
+      spawn: (argv) => {
+        spawnCalls.push(argv);
+        return { exitCode: 0, stdout: "0.5.0", stderr: "" };
+      },
+    });
+    expect(gate.ready).toBe(false);
+    expect(gate.reasons[0]).toMatchObject({
+      reason: REPO_TOOLCHAIN_MISSING,
+      executable: "uv",
+      node: "planner",
+    });
+    expect(whichCalls).toEqual(["uv"]);
+    expect(spawnCalls).toEqual([]);
+    expect(preflightToolchainSync(repo, { now, which: () => null }).ok).toBe(
+      false,
+    );
+  });
+
   test("a repo whose preflight fails is refused, with the failing constraint named", async () => {
     const repo = repoWith(`    toolchain:\n      node: ">=22 <25"\n`);
     const node = fakeNode({ versions: { node: "v18.19.1" } });
