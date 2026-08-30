@@ -451,6 +451,46 @@ describe("stack daemon diagnostics (#1868)", () => {
       fix: null,
     });
   });
+
+  test("reports stale registry and planner health from the live control API", () => {
+    const rows = stackDaemonDiagnostics({
+      root,
+      env: {},
+      listProcesses: () => [],
+      readPidFile: () => "8080\n",
+      probeProcess: () => ({
+        alive: true,
+        command: "bun /factory/stack/event-runtime/cli.mjs serve --port 7381",
+      }),
+      controlApiProbe: (pathname) => {
+        if (pathname === "/status")
+          return { ok: true, body: { events: { admitted: 1 } } };
+        return {
+          ok: true,
+          body: {
+            registry: {
+              stamp: "files:stale",
+              loadedAt: "2026-08-30T12:00:00.000Z",
+              lastReloadError: { message: "bad schema" },
+            },
+            planner: { lastSuccessAt: "2026-08-30T11:00:00.000Z" },
+          },
+        };
+      },
+      registryStamp: () => "files:current",
+      now: () => Date.parse("2026-08-30T12:00:00.000Z"),
+    });
+
+    expect(rows).toContainEqual(
+      expect.objectContaining({ label: "registry health", ok: false }),
+    );
+    expect(rows).toContainEqual(
+      expect.objectContaining({ label: "registry reload", ok: "warn" }),
+    );
+    expect(rows).toContainEqual(
+      expect.objectContaining({ label: "planner health", ok: false }),
+    );
+  });
 });
 
 describe("chain auto-approval policy diagnostic (#1779)", () => {

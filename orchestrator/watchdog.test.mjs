@@ -2,6 +2,7 @@ import { test, expect } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import {
+  assessServeHealth,
   controlApiFailureCode,
   fetchRecentSandboxRefusals,
   formatWatchdogReport,
@@ -17,6 +18,57 @@ import {
   SANDBOX_REFUSAL_MAX_RUNS,
   SCAN_LOOP_AGENTS,
 } from "./watchdog.mjs";
+
+test("assessServeHealth flags a served stale registry and reload error", () => {
+  const result = assessServeHealth(
+    {
+      registry: {
+        stamp: "files:old",
+        loadedAt: "2026-08-30T12:00:00.000Z",
+        lastReloadError: {
+          at: "2026-08-30T12:01:00.000Z",
+          message: "invalid agent pin",
+        },
+      },
+    },
+    { expectedRegistryStamp: "files:current" },
+  );
+
+  expect(result.ok).toBe(false);
+  expect(result.issues.map((issue) => issue.code)).toEqual([
+    "REGISTRY_STALE",
+    "REGISTRY_RELOAD_ERROR",
+  ]);
+});
+
+test("assessServeHealth tolerates an absent planner block", () => {
+  const result = assessServeHealth(
+    { registry: { stamp: "files:current", lastReloadError: null } },
+    { expectedRegistryStamp: "files:current", queuedEvents: 4 },
+  );
+
+  expect(result.ok).toBe(true);
+  expect(result.issues).toEqual([]);
+});
+
+test("assessServeHealth rejects a stale planner while admitted events wait", () => {
+  const result = assessServeHealth(
+    {
+      registry: { stamp: "files:current", lastReloadError: null },
+      planner: { lastSuccessAt: "2026-08-30T11:45:00.000Z" },
+    },
+    {
+      expectedRegistryStamp: "files:current",
+      queuedEvents: 2,
+      now: Date.parse("2026-08-30T12:00:00.000Z"),
+    },
+  );
+
+  expect(result.ok).toBe(false);
+  expect(result.issues).toContainEqual(
+    expect.objectContaining({ code: "PLANNER_STALE" }),
+  );
+});
 
 test("formatWatchdogReport formats clean watchdog status", () => {
   const cleanResult = {

@@ -35,6 +35,10 @@ import {
   reposRoot,
 } from "../event-runtime/lib/repos.mjs";
 import {
+  codeStamp,
+  REGISTRY_STAMP_PATHS,
+} from "../event-runtime/lib/worker.mjs";
+import {
   CHAIN_AUTO_APPROVAL_EVENT_TYPES,
   loadChainAutoApprovalPolicy,
 } from "../event-runtime/lib/auto-approval.mjs";
@@ -436,6 +440,56 @@ function defaultProcessProbe(pid) {
   }
 }
 
+function defaultControlApiProbe(pathname, { port, token = null }) {
+  const headers = [];
+  if (token && pathname !== "/health")
+    headers.push("-H", `Authorization: Bearer ${token}`);
+  const result = spawnSync(
+    "curl",
+    [
+      "-fsS",
+      "--max-time",
+      "3",
+      ...headers,
+      `http://127.0.0.1:${port}${pathname}`,
+    ],
+    { encoding: "utf8" },
+  );
+  if (result.status !== 0) {
+    return {
+      ok: false,
+      detail: String(result.stderr ?? "control API did not respond").trim(),
+    };
+  }
+  try {
+    return { ok: true, body: JSON.parse(result.stdout) };
+  } catch {
+    return { ok: false, detail: "control API returned invalid JSON" };
+  }
+}
+
+function plannerLastSuccessAt(planner) {
+  return (
+    planner?.lastSuccessAt ??
+    planner?.lastPlannedAt ??
+    planner?.lastPlanAt ??
+    planner?.lastCompletedAt ??
+    planner?.lastRunAt ??
+    planner?.lastAt ??
+    null
+  );
+}
+
+function plannerAgeMs(value, now) {
+  const parsed =
+    typeof value === "number"
+      ? value < 1_000_000_000_000
+        ? value * 1000
+        : value
+      : Date.parse(String(value ?? ""));
+  return Number.isFinite(parsed) ? now() - parsed : null;
+}
+
 /**
  * Reports the two daemons that make a local factory stack usable. Process and
  * pidfile probes are injectable so a test never has to manufacture a real
@@ -448,6 +502,9 @@ export function stackDaemonDiagnostics({
   listProcesses = defaultProcessTable,
   readPidFile = (file) => readFileSync(file, "utf8"),
   probeProcess = defaultProcessProbe,
+  controlApiProbe = defaultControlApiProbe,
+  registryStamp = (checkout) => codeStamp(checkout, REGISTRY_STAMP_PATHS),
+  now = () => Date.now(),
 } = {}) {
   const appConfigured = Boolean(
     env.FACTORY_GH_APP_ID &&
@@ -624,6 +681,124 @@ export function stackDaemonDiagnostics({
       ok: true,
       label: "serve.pid identity",
       detail: `PID ${pid} is event-runtime/cli.mjs serve`,
+      fix: null,
+    });
+  }
+
+  // A matching process is necessary but not sufficient: it can be serving a
+  // last-good registry while the checkout has moved. Health stays bearer-free
+  // precisely so doctor can make this local liveness check without reading a
+  // credential.
+  const port = Number(env.FACTORY_EVENT_PORT ?? 7381);
+  const probeOptions = {
+    port,
+    token:
+      env.FACTORY_CONTROL_API_TOKEN ?? process.env.FACTORY_CONTROL_API_TOKEN,
+  };
+  const healthProbe = controlApiProbe("/health", probeOptions);
+  if (!healthProbe?.ok) {
+    diagnostics.push({
+      ok: false,
+      label: "control API health",
+      detail: `unreachable on :${port}${healthProbe?.detail ? ` — ${healthProbe.detail}` : ""}`,
+      fix: "run `factory down && factory up`, then run `factory doctor` again",
+    });
+    return diagnostics;
+  }
+  diagnostics.push({
+    ok: true,
+    label: "control API health",
+    detail: `reachable on :${port}`,
+    fix: null,
+  });
+
+  const registry = healthProbe.body?.registry;
+  const expectedStamp = registryStamp(root);
+  if (!registry?.stamp) {
+    diagnostics.push({
+      ok: "warn",
+      label: "registry health",
+      detail: "not reported by this serve",
+      fix: "restart serve from the current checkout to expose registry health",
+    });
+  } else if (registry.stamp !== expectedStamp) {
+    diagnostics.push({
+      ok: false,
+      label: "registry health",
+      detail: `stale — served ${registry.stamp}, local ${expectedStamp}`,
+      fix: "restart serve so it loads the current registry",
+    });
+  } else {
+    diagnostics.push({
+      ok: true,
+      label: "registry health",
+      detail: `current (${registry.stamp}; loaded ${registry.loadedAt ?? "unknown"})`,
+      fix: null,
+    });
+  }
+  if (registry?.lastReloadError?.message) {
+    diagnostics.push({
+      ok: "warn",
+      label: "registry reload",
+      detail: registry.lastReloadError.message,
+      fix: "repair the rejected registry change, then restart or wait for a successful reload",
+    });
+  } else {
+    diagnostics.push({
+      ok: true,
+      label: "registry reload",
+      detail: "no reload error reported",
+      fix: null,
+    });
+  }
+
+  if (Object.hasOwn(healthProbe.body ?? {}, "planner")) {
+    const statusProbe = controlApiProbe("/status", probeOptions);
+    if (!statusProbe?.ok) {
+      diagnostics.push({
+        ok: "warn",
+        label: "planner health",
+        detail: `cannot read admitted events${statusProbe?.detail ? ` — ${statusProbe.detail}` : ""}`,
+        fix: "restore control API access, then run `factory doctor` again",
+      });
+      return diagnostics;
+    }
+    const admitted = statusProbe?.body?.events?.admitted;
+    const queued = Number.isFinite(admitted)
+      ? admitted
+      : Number.isFinite(admitted?.count)
+        ? admitted.count
+        : 0;
+    const age = plannerAgeMs(
+      plannerLastSuccessAt(healthProbe.body.planner),
+      now,
+    );
+    if (queued > 0 && (age === null || age > 5 * 60 * 1000)) {
+      diagnostics.push({
+        ok: false,
+        label: "planner health",
+        detail:
+          age === null
+            ? `${queued} admitted event(s) queued; planner recency unavailable`
+            : `${queued} admitted event(s) queued; planner last succeeded ${Math.round(age / 60000)}m ago`,
+        fix: "inspect serve logs and restart the planner after resolving its error",
+      });
+    } else {
+      diagnostics.push({
+        ok: true,
+        label: "planner health",
+        detail:
+          queued > 0
+            ? `current with ${queued} admitted event(s)`
+            : "no admitted events waiting",
+        fix: null,
+      });
+    }
+  } else {
+    diagnostics.push({
+      ok: "warn",
+      label: "planner health",
+      detail: "not reported by this serve",
       fix: null,
     });
   }
