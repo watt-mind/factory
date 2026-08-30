@@ -32,7 +32,7 @@ import {
   type DisplayConfig,
 } from "../displayOptions";
 import { EMPTY, formatBytes, formatRelative } from "../format";
-import { hashSearch } from "../hash";
+import { artifactFullHash, hashSearch } from "../hash";
 import {
   refetchIntervals,
   useDisplayOptions,
@@ -276,7 +276,7 @@ export function Artifacts({
   filters: ArtifactFilters;
   onFiltersChange: (filters: ArtifactFilters) => void;
   onJumpRun: (runId: string) => void;
-  onOpenFull?: (digest: string) => void;
+  onOpenFull?: (digest: string, backHash?: string) => void;
   /** Injectable formatter keeps the expensive preview derivation testable. */
   formatContent?: typeof formattedContent;
 }) {
@@ -473,11 +473,12 @@ export function Artifacts({
   const openFull = useCallback(
     (sha256: string) => {
       if (onOpenFull) {
-        onOpenFull(sha256);
+        onOpenFull(sha256, window.location.hash);
       } else {
-        window.location.hash = withCurrentArtifactQuery(
-          `artifact/${encodeURIComponent(sha256)}`,
-        );
+        window.location.hash = `#/${artifactFullHash(
+          sha256,
+          window.location.hash,
+        )}`;
       }
     },
     [onOpenFull],

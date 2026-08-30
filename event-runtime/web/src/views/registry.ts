@@ -19,7 +19,13 @@
  */
 import { createElement, lazy, type ComponentType } from "react";
 import type { OperatorContext } from "../context";
-import { artifactsHash, eventsHash, hashPath, hashSearch } from "../hash";
+import {
+  artifactsHash,
+  eventsHash,
+  hashPath,
+  hashSearch,
+  hashView,
+} from "../hash";
 import type { EventFocus, StatusView } from "../types";
 import type { ArtifactFilters } from "./Artifacts";
 import { Events } from "./Events";
@@ -58,7 +64,7 @@ export type Shell = {
     run: (runId: string) => void;
     runFull: (runId: string) => void;
     runs: (state?: string) => void;
-    artifactFull: (digest: string) => void;
+    artifactFull: (digest: string, backHash?: string) => void;
     ticket: (ticketId: string) => void;
     pr: (number: number) => void;
     proposal: (id: string) => void;
@@ -180,6 +186,12 @@ export const workerHash = (
   const path = hashPath("workers", id);
   return health ? `${path}?health=${encodeURIComponent(health)}` : path;
 };
+
+/** The full reader accepts only catalogue return paths; direct links fall back. */
+export function artifactBackPath(hash: string): string {
+  const back = hashSearch(hash).get("back");
+  return back && hashView(back) === "artifacts" ? back : "artifacts";
+}
 
 // First-paint views (entry chunk, no Suspense flash on the operator's landing).
 const OverviewView = adapt(Overview, ({ navigate, shell }) => ({
@@ -596,9 +608,9 @@ const DEFS = [
     load: load(
       () => import("./ArtifactFull"),
       "ArtifactFull",
-      ({ params, navigate, shell }) => ({
+      ({ params, hash, navigate, shell }) => ({
         digest: params[0]!,
-        onBack: () => navigate("artifacts"),
+        onBack: () => navigate(artifactBackPath(hash)),
         onJumpRun: shell.jump.run,
       }),
     ),

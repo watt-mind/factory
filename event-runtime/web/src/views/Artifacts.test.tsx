@@ -904,7 +904,7 @@ describe("Full-page artifact reader view navigation & 'o' shortcut (WM-828)", ()
     await view.findByRole("region", { name: "Artifact content" });
 
     fireEvent.keyDown(document.body, { key: "o" });
-    expect(view.onOpenFull).toHaveBeenCalledWith(SHA_A);
+    expect(view.onOpenFull).toHaveBeenCalledWith(SHA_A, `#/artifacts/${SHA_A}`);
   });
 
   test("detail pane includes Open in full page action with 'o' shortcut hint", async () => {
@@ -927,7 +927,7 @@ describe("Full-page artifact reader view navigation & 'o' shortcut (WM-828)", ()
     expect(openBtns[0].getAttribute("title")).toBe("Open in full page (o)");
 
     fireEvent.click(openBtns[0]);
-    expect(view.onOpenFull).toHaveBeenCalledWith(SHA_A);
+    expect(view.onOpenFull).toHaveBeenCalledWith(SHA_A, `#/artifacts/${SHA_A}`);
   });
 });
 

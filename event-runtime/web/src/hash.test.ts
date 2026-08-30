@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { HashWriteScheduler } from "./hash";
 import {
+  artifactFullHash,
   createHashWriter,
   eventsHash,
   flushHash,
@@ -128,6 +129,26 @@ describe("eventsHash", () => {
     );
     expect(eventsHash("web", "evt_1", "factory.ticket.ready")).toBe(
       "events/web/evt_1?type=factory.ticket.ready",
+    );
+  });
+});
+
+describe("artifactFullHash", () => {
+  test("carries the filtered inspector as the full reader's return target", () => {
+    const digest = "a".repeat(64);
+    expect(
+      artifactFullHash(
+        digest,
+        `#/artifacts/${digest}?kind=transcript&search=f99e8b&project=factory`,
+      ),
+    ).toBe(
+      `artifact/${digest}?back=artifacts%2F${digest}%3Fkind%3Dtranscript%26search%3Df99e8b%26project%3Dfactory`,
+    );
+  });
+
+  test("does not add a return target outside the catalogue", () => {
+    expect(artifactFullHash("a".repeat(64), "#/runs/run_1")).toBe(
+      `artifact/${"a".repeat(64)}`,
     );
   });
 });
