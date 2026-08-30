@@ -434,23 +434,29 @@ dump_daemon_log() { # <logfile> <label>
 # count as ready. If our recorded pid died at bind, say so from serve.log
 # instead of adopting the process that won the port.
 HEALTH_JSON=""
-for _ in {1..50}; do
-  HEALTH_JSON=$(curl -sf -m 1 "http://127.0.0.1:$API_PORT/health" 2>/dev/null) && break
-  HEALTH_JSON=""
+HEALTH_WAIT_STARTED=$SECONDS
+HEALTH_LAST_CURL_EXIT=0
+while :; do
+  if HEALTH_JSON=$(curl -sf -m 1 "http://127.0.0.1:$API_PORT/health" 2>/dev/null); then
+    break
+  else
+    HEALTH_LAST_CURL_EXIT=$?
+    HEALTH_JSON=""
+  fi
   if ! pid_alive "$RUN_DIR/serve.pid"; then
     dump_daemon_log "$RUN_DIR/serve.log" "event runtime"
     die "event runtime died during startup on $API_PORT — see $RUN_DIR/serve.log"
+  fi
+  HEALTH_WAIT_ELAPSED=$((SECONDS - HEALTH_WAIT_STARTED))
+  if (( HEALTH_WAIT_ELAPSED >= WORKTREE_HEALTH_TIMEOUT_S )); then
+    dump_daemon_log "$RUN_DIR/serve.log" "event runtime"
+    die "control API not healthy after ${HEALTH_WAIT_ELAPSED}s (budget ${WORKTREE_HEALTH_TIMEOUT_S}s, last curl exit ${HEALTH_LAST_CURL_EXIT}) — see $RUN_DIR/serve.log"
   fi
   sleep 0.1
 done
 if ! pid_alive "$RUN_DIR/serve.pid"; then
   dump_daemon_log "$RUN_DIR/serve.log" "event runtime"
   die "event runtime died during startup on $API_PORT — see $RUN_DIR/serve.log"
-fi
-if [[ -z "$HEALTH_JSON" ]]; then
-  dump_daemon_log "$RUN_DIR/serve.log" "event runtime"
-  HEALTH_JSON=$(curl -sf -m 2 "http://127.0.0.1:$API_PORT/health") \
-    || die "control API never came up on $API_PORT — see $RUN_DIR/serve.log"
 fi
 assert_event_home "$HEALTH_JSON" "$HOME_DIR" "$API_PORT"
 assert_event_adapter "$HEALTH_JSON" "$LIVE" "$API_PORT"
@@ -484,19 +490,21 @@ if [[ "$WEB_AVAILABLE" -eq 1 ]]; then
   # adjacent port after allocation. Require the recorded web daemon itself to own
   # the persisted port before reporting the environment ready.
   WEB_PID_PORT=""
-  for _ in {1..50}; do
+  WEB_WAIT_STARTED=$SECONDS
+  while :; do
     if ! pid_alive "$RUN_DIR/web.pid"; then
       dump_daemon_log "$RUN_DIR/web.log" "web server"
       die "web server died during startup on $WEB_PORT — see $RUN_DIR/web.log"
     fi
     WEB_PID_PORT=$(listen_tcp_port "$RUN_DIR/web.pid" || true)
     [[ "$WEB_PID_PORT" == "$WEB_PORT" ]] && break
+    WEB_WAIT_ELAPSED=$((SECONDS - WEB_WAIT_STARTED))
+    if (( WEB_WAIT_ELAPSED >= WORKTREE_WEB_TIMEOUT_S )); then
+      dump_daemon_log "$RUN_DIR/web.log" "web server"
+      die "web server pid $(cat "$RUN_DIR/web.pid") did not bind reserved port $WEB_PORT after ${WEB_WAIT_ELAPSED}s (budget ${WORKTREE_WEB_TIMEOUT_S}s, last observed port ${WEB_PID_PORT:-none})"
+    fi
     sleep 0.1
   done
-  if [[ "$WEB_PID_PORT" != "$WEB_PORT" ]]; then
-    dump_daemon_log "$RUN_DIR/web.log" "web server"
-    die "web server pid $(cat "$RUN_DIR/web.pid") did not bind reserved port $WEB_PORT"
-  fi
 fi
 
 # ------------------------------------------------------------------- seed ---
