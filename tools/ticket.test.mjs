@@ -29,6 +29,7 @@ import {
   formatComments,
   parsePositionalArgs,
   transitionThenComment,
+  fileTicket,
   closureCheckMessages,
   resolveRepoName,
   resolveRepoNameFromTicket,
@@ -329,6 +330,138 @@ test("state does not post a comment when the transition fails", async () => {
     transitionThenComment(cp, "WM-910", "Todo", {}, "do not post"),
   ).rejects.toThrow("transition rejected");
   expect(calls).toEqual(["transition"]);
+});
+
+// ------------------------------------------------------------- file verb ---
+
+function fileHarness(result) {
+  const calls = [];
+  const emitted = [];
+  const exits = [];
+  const cp = {
+    async file(opts) {
+      calls.push(opts);
+      return result;
+    },
+  };
+  const io = {
+    emit: (obj, text) => emitted.push({ obj, text }),
+    setExitCode: (code) => exits.push(code),
+  };
+  return { cp, calls, emitted, exits, io };
+}
+
+test("file surfaces control-plane warnings: warning line, ok:false, exit 1", async () => {
+  const { cp, emitted, exits, io } = fileHarness({
+    identifier: "watt-mind/factory#42",
+    url: "https://github.com/watt-mind/factory/issues/42",
+    warnings: [
+      "watt-mind/factory#42 exists, but a follow-up write failed: boom",
+    ],
+  });
+  const before = process.exitCode ?? 0;
+  try {
+    await fileTicket(
+      cp,
+      { team: "WM", title: "t", body: "", labels: [], state: "Triage" },
+      io,
+    );
+  } finally {
+    process.exitCode = before;
+  }
+  expect(emitted).toHaveLength(1);
+  expect(emitted[0].obj).toMatchObject({
+    ok: false,
+    identifier: "watt-mind/factory#42",
+    warnings: [expect.stringContaining("follow-up write failed")],
+  });
+  expect(emitted[0].text).toBe(
+    "filed watt-mind/factory#42 in Triage  https://github.com/watt-mind/factory/issues/42\nwarning: watt-mind/factory#42 exists, but a follow-up write failed: boom",
+  );
+  expect(exits).toEqual([1]);
+});
+
+test("file sets process.exitCode=1 on warnings by default", async () => {
+  const { cp, io } = fileHarness({
+    identifier: "WM-1",
+    url: "u",
+    warnings: ["off the board"],
+  });
+  // Bun ignores `process.exitCode = undefined`, so restore to a number: a
+  // stale 1 here would make the whole suite exit non-zero with 0 failures.
+  const before = process.exitCode ?? 0;
+  try {
+    process.exitCode = 0;
+    await fileTicket(
+      cp,
+      { team: "WM", title: "t", state: "Triage" },
+      { emit: io.emit },
+    );
+    expect(process.exitCode).toBe(1);
+  } finally {
+    process.exitCode = before;
+  }
+});
+
+test("file without warnings prints the clean line, ok:true, and leaves the exit code alone", async () => {
+  const { cp, calls, emitted, exits, io } = fileHarness({
+    identifier: "WM-2",
+    url: "https://linear.app/wm/issue/WM-2",
+  });
+  await fileTicket(
+    cp,
+    { team: "WM", title: "t", body: "b", labels: ["type:bug"], state: "Todo" },
+    io,
+  );
+  expect(emitted[0].obj).toEqual({
+    ok: true,
+    identifier: "WM-2",
+    url: "https://linear.app/wm/issue/WM-2",
+  });
+  expect(emitted[0].text).toBe(
+    "filed WM-2 in Todo  https://linear.app/wm/issue/WM-2",
+  );
+  expect(exits).toEqual([]);
+  // No dedupe key: neither dedupeKey nor matchTitle reaches the control plane.
+  expect(calls[0]).toEqual({
+    team: "WM",
+    title: "t",
+    body: "b",
+    labels: ["type:bug"],
+    state: "Todo",
+    projectId: undefined,
+  });
+  expect("dedupeKey" in calls[0]).toBe(false);
+  expect("matchTitle" in calls[0]).toBe(false);
+});
+
+test("file --dedupe-key K passes dedupeKey:'K' with matchTitle:true", async () => {
+  const { cp, calls, io } = fileHarness({ identifier: "WM-3", url: "u" });
+  await fileTicket(
+    cp,
+    { team: "WM", title: "t", state: "Triage", dedupeKey: " K " },
+    io,
+  );
+  expect(calls[0]).toMatchObject({ dedupeKey: "K", matchTitle: true });
+});
+
+test("file says 'reused' when the control plane deduplicated onto an existing issue", async () => {
+  const { cp, emitted, exits, io } = fileHarness({
+    identifier: "watt-mind/factory#7",
+    url: "https://github.com/watt-mind/factory/issues/7",
+    reused: true,
+    warnings: ["reused closed issue #7: the dedupe key matched a closed issue"],
+  });
+  await fileTicket(
+    cp,
+    { team: "WM", title: "t", state: "Triage", dedupeKey: "run-1" },
+    io,
+  );
+  expect(emitted[0].text).toBe(
+    "reused watt-mind/factory#7 in Triage  https://github.com/watt-mind/factory/issues/7\nwarning: reused closed issue #7: the dedupe key matched a closed issue",
+  );
+  expect(emitted[0].obj).toMatchObject({ ok: false, reused: true });
+  expect(exits).toEqual([1]);
 });
 
 test("values for other flags are not treated as positional arguments", () => {
