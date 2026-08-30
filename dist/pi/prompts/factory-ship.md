@@ -21,7 +21,7 @@ Interpret `$ARGUMENTS` as a repo name from `config/repos.yaml` (run from that re
 
 ## 3. Wait for CI — properly
 
-`gh pr checks <PR> --watch --fail-fast`. **Never `sleep` and re-poll.** Also confirm the PR is mergeable (no conflicts — a develop → master PR with conflicts means someone committed to master directly; surface that, don't resolve it silently by picking sides).
+For the release head SHA, select the CI workflow with `gh run list --workflow ci.yml --commit <sha> --json databaseId --limit 1`, wait with `gh run watch <run-id> --exit-status --interval 60`, then assert every check run completed green with `gh api repos/<owner>/<repo>/commits/<sha>/check-runs`. The workflow run can lag the push, so retry the workflow-selected lookup for up to about two minutes when it is empty. **Never `sleep` and re-poll.** Also confirm the PR is mergeable (no conflicts — a develop → master PR with conflicts means someone committed to master directly; surface that, don't resolve it silently by picking sides).
 
 If CI is red: this is release CI on code that was already green on develop, so first look whether the failure is environmental/flaky (re-run once via `gh run rerun --failed`). A real failure means develop and master CI disagree — fix on **develop** (max 2 fix rounds, per the standard loop), let it flow back into this PR. Still red after that: stop, notify (`CI RED`), report what was tried.
 

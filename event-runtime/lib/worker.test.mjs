@@ -3805,7 +3805,7 @@ sh -c 'sleep 5 & wait'
     );
   });
 
-  test("a missing declared input artifact is fatal and never reaches the adapter", async () => {
+  test("a missing pinned memo artifact retires its memo before terminal failure", async () => {
     const db = openDb(":memory:");
     const missingSha = "a".repeat(64);
     let executed = false;
@@ -3818,6 +3818,10 @@ sh -c 'sleep 5 & wait'
     const spec = queueRun(
       db,
       makeSpec({
+        input: {
+          repos: ["ok"],
+          memoPin: { entries: [{ sha256: missingSha }] },
+        },
         workspace: {
           type: "artifacts",
           inputs: [{ from: missingSha, as: "input.json" }],
@@ -3825,6 +3829,10 @@ sh -c 'sleep 5 & wait'
         maxEnvironmentRetries: 5,
       }),
     );
+    db.query(
+      `INSERT INTO memos (sha256, subject_type, subject_id, kind, created_at)
+       VALUES (?, 'repo', 'factory', 'repo-note', ?)`,
+    ).run(missingSha, T0);
 
     const summary = await runOnce(
       db,
@@ -3847,6 +3855,46 @@ sh -c 'sleep 5 & wait'
     expect(lifecycleOf(db, spec.runId).at(-1).reason).toContain(
       "failure:fatal:input_artifact_missing",
     );
+    expect(
+      db
+        .query(`SELECT retired_at, retired_reason FROM memos WHERE sha256 = ?`)
+        .get(missingSha),
+    ).toEqual({ retired_at: T0, retired_reason: "artifact_missing" });
+  });
+
+  test("a missing non-memo declared input stays fatal without retiring a memo", async () => {
+    const db = openDb(":memory:");
+    const missingSha = "b".repeat(64);
+    const spec = queueRun(
+      db,
+      makeSpec({
+        workspace: {
+          type: "artifacts",
+          inputs: [{ from: missingSha, as: "input.json" }],
+        },
+      }),
+    );
+    db.query(
+      `INSERT INTO memos (sha256, subject_type, subject_id, kind, created_at)
+       VALUES (?, 'repo', 'factory', 'repo-note', ?)`,
+    ).run(missingSha, T0);
+
+    const summary = await runOnce(
+      db,
+      registry,
+      { fake },
+      opts({ artifactStore: freshRoot() }),
+    );
+
+    expect(summary).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "input_artifact_missing",
+    });
+    expect(
+      db
+        .query(`SELECT retired_at, retired_reason FROM memos WHERE sha256 = ?`)
+        .get(missingSha),
+    ).toEqual({ retired_at: null, retired_reason: null });
   });
 
   test("environment failures do not consume agent_exit retry attempts", async () => {

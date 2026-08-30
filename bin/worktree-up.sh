@@ -330,6 +330,11 @@ cleanup_worktree_up() {
     [[ "$STARTED_SERVE" -eq 1 ]] && await_daemon "$RUN_DIR/serve.pid" "event runtime"
     release_worktree_ports_if_idle "$WT"
   fi
+  # Release the lifecycle lock last (#1624): while daemons are being TERMed and
+  # ports handed back, a concurrent worktree-down must still see the ticket as
+  # busy, or it could tear down the tree mid-cleanup. The release is idempotent
+  # (it only removes a lock whose pid is ours).
+  release_worktree_lifecycle_lock
   exit "$code"
 }
 trap cleanup_worktree_up EXIT
