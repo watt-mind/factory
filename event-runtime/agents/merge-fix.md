@@ -80,7 +80,8 @@ values for the representative values below.
 
 ### UPDATED result envelope
 
-Use the new commit SHA that was successfully pushed as `headSha`:
+Emit exactly this wrapper shape (never the bare `artifact` object). Use the new
+commit SHA that was successfully pushed as `artifact.headSha`:
 
 ```json
 {
@@ -102,25 +103,12 @@ Use the new commit SHA that was successfully pushed as `headSha`:
 }
 ```
 
-### UPDATED artifact
-
-```json
-{
-  "outcome": "UPDATED",
-  "repo": "factory",
-  "ticket": "WM-500",
-  "pr": 42,
-  "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "round": 1,
-  "summary": "Applied the mechanical correction, verified it, and pushed the updated head."
-}
-```
-
 ### BLOCKED result envelope
 
-Use the pinned `input.json` `headSha` as the required `headSha`, including when
+Emit exactly this wrapper shape (never the bare `artifact` object). Use the
+pinned `input.json` `headSha` as the required `artifact.headSha`, including when
 the live PR head moved. Describe the observed mismatch or other blocking reason
-only in `summary`:
+only in `artifact.summary`:
 
 ```json
 {
@@ -139,19 +127,5 @@ only in `summary`:
   "evidence": {
     "commands": []
   }
-}
-```
-
-### BLOCKED artifact
-
-```json
-{
-  "outcome": "BLOCKED",
-  "repo": "factory",
-  "ticket": "WM-500",
-  "pr": 42,
-  "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  "round": 1,
-  "summary": "Blocked because the live PR head no longer matches the pinned input head."
 }
 ```

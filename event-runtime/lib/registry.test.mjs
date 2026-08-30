@@ -204,8 +204,9 @@ describe("registry", () => {
       ["merge-notify@1", 1],
     ]);
 
+    const registry = loadRegistry();
     for (const [ref, expectedCount] of expectedCompletedExamples) {
-      const def = getAgent(loadRegistry(), ref);
+      const def = getAgent(registry, ref);
       const examples = [
         ...readFileSync(def.promptPath, "utf8").matchAll(
           /```json\n([\s\S]*?)\n```/g,
@@ -216,7 +217,7 @@ describe("registry", () => {
 
       expect(examples).toHaveLength(expectedCount);
       for (const example of examples) {
-        expect(validate(loadRegistry().schemas.agentResult, example)).toEqual({
+        expect(validate(registry.schemas.agentResult, example)).toEqual({
           valid: true,
           errors: [],
         });
@@ -341,9 +342,10 @@ describe("registry", () => {
     // contract, route, capability, or model tier changed.
     // Regenerated (#1521): merge-fix now documents the required outer result
     // wrapper; merge-review and merge-notify document the same artifact
-    // nesting, and all three agent definitions are re-pinned.
+    // nesting, and all three agent definitions are re-pinned. Post-review:
+    // merge-fix.md drops the bare-artifact twin examples (re-pinned again).
     const expected =
-      "sha256:20c93306632dc7ca3d92c6d03648e2ce441d03ffe791522f3c5365b9519822de";
+      "sha256:3da3fdd6554606b51aa8c8c907d0e84fae8e370e0f97c93c2d3234f75af1bdb3";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
