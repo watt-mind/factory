@@ -16,6 +16,7 @@ import type {
   TicketTrackerDetail,
 } from "../subjectJourney";
 import * as subjectJourneyModel from "../subjectJourney";
+import type { Worker } from "../types";
 
 const realFetch = globalThis.fetch;
 
@@ -148,6 +149,7 @@ function journeyFetch(
   data: TicketJourneySource,
   detail?: TicketTrackerDetail | null,
   detailStatus = 200,
+  workers: Worker[] = [],
 ) {
   return (async (input: RequestInfo | URL) => {
     const url = String(input);
@@ -165,6 +167,9 @@ function journeyFetch(
     if (/\/api\/schedules/.test(url)) {
       return new Response(JSON.stringify({ schedules: [] }), { status: 200 });
     }
+    if (/\/api\/workers/.test(url)) {
+      return new Response(JSON.stringify({ workers }), { status: 200 });
+    }
     return new Response(JSON.stringify(data), { status: 200 });
   }) as unknown as typeof fetch;
 }
@@ -172,8 +177,9 @@ function journeyFetch(
 function renderTicket(
   data: TicketJourneySource,
   detail?: TicketTrackerDetail | null,
+  workers: Worker[] = [],
 ) {
-  globalThis.fetch = journeyFetch(data, detail);
+  globalThis.fetch = journeyFetch(data, detail, 200, workers);
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, refetchInterval: false } },
   });
@@ -191,6 +197,78 @@ afterEach(() => {
 });
 
 describe("Ticket journey view", () => {
+  test("adds elapsed time and a fresh heartbeat next to the current run", async () => {
+    const runId = "run_ticket_fresh";
+    const data = source();
+    const live = run(runId, new Date(Date.now() - 2 * 60_000).toISOString());
+    live.run.state = "RUNNING";
+    live.lifecycle[1] = { ...live.lifecycle[1], to_state: "RUNNING" };
+    (live as JourneyRun & { attempts: unknown[] }).attempts = [
+      {
+        started_at: new Date(Date.now() - 2 * 60_000).toISOString(),
+        lease_owner: "worker_ticket_fresh",
+      },
+    ];
+    data.runs = [live];
+    const view = renderTicket(data, undefined, [
+      {
+        workerId: "worker_ticket_fresh",
+        host: "test",
+        pid: 1,
+        labels: {},
+        adapters: [],
+        state: "busy",
+        currentRun: runId,
+        lastSeen: new Date(Date.now() - 10_000).toISOString(),
+        stale: false,
+        startedAt: new Date().toISOString(),
+        stoppedAt: null,
+      },
+    ]);
+    await view.findByRole("heading", { name: "WM-542" });
+    const current = view.getByText("Current run / worker")
+      .nextElementSibling as HTMLElement;
+    expect(current.textContent).toContain(`${runId} · elapsed 2m`);
+    expect(current.textContent).toContain("worker_ticket_fresh");
+    expect(current.textContent).toMatch(/heartbeat 1?0s ago/);
+  });
+
+  test("shows stale heartbeat age next to the current run", async () => {
+    const runId = "run_ticket_stale";
+    const data = source();
+    const live = run(runId, new Date(Date.now() - 2 * 60_000).toISOString());
+    live.run.state = "RUNNING";
+    live.lifecycle[1] = { ...live.lifecycle[1], to_state: "RUNNING" };
+    (live as JourneyRun & { attempts: unknown[] }).attempts = [
+      {
+        started_at: new Date(Date.now() - 2 * 60_000).toISOString(),
+        lease_owner: "worker_ticket_stale",
+      },
+    ];
+    data.runs = [live];
+    const view = renderTicket(data, undefined, [
+      {
+        workerId: "worker_ticket_stale",
+        host: "test",
+        pid: 1,
+        labels: {},
+        adapters: [],
+        state: "busy",
+        currentRun: runId,
+        lastSeen: new Date(Date.now() - 5 * 60_000).toISOString(),
+        stale: true,
+        startedAt: new Date().toISOString(),
+        stoppedAt: null,
+      },
+    ]);
+    await view.findByRole("heading", { name: "WM-542" });
+    const current = view.getByText("Current run / worker")
+      .nextElementSibling as HTMLElement;
+    expect(current.textContent).toContain(`${runId} · elapsed 2m`);
+    expect(current.textContent).toContain("worker_ticket_stale");
+    expect(current.textContent).toContain("stale · 5m");
+  });
+
   test("renders a two-run journey, PR, aggregates, timeline sources, and current-state block", async () => {
     const view = renderTicket(source());
     await view.findByRole("heading", { name: "WM-542" });

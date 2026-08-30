@@ -58,7 +58,12 @@ import type {
   RunDetail,
   RunListItem,
   TicketSummary,
+  Worker,
 } from "../types";
+
+type TicketRunWithAttempts = JourneyRun & {
+  attempts?: Array<{ started_at: string | null; lease_owner: string | null }>;
+};
 
 function Metric({ label, value }: { label: string; value: string }) {
   return (
@@ -837,14 +842,19 @@ function JourneyLayout({
   detail = null,
   detailPending = false,
   detailError = null,
+  currentRunDetail = null,
+  currentWorker = null,
 }: {
   journey: SubjectJourney;
   onNavigateTicket?: (ticketId: string) => void;
   detail?: TicketTrackerDetail | null;
   detailPending?: boolean;
   detailError?: string | null;
+  currentRunDetail?: TicketRunWithAttempts | null;
+  currentWorker?: Worker | null;
 }) {
   const [tab, setTab] = useState<JourneyTab>("timeline");
+  const now = useNow();
   const cost =
     journey.totalCost == null ? "—" : `$${journey.totalCost.toFixed(2)}`;
   const tokens =
@@ -1078,9 +1088,20 @@ function JourneyLayout({
                 <div>
                   <dt className="text-(--text-faint)">Current run / worker</dt>
                   <dd className="mono mt-1 break-words text-(--text-dim)">
-                    {journey.currentRun
-                      ? `${journey.currentRun.runId}${journey.currentRun.actor ? ` · ${journey.currentRun.actor}` : ""}`
-                      : "—"}
+                    {journey.currentRun ? (
+                      <>
+                        {journey.currentRun.runId}
+                        {currentRunDetail?.attempts?.at(-1)?.started_at &&
+                          ` · elapsed ${formatDuration(now - Date.parse(currentRunDetail.attempts.at(-1)!.started_at!))}`}
+                        {currentWorker &&
+                          ` · ${currentWorker.workerId} · ${currentWorker.stale ? `stale · ${formatDuration(now - Date.parse(currentWorker.lastSeen))}` : `heartbeat ${formatDuration(now - Date.parse(currentWorker.lastSeen))} ago`}`}
+                        {!currentWorker &&
+                          journey.currentRun.actor &&
+                          ` · ${journey.currentRun.actor}`}
+                      </>
+                    ) : (
+                      "—"
+                    )}
                   </dd>
                 </div>
                 <div>
@@ -1151,6 +1172,12 @@ export function Ticket({
     enabled: valid,
     staleTime: 15_000,
     ...pollingOptions(30_000),
+  });
+  const workersQuery = useQuery({
+    queryKey: ["workers"],
+    queryFn: api.workers,
+    enabled: valid,
+    ...refetchIntervals.primary,
   });
 
   if (!ticketId || ticketId.trim() === "")
@@ -1250,6 +1277,16 @@ export function Ticket({
     }),
     detailQuery.data,
   );
+  const currentRunDetail =
+    (query.data.runs.find(
+      (run) => run.run.runId === journey.currentRun?.runId,
+    ) as TicketRunWithAttempts | undefined) ?? null;
+  const currentWorker =
+    (workersQuery.data?.workers ?? []).find(
+      (worker) =>
+        worker.workerId === currentRunDetail?.attempts?.at(-1)?.lease_owner ||
+        worker.currentRun === journey.currentRun?.runId,
+    ) ?? null;
   return (
     <JourneyLayout
       journey={journey}
@@ -1260,6 +1297,8 @@ export function Ticket({
           ? ((detailQuery.error as Error)?.message ?? "unavailable")
           : null
       }
+      currentRunDetail={currentRunDetail}
+      currentWorker={currentWorker}
     />
   );
 }
