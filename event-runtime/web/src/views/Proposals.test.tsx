@@ -323,8 +323,17 @@ describe("Proposals multi-row selection & bulk actions (WM-71)", () => {
 
     // Should have approved prop_1 and prop_2, skipping prop_3
     expect(approvedIds).toEqual(["prop_1", "prop_2"]);
-    // Selection should be cleared
-    expect(r.queryByRole("toolbar", { name: /bulk actions/i })).toBeNull();
+    // Only the approved rows lose their selection; prop_3 was never acted on
+    // (non-actionable for approval), so it stays selected (#1899).
+    expect(
+      (r.getByLabelText("Select proposal prop_1") as HTMLInputElement).checked,
+    ).toBe(false);
+    expect(
+      (r.getByLabelText("Select proposal prop_2") as HTMLInputElement).checked,
+    ).toBe(false);
+    expect(
+      (r.getByLabelText("Select proposal prop_3") as HTMLInputElement).checked,
+    ).toBe(true);
   });
 
   test("bulk reject prompts once for reason and applies to all selected", async () => {
@@ -1984,5 +1993,140 @@ describe("Proposals hook decisions (WM-864)", () => {
         expect(r.getByText("No hook ran for this proposal.")).toBeTruthy();
       },
     );
+  });
+});
+
+describe("Proposals bulk scope follows the visible rows (#1899)", () => {
+  test("a filter-hidden selected row is not rejected and keeps its selection", async () => {
+    const shown = stubProposal("prop_security", "open", {
+      agent: "security-scan",
+    });
+    const hidden = stubProposal("prop_triage", "open", {
+      agent: "triage-scan",
+    });
+    api.proposals = async () => ({ proposals: [shown, hidden] });
+    api.proposalHistory = async () => ({ proposals: [] });
+
+    const rejectedIds: string[] = [];
+    api.reject = async (id: string) => {
+      rejectedIds.push(id);
+      return { rejected: true };
+    };
+
+    const r = renderProposals();
+    await waitFor(() =>
+      expect(r.getByLabelText("Select all proposals")).toBeTruthy(),
+    );
+    fireEvent.click(r.getByLabelText("Select all proposals"));
+    expect(r.getByText("Reject selected (2)")).toBeTruthy();
+
+    const filterInput = r.getByLabelText(
+      "Filter proposals",
+    ) as HTMLInputElement;
+    await act(async () => {
+      changeInput(filterInput, "security");
+    });
+
+    // The bulk bar counts what the operator can see, not what is merely
+    // selected — the triage row is off screen behind the filter.
+    await waitFor(() =>
+      expect(r.getByText("Reject selected (1)")).toBeTruthy(),
+    );
+    fireEvent.click(r.getByText("Reject selected (1)"));
+
+    const dialog = r.getByRole("dialog");
+    expect(dialog.textContent).toContain("prop_security");
+    expect(dialog.textContent).not.toContain("prop_triage");
+
+    fireEvent.click(r.getByRole("button", { name: "Scope too wide" }));
+    await act(async () => {
+      fireEvent.click(r.getByRole("button", { name: "Reject 1 proposals" }));
+    });
+
+    expect(rejectedIds).toEqual(["prop_security"]);
+
+    await act(async () => {
+      changeInput(filterInput, "");
+    });
+    const hiddenBox = (await waitFor(() =>
+      r.getByLabelText("Select proposal prop_triage"),
+    )) as HTMLInputElement;
+    expect(hiddenBox.checked).toBe(true);
+    expect(
+      (r.getByLabelText("Select proposal prop_security") as HTMLInputElement)
+        .checked,
+    ).toBe(false);
+  });
+
+  test("an out-of-repo selected row survives a bulk reject with its selection", async () => {
+    const inScope = stubProposal("prop_in_scope", "open", {
+      agent: "repo-a-agent",
+      repos: ["repo-a"],
+    });
+    const outOfScope = stubProposal("prop_out_of_scope", "open", {
+      agent: "repo-b-agent",
+      repos: ["repo-b"],
+    });
+    api.proposals = async () => ({ proposals: [inScope, outOfScope] });
+    api.proposalHistory = async () => ({ proposals: [] });
+
+    const rejectedIds: string[] = [];
+    api.reject = async (id: string) => {
+      rejectedIds.push(id);
+      return { rejected: true };
+    };
+
+    const r = renderProposals();
+    await waitFor(() =>
+      expect(r.getByLabelText("Select all proposals")).toBeTruthy(),
+    );
+    fireEvent.click(r.getByLabelText("Select all proposals"));
+    expect(r.getByText("Reject selected (2)")).toBeTruthy();
+
+    r.rerender(
+      <Proposals
+        connected={true}
+        healthPending={false}
+        context={{ kind: "repo", name: "repo-a" }}
+        onRunQueued={noop}
+        focusProposalId={null}
+        onSelectProposal={noop}
+        focusExpired={false}
+        onFocusExpiredConsumed={noop}
+        onJumpAgent={noop}
+        onJumpEvent={noop}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(r.getByText("Reject selected (1)")).toBeTruthy(),
+    );
+    fireEvent.click(r.getByText("Reject selected (1)"));
+    fireEvent.click(r.getByRole("button", { name: "Scope too wide" }));
+    await act(async () => {
+      fireEvent.click(r.getByRole("button", { name: "Reject 1 proposals" }));
+    });
+
+    expect(rejectedIds).toEqual(["prop_in_scope"]);
+
+    r.rerender(
+      <Proposals
+        connected={true}
+        healthPending={false}
+        context={{ kind: "all" }}
+        onRunQueued={noop}
+        focusProposalId={null}
+        onSelectProposal={noop}
+        focusExpired={false}
+        onFocusExpiredConsumed={noop}
+        onJumpAgent={noop}
+        onJumpEvent={noop}
+      />,
+    );
+
+    const survivor = (await waitFor(() =>
+      r.getByLabelText("Select proposal prop_out_of_scope"),
+    )) as HTMLInputElement;
+    expect(survivor.checked).toBe(true);
   });
 });

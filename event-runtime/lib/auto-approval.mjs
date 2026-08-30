@@ -134,8 +134,13 @@ export function loadChainAutoApprovalPolicy({ root = reposRoot() } = {}) {
       autoMergeBase: new Set(autoMergeBase),
       autoMergeOwners: new Set(autoMergeOwners),
     };
-  } catch {
-    return { allowed: new Set(), reason: "policy_invalid" };
+  } catch (err) {
+    const message = String(err?.message ?? err);
+    console.error(`policy_invalid: ${message}`);
+    return {
+      allowed: new Set(),
+      reason: `policy_invalid:${clipReason(message)}`,
+    };
   }
 }
 
@@ -187,6 +192,7 @@ const ENVIRONMENT_FAILURE_REASONS = new Set([
   "cli_not_found",
   "unknown_adapter",
 ]);
+const RUNTIME_POLICY_LOAD_ERROR = Symbol("runtime_policy_load_error");
 
 function loadRuntimePolicy(root = reposRoot()) {
   const file = policyPath(root);
@@ -194,8 +200,10 @@ function loadRuntimePolicy(root = reposRoot()) {
   try {
     const parsed = Bun.YAML.parse(readFileSync(file, "utf8"));
     return parsed && typeof parsed === "object" ? parsed : null;
-  } catch {
-    return null;
+  } catch (err) {
+    const message = String(err?.message ?? err);
+    console.error(`runtime_policy_unavailable: ${message}`);
+    return { [RUNTIME_POLICY_LOAD_ERROR]: message };
   }
 }
 
@@ -212,6 +220,11 @@ export function chainRuntimeGuard(
   } = {},
 ) {
   if (!runtimePolicy) return "runtime_policy_unavailable";
+  if (runtimePolicy[RUNTIME_POLICY_LOAD_ERROR]) {
+    return `runtime_policy_unavailable:${clipReason(
+      runtimePolicy[RUNTIME_POLICY_LOAD_ERROR],
+    )}`;
+  }
 
   try {
     if (budgetCheck(runtimePolicy)) return "budget_exhausted";
@@ -1148,8 +1161,10 @@ async function runPass(
               hookTimeoutMs,
             });
             if (isThenable(reason)) reason = await reason;
-          } catch {
-            reason = "approve_hooks_failed";
+          } catch (err) {
+            const message = String(err?.message ?? err);
+            console.error(`approve_hooks_failed: ${message}`);
+            reason = `approve_hooks_failed:${clipReason(message)}`;
           }
         }
         if (reason) {
@@ -1161,8 +1176,10 @@ async function runPass(
         let guardReason;
         try {
           guardReason = runtimeGuard(db, passRuntimeGuardOptions);
-        } catch {
-          guardReason = "runtime_guard_failed";
+        } catch (err) {
+          const message = String(err?.message ?? err);
+          console.error(`runtime_guard_failed: ${message}`);
+          guardReason = `runtime_guard_failed:${clipReason(message)}`;
         }
         if (guardReason) {
           noteOpenReason(db, row.id, guardReason);
