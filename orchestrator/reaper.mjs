@@ -43,6 +43,7 @@ import { loadRepos } from "../event-runtime/lib/repos.mjs";
 import { dbPath } from "../event-runtime/lib/config.mjs";
 import { HEARTBEAT_STALE_MS } from "../event-runtime/lib/workers.mjs";
 import { ticketSlug } from "../lib/ticket-slug.mjs";
+import { parseRateLimitReset } from "../tools/ticket.mjs";
 
 export const REAPER_LOG_DIR = path.join(homedir(), ".factory/logs");
 
@@ -175,7 +176,11 @@ function retryDelay(ms, signal) {
 }
 
 function rateLimitError(message, response) {
-  const resetAt = response?.headers?.get("x-ratelimit-requests-reset") ?? null;
+  // Linear's reset header is a raw unix epoch; downstream consumers
+  // (Date.parse in the planner cache, budget.json) expect ISO-8601.
+  const resetAt = parseRateLimitReset(
+    response?.headers?.get("x-ratelimit-requests-reset"),
+  );
   const error = new Error(
     `linear_rate_limited: resetAt=${resetAt ?? "unknown"}${message ? `: ${message}` : ""}`,
   );

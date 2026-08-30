@@ -265,7 +265,14 @@ export function parseRateLimitHeaders(headers, now = Date.now()) {
 }
 
 export function linearCacheDir() {
-  return process.env.LINEAR_CACHE_DIR || CACHE_DIR;
+  if (process.env.LINEAR_CACHE_DIR) return process.env.LINEAR_CACHE_DIR;
+  // A scoped runtime home owns its own budget capture: tests and isolated
+  // stacks (FACTORY_EVENT_HOME) must never read or spend the operator's
+  // shared ~/.factory budget clock.
+  if (process.env.FACTORY_EVENT_HOME) {
+    return path.join(process.env.FACTORY_EVENT_HOME, "cache", "linear");
+  }
+  return CACHE_DIR;
 }
 
 export function loadLinearBudget() {

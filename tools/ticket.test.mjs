@@ -88,9 +88,15 @@ test("the Linear transport does not retry a 429 rate-limit response", async () =
   };
 
   try {
-    await expect(gql("query { ping }", {}, { retries: 5 })).rejects.toThrow(
-      "linear_rate_limited",
-    );
+    let thrown = null;
+    try {
+      await gql("query { ping }", {}, { retries: 5 });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(String(thrown?.message)).toContain("linear_rate_limited");
+    // The raw header is a unix epoch; consumers get the ISO reset clock.
+    expect(thrown?.resetAt).toBe(new Date(1786539600 * 1000).toISOString());
     expect(calls).toBe(1);
   } finally {
     globalThis.fetch = previousFetch;
