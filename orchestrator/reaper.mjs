@@ -148,7 +148,52 @@ export function getApiKey() {
   return key;
 }
 
-export async function gql(query, variables = {}, retries = 5) {
+function abortReason(signal) {
+  return signal?.reason instanceof Error
+    ? signal.reason
+    : new Error("Linear request aborted");
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw abortReason(signal);
+}
+
+function retryDelay(ms, signal) {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  throwIfAborted(signal);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, ms);
+    const onAbort = () => done(abortReason(signal));
+    function done(error) {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      if (error) reject(error);
+      else resolve();
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * Send a Linear GraphQL request, retrying transient responses unless cancelled.
+ *
+ * A failed or timed-out mutation has an unknown server outcome: Linear may have
+ * committed a non-idempotent create/comment before this client observes the
+ * failure. Callers must inspect the resulting resource instead of replaying it.
+ */
+export async function gql(
+  query,
+  variables = {},
+  retriesOrOptions = 5,
+  legacySignal,
+) {
+  const options =
+    typeof retriesOrOptions === "number"
+      ? { retries: retriesOrOptions, signal: legacySignal }
+      : retriesOrOptions instanceof AbortSignal
+        ? { retries: 5, signal: retriesOrOptions }
+        : (retriesOrOptions ?? {});
+  const { retries = 5, signal } = options;
   const apiKey = getApiKey();
   const headers = {
     "Content-Type": "application/json",
@@ -159,10 +204,12 @@ export async function gql(query, variables = {}, retries = 5) {
 
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
+      throwIfAborted(signal);
       const res = await fetch(LINEAR_API_URL, {
         method: "POST",
         headers,
         body,
+        signal,
       });
 
       if (!res.ok) {
@@ -170,7 +217,7 @@ export async function gql(query, variables = {}, retries = 5) {
           [429, 500, 502, 503, 504].includes(res.status) &&
           attempt < retries - 1
         ) {
-          await new Promise((r) => setTimeout(r, delay));
+          await retryDelay(delay, signal);
           delay *= 2;
           continue;
         }
@@ -185,7 +232,7 @@ export async function gql(query, variables = {}, retries = 5) {
           msg.toUpperCase().includes("RATELIMITED") &&
           attempt < retries - 1
         ) {
-          await new Promise((r) => setTimeout(r, delay));
+          await retryDelay(delay, signal);
           delay *= 2;
           continue;
         }
@@ -194,11 +241,12 @@ export async function gql(query, variables = {}, retries = 5) {
 
       return data.data || {};
     } catch (err) {
+      if (signal?.aborted) throw abortReason(signal);
       if (
         attempt < retries - 1 &&
         !(err.message && err.message.startsWith("HTTP 4"))
       ) {
-        await new Promise((r) => setTimeout(r, delay));
+        await retryDelay(delay, signal);
         delay *= 2;
         continue;
       }
