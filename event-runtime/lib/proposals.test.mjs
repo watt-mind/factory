@@ -95,6 +95,10 @@ function dispatchPlanned() {
   expect(outcome.decision).toBe("run");
   const spec = JSON.parse(outcome.proposal.spec_json);
   spec.idempotencyKey = `${spec.idempotencyKey}#1`;
+  spec.configSnapshot = {
+    root: "/policy/snapshot",
+    repos: [{ name: "factory", base: "develop" }],
+  };
   const specJson = JSON.stringify(spec);
   const specHash = hashJson(spec);
   db.query(
@@ -272,6 +276,11 @@ describe("approveProposal after TTL expiry (§12)", () => {
     const originalSpec = JSON.parse(proposal.spec_json);
     expect(originalSpec.approvalPolicy).toBeTruthy();
     expect(originalSpec.modelTier).toBe("light");
+    expect(originalSpec.model).toBeTruthy();
+    expect(originalSpec.configSnapshot).toEqual({
+      root: "/policy/snapshot",
+      repos: [{ name: "factory", base: "develop" }],
+    });
     expect(originalSpec.idempotencyKey).toContain("#");
 
     const result = approveProposal(db, registry, proposal.id, {
@@ -319,6 +328,7 @@ describe("approveProposal after TTL expiry (§12)", () => {
     expect(freshSpec.approvalPolicy).toEqual(originalSpec.approvalPolicy);
     expect(freshSpec.modelTier).toBe(originalSpec.modelTier);
     expect(freshSpec.model).toBe(originalSpec.model);
+    expect(freshSpec.configSnapshot).toEqual(originalSpec.configSnapshot);
     expect(freshSpec.idempotencyKey).toBe(originalSpec.idempotencyKey);
     expect(
       JSON.parse(

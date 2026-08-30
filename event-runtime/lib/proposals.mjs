@@ -195,6 +195,12 @@ export function approveProposal(
         now,
         ...ttlReplanOptions(storedSpec),
       }),
+      // configSnapshot can affect planning and is itself part of specs that
+      // explicitly pin it. Keep the pin in the rebuilt spec as well as
+      // supplying it to buildRunSpec above.
+      ...(Object.hasOwn(storedSpec, "configSnapshot")
+        ? { configSnapshot: storedSpec.configSnapshot }
+        : {}),
       // A run is its existing idempotency generation, not a new family
       // member. Reapply the stored key after buildRunSpec derives its normal
       // declaration key.
