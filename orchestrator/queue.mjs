@@ -78,6 +78,9 @@ for (const repo of repos) {
   if (s.answered) line("Held, reply received", s.answered, c.green);
   line("Todo, not ready", s.todoNotReady);
   line("READY to dispatch", s.ready, s.ready ? c.green : c.red);
+  if (s.readyStale) line("READY, stale pin", s.readyStale, c.yellow);
+  if (s.readyUnreadable)
+    line("READY, pin unreadable", s.readyUnreadable, c.yellow);
   if (s.readyHeld) line("READY, held by blocker", s.readyHeld, c.yellow);
   line("In Progress", s.inProgress);
   line("In Review", s.inReview, s.inReview ? c.cyan : (x) => x);
@@ -132,6 +135,12 @@ for (const repo of repos) {
         `\n  nothing startable — all ready tickets collide with running or with each other's unparseable Owned Paths`,
       ),
     );
+  } else if (s.readyStale || s.readyUnreadable) {
+    console.log(
+      c.dim(
+        `\n  nothing startable — ${s.readyStale} ready ticket(s) have stale pins and ${s.readyUnreadable} pin feed(s) could not be read`,
+      ),
+    );
   } else if (s.readyHeld) {
     // Not "queue empty": there IS specified work, it is waiting on its
     // blockers, and if those never finish this line is the only symptom.
@@ -157,6 +166,15 @@ for (const repo of repos) {
       console.log(
         `    ${c.yellow(t.identifier.padEnd(10))} blocked by ${t.blockedBy.join(", ")}  ${c.dim(t.title.slice(0, 45))}`,
       );
+  }
+  if (s.readyStale) {
+    console.log(
+      c.yellow(
+        `\n  ready pin stale — re-promote after reviewing the body change:`,
+      ),
+    );
+    for (const t of s.readyStaleTickets)
+      console.log(`    ${t.identifier.padEnd(10)} ${t.title.slice(0, 60)}`);
   }
   if (s.inReview) {
     console.log(c.dim(`\n  awaiting review/merge:`));

@@ -15,8 +15,10 @@ import {
   demote,
   fetchReadyIssues,
   ownedPathsClosureGuard,
+  readyPinGuard,
   templateGaps,
 } from "./label-guard.mjs";
+import { readyPinMarker } from "../event-runtime/lib/triage.mjs";
 
 const FULL_SPEC = `## Problem & Context
 
@@ -36,6 +38,23 @@ Something is broken and it matters.
 
 test("a real §5 spec passes with no gaps", () => {
   expect(templateGaps(FULL_SPEC)).toEqual([]);
+});
+
+test("a stale ready pin is reported without treating an absent pin as stale", async () => {
+  const promoted = "original approved body";
+  const changed = "body edited after approval";
+  const stale = await readyPinGuard(
+    { identifier: "WM-1574", description: changed },
+    async () => [
+      { body: readyPinMarker(promoted), createdAt: "2026-08-30T10:00:00Z" },
+    ],
+  );
+  const missing = await readyPinGuard(
+    { identifier: "WM-1574", description: changed },
+    async () => [],
+  );
+  expect(stale).toBe("stale");
+  expect(missing).toBe("missing");
 });
 
 test("a Verification Command heading with only blank lines under it is a gap", () => {

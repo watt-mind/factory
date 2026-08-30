@@ -25,6 +25,7 @@
  */
 import { loadControlPlane } from "../lib/control-plane/index.mjs";
 import { loadRepos } from "../event-runtime/lib/repos.mjs";
+import { readyPinStatus } from "../lib/queue-summary.mjs";
 import {
   parseOwnedPaths,
   ticketSections,
@@ -160,6 +161,18 @@ export async function fetchReadyIssues(
   });
 }
 
+/** Read and classify a ready pin without turning a tracker outage into stale. */
+export async function readyPinGuard(issue, listComments) {
+  try {
+    return readyPinStatus(
+      issue.description ?? "",
+      await listComments(issue.identifier),
+    );
+  } catch {
+    return "unreadable";
+  }
+}
+
 export async function demote(
   issue,
   repo,
@@ -227,34 +240,49 @@ export async function main(argv = process.argv.slice(2)) {
 
   for (const repo of repos) {
     const issues = await fetchReadyIssues(repo);
+    const controlPlane = loadControlPlane({ repoName: repo.name });
     const closureRequirements = new Map();
-    const bad = issues
-      .map((issue) => {
-        const gapNames = [...templateGaps(issue.description ?? "")];
-        const closure = ownedPathsClosureGuard(
-          issue.description ?? "",
-          repo,
-          closureRequirements,
-        );
-        gapNames.push(...closure.messages);
-        return { issue, gaps: gapNames };
-      })
-      .filter((r) => r.gaps.length);
+    const bad = (
+      await Promise.all(
+        issues.map(async (issue) => {
+          const gapNames = [...templateGaps(issue.description ?? "")];
+          const closure = ownedPathsClosureGuard(
+            issue.description ?? "",
+            repo,
+            closureRequirements,
+          );
+          gapNames.push(...closure.messages);
+          return {
+            issue,
+            gaps: gapNames,
+            pinStatus: await readyPinGuard(
+              issue,
+              controlPlane.listComments.bind(controlPlane),
+            ),
+          };
+        }),
+      )
+    ).filter(({ gaps, pinStatus }) => gaps.length || pinStatus === "stale");
 
     console.log(
-      `${repo.name}  ${repo.team} / ${repo.project}  --  ${issues.length} ai:agent-ready ticket(s), ${bad.length} failing §5`,
+      `${repo.name}  ${repo.team} / ${repo.project}  --  ${issues.length} ai:agent-ready ticket(s), ${bad.length} guard finding(s)`,
     );
 
     if (!bad.length) continue;
     violations += bad.length;
 
-    for (const { issue, gaps } of bad) {
+    for (const { issue, gaps, pinStatus } of bad) {
       console.log(
         `  ${issue.identifier.padEnd(10)} ${issue.title.slice(0, 60)}`,
       );
       for (const g of gaps) console.log(`      missing: ${g}`);
+      if (pinStatus === "stale")
+        console.log("      stale: Ready Pin (body changed after promotion)");
 
-      if (args.apply) {
+      // `--apply` retains its existing structural-template demotion behavior,
+      // but a stale pin is reported only. Re-stamping it automatically would
+      // erase the approval-boundary signal the pin was introduced to keep.
+      if (args.apply && gaps.length) {
         try {
           await demote(issue, repo, gaps, true);
           console.log(`      -> demoted to Triage, ai:agent-ready removed`);
@@ -265,11 +293,11 @@ export async function main(argv = process.argv.slice(2)) {
     }
   }
 
-  console.log(
-    `\n=== ${args.apply ? "Demoted" : "Would demote"}: ${violations} ===`,
-  );
+  console.log(`\n=== Guard findings: ${violations} ===`);
   if (!args.apply && violations)
-    console.log("Run again with --apply to demote these.");
+    console.log(
+      "Run with --apply to demote structural gaps; re-promote stale pins after review.",
+    );
 }
 
 if (import.meta.main || process.argv[1]?.endsWith("label-guard.mjs")) {
