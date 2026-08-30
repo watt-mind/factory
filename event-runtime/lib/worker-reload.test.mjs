@@ -1,6 +1,6 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-worker-reload-test-mjs";
 import "../test-helpers.mjs";
-import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
 
 /**
@@ -18,120 +18,25 @@ import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
  * state, so a real hang still fails, just not a slow host.
  */
 const EXECUTE_SPAWN_TIMEOUT_MS = loadAdjustedTimeout(5_000);
-import { insideHandoffSandbox } from "./verify.mjs";
-import { createHash } from "node:crypto";
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
-  readdirSync,
-  realpathSync,
   rmSync,
-  symlinkSync,
   writeFileSync,
 } from "node:fs";
-import * as nodeFs from "node:fs";
-const realReadFileSync = nodeFs.readFileSync;
-import { homedir } from "node:os";
 import path from "node:path";
 import {
-  buildClaudeArgv,
-  execute as executeClaude,
-} from "./adapters/claude.mjs";
-import * as fake from "./adapters/fake.mjs";
-import { buildPiArgv, execute as executePi } from "./adapters/pi.mjs";
-import { createAdapterRegistry } from "./adapters/index.mjs";
-import { SandboxUnsupportedError } from "./adapters/sandboxed.mjs";
-import { pinRunArtifact } from "./artifacts.mjs";
-import { admitEvent } from "./intake.mjs";
-import { planEvent } from "./planner.mjs";
-import { canonicalJson, hashBytes, hashJson } from "./canonical.mjs";
-import { artifactsRoot, resolveConfigPath } from "./config.mjs";
-import { openDb, runUsage } from "./db.mjs";
-import {
-  createRun,
-  lifecycleOf,
-  runState,
-  transition,
-  IllegalTransition,
-} from "./lifecycle.mjs";
-import { computeDefHash } from "./receipts.mjs";
-import { getAgent, loadRegistry } from "./registry.mjs";
-import { transcriptSessionId } from "./transcripts.mjs";
-import {
-  acquireClaimLock,
-  adapterExecuteTimeoutMs,
-  cancelRun,
-  CLAIM_LOCK_BACKOFF_MAX_MS,
-  claimNext,
-  claimedRetryFor,
   CODE_RELOAD_EXIT,
   codeStamp,
   codeStampFiles,
   codeStampRoot,
   createReloadWatcher,
-  DEFAULT_MAX_ENVIRONMENT_RETRIES,
-  defaultLocksDir,
-  defaultProjectTierEscalation,
-  defaultReturnHandoffTicket,
-  defaultUnclaimTicket,
-  dispatchLockPath,
-  DYNAMIC_DEADLINE_ADAPTERS,
-  executeClaimed,
-  classifyFailureCause,
-  expireRunDeadline,
-  extendRunDeadline,
-  forceFailRun,
-  LEASE_GRACE_SECONDS,
-  policyMaxRunMinutes,
-  policyWorkspaceOnlyFallback,
-  materializeRunHarness,
-  reapExpiredLeases,
-  releaseStalledWorkerLease,
-  releaseClaimLock,
-  repositoryIsClean,
-  repositoryStatus,
-  provisionInstanceLocalConfigs,
-  resolveLinearApiKey,
-  reconcileTierEscalations,
-  scheduleTierEscalation,
-  tierEscalationEligibility,
-  retryRun,
-  runLinearCli,
-  runOnce,
-  ticketHandoffContext,
 } from "./worker.mjs";
-import {
-  liveWorkerLeases,
-  writeWorkerLease,
-} from "../../lib/worker-leases.mjs";
-import {
-  cleanupTrackedProcesses,
-  processOwnerWatchdogSource,
-  registerTestProcessCleanup,
-  trackMarkedFakeRuntimeGroups,
-  trackProcess,
-  trackProcessGroupsMatching,
-} from "./test-helpers-process.mjs";
-
-import {
-  EMPTY_POLICY_ROOT,
-  adapters,
-  freshRoot,
-  insertStalledWorker,
-  linkEvent,
-  makeSpec,
-  opts,
-  queueRun,
-  registry,
-  T0,
-} from "./worker-test-helpers.mjs";
+import { registerTestProcessCleanup } from "./test-helpers-process.mjs";
 
 registerTestProcessCleanup(import.meta.url);
-
-let seq = 0;
 
 // ---------------------------------------------------------------------------
 // Dev live-reload: code stamp + drain-aware reload watcher (WM-213)
