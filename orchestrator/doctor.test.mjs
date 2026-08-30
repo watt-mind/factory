@@ -13,6 +13,7 @@
 import { test, expect, describe } from "bun:test";
 import {
   mkdtempSync,
+  mkdirSync,
   writeFileSync,
   chmodSync,
   existsSync,
@@ -29,6 +30,7 @@ import {
 } from "./doctor-browser.mjs";
 import {
   compareCliVersions,
+  chainAutoApprovalPolicyDiagnostic,
   MIN_BUN_VERSION,
   MIN_GIT_VERSION,
   ossOnboardingDiagnostics,
@@ -256,6 +258,72 @@ describe("repo toolchain diagnostics (#1097)", () => {
     // Doctor keeps going: the next repo is still probed.
     expect(rows[1]).toMatchObject({ ok: true, label: "toolchain bun" });
     expect(probes).toBe(1);
+  });
+});
+
+describe("chain auto-approval policy diagnostic (#1779)", () => {
+  const writePolicy = (root, policy) => {
+    mkdirSync(path.join(root, "config"));
+    writeFileSync(path.join(root, "config", "policy.yaml"), policy);
+  };
+
+  test("reports the four loader outcomes from a temporary instance root", () => {
+    const valid = scratch();
+    writePolicy(
+      valid,
+      `chain_auto_approval:
+  allowed_event_types:
+    - factory.merge.requested
+merge:
+  max_fix_rounds: 2
+  batch_size: 3
+escalation:
+  auto_merge_base: [develop]
+  auto_merge_owners: [watt-mind]
+`,
+    );
+    expect(chainAutoApprovalPolicyDiagnostic({ root: valid })).toEqual({
+      ok: true,
+      label: "chain auto-approval policy",
+      detail:
+        "ok (1 allowed event type: factory.merge.requested; merge max_fix_rounds=2, batch_size=3; escalation auto_merge_base=develop, auto_merge_owners=watt-mind)",
+      fix: null,
+    });
+
+    const missing = scratch();
+    expect(chainAutoApprovalPolicyDiagnostic({ root: missing })).toEqual({
+      ok: "warn",
+      label: "chain auto-approval policy",
+      detail: "policy_missing — every chain proposal is watched",
+      fix: "add config/policy.yaml chain_auto_approval.allowed_event_types to opt into safe chain approvals",
+    });
+
+    const invalid = scratch();
+    writePolicy(invalid, "chain_auto_approval:\n  allowed_event_types: nope\n");
+    expect(chainAutoApprovalPolicyDiagnostic({ root: invalid })).toEqual({
+      ok: false,
+      label: "chain auto-approval policy",
+      detail:
+        "policy_invalid — chain_auto_approval.allowed_event_types must be an array of strings",
+      fix: "compare config/policy.yaml chain_auto_approval.allowed_event_types with CHAIN_AUTO_APPROVAL_EVENT_TYPES",
+    });
+
+    const forbidden = scratch();
+    writePolicy(
+      forbidden,
+      "chain_auto_approval:\n  allowed_event_types: [factory.work.requested, factory.ship-apply.requested]\nescalation:\n  auto_merge_base: []\n  auto_merge_owners: []\n",
+    );
+    expect(chainAutoApprovalPolicyDiagnostic({ root: forbidden })).toEqual({
+      ok: false,
+      label: "chain auto-approval policy",
+      detail:
+        "policy_contains_forbidden_event — offending entries: factory.ship-apply.requested",
+      fix: "compare config/policy.yaml chain_auto_approval.allowed_event_types with CHAIN_AUTO_APPROVAL_EVENT_TYPES",
+    });
+
+    for (const root of [valid, missing, invalid, forbidden]) {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
