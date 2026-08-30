@@ -314,7 +314,9 @@ function latestJanitorRunMs(repo) {
 // active *.log files plus every numbered archive (*.log.[0-9]*). A missing run
 // directory is normal before the live stack has ever been started.
 function liveStackLogBytes() {
-  const runDir = path.join(homedir(), ".factory", "run");
+  // Honour the same override bin/live-stack.sh uses for its run directory.
+  const runDir =
+    process.env.FACTORY_RUN_DIR || path.join(homedir(), ".factory", "run");
   let total = 0;
   try {
     for (const name of readdirSync(runDir)) {
@@ -428,7 +430,9 @@ const factoryStatus = output.factory;
 console.log(
   `\nMaintenance  reaper ${formatAge(output.maintenance.reaperLastRun)}  ·  janitor ${formatAge(output.maintenance.janitorLastRun)}`,
 );
-console.log(`Live stack   ${output.liveStack.logBytes} log bytes`);
+console.log(
+  `Live stack   ${(output.liveStack.logBytes / (1024 * 1024)).toFixed(1)} MiB of logs`,
+);
 console.log(c.bold("\nFactory now:"));
 
 if (!factoryStatus.available) {
