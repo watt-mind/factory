@@ -1230,10 +1230,23 @@ function tierEscalationForContinuation(db, runId) {
   };
 }
 
-/** Only diagnostics the next dispatch can act on belong in its continuation. */
-function continuationHandoffFailure(violations) {
-  const failure = (violations ?? []).find((line) =>
-    /^(?:web_build_failed|ticket_verify_failed):/.test(line),
+/**
+ * Only diagnostics the next dispatch can act on belong in its continuation.
+ * Each violation is matched on its own, anchored at its start: a
+ * `repo_verify_failed:` reason that merely quotes a `web_build_failed:` line
+ * inside its output is not a handoff failure, and a pre-joined
+ * `ContractViolation.message` is split back into its lines first.
+ */
+export function continuationHandoffFailure(violations) {
+  const lines = Array.isArray(violations)
+    ? violations
+    : typeof violations === "string"
+      ? violations.split(/;\s+(?=[a-z_]+:)/)
+      : [];
+  const failure = lines.find(
+    (line) =>
+      typeof line === "string" &&
+      /^(?:web_build_failed|ticket_verify_failed):/.test(line),
   );
   return failure ?? null;
 }

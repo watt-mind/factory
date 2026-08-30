@@ -74,6 +74,7 @@ import {
   codeStampFiles,
   codeStampRoot,
   continuationExecutionInput,
+  continuationHandoffFailure,
   createReloadWatcher,
   DEFAULT_MAX_ENVIRONMENT_RETRIES,
   defaultLocksDir,
@@ -2518,6 +2519,27 @@ sh -c 'sleep 5 & wait'
         "agent_exit_1",
       ).eligible,
     ).toBe(false);
+  });
+
+  test("continuation handoff failures are matched per violation, anchored at its start", () => {
+    const quoted =
+      "repo_verify_failed: (fail) x\nweb_build_failed: quoted inside output";
+    expect(continuationHandoffFailure([quoted])).toBeNull();
+    expect(
+      continuationHandoffFailure([
+        quoted,
+        "ticket_verify_failed: bunx: command not found; sandbox_limits: tmpfs=1024MiB",
+      ]),
+    ).toBe(
+      "ticket_verify_failed: bunx: command not found; sandbox_limits: tmpfs=1024MiB",
+    );
+    expect(
+      continuationHandoffFailure(
+        "owned_paths_violation: a; web_build_failed: error TS7053",
+      ),
+    ).toBe("web_build_failed: error TS7053");
+    expect(continuationHandoffFailure(undefined)).toBeNull();
+    expect(continuationHandoffFailure([42, null])).toBeNull();
   });
 
   test("tier continuation input carries the worker-observed handoff failure verbatim", () => {

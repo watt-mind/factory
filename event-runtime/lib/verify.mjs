@@ -1079,13 +1079,31 @@ function boundedDiagnostic(lines) {
   return excerpt.join("\n");
 }
 
-/** Preserve enough of a handoff red for its one permitted continuation. */
-function handoffFailureOutput(obs) {
-  const output = String(obs?.output ?? "").slice(
-    0,
-    HANDOFF_FAILURE_OUTPUT_MAX_CHARS,
-  );
-  return output || `exit ${obs?.exitCode ?? "unknown"}`;
+function stripAnsi(output) {
+  // eslint-disable-next-line no-control-regex -- \x1b is the ANSI escape byte being stripped, not a typo
+  return String(output ?? "").replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+/** Keep the tail of a diagnostic: the fatal line of a handoff red is last. */
+function boundedTail(text, maxChars = HANDOFF_FAILURE_OUTPUT_MAX_CHARS) {
+  if (text.length <= maxChars) return text;
+  return `…${text.slice(-(maxChars - 1))}`;
+}
+
+/**
+ * Preserve enough of a handoff red for its one permitted continuation. Same
+ * curated diagnostic as the repository verification reason (timeout, then
+ * explicit failure markers, then the trailing lines), bounded from the tail so
+ * a `bun test` that passes and then dies on `bunx: command not found` keeps
+ * the line that actually killed it.
+ */
+export function handoffFailureOutput(obs, { timeoutMs } = {}) {
+  if (obs?.timedOut)
+    return `timed out after ${timeoutMs ?? obs?.timeoutMs ?? "unknown"}ms`;
+  const curated =
+    repoVerifyFailureExcerpt(obs?.output) ||
+    stripAnsi(obs?.output).trimEnd().slice(-HANDOFF_FAILURE_OUTPUT_MAX_CHARS);
+  return boundedTail(curated.trim()) || `exit ${obs?.exitCode ?? "unknown"}`;
 }
 
 /**
@@ -1094,9 +1112,7 @@ function handoffFailureOutput(obs) {
  * errors, so later runner noise cannot displace the failing test names.
  */
 function repoVerifyFailureExcerpt(output) {
-  const lines = String(output ?? "")
-    // eslint-disable-next-line no-control-regex -- \x1b is the ANSI escape byte being stripped, not a typo
-    .replace(/\x1b\[[0-9;]*m/g, "")
+  const lines = stripAnsi(output)
     .split("\n")
     .map((line) => line.trimEnd())
     .filter((line) => line.trim().length > 0);
@@ -1684,6 +1700,8 @@ function verifyCompleted({
       obs.timedOut
         ? `timed out after ${verifyTimeoutMs}ms`
         : repoVerifyFailureExcerpt(obs.output) || `exit ${obs.exitCode}`;
+    const handoffWhy = (obs) =>
+      handoffFailureOutput(obs, { timeoutMs: verifyTimeoutMs });
 
     // Fail-closed: something must stand behind the Verification line.
     if (!worktreeRecord.verify && !ticketCommand) {
@@ -1740,7 +1758,7 @@ function verifyCompleted({
       if (!obs.passed) {
         refuse(
           "handoff_verification_failed",
-          `ticket_verify_failed: ${handoffFailureOutput(obs)}; sandbox_limits: ${handoffSandboxLimits(obs.sandbox.tmpfsMb)}`,
+          `ticket_verify_failed: ${handoffWhy(obs)}; sandbox_limits: ${handoffSandboxLimits(obs.sandbox.tmpfsMb)}`,
         );
       }
       handoffChecks.push("ticket_verify_passed");
@@ -1773,7 +1791,7 @@ function verifyCompleted({
       if (!obs.passed) {
         refuse(
           "handoff_verification_failed",
-          `web_build_failed: ${handoffFailureOutput(obs)}`,
+          `web_build_failed: ${handoffWhy(obs)}`,
         );
       }
       handoffChecks.push("web_build_passed");
