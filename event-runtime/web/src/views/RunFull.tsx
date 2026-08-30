@@ -27,6 +27,8 @@ import { handleRunArtifactClick, toggleRunPin } from "./Runs";
 import { AgentHoverCard } from "../components/AgentHoverCard";
 import { TicketText } from "../components/TicketHoverCard";
 import type { RunSummary } from "../types";
+import { formatDuration, formatRelative } from "../format";
+import { leaseRemaining } from "./Runs";
 
 /**
  * Full-page run view (`#/run/:id`, webui doc §10.11) — the trace at a
@@ -84,6 +86,11 @@ export function RunFull({
     queryKey: ["events", "ALL"],
     queryFn: () => api.events(),
     ...refetchIntervals.secondary,
+  });
+  const workersQ = useQuery({
+    queryKey: ["workers"],
+    queryFn: api.workers,
+    ...refetchIntervals.primary,
   });
   const listRow: RunSummary | null = useMemo(
     () => (listQ.data?.runs ?? []).find((r) => r.runId === runId) ?? null,
@@ -380,6 +387,19 @@ export function RunFull({
   ]);
 
   const inflight = Boolean(d && ["RUNNING", "VERIFYING"].includes(d.run.state));
+  const activeAttempt = d?.attempts.at(-1) ?? null;
+  const worker = useMemo(() => {
+    const workers = workersQ.data?.workers ?? [];
+    return (
+      workers.find((row) => row.workerId === activeAttempt?.lease_owner) ??
+      workers.find((row) => row.currentRun === d?.run.runId) ??
+      null
+    );
+  }, [activeAttempt?.lease_owner, d?.run.runId, workersQ.data]);
+  const elapsed = activeAttempt?.started_at
+    ? formatDuration((now - Date.parse(activeAttempt.started_at)) / 1000)
+    : null;
+  const lease = leaseRemaining(activeAttempt?.lease_expires_at, now);
   const showVerbRow =
     Boolean(canApprove && selProposal) ||
     Boolean(d && isCancellable(d.run.state)) ||
@@ -508,6 +528,32 @@ export function RunFull({
             )}
             {inflight && d && (
               <>
+                {(elapsed || lease || worker) && (
+                  <span
+                    aria-label="In-flight run status"
+                    className="mr-1 inline-flex flex-wrap items-center gap-1 text-[12px] text-(--text-dim) tabular-nums"
+                  >
+                    {elapsed && <span>Elapsed {elapsed}</span>}
+                    {elapsed && (lease || worker) && <span>·</span>}
+                    {lease && <span>{lease}</span>}
+                    {lease && worker && <span>·</span>}
+                    {worker && (
+                      <>
+                        <span>{worker.workerId}</span>
+                        <span>·</span>
+                        <span>
+                          heartbeat {formatRelative(worker.lastSeen, now)}
+                        </span>
+                        {worker.stale && (
+                          <StateBadge
+                            state="stale"
+                            hues={{ stale: "var(--hue-err)" }}
+                          />
+                        )}
+                      </>
+                    )}
+                  </span>
+                )}
                 <span
                   className="mr-1 text-[12px] text-(--text-dim) tabular-nums"
                   title="Current execution deadline. The sidebar budget meter preserves the original approved RunSpec; its lease clock reflects extensions."

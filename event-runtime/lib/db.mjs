@@ -146,6 +146,16 @@ CREATE INDEX IF NOT EXISTS idx_attempt_trace_run ON attempt_trace (run_id, seq);
 
 const SCHEMA = SCHEMA_V1;
 
+/** Return the normalized ticket subject carried by a run specification. */
+export function runSubject(spec) {
+  const candidates = [spec?.input?.ticket, spec?.subject];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim())
+      return candidate.trim().toUpperCase();
+  }
+  return null;
+}
+
 /**
  * Ordered linear migrations list. Each migration runs sequentially inside a
  * transaction and advances PRAGMA user_version.
@@ -527,6 +537,38 @@ export const MIGRATIONS = [
       if (!columns.has("delivery_error")) {
         db.exec(`ALTER TABLE outbox ADD COLUMN delivery_error TEXT;`);
       }
+    },
+  },
+  {
+    version: 19,
+    name: "runs_subject",
+    up(db) {
+      const columns = new Set(
+        db
+          .query(`PRAGMA table_info(runs)`)
+          .all()
+          .map((row) => row.name),
+      );
+      if (!columns.has("subject")) {
+        db.exec(`ALTER TABLE runs ADD COLUMN subject TEXT;`);
+        const updateSubject = db.query(
+          `UPDATE runs SET subject = ? WHERE run_id = ?`,
+        );
+        for (const row of db
+          .query(`SELECT run_id, spec_json FROM runs`)
+          .all()) {
+          let spec = null;
+          try {
+            spec = JSON.parse(row.spec_json);
+          } catch {
+            // Preserve malformed legacy specifications as unclassified rows.
+          }
+          updateSubject.run(runSubject(spec), row.run_id);
+        }
+      }
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_runs_subject ON runs (subject);
+      `);
     },
   },
 ];

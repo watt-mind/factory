@@ -411,6 +411,20 @@ function leasePart(
   };
 }
 
+/** The compact lease label shared by the list and the full run view. */
+export function leaseRemaining(
+  leaseExpiresAt: string | null | undefined,
+  now: number,
+) {
+  if (!leaseExpiresAt) return null;
+  const lease = leasePart(
+    clockTo(leaseExpiresAt, 0, now),
+    null,
+    leaseExpiresAt,
+  );
+  return lease?.text ?? null;
+}
+
 /**
  * The one place a row says how long an in-flight attempt has left (WM-725).
  * Budget and lease share this single line: stacking a second line of clocks

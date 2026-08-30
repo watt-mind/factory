@@ -6,7 +6,7 @@
  * that updates the run row. Illegal transitions are rejected, never repaired.
  */
 import { hashJson } from "./canonical.mjs";
-import { tx, txImmediate } from "./db.mjs";
+import { runSubject, tx, txImmediate } from "./db.mjs";
 
 export const STATES = [
   "PROPOSED",
@@ -130,9 +130,9 @@ export function createRun(
   const at = new Date(resolveNow(now)).toISOString();
   const result = txImmediate(db, () => {
     db.query(
-      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'PROPOSED', 0, ?, ?)`,
-    ).run(runId, idempotencyKey, specJson, specHash, at, at);
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at, subject)
+       VALUES (?, ?, ?, ?, 'PROPOSED', 0, ?, ?, ?)`,
+    ).run(runId, idempotencyKey, specJson, specHash, at, at, runSubject(spec));
     appendJournal(db, {
       runId,
       from: null,

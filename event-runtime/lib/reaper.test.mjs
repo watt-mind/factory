@@ -335,24 +335,38 @@ describe("reaper (OPS-416)", () => {
     });
   });
 
-  test("prunes stale stopped workers during reap cycle (OPS-431)", () => {
+  test("prunes expired stopped and dead workers during reap cycle", () => {
     const db = openDb(":memory:");
-    // w1: stopped 30 hours ago (> 24h retention window)
-    registerWorker(db, { workerId: "w1", now: T0 - 48 * 60 * 60 * 1000 });
-    deregisterWorker(db, "w1", { now: T0 - 30 * 60 * 60 * 1000 });
-
-    // w2: active worker
+    const hour = 60 * 60 * 1000;
+    registerWorker(db, { workerId: "w1", now: T0 });
     registerWorker(db, { workerId: "w2", now: T0 });
+    registerWorker(db, { workerId: "w3", now: T0 });
+    registerWorker(db, { workerId: "w4", now: T0 });
+    registerWorker(db, { workerId: "w5", now: T0 });
 
-    // w3: stopped 2 hours ago (< 24h retention window)
-    registerWorker(db, { workerId: "w3", now: T0 - 5 * 60 * 60 * 1000 });
-    deregisterWorker(db, "w3", { now: T0 - 2 * 60 * 60 * 1000 });
-
-    expect(listWorkers(db, { now: T0 })).toHaveLength(3);
+    // w1: stopped 2 hours ago (> 1h retention window).
+    deregisterWorker(db, "w1", { now: T0 - 2 * hour });
+    // w3: stopped 30 minutes ago (< 1h retention window).
+    deregisterWorker(db, "w3", { now: T0 - 30 * 60 * 1000 });
+    // w4: dead for more than 6 hours without a lease.
+    // w5: stale, but still owns an active attempt and must remain visible.
+    for (const workerId of ["w4", "w5"]) {
+      db.query(`UPDATE workers SET last_seen = ? WHERE worker_id = ?`).run(
+        new Date(T0 - 7 * hour).toISOString(),
+        workerId,
+      );
+    }
+    const leased = makeSpec({ runId: "run-leased-worker", maxAttempts: 2 });
+    setupVerifyingRun(db, leased, { now: T0, expired: false });
+    db.query(`UPDATE attempts SET lease_owner = ? WHERE run_id = ?`).run(
+      "w5",
+      leased.runId,
+    );
+    expect(listWorkers(db, { now: T0 })).toHaveLength(5);
 
     reapExpiredLeases(db, { now: T0, policyVersion: "test" });
 
     const remaining = listWorkers(db, { now: T0 });
-    expect(remaining.map((w) => w.workerId).sort()).toEqual(["w2", "w3"]);
+    expect(remaining.map((w) => w.workerId).sort()).toEqual(["w2", "w3", "w5"]);
   });
 });

@@ -1815,6 +1815,51 @@ describe("handoff verification helpers (WM-718)", () => {
     expect(obs.output.trim().split("\n").pop().trim()).toBe("1");
   });
 
+  test("the sandbox supplies standard fd links for Bash process substitution", () => {
+    if (insideHandoffSandbox()) return;
+    if (!handoffSandboxAvailable({ cache: false, nested: false })) return;
+    const worktree = realpathSync(tmpDir("evrt-handoff-fd-"));
+    const obs = runHandoffCommand({
+      command:
+        "bash -c 'cat <(echo ok)' && readlink /dev/fd && readlink /dev/stdin && readlink /dev/stdout && readlink /dev/stderr && find /dev -mindepth 1 -maxdepth 1 -printf '%f\\n' | sort",
+      cwd: worktree,
+      worktreePath: worktree,
+      logPath: path.join(worktree, "handoff.log"),
+      timeoutMs: 60_000,
+    });
+    expect(obs.passed).toBe(true);
+    expect(obs.output).toContain("ok\n/proc/self/fd\n/proc/self/fd/0");
+    expect(obs.output).toContain("/proc/self/fd/1\n/proc/self/fd/2");
+    expect(obs.output.trim().split("\n").slice(-8)).toEqual([
+      "fd",
+      "null",
+      "random",
+      "stderr",
+      "stdin",
+      "stdout",
+      "urandom",
+      "zero",
+    ]);
+  });
+
+  test("the sandbox exposes only read-only host alternatives under /etc", () => {
+    if (insideHandoffSandbox()) return;
+    if (!handoffSandboxAvailable({ cache: false, nested: false })) return;
+    const worktree = realpathSync(tmpDir("evrt-handoff-alternatives-"));
+    const hostHasAlternatives = existsSync("/etc/alternatives");
+    const obs = runHandoffCommand({
+      command:
+        "test ! -e /etc/hostname && test ! -e /etc/passwd && if [ -d /etc/alternatives ]; then awk 'BEGIN { print 1 }'; test -r /etc/alternatives; ! touch /etc/alternatives/.factory-write-probe 2>/dev/null; else test ! -e /etc/alternatives; fi",
+      cwd: worktree,
+      worktreePath: worktree,
+      logPath: path.join(worktree, "handoff.log"),
+      timeoutMs: 60_000,
+    });
+    expect(obs.passed).toBe(true);
+    if (hostHasAlternatives) expect(obs.output.trim()).toBe("1");
+    else expect(obs.output.trim()).toBe("");
+  });
+
   test("the PID-namespace init reaps a forked grandchild", () => {
     if (insideHandoffSandbox()) return;
     if (!handoffSandboxAvailable({ cache: false, nested: false })) return;
