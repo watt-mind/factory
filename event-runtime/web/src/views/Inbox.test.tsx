@@ -673,6 +673,39 @@ describe("Inbox view", () => {
     expect(view.queryByRole("button", { name: /^Ack/ })).toBeNull();
   });
 
+  test("contains a detail render failure and retries it without losing the list", async () => {
+    let failDetail = true;
+    const decision = {
+      schemaVersion: "factory.decision-request/v1" as const,
+      question: "Can this detail recover?",
+      get options() {
+        if (failDetail) {
+          throw new Error("first detail render failed");
+        }
+        return [{ id: "retry", label: "Retry", effect: "dismiss" as const }];
+      },
+    };
+    ledger = [
+      item({
+        id: "inbox_detail_failure",
+        kind: "decision_needed",
+        title: "Decision that initially fails",
+        decision,
+      }),
+    ];
+
+    const { view } = renderInbox({ focusItemId: "inbox_detail_failure" });
+    await waitFor(() => view.getByRole("alert"));
+    expect(view.getByTitle("Decision that initially fails")).toBeTruthy();
+    expect(view.getByText("Open raw item")).toBeTruthy();
+
+    failDetail = false;
+    fireEvent.click(view.getByRole("button", { name: "Retry" }));
+
+    await waitFor(() => view.getByText("Can this detail recover?"));
+    expect(view.queryByText("This item could not render")).toBeNull();
+  });
+
   test("unknown deep link shows an inline notice, not a blank list", async () => {
     const { view } = renderInbox({ focusItemId: "inbox_nope" });
     await waitFor(() => view.getByText(/^No inbox item/));

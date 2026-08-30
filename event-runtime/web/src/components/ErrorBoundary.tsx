@@ -69,6 +69,10 @@ type Props = {
   storage?: StorageLike;
   route?: string;
   now?: () => number;
+  /** Render a local recovery UI instead of the application-wide fallback. */
+  fallback?: (error: Error, retry: () => void) => ReactNode;
+  /** Changing this value clears a prior render error, for example on navigation. */
+  resetKey?: unknown;
 };
 
 type State = {
@@ -93,9 +97,19 @@ export class ErrorBoundary extends Component<Props, State> {
     }
   }
 
+  componentDidUpdate(previousProps: Props) {
+    if (this.state.error && previousProps.resetKey !== this.props.resetKey) {
+      this.setState({ error: null, reloading: false });
+    }
+  }
+
+  retry = () => this.setState({ error: null, reloading: false });
+
   render() {
     const { error, reloading } = this.state;
     if (!error) return this.props.children;
+
+    if (this.props.fallback) return this.props.fallback(error, this.retry);
 
     const chunkFailure = isChunkLoadError(error);
     const title = chunkFailure
