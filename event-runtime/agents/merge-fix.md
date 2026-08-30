@@ -42,15 +42,20 @@ isolated worktree for the ticket. This is not a general implementation run.
      ```
 
      Compare `expectedRemoteSha` with the pinned `input.json` `headSha`. Only
-     when they differ, inspect the fetched tip's committer email and timestamp:
-     that difference proves the PR head changed after this run was planned. If
-     the changed tip was pushed by an actor other than this run
-     (`git config user.email`) within `MERGE_FIX_IN_FLIGHT_MINUTES` (default
-     `10`), do not touch or push the branch. Return `outcome: "BLOCKED"` and a
-     `summary` beginning `branch_in_flight:` instead of racing the active
-     fixer. When the head changed, treat an unknown actor or timestamp as in
-     flight; validate the optional minute value as a positive integer before
-     using it. Never classify the unchanged pinned head as `branch_in_flight`.
+     when they differ, query the live PR with
+     `gh pr view <pr> --repo <github> --json headRefOid,updatedAt`. Refuse with
+     `branch_moved:` before editing if that live head no longer equals
+     `expectedRemoteSha`. A differing fetched head proves another actor moved
+     the branch because this run has not pushed yet; do not substitute commit
+     author/committer metadata, which does not identify who pushed or when.
+     Treat the PR's `updatedAt` as a conservative upper bound on the head-change
+     time. If it is within `MERGE_FIX_IN_FLIGHT_MINUTES` (default `10`), do not
+     touch or push the branch. Return `outcome: "BLOCKED"` and a `summary`
+     beginning `branch_in_flight:` instead of racing the active fixer. Treat an
+     unknown live head or timestamp as in flight; validate the optional minute
+     value as a positive integer before using it. Never classify the unchanged
+     pinned head as `branch_in_flight`. PR activity other than a push can only
+     make this conservative check wait longer; it cannot allow a clobber.
 
      If `expectedRemoteSha` is not an ancestor of local `HEAD`, someone pushed
      commits the worktree does not contain. Rebase local work **on top of** the

@@ -440,6 +440,35 @@ describe("registry", () => {
     ]);
   });
 
+  test("merge-fix rebase instructions preserve concurrent branch commits", () => {
+    const prompt = readFileSync(
+      path.join(RUNTIME_ROOT, "agents", "merge-fix.md"),
+      "utf8",
+    );
+    const flat = prompt.replace(/\s+/g, " ");
+
+    expect(flat).toContain('git rebase "origin/<headRef>"');
+    expect(flat).toContain(
+      '"--force-with-lease=<headRef>:${expectedRemoteSha}"',
+    );
+    expect(flat).toContain("MERGE_FIX_IN_FLIGHT_MINUTES");
+    expect(flat).toContain(
+      "Compare `expectedRemoteSha` with the pinned `input.json` `headSha`",
+    );
+    expect(flat).toContain(
+      "gh pr view <pr> --repo <github> --json headRefOid,updatedAt",
+    );
+    expect(flat).toContain(
+      "do not substitute commit author/committer metadata",
+    );
+    expect(flat).toContain(
+      "Never classify the unchanged pinned head as `branch_in_flight`",
+    );
+    expect(flat).toContain("`summary` beginning `branch_in_flight:`");
+    expect(flat).toContain("`summary` beginning `branch_moved:`");
+    expect(flat).toContain("make no retry push");
+  });
+
   test("local schedule overlay permits new complete entries and rejects kernel routing changes", () => {
     const config = path.join(tmpDir("event-schedule-new-"), "schedule.yaml");
     writeFileSync(
