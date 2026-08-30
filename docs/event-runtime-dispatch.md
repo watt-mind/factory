@@ -472,10 +472,14 @@ requires the emitted repository to match the predecessor input.
 
 `config/policy.yaml` is the only allowlist for unattended chain proposals. Its
 closed set covers `factory.work.requested`, `factory.triage.requested`,
-`factory.triage-apply.requested`, and `factory.dispatch.requested`; missing or
-malformed policy means watched. The event must have been admitted with source
-`chain`, and the normal proposal, lifecycle, journal, budget, and worker gates
-remain in force.
+`factory.triage-apply.requested`, `factory.dispatch.requested`, and the
+read-only `factory.ci-diagnose.requested`; missing or malformed policy means
+watched. The event must have been admitted with source `chain`, and the normal
+proposal, lifecycle, journal, budget, and worker gates remain in force.
+
+`factory.ci-diagnose.requested` runs `ci-doctor@2`, which is non-mutating and
+limited to `gh:read`; its downstream `ci-rerun` and `dispatch` edges retain
+their separate approval gates.
 
 Dispatch is re-read immediately before approval: it must still be Todo,
 unassigned, `ai:agent-ready`, inside its lease cap, and disjoint from active

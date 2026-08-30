@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { withTmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-auto-approval-test-mjs";
 
 import {
   autoApproveChains,
+  buildChainApprovalPolicy,
   chainRuntimeGuard,
   CHAIN_AUTO_APPROVAL_ACTOR,
   CHAIN_AUTO_APPROVAL_EVENT_TYPES,
@@ -10,6 +14,7 @@ import {
   loadChainAutoApprovalPolicy,
 } from "./auto-approval.mjs";
 import { canonicalJson, hashJson } from "./canonical.mjs";
+import { FACTORY_ROOT } from "./config.mjs";
 import { openDb } from "./db.mjs";
 import { createHookRegistry, hookDecisionsFor } from "./hooks.mjs";
 import { admitEvent } from "./intake.mjs";
@@ -489,12 +494,59 @@ describe("declared chain command edge characterization (WM-469)", () => {
 });
 
 describe("chain auto approval (WM-357)", () => {
-  test("git-owned policy is an explicit closed allowlist", async () => {
-    const loaded = loadChainAutoApprovalPolicy();
-    expect([...loaded.allowed].sort()).toEqual(
-      [...CHAIN_AUTO_APPROVAL_EVENT_TYPES].sort(),
-    );
-    expect(loaded.reason).toBeNull();
+  test("git-owned policy is an explicit closed allowlist", () => {
+    withTmpDir("factory-auto-approval-", (root) => {
+      mkdirSync(path.join(root, "config"));
+      copyFileSync(
+        path.join(FACTORY_ROOT, "config", "policy.example.yaml"),
+        path.join(root, "config", "policy.yaml"),
+      );
+      const loaded = loadChainAutoApprovalPolicy({ root });
+      expect([...loaded.allowed].sort()).toEqual(
+        [...CHAIN_AUTO_APPROVAL_EVENT_TYPES].sort(),
+      );
+      expect(loaded.reason).toBeNull();
+    });
+  });
+
+  test("ci-doctor diagnoses can be explicitly auto-approved by chain policy", () => {
+    withTmpDir("factory-auto-approval-", (root) => {
+      mkdirSync(path.join(root, "config"));
+      writeFileSync(
+        path.join(root, "config", "policy.yaml"),
+        "chain_auto_approval:\n  allowed_event_types:\n    - factory.ci-diagnose.requested\n",
+      );
+
+      const allowed = loadChainAutoApprovalPolicy({ root });
+      expect(allowed.reason).toBeNull();
+      expect(
+        buildChainApprovalPolicy("factory.ci-diagnose.requested", {
+          source: "chain",
+          policy: allowed,
+        }),
+      ).toEqual({
+        source: "chain",
+        mode: "auto",
+        eventType: "factory.ci-diagnose.requested",
+      });
+
+      writeFileSync(
+        path.join(root, "config", "policy.yaml"),
+        "chain_auto_approval:\n  allowed_event_types: []\n",
+      );
+      const watched = loadChainAutoApprovalPolicy({ root });
+      expect(
+        buildChainApprovalPolicy("factory.ci-diagnose.requested", {
+          source: "chain",
+          policy: watched,
+        }),
+      ).toEqual({
+        source: "chain",
+        mode: "watched",
+        eventType: "factory.ci-diagnose.requested",
+        reason: "event_type_not_allowlisted",
+      });
+    });
   });
 
   test("merge-scan REVIEW proposals auto-approve factory.merge-review.requested (WM-907)", async () => {

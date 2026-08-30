@@ -51,6 +51,7 @@ chain_auto_approval:
     - factory.triage.requested
     - factory.triage-apply.requested
     - factory.dispatch.requested
+    - factory.ci-diagnose.requested
     - factory.merge.requested
     - factory.merge-review.requested
     - factory.merge-fix.requested

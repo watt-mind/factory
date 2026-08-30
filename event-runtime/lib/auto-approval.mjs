@@ -33,6 +33,9 @@ export const CHAIN_AUTO_APPROVAL_EVENT_TYPES = new Set([
   "factory.triage.requested",
   "factory.triage-apply.requested",
   "factory.dispatch.requested",
+  // ci-doctor@2 is non-mutating and gh:read-only; ci-rerun and dispatch
+  // downstream edges retain their own approval gates.
+  "factory.ci-diagnose.requested",
   "factory.merge.requested",
   "factory.merge-review.requested",
   "factory.merge-fix.requested",
