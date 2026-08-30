@@ -6,12 +6,7 @@ import {
   readSync,
   rmSync,
 } from "node:fs";
-import {
-  findArtifact,
-  hashFileAsync,
-  listArtifactPage,
-  pruneArtifacts,
-} from "./artifacts.mjs";
+import { findArtifact, hashFileAsync, pruneArtifacts } from "./artifacts.mjs";
 import { artifactsRoot } from "./config.mjs";
 import { ApiParameterError, parseListLimit } from "./api-params.mjs";
 
@@ -64,6 +59,8 @@ export async function handleArtifactApiRoute({
   env,
   nowMs,
   clearStoreStats,
+  clearArtifactPage,
+  getArtifactPage,
 }) {
   if (route === "GET /artifacts") {
     const orphanParam = url.searchParams.get("orphan");
@@ -100,17 +97,20 @@ export async function handleArtifactApiRoute({
         return send(422, { error: "invalid before cursor" });
       }
     }
-    const page = listArtifactPage(db, artifactsRoot(env.home), {
-      orphan: orphanParam === null ? undefined : orphanParam === "true",
-      kind: url.searchParams.has("kind")
-        ? url.searchParams.get("kind")
-        : undefined,
-      search: url.searchParams.has("search")
-        ? url.searchParams.get("search")
-        : undefined,
-      limit,
-      before,
-    });
+    const page = getArtifactPage(
+      {
+        orphan: orphanParam === null ? undefined : orphanParam === "true",
+        kind: url.searchParams.has("kind")
+          ? url.searchParams.get("kind")
+          : undefined,
+        search: url.searchParams.has("search")
+          ? url.searchParams.get("search")
+          : undefined,
+        limit,
+        before,
+      },
+      nowMs,
+    );
     return send(200, page);
   }
 
@@ -136,7 +136,10 @@ export async function handleArtifactApiRoute({
       now: nowMs,
       dryRun: !apply,
     });
-    if (apply) clearStoreStats();
+    if (apply) {
+      clearStoreStats();
+      clearArtifactPage();
+    }
     return send(200, result);
   }
 
