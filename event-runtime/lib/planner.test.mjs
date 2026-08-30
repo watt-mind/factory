@@ -2650,13 +2650,30 @@ describe("planEvent model pinning (WM-135)", () => {
     const ref = admit(db, tieredEnvelope());
     const outcome = planEvent(
       db,
-      tieredRegistry({ modelTier: "standard", model: "claude-opus-4-1" }),
+      tieredRegistry({ modelTier: "standard", model: "default" }),
       ref,
       { now: NOW, policyVersion: "git:test" },
     );
     const spec = JSON.parse(outcome.proposal.spec_json);
-    expect(spec.model).toBe("claude-opus-4-1");
+    expect(spec.model).toBe("default");
     expect(spec.modelTier).toBe("standard");
+  });
+
+  test("refuses a model override that is not configured for the selected adapter", () => {
+    const db = openDb(":memory:");
+    const ref = admit(db, tieredEnvelope());
+    const outcome = planEvent(
+      db,
+      tieredRegistry({
+        modelTier: "standard",
+        model: "openai-codex/gpt-5.6-terra",
+      }),
+      ref,
+      { now: NOW, policyVersion: "git:test" },
+    );
+    expect(outcome).toMatchObject({ decision: "human_needed" });
+    expect(outcome.reason).toStartWith("model_adapter_mismatch:");
+    expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(0);
   });
 
   test("a definition declaring nothing produces a spec without model fields — today's behavior (regression)", () => {

@@ -114,6 +114,20 @@ export function idempotencyKeyFor(mapping, def, envelope, inputHash) {
 }
 
 /**
+ * A RunSpec's concrete model must be one of the configured values for its
+ * adapter. Model tiers are portable intent; model names are not. Keep this at
+ * the planning boundary so a bad runtime overlay or carried-forward pin parks
+ * the event rather than producing a QUEUED run the adapter will reject.
+ */
+function modelAdapterMismatch(spec, modelTiers, adapter) {
+  if (spec?.model == null) return null;
+  const allowed = Object.values(modelTiers?.[adapter] ?? {});
+  return allowed.includes(spec.model)
+    ? null
+    : `model_adapter_mismatch: model ${JSON.stringify(spec.model)} is not configured for adapter ${JSON.stringify(adapter)}`;
+}
+
+/**
  * Per-agent repo scoping (WM-64), the repo analogue of the actions adapter's
  * host allowlist: a definition that declares `repos` may only run over those
  * repos. Applies to any input carrying a `repo` field, whatever the workspace
@@ -2660,6 +2674,13 @@ export function planEvent(
       }),
       idempotencyKey,
     };
+    const modelMismatch = modelAdapterMismatch(
+      spec,
+      registry.modelTiers,
+      mapping.adapter,
+    );
+    if (modelMismatch)
+      return humanNeeded(db, event, modelMismatch, at, ttlSeconds);
     const specJson = canonicalJson(spec);
     const specHash = hashJson(spec);
     try {
