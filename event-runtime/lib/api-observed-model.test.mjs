@@ -3,6 +3,7 @@ import {
   trackTmpDir,
 } from "../test-support/tmp.mjs?file=event-runtime-lib-api-observed-model-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { clearObservedModelCache, handleRunApiRoute } from "./api-runs.mjs";
 import {
   GH_SECRET,
   PV,
@@ -44,6 +45,8 @@ const makeServer = async (...args) => {
 };
 
 describe("model surfacing on run views (WM-221)", () => {
+  afterAll(() => clearObservedModelCache());
+
   test("reads the claude harness's own init line", () => {
     const head = [
       `{"type":"system","subtype":"hook_started","hook_name":"SessionStart:startup"}`,
@@ -98,7 +101,68 @@ describe("model surfacing on run views (WM-221)", () => {
     ).toBeNull();
   });
 
-  test("the run list carries the plan-time pins and the detail carries observedModel", async () => {
+  test("memoizes a terminal transcript hash and reads a distinct hash", async () => {
+    clearObservedModelCache();
+    const home = tmpDir("evrt-observed-model-cache-");
+    const { db, close } = await makeServer({ env: { name: "test", home } });
+    try {
+      db.query(
+        `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'COMPLETED', ?, ?)`,
+      ).run(
+        "model-cache",
+        "model-cache",
+        "{}",
+        "model-cache",
+        "2026-01-01T00:00:00.000Z",
+        "2026-01-01T00:00:00.000Z",
+      );
+      db.query(
+        `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+         VALUES (?, 1, ?, ?, '{}', '{}', ?)`,
+      ).run(
+        "model-cache",
+        JSON.stringify({
+          artifacts: [{ kind: "transcript", sha256: "a".repeat(64) }],
+        }),
+        "sha256:model-cache",
+        "2026-01-01T00:00:00.000Z",
+      );
+      let reads = 0;
+      const readView = () =>
+        handleRunApiRoute({
+          req: { method: "GET" },
+          url: new URL("http://test/runs/model-cache"),
+          db,
+          registry,
+          artifactsDir: home,
+          readArtifactHead: (_dir, sha256) => {
+            reads += 1;
+            return `{"type":"system","subtype":"init","model":"${sha256}"}\n`;
+          },
+          send: (_status, body) => body,
+        });
+
+      expect((await readView()).observedModel).toBe("a".repeat(64));
+      expect((await readView()).observedModel).toBe("a".repeat(64));
+      expect(reads).toBe(1);
+
+      db.query(`UPDATE results SET result_json = ? WHERE run_id = ?`).run(
+        JSON.stringify({
+          artifacts: [{ kind: "transcript", sha256: "b".repeat(64) }],
+        }),
+        "model-cache",
+      );
+      expect((await readView()).observedModel).toBe("b".repeat(64));
+      expect(reads).toBe(2);
+    } finally {
+      close();
+      clearObservedModelCache();
+    }
+  });
+
+  test("the run list carries the plan-time pins and caches terminal observedModel values", async () => {
+    clearObservedModelCache();
     const home = tmpDir("evrt-home-");
     const { db, server, port, close } = await makeServer({
       env: { name: "test", home },
@@ -144,12 +208,38 @@ describe("model surfacing on run views (WM-221)", () => {
       expect(view).toHaveProperty("observedModel");
       expect(view.observedModel).toBeNull();
 
-      // And the value really comes off the stored bytes: rewrite that same
-      // transcript with a harness init line and the next read reports it.
+      // Terminal transcript hashes are immutable, including the no-model
+      // observation. Rewriting the fixture must not make a polling read scan
+      // the same hash again.
       const transcript = view.result.artifacts.find(
         (a) => a.kind === "transcript",
       );
       expect(transcript).toBeTruthy();
+      writeFileSync(
+        path.join(home, "artifacts", transcript.sha256),
+        `{"type":"system","subtype":"init","model":"claude-opus-5[1m]"}\n`,
+        "utf8",
+      );
+      expect((await client.run(summary.runId)).observedModel).toBeNull();
+
+      // Tests clear the module-scoped cache before changing stored fixtures.
+      clearObservedModelCache();
+      expect((await client.run(summary.runId)).observedModel).toBe(
+        "claude-opus-5[1m]",
+      );
+
+      // A null model for a growing run remains uncached: a later polling read
+      // can observe the model once the transcript has gained its init line.
+      clearObservedModelCache();
+      db.query(`UPDATE runs SET state = 'RUNNING' WHERE run_id = ?`).run(
+        summary.runId,
+      );
+      writeFileSync(
+        path.join(home, "artifacts", transcript.sha256),
+        `{"type":"assistant","message":{"content":[]}}\n`,
+        "utf8",
+      );
+      expect((await client.run(summary.runId)).observedModel).toBeNull();
       writeFileSync(
         path.join(home, "artifacts", transcript.sha256),
         `{"type":"system","subtype":"init","model":"claude-opus-5[1m]"}\n`,

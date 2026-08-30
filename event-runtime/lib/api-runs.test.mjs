@@ -14,6 +14,7 @@ import {
 import { memoryControlPlane } from "../../lib/control-plane/index.mjs";
 import {
   TICKET_DETAIL_CACHE_TTL_MS,
+  clearObservedModelCache,
   clearTicketDetailCache,
   mergeTicketSupply,
   scanTicketSupply,
@@ -553,7 +554,8 @@ describe("list views carry repos[] (OPS-356)", () => {
 
 describe("ticket journey join (WM-595)", () => {
   test("GET /runs?ticket= joins explicit ticket activity and PR-linked merge runs", async () => {
-    const s = await makeServer();
+    const home = tmpDir("evrt-journey-home-");
+    const s = await makeServer({ env: { name: "test", home } });
     try {
       await s.client.replay(
         envelope({
@@ -678,6 +680,52 @@ describe("ticket journey join (WM-595)", () => {
 
       const unknown = await fetch(s.url("/runs?ticket=WM-999"));
       expect((await unknown.json()).activity).toBe(false);
+
+      // The journey view reaches runView without a transcript reader; on a
+      // cache miss it must fall back to the store rather than 500 (#1421).
+      clearObservedModelCache();
+      const transcriptSha = "c".repeat(64);
+      mkdirSync(path.join(home, "artifacts"), { recursive: true });
+      writeFileSync(
+        path.join(home, "artifacts", transcriptSha),
+        `{"type":"system","subtype":"init","model":"claude-opus-5[1m]"}\n`,
+        "utf8",
+      );
+      s.db.query(`UPDATE results SET result_json = ? WHERE run_id = ?`).run(
+        JSON.stringify({
+          terminalState: "completed",
+          artifact: { outcome: "PR_OPEN", ticket: "WM-595" },
+          artifacts: [{ kind: "transcript", sha256: transcriptSha }],
+        }),
+        "run_ticket",
+      );
+      const withTranscript = await fetch(s.url("/runs?ticket=WM-595"));
+      expect(withTranscript.status).toBe(200);
+      const journeyRuns = (await withTranscript.json()).runs;
+      expect(
+        journeyRuns.find((run) => run.run.runId === "run_ticket"),
+      ).toHaveProperty("observedModel", "claude-opus-5[1m]");
+
+      // The memo is keyed by store root too: the same hash under another
+      // artifacts directory is a fresh read, not a stale hit.
+      const otherStore = tmpDir("evrt-other-artifacts-");
+      mkdirSync(otherStore, { recursive: true });
+      writeFileSync(
+        path.join(otherStore, transcriptSha),
+        `{"type":"system","subtype":"init","model":"claude-sonnet-5"}\n`,
+        "utf8",
+      );
+      expect(
+        ticketJourneyView(s.db, "WM-595", {
+          artifactsDir: otherStore,
+        }).runs.find((run) => run.run.runId === "run_ticket").observedModel,
+      ).toBe("claude-sonnet-5");
+      expect(
+        ticketJourneyView(s.db, "WM-595", {
+          artifactsDir: path.join(home, "artifacts"),
+        }).runs.find((run) => run.run.runId === "run_ticket").observedModel,
+      ).toBe("claude-opus-5[1m]");
+      clearObservedModelCache();
       const invalid = await fetch(s.url("/runs?ticket=not-a-ticket"));
       expect(invalid.status).toBe(422);
     } finally {
