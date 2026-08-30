@@ -476,9 +476,12 @@ POST /inbox/:id/decide/retry   → re-run a failed effect with the stored respon
 ```
 
 Decision endpoints return `{ error, message, errors? }`; `errors` is present
-only when validation supplies individual errors. The route returns
-`invalid_json` (400) when it cannot parse a non-empty request body
-(`event-runtime/lib/api.mjs:serve`). Otherwise the following
+only when validation supplies individual errors. The routes return
+`invalid_json` (400) when the request body does not parse as JSON
+(`event-runtime/lib/api.mjs:createApi`): `/decide` always parses the body, so
+an empty body is also `invalid_json`; `/decide/retry` only validates a
+non-empty body (an empty body is accepted, and the retry always re-runs the
+stored response). Otherwise the following
 `InboxDecisionError` codes are the complete decision/retry vocabulary:
 
 <!-- inbox-decision-errors:start -->
