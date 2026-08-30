@@ -20,4 +20,23 @@ describe("statusView outbox counts", () => {
       parkedOutbox: 1,
     });
   });
+
+  test("reports an unconfigured GitHub intake separately from a stale configured intake", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-30T08:00:00.000Z");
+
+    const unconfigured = statusView(db, { schedules: [] }, now, {
+      githubSecret: null,
+    });
+    expect(unconfigured.anomalies.configuration).toContain(
+      "FACTORY_GITHUB_WEBHOOK_SECRET is unset (GitHub webhook intake disabled)",
+    );
+
+    const configured = statusView(db, { schedules: [] }, now, {
+      githubSecret: "configured",
+    });
+    expect(configured.anomalies.configuration).toContain(
+      "GitHub webhook intake is stale (no GitHub delivery has been admitted; threshold 43200000ms)",
+    );
+  });
 });
