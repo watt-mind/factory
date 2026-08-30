@@ -18,6 +18,7 @@ export const DEFAULT_PORT = 7381;
 export const DEFAULT_TIMEOUT_MS = 30_000;
 export const DEFAULT_POLL_MS = 500;
 export const DEFAULT_WATCH_TIMEOUT_MS = 10_000;
+export const DEFAULT_WATCH_MAX_MS = 30 * 60_000;
 export const EXIT = {
   CONTROL_API_ERROR: 1,
   RUN_NOT_COMPLETED: 2,
@@ -59,11 +60,20 @@ export function resolveWatchTimeoutMs(env = process.env) {
   );
 }
 
+export function resolveWatchMaxMs(env = process.env) {
+  return positiveEnv(
+    env,
+    "FACTORY_DISPATCH_WATCH_MAX_MS",
+    DEFAULT_WATCH_MAX_MS,
+  );
+}
+
 const port = resolvePort();
 const BASE_URL = `http://127.0.0.1:${port}`;
 const timeoutMs = resolveTimeoutMs();
 const pollMs = resolvePollMs();
 const watchTimeoutMs = resolveWatchTimeoutMs();
+const watchMaxMs = resolveWatchMaxMs();
 
 const HELP = `factory dispatch — swift event-runtime task dispatcher
 
@@ -87,8 +97,10 @@ Options:
 Exit status:
   0                  Event run completed
   1                  Control API or command error
-  2                  Event run settled in a non-COMPLETED state
+  2                  Event run settled in a non-COMPLETED state, or --watch
+                     exceeded FACTORY_DISPATCH_WATCH_MAX_MS (default 30 min)
   3                  Event was admitted but the planner produced no run
+                     (NOOP, or a proposal still AWAITING_APPROVAL)
 `;
 
 function die(msg, code = 1) {
@@ -142,8 +154,17 @@ function progress(message, json) {
   (json ? console.error : console.log)(message);
 }
 
-function finalWatchResult({ eventId, runId, state, reasonCode }, json) {
-  const result = { eventId, runId, state, reasonCode: reasonCode ?? null };
+function finalWatchResult(
+  { eventId, runId, state, reasonCode, ...extra },
+  json,
+) {
+  const result = {
+    eventId,
+    runId,
+    state,
+    reasonCode: reasonCode ?? null,
+    ...extra,
+  };
   if (json) console.log(JSON.stringify(result));
   else {
     const subject = runId ? `Run ${runId}` : `Event ${eventId}`;
@@ -160,6 +181,7 @@ async function streamTrace(eventId, runId, json) {
     json,
   );
   let since = 0;
+  const startedAt = Date.now();
 
   while (true) {
     const trace = await api(
@@ -195,15 +217,24 @@ async function streamTrace(eventId, runId, json) {
       };
     }
 
+    if (Date.now() - startedAt >= watchMaxMs) {
+      const result = finalWatchResult(
+        { eventId, runId, state: "WATCH_TIMEOUT", reasonCode: "watch_timeout" },
+        json,
+      );
+      return { exitCode: EXIT.RUN_NOT_COMPLETED, result };
+    }
+
     await new Promise((r) => setTimeout(r, pollMs));
   }
 }
 
 async function findRunForEvent(source, eventId, maxWaitMs = watchTimeoutMs) {
   const start = Date.now();
+  let proposal = null;
   while (Date.now() - start < maxWaitMs) {
     const res = await api(`/proposals?status=all`);
-    const proposal = (res.proposals || []).find(
+    proposal = (res.proposals || []).find(
       (p) => p.eventSource === source && p.eventId === eventId,
     );
     if (proposal?.runId) {
@@ -211,13 +242,30 @@ async function findRunForEvent(source, eventId, maxWaitMs = watchTimeoutMs) {
     }
     await new Promise((r) => setTimeout(r, pollMs));
   }
+  // A live proposal without a run is waiting on approval (or approved but
+  // not yet started); noop/rejected/superseded/expired ones are a planner NOOP.
+  if (
+    proposal &&
+    proposal.decision !== "noop" &&
+    !proposal.expired &&
+    (proposal.status === "open" || proposal.status === "approved")
+  ) {
+    return {
+      runId: null,
+      state: "AWAITING_APPROVAL",
+      reasonCode: "awaiting_approval",
+      proposalId: proposal.id ?? null,
+      proposalStatus: proposal.status,
+    };
+  }
   const events = await api(`/events`);
   const event = (events.events || []).find(
     (entry) => entry.source === source && entry.eventId === eventId,
   );
   return {
     runId: null,
-    reasonCode: event?.lastPlanError || "no_proposal",
+    state: "NOOP",
+    reasonCode: event?.lastPlanError || proposal?.reason || "no_proposal",
   };
 }
 
@@ -320,19 +368,7 @@ async function main() {
       );
       process.exitCode = watched.exitCode;
     } else {
-      const result = finalWatchResult(
-        {
-          eventId: envelope.eventId,
-          runId: null,
-          state: "NOOP",
-          reasonCode: planned.reasonCode,
-        },
-        values.json,
-      );
-      if (!values.json)
-        console.log(
-          `Event admitted but planner produced no run: ${result.reasonCode}`,
-        );
+      finalWatchResult({ eventId: envelope.eventId, ...planned }, values.json);
       process.exitCode = EXIT.NO_PROPOSAL;
     }
   } else {

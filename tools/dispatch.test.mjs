@@ -43,6 +43,11 @@ function watchServer({ state, reasonCode = "needs_human" } = {}) {
         return Response.json({ admitted: true, eventId });
       }
       if (url.pathname === "/proposals") {
+        if (url.searchParams.get("status") !== "all")
+          return Response.json(
+            { error: "expected ?status=all" },
+            { status: 400 },
+          );
         return Response.json({
           proposals: [
             { eventSource: "factory-cli", eventId, runId: "run-watch-test" },
@@ -228,8 +233,14 @@ test("dispatch --watch reports a planner NOOP with the documented exit code", as
         eventId = event.eventId;
         return Response.json({ admitted: true, eventId });
       }
-      if (url.pathname === "/proposals")
+      if (url.pathname === "/proposals") {
+        if (url.searchParams.get("status") !== "all")
+          return Response.json(
+            { error: "expected ?status=all" },
+            { status: 400 },
+          );
         return Response.json({ proposals: [] });
+      }
       if (url.pathname === "/events")
         return Response.json({
           events: [
@@ -250,7 +261,80 @@ test("dispatch --watch reports a planner NOOP with the documented exit code", as
       "--watch",
     ]);
     expect(exitCode).toBe(3);
+    expect(stdout).toContain("settled: NOOP");
     expect(stdout).toContain("ticket_not_todo");
+    expect(stdout.match(/ticket_not_todo/g)).toHaveLength(1);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("dispatch --watch reports AWAITING_APPROVAL when the proposal has no run yet", async () => {
+  let eventId = null;
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const url = new URL(request.url);
+      if (request.method === "POST" && url.pathname === "/replay") {
+        const event = await request.json();
+        eventId = event.eventId;
+        return Response.json({ admitted: true, eventId });
+      }
+      if (url.pathname === "/proposals") {
+        if (url.searchParams.get("status") !== "all")
+          return Response.json(
+            { error: "expected ?status=all" },
+            { status: 400 },
+          );
+        return Response.json({
+          proposals: [
+            {
+              id: "prop-42",
+              eventSource: "factory-cli",
+              eventId,
+              status: "open",
+              runId: null,
+            },
+          ],
+        });
+      }
+      return new Response("not found", { status: 404 });
+    },
+  });
+  try {
+    const { exitCode, stdout } = await runDispatch(server, [
+      "status",
+      "--json",
+      "--watch",
+    ]);
+    expect(exitCode).toBe(3);
+    expect(JSON.parse(stdout)).toMatchObject({
+      runId: null,
+      state: "AWAITING_APPROVAL",
+      reasonCode: "awaiting_approval",
+      proposalId: "prop-42",
+      proposalStatus: "open",
+    });
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("dispatch --watch exits 2 with WATCH_TIMEOUT when the run never settles", async () => {
+  const server = watchServer({ state: "RUNNING", reasonCode: null });
+  try {
+    const { exitCode, stdout } = await runDispatch(
+      server,
+      ["status", "--json", "--watch"],
+      { FACTORY_DISPATCH_WATCH_MAX_MS: "30" },
+    );
+    expect(exitCode).toBe(2);
+    expect(JSON.parse(stdout)).toMatchObject({
+      runId: "run-watch-test",
+      state: "WATCH_TIMEOUT",
+      reasonCode: "watch_timeout",
+    });
   } finally {
     server.stop(true);
   }
