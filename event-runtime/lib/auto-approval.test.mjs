@@ -1964,11 +1964,9 @@ describe("chain auto approval (WM-357)", () => {
     };
     const json = canonicalJson(spec);
     const hash = hashJson(spec);
-    db.query(`UPDATE runs SET spec_json = ?, spec_hash = ? WHERE run_id = ?`).run(
-      json,
-      hash,
-      seeded.runId,
-    );
+    db.query(
+      `UPDATE runs SET spec_json = ?, spec_hash = ? WHERE run_id = ?`,
+    ).run(json, hash, seeded.runId);
     db.query(
       `UPDATE proposals SET spec_json = ?, spec_hash = ? WHERE id = ?`,
     ).run(json, hash, seeded.id);
