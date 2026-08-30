@@ -425,8 +425,15 @@ export async function execute({
     }
 
     let finalUsage = null;
+    // `close` on the child only guarantees that its stdout fd closed. The
+    // readline consumer has its own close lifecycle, and its final line event
+    // can otherwise still be queued when `execute()` resolves. Keep the
+    // transcript and trace consumers in lockstep so callers can safely read
+    // both the artifact and emitted usage/trace state after awaiting execute.
+    let linesClosed = Promise.resolve();
     if (child.stdout) {
       const lines = createInterface({ input: child.stdout });
+      linesClosed = new Promise((done) => lines.once("close", done));
       lines.on("line", (line) => {
         let parsed;
         try {
@@ -485,7 +492,7 @@ export async function execute({
       cancelTermination?.();
       abortSignal?.removeEventListener("abort", cancel);
       signal?.removeEventListener("abort", cancel);
-      await transcriptClosed;
+      await Promise.all([transcriptClosed, linesClosed]);
       if (exitCode !== 0 && stderrBuf) {
         try {
           writeFileSync(
