@@ -106,6 +106,25 @@ describe("webhook intake (§14)", () => {
     }
   });
 
+  test("GET /health exposes planner liveness and recency", async () => {
+    const planner = {
+      lastPlannedAt: "2026-08-30T08:00:00.000Z",
+      ageMs: 60_000,
+      stale: true,
+      staleAfterMs: 300_000,
+      alive: false,
+    };
+    const live = await makeServer({
+      getTickStats: () => ({ planner }),
+    });
+    try {
+      const body = await (await fetch(live.url("/health"))).json();
+      expect(body.planner).toEqual(planner);
+    } finally {
+      live.close();
+    }
+  });
+
   test("unknown route → 404 with an error body", async () => {
     const res = await fetch(s.url("/nope"));
     expect(res.status).toBe(404);

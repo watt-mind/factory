@@ -83,6 +83,32 @@ describe("statusView outbox counts", () => {
     );
   });
 
+  test("reports a dead or stale planner when admitted work is waiting", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-30T08:00:00.000Z");
+    seedGithubEvent(db, "2026-08-30T07:59:00.000Z");
+    const planner = {
+      lastPlannedAt: "2026-08-30T07:54:00.000Z",
+      ageMs: 300_000,
+      stale: true,
+      staleAfterMs: 300_000,
+      alive: true,
+    };
+
+    const stale = statusView(db, { schedules: [] }, now, {
+      getTickStats: () => ({ planner }),
+    });
+    expect(stale.planner).toEqual(planner);
+    expect(stale.anomalies.configuration).toContain(
+      "Planner worker is stale (last planning activity was 300000ms ago; threshold 300000ms)",
+    );
+
+    const dead = statusView(db, { schedules: [] }, now, {
+      getTickStats: () => ({ planner: { ...planner, alive: false } }),
+    });
+    expect(dead.anomalies.configuration).toContain("Planner worker is dead");
+  });
+
   test("exposes unparsable result counts with artifact statistics", () => {
     const db = openDb(":memory:");
     const view = statusView(db, { schedules: [] }, Date.now(), {

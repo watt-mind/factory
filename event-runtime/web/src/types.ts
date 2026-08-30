@@ -847,6 +847,8 @@ export interface StatusView {
   policy?: { dispatchPaused: boolean };
   /** GitHub webhook intake health; absent on pre-#1632 control APIs. */
   githubIntake?: GithubIntakeStatus;
+  /** Background planning worker freshness; null when serve disables planning. */
+  planner?: PlannerStatus | null;
   proposals: { open: number; expired: number };
   runs: { byState: Partial<Record<RunState, number>> };
   /** Fleet counts; `live` and `busy` exclude stale workers, as the API does. */
@@ -901,6 +903,15 @@ export interface GithubIntakeStatus {
   rejected: number;
   stale: boolean;
   staleAfterMs: number;
+}
+
+/** Planner worker liveness plus recency of its last non-empty planning pass. */
+export interface PlannerStatus {
+  lastPlannedAt: string | null;
+  ageMs: number | null;
+  stale: boolean;
+  staleAfterMs: number;
+  alive: boolean;
 }
 
 export interface ApproveOutcome {

@@ -187,12 +187,14 @@ export function statusView(
     policyVersion,
     env,
     getStoreStats,
+    getTickStats,
     workerPolicy,
     workerRunDir,
     dispatchPaused = policyDispatchPaused,
   } = {},
 ) {
   const open = openProposals(db, { now: nowMs });
+  const events = eventCounts(db);
   const expiredOpen = open.filter((p) => p.expired);
   const staleLeases = db
     .query(
@@ -258,6 +260,10 @@ export function statusView(
     nowMs,
     configured: Boolean(githubSecret),
   });
+  const planner =
+    typeof getTickStats === "function"
+      ? (getTickStats()?.planner ?? null)
+      : null;
   if (!secret)
     configAnomalies.push(
       "FACTORY_EVENT_SECRET is unset (webhook intake disabled)",
@@ -276,6 +282,17 @@ export function statusView(
       `GitHub webhook intake is stale (${age}; threshold ${githubIntake.staleAfterMs}ms)`,
     );
   }
+  if (planner && !planner.alive) {
+    configAnomalies.push("Planner worker is dead");
+  } else if (planner?.stale && events.admitted > 0) {
+    const age =
+      planner.ageMs === null
+        ? "no event has been planned"
+        : `last planning activity was ${planner.ageMs}ms ago`;
+    configAnomalies.push(
+      `Planner worker is stale (${age}; threshold ${planner.staleAfterMs}ms)`,
+    );
+  }
   if (policyVersion === "unknown")
     configAnomalies.push("policyVersion is unknown");
   if (fleet.policyError) configAnomalies.push(fleet.policyError);
@@ -284,8 +301,9 @@ export function statusView(
   configAnomalies.push(...(registry?.anomalies ?? []));
 
   return {
-    events: eventCounts(db),
+    events,
     githubIntake,
+    planner,
     policy,
     proposals: { open: open.length, expired: expiredOpen.length },
     inbox: inboxCounts(db),
@@ -349,6 +367,7 @@ export function handleStatusApiRoute({
   policyVersion,
   env,
   getStoreStats,
+  getTickStats,
   workerPolicy,
   workerRunDir,
 }) {
@@ -361,6 +380,7 @@ export function handleStatusApiRoute({
         policyVersion,
         env,
         getStoreStats,
+        getTickStats,
         workerPolicy,
         workerRunDir,
       }),
