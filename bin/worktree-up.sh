@@ -320,7 +320,6 @@ WORKTREE_UP_OK=0
 cleanup_worktree_up() {
   local code=$?
   trap - EXIT INT TERM
-  release_worktree_lifecycle_lock
   release_port_allocation_lock
   if [[ "$code" -ne 0 && "$WORKTREE_UP_OK" -ne 1 ]]; then
     [[ "$STARTED_WEB" -eq 1 ]] && term_daemon "$RUN_DIR/web.pid" "web server"
@@ -331,6 +330,11 @@ cleanup_worktree_up() {
     [[ "$STARTED_SERVE" -eq 1 ]] && await_daemon "$RUN_DIR/serve.pid" "event runtime"
     release_worktree_ports_if_idle "$WT"
   fi
+  # Release the lifecycle lock last (#1624): while daemons are being TERMed and
+  # ports handed back, a concurrent worktree-down must still see the ticket as
+  # busy, or it could tear down the tree mid-cleanup. The release is idempotent
+  # (it only removes a lock whose pid is ours).
+  release_worktree_lifecycle_lock
   exit "$code"
 }
 trap cleanup_worktree_up EXIT
