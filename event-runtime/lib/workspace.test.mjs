@@ -20,6 +20,8 @@ import {
   WorktreeError,
   MEMOS_JSON_NOTICE,
   commentOnPreservedWorktree,
+  preservationCommentTimeoutMs,
+  PRESERVATION_COMMENT_TIMEOUT_MS,
   confinedRegularFile,
   createWorkspace,
   destroyWorkspace,
@@ -548,9 +550,42 @@ describe("worktree workspaces (WM-108)", () => {
     expect(destroyWorkspace(dir)).toBe(true);
   });
 
-  test("a timed-out preservation comment records the failure without losing the preserved ref", () => {
+  test("the preservation comment timeout is bounded by the worktree script timeout", () => {
     const previous = process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS;
-    process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS = "25";
+    try {
+      delete process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS;
+      expect(preservationCommentTimeoutMs()).toBe(
+        PRESERVATION_COMMENT_TIMEOUT_MS,
+      );
+      process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS = "25";
+      expect(preservationCommentTimeoutMs()).toBe(25);
+    } finally {
+      if (previous === undefined)
+        delete process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS;
+      else process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS = previous;
+    }
+  });
+
+  test("a preservation comment that fails to spawn records the cause, not a blank error", () => {
+    expect(() =>
+      commentOnPreservedWorktree({
+        ticket: "WM-13-enoent",
+        preservation: { ref: "wip/x", commit: "abc", push: "pushed" },
+        spawn: () => ({
+          error: Object.assign(new Error("spawnSync bun ENOENT"), {
+            code: "ENOENT",
+          }),
+          status: null,
+          stdout: "",
+          stderr: "",
+        }),
+      }),
+    ).toThrow(/Linear comment failed to run: spawnSync bun ENOENT/);
+  });
+
+  test("a timed-out preservation comment records the failure without losing the preserved ref", () => {
+    // Only the preservation path gets the short timeout; the real worktree_up
+    // spawn keeps a generous bound so this cannot flake under load.
     const root = tmpRoot();
     const workspaceDir = path.join(root, "run_wt13_timeout-a1");
     const calls = [];
@@ -562,10 +597,12 @@ describe("worktree workspaces (WM-108)", () => {
         attempt: 1,
         input: { repo: "recovered-up", ticket: "WM-13-timeout" },
         workspace: { type: "worktree" },
+        worktreeTimeoutMs: 120_000,
         worktreePreservationComment: ({ ticket, preservation }) =>
           commentOnPreservedWorktree({
             ticket,
             preservation,
+            timeoutMs: 25,
             spawn: (...args) => {
               calls.push(args);
               return { error: { code: "ETIMEDOUT" } };
@@ -574,10 +611,6 @@ describe("worktree workspaces (WM-108)", () => {
       });
     } catch (error) {
       caught = error;
-    } finally {
-      if (previous === undefined)
-        delete process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS;
-      else process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS = previous;
     }
 
     expect(caught).toBeInstanceOf(WorktreeError);
