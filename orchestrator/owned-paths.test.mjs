@@ -71,10 +71,11 @@ Something is broken.
   ]);
 });
 
-test("duplicate §5 headings keep the first Owned Paths and Verification Command blocks authoritative", () => {
+test("duplicate §5 headings are unioned: Owned Paths deduped in first-occurrence order, Verification Commands joined", () => {
   const desc = `## Owned Paths
 
 - \`orchestrator/owned-paths.mjs\`
+- \`docs/protocol.md\`
 
 ## Verification Command
 
@@ -83,13 +84,42 @@ test("duplicate §5 headings keep the first Owned Paths and Verification Command
 ## Owned Paths
 
 - \`docs/protocol.md\`
+- \`tools/ticket.mjs\`
 
 ## Verification Command
 
-\`bun test stale-appended.mjs\``;
+\`bun test appended.mjs\``;
 
-  expectEqual(parseOwnedPaths(desc), ["orchestrator/owned-paths.mjs"]);
-  expectEqual(parseVerificationCommand(desc), "bun test first.mjs");
+  expectEqual(parseOwnedPaths(desc), [
+    "orchestrator/owned-paths.mjs",
+    "docs/protocol.md",
+    "tools/ticket.mjs",
+  ]);
+  expectEqual(
+    parseVerificationCommand(desc),
+    "bun test first.mjs && bun test appended.mjs",
+  );
+});
+
+test("an identical appended Verification Command does not repeat itself", () => {
+  const desc = `## Verification Command
+
+\`bun test a.mjs\`
+
+## Verification Command
+
+\`bun test a.mjs\``;
+  expectEqual(parseVerificationCommand(desc), "bun test a.mjs");
+});
+
+test("an empty Verification Command section is not a command", () => {
+  expectEqual(parseVerificationCommand("## Verification Command\n\n"), null);
+  expectEqual(
+    parseVerificationCommand(
+      "## Verification Command\n\n## Verification Command\n\n`bun test a.mjs`",
+    ),
+    "bun test a.mjs",
+  );
 });
 
 test("missing section yields no paths (caller decides what that means)", () => {

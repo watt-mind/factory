@@ -549,33 +549,51 @@ export function closureCheckMessages(issue) {
   return formatOwnedPathClosureGaps(gaps);
 }
 
+/** A Linear issue key: team prefix, dash, number (`CLNT-616`, `WM-1007`). */
+const LINEAR_KEY = /^[A-Z][A-Z0-9]*-\d+$/;
+
 /**
  * Build the tracker-native escape-hatch mutation for `detail --replace`.
  *
  * The replacement stays in the ticket CLI's declared surface while adapters
- * grow a first-class replacement verb (see #1666). GitHub issue identifiers
- * are owner/repo#N; Linear identifiers are team keys such as CLNT-616.
+ * grow a first-class replacement verb (see #1666). The control plane's own
+ * `kind` decides the tracker; without one, a Linear key shape (`CLNT-616`)
+ * selects Linear and everything else — `owner/repo#N`, `#N`, bare `N`, all of
+ * which the GitHub adapter accepts — selects GitHub.
  */
-export function descriptionReplacementRequest(identifier, id, description) {
-  if (String(identifier).includes("/")) {
+export function descriptionReplacementRequest(
+  identifier,
+  id,
+  description,
+  { kind } = {},
+) {
+  const linear =
+    kind === "linear" ||
+    (kind == null && LINEAR_KEY.test(String(identifier).trim()));
+  if (linear) {
     return {
       query:
-        "mutation($id:ID!,$body:String!){updateIssue(input:{id:$id,body:$body}){issue{id}}}",
-      variables: { id, body: description },
-      resultAt: ["updateIssue", "issue", "id"],
+        "mutation($id:String!,$description:String!){issueUpdate(id:$id,input:{description:$description}){success}}",
+      variables: { id, description },
+      resultAt: ["issueUpdate", "success"],
     };
   }
   return {
     query:
-      "mutation($id:String!,$description:String!){issueUpdate(id:$id,input:{description:$description}){success}}",
-    variables: { id, description },
-    resultAt: ["issueUpdate", "success"],
+      "mutation($id:ID!,$body:String!){updateIssue(input:{id:$id,body:$body}){issue{id}}}",
+    variables: { id, body: description },
+    resultAt: ["updateIssue", "issue", "id"],
   };
 }
 
-function replacementSucceeded(result, resultAt) {
+/**
+ * Did the replacement mutation take? The tail of `resultAt` is either a
+ * boolean (`success`) or an id; both must be truthy — `success: false` is a
+ * failure, not "a value came back".
+ */
+export function replacementSucceeded(result, resultAt) {
   const payload = result?.data ?? result;
-  return resultAt.reduce((value, key) => value?.[key], payload) !== undefined;
+  return Boolean(resultAt.reduce((value, key) => value?.[key], payload));
 }
 
 const teamOf = (key) => String(key).split("-")[0];
@@ -747,7 +765,12 @@ const VERBS = {
         );
         return;
       }
-      const request = descriptionReplacementRequest(key, issue.id, description);
+      const request = descriptionReplacementRequest(
+        key,
+        issue.id,
+        description,
+        { kind: cp.kind },
+      );
       const result = await cp.raw(request.query, request.variables);
       if (!replacementSucceeded(result, request.resultAt))
         throw new Error(`detail replacement failed for ${key}`);

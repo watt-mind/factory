@@ -175,12 +175,18 @@ A ticket missing a load-bearing section (`Owned Paths` or `Verification
 Command`) is demoted to `Triage`; do not dispatch it. `factory label-guard`
 checks those two mechanically.
 
-When a §5 heading is duplicated, the **first** matching block is authoritative
-for every reader (dispatch, handoff verification, and the template guard).
-This keeps an already-corrupted ticket deterministic rather than silently
-using a later append. `factory ticket detail ISSUE -- "..."` appends an
-idempotent detail block; use `factory ticket detail ISSUE --replace -- "..."`
-to replace the complete description when re-specifying a ticket.
+When a §5 heading is duplicated (the usual cause: a respec appended with
+`ticket detail`), every reader **unions** the matching blocks in document
+order — dispatch, handoff verification, and the template guard alike, so they
+can never disagree about which copy counts. `Owned Paths` becomes the
+deduplicated union of all blocks (first occurrence keeps its position), so an
+appended respec widens scope to cover the old and the new block and is never
+silently narrower than either. `Verification Command` becomes the distinct
+commands joined with `&&` — all of them must pass. A first-match win is
+deliberately not what happens. `factory ticket detail ISSUE -- "..."` appends
+an idempotent detail block; use `factory ticket detail ISSUE --replace -- "..."`
+to replace the complete description when re-specifying a ticket, which is the
+only way to make a stale block stop counting.
 
 ## 6. Bundles
 

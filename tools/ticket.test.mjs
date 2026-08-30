@@ -33,6 +33,7 @@ import {
   fileTicket,
   closureCheckMessages,
   descriptionReplacementRequest,
+  replacementSucceeded,
   resolveRepoName,
   resolveRepoNameFromTicket,
   resolveRepoNameForFile,
@@ -528,6 +529,43 @@ test("detail --replace uses each tracker's body replacement mutation", () => {
     variables: { id: "issue-id", description: "new" },
     resultAt: ["issueUpdate", "success"],
   });
+});
+
+test("detail --replace routes bare and #-prefixed GitHub numbers to GitHub, not Linear", () => {
+  for (const identifier of ["1564", "#1564", " 1564 "]) {
+    expect(
+      descriptionReplacementRequest(identifier, "I_1", "new").resultAt,
+    ).toEqual(["updateIssue", "issue", "id"]);
+  }
+});
+
+test("detail --replace lets the control plane's kind override the identifier shape", () => {
+  expect(
+    descriptionReplacementRequest("CLNT-42", "I_1", "new", { kind: "github" })
+      .resultAt,
+  ).toEqual(["updateIssue", "issue", "id"]);
+  expect(
+    descriptionReplacementRequest("42", "lin-id", "new", { kind: "linear" })
+      .resultAt,
+  ).toEqual(["issueUpdate", "success"]);
+});
+
+test("replacementSucceeded treats success:false as a failure", () => {
+  const at = ["issueUpdate", "success"];
+  expect(replacementSucceeded({ issueUpdate: { success: false } }, at)).toBe(
+    false,
+  );
+  expect(replacementSucceeded({ issueUpdate: { success: true } }, at)).toBe(
+    true,
+  );
+  expect(replacementSucceeded({ data: { issueUpdate: {} } }, at)).toBe(false);
+  expect(
+    replacementSucceeded({ updateIssue: { issue: { id: "I_1" } } }, [
+      "updateIssue",
+      "issue",
+      "id",
+    ]),
+  ).toBe(true);
 });
 
 test("unknown flags remain flags instead of becoming positional bodies", () => {
@@ -1043,4 +1081,152 @@ test("instanceConfigRoot throws instance_config_missing when no instance config 
   } finally {
     rmSync(checkoutRoot, { recursive: true, force: true });
   }
+});
+
+/**
+ * Run `ticket.mjs detail <n> --replace` from inside a GitHub-plane repository
+ * against a stub `gh` on PATH that answers the reads the adapter makes and
+ * records every call (arguments and stdin) so the test can see which
+ * mutation the CLI actually issued.
+ */
+function spawnDetailReplaceAgainstStubGh(args, { body }) {
+  const root = mkdtempSync(path.join(os.tmpdir(), "ticket-detail-replace-"));
+  const repoDir = path.join(root, "repo");
+  const bin = path.join(root, "bin");
+  const ghLog = path.join(root, "gh.log");
+  const stdinLog = path.join(root, "gh-stdin.log");
+  const cliRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+  );
+  const issue = JSON.stringify({
+    number: 1564,
+    node_id: "I_1564",
+    title: "respec me",
+    body: "## Owned Paths\n\n- old/path.mjs\n",
+    state: "open",
+    html_url: "https://github.com/watt-mind/factory/issues/1564",
+    labels: [],
+    user: { login: "owner" },
+    author_association: "OWNER",
+  });
+  const project = JSON.stringify({
+    data: {
+      repository: {
+        projectsV2: {
+          nodes: [
+            {
+              id: "P_1",
+              title: "Factory",
+              field: {
+                id: "F_1",
+                options: [{ id: "o_todo", name: "Todo" }],
+              },
+            },
+          ],
+        },
+      },
+    },
+  });
+  try {
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    mkdirSync(repoDir);
+    mkdirSync(bin);
+    writeFileSync(
+      path.join(bin, "gh"),
+      [
+        "#!/bin/sh",
+        'input=""',
+        'for a in "$@"; do [ "$a" = "-" ] && input=$(cat); done',
+        `printf '%s\n' "$*" >> "${ghLog}"`,
+        `printf '%s\n' "$input" >> "${stdinLog}"`,
+        'case "$*" in',
+        "  *graphql*)",
+        '    case "$input" in',
+        `      *updateIssue*) printf '%s\\n' '{"data":{"updateIssue":{"issue":{"id":"I_1564"}}}}' ;;`,
+        `      *FindRepoProject*) printf '%s\\n' '${project}' ;;`,
+        `      *ProjectItems*) printf '%s\\n' '{"data":{"node":{"items":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}' ;;`,
+        `      *) printf '%s\\n' '{"data":{}}' ;;`,
+        "    esac ;;",
+        `  *issues/1564/comments*) printf '%s\\n' '[]' ;;`,
+        `  *issues/1564*) printf '%s\\n' '${issue}' ;;`,
+        `  *) printf '%s\\n' '{}' ;;`,
+        "esac",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      path.join(root, "config", "policy.yaml"),
+      "controlPlane:\n  kind: github\n",
+    );
+    writeFileSync(
+      path.join(root, "config", "repos.yaml"),
+      `repos:\n  - name: factory\n    path: ${repoDir}\n    github: watt-mind/factory\n    control_plane: github\n`,
+    );
+    const env = { ...process.env, FACTORY_REPOS_ROOT: root, HOME: root };
+    env.PATH = `${bin}${path.delimiter}${env.PATH ?? ""}`;
+    for (const name of Object.keys(env)) {
+      if (
+        name === "LINEAR_API_KEY" ||
+        name === "GH_TOKEN" ||
+        name === "GITHUB_TOKEN" ||
+        name.startsWith("FACTORY_GH_APP_")
+      )
+        delete env[name];
+    }
+    const result = Bun.spawnSync({
+      cmd: [
+        "bun",
+        path.join(cliRoot, "tools", "ticket.mjs"),
+        "detail",
+        ...args,
+        "--",
+        body,
+      ],
+      cwd: repoDir,
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return {
+      exitCode: result.exitCode,
+      stdout: result.stdout.toString(),
+      stderr: result.stderr.toString(),
+      ghCalls: existsSync(ghLog) ? readFileSync(ghLog, "utf8") : "",
+      ghStdin: existsSync(stdinLog) ? readFileSync(stdinLog, "utf8") : "",
+    };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("detail <bare number> --replace on a GitHub repo issues the GitHub updateIssue mutation", () => {
+  const result = spawnDetailReplaceAgainstStubGh(["1564", "--replace"], {
+    body: "## Owned Paths\n\n- new/path.mjs\n",
+  });
+  expect(result.stderr).toBe("");
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain("detail replaced");
+  expect(result.ghCalls).toContain("repos/watt-mind/factory/issues/1564");
+  const mutations = result.ghStdin
+    .split("\n")
+    .filter((line) => line.includes("mutation"));
+  expect(mutations).toHaveLength(1);
+  expect(mutations[0]).toContain("updateIssue");
+  expect(mutations[0]).not.toContain("issueUpdate");
+  expect(JSON.parse(mutations[0]).variables).toEqual({
+    id: "I_1564",
+    body: "## Owned Paths\n\n- new/path.mjs",
+  });
+});
+
+test("detail --replace with an unchanged body issues no mutation", () => {
+  const result = spawnDetailReplaceAgainstStubGh(["#1564", "--replace"], {
+    body: "## Owned Paths\n\n- old/path.mjs\n",
+  });
+  expect(result.stderr).toBe("");
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain("already matches");
+  expect(result.ghStdin).not.toContain("mutation");
 });
