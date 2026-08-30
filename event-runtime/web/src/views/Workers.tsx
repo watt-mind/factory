@@ -280,7 +280,9 @@ export function enrichWorker(
   const activeTarget =
     repos && ticketMatch && !repos.includes(ticketMatch)
       ? `${repos} · ${ticketMatch}`
-      : repos || ticketMatch || (r?.eventId ? shortId(r.eventId) : EMPTY);
+      : repos ||
+        ticketMatch ||
+        (r?.eventId ? shortId(r.eventId) : loading ? LOADING : EMPTY);
   const activeModel = r
     ? pinnedModelText(r.adapter, r.model)
     : loading
@@ -672,7 +674,10 @@ export function Workers({
           query.isPending ? [missingRunIds[index]] : [],
         ),
       ),
-    [missingRunIds, missingRunQueries],
+    // useQueries returns a new array every render; its data timestamps are
+    // the stable inputs that should recompute this projection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [missingRunIds, missingRunDataKey],
   );
   const allRuns = useMemo(
     () => new Map([...runMap, ...missingRunMap]),

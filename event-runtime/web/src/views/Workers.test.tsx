@@ -13,12 +13,14 @@ import {
   Workers,
   capacityFromWorkers,
   defaultWorkerTab,
+  enrichWorker,
   fleetBanner,
   isLive,
   partitionWorkers,
   workerDisplayState,
 } from "./Workers";
 import { api } from "../api";
+import { EMPTY } from "../format";
 import {
   changeInput,
   createRunDetailFixture,
@@ -774,6 +776,23 @@ describe("Active agent, target, and model columns in Workers view (WM-463)", () 
     } finally {
       api.run = origRun;
     }
+  });
+
+  test("shows the Loading placeholder for agent, target, and model while the missing-run fetch is pending (factory#1857)", () => {
+    const w: Worker = {
+      ...stubWorker("w_busy_pending", "busy"),
+      currentRun: "run_pending_1857",
+    };
+
+    const pending = enrichWorker(w, new Map(), new Set(["run_pending_1857"]));
+    expect(pending.activeAgent).toBe("Loading…");
+    expect(pending.activeTarget).toBe("Loading…");
+    expect(pending.activeModel).toBe("Loading…");
+
+    const settledMissing = enrichWorker(w, new Map(), new Set());
+    expect(settledMissing.activeAgent).toBe(EMPTY);
+    expect(settledMissing.activeTarget).toBe(EMPTY);
+    expect(settledMissing.activeModel).toBe(EMPTY);
   });
 
   test("uses the compact default column set and renders optional adapters as a titled count", async () => {
