@@ -4,10 +4,19 @@ import { promisify } from "node:util";
 import path from "node:path";
 
 import { hashBytes } from "./canonical.mjs";
-import { FACTORY_ROOT } from "./config.mjs";
+import {
+  FACTORY_ROOT,
+  policyVersion as factoryPolicyVersion,
+} from "./config.mjs";
 import { admitExternalEvent } from "./intake.mjs";
 import { requeueEvent } from "./planner.mjs";
 import { approveProposal, rejectProposal } from "./proposals.mjs";
+
+function resolvePolicyVersion(value) {
+  return typeof value === "string" && value !== "" && value !== "unknown"
+    ? value
+    : factoryPolicyVersion();
+}
 
 const linearCli = () => path.join(FACTORY_ROOT, "tools", "linear.mjs");
 const execFileAsync = promisify(execFile);
@@ -48,8 +57,9 @@ export const linearDecisionTransport = {
 /** Bind runtime operations that need the loaded registry. */
 export function decisionEffectPlanner(
   registry,
-  { onEvent = () => {}, policyVersion = "unknown" } = {},
+  { onEvent = () => {}, policyVersion } = {},
 ) {
+  const resolvedPolicyVersion = resolvePolicyVersion(policyVersion);
   return {
     admit(db, envelope, { now } = {}) {
       const outcome = admitExternalEvent(db, registry, envelope, { now });
@@ -64,11 +74,14 @@ export function decisionEffectPlanner(
     approveProposal(db, id, options) {
       return approveProposal(db, registry, id, {
         ...options,
-        policyVersion,
+        policyVersion: resolvedPolicyVersion,
       });
     },
     rejectProposal(db, id, options) {
-      return rejectProposal(db, id, { ...options, policyVersion });
+      return rejectProposal(db, id, {
+        ...options,
+        policyVersion: resolvedPolicyVersion,
+      });
     },
   };
 }

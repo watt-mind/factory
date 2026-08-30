@@ -10,7 +10,10 @@ import path from "node:path";
 import { budgetExhausted } from "../../lib/spend.mjs";
 import { buildChainInput } from "./chain.mjs";
 import { hashJson } from "./canonical.mjs";
-import { resolveConfigPath } from "./config.mjs";
+import {
+  policyVersion as factoryPolicyVersion,
+  resolveConfigPath,
+} from "./config.mjs";
 import { defaultHookRegistry } from "./hooks.mjs";
 import { approveProposal } from "./proposals.mjs";
 import { getAgent, getEventType } from "./registry.mjs";
@@ -960,6 +963,12 @@ export function autoApproveChains(db, registry, options = {}) {
   return pass;
 }
 
+function resolvePolicyVersion(value) {
+  return typeof value === "string" && value !== "" && value !== "unknown"
+    ? value
+    : factoryPolicyVersion();
+}
+
 /**
  * The pass itself. `marker.settled` is set in a `finally` inside this async
  * frame: if no `await` was reached (every hook answered synchronously) it is
@@ -981,6 +990,7 @@ async function runPass(
   } = {},
   marker = { settled: false },
 ) {
+  const resolvedPolicyVersion = resolvePolicyVersion(policyVersion);
   try {
     const approved = [];
     const open = [];
@@ -1057,7 +1067,7 @@ async function runPass(
               ? HANDOFF_AUTO_APPROVAL_REASON
               : CHAIN_AUTO_APPROVAL_REASON,
             now,
-            policyVersion,
+            policyVersion: resolvedPolicyVersion,
           });
           if (outcome.approved)
             approved.push({ proposalId: row.id, runId: outcome.runId });

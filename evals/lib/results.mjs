@@ -42,6 +42,10 @@ function byId(run) {
 }
 
 /**
+ * Diff two recorded runs. `removed` is reported so the operator can see the
+ * case-set delta; it does not fail the run (case sets legitimately differ
+ * across branches). A `pass` -> not-`pass` transition is a regression.
+ *
  * @returns {{regressions: Array, fixes: Array, added: Array<string>, removed: Array<string>, graderChanged: boolean, previousGrader: string|null, currentGrader: string|null, previousAt: string|null}}
  */
 export function compareRuns(previous, current) {

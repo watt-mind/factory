@@ -66,6 +66,8 @@ repos:
           requires:
             - dist/**
             - plugins/core/**
+            # Shared harness content must update its committed content pins.
+            - event-runtime/pins.json
       pin_manifests: # Pin manifests that must accompany matching path changes.
         - event-runtime/agents/*.json
       # Registry inputs change the tracked zero-pack digest baseline.

@@ -71,7 +71,7 @@ evals:
 
 ### Runs are recorded, and drops are what you compare
 
-Two runs of the same cases on the same models can disagree, so an absolute score cannot tell you whether a prompt edit made things worse. The diff can. Every run writes `evals/.results/<timestamp>.json` — the models, the case set, and per-case pass/fail with the grader's reason — and `--compare <file>` reports the transitions against an earlier one: `pass -> fail` is a **regression** and exits non-zero; a grader change is flagged, because runs judged by different models are not a comparable measurement.
+Two runs of the same cases on the same models can disagree, so an absolute score cannot tell you whether a prompt edit made things worse. The diff can. Every run writes `evals/.results/<timestamp>.json` — the models, the case set, and per-case pass/fail with the grader's reason — and `--compare <file>` reports the transitions against an earlier one: `pass -> fail` is a **regression** and exits non-zero; a case present in the previous run and absent from the current one is reported as removed and does not fail the run, because case sets legitimately differ across branches; a grader change is flagged, because runs judged by different models are not a comparable measurement.
 
 `evals/.results/` is local run output, not repo content. Add it to `.gitignore` (tracked in [#1090](https://github.com/watt-mind/factory/issues/1090), together with the policy stanza above) or pass `--no-results`.
 
