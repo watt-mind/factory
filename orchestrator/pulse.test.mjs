@@ -83,3 +83,42 @@ test("gatherPulse handles unreachable API gracefully", async () => {
   expect(pulse.stack.workers.total).toBe(0);
   expect(pulse.runs.active.length).toBe(0);
 });
+
+test("gatherPulse sends the control API bearer on protected reads", async () => {
+  const token = "pulse-control-token";
+  const authorization = [];
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname !== "/")
+        authorization.push(req.headers.get("authorization"));
+      if (url.pathname === "/health") return Response.json({ ok: true });
+      if (url.pathname === "/status")
+        return Response.json({ runs: { byState: {} } });
+      if (url.pathname === "/workers") return Response.json({ workers: [] });
+      if (url.pathname === "/runs") return Response.json({ runs: [] });
+      return new Response("not found", { status: 404 });
+    },
+  });
+  const previous = process.env.FACTORY_CONTROL_API_TOKEN;
+  process.env.FACTORY_CONTROL_API_TOKEN = token;
+
+  try {
+    const pulse = await gatherPulse({
+      port: server.port,
+      webPort: server.port,
+      fetchLinear: false,
+      fetchGitHub: false,
+    });
+    expect(pulse.stack.api.ok).toBe(true);
+    expect(authorization).toHaveLength(5);
+    expect(authorization).toEqual(
+      Array(authorization.length).fill(`Bearer ${token}`),
+    );
+  } finally {
+    if (previous === undefined) delete process.env.FACTORY_CONTROL_API_TOKEN;
+    else process.env.FACTORY_CONTROL_API_TOKEN = previous;
+    server.stop(true);
+  }
+});
