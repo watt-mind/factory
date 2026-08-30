@@ -80,6 +80,21 @@ describe("supervise (WM-226)", () => {
     }
   });
 
+  test("rejects unsafe drain timeouts before writing its pidfile", () => {
+    for (const value of ["not-a-number", "0", "-1"]) {
+      const dir = tmpDir("evrt-pool-invalid-drain-");
+      const r = runCli(
+        ["supervise", "--workers", "1:1", "--drain-timeout", value, "--once"],
+        { FACTORY_RUN_DIR: dir },
+      );
+      expect(r.status).not.toBe(0);
+      expect(r.all).toContain(
+        "supervise: --drain-timeout must be an integer between 1 and 3600 seconds",
+      );
+      expect(existsSync(path.join(dir, "supervisor.pid"))).toBe(false);
+    }
+  });
+
   test("refuses to be the second supervisor on one run dir — two would orphan each other's workers", () => {
     const dir = tmpDir("evrt-pool-dup-");
     try {
