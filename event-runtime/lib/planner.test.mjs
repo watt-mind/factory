@@ -2316,6 +2316,31 @@ describe("planEvent worktree gate (WM-108)", () => {
     });
   });
 
+  test("factory dispatch for a repo missing from config/repos.yaml → human_needed repo_unknown", () => {
+    withReposRoot(tierRepo, () => {
+      const db = openDb(":memory:");
+      const ref = admit(db, {
+        type: "factory.dispatch.requested",
+        eventId: "toolchain-repo-unknown",
+        correlationId: "toolchain-repo-unknown",
+        payload: { repo: "ghost", ticket: "WM-694" },
+      });
+      const outcome = planEvent(db, registry, ref, {
+        now: NOW,
+        dispatch: tierDispatch(),
+        toolchain: {
+          cache: new Map(),
+          which: () => {
+            throw new Error("unknown repo must not probe");
+          },
+        },
+      });
+      expect(outcome.decision).toBe("human_needed");
+      expect(outcome.reason).toMatch(/^repo_unknown: /);
+      expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(0);
+    });
+  });
+
   test("a repo missing from config/repos.yaml → human_needed repo_unknown", () => {
     withReposRoot(
       `repos:\n  - name: real\n    path: /tmp/nowhere\n    base: develop\n`,

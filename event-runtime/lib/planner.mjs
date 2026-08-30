@@ -912,7 +912,15 @@ function dispatchToolchainEligibility(
   payload,
   { configSnapshot = null, toolchain = {} } = {},
 ) {
-  const repo = getRepo(snapshotRepos(configSnapshot), payload?.repo);
+  let repo;
+  try {
+    repo = getRepo(snapshotRepos(configSnapshot), payload?.repo);
+  } catch (err) {
+    // An unknown repo is not a toolchain fact: leave it to the worktree gate,
+    // which refuses it as `human_needed repo_unknown` with full evidence.
+    if (err instanceof RepoError) return null;
+    throw err;
+  }
   // Preserve the additive path exactly: no declared tools means no probe and
   // no new dispatch behavior.
   if (!repo.toolchain?.length) return null;

@@ -503,6 +503,101 @@ function failedToolchainProbe({
 }
 
 /**
+ * Typed result for a tool `which` could not find on PATH. The reason's action
+ * differs from a failed probe: the operator installs, not investigates.
+ */
+function missingToolchainProbe({ node, repo, executable, constraint }) {
+  return {
+    tool: {
+      executable,
+      constraint,
+      resolved: null,
+      observed: null,
+      observedRaw: null,
+      satisfied: false,
+    },
+    reason: {
+      reason: REPO_TOOLCHAIN_MISSING,
+      node,
+      repo,
+      executable,
+      constraint,
+      observed: null,
+      action: `install ${executable} ${constraint} on ${node}, or drop it from repo ${repo}'s toolchain in config/repos.yaml`,
+    },
+  };
+}
+
+/**
+ * Turn one `--version` probe result into its typed tool record and, when the
+ * constraint is not satisfied, its mismatch reason. Shared by the async and
+ * sync preflights so both attest identically.
+ */
+function probedToolchainTool({
+  node,
+  repo,
+  executable,
+  constraint,
+  resolved,
+  probe,
+}) {
+  const { exitCode, stdout, stderr } = probe;
+  const output = stdout?.trim() ? stdout : (stderr ?? "");
+  const observedRaw =
+    output
+      .split("\n")
+      .find((line) => line.trim())
+      ?.trim() ?? null;
+  const observed = exitCode === 0 ? normalizeToolVersion(output) : null;
+  const satisfied = satisfiesConstraint(observed, constraint);
+  const tool = {
+    executable,
+    constraint,
+    resolved,
+    observed,
+    observedRaw,
+    satisfied,
+  };
+  if (satisfied) return { tool, reason: null };
+  return {
+    tool,
+    reason: {
+      reason: REPO_TOOLCHAIN_MISMATCH,
+      node,
+      repo,
+      executable,
+      constraint,
+      // The observed version is the whole point of the payload: without it the
+      // operator still has to go to the node to find out what is installed.
+      observed,
+      observedRaw,
+      detail:
+        exitCode !== 0
+          ? "version_probe_failed"
+          : observed === null
+            ? "unparseable_version"
+            : "constraint_unsatisfied",
+      action: `make ${executable} ${constraint} the resolved version on ${node} (observed ${observed ?? observedRaw ?? "nothing"}), or relax repo ${repo}'s constraint in config/repos.yaml`,
+    },
+  };
+}
+
+/** Assemble the attestation both preflight variants return. */
+function toolchainAttestation({ repo, node, now, toolchain, tools, reasons }) {
+  return {
+    repo: repo?.name ?? null,
+    node,
+    implementationVersion: TOOLCHAIN_PREFLIGHT_VERSION,
+    toolchainHash: toolchainHash(toolchain),
+    declared: toolchain !== null,
+    verifiedAt: now().toISOString(),
+    ok: reasons.length === 0,
+    tools,
+    reasons,
+  };
+}
+
+/**
  * Verify one node's tooling against a repo's declared constraints and return
  * an attestation (docs/event-runtime-repos.md §6.2).
  *
@@ -527,43 +622,29 @@ export async function preflightToolchain(
   const toolchain = repo?.toolchain ?? null;
   const tools = [];
   const reasons = [];
+  const record = ({ tool, reason }) => {
+    tools.push(tool);
+    if (reason) reasons.push(reason);
+  };
 
   for (const { executable, constraint } of toolchain ?? []) {
+    const probeContext = { node, repo: repo.name, executable, constraint };
     let resolved;
     try {
       resolved = await which(executable);
     } catch (error) {
-      const failed = failedToolchainProbe({
-        node,
-        repo: repo.name,
-        executable,
-        constraint,
-        resolved: null,
-        error,
-        detail: "which_failed",
-      });
-      tools.push(failed.tool);
-      reasons.push(failed.reason);
+      record(
+        failedToolchainProbe({
+          ...probeContext,
+          resolved: null,
+          error,
+          detail: "which_failed",
+        }),
+      );
       continue;
     }
     if (!resolved) {
-      tools.push({
-        executable,
-        constraint,
-        resolved: null,
-        observed: null,
-        observedRaw: null,
-        satisfied: false,
-      });
-      reasons.push({
-        reason: REPO_TOOLCHAIN_MISSING,
-        node,
-        repo: repo.name,
-        executable,
-        constraint,
-        observed: null,
-        action: `install ${executable} ${constraint} on ${node}, or drop it from repo ${repo.name}'s toolchain in config/repos.yaml`,
-      });
+      record(missingToolchainProbe(probeContext));
       continue;
     }
 
@@ -571,68 +652,20 @@ export async function preflightToolchain(
     try {
       probe = await spawn([resolved, TOOLCHAIN_VERSION_ARG]);
     } catch (error) {
-      const failed = failedToolchainProbe({
-        node,
-        repo: repo.name,
-        executable,
-        constraint,
-        resolved,
-        error,
-        detail: "version_probe_threw",
-      });
-      tools.push(failed.tool);
-      reasons.push(failed.reason);
+      record(
+        failedToolchainProbe({
+          ...probeContext,
+          resolved,
+          error,
+          detail: "version_probe_threw",
+        }),
+      );
       continue;
     }
-    const { exitCode, stdout, stderr } = probe;
-    const output = stdout?.trim() ? stdout : (stderr ?? "");
-    const observedRaw =
-      output
-        .split("\n")
-        .find((l) => l.trim())
-        ?.trim() ?? null;
-    const observed = exitCode === 0 ? normalizeToolVersion(output) : null;
-    const satisfied = satisfiesConstraint(observed, constraint);
-    tools.push({
-      executable,
-      constraint,
-      resolved,
-      observed,
-      observedRaw,
-      satisfied,
-    });
-    if (satisfied) continue;
-    reasons.push({
-      reason: REPO_TOOLCHAIN_MISMATCH,
-      node,
-      repo: repo.name,
-      executable,
-      constraint,
-      // The observed version is the whole point of the payload: without it the
-      // operator still has to go to the node to find out what is installed.
-      observed,
-      observedRaw,
-      detail:
-        exitCode !== 0
-          ? "version_probe_failed"
-          : observed === null
-            ? "unparseable_version"
-            : "constraint_unsatisfied",
-      action: `make ${executable} ${constraint} the resolved version on ${node} (observed ${observed ?? observedRaw ?? "nothing"}), or relax repo ${repo.name}'s constraint in config/repos.yaml`,
-    });
+    record(probedToolchainTool({ ...probeContext, resolved, probe }));
   }
 
-  return {
-    repo: repo?.name ?? null,
-    node,
-    implementationVersion: TOOLCHAIN_PREFLIGHT_VERSION,
-    toolchainHash: toolchainHash(toolchain),
-    declared: toolchain !== null,
-    verifiedAt: now().toISOString(),
-    ok: reasons.length === 0,
-    tools,
-    reasons,
-  };
+  return toolchainAttestation({ repo, node, now, toolchain, tools, reasons });
 }
 
 /**
@@ -652,43 +685,29 @@ export function preflightToolchainSync(
   const toolchain = repo?.toolchain ?? null;
   const tools = [];
   const reasons = [];
+  const record = ({ tool, reason }) => {
+    tools.push(tool);
+    if (reason) reasons.push(reason);
+  };
 
   for (const { executable, constraint } of toolchain ?? []) {
+    const probeContext = { node, repo: repo.name, executable, constraint };
     let resolved;
     try {
       resolved = which(executable);
     } catch (error) {
-      const failed = failedToolchainProbe({
-        node,
-        repo: repo.name,
-        executable,
-        constraint,
-        resolved: null,
-        error,
-        detail: "which_failed",
-      });
-      tools.push(failed.tool);
-      reasons.push(failed.reason);
+      record(
+        failedToolchainProbe({
+          ...probeContext,
+          resolved: null,
+          error,
+          detail: "which_failed",
+        }),
+      );
       continue;
     }
     if (!resolved) {
-      tools.push({
-        executable,
-        constraint,
-        resolved: null,
-        observed: null,
-        observedRaw: null,
-        satisfied: false,
-      });
-      reasons.push({
-        reason: REPO_TOOLCHAIN_MISSING,
-        node,
-        repo: repo.name,
-        executable,
-        constraint,
-        observed: null,
-        action: `install ${executable} ${constraint} on ${node}, or drop it from repo ${repo.name}'s toolchain in config/repos.yaml`,
-      });
+      record(missingToolchainProbe(probeContext));
       continue;
     }
 
@@ -696,66 +715,20 @@ export function preflightToolchainSync(
     try {
       probe = spawn([resolved, TOOLCHAIN_VERSION_ARG]);
     } catch (error) {
-      const failed = failedToolchainProbe({
-        node,
-        repo: repo.name,
-        executable,
-        constraint,
-        resolved,
-        error,
-        detail: "version_probe_threw",
-      });
-      tools.push(failed.tool);
-      reasons.push(failed.reason);
+      record(
+        failedToolchainProbe({
+          ...probeContext,
+          resolved,
+          error,
+          detail: "version_probe_threw",
+        }),
+      );
       continue;
     }
-    const { exitCode, stdout, stderr } = probe;
-    const output = stdout?.trim() ? stdout : (stderr ?? "");
-    const observedRaw =
-      output
-        .split("\n")
-        .find((line) => line.trim())
-        ?.trim() ?? null;
-    const observed = exitCode === 0 ? normalizeToolVersion(output) : null;
-    const satisfied = satisfiesConstraint(observed, constraint);
-    tools.push({
-      executable,
-      constraint,
-      resolved,
-      observed,
-      observedRaw,
-      satisfied,
-    });
-    if (satisfied) continue;
-    reasons.push({
-      reason: REPO_TOOLCHAIN_MISMATCH,
-      node,
-      repo: repo.name,
-      executable,
-      constraint,
-      observed,
-      observedRaw,
-      detail:
-        exitCode !== 0
-          ? "version_probe_failed"
-          : observed === null
-            ? "unparseable_version"
-            : "constraint_unsatisfied",
-      action: `make ${executable} ${constraint} the resolved version on ${node} (observed ${observed ?? observedRaw ?? "nothing"}), or relax repo ${repo.name}'s constraint in config/repos.yaml`,
-    });
+    record(probedToolchainTool({ ...probeContext, resolved, probe }));
   }
 
-  return {
-    repo: repo?.name ?? null,
-    node,
-    implementationVersion: TOOLCHAIN_PREFLIGHT_VERSION,
-    toolchainHash: toolchainHash(toolchain),
-    declared: toolchain !== null,
-    verifiedAt: now().toISOString(),
-    ok: reasons.length === 0,
-    tools,
-    reasons,
-  };
+  return toolchainAttestation({ repo, node, now, toolchain, tools, reasons });
 }
 
 /** Does this attestation still describe this repo on this node, recently enough? */
