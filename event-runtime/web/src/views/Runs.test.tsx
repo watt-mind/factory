@@ -266,6 +266,28 @@ describe("Runs API pagination (WM-976)", () => {
     );
   });
 
+  test("keeps a wide table's empty-state copy inside the visible viewport", async () => {
+    const newestCompleted = stubListItem("run-newest-completed", "COMPLETED");
+    const runs = mock(async (state?: string) => ({
+      runs: state === "ACTIVE" ? [] : [newestCompleted],
+    }));
+
+    await withApi(
+      { runs, status: async () => createStatusFixture() },
+      async () => {
+        const r = renderRuns();
+        await r.findByTitle("run-newest-completed");
+
+        fireEvent.click(r.getByRole("tab", { name: /^Active/i }));
+
+        await r.findByText("No active runs.");
+        const table = r.getByRole("grid", { name: "Runs" });
+        expect(table.className).toContain("[&_tbody>tr>td>div]:sticky");
+        expect(table.className).toContain("[&_tbody>tr>td>div]:w-screen");
+      },
+    );
+  });
+
   test("resets the cursor when switching repository contexts", async () => {
     const newest = stubListItem("run-page-new", "COMPLETED", {
       maxAttempts: undefined,

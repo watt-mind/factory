@@ -1317,7 +1317,11 @@ export function Runs({
         <Table
           role="grid"
           aria-label="Runs"
-          className="w-full table-fixed border-separate border-spacing-0"
+          className={`w-full table-fixed border-separate border-spacing-0 ${
+            visible.length === 0
+              ? "[&_tbody>tr>td>div]:sticky [&_tbody>tr>td>div]:left-0 [&_tbody>tr>td>div]:w-screen"
+              : ""
+          }`}
           style={{
             minWidth: `${listCols.reduce(
               (width, c) => width + (c.key === "state" ? 176 : 112),
