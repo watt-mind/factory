@@ -638,6 +638,10 @@ function materializeWorktree({
     env: {
       ...process.env,
       FACTORY_WORKTREE_REPORT: reportPath,
+      // Dispatched agents need an isolated checkout and daemons, not the
+      // interactive demo fixture. Keep the script's default seeded for direct
+      // developer use; dispatch opts out explicitly.
+      FACTORY_WORKTREE_SEED: "0",
       FACTORY_WORKTREE_PRESERVE_ABANDONED: "1",
       FACTORY_WORKTREE_PRESERVATION_REPORT: preservationPath,
       // Revalidated by factory's worktree-up while it holds the per-ticket

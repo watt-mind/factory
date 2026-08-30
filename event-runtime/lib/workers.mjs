@@ -31,6 +31,28 @@ const iso = (now) => new Date(now).toISOString();
 
 const ACTIVE_ATTEMPT_STATES = "'LEASED', 'RUNNING', 'VERIFYING'";
 
+function normalizeSkipped(skipped = []) {
+  if (!Array.isArray(skipped)) {
+    throw new TypeError(
+      "skipped must be an array of { runId, reason } objects",
+    );
+  }
+  for (const entry of skipped) {
+    if (
+      !entry ||
+      typeof entry !== "object" ||
+      Array.isArray(entry) ||
+      typeof entry.runId !== "string" ||
+      typeof entry.reason !== "string"
+    ) {
+      throw new TypeError(
+        "skipped entries must be objects with string runId and reason",
+      );
+    }
+  }
+  return skipped;
+}
+
 /** Do not discard a registry row while an in-flight attempt still names it. */
 const unleasedWorker = `NOT EXISTS (
   SELECT 1
@@ -58,20 +80,22 @@ function pruneHostWorkers(db, { host, workerId, now }) {
 
 export function registerWorker(
   db,
-  { workerId, labels = {}, adapters = [], now = Date.now() },
+  { workerId, labels = {}, adapters = [], skipped = [], now = Date.now() },
 ) {
   const at = iso(now);
   const host = hostname();
+  const normalizedSkipped = normalizeSkipped(skipped);
   return tx(db, () => {
     // A clean pool restart deregisters each local worker first. Remove those
     // obsolete rows as the replacement starts, while retaining active leases.
     pruneHostWorkers(db, { host, workerId, now });
     db.query(
-      `INSERT INTO workers (worker_id, host, pid, labels_json, adapters, started_at, last_seen, state)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'idle')
+      `INSERT INTO workers (worker_id, host, pid, labels_json, adapters, skipped_json, started_at, last_seen, state)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'idle')
        ON CONFLICT(worker_id) DO UPDATE SET
          host = excluded.host, pid = excluded.pid, labels_json = excluded.labels_json,
-         adapters = excluded.adapters, last_seen = excluded.last_seen,
+         adapters = excluded.adapters, skipped_json = excluded.skipped_json,
+         last_seen = excluded.last_seen,
          state = 'idle', stopped_at = NULL`,
     ).run(
       workerId,
@@ -79,10 +103,18 @@ export function registerWorker(
       process.pid,
       JSON.stringify(labels),
       adapters.join(","),
+      JSON.stringify(normalizedSkipped),
       at,
       at,
     );
-    return { workerId, host, pid: process.pid, labels, adapters };
+    return {
+      workerId,
+      host,
+      pid: process.pid,
+      labels,
+      adapters,
+      skipped: normalizedSkipped,
+    };
   });
 }
 
@@ -95,30 +127,35 @@ export function heartbeat(
     runId = null,
     labels = {},
     adapters = [],
+    skipped = [],
     now = Date.now(),
     startedAt = now,
   } = {},
 ) {
   const at = iso(now);
+  const normalizedSkipped = normalizeSkipped(skipped);
   const { changes } = db
     .query(
-      `UPDATE workers SET last_seen = ?, state = ?, current_run = ? WHERE worker_id = ?`,
+      `UPDATE workers
+          SET last_seen = ?, state = ?, current_run = ?, skipped_json = ?
+        WHERE worker_id = ?`,
     )
-    .run(at, state, runId, workerId);
+    .run(at, state, runId, JSON.stringify(normalizedSkipped), workerId);
   if (changes) return;
 
   db.query(
-    `INSERT INTO workers (worker_id, host, pid, labels_json, adapters, started_at, last_seen, state, current_run)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO workers (worker_id, host, pid, labels_json, adapters, skipped_json, started_at, last_seen, state, current_run)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(worker_id) DO UPDATE SET
        last_seen = excluded.last_seen, state = excluded.state,
-       current_run = excluded.current_run`,
+       current_run = excluded.current_run, skipped_json = excluded.skipped_json`,
   ).run(
     workerId,
     hostname(),
     process.pid,
     JSON.stringify(labels),
     adapters.join(","),
+    JSON.stringify(normalizedSkipped),
     iso(startedAt),
     at,
     state,
@@ -143,6 +180,7 @@ export function listWorkers(db, { now = Date.now() } = {}) {
       pid: row.pid,
       labels: JSON.parse(row.labels_json),
       adapters: row.adapters ? row.adapters.split(",") : [],
+      skipped: JSON.parse(row.skipped_json),
       startedAt: row.started_at,
       lastSeen: row.last_seen,
       state: row.state,
