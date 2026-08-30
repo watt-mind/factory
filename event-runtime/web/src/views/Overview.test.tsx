@@ -8,7 +8,11 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  QueryClient,
+  QueryClientProvider,
+  useQuery,
+} from "@tanstack/react-query";
 import {
   Overview,
   groupJournalEntries,
@@ -21,7 +25,7 @@ import { shortId } from "../components/ui";
 import { api } from "../api";
 import type { OperatorContext } from "../context";
 import { scopedCount, scopedTally } from "../context";
-import { withApi } from "../test-render";
+import { restoreApi, withApi } from "../test-render";
 import type {
   AdmittedEvent,
   EventFocus,
@@ -46,6 +50,16 @@ function renderWithClient(ui: React.ReactElement) {
 }
 
 const noop = () => {};
+
+function UnmockedApiProbe() {
+  const query = useQuery({
+    queryKey: ["unmocked-status"],
+    queryFn: api.status,
+  });
+  return (
+    <p>{query.error instanceof Error ? query.error.message : "pending"}</p>
+  );
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -526,6 +540,26 @@ describe("Overview keyboard navigation (WM-292)", () => {
 });
 
 describe("Overview anomaly deck (WM-95, WM-979)", () => {
+  test("an incomplete api stub fails closed without reaching the network", async () => {
+    const originalProposals = api.proposals;
+    api.proposals = async () => ({ proposals: [] });
+    try {
+      const view = renderWithClient(<UnmockedApiProbe />);
+      await waitFor(() =>
+        expect(view.getByText("unmocked api call: GET /status")).toBeTruthy(),
+      );
+    } finally {
+      api.proposals = originalProposals;
+      restoreApi();
+    }
+  });
+
+  test("the network guard reports mutating methods and normalized api paths", async () => {
+    await expect(
+      globalThis.fetch("/api/events", { method: "POST" }),
+    ).rejects.toThrow("unmocked api call: POST /events");
+  });
+
   test("collapses expired-open proposals to one Review-expired row (WM-979)", async () => {
     const origStatus = api.status;
     const origProposals = api.proposals;

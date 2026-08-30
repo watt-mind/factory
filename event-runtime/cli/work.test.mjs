@@ -958,6 +958,11 @@ describe("work --reload-on-change (WM-213)", () => {
   test(
     "a run in flight defers reload; its supervisor restarts only once it is idle",
     async () => {
+      // gh-1781 classification: this was a distinct synchronization defect,
+      // not an HTTP/base-URL failure. gh-1423 replaced wall-clock coordination
+      // with the fake adapter's hold marker/release file, and gh-1466 made the
+      // supervisor handoff observable; the 90s ceiling is only a process-safety
+      // budget scaled for loaded runners.
       const { openDb } = await import("../lib/db.mjs");
       const { createRun, transition } = await import("../lib/lifecycle.mjs");
       const { canonicalJson, hashJson } = await import("../lib/canonical.mjs");

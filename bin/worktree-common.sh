@@ -807,16 +807,28 @@ listen_tcp_port() { # <pidfile>
   printf '%s' "$port"
 }
 
+require_loopback_port() { # <caller> <port>
+  local caller="$1" port="${2:-}"
+  [[ -n "$port" ]] || die "$caller: port argument is unset"
+  [[ "$port" =~ ^[0-9]+$ ]] || die "$caller: port argument must be numeric (got '$port')"
+  (( 10#$port >= 1 && 10#$port <= 65535 )) \
+    || die "$caller: port argument must be between 1 and 65535 (got '$port')"
+}
+
 port_listening() { # <port>
-  (exec 3<>/dev/tcp/127.0.0.1/"$1") 2>/dev/null && { exec 3>&- 3<&-; return 0; }
+  local port="${1:-}"
+  require_loopback_port port_listening "$port"
+  (exec 3<>/dev/tcp/127.0.0.1/"$port") 2>/dev/null && { exec 3>&- 3<&-; return 0; }
   if command -v lsof >/dev/null 2>&1; then
-    lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1 && return 0
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1 && return 0
   fi
   return 1
 }
 
 health_json() { # <port>
-  curl -sf -m 1 "http://127.0.0.1:$1/health" 2>/dev/null || true
+  local port="${1:-}"
+  require_loopback_port health_json "$port"
+  curl -sf -m 1 "http://127.0.0.1:$port/health" 2>/dev/null || true
 }
 
 # Extract env.<field> from a /health JSON body. Empty if missing/null/unparseable.

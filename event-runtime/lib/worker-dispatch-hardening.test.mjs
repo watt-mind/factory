@@ -1217,6 +1217,10 @@ describe("execute-side dispatch hardening (WM-115)", () => {
   // may terminally REFUSE with claim_lock_starvation just because a live holder
   // still owns the lock — and the atomic claim must be preserved throughout
   // (at most one active tracker claim, each ticket claimed exactly once).
+  // gh-1781 classification: this is not related to an HTTP base URL. It is an
+  // in-memory SQLite/fake-clock stress case with 570 deliberate contention
+  // passes; any wall-clock timeout is the test's genuine load-scaled execution
+  // budget, while its liveness assertions remain deterministic.
   test("a same-repo dispatch burst never claim_lock_starves against a live holder", async () => {
     const db = openDb(":memory:");
     const lockDir = tmpDir("evrt-lock-burst20-");

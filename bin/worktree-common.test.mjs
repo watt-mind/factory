@@ -115,6 +115,24 @@ function command(cmd, cwd, extraEnv = {}) {
   };
 }
 
+test("loopback helpers fail closed on unset or non-numeric ports", () => {
+  for (const helper of ["port_listening", "health_json"]) {
+    const unset = sh(`${helper} ""`);
+    expect(unset.status).not.toBe(0);
+    expect(unset.stderr).toContain(`${helper}: port argument is unset`);
+    expect(`${unset.stdout}${unset.stderr}`).not.toContain("127.0.0.1:80");
+
+    const nonNumeric = sh(`${helper} not-a-port`);
+    expect(nonNumeric.status).not.toBe(0);
+    expect(nonNumeric.stderr).toContain(
+      `${helper}: port argument must be numeric`,
+    );
+    expect(`${nonNumeric.stdout}${nonNumeric.stderr}`).not.toContain(
+      "127.0.0.1:80",
+    );
+  }
+});
+
 test("run log rotation retains bounded generations and copy-truncates a live owner", () => {
   const r = sh(`
     dir="$(mktemp -d)"

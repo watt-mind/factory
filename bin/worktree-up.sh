@@ -384,6 +384,9 @@ else
   preferred="$(ticket_api_port "$TICKET")"
 fi
 resolve_worktree_ports "$WT" "$preferred" "$HOME_DIR"
+# worktree-common.sh runs under set -u: resolve_worktree_ports either assigns
+# numeric API_PORT/WEB_PORT values or exits, so every loopback probe below can
+# pass the helpers' new loud port validation without an unset-variable path.
 
 # ------------------------------------------------------------ dependencies ---
 info "installing dependencies (bun install, root + web)"
