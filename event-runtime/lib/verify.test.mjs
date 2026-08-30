@@ -2051,6 +2051,8 @@ describe("handoff verification helpers (WM-718)", () => {
 
   test("composeHandoffVerification is built from observation; the agent's claim is only agent-reported", () => {
     const body = composeHandoffVerification({
+      prNumber: 42,
+      prDraft: true,
       verification: {
         source: "ticket",
         command: "bun test",
@@ -2081,7 +2083,8 @@ describe("handoff verification helpers (WM-718)", () => {
     });
     const lines = body.split("\n");
     expect(lines[0]).toBe("## Handoff verification (worker-observed)");
-    expect(lines[1]).toBe("- Verification: `bun test` — exit 1 (FAIL)");
+    expect(lines[1]).toBe("- PR: #42 (draft)");
+    expect(lines[2]).toBe("- Verification: `bun test` — exit 1 (FAIL)");
     expect(body).toContain("(fail) x > y");
     expect(body).toContain(
       "- Repo verify: `bun test event-runtime/lib` — exit 0 (pass)",

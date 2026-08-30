@@ -887,6 +887,11 @@ function commandLine(label, obs) {
  */
 export function composeHandoffVerification(handoff) {
   const lines = [HANDOFF_COMMENT_HEADING];
+  if (Number.isInteger(handoff.prNumber) && handoff.prNumber > 0) {
+    lines.push(
+      `- PR: #${handoff.prNumber} (${handoff.prDraft === true ? "draft" : "ready"})`,
+    );
+  }
   const primary = handoff.verification;
   if (primary) {
     lines.push(commandLine("Verification", primary));

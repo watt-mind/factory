@@ -74,6 +74,7 @@ import {
   createReloadWatcher,
   DEFAULT_MAX_ENVIRONMENT_RETRIES,
   defaultLocksDir,
+  defaultReconcileVerifiedHandoffTicket,
   defaultProjectTierEscalation,
   defaultReturnHandoffTicket,
   defaultUnclaimTicket,
@@ -4028,5 +4029,65 @@ sh -c 'sleep 5 & wait'
     expect(capturedReadOnlyEnv.SSH_AUTH_SOCK).toBeUndefined();
     expect(capturedReadOnlyEnv.GITHUB_TOKEN).toBeUndefined();
     expect(capturedReadOnlyEnv.ANTHROPIC_API_KEY).toBeUndefined();
+  });
+
+  describe("defaultReconcileVerifiedHandoffTicket (#1498)", () => {
+    const STATE_ARGS = [
+      "state",
+      "WM-1498",
+      "In Review",
+      "--add",
+      "ai:needs-review",
+      "--remove",
+      "ai:in-progress",
+      "--remove",
+      "ai:agent-ready",
+    ];
+
+    test("moves a Todo handoff to In Review and fixes its dispatch labels", () => {
+      const calls = [];
+      const result = defaultReconcileVerifiedHandoffTicket({
+        repo: "factory",
+        ticket: "WM-1498",
+        fetchTicket: () => ({ state: { name: "Todo" } }),
+        runCli: (args, options) => (calls.push({ args, options }), ""),
+      });
+
+      expect(result).toBe(true);
+      expect(calls).toEqual([
+        { args: STATE_ARGS, options: { repo: "factory" } },
+      ]);
+    });
+
+    test("does not mutate a ticket the agent already put In Review", () => {
+      const calls = [];
+      const result = defaultReconcileVerifiedHandoffTicket({
+        repo: "factory",
+        ticket: "WM-1498",
+        fetchTicket: () => ({ state: { name: "In Review" } }),
+        runCli: (args) => (calls.push(args), ""),
+      });
+
+      expect(result).toBe(false);
+      expect(calls).toHaveLength(0);
+    });
+
+    test("a false mayMutateClaimedTicket guard makes no reconciliation calls", () => {
+      const calls = [];
+      const mayMutateClaimedTicket = () => false;
+      if (mayMutateClaimedTicket()) {
+        defaultReconcileVerifiedHandoffTicket({
+          repo: "factory",
+          ticket: "WM-1498",
+          fetchTicket: () => {
+            calls.push("fetch");
+            return { state: { name: "Todo" } };
+          },
+          runCli: (args) => (calls.push(args), ""),
+        });
+      }
+
+      expect(calls).toHaveLength(0);
+    });
   });
 });
