@@ -349,6 +349,10 @@ function planAfterResponse(onEvent, kind = "admitted") {
   });
 }
 
+export function sendPayloadMismatch(send, eventId) {
+  return send(409, { error: "payload_mismatch", eventId });
+}
+
 function admit(
   db,
   registry,
@@ -365,10 +369,7 @@ function admit(
     now: nowMs,
   });
   if (outcome.conflict) {
-    return send(409, {
-      error: "payload_mismatch",
-      eventId: parsed.value.eventId,
-    });
+    return sendPayloadMismatch(send, parsed.value.eventId);
   }
   if (!outcome.admitted && !outcome.duplicate)
     return send(422, { errors: outcome.errors });
@@ -481,6 +482,8 @@ export async function handleIntakeApiRoute({
     const outcome = admitExternalEvent(db, registry, translated.envelope, {
       now: nowMs,
     });
+    if (outcome.conflict)
+      return sendPayloadMismatch(send, translated.envelope.eventId);
     if (!outcome.admitted && !outcome.duplicate)
       return send(422, { errors: outcome.errors });
     // Ack GitHub immediately; plan off the response path (WM-1162).
