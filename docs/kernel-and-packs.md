@@ -140,6 +140,10 @@ validates a supplied `harnessRoots` array against this file at load time,
 failing closed exactly like the per-agent pin check, on either an unpinned
 file or content that has drifted from its pin:
 
+Adding or removing any file under `shared/` requires re-running
+`bun event-runtime/cli.mjs update-pins`. The repository verification gate
+enforces that the committed harness pins remain current.
+
 ```sh
 bun event-runtime/cli.mjs update-pins --check
 ```
