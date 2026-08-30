@@ -579,10 +579,12 @@ for (const [name, make] of IMPLEMENTATIONS) {
       const names = (await cp.getTicket("WM-1")).labels.map((l) => l.name);
       expect(names).toContain(AGENT_READY_LABEL);
       expect(names).toContain("type:bug");
-      await cp.setLabels("WM-1", { remove: [AGENT_READY_LABEL] });
-      expect((await cp.getTicket("WM-1")).labels.map((l) => l.name)).toEqual([
-        "type:bug",
-      ]);
+      await expect(
+        cp.setLabels("WM-1", { remove: [AGENT_READY_LABEL] }),
+      ).rejects.toThrow(/refusing to remove ai:agent-ready/);
+      expect(
+        (await cp.getTicket("WM-1")).labels.map((l) => l.name).sort(),
+      ).toEqual([AGENT_READY_LABEL, "type:bug"].sort());
     });
 
     test("setLabels rejects unknown type:* values before mutating", async () => {
