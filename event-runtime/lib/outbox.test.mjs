@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { openDb } from "./db.mjs";
-import { publishOutbox, sweepPublishedOutbox } from "./outbox.mjs";
+import {
+  DEFAULT_OUTBOX_MAX_ATTEMPTS,
+  publishOutbox,
+  sweepPublishedOutbox,
+} from "./outbox.mjs";
 
 function seedOutbox(db, eventId) {
   db.query(`INSERT INTO outbox (event_json, created_at) VALUES (?, ?)`).run(
@@ -111,42 +115,119 @@ describe("publishOutbox", () => {
       seen.push(event.eventId);
     };
 
-    expect(publishOutbox(db, { sink, now: 0 })).toEqual({
+    expect(publishOutbox(db, { sink, now: 0, random: () => 1 })).toEqual({
       delivered: 0,
       remaining: 2,
     });
     expect(seen).toEqual([]);
-    expect(publishOutbox(db, { sink, now: 4_999 })).toEqual({
+    expect(publishOutbox(db, { sink, now: 4_999, random: () => 1 })).toEqual({
       delivered: 0,
       remaining: 2,
     });
-    expect(publishOutbox(db, { sink, now: 5_000 })).toEqual({
+    expect(publishOutbox(db, { sink, now: 5_000, random: () => 1 })).toEqual({
       delivered: 2,
       remaining: 0,
     });
     expect(seen).toEqual(["a", "b"]);
   });
 
-  test("doubles transient retry delays before parking at the attempt limit", () => {
+  test("jittered transient retry delays stay within exponential and cap bounds", () => {
     const db = openDb(":memory:");
     seedOutbox(db, "a");
     const sink = () => {
       throw new Error("sink down");
     };
 
-    expect(publishOutbox(db, { sink, now: 0 })).toEqual({
+    expect(
+      publishOutbox(db, {
+        sink,
+        now: 0,
+        maxAttempts: 4,
+        retryBaseMs: 10,
+        retryFactor: 2,
+        retryCapMs: 25,
+        random: () => 0,
+      }),
+    ).toEqual({
       delivered: 0,
       remaining: 1,
     });
-    expect(publishOutbox(db, { sink, now: 5_000 })).toEqual({
+    let retryAt = JSON.parse(
+      db.query(`SELECT delivery_error FROM outbox WHERE seq = 1`).get()
+        .delivery_error,
+    ).retryAt;
+    expect(retryAt).toBeGreaterThanOrEqual(5);
+    expect(retryAt).toBeLessThanOrEqual(10);
+
+    expect(
+      publishOutbox(db, {
+        sink,
+        now: retryAt,
+        maxAttempts: 4,
+        retryBaseMs: 10,
+        retryFactor: 2,
+        retryCapMs: 25,
+        random: () => 1,
+      }),
+    ).toEqual({
       delivered: 0,
       remaining: 1,
     });
-    expect(publishOutbox(db, { sink, now: 14_999 })).toEqual({
+    retryAt = JSON.parse(
+      db.query(`SELECT delivery_error FROM outbox WHERE seq = 1`).get()
+        .delivery_error,
+    ).retryAt;
+    expect(retryAt).toBeGreaterThanOrEqual(25);
+    expect(retryAt).toBeLessThanOrEqual(30);
+
+    expect(
+      publishOutbox(db, {
+        sink,
+        now: retryAt,
+        maxAttempts: 4,
+        retryBaseMs: 10,
+        retryFactor: 2,
+        retryCapMs: 25,
+        random: () => 0.5,
+      }),
+    ).toEqual({
       delivered: 0,
       remaining: 1,
     });
-    expect(publishOutbox(db, { sink, now: 15_000 })).toEqual({
+    retryAt = JSON.parse(
+      db.query(`SELECT delivery_error FROM outbox WHERE seq = 1`).get()
+        .delivery_error,
+    ).retryAt;
+    expect(retryAt).toBeGreaterThanOrEqual(42);
+    expect(retryAt).toBeLessThanOrEqual(55);
+  });
+
+  test("does not park transient failures before the default retry window", () => {
+    const db = openDb(":memory:");
+    seedOutbox(db, "a");
+    const sink = () => {
+      throw new Error("sink down");
+    };
+    let now = 0;
+
+    expect(DEFAULT_OUTBOX_MAX_ATTEMPTS).toBeGreaterThanOrEqual(8);
+    for (
+      let attempts = 1;
+      attempts < DEFAULT_OUTBOX_MAX_ATTEMPTS;
+      attempts += 1
+    ) {
+      expect(publishOutbox(db, { sink, now, random: () => 1 })).toEqual({
+        delivered: 0,
+        remaining: 1,
+      });
+      now = JSON.parse(
+        db.query(`SELECT delivery_error FROM outbox WHERE seq = 1`).get()
+          .delivery_error,
+      ).retryAt;
+    }
+    expect(now).toBeGreaterThanOrEqual(30 * 60 * 1000);
+
+    expect(publishOutbox(db, { sink, now, random: () => 1 })).toEqual({
       delivered: 0,
       remaining: 0,
     });
@@ -158,10 +239,46 @@ describe("publishOutbox", () => {
         )
         .get(),
     ).toEqual({
-      delivery_attempts: 3,
+      delivery_attempts: DEFAULT_OUTBOX_MAX_ATTEMPTS,
       delivery_error: "sink down",
       published_at: expect.any(String),
     });
+  });
+
+  test("allows short positive retry bases for tests and local loops", () => {
+    const db = openDb(":memory:");
+    seedOutbox(db, "a");
+    let fail = true;
+    const sink = () => {
+      if (fail) {
+        fail = false;
+        throw new Error("sink down");
+      }
+    };
+
+    expect(
+      publishOutbox(db, { sink, now: 0, retryBaseMs: 1, random: () => 1 }),
+    ).toEqual({ delivered: 0, remaining: 1 });
+    expect(
+      publishOutbox(db, { sink, now: 1, retryBaseMs: 1, random: () => 1 }),
+    ).toEqual({ delivered: 1, remaining: 0 });
+    expect(() => publishOutbox(db, { sink, retryBaseMs: 0 })).toThrow(
+      "retryBaseMs must be a positive number of milliseconds",
+    );
+  });
+
+  test("rejects retry policies that cannot back off", () => {
+    const db = openDb(":memory:");
+    const sink = () => {};
+    expect(() => publishOutbox(db, { sink, retryFactor: 1 })).toThrow(
+      "retryFactor must be a number greater than 1",
+    );
+    expect(() => publishOutbox(db, { sink, retryCapMs: 0 })).toThrow(
+      "retryCapMs must be a positive number of milliseconds",
+    );
+    expect(() => publishOutbox(db, { sink, random: 0.5 })).toThrow(
+      "random must be a function",
+    );
   });
 });
 

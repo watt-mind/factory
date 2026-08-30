@@ -215,8 +215,17 @@ export default async function supervise(args) {
       "supervise: --interval-ms must be an integer between 100 and 60000",
     );
   }
-  const drainTimeoutMs =
-    Number(flagValue(args, "--drain-timeout") ?? 60) * 1000;
+  const drainTimeoutSeconds = Number(flagValue(args, "--drain-timeout") ?? 60);
+  if (
+    !Number.isInteger(drainTimeoutSeconds) ||
+    drainTimeoutSeconds < 1 ||
+    drainTimeoutSeconds > 3_600
+  ) {
+    return fail(
+      "supervise: --drain-timeout must be an integer between 1 and 3600 seconds",
+    );
+  }
+  const drainTimeoutMs = drainTimeoutSeconds * 1000;
   const spawnGraceMs = Number(
     flagValue(args, "--spawn-grace-ms") ?? SPAWN_GRACE_MS,
   );
