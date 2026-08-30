@@ -647,8 +647,8 @@ export default async function serve(args) {
   function getTickStats() {
     const queued =
       db
-        .query(`SELECT COUNT(*) AS n FROM events WHERE status = 'admitted'`)
-        .get().n > 0;
+        .query(`SELECT 1 FROM events WHERE status = 'admitted' LIMIT 1`)
+        .get() != null;
     return {
       lastMs: lastTickMs,
       overruns: tickOverruns,

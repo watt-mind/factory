@@ -29,6 +29,7 @@ export function startPlannerWorker({
   });
   let lastPlannedAt = null;
   let alive = true;
+  let stopping = false;
 
   worker.on("message", (msg) => {
     if (msg?.type === "planned") {
@@ -45,7 +46,9 @@ export function startPlannerWorker({
 
   worker.on("exit", (code) => {
     alive = false;
-    log(`planner worker thread exited with code ${code}`);
+    if (!(stopping && code === 0)) {
+      log(`planner worker thread exited with code ${code}`);
+    }
   });
 
   return {
@@ -67,6 +70,7 @@ export function startPlannerWorker({
       };
     },
     stop: async () => {
+      stopping = true;
       try {
         worker.postMessage({ type: "stop" });
         await worker.terminate();

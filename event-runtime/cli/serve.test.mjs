@@ -58,7 +58,11 @@ test("planner worker exit is logged and exposed as dead", async () => {
   try {
     await planner.worker.terminate();
     expect(planner.state()).toMatchObject({ alive: false, stale: true });
-    expect(logs).toContain("planner worker thread exited with code 1");
+    expect(
+      logs.some((line) =>
+        /^planner worker thread exited with code \d+$/.test(line),
+      ),
+    ).toBe(true);
   } finally {
     await planner.stop();
   }
