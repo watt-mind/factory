@@ -183,6 +183,28 @@ export function workerPassthroughArgs(args) {
 }
 
 /**
+ * Run the supervisor's first and recurring ticks. A daemon records a transient
+ * tick failure and tries again on its next interval; a scripted --once pass
+ * keeps the failure visible to its caller.
+ */
+export function startTickLoop(tick, { once, intervalMs, log }) {
+  if (once) {
+    tick();
+    return null;
+  }
+  const guardedTick = () => {
+    try {
+      tick();
+    } catch (err) {
+      log(`tick error: ${err.message}`);
+    }
+  };
+  const timer = setInterval(guardedTick, intervalMs);
+  guardedTick();
+  return timer;
+}
+
+/**
  * The pool supervisor: a deterministic loop that maintains
  * `workers.min ≤ pool ≤ workers.max` from observed queue depth. It is its own
  * process, not part of `serve`, so restarting the control plane never touches
@@ -475,15 +497,13 @@ export default async function supervise(args) {
     return decision;
   }
 
+  const timer = startTickLoop(tick, { once, intervalMs, log });
   if (once) {
-    tick();
     rmSync(supervisorPidFile, { force: true });
     return;
   }
 
   let stopping = false;
-  const timer = setInterval(tick, intervalMs);
-  tick();
 
   /**
    * Shutdown escalates, and every step short of the last is a request rather

@@ -14,6 +14,7 @@ import { registerWorker } from "../lib/workers.mjs";
 import {
   crashBackoffMs,
   readPool,
+  startTickLoop,
   workerPassthroughArgs,
 } from "./supervise.mjs";
 import {
@@ -30,6 +31,7 @@ import {
   seedRun,
   spawnSupervisor,
   spawnWorker,
+  until,
   waitFor,
   registerCliTmpCleanup,
 } from "./test-helpers.mjs";
@@ -79,6 +81,74 @@ describe("supervise (WM-226)", () => {
       expect(runCli(args).status).not.toBe(0);
     }
   });
+
+  test("--once propagates tick failures while daemon ticks are logged and retried", () => {
+    const error = new Error("transient failure");
+    expect(() =>
+      startTickLoop(
+        () => {
+          throw error;
+        },
+        { once: true, intervalMs: 100, log: () => {} },
+      ),
+    ).toThrow(error);
+
+    const lines = [];
+    const timer = startTickLoop(
+      (() => {
+        let calls = 0;
+        return () => {
+          calls += 1;
+          if (calls === 1) throw error;
+        };
+      })(),
+      { once: false, intervalMs: 100, log: (line) => lines.push(line) },
+    );
+    clearInterval(timer);
+    expect(lines).toEqual(["tick error: transient failure"]);
+  });
+
+  test("a transient tick failure is logged and the supervisor keeps ticking", async () => {
+    const home = tmpDir("evrt-pool-tick-error-");
+    const dir = tmpDir("evrt-pool-tick-error-run-");
+    const box = spawnSupervisor(
+      [
+        "--workers",
+        "1:1",
+        "--interval-ms",
+        "100",
+        "--adapter-override",
+        "fake",
+        "--poll-ms",
+        "50",
+      ],
+      { FACTORY_EVENT_HOME: home, FACTORY_RUN_DIR: dir },
+    );
+    try {
+      expect(await waitFor(box, "spawn slot 1")).toBe(true);
+      const worker = readPool(dir).slots[0];
+      const crashLoop = path.join(dir, "worker-1.crash-loop.json");
+      rmSync(crashLoop, { force: true });
+      mkdirSync(crashLoop);
+      process.kill(worker.pid, "SIGKILL");
+      expect(await waitFor(box, "tick error:", 10_000)).toBe(true);
+      expect(box.child.exitCode ?? null).toBeNull();
+      rmSync(crashLoop, { recursive: true, force: true });
+
+      const failedTickAt = box.out.lastIndexOf("tick error:");
+      expect(await waitFor(box, "slot released", 10_000)).toBe(true);
+      await until(
+        "supervisor to respawn after the failed tick",
+        () => box.out.slice(failedTickAt).includes("spawn slot 1"),
+        { timeoutMs: 10_000 },
+      );
+      expect(box.out.slice(failedTickAt)).toContain("spawn slot 1");
+    } finally {
+      await killPool(box, dir);
+      rmSync(home, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   test("refuses to be the second supervisor on one run dir — two would orphan each other's workers", () => {
     const dir = tmpDir("evrt-pool-dup-");
