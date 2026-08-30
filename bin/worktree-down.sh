@@ -104,7 +104,8 @@ if [[ "$PRUNE" -eq 1 ]]; then
   for WT in "$WT_ROOT"/*; do
     [[ -d "$WT" ]] || continue
     ticket=$(basename "$WT")
-    [[ "$ticket" =~ ^[A-Z]+-[0-9]+(-[A-Za-z0-9][A-Za-z0-9-]*)?$ ]] || continue
+    ticket_is_valid "$ticket" || continue
+    [[ "$(ticket_slug "$ticket")" == "$ticket" ]] || continue
 
     status=$(git -C "$WT" status --porcelain 2>/dev/null) || {
       warn "skipping $ticket — cannot inspect worktree status"

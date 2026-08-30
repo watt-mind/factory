@@ -361,6 +361,8 @@ export function detectWorktreeOwnershipConflict({
   databasePath = dbPath(),
   leasesDir,
   leases = liveWorkerLeases(repo, { dir: leasesDir }),
+  staleOwnerLog = (staleRunId) =>
+    console.warn(`worktree_owner_stale:${staleRunId}`),
 } = {}) {
   const runs = [];
   if (existsSync(databasePath)) {
@@ -368,18 +370,27 @@ export function detectWorktreeOwnershipConflict({
     try {
       db = new Database(databasePath, { readonly: true });
       for (const row of db
-        .query(`SELECT run_id, state, spec_json FROM runs`)
+        .query(`SELECT run_id, state, spec_json, attempts FROM runs`)
         .all()) {
         if (row.run_id === runId || TERMINAL_STATES.has(row.state)) continue;
+        let spec;
         let input;
         try {
-          input = JSON.parse(row.spec_json)?.input;
+          spec = JSON.parse(row.spec_json);
+          input = spec?.input;
         } catch {
           continue;
         }
-        if (input?.repo === repo && input?.ticket === ticket) {
-          runs.push({ runId: row.run_id, state: row.state });
+        if (input?.repo !== repo || input?.ticket !== ticket) continue;
+        if (
+          row.state === "FAILED" &&
+          spec?.maxAttempts != null &&
+          row.attempts >= spec.maxAttempts
+        ) {
+          staleOwnerLog(row.run_id);
+          continue;
         }
+        runs.push({ runId: row.run_id, state: row.state });
       }
     } catch (err) {
       return {
