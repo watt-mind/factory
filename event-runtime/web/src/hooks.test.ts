@@ -9,9 +9,11 @@ import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { createElement as h, useEffect, useState } from "react";
 import { api } from "./api";
 import {
+  isApiBusyBackoff,
   modal,
   pollingOptions,
   refetchIntervals,
+  setApiBusyBackoff,
   useHashRoute,
   useListKeys,
   useRequeuePoll,
@@ -95,6 +97,31 @@ describe("collection refetch intervals", () => {
       expect(refetchIntervals.secondary.refetchInterval()).toBe(15_000);
       expect(refetchIntervals.primary.refetchIntervalInBackground).toBe(true);
     } finally {
+      if (originalHidden)
+        Object.defineProperty(document, "hidden", originalHidden);
+      else Reflect.deleteProperty(document, "hidden");
+    }
+  });
+
+  test("backs off visible polling from 2s to 10s when API busy backoff is active", () => {
+    const originalHidden = Object.getOwnPropertyDescriptor(document, "hidden");
+    try {
+      Object.defineProperty(document, "hidden", {
+        configurable: true,
+        value: false,
+      });
+      setApiBusyBackoff(false);
+      expect(isApiBusyBackoff()).toBe(false);
+      expect(refetchIntervals.primary.refetchInterval()).toBe(2_000);
+      expect(refetchIntervals.fast.refetchInterval()).toBe(5_000);
+
+      setApiBusyBackoff(true);
+      expect(isApiBusyBackoff()).toBe(true);
+      expect(refetchIntervals.primary.refetchInterval()).toBe(10_000);
+      expect(refetchIntervals.fast.refetchInterval()).toBe(10_000);
+      expect(refetchIntervals.secondary.refetchInterval()).toBe(10_000);
+    } finally {
+      setApiBusyBackoff(false);
       if (originalHidden)
         Object.defineProperty(document, "hidden", originalHidden);
       else Reflect.deleteProperty(document, "hidden");

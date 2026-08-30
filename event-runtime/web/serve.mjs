@@ -43,6 +43,10 @@ function hostOf(value) {
 // a non-loopback browser must present for mutating proxy requests. Never logged.
 const CONTROL_API_TOKEN = process.env.FACTORY_CONTROL_API_TOKEN || "";
 
+const PROXY_TIMEOUT_MS = Number(
+  process.env.FACTORY_WEB_PROXY_TIMEOUT_MS || 10_000,
+);
+
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
 
 function hostAllowed(value) {
@@ -141,7 +145,9 @@ Bun.serve({
       if (CONTROL_API_TOKEN)
         headers.set("authorization", `Bearer ${CONTROL_API_TOKEN}`);
       else headers.delete("authorization");
-      const init = { method: req.method, headers };
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
+      const init = { method: req.method, headers, signal: controller.signal };
       try {
         if (bodyless) {
           // Drain any non-standard incoming payload so a keep-alive connection
@@ -155,6 +161,28 @@ Bun.serve({
         }
         return await fetch(target, init);
       } catch (error) {
+        if (
+          controller.signal.aborted ||
+          error?.name === "AbortError" ||
+          error?.name === "TimeoutError"
+        ) {
+          console.error(
+            `[web] ${req.method} ${url.pathname} upstream timed out after ${PROXY_TIMEOUT_MS}ms`,
+          );
+          return new Response(
+            JSON.stringify({
+              error: "api_busy",
+              message: "event runtime is busy",
+            }),
+            {
+              status: 504,
+              headers: {
+                "content-type": "application/json; charset=utf-8",
+                "retry-after": "5",
+              },
+            },
+          );
+        }
         // Backend restarts are expected during deploys and watch-mode reloads.
         // Keep the static server alive and give clients an explicit retryable
         // response instead of allowing Bun's rejected fetch to escape.
@@ -172,6 +200,8 @@ Bun.serve({
             },
           },
         );
+      } finally {
+        clearTimeout(timeoutId);
       }
     }
 

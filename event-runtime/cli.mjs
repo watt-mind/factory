@@ -44,8 +44,8 @@ const USAGE = BASE_USAGE.replace(
     "\n  pack init <name> [path]          scaffold a pinned, data-only pack (default packs/<name>)\n  pack validate <path>              validate one pack through the registry loader\n  artifacts backfill-results [--apply]\n                                 materialize stored typed result output (dry by default)",
   )
   .replace(
-    "All commands except serve, work, supervise, and update-pins are clients of the control",
-    "All commands except init, serve, work, supervise, update-pins, and artifacts are clients of the control",
+    "All commands except serve, work, plan, supervise, and update-pins are clients of the control",
+    "All commands except init, serve, work, plan, supervise, update-pins, and artifacts are clients of the control",
   );
 
 // Preserve the small programmatic surface used by runtime tests and tooling.
