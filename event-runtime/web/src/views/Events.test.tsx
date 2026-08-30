@@ -1101,6 +1101,54 @@ describe("Events component harness: facet chips synchronization with FilterInput
 });
 
 describe("Events repo scope caption (WM-142)", () => {
+  test("repo dead-lettered tab requests and renders its server-scoped page", async () => {
+    const newest = stubEvent("evt_repo_newest", "admitted", {
+      repos: ["factory"],
+    });
+    const olderDeadLetter = stubEvent(
+      "evt_repo_older_dead_letter",
+      "dead_lettered",
+      {
+        repos: ["factory"],
+      },
+    );
+    const requests: Array<string | undefined> = [];
+
+    await withApi(
+      {
+        events: async (status) => {
+          requests.push(status);
+          return {
+            events: status === "dead_lettered" ? [olderDeadLetter] : [newest],
+          };
+        },
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { container, getByRole } = renderEvents({
+          context: { kind: "repo", name: "factory" },
+        });
+
+        await waitFor(() =>
+          expect(
+            container.querySelector('td[title="evt_repo_newest"]'),
+          ).toBeTruthy(),
+        );
+        fireEvent.click(getByRole("tab", { name: /^Dead lettered/i }));
+
+        await waitFor(() =>
+          expect(
+            container.querySelector('td[title="evt_repo_older_dead_letter"]'),
+          ).toBeTruthy(),
+        );
+        expect(requests).toContain("dead_lettered");
+        expect(
+          container.querySelector('td[title="evt_repo_newest"]'),
+        ).toBeNull();
+      },
+    );
+  });
+
   test("repo context renders scope caption while rows are filtered", async () => {
     const matching = stubEvent("evt_repo_match", "admitted", {
       repos: ["factory"],
