@@ -193,8 +193,8 @@ export async function demote(
   const cp = resolveControlPlane({ repoName: repo.name });
   await cp.transition(issue.identifier, "Triage", {
     remove: [AI_AGENT_READY],
+    demotionComment: body,
   });
-  await cp.comment(issue.identifier, body);
 }
 
 export function parseArgs(argv = process.argv.slice(2)) {

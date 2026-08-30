@@ -126,8 +126,15 @@ test("listing and demotion select the control plane configured for the repo", as
       calls.push({ method: "listDispatchable", filters });
       return [{ identifier: "#1555" }];
     },
-    transition: async (...args) => calls.push({ method: "transition", args }),
-    comment: async (...args) => calls.push({ method: "comment", args }),
+    transition: async (...args) => {
+      calls.push({ method: "transition", args });
+      const [identifier, , options] = args;
+      if (options.demotionComment)
+        calls.push({
+          method: "comment",
+          args: [identifier, options.demotionComment],
+        });
+    },
   };
   const resolveControlPlane = (options) => {
     calls.push({ method: "loadControlPlane", options });
@@ -147,8 +154,15 @@ test("listing and demotion select the control plane configured for the repo", as
   });
   expect(calls).toContainEqual({
     method: "transition",
-    args: ["#1555", "Triage", { remove: ["ai:agent-ready"] }],
+    args: [
+      "#1555",
+      "Triage",
+      expect.objectContaining({ remove: ["ai:agent-ready"] }),
+    ],
   });
+  const comments = calls.filter((call) => call.method === "comment");
+  expect(comments).toHaveLength(1);
+  expect(comments[0].args[1]).toContain("Demoted by the `ai:agent-ready`");
 });
 
 test("a malformed registry digest policy is rendered as a guard message", () => {

@@ -33,6 +33,19 @@ function isExpired(proposal, now) {
   return now - Date.parse(proposal.created_at) > proposal.ttl_seconds * 1000;
 }
 
+/** A pin that can be compared. `"unknown"` is the no-registry sentinel, not a version. */
+function isKnownPolicyVersion(value) {
+  return typeof value === "string" && value !== "" && value !== "unknown";
+}
+
+function recordedSpecPinsVersion(spec) {
+  return (
+    spec != null &&
+    (isKnownPolicyVersion(spec.promptVersion) ||
+      isKnownPolicyVersion(spec.policyVersion))
+  );
+}
+
 function withSpec(row) {
   return { ...row, spec: row.spec_json ? JSON.parse(row.spec_json) : null };
 }
@@ -140,9 +153,13 @@ function approveRun(
 
 /**
  * Approve an open 'run' proposal. Within TTL the recorded spec executes
- * as-is only while its registry-version pins still match. After expiry or a
- * stale registry pin, the spec is rebuilt against current state under the
- * same runId: equivalent → approved; different → the stale proposal is
+ * as-is only while its registry-version pins still match a *known* caller
+ * `policyVersion`. `"unknown"` (the parameter default) is treated as a
+ * mismatch when the recorded spec pins a version, so the spec is replanned
+ * rather than approved as-is. Specs that predate version pins remain
+ * approvable without a known policyVersion. After expiry or a stale
+ * registry pin, the spec is rebuilt against current state under the same
+ * runId: equivalent → approved; different → the stale proposal is
  * superseded, the still-PROPOSED run gets the fresh spec, and a new open
  * proposal is returned instead (§12).
  *
@@ -193,10 +210,13 @@ export function approveProposal(
     const recordedSpec = proposal.spec_json
       ? JSON.parse(proposal.spec_json)
       : null;
+    // Fail-closed: an unknown/omitted caller version is *not equal* to a
+    // recorded pin. Skipping the comparison here used to approve the
+    // recorded spec as-is whenever a caller forwarded the default.
     const registryVersionMismatch =
-      recordedSpec !== null &&
-      policyVersion !== "unknown" &&
-      (recordedSpec.promptVersion !== policyVersion ||
+      recordedSpecPinsVersion(recordedSpec) &&
+      (!isKnownPolicyVersion(policyVersion) ||
+        recordedSpec.promptVersion !== policyVersion ||
         recordedSpec.policyVersion !== policyVersion);
     let registryReloadMismatch = false;
     if (recordedSpec?.defHash) {
@@ -259,8 +279,12 @@ export function approveProposal(
         }
       : built;
     const freshHash = hashJson(fresh);
+    // Refresh-and-approve only when the caller named a real current version.
+    // Replanning with `"unknown"` must not stamp that sentinel onto the
+    // recorded spec and queue it.
     const versionRefreshMatches =
       registryVersionMismatch &&
+      isKnownPolicyVersion(policyVersion) &&
       !registryReloadMismatch &&
       matchesAfterRegistryVersionRefresh(storedSpec, fresh);
     if (

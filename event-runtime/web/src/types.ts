@@ -280,7 +280,19 @@ export interface MetricsBreakdownView {
   by: string;
   metric: string;
   limit: number | null;
-  rows: Array<{ key: string; value: number }>;
+  rows: Array<{ key: string; value: number; at?: string }>;
+}
+
+/** Per-agent usage values joined from metrics breakdowns by the registry view. */
+export interface RegistryAgentUsage {
+  runs: number | null;
+  failures: number | null;
+  refusals: number | null;
+  timeouts: number | null;
+  p95_execution: number | null;
+  cost: number | null;
+  tokens: number | null;
+  last_run_at: string | null;
 }
 
 /** One append-only journal row (GET /journal) — the runtime's activity feed. */

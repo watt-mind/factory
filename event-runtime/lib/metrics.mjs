@@ -35,9 +35,12 @@ export const VALID_BREAKDOWN_DIMENSIONS = Object.freeze([
 export const VALID_BREAKDOWN_METRICS = Object.freeze([
   "runs",
   "failures",
+  "refusals",
+  "timeouts",
   "cost",
   "tokens",
   "p95_execution",
+  "last_run_at",
 ]);
 
 export const MAX_METRIC_BUCKETS = 500;
@@ -431,17 +434,33 @@ function factKeys(row, dimension) {
 }
 
 function breakdownFacts(db, metric, range) {
-  if (metric === "runs" || metric === "failures") {
-    const failures =
-      metric === "failures"
-        ? "AND r.state IN ('FAILED', 'REFUSED', 'TIMED_OUT', 'CANCELLED')"
-        : "";
-    const time = metric === "failures" ? "r.updated_at" : "r.created_at";
+  if (
+    metric === "runs" ||
+    metric === "failures" ||
+    metric === "refusals" ||
+    metric === "timeouts"
+  ) {
+    const states = {
+      failures: "'FAILED', 'REFUSED', 'TIMED_OUT', 'CANCELLED'",
+      refusals: "'REFUSED'",
+      timeouts: "'TIMED_OUT'",
+    };
+    const state = states[metric];
+    const time = state ? "r.updated_at" : "r.created_at";
     return db
       .query(
         `${RUN_FACTS_SELECT}, 1 AS value
        FROM runs r ${RUN_FACTS_JOINS}
-       WHERE ${time} >= ? AND ${time} < ? ${failures}`,
+       WHERE ${time} >= ? AND ${time} < ? ${state ? `AND r.state IN (${state})` : ""}`,
+      )
+      .all(range.startIso, range.endIso);
+  }
+  if (metric === "last_run_at") {
+    return db
+      .query(
+        `${RUN_FACTS_SELECT}, r.created_at AS last_run_at
+       FROM runs r ${RUN_FACTS_JOINS}
+       WHERE r.created_at >= ? AND r.created_at < ?`,
       )
       .all(range.startIso, range.endIso);
   }
@@ -604,7 +623,11 @@ export function modelTierEconomicsView(
     .sort((a, b) => a.key.localeCompare(b.key));
 }
 
-/** Top-N operational dimensions used by GET /metrics/breakdown. */
+/**
+ * Top-N operational dimensions used by GET /metrics/breakdown. `last_run_at`
+ * is the only timestamp metric: its row value is epoch milliseconds, with the
+ * corresponding ISO-8601 timestamp exposed as `at`.
+ */
 export function metricsBreakdownView(
   db,
   { now, window = "24h", by, metric, limit } = {},
@@ -658,12 +681,19 @@ export function metricsBreakdownView(
         const samples = grouped.get(key) ?? [];
         samples.push(durationMs);
         grouped.set(key, samples);
+      } else if (metric === "last_run_at") {
+        const value = Date.parse(fact.last_run_at);
+        if (!Number.isFinite(value)) continue;
+        const current = grouped.get(key);
+        if (!current || value > current.value)
+          grouped.set(key, { value, at: fact.last_run_at });
       } else {
         grouped.set(key, (grouped.get(key) ?? 0) + Number(fact.value ?? 0));
       }
     }
   }
   let rows = [...grouped.entries()].map(([key, value]) => {
+    if (metric === "last_run_at") return { key, ...value };
     if (metric !== "p95_execution") return { key, value };
     value.sort((a, b) => a - b);
     return { key, value: percentile(value, 0.95) };
