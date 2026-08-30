@@ -148,7 +148,24 @@ describe("dueSlots — catch-up policy (§4)", () => {
       cadenceSeconds: hour,
       catchUp: "last",
     });
-    expect(outcome.slots).toEqual(["2026-08-14T04:00:00.000Z"]);
+    expect(outcome).toEqual({
+      slots: ["2026-08-14T03:00:00.000Z"],
+      skipped: 4,
+    });
+  });
+
+  test("last: with no missed slots, fires the current slot like none", () => {
+    expect(
+      dueSlots({
+        lastSlot: "2026-08-14T03:00:00.000Z",
+        nowMs: now,
+        cadenceSeconds: hour,
+        catchUp: "last",
+      }),
+    ).toEqual({
+      slots: ["2026-08-14T04:00:00.000Z"],
+      skipped: 0,
+    });
   });
 
   test("all: every missed slot fires, in order, nothing skipped", () => {
@@ -243,6 +260,32 @@ describe("emitDueTicks (§3)", () => {
       tickEventId("reaper", "2026-08-14T04:00:00.000Z"),
     );
     expect(envelope.source).toBe("schedule");
+  });
+
+  test("a last catch-up tick binds its payload slot to its event ID and auto-approves", () => {
+    const d = db();
+    const registry = withLoop({ catchUp: "last", approval: "auto" });
+    emitDueTicks(d, registry, { now: at("2026-08-13T22:00:00Z") });
+    emitDueTicks(d, registry, { now: at("2026-08-14T04:00:00Z") });
+
+    const row = d
+      .query(
+        `SELECT event_id, envelope_json FROM events ORDER BY event_id DESC LIMIT 1`,
+      )
+      .get();
+    const envelope = JSON.parse(row.envelope_json);
+    expect(envelope.payload).toMatchObject({
+      loop: "reaper",
+      slot: "2026-08-14T03:00:00.000Z",
+      skippedSlots: 4,
+    });
+    expect(row.event_id).toBe(tickEventId("reaper", envelope.payload.slot));
+
+    planAdmittedEvents(d, registry, { policyVersion: PV });
+    expect(
+      autoApproveScheduled(d, registry, approveProposal, { policyVersion: PV })
+        .approved,
+    ).toHaveLength(2);
   });
 
   test("a static payload rides on the tick and the planner proposes the routed run (WM-72)", () => {
