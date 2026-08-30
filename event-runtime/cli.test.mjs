@@ -4,7 +4,12 @@ import { events } from "./cli/events.mjs";
 import { inbox as legacyInbox } from "./cli/inbox.mjs";
 import { renderInspect } from "./cli/inspect.mjs";
 import { ps } from "./cli/ps.mjs";
-import { runs, runsCommand } from "./cli/runs.mjs";
+import {
+  RUN_LIST_MAX_PAGES,
+  dispatchOnlyPredicate,
+  runs,
+  runsCommand,
+} from "./cli/runs.mjs";
 import { CLI, freePort, runCli, throwawayRunDir } from "./cli/test-helpers.mjs";
 import { apiClient } from "./lib/client.mjs";
 import { tmpDir } from "./test-support/tmp.mjs?file=event-runtime-cli-test-mjs";
@@ -247,7 +252,9 @@ describe("cli routing", () => {
     } finally {
       console.log = log;
     }
-    expect(calls).toEqual([{ state: "RUNNING", agent: "dispatch@1" }]);
+    expect(calls).toEqual([
+      { state: "RUNNING", agent: "dispatch@1", limit: 200 },
+    ]);
     expect(lines).toEqual(["no runs with state RUNNING"]);
   });
 
@@ -311,8 +318,8 @@ describe("cli routing", () => {
       console.log = log;
     }
     expect(calls).toEqual([
-      { state: "RUNNING" },
-      { state: "RUNNING", before: "cursor-1" },
+      { state: "RUNNING", limit: 200 },
+      { state: "RUNNING", limit: 200, before: "cursor-1" },
     ]);
     expect(lines).toEqual(["2"]);
   });
@@ -340,8 +347,123 @@ describe("cli routing", () => {
     } finally {
       console.log = log;
     }
-    expect(calls).toEqual([{ state: "RUNNING" }]);
+    expect(calls).toEqual([{ state: "RUNNING", limit: 200 }]);
     expect(lines).toEqual(["0"]);
+  });
+
+  test("dispatch-only keeps dispatch agents by id, prefix, or contract and drops unregistered ones", () => {
+    const keep = dispatchOnlyPredicate([
+      { id: "dispatch", ref: "dispatch@1" },
+      { id: "dispatch-hotfix", ref: "dispatch-hotfix@2" },
+      {
+        id: "lander",
+        ref: "lander@1",
+        outputContract: "factory.dispatch-result/v1",
+      },
+      { id: "merge-fix", ref: "merge-fix@1" },
+      { id: "merge-review", ref: "merge-review@1" },
+      { id: "work-scan", ref: "work-scan@1" },
+    ]);
+    const kept = [
+      "dispatch@1",
+      "dispatch-hotfix@2",
+      "lander@1",
+      "worker@1",
+      "dispatch@7",
+    ];
+    const dropped = [
+      "merge-fix@1",
+      "merge-review@1",
+      "work-scan@1",
+      "ci-doctor@1",
+      "retired-agent@1",
+    ];
+    expect(kept.map((agent) => keep({ agent }))).toEqual(kept.map(() => true));
+    expect(dropped.map((agent) => keep({ agent }))).toEqual(
+      dropped.map(() => false),
+    );
+  });
+
+  function captureConsole() {
+    const out = [];
+    const err = [];
+    const log = console.log;
+    const error = console.error;
+    console.log = (...values) => out.push(values.join(" "));
+    console.error = (...values) => err.push(values.join(" "));
+    return {
+      out,
+      err,
+      restore: () => ((console.log = log), (console.error = error)),
+    };
+  }
+
+  test("runs clamps the page size to 200 and stops fetching once --limit is reached", async () => {
+    const calls = [];
+    const client = {
+      runs: async (options) => {
+        calls.push(options);
+        return {
+          runs: [{ runId: `run-${calls.length}` }],
+          nextBefore: `cursor-${calls.length}`,
+        };
+      },
+    };
+    const c = captureConsole();
+    try {
+      await runs(client, "running", { limit: 2 });
+    } finally {
+      c.restore();
+    }
+    expect(calls.map((o) => o.limit)).toEqual([2, 2]);
+    expect(c.out.filter((l) => l.startsWith("run-"))).toHaveLength(2);
+    expect(c.err).toEqual(["... 0+ more rows (truncated)"]);
+
+    calls.length = 0;
+    const big = captureConsole();
+    try {
+      await runs(client, "running", { limit: 5000, count: true });
+    } finally {
+      big.restore();
+    }
+    expect(calls[0].limit).toBe(200);
+    expect(calls).toHaveLength(RUN_LIST_MAX_PAGES);
+  });
+
+  test("runs caps the page walk and breaks on a repeated cursor", async () => {
+    let calls = 0;
+    const endless = {
+      runs: async () => {
+        calls += 1;
+        return { runs: [{ runId: `run-${calls}` }], nextBefore: `c-${calls}` };
+      },
+    };
+    const capped = captureConsole();
+    try {
+      await runs(endless, "running", { count: true });
+    } finally {
+      capped.restore();
+    }
+    expect(calls).toBe(RUN_LIST_MAX_PAGES);
+    expect(capped.out).toEqual([String(RUN_LIST_MAX_PAGES)]);
+    expect(capped.err[0]).toContain("page cap");
+
+    calls = 0;
+    const looping = {
+      runs: async () => {
+        calls += 1;
+        return { runs: [{ runId: `run-${calls}` }], nextBefore: "same" };
+      },
+    };
+    const loop = captureConsole();
+    try {
+      await runs(looping, "running", {});
+    } finally {
+      loop.restore();
+    }
+    expect(calls).toBe(2);
+    expect(loop.err[0]).toContain("repeated");
+    expect(loop.err.at(-1)).toBe("... 0+ more rows (truncated)");
   });
 
   test("client.runs accepts options while retaining the state-string form", async () => {

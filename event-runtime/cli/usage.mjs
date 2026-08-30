@@ -41,7 +41,14 @@ usage: bun event-runtime/cli.mjs <command>
   events [status]                admitted events, optionally filtered by status
   ps [state]                     running event processes/runs (default: RUNNING or LEASED)
   runs [state] [--agent ID] [--exclude-agent ID] [--dispatch-only]
-       [--count] [--limit N]     runs; filters, count-only output, and pagination
+       [--count] [--limit N]     runs; --agent is forwarded to the API, --exclude-agent
+                                 (repeatable) filters client-side, --dispatch-only keeps
+                                 only dispatch agents (id dispatch/worker/dispatch-*, or
+                                 output contract factory.dispatch-result/v1) and drops
+                                 merge-*/ci-*/*-scan and unregistered agents, --count
+                                 prints the integer only; pages of 200 are followed until
+                                 exhausted, --limit N, or 50 pages, then
+                                 "... N more rows (truncated)" goes to stderr
   proposals                      open proposals with TTL age
   inbox                          open items waiting on the human
   agents                         registered agent definitions and event routing
