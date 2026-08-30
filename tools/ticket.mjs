@@ -998,15 +998,20 @@ const VERBS = {
   async queue() {
     let team = flag("team") ?? teamOf(positional[0] ?? "");
     let project = flag("project") ?? null;
+    const repoFlag = flag("repo");
+    // Validate an explicit repository even when --team also supplied one. A
+    // typo is an operator error, not a reason to discard the repo scoping and
+    // fall through to the generic queue usage message.
+    const repos = repoFlag ? getRepos() : null;
+    const repoName = repoFlag ? resolveRepoName({ repos, repoFlag }) : null;
     if (!team) {
       // Repo-scoped read (work-scan calls `queue --repo <name>`): derive the
       // team from the repo's config. GitHub-plane repos have no meaningful
       // team of their own — listDispatchable maps it back to the repo — but
       // the verb still needs *a* team, and requiring the caller to pass it for
       // a --repo read is exactly the mismatch that made work-scan refuse.
-      const repoName = flag("repo");
       if (repoName) {
-        const cfg = getRepos().get(repoName);
+        const cfg = repos.get(repoName);
         team = cfg?.team ?? null;
         // ...and its project. Several repos share one Linear team (CLNT covers
         // BJ29 Coaching, CashMap, RiccoMoto, ...); without the project filter
