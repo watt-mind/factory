@@ -918,7 +918,8 @@ export function liveIdleWatchdogDeps({
   stateFile = path.join(STATE_DIR, "idle-watchdog.json"),
   logFile = path.join(homedir(), ".factory", "logs", "idle-watchdog.log"),
 } = {}) {
-  const api = (pathname, opts) => controlApi(pathname, { host, port, ...opts });
+  const api = (pathname, opts) =>
+    controlApi(pathname, { host, port, timeoutMs: 8000, ...opts });
   return {
     repo,
     serveOk: async () => {

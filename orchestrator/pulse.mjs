@@ -181,15 +181,15 @@ export async function gatherPulse({
       pulse.runs.sandboxRefusals = sandboxRefusals;
     } catch (err) {
       const code = controlApiFailureCode(err);
-      // Auth and control locks are not an idle factory. Surface them to the
-      // operator instead of leaving the default empty workers/runs values.
-      if (code === "API_UNAUTHORIZED" || code === "API_LOCKED") {
-        pulse.stack.api = {
-          ok: false,
-          code,
-          error: `${code}: ${err.message}`,
-        };
-      }
+      // A failed protected read (auth, control lock, timeout, 5xx) is not an
+      // idle factory. Surface it to the operator instead of leaving the
+      // default empty workers/runs values, keeping what /health told us.
+      pulse.stack.api = {
+        ...pulse.stack.api,
+        ok: false,
+        code,
+        error: `${code}: ${err.message}`,
+      };
     }
   }
 
