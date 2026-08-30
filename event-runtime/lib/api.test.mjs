@@ -4,6 +4,7 @@ import {
 } from "../test-support/tmp.mjs?file=event-runtime-lib-api-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
+  CONTROL_TOKEN,
   GH_SECRET,
   PV,
   SECRET,
@@ -382,7 +383,7 @@ describe("artifact-view sidecar on GET /agents (WM-454)", () => {
         state: () => ({ loadedAt, stamp: "files:test", lastReloadError: null }),
       },
     });
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       const before = await client.agents();
       const agents = new Map(registry.agents);
