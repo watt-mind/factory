@@ -65,6 +65,7 @@ import { traceRecorder } from "./trace.mjs";
 import {
   ContractViolation,
   composeHandoffVerification,
+  HANDOFF_DEPENDENCIES_MISSING,
   HANDOFF_REASON_CODES,
   HANDOFF_SANDBOX_UNAVAILABLE,
   normalizeFailureOutput,
@@ -911,11 +912,20 @@ const ENVIRONMENT_FAILURES = new Set([
   // agent's work is implicated, so this must never burn an agent attempt or
   // draft the PR — it is the worker host that needs attention.
   HANDOFF_SANDBOX_UNAVAILABLE,
+  // The offline sandbox cannot restore packages; this is a host fault rather
+  // than evidence that the agent's branch is red.
+  HANDOFF_DEPENDENCIES_MISSING,
 ]);
+const isAgentHandoffFailure = (reasonCode) =>
+  HANDOFF_REASON_CODES.has(reasonCode) &&
+  reasonCode !== HANDOFF_DEPENDENCIES_MISSING;
 // The handoff gate (WM-718) catching the agent's own red is an agent error:
 // bounded by maxAttempts like any contract violation, never an environment
 // retry and never fatal — the ticket is already back in Todo + agent-ready.
-const AGENT_FAILURES = new Set(["contract_violation", ...HANDOFF_REASON_CODES]);
+const AGENT_FAILURES = new Set([
+  "contract_violation",
+  ...[...HANDOFF_REASON_CODES].filter(isAgentHandoffFailure),
+]);
 const FATAL_FAILURES = new Set([
   "cli_not_found",
   "filesystem_confinement_unavailable",
@@ -953,7 +963,7 @@ export function tierEscalationEligibility(spec, reasonCode) {
   // (verify.mjs HANDOFF_REASON_CODES). Match the emitted codes only — a
   // reason code no producer writes is dead weight that reads as coverage.
   const eligibleReason =
-    HANDOFF_REASON_CODES.has(reasonCode) ||
+    isAgentHandoffFailure(reasonCode) ||
     reasonCode === "contract_violation" ||
     String(reasonCode).startsWith("agent_exit_");
   const eligible = Boolean(
@@ -4407,6 +4417,7 @@ export async function executeClaimed(
       const reasonCode =
         activeError.reasonCode === "baseline_red" ||
         activeError.reasonCode === HANDOFF_SANDBOX_UNAVAILABLE ||
+        activeError.reasonCode === HANDOFF_DEPENDENCIES_MISSING ||
         HANDOFF_REASON_CODES.has(activeError.reasonCode)
           ? activeError.reasonCode
           : "contract_violation";
@@ -4427,7 +4438,7 @@ export async function executeClaimed(
       // WM-718: the PR is the agent's, already opened; the structural hold is
       // to draft it and quote the observed failure where the reviewer looks.
       if (
-        HANDOFF_REASON_CODES.has(reasonCode) &&
+        isAgentHandoffFailure(reasonCode) &&
         handoff?.prNumber &&
         mayMutateClaimedTicket()
       ) {
@@ -4444,7 +4455,7 @@ export async function executeClaimed(
         }
       }
       if (mayMutateClaimedTicket() && !escalating) {
-        if (HANDOFF_REASON_CODES.has(reasonCode)) {
+        if (isAgentHandoffFailure(reasonCode)) {
           try {
             const returned = returnHandoffTicketFn({
               repo: repoName,

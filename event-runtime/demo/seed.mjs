@@ -31,7 +31,8 @@
  *   Open watched proposals:
  *     - direct operator approvable (`run`)
  *     - merge-apply and ship-apply (human watched)
- *     - human_needed (empty repos fails schema minItems)
+ *     - human_needed (empty repos fails schema minItems), surfaced in the
+ *       Inbox as a `BLOCKED` item with the `parked` decision request
  *     - TTL-expired proposal
  *
  *   Admitted & anomaly events:

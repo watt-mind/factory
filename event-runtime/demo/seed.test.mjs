@@ -323,6 +323,15 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
         env: suiteEnv(home),
       });
       await expectSuccess("initial verify", verifyRes, port);
+      expect(verifyRes.stdout).toContain(
+        "GET /inbox?status=open returns ≥1 open item",
+      );
+      expect(verifyRes.stdout).toContain(
+        "BLOCKED parked human_needed Inbox item has requeue/dismiss decision",
+      );
+      expect(verifyRes.stdout).toContain(
+        "TTL-expired Inbox item offers approve/reject decision",
+      );
     },
     loadAdjustedTimeout(30_000),
   );
