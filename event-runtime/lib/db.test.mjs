@@ -25,6 +25,7 @@ import {
   recordRunUsage,
   retryBusy,
   runUsage,
+  runSubject,
   setSchemaVersion,
   txImmediate,
   usageSpend,
@@ -391,7 +392,7 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     db.close();
   });
 
-  test("runs subject migration backfills populated v18 rows and indexes the column", () => {
+  test("runs subject migration retains ticket identifiers and indexes the column", () => {
     const db = new Database(freshFile());
     migrateDb(db, { targetVersion: 18 });
     db.query(
@@ -410,7 +411,17 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     ).run(
       "with-subject",
       "with-subject-key",
-      JSON.stringify({ subject: "ops-42" }),
+      JSON.stringify({ subject: "watt-mind/factory#873" }),
+      "2026-08-30T00:00:00.000Z",
+      "2026-08-30T00:00:00.000Z",
+    );
+    db.query(
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+       VALUES (?, ?, ?, 'hash', 'COMPLETED', 1, ?, ?)`,
+    ).run(
+      "with-ambiguous-subject",
+      "with-ambiguous-subject-key",
+      JSON.stringify({ subject: "#865" }),
       "2026-08-30T00:00:00.000Z",
       "2026-08-30T00:00:00.000Z",
     );
@@ -431,7 +442,8 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     expect(
       db.query(`SELECT run_id, subject FROM runs ORDER BY run_id`).all(),
     ).toEqual([
-      { run_id: "with-subject", subject: "OPS-42" },
+      { run_id: "with-ambiguous-subject", subject: null },
+      { run_id: "with-subject", subject: "watt-mind/factory#873" },
       { run_id: "with-ticket", subject: "WM-1503" },
       { run_id: "without-ticket", subject: null },
     ]);
@@ -443,6 +455,14 @@ describe("schema migration runner and assertions (OPS-415)", () => {
         .get()?.sql,
     ).toContain("runs (subject)");
     db.close();
+  });
+
+  test("runSubject normalizes Linear IDs and retains GitHub refs verbatim", () => {
+    expect(runSubject({ input: { ticket: " wm-1503 " } })).toBe("WM-1503");
+    expect(runSubject({ subject: "watt-mind/factory#873" })).toBe(
+      "watt-mind/factory#873",
+    );
+    expect(runSubject({ subject: "873" })).toBeNull();
   });
 
   test("hot proposal, inbox and runs subject lookup indexes upgrade an existing database", () => {
