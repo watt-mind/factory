@@ -376,6 +376,64 @@ describe("Proposals multi-row selection & bulk actions (WM-71)", () => {
     expect(r.queryByRole("toolbar", { name: /bulk actions/i })).toBeNull();
   });
 
+  test("bulk reject only acts on selections visible in the narrowed repo context", async () => {
+    const inScope = stubProposal("prop_in_scope", "open", {
+      agent: "repo-a-agent",
+      repos: ["repo-a"],
+    });
+    const hidden = stubProposal("prop_hidden", "open", {
+      agent: "repo-b-agent",
+      repos: ["repo-b"],
+    });
+    api.proposals = async () => ({ proposals: [inScope, hidden] });
+
+    const rejectedIds: string[] = [];
+    api.reject = async (id: string) => {
+      rejectedIds.push(id);
+      return { rejected: true };
+    };
+
+    const r = renderProposals();
+    await waitFor(() =>
+      expect(r.getByLabelText("Select all proposals")).toBeTruthy(),
+    );
+    fireEvent.click(r.getByLabelText("Select all proposals"));
+    expect(r.getByText("Reject selected (2)")).toBeTruthy();
+
+    r.rerender(
+      <Proposals
+        connected={true}
+        healthPending={false}
+        context={{ kind: "repo", name: "repo-a" }}
+        onRunQueued={noop}
+        focusProposalId={null}
+        onSelectProposal={noop}
+        focusExpired={false}
+        onFocusExpiredConsumed={noop}
+        onJumpAgent={noop}
+        onJumpEvent={noop}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(r.getByText("Reject selected (1)")).toBeTruthy(),
+    );
+    fireEvent.click(r.getByText("Reject selected (1)"));
+
+    const dialog = r.getByRole("dialog");
+    expect(dialog.textContent).toContain("repo-a-agent");
+    expect(dialog.textContent).toContain("prop_in_scope");
+    expect(dialog.textContent).not.toContain("repo-b-agent");
+    expect(dialog.textContent).not.toContain("prop_hidden");
+
+    fireEvent.click(r.getByRole("button", { name: "Scope too wide" }));
+    await act(async () => {
+      fireEvent.click(r.getByRole("button", { name: "Reject 1 proposals" }));
+    });
+
+    expect(rejectedIds).toEqual(["prop_in_scope"]);
+  });
+
   test("Space and Shift+Space toggle the highlighted proposal checkbox", async () => {
     const p1 = stubProposal("prop_keyboard", "open", {
       agent: "keyboard-agent",
