@@ -48,6 +48,7 @@ export const LEARNINGS_MAX = 5;
 export const BODY_MAX_BYTES = 4 * 1024;
 export const EVIDENCE_MAX_BYTES = 1024;
 export const LIST_MEMOS_DEFAULT_MAX = 20;
+export const MEMO_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** Kind-default expiry; a binding.expiresAt always wins (§6.2). */
 export const KIND_DEFAULT_TTL_MS = Object.freeze({
@@ -551,24 +552,61 @@ function usefulCounts(db, hashes) {
   return counts;
 }
 
-function bindingHolds(row, { descriptionHash, headSha } = {}) {
-  if (
-    row.description_hash &&
-    descriptionHash !== undefined &&
-    descriptionHash !== null &&
-    row.description_hash !== descriptionHash
-  ) {
-    return { holds: false, reason: "description_hash_mismatch" };
-  }
-  if (
-    row.head_sha &&
-    headSha !== undefined &&
-    headSha !== null &&
-    row.head_sha !== headSha
-  ) {
-    return { holds: false, reason: "head_sha_mismatch" };
-  }
-  return { holds: true, reason: null };
+/** Upper bound on memo rows one `sweepMemos` pass will delete. */
+export const MEMO_SWEEP_BATCH = 500;
+
+/**
+ * Remove memo rows whose terminal state has outlived the audit retention
+ * window. Supersession has no timestamp of its own, so the replacement memo's
+ * creation time is the point at which the predecessor became superseded; when
+ * the replacement is already gone (swept by an earlier pass) the predecessor's
+ * own creation time is the fallback, so a dangling `superseded_by` never pins
+ * a row forever. Each pass is bounded by `limit` so a large backlog cannot
+ * stall the serve tick; the next hourly pass drains the remainder.
+ */
+export function sweepMemos(
+  db,
+  {
+    now = Date.now(),
+    retentionMs = MEMO_RETENTION_MS,
+    limit = MEMO_SWEEP_BATCH,
+  } = {},
+) {
+  const cutoff = now - retentionMs;
+  const batch = Number.isInteger(limit) && limit > 0 ? limit : MEMO_SWEEP_BATCH;
+  const doomed = db
+    .query(
+      `SELECT memo.sha256 FROM memos AS memo
+       LEFT JOIN memos AS replacement ON replacement.sha256 = memo.superseded_by
+       WHERE (memo.expires_at IS NOT NULL AND memo.expires_at <= ?)
+          OR (memo.retired_at IS NOT NULL AND memo.retired_at <= ?)
+          OR (memo.superseded_by IS NOT NULL
+              AND COALESCE(replacement.created_at, memo.created_at) <= ?)
+       ORDER BY memo.created_at ASC, memo.sha256 ASC
+       LIMIT ?`,
+    )
+    .all(cutoff, cutoff, cutoff, batch)
+    .map((row) => row.sha256);
+  if (doomed.length === 0) return { deleted: 0, usesDeleted: 0 };
+
+  const placeholders = doomed.map(() => "?").join(", ");
+  const result = db.transaction(() => {
+    const usesDeleted = Number(
+      db
+        .query(
+          `SELECT COUNT(*) AS n FROM memo_uses WHERE sha256 IN (${placeholders})`,
+        )
+        .get(...doomed)?.n ?? 0,
+    );
+    db.query(`DELETE FROM memo_uses WHERE sha256 IN (${placeholders})`).run(
+      ...doomed,
+    );
+    db.query(`DELETE FROM memos WHERE sha256 IN (${placeholders})`).run(
+      ...doomed,
+    );
+    return { deleted: doomed.length, usesDeleted };
+  })();
+  return result;
 }
 
 /**
@@ -590,51 +628,64 @@ export function listMemos(
 ) {
   const normalized = normalizeSubject(subject);
   const params = [normalized.type, normalized.id];
-  let sql = `SELECT * FROM memos WHERE subject_type = ? AND subject_id = ?`;
+  let where = `subject_type = ? AND subject_id = ?`;
   if (Array.isArray(kinds) && kinds.length > 0) {
-    sql += ` AND kind IN (${kinds.map(() => "?").join(", ")})`;
+    where += ` AND kind IN (${kinds.map(() => "?").join(", ")})`;
     params.push(...kinds);
   }
-  const rows = db.query(sql).all(...params);
+
+  if (live) {
+    const liveWhere = `${where}
+      AND superseded_by IS NULL
+      AND retired_at IS NULL
+      AND (expires_at IS NULL OR expires_at > ?)`;
+    const liveParams = [...params, now];
+    // Match the prior folding behavior: bindings are observed only for rows
+    // that are otherwise live, and description hash wins when both mismatch.
+    if (descriptionHash !== undefined && descriptionHash !== null) {
+      db.query(
+        `UPDATE memos SET retired_at = ?, retired_reason = 'description_hash_mismatch'
+         WHERE ${liveWhere} AND description_hash IS NOT NULL AND description_hash != ?`,
+      ).run(now, ...liveParams, descriptionHash);
+    }
+    if (headSha !== undefined && headSha !== null) {
+      db.query(
+        `UPDATE memos SET retired_at = ?, retired_reason = 'head_sha_mismatch'
+         WHERE ${liveWhere} AND head_sha IS NOT NULL AND head_sha != ?`,
+      ).run(now, ...liveParams, headSha);
+    }
+
+    const limit =
+      Number.isInteger(max) && max > 0 ? max : LIST_MEMOS_DEFAULT_MAX;
+    const rows = db
+      .query(
+        `SELECT memos.*,
+                SUM(CASE WHEN memo_uses.verdict = 'useful' THEN 1 ELSE 0 END) AS useful_count,
+                SUM(CASE WHEN memo_uses.verdict = 'wrong' THEN 1 ELSE 0 END) AS wrong_count
+         FROM memos LEFT JOIN memo_uses ON memo_uses.sha256 = memos.sha256
+         WHERE ${liveWhere}
+         GROUP BY memos.sha256
+         ORDER BY useful_count DESC, memos.created_at DESC, memos.sha256 DESC
+         LIMIT ?`,
+      )
+      .all(...liveParams, limit);
+    return rows.map((row) =>
+      foldMemo(row, {
+        useful: Number(row.useful_count),
+        wrong: Number(row.wrong_count),
+      }),
+    );
+  }
+
+  const rows = db.query(`SELECT * FROM memos WHERE ${where}`).all(...params);
   const counts = usefulCounts(
     db,
     rows.map((row) => row.sha256),
   );
   const folded = [];
   for (const row of rows) {
-    if (live) {
-      if (row.superseded_by) continue;
-      if (row.retired_at) continue;
-      if (row.expires_at !== null && row.expires_at <= now) continue;
-      const binding = bindingHolds(row, { descriptionHash, headSha });
-      if (!binding.holds) {
-        db.query(
-          `UPDATE memos SET retired_at = ?, retired_reason = ?
-           WHERE sha256 = ? AND retired_at IS NULL`,
-        ).run(now, binding.reason, row.sha256);
-        continue;
-      }
-    }
     const tally = counts.get(row.sha256) ?? { useful: 0, wrong: 0 };
-    folded.push({
-      sha256: row.sha256,
-      subject: { type: row.subject_type, id: row.subject_id },
-      kind: row.kind,
-      runId: row.run_id,
-      inboxItemId: row.inbox_item_id,
-      createdAt: new Date(row.created_at).toISOString(),
-      createdAtMs: row.created_at,
-      expiresAt:
-        row.expires_at === null ? null : new Date(row.expires_at).toISOString(),
-      descriptionHash: row.description_hash,
-      headSha: row.head_sha,
-      supersededBy: row.superseded_by,
-      retiredAt:
-        row.retired_at === null ? null : new Date(row.retired_at).toISOString(),
-      retiredReason: row.retired_reason,
-      usefulCount: tally.useful,
-      wrongCount: tally.wrong,
-    });
+    folded.push(foldMemo(row, tally));
   }
   folded.sort((a, b) => {
     if (b.usefulCount !== a.usefulCount) return b.usefulCount - a.usefulCount;
@@ -642,6 +693,28 @@ export function listMemos(
   });
   const limit = Number.isInteger(max) && max > 0 ? max : LIST_MEMOS_DEFAULT_MAX;
   return folded.slice(0, limit);
+}
+
+function foldMemo(row, tally) {
+  return {
+    sha256: row.sha256,
+    subject: { type: row.subject_type, id: row.subject_id },
+    kind: row.kind,
+    runId: row.run_id,
+    inboxItemId: row.inbox_item_id,
+    createdAt: new Date(row.created_at).toISOString(),
+    createdAtMs: row.created_at,
+    expiresAt:
+      row.expires_at === null ? null : new Date(row.expires_at).toISOString(),
+    descriptionHash: row.description_hash,
+    headSha: row.head_sha,
+    supersededBy: row.superseded_by,
+    retiredAt:
+      row.retired_at === null ? null : new Date(row.retired_at).toISOString(),
+    retiredReason: row.retired_reason,
+    usefulCount: tally.useful,
+    wrongCount: tally.wrong,
+  };
 }
 
 function learningErrors(entry, index) {

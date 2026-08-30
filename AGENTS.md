@@ -16,7 +16,9 @@
 
 Non-negotiable for every agent in this repo, in any harness. Full protocol: `$FACTORY_ROOT/docs/protocol.md`. If that path doesn't exist where you're running (a cloud sandbox, someone else's machine), this block is the whole contract — follow it as written and don't infer the rest.
 
-**Work comes from Linear, and only when it's ready.** A ticket is dispatchable only if it is `Todo` + `ai:agent-ready` + unassigned. `Triage` and `Backlog` are not queues to pull from.
+**Event-runtime code follows the documented house conventions.** For module shape, dependency injection, adapter contracts, fail-closed boundaries, and tests, read [`docs/event-runtime-conventions.md`](https://github.com/watt-mind/factory/blob/develop/docs/event-runtime-conventions.md) before changing `event-runtime/`.
+
+**Work comes from the control plane, and only when it's ready.** A ticket is dispatchable only if it is `Todo` + `ai:agent-ready` + unassigned. `Triage` and `Backlog` are not queues to pull from.
 
 **An ad-hoc request gets a ticket too — file it, don't wait to be asked.** A request typed into a chat session is not exempt from the control plane; if it isn't tracked, it is invisible to every other agent and to tomorrow. **The trip wire is your first file edit:** before it, either find the issue that already covers this or create one, and say in one line which it is ("Tracking as OPS-91"). Commits still carry their `(ISSUE-ID)`. Skip the ticket only for ordinary questions, read-only lookups with no actionable finding, and inconsequential edits — and the human can always say "no ticket", which settles it. Sessions drift: one that began as a question and turned into a change trips the wire at that moment, not at the end.
 
@@ -36,7 +38,7 @@ Non-negotiable for every agent in this repo, in any harness. Full protocol: `$FA
 - Restore working state: `git checkout HEAD -- <path>`
 - Save work in progress: save a patch via `git diff > /tmp/<ISSUE-ID>.patch` (restore with `git apply /tmp/<ISSUE-ID>.patch`) or create a temporary WIP commit on the branch (`git commit -m "wip"`, undo later with `git reset HEAD~1`).
 
-**Stay inside `Owned Paths`.** That glob set is what makes parallel work safe; the dispatcher refuses to run two tickets whose sets intersect. Work discovered outside it becomes a new `Triage` issue — it never expands the current ticket. Write the section as **one path or glob per bullet** (`- event-runtime/lib/foo.mjs`); the planner's parser (`orchestrator/owned-paths.mjs`) keeps only bullets that look like a path and contain no spaces, so a comma-separated list on one bullet is silently dropped — the ticket then either fails to dispatch (`owned_paths_unknown`) or, worse, dispatches with a narrower scope than you wrote and the agent blocks on "Owned Paths omit …".
+**Stay inside `Owned Paths`.** That glob set is what makes parallel work safe; the dispatcher refuses to run two tickets whose sets intersect. Work discovered outside it becomes a new `Triage` issue — it never expands the current ticket.
 
 **Heartbeat** at each phase change (claimed → implemented → verified → PR open) and at least every 20 minutes, saying what changed. After 45 minutes of silence the ticket is reclaimed.
 
@@ -46,7 +48,7 @@ Non-negotiable for every agent in this repo, in any harness. Full protocol: `$FA
 
 **Negative testing and falsifiability.** New regression tests must be observed failing before applying the fix to prove they test the actual failure mode and are not vacuous. Verify that tests distinguish correct implementations from plausible incorrect ones (without using `git stash`; use safe per-file reverts such as `git show <ref>:<path> > <path>`). A test that passes before the fix is applied tests nothing.
 
-**Mandatory `## Handoff` comment.** Before moving a ticket to `In Review`, post a structured `## Handoff` comment on the Linear ticket with these exact fields:
+**Mandatory `## Handoff` comment.** Before moving a ticket to `In Review`, post a structured `## Handoff` comment on the ticket with these exact fields:
 
 ```
 ## Handoff
@@ -63,7 +65,7 @@ Posting this structured comment is a mandatory prerequisite before advancing a t
 
 ### Never auto-merge
 
-Regardless of CI or review outcome, these come back to a human with findings: **auth/authz, payments or money movement, credential and secret handling, destructive DB migrations, production infra config, and `CLNT` security behavior.** When escalating, add `ai:escalated` to the Linear ticket — that's what surfaces it in the human's "My Decisions Needed" view — and notify (see below).
+Regardless of CI or review outcome, these come back to a human with findings: **auth/authz, payments or money movement, credential and secret handling, destructive DB migrations, production infra config, and `CLNT` security behavior.** When escalating, add `ai:escalated` to the ticket — that's what surfaces it in the human's "My Decisions Needed" view — and notify (see below).
 
 The test is whether the diff **changes security-relevant behavior**, not whether a file sits near security code — read as file-adjacency this list swallows every PR in an app where auth is everywhere, and that trains everyone to rubber-stamp it. When it's genuinely ambiguous, escalate: a false escalation costs one message, a wrong merge costs a client incident.
 
@@ -93,15 +95,15 @@ Same care for force-pushes: never `--force` onto a `base` or `deploy_branch`, an
 
 Move the ticket to `Blocked`, say specifically what you need in one answerable question, and notify. Never leave a stalled ticket sitting in `In Progress`.
 
-**"Notify" means exactly this command** — a Linear comment, a `Blocked` state change, or a line in your final report does not reach the human in real time:
+**"Notify" means exactly this command** — a ticket comment, a `Blocked` state change, or a line in your final report does not reach the human in real time:
 
 ```bash
 factory notify "<EVENT> <TICKET/PR>: <one answerable sentence>"
 ```
 
-Event prefix is one of `BLOCKED`, `ESCALATED`, `CI RED`, `SMOKE RED`, `CIRCUIT BREAKER`, `RC READY`. It pushes a Telegram message to the human and exits non-zero on failure — if it fails, post the same text as a Linear comment and flag the failed push in your report. Notify only for those six events; routine progress (claims, PRs opened, clean merges) goes to Linear and the run report, never here.
+Event prefix is one of `BLOCKED`, `ESCALATED`, `CI RED`, `SMOKE RED`, `CIRCUIT BREAKER`, `RC READY`. It pushes a Telegram message to the human and exits non-zero on failure — if it fails, post the same text as a ticket comment and flag the failed push in your report. Notify only for those six events; routine progress (claims, PRs opened, clean merges) goes to the ticket and the run report, never here.
 
-Before blocking on product intent, check whether it's already written down — the repo's `docs/product-decisions.md`, `docs/`, or the Linear project Overview. If you resolve a decision that wasn't recorded, record it.
+Before blocking on product intent, check whether it's already written down — the repo's `docs/product-decisions.md`, `docs/`, or the tracker project overview. If you resolve a decision that wasn't recorded, record it.
 
 ### Waiting
 
@@ -153,7 +155,7 @@ Ahead-only (clean, not behind, but carrying unpushed commits) still routes to `o
 
 Never pull over uncommitted work to get a fresher read — those files are a human's in-flight change, and losing them costs far more than a slightly stale spec. Reading `origin/<base>` gets the same correctness without touching the tree.
 
-Then **name the ref your evidence came from** in the report or the Linear comment. `origin/develop@a1b2c3d` is checkable by the next reader; "I read the file" is not.
+Then **name the ref your evidence came from** in the report or the ticket comment. `origin/develop@a1b2c3d` is checkable by the next reader; "I read the file" is not.
 
 Dispatch is exempt — the worktree script branches from `origin/<base>`, so ticket work always starts current. The exposure is the read-only stages (sweep, triage, audit), which read the main checkout: against a stale one, a shipped feature reads as unshipped and an overtaken ticket keeps its place in the queue.
 
@@ -177,7 +179,24 @@ A tool result is not paid for once. It stays in the context window and is re-sen
 
 Factory-spawned sessions get their **own isolated headless Chrome** (via `--mcp-config`, `config/mcp/claude.json` in the factory repo) — a temp profile per session, screenshots served as capped webp. There is nothing to share and nothing to fight over.
 
-If a browser tool still errors: report it and continue with non-browser verification — never retry in a loop, and **never kill another process's Chrome**; a killed browser mid-flight destroys another agent's verification run. `browser is already running for .../chrome-profile` means you are running outside the factory config (interactive session, older harness) where the profile IS shared — attach to the running browser (`list_pages`, then work in your own new page) rather than fighting the lock.
+If an IDE browser tool reports a stale/missing tab, its tab listing disagrees with navigation, or a call deadlocks, use **one bounded recovery**: record the backend/tool/URL and exact error (or the harness timeout with no result), call `list_pages`/`tabs` once, discard every cached tab ID, select or create a page from the fresh result, and navigate once. If listing and navigation still disagree or either call times out, that browser backend is unavailable — never retry it in a loop.
+
+Use an independent isolated headless backend when the harness provides one (the factory Chrome DevTools MCP or Pi `chrome_devtools_*`), rather than reusing the broken IDE registry. Let the backend own the browser lifecycle whenever possible. On display-less Linux, launch through the factory wrapper. If `FACTORY_ROOT` is unset, do not guess its location: run `factory doctor`, record that the fallback is not configured, and stop browser recovery. For a CDP-capable fallback driver, kept in one managed shell session:
+
+```bash
+profile="$(mktemp -d "${TMPDIR:-/tmp}/factory-browser.XXXXXX")"
+"$FACTORY_ROOT/bin/chrome-headless.sh" --remote-debugging-port=0 \
+  --user-data-dir="$profile" about:blank >"$profile/chrome.log" 2>&1 &
+chrome_pid=$!
+bun -e 'import { existsSync, watch } from "node:fs"; const [file, dir] = process.argv.slice(1); if (existsSync(file)) process.exit(0); const timer = setTimeout(() => process.exit(1), 10000); const watcher = watch(dir, () => { if (existsSync(file)) { clearTimeout(timer); watcher.close(); process.exit(0); } });' \
+  "$profile/DevToolsActivePort" "$profile"
+```
+
+The file watcher is the bounded readiness gate; never replace it with a fixed sleep. Attach the fallback driver using `$profile/DevToolsActivePort`. If readiness or attachment fails, preserve the exact error and the last lines of `$profile/chrome.log`, then clean up. After failure or after the review, stop and reap only that child and remove only the profile created above: `kill "$chrome_pid" 2>/dev/null || true; wait "$chrome_pid" 2>/dev/null || true; rm -rf -- "$profile"`. A raw `curl`, DOM dump, source read, or bare headless screenshot is not an interactive browser fallback and cannot support a UX verdict. If no independent driver exists or launch/attach fails, stop browser recovery and continue only with non-browser verification.
+
+**Never kill another process's Chrome or delete another profile**; a killed browser mid-flight destroys another agent's verification run. `browser is already running for .../chrome-profile` means you are outside the factory config (interactive session, older harness) where the profile is shared — attach to the running browser (`list_pages`, then work in your own fresh page) rather than fighting the lock.
+
+For a required UX critique, browser failure is `NOT-ASSESSED`, not approval. Report the failed backend/tool, requested URL, exact error or timeout, registry-resync result, fallback launch/attach result, and unexercised flows. Reserve `BLOCKED` for the critic's startup worktree/shell mismatch. `SHIP` and `FIX-FIRST` require an exercised journey plus at least one observed page URL or screenshot path; static inspection never qualifies.
 
 ### Shell globs
 
@@ -196,11 +215,11 @@ factory label-guard --repo bj29 --apply
 
 Install once: `bun build/emit.mjs --link-bin` (symlinks `~/Develop/factory/bin/factory` → `~/.local/bin/factory`). `factory notify` is the cwd-independent wrapper around the human interrupt channel. Never `bun orchestrator/...` from a worktree — that path is not there.
 
-### Linear
+### Tickets
 
-**Use `factory ticket` — not the Linear MCP, and not the standalone `linear` CLI.** The `linear` command is a deprecated alias. The MCP fails input validation often enough that 96 measured runs fell through to a hand-rolled GraphQL fallback; the schpet `linear` CLI fails differently (`linear issue comment CLNT-526 --body` is wrong syntax — it needs `comment add`; `linear issue query` with hand-rolled filters errors on type coercion). Both waste turns. The factory tool is in git, has the protocol's guardrails built in, and its claim verb performs the read-back that _is_ the concurrency control.
+**Use `factory ticket` — not the Linear MCP, and not the standalone `linear` CLI.** The MCP fails input validation often enough that 96 measured runs fell through to a hand-rolled GraphQL fallback; the schpet `linear` CLI fails differently (`linear issue comment CLNT-526 --body` is wrong syntax — it needs `comment add`; `linear issue query` with hand-rolled filters errors on type coercion). Both waste turns. The factory tool is in git, has the protocol's guardrails built in, and its claim verb performs the read-back that _is_ the concurrency control.
 
-You work in a worktree, not in the factory checkout. **`factory ticket` resolves the checkout itself**; headless runs also set `$FACTORY_ROOT`. Fallback when the CLI is missing: `bun "$FACTORY_ROOT/tools/linear.mjs"`.
+You work in a worktree, not in the factory checkout. **`factory ticket` resolves the checkout itself**; headless runs also set `$FACTORY_ROOT`. Fallback when the CLI is missing: `bun "$FACTORY_ROOT/tools/ticket.mjs"`.
 
 ```bash
 factory ticket get CLNT-616                              # ticket, state, labels, criteria
@@ -213,7 +232,7 @@ factory ticket queue --team CLNT                         # what is dispatchable
 
 `claim` **exits non-zero when another agent won the race** — that is not a retry, it means take the next ticket. For anything the verbs do not cover, `raw '<graphql>' --var k=v` beats inventing a new flag.
 
-**Attribution.** Factory runs set `$FACTORY_RUN_ID`. Linear comments and issues filed through `tools/linear.mjs` are stamped with it automatically; the one surface the tool cannot reach is GitHub, so **end every PR body with a final line `run:$FACTORY_RUN_ID`** (after `Fixes <ISSUE-ID>`). That one line is what joins the PR back to its transcript and metrics row when someone asks "which run produced this?". Unset (interactive session) — omit it.
+**Attribution.** Factory runs set `$FACTORY_RUN_ID`. Comments and issues filed through `tools/ticket.mjs` are stamped with it automatically; the one surface the tool cannot reach is GitHub, so **end every PR body with a final line `run:$FACTORY_RUN_ID`** (after `Fixes <ISSUE-ID>`). That one line is what joins the PR back to its transcript and metrics row when someone asks "which run produced this?". Unset (interactive session) — omit it.
 
 **Labels are replaced wholesale, never merged.** Always go through `--add` / `--remove` via `factory ticket state` or `factory ticket claim`; a hand-written mutation or `linear issue update -l` that passes only the labels you want added silently replaces the entire label set, stripping `type:*`, `area:*`, `source:*`, and other existing taxonomy labels from the ticket. `type:*` has exactly eight values: `bug feature ui-ux security performance maintenance docs a11y` — `type:chore` fails. `area:*` is per-team; copy an existing ticket in the project rather than inventing one. Every new issue carries exactly one `source:*`: `source:agent` for work you discover yourself, `source:human` for a direct request, `source:sentry` / `source:client-support` for those intake paths.
 
@@ -221,7 +240,7 @@ factory ticket queue --team CLNT                         # what is dispatchable
 
 ### Secrets
 
-Never print, echo, commit, or paste an API key, token, or `.env` file — not into a transcript, a PR, a Linear comment, or a log. Scripts read credentials themselves. If a secret appears in a diff, that's an escalation, not a cleanup.
+Never print, echo, commit, or paste an API key, token, or `.env` file — not into a transcript, a PR, a ticket comment, or a log. Scripts read credentials themselves. If a secret appears in a diff, that's an escalation, not a cleanup.
 <!-- FACTORY:FLOOR:END -->
 
 ## Repo-specific notes
