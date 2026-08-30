@@ -194,6 +194,8 @@ test("an idle gate releases its job for the next tick", async () => {
 
 test("a rejected gate probe releases its job for the next tick", async () => {
   const running = new Set();
+  const logs = [];
+  let failed = 0;
   let probes = 0;
   const runJob = createJobRunner({
     running,
@@ -206,7 +208,10 @@ test("a rejected gate probe releases its job for the next tick", async () => {
     },
     commandFor: () => "echo work",
     shouldProbeGate: true,
-    log: () => {},
+    log: (message) => logs.push(message),
+    onFailed: () => {
+      failed++;
+    },
   });
   const job = { name: "dispatch", gate_command: "queue --gate" };
 
@@ -214,5 +219,61 @@ test("a rejected gate probe releases its job for the next tick", async () => {
   await runJob(job);
 
   expect(probes).toBe(2);
+  expect(failed).toBe(2);
+  expect(logs.every((message) => message.includes("GATE FAIL"))).toBe(true);
+  expect(running.size).toBe(0);
+});
+
+test("a synchronous spawn failure is labeled separately from a gate failure", async () => {
+  const running = new Set();
+  const logs = [];
+  let failed = 0;
+  const runJob = createJobRunner({
+    running,
+    probe: () => Promise.resolve({ code: 0, out: "work found" }),
+    spawnCommand: () => {
+      throw new Error("spawn unavailable");
+    },
+    commandFor: () => "echo work",
+    shouldProbeGate: false,
+    log: (message) => logs.push(message),
+    onFailed: () => {
+      failed++;
+    },
+  });
+
+  await runJob({ name: "dispatch" });
+
+  expect(failed).toBe(1);
+  expect(logs.some((message) => message.includes("SPAWN FAIL"))).toBe(true);
+  expect(logs.some((message) => message.includes("GATE FAIL"))).toBe(false);
+  expect(running.size).toBe(0);
+});
+
+test("a child error is labeled separately from a gate failure", async () => {
+  const running = new Set();
+  const logs = [];
+  let failed = 0;
+  const child = runnableChild();
+  const runJob = createJobRunner({
+    running,
+    probe: () => Promise.resolve({ code: 0, out: "work found" }),
+    spawnCommand: () => child,
+    commandFor: () => "echo work",
+    shouldProbeGate: false,
+    log: (message) => logs.push(message),
+    onFailed: () => {
+      failed++;
+    },
+  });
+
+  const run = runJob({ name: "dispatch" });
+  await Promise.resolve();
+  child.emit("error", new Error("ENOENT"));
+  await run;
+
+  expect(failed).toBe(1);
+  expect(logs.some((message) => message.includes("SPAWN FAIL"))).toBe(true);
+  expect(logs.some((message) => message.includes("GATE FAIL"))).toBe(false);
   expect(running.size).toBe(0);
 });
