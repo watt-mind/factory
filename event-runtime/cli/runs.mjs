@@ -1,27 +1,11 @@
 import { pad, withClient } from "./shared.mjs";
+import { isDispatchClassAgent } from "../lib/proposal-subject.mjs";
 
 /**
- * `--dispatch-only` allowlist. A run counts as dispatch work when its agent
- * definition matches any of these, in order:
- *
- * 1. its `id` is in DISPATCH_AGENT_IDS (`dispatch`; `worker` is the legacy
- *    name some fixtures and older registries still use);
- * 2. its `id` starts with `dispatch-` (repo-local dispatch variants);
- * 3. its `outputContract` is a dispatch result contract — the registry field
- *    that actually marks "this agent lands a ticket", so a renamed dispatch
- *    agent still counts without touching this file.
- *
- * Everything else the registry knows (merge-review, merge-fix, ci-doctor,
- * ci-notify, merge-notify, triage-scan, merge-scan, work-scan, reaper, the
- * smoke probes, ...) is excluded, and so is any row whose agent is not in the
- * registry at all: a drain (`until [ "$(factory runs RUNNING --dispatch-only
- * --count)" = 0 ]`) must not be kept busy by an agent that was since removed.
+ * `--dispatch-only` includes only the explicit dispatch class: runs that hold
+ * a ticket lease and worktree (including their tier continuation). A
+ * dispatch-like name or output contract is not sufficient.
  */
-export const DISPATCH_AGENT_IDS = new Set(["dispatch", "worker"]);
-export const DISPATCH_OUTPUT_CONTRACTS = new Set([
-  "factory.dispatch-result/v1",
-]);
-
 /**
  * Hard limits for the cursor walk. The control API clamps a page to
  * RUN_LIST_MAX_LIMIT (200, `lib/api-runs.mjs`) and rejects anything larger,
@@ -71,34 +55,18 @@ export function parseRunsArgs(args) {
   return options;
 }
 
-export function isDispatchWorkerAgent(def) {
-  const id = typeof def?.id === "string" ? def.id : "";
-  return (
-    DISPATCH_AGENT_IDS.has(id) ||
-    id.startsWith("dispatch-") ||
-    DISPATCH_OUTPUT_CONTRACTS.has(def?.outputContract)
-  );
-}
-
-/** Agent id of a run row's `agent` ref (`dispatch@1` -> `dispatch`). */
-function agentIdOf(ref) {
-  return typeof ref === "string" ? ref.split("@")[0] : "";
-}
-
 /**
- * Build the row predicate for `--dispatch-only` from the registry: keep rows
- * whose agent ref (or bare id) belongs to a dispatch definition, or whose id
- * is a known dispatch id even when the registry no longer lists it.
+ * Build the row predicate for `--dispatch-only` from the explicit
+ * dispatch-class membership shared with metrics.
  */
 export function dispatchOnlyPredicate(agents) {
   const refs = new Set();
   for (const def of agents ?? []) {
-    if (!isDispatchWorkerAgent(def)) continue;
+    if (!isDispatchClassAgent(def?.id)) continue;
     if (typeof def.ref === "string") refs.add(def.ref);
     if (typeof def.id === "string") refs.add(def.id);
   }
-  return (row) =>
-    refs.has(row.agent) || isDispatchWorkerAgent({ id: agentIdOf(row.agent) });
+  return (row) => refs.has(row.agent) || isDispatchClassAgent(row.agent);
 }
 
 export async function runs(client, stateFilter, options = {}) {

@@ -284,10 +284,10 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     migrated.close();
   });
 
-  test("tier escalation handoffs, inbox proposal IDs and lookup indexes reach schema 21 from a fresh and from a v14 database", () => {
-    expect(CURRENT_SCHEMA_VERSION).toBe(21);
+  test("tier escalation handoffs and lookup indexes reach schema 22 from a fresh and from a v14 database", () => {
+    expect(CURRENT_SCHEMA_VERSION).toBe(22);
     const fresh = openDb(freshFile());
-    expect(getSchemaVersion(fresh)).toBe(21);
+    expect(getSchemaVersion(fresh)).toBe(22);
     expect(
       fresh
         .query(`PRAGMA table_info(outbox)`)
@@ -300,6 +300,13 @@ describe("schema migration runner and assertions (OPS-415)", () => {
         .all()
         .map((row) => row.name),
     ).toContain("subject");
+    expect(
+      fresh
+        .query(
+          `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_subject'`,
+        )
+        .get()?.sql,
+    ).toContain("events (subject)");
     fresh.close();
 
     // #1230 (#1197) owns migration 14 and lands first; a database already at
@@ -310,7 +317,7 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     migrateDb(at14, { targetVersion: 13 });
     at14.exec("PRAGMA user_version = 14;");
     migrateDb(at14);
-    expect(getSchemaVersion(at14)).toBe(21);
+    expect(getSchemaVersion(at14)).toBe(22);
     expect(
       at14
         .query(`PRAGMA table_info(outbox)`)
@@ -324,7 +331,7 @@ describe("schema migration runner and assertions (OPS-415)", () => {
         .map((row) => row.name),
     ).toContain("subject");
     migrateDb(at14);
-    expect(getSchemaVersion(at14)).toBe(21);
+    expect(getSchemaVersion(at14)).toBe(22);
     expect(
       at14
         .query(
@@ -354,7 +361,7 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     legacy.close();
 
     const upgraded = openDb(file);
-    expect(getSchemaVersion(upgraded)).toBe(21);
+    expect(getSchemaVersion(upgraded)).toBe(22);
     expect(
       upgraded
         .query(`PRAGMA table_info(workers)`)
@@ -368,6 +375,41 @@ describe("schema migration runner and assertions (OPS-415)", () => {
           .get("legacy-worker").skipped_json,
       ),
     ).toEqual([]);
+    upgraded.close();
+  });
+
+  test("events subject index migrates a v21 database idempotently", () => {
+    const file = freshFile();
+    const legacy = new Database(file);
+    migrateDb(legacy, { targetVersion: 21 });
+    expect(getSchemaVersion(legacy)).toBe(21);
+    expect(
+      legacy
+        .query(
+          `SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_subject'`,
+        )
+        .get(),
+    ).toBeNull();
+    legacy.close();
+
+    const upgraded = openDb(file);
+    expect(getSchemaVersion(upgraded)).toBe(22);
+    expect(
+      upgraded
+        .query(
+          `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_subject'`,
+        )
+        .get()?.sql,
+    ).toContain("events (subject)");
+
+    MIGRATIONS.find((entry) => entry.version === 22).up(upgraded);
+    expect(
+      upgraded
+        .query(
+          `SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_subject'`,
+        )
+        .get().n,
+    ).toBe(1);
     upgraded.close();
   });
 
@@ -385,8 +427,8 @@ describe("schema migration runner and assertions (OPS-415)", () => {
 
     migrateDb(db);
 
-    expect(CURRENT_SCHEMA_VERSION).toBe(21);
-    expect(getSchemaVersion(db)).toBe(21);
+    expect(CURRENT_SCHEMA_VERSION).toBe(22);
+    expect(getSchemaVersion(db)).toBe(22);
     expect(
       db
         .query(
@@ -474,7 +516,7 @@ describe("schema migration runner and assertions (OPS-415)", () => {
 
     migrateDb(db);
 
-    expect(getSchemaVersion(db)).toBe(21);
+    expect(getSchemaVersion(db)).toBe(22);
     expect(
       db.query(`SELECT run_id, subject FROM runs ORDER BY run_id`).all(),
     ).toEqual([
@@ -499,8 +541,8 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     expect(getSchemaVersion(db)).toBe(19);
 
     migrateDb(db);
-    expect(CURRENT_SCHEMA_VERSION).toBe(21);
-    expect(getSchemaVersion(db)).toBe(21);
+    expect(CURRENT_SCHEMA_VERSION).toBe(22);
+    expect(getSchemaVersion(db)).toBe(22);
     expect(
       db
         .query(
@@ -553,9 +595,9 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     db.close();
 
     const migrated = openDb(file);
-    expect(getSchemaVersion(migrated)).toBe(21);
+    expect(getSchemaVersion(migrated)).toBe(22);
     migrateDb(migrated);
-    expect(getSchemaVersion(migrated)).toBe(21);
+    expect(getSchemaVersion(migrated)).toBe(22);
     const plans = [
       [
         "metrics latest proposal",

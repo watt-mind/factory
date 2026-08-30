@@ -58,6 +58,11 @@ pid_alive() {
   if [[ "$(basename "$1")" == "serve.pid" && -f "$1" ]]; then
     return 0
   fi
+  if [[ "$(basename "$1")" == "worker.pid" || "$(basename "$1")" == "supervisor.pid" ]]; then
+    [[ -f "$1" ]] || return 1
+    [[ -f "$1.terminated" || -f "$1.exited" ]] && return 1
+    return 0
+  fi
   [[ "\${FAKE_ALIVE:-0}" == "1" ]] || return 1
   [[ -f "$1" ]] || return 1
   [[ -f "$1.terminated" ]] && return 1
@@ -69,10 +74,16 @@ spawn_daemon() { # <pidfile> <logfile> <workdir> <cmd...>
   printf 'SPAWN pid=%s workdir=%s cmd=%s\\n' "$(basename "$pidfile")" "$workdir" "$*" >>"$SPAWN_LOG"
   if [[ "$(basename "$pidfile")" == "\${FAKE_SPAWN_FAIL_PIDFILE:-}" ]]; then return 1; fi
   printf '1\\n' >"$pidfile"
-  if [[ "\${FAKE_POOL_CHILDREN:-0}" == "1" && "$*" == *"cli.mjs supervise"* ]]; then
+  if [[ -n "\${FAKE_DAEMON_DIES_FOR:-}" && "$*" == *"\${FAKE_DAEMON_DIES_FOR}"* ]]; then
+    printf 'fake daemon exited 1\\n' >"$logfile"
+    touch "$pidfile.exited"
+  fi
+  if [[ "\${FAKE_SUPERVISOR_MISSING:-0}" != "1" && "$*" == *"cli.mjs supervise"* ]]; then
     printf '2\\n' >"$(dirname "$pidfile")/supervisor.pid"
-    printf '3\\n' >"$(dirname "$pidfile")/worker-1.pid"
-    printf 'worker_test\\n' >"$(dirname "$pidfile")/worker-1.id"
+    if [[ "\${FAKE_POOL_CHILDREN:-0}" == "1" ]]; then
+      printf '3\\n' >"$(dirname "$pidfile")/worker-1.pid"
+      printf 'worker_test\\n' >"$(dirname "$pidfile")/worker-1.id"
+    fi
   fi
 }
 term_daemon() {
@@ -271,6 +282,9 @@ function runStack(fixture, args, extraEnv = {}) {
       BUILD_LOG: fixture.buildLog,
       FACTORY_RUN_DIR: path.join(fixture.root, "run"),
       FACTORY_EVENT_HOME: path.join(fixture.root, "home"),
+      // Startup survival is covered by focused cases below. Keep unrelated
+      // command-wiring tests immediate instead of paying the production 5s.
+      FACTORY_WORKER_READY_TIMEOUT: "0",
       ...extraEnv,
     },
   });
@@ -304,6 +318,7 @@ test("plain `up` spawns serve, worker, and the static web server — unchanged b
     expect(spawnFor(r.spawns, "worker.pid")).not.toContain(
       "__supervise-worker",
     );
+    expect(existsSync(path.join(f.runDir, "worker.pid"))).toBe(true);
 
     const web = spawnFor(r.spawns, "web.pid");
     expect(web).toContain("web/serve.mjs");
@@ -315,6 +330,29 @@ test("plain `up` spawns serve, worker, and the static web server — unchanged b
     f.cleanup();
   }
 });
+
+test.each([
+  ["work", ["up"], "cli.mjs work"],
+  ["supervise", ["up", "--workers", "1:1"], "cli.mjs supervise"],
+])(
+  "a worker daemon that exits during %s startup fails `up` and cleans up its pidfiles",
+  (_command, args, failingCommand) => {
+    const f = makeFixture();
+    try {
+      const r = runStack(f, args, { FAKE_DAEMON_DIES_FOR: failingCommand });
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toContain("worker exited during startup");
+      expect(r.stderr).toContain("worker.log");
+      expect(r.stderr).toContain("fake daemon exited 1");
+      expect(r.spawns).toContain("TERM worker");
+      expect(r.spawns).toContain("TERM event runtime");
+      for (const file of ["worker.pid", "serve.pid"])
+        expect(existsSync(path.join(f.runDir, file))).toBe(false);
+    } finally {
+      f.cleanup();
+    }
+  },
+);
 
 test("`up --dry-run` prints the resolved daemon plan without spawning", () => {
   const f = makeFixture();
@@ -383,6 +421,10 @@ test("malformed timing knobs fail before `up` snapshots or starts daemons", () =
       "FACTORY_API_READY_TIMEOUT must be a non-negative integer",
     ],
     [
+      { FACTORY_WORKER_READY_TIMEOUT: "soon" },
+      "FACTORY_WORKER_READY_TIMEOUT must be a non-negative integer",
+    ],
+    [
       { FACTORY_WEB_SUPERVISOR_INTERVAL: "0" },
       "FACTORY_WEB_SUPERVISOR_INTERVAL must be a positive number",
     ],
@@ -401,6 +443,26 @@ test("malformed timing knobs fail before `up` snapshots or starts daemons", () =
     } finally {
       f.cleanup();
     }
+  }
+});
+
+test("a pool without a supervisor pidfile fails worker readiness and cleans up", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, ["up", "--workers", "1:1"], {
+      FAKE_SUPERVISOR_MISSING: "1",
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain(
+      "worker pool supervisor did not start within 0s",
+    );
+    expect(r.stderr).toContain("worker.log");
+    expect(r.spawns).toContain("TERM worker");
+    expect(r.spawns).toContain("TERM event runtime");
+    for (const file of ["worker.pid", "serve.pid"])
+      expect(existsSync(path.join(f.runDir, file))).toBe(false);
+  } finally {
+    f.cleanup();
   }
 });
 
