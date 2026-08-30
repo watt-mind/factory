@@ -690,7 +690,11 @@ function prData() {
   return {
     events,
     proposals,
-    runs: { run_scan: scan, run_dispatch: dispatch, run_fix: fix },
+    runs: {
+      run_scan: scan,
+      run_dispatch: dispatch,
+      run_fix: fix,
+    } as Record<string, JourneyRun>,
     schedules: [
       {
         loop: "merge-factory",
