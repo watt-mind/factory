@@ -1317,6 +1317,38 @@ test("locked_bun_install removes a stale stamp when install fails", () => {
   }
 });
 
+test("locked_bun_install does not create node_modules when install is a no-op success", () => {
+  const target = bunInstallFixture();
+  const mockBin = mkdtempSync(path.join(tmpdir(), "mock-bun-noop-"));
+  writeFileSync(
+    path.join(mockBin, "bun"),
+    `#!/usr/bin/env bash
+if [[ "$1" == "install" ]]; then
+  exit 0
+fi
+echo "unexpected bun invocation: $*" >&2
+exit 1
+`,
+  );
+  chmodSync(path.join(mockBin, "bun"), 0o755);
+  const lockDir = path.join(
+    tmpdir(),
+    `bun-lock-noop-${process.pid}-${Date.now()}`,
+  );
+  try {
+    const r = sh(`locked_bun_install "${target}"`, {
+      PATH: `${mockBin}:${TEST_PATH}`,
+      FACTORY_LOCK_DIR: lockDir,
+    });
+    expect(r.status).toBe(0);
+    expect(existsSync(path.join(target, "node_modules"))).toBe(false);
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
 test("preflightHandoffDependencies reports installed:false for a shell-stamped directory", () => {
   const target = bunInstallFixture();
   const mockBin = mockBunInstallBin(true);

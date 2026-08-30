@@ -1063,17 +1063,29 @@ rename_dir_atomic() { # <src> <dst>
 # Write node_modules/.bun-lock-sha as the lowercase hex sha256 of bun.lock
 # (same bytes preflightHandoffDependencies trims after sha256Hex(readFileSync)).
 # A matching stamp lets the handoff preflight skip a redundant frozen install
-# (gh-1694). Missing lockfile or hasher failure leaves no stamp.
+# (gh-1694). Never mkdir node_modules: an empty tree would shadow Bun's
+# resolver (WM-115 baseline-red stubs `bun install` as a no-op). Missing
+# lockfile, missing/empty node_modules, or hasher failure leaves no stamp.
 write_bun_lock_stamp() { # <dir>
   local dir="$1"
   local lockfile="$dir/bun.lock"
-  local stamp="$dir/node_modules/.bun-lock-sha"
-  local digest=""
-  if [[ ! -f "$lockfile" ]]; then
+  local nm="$dir/node_modules"
+  local stamp="$nm/.bun-lock-sha"
+  local digest="" entry populated=0
+  if [[ ! -f "$lockfile" || ! -d "$nm" ]]; then
     rm -f "$stamp"
     return 0
   fi
-  mkdir -p "$dir/node_modules"
+  for entry in "$nm"/* "$nm"/.[!.]*; do
+    [[ -e "$entry" || -L "$entry" ]] || continue
+    [[ "$(basename -- "$entry")" == ".bun-lock-sha" ]] && continue
+    populated=1
+    break
+  done
+  if [[ "$populated" -eq 0 ]]; then
+    rm -f "$stamp"
+    return 0
+  fi
   if command -v sha256sum >/dev/null 2>&1; then
     digest=$(sha256sum -- "$lockfile") || return 1
   elif command -v shasum >/dev/null 2>&1; then
