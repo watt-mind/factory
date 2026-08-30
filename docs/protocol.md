@@ -175,6 +175,13 @@ A ticket missing a load-bearing section (`Owned Paths` or `Verification
 Command`) is demoted to `Triage`; do not dispatch it. `factory label-guard`
 checks those two mechanically.
 
+When a §5 heading is duplicated, the **first** matching block is authoritative
+for every reader (dispatch, handoff verification, and the template guard).
+This keeps an already-corrupted ticket deterministic rather than silently
+using a later append. `factory ticket detail ISSUE -- "..."` appends an
+idempotent detail block; use `factory ticket detail ISSUE --replace -- "..."`
+to replace the complete description when re-specifying a ticket.
+
 ## 6. Bundles
 
 Bundling several tickets into one worktree is the **human's** call, never
@@ -369,8 +376,10 @@ factory ticket comment CLNT-616 "..."
 factory ticket triage CLNT-616 --comment "..."
 # Record an answer and return a blocked ticket to Todo when applicable.
 factory ticket answer CLNT-616 "..."
-# Append idempotent Markdown detail to a ticket.
+# Append idempotent Markdown detail to a ticket (the default never replaces).
 factory ticket detail CLNT-616 -- "..."
+# Replace the complete description when re-specifying a ticket.
+factory ticket detail CLNT-616 --replace -- "..."
 # Read or mutate labels (`label` is an alias for `labels`).
 factory ticket labels CLNT-616 --add ai:needs-review --remove ai:in-progress
 factory ticket label CLNT-616

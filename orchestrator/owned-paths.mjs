@@ -36,21 +36,47 @@ export const REGISTRY_DIGEST_BASELINE_PATH =
   "event-runtime/lib/registry.test.mjs";
 
 /**
+ * Split level 2–4 Markdown headings into their sections.
+ *
+ * Every §5 reader treats the first matching duplicate heading as
+ * authoritative. This keeps already-corrupted tickets deterministic until a
+ * triage agent explicitly rewrites the description with `ticket detail
+ * --replace`.
+ */
+export function ticketSections(description = "") {
+  return String(description ?? "")
+    .split(/^#{2,4}\s+/m)
+    .slice(1)
+    .map((section) => {
+      const nl = section.indexOf("\n");
+      return {
+        heading: (nl === -1 ? section : section.slice(0, nl)).trim(),
+        // Preserve leading indentation: an Owned Paths block may be an
+        // indented Markdown code block, which would stop parsing if trimmed.
+        body: nl === -1 ? "" : section.slice(nl + 1),
+      };
+    });
+}
+
+/** Return the authoritative (first) ticket section whose heading matches. */
+export function firstTicketSection(description = "", matchesHeading) {
+  return ticketSections(description).find((section) =>
+    matchesHeading(section.heading),
+  );
+}
+
+/**
  * Extract the Owned Paths bullet list (levels 2-4) from a Linear issue description.
+ * If a ticket has more than one Owned Paths heading, only the first is
+ * authoritative; see {@link firstTicketSection}.
  * Returns [] when the section is missing or fails to parse — for dispatch,
  * use `effectiveOwnedPaths`, which turns that into "collides with
  * everything" rather than "not dispatchable".
  */
 export function parseOwnedPaths(description = "") {
-  // `split` retains the pre-heading prose as index 0. It cannot be a section,
-  // even when it mentions "Owned Paths", so only inspect heading-led chunks.
-  const section = description
-    .split(/^#{2,4}\s+/m)
-    .slice(1)
-    .find((s) => {
-      const heading = s.split("\n")[0];
-      return /\bOwned Paths\b/i.test(heading);
-    });
+  const section = firstTicketSection(description, (heading) =>
+    /\bOwned Paths\b/i.test(heading),
+  );
   if (!section) return [];
 
   // Real tickets write this section three different ways — bullet lists, fenced
@@ -62,7 +88,7 @@ export function parseOwnedPaths(description = "") {
   const out = [];
   let inFence = false;
 
-  for (const raw of section.split("\n").slice(1)) {
+  for (const raw of section.body.split("\n")) {
     if (/^\s*```/.test(raw)) {
       inFence = !inFence;
       continue;
@@ -135,15 +161,12 @@ export function effectiveOwnedPaths(description = "") {
  * absent both, refuses the handoff (fail-closed).
  */
 export function parseVerificationCommand(description = "") {
-  const section = String(description ?? "")
-    .split(/^#{2,4}\s+/m)
-    .find((s) => {
-      const heading = s.split("\n")[0];
-      return /^Verification(\s+Command)?\s*:?\s*$/i.test(heading.trim());
-    });
+  const section = firstTicketSection(description, (heading) =>
+    /^Verification(\s+Command)?\s*:?\s*$/i.test(heading.trim()),
+  );
   if (!section) return null;
 
-  const body = section.split("\n").slice(1);
+  const body = section.body.split("\n");
   const fenced = [];
   let inFence = false;
   let sawFence = false;

@@ -14,7 +14,8 @@
  *   bun tools/ticket.mjs comment CLNT-616 "verified: 42 tests pass"
  *   bun tools/ticket.mjs triage CLNT-616 --comment "Owned Paths need revision"
  *   bun tools/ticket.mjs answer CLNT-616 "Use the existing token cache"
- *   bun tools/ticket.mjs detail CLNT-616 -- "## Acceptance criteria\n- [ ] ..."
+ *   bun tools/ticket.mjs detail CLNT-616 -- "## Acceptance criteria\n- [ ] ..." # append
+ *   bun tools/ticket.mjs detail CLNT-616 --replace -- "## Acceptance criteria\n- [ ] ..."
  *   bun tools/ticket.mjs labels CLNT-616 --add ai:needs-review --remove ai:in-progress
  *   bun tools/ticket.mjs state CLNT-616 "In Review" --add ai:needs-review
  *   bun tools/ticket.mjs file --team CLNT --title "..." --body "..." --type bug --dedupe-key "..."
@@ -548,6 +549,35 @@ export function closureCheckMessages(issue) {
   return formatOwnedPathClosureGaps(gaps);
 }
 
+/**
+ * Build the tracker-native escape-hatch mutation for `detail --replace`.
+ *
+ * The replacement stays in the ticket CLI's declared surface while adapters
+ * grow a first-class replacement verb (see #1666). GitHub issue identifiers
+ * are owner/repo#N; Linear identifiers are team keys such as CLNT-616.
+ */
+export function descriptionReplacementRequest(identifier, id, description) {
+  if (String(identifier).includes("/")) {
+    return {
+      query:
+        "mutation($id:ID!,$body:String!){updateIssue(input:{id:$id,body:$body}){issue{id}}}",
+      variables: { id, body: description },
+      resultAt: ["updateIssue", "issue", "id"],
+    };
+  }
+  return {
+    query:
+      "mutation($id:String!,$description:String!){issueUpdate(id:$id,input:{description:$description}){success}}",
+    variables: { id, description },
+    resultAt: ["issueUpdate", "success"],
+  };
+}
+
+function replacementSucceeded(result, resultAt) {
+  const payload = result?.data ?? result;
+  return resultAt.reduce((value, key) => value?.[key], payload) !== undefined;
+}
+
 const teamOf = (key) => String(key).split("-")[0];
 
 // ------------------------------------------------------------------ verbs ---
@@ -704,8 +734,30 @@ const VERBS = {
     const key = positional[0];
     const rawDetail = positional[1];
     if (!key || !rawDetail)
-      throw new Error(`usage: detail <ISSUE-ID> [--] "<markdown>"`);
-    const { appended } = await controlPlane().appendDetail(key, rawDetail);
+      throw new Error(`usage: detail <ISSUE-ID> [--replace] [--] "<markdown>"`);
+    const cp = controlPlane();
+    if (has("replace")) {
+      const issue = await cp.getTicket(key);
+      const description = String(rawDetail).trim();
+      const current = String(issue.description ?? "").trim();
+      if (description === current) {
+        out(
+          { ok: true, identifier: key, replaced: false },
+          `${key} detail already matches`,
+        );
+        return;
+      }
+      const request = descriptionReplacementRequest(key, issue.id, description);
+      const result = await cp.raw(request.query, request.variables);
+      if (!replacementSucceeded(result, request.resultAt))
+        throw new Error(`detail replacement failed for ${key}`);
+      out(
+        { ok: true, identifier: key, replaced: true },
+        `${key} detail replaced`,
+      );
+      return;
+    }
+    const { appended } = await cp.appendDetail(key, rawDetail);
     if (!appended) {
       out(
         { ok: true, identifier: key, appended: false },

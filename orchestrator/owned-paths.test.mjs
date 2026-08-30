@@ -71,6 +71,27 @@ Something is broken.
   ]);
 });
 
+test("duplicate §5 headings keep the first Owned Paths and Verification Command blocks authoritative", () => {
+  const desc = `## Owned Paths
+
+- \`orchestrator/owned-paths.mjs\`
+
+## Verification Command
+
+\`bun test first.mjs\`
+
+## Owned Paths
+
+- \`docs/protocol.md\`
+
+## Verification Command
+
+\`bun test stale-appended.mjs\``;
+
+  expectEqual(parseOwnedPaths(desc), ["orchestrator/owned-paths.mjs"]);
+  expectEqual(parseVerificationCommand(desc), "bun test first.mjs");
+});
+
 test("missing section yields no paths (caller decides what that means)", () => {
   expectEqual(parseOwnedPaths("## Problem\n\nno paths here"), []);
 });

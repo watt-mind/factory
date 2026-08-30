@@ -32,6 +32,7 @@ import {
   transitionThenComment,
   fileTicket,
   closureCheckMessages,
+  descriptionReplacementRequest,
   resolveRepoName,
   resolveRepoNameFromTicket,
   resolveRepoNameForFile,
@@ -506,6 +507,27 @@ test("the end-of-options sentinel preserves arbitrary leading dashes", () => {
   expect(
     parsePositionalArgs(["comment", "WM-316", "--", "---\n\n## Heading"]),
   ).toEqual(["WM-316", "---\n\n## Heading"]);
+});
+
+test("detail --replace keeps its Markdown body positional", () => {
+  expect(
+    parsePositionalArgs(["detail", "WM-318", "--replace", "## Heading"]),
+  ).toEqual(["WM-318", "## Heading"]);
+});
+
+test("detail --replace uses each tracker's body replacement mutation", () => {
+  expect(
+    descriptionReplacementRequest("watt-mind/factory#42", "issue-id", "new"),
+  ).toMatchObject({
+    variables: { id: "issue-id", body: "new" },
+    resultAt: ["updateIssue", "issue", "id"],
+  });
+  expect(
+    descriptionReplacementRequest("CLNT-42", "issue-id", "new"),
+  ).toMatchObject({
+    variables: { id: "issue-id", description: "new" },
+    resultAt: ["issueUpdate", "success"],
+  });
 });
 
 test("unknown flags remain flags instead of becoming positional bodies", () => {
