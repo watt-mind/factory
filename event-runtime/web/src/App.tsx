@@ -239,9 +239,15 @@ export function App() {
     if (!root) return;
     let disposed = false;
     let uninstall = () => {};
-    void import("./subjectJourney").then(({ installTicketJourneyLinks }) => {
-      if (!disposed) uninstall = installTicketJourneyLinks(root, jumpToTicket);
-    });
+    void import("./subjectJourney")
+      .then(({ installTicketJourneyLinks }) => {
+        if (!disposed)
+          uninstall = installTicketJourneyLinks(root, jumpToTicket);
+      })
+      .catch((error: unknown) => {
+        if (disposed) return;
+        console.warn("ticket journey chunk import failed", error);
+      });
     return () => {
       disposed = true;
       uninstall();

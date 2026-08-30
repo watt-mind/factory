@@ -1,5 +1,5 @@
 import "./test-dom";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
@@ -15,6 +15,8 @@ import { refetchIntervals } from "./hooks";
 import { NAV } from "./nav";
 import { createProposalFixture } from "./test-render";
 import type { MetricsView, Proposal, StatusView } from "./types";
+
+const actualSubjectJourney = await import("./subjectJourney");
 
 const ENV = { name: "dev", home: "/tmp/factory", adapter: null };
 
@@ -198,6 +200,7 @@ afterEach(() => {
   goPrefix.armedAt = 0;
   cleanup();
   globalThis.fetch = realFetch;
+  mock.module("./subjectJourney", () => actualSubjectJourney);
 });
 
 describe("cold query rendering (WM-266)", () => {
@@ -1005,6 +1008,40 @@ describe("ticket journey navigation (WM-595)", () => {
     expect(why.closest("[cmdk-item]")!.textContent).toContain("Why isn't");
     fireEvent.click(command.closest("[cmdk-item]")!);
     expect(window.location.hash).toBe("#/tickets/WM-595");
+  });
+});
+
+describe("ticket journey chunk loading", () => {
+  test("warns instead of leaking an unhandled rejection when the journey chunk is stale", async () => {
+    const warn = mock(() => {});
+    const originalWarn = console.warn;
+    const rejections: PromiseRejectionEvent[] = [];
+    const onUnhandledRejection = (event: PromiseRejectionEvent) =>
+      rejections.push(event);
+
+    console.warn = warn;
+    window.addEventListener("unhandledrejection", onUnhandledRejection);
+    mock.module("./subjectJourney", () => {
+      return {
+        installTicketJourneyLinks: () => {
+          throw new Error("stale journey chunk");
+        },
+      };
+    });
+
+    try {
+      renderApp();
+      await waitFor(() => {
+        expect(warn).toHaveBeenCalledWith(
+          "ticket journey chunk import failed",
+          expect.any(Error),
+        );
+      });
+      expect(rejections).toHaveLength(0);
+    } finally {
+      console.warn = originalWarn;
+      window.removeEventListener("unhandledrejection", onUnhandledRejection);
+    }
   });
 });
 
