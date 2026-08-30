@@ -207,10 +207,15 @@ export default async function work(args) {
     ];
   }
 
-  function reportSkippedQueuedRuns(now) {
-    const skipped = inspectSkippedQueuedRuns(now);
-    skippedQueuedRuns = skipped;
+  /** Refresh the bounded snapshot the registry row and heartbeat publish. */
+  function snapshotSkippedQueuedRuns(now) {
+    skippedQueuedRuns = inspectSkippedQueuedRuns(now);
     lastSkipInspectionAt = now;
+  }
+
+  /** Log the current snapshot, rate-limited per (run, reason). */
+  function emitSkipReport(now) {
+    const skipped = skippedQueuedRuns;
     const present = new Set(
       skipped.map(({ runId, reason }) => `${runId}\u0000${reason}`),
     );
@@ -225,9 +230,17 @@ export default async function work(args) {
     }
   }
 
+  function reportSkippedQueuedRuns(now) {
+    snapshotSkippedQueuedRuns(now);
+    emitSkipReport(now);
+  }
+
   // Inspect once before registration so the first registry row is useful, and
   // retain this bounded snapshot until the idle-loop throttle refreshes it.
-  reportSkippedQueuedRuns(startedAt);
+  // The log lines are emitted only after the row exists: an observer that
+  // sees the first "skipped" line must be able to find the same diagnostics
+  // in the registry.
+  snapshotSkippedQueuedRuns(startedAt);
   registerWorker(db, {
     workerId,
     labels,
@@ -235,6 +248,7 @@ export default async function work(args) {
     skipped: skippedQueuedRuns,
     now: startedAt,
   });
+  emitSkipReport(startedAt);
   log(`worker ${workerId} on ${hostname()} (db ${dbPath()}, policy ${pv})`);
   if (Object.keys(labels).length > 0) log(`labels: ${JSON.stringify(labels)}`);
   if (!sandboxReport.available)

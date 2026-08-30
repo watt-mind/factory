@@ -40,6 +40,19 @@ registerTestProcessCleanup(import.meta.url);
 const WORKER_POLICY_VERSION = policyVersion();
 const LIVE_STACK = path.resolve(import.meta.dir, "../../bin/live-stack.sh");
 
+/** Poll the registry until the worker row exists (registration is racy vs stdout). */
+async function registeredWorker(home, { timeoutMs = 5_000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const db = openDb(path.join(home, "runtime.db"));
+    const [worker] = listWorkers(db);
+    db.close();
+    if (worker) return worker;
+    if (Date.now() >= deadline) throw new Error("worker never registered");
+    await Bun.sleep(25);
+  }
+}
+
 async function seedSkippedRun(
   home,
   { runId, placement, promptVersion = WORKER_POLICY_VERSION, queuedReason },
@@ -194,9 +207,7 @@ describe("work command", () => {
           /registry_stale:spec=git:older-registry\/git:older-registry:worker=git:[^:"]+:checkout=git:[^"}]+/,
         );
         expect(box.out).not.toContain("refused run_registry_skip");
-        const d = openDb(path.join(home, "runtime.db"));
-        const [worker] = listWorkers(d);
-        d.close();
+        const worker = await registeredWorker(home);
         expect(worker.skipped).toEqual([
           {
             runId: "run_registry_skip",
@@ -236,9 +247,7 @@ describe("work command", () => {
       );
       try {
         await waitFor(box, '"runId":"run_registry_000"');
-        const d = openDb(path.join(home, "runtime.db"));
-        const [worker] = listWorkers(d);
-        d.close();
+        const worker = await registeredWorker(home);
         expect(worker.skipped).toHaveLength(50);
         expect(worker.skipped[0].runId).toBe("run_registry_000");
         expect(worker.skipped.at(-1)).toEqual({
