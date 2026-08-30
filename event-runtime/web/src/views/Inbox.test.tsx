@@ -301,6 +301,7 @@ const origInbox = api.inbox;
 const origAck = api.ackInbox;
 const origResolve = api.resolveInbox;
 const origProposals = api.proposals;
+const origStatus = api.status;
 
 let ledger: InboxItem[] = [];
 
@@ -340,7 +341,19 @@ beforeEach(() => {
       resolvedBy: "operator",
     }),
   ];
-  api.inbox = mock(async () => ({ items: ledger }));
+  api.inbox = mock(async (status) => ({
+    items: ledger.filter(
+      (entry) => status === "all" || itemStatus(entry) === status,
+    ),
+  }));
+  api.status = mock(async () => ({
+    inbox: {
+      open: ledger.filter(
+        (entry) => itemStatus(entry) === "open" && !entry.expired,
+      ).length,
+      acked: ledger.filter((entry) => itemStatus(entry) === "acked").length,
+    },
+  })) as unknown as typeof api.status;
   api.proposals = mock(async () => ({ proposals: [] }));
   api.ackInbox = mock(async (id: string) => {
     ledger = ledger.map((it) => (it.id === id ? { ...it, ackedAt: T2 } : it));
@@ -366,6 +379,7 @@ afterEach(() => {
   api.ackInbox = origAck;
   api.resolveInbox = origResolve;
   api.proposals = origProposals;
+  api.status = origStatus;
 });
 
 function renderInbox(props: Partial<React.ComponentProps<typeof Inbox>> = {}) {
@@ -414,6 +428,44 @@ describe("Inbox view", () => {
     expect(view.queryByText("CI RED")).toBeNull();
   });
 
+  test("keeps open items and their badge visible past a resolved cursor page", async () => {
+    const resolved = Array.from({ length: 100 }, (_, index) =>
+      item({
+        id: `resolved-${index}`,
+        kind: "RC READY",
+        ackedAt: T1,
+        resolvedAt: T2,
+      }),
+    );
+    const olderOpen = item({
+      id: "older-open",
+      kind: "BLOCKED",
+      title: "Open item behind resolved history",
+    });
+    api.inbox = mock(async (status, page = {}) => {
+      if (status === "open") return { items: [olderOpen] };
+      if (status === "resolved")
+        return page.before
+          ? { items: [] }
+          : { items: resolved, nextBefore: "resolved-page-2" };
+      return { items: [] };
+    });
+    api.status = mock(async () => ({
+      inbox: { open: 1, acked: 0 },
+    })) as unknown as typeof api.status;
+
+    const { view } = renderInbox();
+    await waitFor(() => view.getByText("Open item behind resolved history"));
+    expect(view.getByRole("tab", { name: /Open/ }).textContent).toContain("1");
+
+    fireEvent.click(view.getByRole("tab", { name: /Resolved/ }));
+    await waitFor(() =>
+      expect(
+        view.getByRole("button", { name: "Load older inbox items" }),
+      ).toBeTruthy(),
+    );
+  });
+
   test("hides expired open items by default and shows only them from the Expired chip", async () => {
     ledger = [
       item({ id: "active", kind: "BLOCKED", title: "Active decision" }),
@@ -433,6 +485,9 @@ describe("Inbox view", () => {
     api.proposals = mock(async () => ({
       proposals: [],
     }));
+    api.status = mock(async () => ({
+      inbox: { open: 1, acked: 0 },
+    })) as unknown as typeof api.status;
 
     const { view } = renderInbox();
     await waitFor(() => view.getByText("Active decision"));

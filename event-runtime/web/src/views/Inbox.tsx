@@ -1,4 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import {
   Fragment,
   useEffect,
@@ -794,14 +799,56 @@ export function Inbox({
 }) {
   const now = useNow();
   const queryClient = useQueryClient();
-  // One fetch of the whole ledger: it is small, every tab is a client-side
-  // filter, and a deep link to a resolved item still resolves from the Open tab.
-  const query = useQuery({
-    queryKey: ["inbox", "all"],
-    queryFn: () => api.inbox("all"),
+  // The ledger is paginated. Keep an independent cursor for each status so
+  // old resolved rows can never push actionable rows out of the Open tab.
+  const openQuery = useInfiniteQuery({
+    queryKey: ["inbox", "open"],
+    queryFn: ({ pageParam }) => api.inbox("open", { before: pageParam }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.nextBefore ?? undefined,
     ...refetchIntervals.primary,
   });
-  const items = query.data?.items ?? [];
+  const ackedQuery = useInfiniteQuery({
+    queryKey: ["inbox", "acked"],
+    queryFn: ({ pageParam }) => api.inbox("acked", { before: pageParam }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.nextBefore ?? undefined,
+    ...refetchIntervals.primary,
+  });
+  const resolvedQuery = useInfiniteQuery({
+    queryKey: ["inbox", "resolved"],
+    queryFn: ({ pageParam }) => api.inbox("resolved", { before: pageParam }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.nextBefore ?? undefined,
+    ...refetchIntervals.primary,
+  });
+  const inboxQueries = {
+    open: openQuery,
+    acked: ackedQuery,
+    resolved: resolvedQuery,
+  };
+  const statusQuery = useQuery({
+    queryKey: ["status"],
+    queryFn: api.status,
+    ...refetchIntervals.primary,
+  });
+  const [tab, setTab] = useState<InboxTab>("open");
+  const activeQueries =
+    tab === "all"
+      ? [openQuery, ackedQuery, resolvedQuery]
+      : [inboxQueries[tab]];
+  const items = activeQueries.flatMap(
+    (inbox) => inbox.data?.pages.flatMap((page) => page.items) ?? [],
+  );
+  const allItems = [openQuery, ackedQuery, resolvedQuery].flatMap(
+    (inbox) => inbox.data?.pages.flatMap((page) => page.items) ?? [],
+  );
+  const query = {
+    isSuccess: activeQueries.every((inbox) => inbox.isSuccess),
+    isPending: activeQueries.some((inbox) => inbox.isPending),
+    isError: activeQueries.some((inbox) => inbox.isError),
+    data: activeQueries.some((inbox) => inbox.data) ? items : undefined,
+  };
   const proposalsQuery = useQuery({
     queryKey: ["proposals"],
     queryFn: api.proposals,
@@ -815,7 +862,6 @@ export function Inbox({
     return map;
   }, [proposalsQuery.data]);
 
-  const [tab, setTab] = useState<InboxTab>("open");
   const [expiredOnly, setExpiredOnly] = useState(false);
   const [filter, setFilter] = useState("");
   const expiredOpenItems = useMemo(
@@ -846,8 +892,15 @@ export function Inbox({
       c[itemStatus(it)] += 1;
       c.all += 1;
     }
+    // `/status` is an aggregate rather than a cursor page. Its open and acked
+    // totals remain correct even when a status has more than one page.
+    if (statusQuery.data?.inbox) {
+      c.open = statusQuery.data.inbox.open;
+      c.acked = statusQuery.data.inbox.acked;
+      c.all = c.open + c.acked + c.resolved;
+    }
     return c;
-  }, [items, now, proposalsById]);
+  }, [items, now, proposalsById, statusQuery.data?.inbox]);
 
   const byTab = useMemo(
     () =>
@@ -999,7 +1052,7 @@ export function Inbox({
   };
 
   const sel = focusItemId
-    ? (items.find((it) => it.id === focusItemId) ?? null)
+    ? (allItems.find((it) => it.id === focusItemId) ?? null)
     : null;
   const selectedIndex = sel ? visible.findIndex((it) => it.id === sel.id) : -1;
   // A deep link is only "unknown" once the ledger has actually answered.
@@ -1021,8 +1074,9 @@ export function Inbox({
   };
   const ack = useMutation({
     mutationFn: (id: string) => api.ackInbox(id),
-    onSuccess: (_out, id) => {
+    onSuccess: (out, id) => {
       invalidate();
+      if (focusItemId === id) setTab(itemStatus(out.item));
       notify(`Acked ${shortId(id)}`, "ok");
     },
     onError: (err) => notify(`Ack failed: ${(err as Error).message}`, "err"),
@@ -1033,8 +1087,9 @@ export function Inbox({
   const resolve = useMutation({
     mutationFn: ({ id, reason }: { id: string; reason: string }) =>
       api.resolveInbox(id, reason),
-    onSuccess: (_out, { id }) => {
+    onSuccess: (out, { id }) => {
       invalidate();
+      if (focusItemId === id) setTab(itemStatus(out.item));
       setConfirmResolve(false);
       setResolveReason("");
       notify(`Resolved ${shortId(id)}`, "ok");
@@ -1325,6 +1380,15 @@ export function Inbox({
   const tdCls = "border-b border-(--border) px-3 py-1.5 whitespace-nowrap";
   const openEmpty =
     tab === "open" && byTab.length === 0 && !filter.trim() && query.isSuccess;
+  const hasOlderItems = activeQueries.some((inbox) => inbox.hasNextPage);
+  const isLoadingOlder = activeQueries.some(
+    (inbox) => inbox.isFetchingNextPage,
+  );
+  const loadOlderItems = () => {
+    for (const inbox of activeQueries) {
+      if (inbox.hasNextPage) void inbox.fetchNextPage();
+    }
+  };
   const handleExport = () => {
     const sorted = sortRows(filtered, INBOX_DISPLAY, display);
     const dateStr = new Date().toISOString().slice(0, 10);
@@ -1684,6 +1748,26 @@ export function Inbox({
                     }
                     escHint={Boolean(filter.trim())}
                   />
+                )}
+                {hasOlderItems && (
+                  <tr>
+                    <td
+                      colSpan={Math.max(
+                        cols.length + (selectionEnabled ? 1 : 0),
+                        1,
+                      )}
+                      className="px-3 py-3 text-center"
+                    >
+                      <Button
+                        onClick={loadOlderItems}
+                        disabled={isLoadingOlder}
+                      >
+                        {isLoadingOlder
+                          ? "Loading older inbox items…"
+                          : "Load older inbox items"}
+                      </Button>
+                    </td>
+                  </tr>
                 )}
               </tbody>
             </Table>
