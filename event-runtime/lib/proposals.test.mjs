@@ -651,4 +651,63 @@ describe("approveProposal after TTL expiry (§12)", () => {
     expect(approved).toEqual({ approved: true, runId });
     expect(runState(db, runId)).toBe("QUEUED");
   });
+
+  test("re-resolves a carried model through the fresh adapter after TTL expiry", () => {
+    const { db, proposal, runId } = dispatchPlanned();
+    const staleSpec = {
+      ...getProposal(db, proposal.id).spec,
+      adapter: "pi",
+      model: "openai-codex/gpt-5.6-luna",
+    };
+    const staleJson = canonicalJson(staleSpec);
+    const staleHash = hashJson(staleSpec);
+    db.query(
+      `UPDATE proposals SET spec_json = ?, spec_hash = ? WHERE id = ?`,
+    ).run(staleJson, staleHash, proposal.id);
+    db.query(
+      `UPDATE runs SET spec_json = ?, spec_hash = ? WHERE run_id = ?`,
+    ).run(staleJson, staleHash, runId);
+
+    const result = approveProposal(db, registry, proposal.id, {
+      actor: "operator",
+      now: NOW + TTL_MS + 1,
+      policyVersion: "git:test",
+    });
+
+    expect(result).toMatchObject({ approved: false, replanned: true });
+    expect(result.proposal.spec).toMatchObject({
+      adapter: "cursor",
+      modelTier: "light",
+      model: "cursor-grok-4.6-low-fast",
+    });
+  });
+
+  test("refuses an invalid stored adapter/model pair before queueing", () => {
+    const { db, proposal, runId } = dispatchPlanned();
+    const invalidSpec = {
+      ...getProposal(db, proposal.id).spec,
+      model: "openai-codex/gpt-5.6-terra",
+    };
+    const invalidJson = canonicalJson(invalidSpec);
+    const invalidHash = hashJson(invalidSpec);
+    db.query(
+      `UPDATE proposals SET spec_json = ?, spec_hash = ? WHERE id = ?`,
+    ).run(invalidJson, invalidHash, proposal.id);
+    db.query(
+      `UPDATE runs SET spec_json = ?, spec_hash = ? WHERE run_id = ?`,
+    ).run(invalidJson, invalidHash, runId);
+
+    try {
+      approveProposal(db, registry, proposal.id, {
+        actor: "operator",
+        now: NOW + 1,
+        policyVersion: "git:test",
+      });
+      throw new Error("expected approval to refuse the invalid model");
+    } catch (err) {
+      expect(err.code).toBe("model_adapter_mismatch");
+    }
+    expect(runState(db, runId)).toBe("PROPOSED");
+    expect(getProposal(db, proposal.id).status).toBe("open");
+  });
 });
