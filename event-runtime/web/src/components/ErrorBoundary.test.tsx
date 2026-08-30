@@ -1,6 +1,6 @@
 import "../test-dom";
 import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import {
   CHUNK_RELOAD_STORAGE_KEY,
   ErrorBoundary,
@@ -92,5 +92,59 @@ describe("chunk-load recovery", () => {
     );
     expect(second.getByRole("button", { name: "Reload" })).toBeTruthy();
     expect(reloads).toBe(1);
+  });
+});
+
+describe("local recovery", () => {
+  test("retries without reloading and resets when its key changes", async () => {
+    let failDetail = true;
+    let reloads = 0;
+    const Detail = () => {
+      if (failDetail) throw new Error("detail failed");
+      return <p>Normal detail</p>;
+    };
+    const fallback = (_error: Error, retry: () => void) => (
+      <section role="alert">
+        Detail unavailable
+        <button type="button" onClick={retry}>
+          Retry
+        </button>
+      </section>
+    );
+
+    const view = render(
+      <ErrorBoundary
+        resetKey="first"
+        reload={() => {
+          reloads += 1;
+        }}
+        fallback={fallback}
+      >
+        <Detail />
+      </ErrorBoundary>,
+    );
+    await waitFor(() => view.getByRole("alert"));
+    expect(reloads).toBe(0);
+
+    failDetail = false;
+    fireEvent.click(view.getByRole("button", { name: "Retry" }));
+    await waitFor(() => view.getByText("Normal detail"));
+    expect(reloads).toBe(0);
+
+    failDetail = true;
+    view.rerender(
+      <ErrorBoundary resetKey="first" fallback={fallback}>
+        <Detail />
+      </ErrorBoundary>,
+    );
+    await waitFor(() => view.getByRole("alert"));
+
+    failDetail = false;
+    view.rerender(
+      <ErrorBoundary resetKey="second" fallback={fallback}>
+        <Detail />
+      </ErrorBoundary>,
+    );
+    await waitFor(() => view.getByText("Normal detail"));
   });
 });
