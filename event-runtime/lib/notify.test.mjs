@@ -5,11 +5,13 @@ import path from "node:path";
 import { openDb } from "./db.mjs";
 import {
   DEFAULT_NOTIFY_CMD,
+  ensureNotifyLog,
   notifyCommand,
   notifyEnabled,
   notifyPending,
   pendingNotifications,
   sendNotification,
+  sweepNotifyLog,
 } from "./notify.mjs";
 import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
 import { fileURLToPath } from "node:url";
@@ -392,6 +394,101 @@ describe("notify (WM-65)", () => {
       createdAt: new Date(now - 60 * 60_000).toISOString(),
     });
     expect(pendingNotifications(db, { now })).toEqual([]);
+  });
+
+  test("sweeps stale markers for resolved referents but preserves parked-event dedup", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const old = new Date(now - 15 * 24 * 60 * 60 * 1000).toISOString();
+    ensureNotifyLog(db);
+    insertEvent(db, { eventId: "evt-resolved", status: "completed" });
+    insertEvent(db, { eventId: "evt-parked", status: "human_needed" });
+    insertProposal(db, {
+      id: "prop-decided",
+      eventId: "evt-resolved",
+      status: "approved",
+    });
+    insertProposal(db, { id: "prop-open", eventId: "evt-parked" });
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES (?, ?, 'old marker', ?)`,
+    ).run("human_needed", "test/evt-resolved", old);
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES (?, ?, 'old marker', ?)`,
+    ).run("human_needed", "test/evt-parked", old);
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES (?, ?, 'old marker', ?)`,
+    ).run("proposal_ttl", "prop-decided", old);
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES (?, ?, 'old marker', ?)`,
+    ).run("proposal_ttl", "prop-open", old);
+
+    expect(sweepNotifyLog(db, { now })).toBe(2);
+    expect(
+      db.query("SELECT kind, target FROM notify_log ORDER BY target").all(),
+    ).toEqual([
+      { kind: "proposal_ttl", target: "prop-open" },
+      { kind: "human_needed", target: "test/evt-parked" },
+    ]);
+
+    // A sweep must not remove the marker for an eligible park: no duplicate.
+    expect(
+      notifyPending(db, { now, enabled: true, command: "/x/stub" }).sent,
+    ).toEqual([]);
+  });
+
+  test("a recent marker for an already-resolved referent survives the sweep", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const recent = new Date(now - 2 * 24 * 60 * 60 * 1000).toISOString();
+    ensureNotifyLog(db);
+    insertEvent(db, { eventId: "evt-done", status: "completed" });
+    insertProposal(db, {
+      id: "prop-done",
+      eventId: "evt-done",
+      status: "rejected",
+    });
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES (?, ?, 'recent marker', ?)`,
+    ).run("human_needed", "test/evt-done", recent);
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES (?, ?, 'recent marker', ?)`,
+    ).run("proposal_ttl", "prop-done", recent);
+
+    expect(sweepNotifyLog(db, { now })).toBe(0);
+    expect(db.query("SELECT count(*) AS n FROM notify_log").get().n).toBe(2);
+  });
+
+  test("an event id containing '/' still matches its parked event", () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const old = new Date(now - 15 * 24 * 60 * 60 * 1000).toISOString();
+    ensureNotifyLog(db);
+    insertEvent(db, {
+      source: "github",
+      eventId: "issue/42/comment",
+      status: "human_needed",
+    });
+    db.query(
+      `INSERT INTO notify_log (kind, target, message, sent_at)
+       VALUES (?, ?, 'old marker', ?)`,
+    ).run("human_needed", "github/issue/42/comment", old);
+
+    expect(sweepNotifyLog(db, { now })).toBe(0);
+  });
+
+  test("sweepNotifyLog rejects a non-positive retention", () => {
+    const db = openDb(":memory:");
+    for (const retentionDays of [0, -1, NaN, Infinity]) {
+      expect(() => sweepNotifyLog(db, { retentionDays })).toThrow(
+        /retentionDays must be a positive number of days/,
+      );
+    }
   });
 
   test("a notifier that exits non-zero is recorded on notify_log and logged, not thrown", async () => {

@@ -18,6 +18,7 @@ import {
 import { openDb } from "../lib/db.mjs";
 import { newWorkerId } from "../lib/ids.mjs";
 import { pruneArtifacts } from "../lib/artifacts.mjs";
+import { sweepMemos } from "../lib/memos.mjs";
 import { publishOutbox } from "../lib/outbox.mjs";
 import { autoApproveScheduled, emitDueTicks } from "../lib/schedules.mjs";
 import { autoApproveChains } from "../lib/auto-approval.mjs";
@@ -26,7 +27,7 @@ import {
   planAdmittedEvents,
 } from "../lib/planner.mjs";
 import { resolveChains } from "../lib/chain.mjs";
-import { notifyPending } from "../lib/notify.mjs";
+import { notifyPending, sweepNotifyLog } from "../lib/notify.mjs";
 import { reconcileInbox } from "../lib/inbox.mjs";
 import { loadModelTierMap, loadRegistry } from "../lib/registry.mjs";
 import { applyModelTierCellOverrides } from "../lib/runtime-overrides.mjs";
@@ -182,15 +183,37 @@ export async function tick({
   let nextPrune = lastPrune;
   await runStep("GC", () => {
     if (now - lastPrune <= pruneIntervalMs) return;
-    try {
+    // The cadence advances even when a sub-step throws: a broken sweep must
+    // not turn into a hot loop of retries on every tick.
+    nextPrune = now;
+    const gcStep = (name, fn) => {
+      try {
+        fn();
+      } catch (err) {
+        logLine(`tick GC: ${name}: ${err.message}`);
+      }
+    };
+    // Sweep first so memo artifacts become eligible for this GC pass rather
+    // than staying pinned until the next hourly artifact prune. Each sub-step
+    // is isolated: a memo-sweep failure never skips artifact GC.
+    gcStep("memos", () => {
+      const swept = sweepMemos(db, { now });
+      if (swept.deleted > 0)
+        logLine(
+          `memos: swept ${swept.deleted} expired/retired/superseded memo(s)`,
+        );
+    });
+    gcStep("artifacts", () => {
       const pruned = pruneArtifacts(db, storeRoot ?? artifactsRoot(), { now });
       if (pruned.deleted > 0)
         logLine(
           `artifacts: pruned ${pruned.deleted} orphan(s), freed ${pruned.freedBytes}B`,
         );
-    } finally {
-      nextPrune = now;
-    }
+    });
+    gcStep("notify", () => {
+      const swept = sweepNotifyLog(db, { now });
+      if (swept > 0) logLine(`notify: swept ${swept} stale dedup marker(s)`);
+    });
   });
 
   await runStep("chains", () => {

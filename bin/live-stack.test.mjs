@@ -48,7 +48,13 @@ spawn_daemon() { # <pidfile> <logfile> <workdir> <cmd...>
   local pidfile="$1" logfile="$2" workdir="$3"
   shift 3
   printf 'SPAWN pid=%s workdir=%s cmd=%s\\n' "$(basename "$pidfile")" "$workdir" "$*" >>"$SPAWN_LOG"
+  if [[ "$(basename "$pidfile")" == "\${FAKE_SPAWN_FAIL_PIDFILE:-}" ]]; then return 1; fi
   printf '1\\n' >"$pidfile"
+  if [[ "\${FAKE_POOL_CHILDREN:-0}" == "1" && "$*" == *"cli.mjs supervise"* ]]; then
+    printf '2\\n' >"$(dirname "$pidfile")/supervisor.pid"
+    printf '3\\n' >"$(dirname "$pidfile")/worker-1.pid"
+    printf 'worker_test\\n' >"$(dirname "$pidfile")/worker-1.id"
+  fi
 }
 term_daemon() {
   printf 'TERM %s\\n' "$2" >>"$SPAWN_LOG"
@@ -132,7 +138,16 @@ function makeFixture({
 
   // The health polls must not gate a test on a server nobody started.
   const curl = path.join(root, "stubs", "curl");
-  writeFileSync(curl, "#!/bin/sh\nexit 0\n", "utf8");
+  writeFileSync(
+    curl,
+    `#!/bin/sh
+if [ -n "\${FAKE_CURL_FAIL_URL:-}" ]; then
+  case "$*" in *"$FAKE_CURL_FAIL_URL"*) exit 1 ;; esac
+fi
+exit "\${FAKE_CURL_STATUS:-0}"
+`,
+    "utf8",
+  );
   chmodSync(curl, 0o755);
 
   // Non-dev web builds are recorded and materialize the one artifact the
@@ -220,6 +235,159 @@ test("plain `up` spawns serve, worker, and the static web server — unchanged b
     f.cleanup();
   }
 });
+
+test("`up --dry-run` prints the resolved daemon plan without spawning", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, [
+      "up",
+      "--dry-run",
+      "--port",
+      "7411",
+      "--web-port",
+      "7412",
+    ]);
+    expect(r.status).toBe(0);
+    expect(r.spawns).toEqual([]);
+    expect(r.builds).toEqual([]);
+    expect(r.stdout).toContain("dry run — no daemons will be started");
+    expect(r.stdout).toContain(`RUN_DIR=${f.runDir}`);
+    expect(r.stdout).toContain("API_PORT=7411");
+    expect(r.stdout).toContain("WEB_PORT=7412");
+    expect(r.stdout).toContain("event runtime: env");
+    expect(r.stdout).toContain("cli.mjs serve --port 7411");
+    expect(r.stdout).toContain("worker: env");
+    expect(r.stdout).toContain("web server: env");
+    expect(r.stdout).toContain("web supervisor: env");
+    // A dry run leaves no trace on disk: no run dir, no event home.
+    expect(existsSync(f.runDir)).toBe(false);
+    expect(existsSync(path.join(f.root, "home"))).toBe(false);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("failed runtime health cleans up only daemons spawned by this `up`", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, ["up"], {
+      FACTORY_GH_APP_ID: "test-app",
+      FACTORY_GH_APP_PRIVATE_KEY_PATH: "/tmp/test-key",
+      FAKE_CURL_STATUS: "1",
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("event runtime failed to start");
+    expect(r.spawns).toContainEqual(
+      expect.stringContaining("pid=gh-app-auth.pid"),
+    );
+    expect(r.spawns).toContainEqual(expect.stringContaining("pid=serve.pid"));
+    expect(r.spawns).toContain("TERM GitHub App token daemon");
+    expect(r.spawns).toContain("TERM event runtime");
+    expect(existsSync(path.join(f.runDir, "gh-app-auth.pid"))).toBe(false);
+    expect(existsSync(path.join(f.runDir, "serve.pid"))).toBe(false);
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
+
+test("failed `up` leaves an already-running daemon alone", () => {
+  const f = makeFixture();
+  try {
+    mkdirSync(f.runDir, { recursive: true });
+    writeFileSync(path.join(f.runDir, "serve.pid"), "4242\n", "utf8");
+    const r = runStack(f, ["up"], {
+      FAKE_ALIVE: "1",
+      FAKE_CURL_STATUS: "1",
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stdout).toContain("event runtime already running");
+    expect(r.spawns).not.toContain("TERM event runtime");
+    expect(existsSync(path.join(f.runDir, "serve.pid"))).toBe(true);
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
+
+test("slow web health warns and keeps the healthy runtime and pool running", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, ["up", "--workers", "1:1"], {
+      FAKE_POOL_CHILDREN: "1",
+      FAKE_CURL_FAIL_URL: ":7382",
+    });
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain("web server not responding on 7382 yet");
+    expect(r.stdout).toContain("ready — live factory stack");
+    expect(r.spawns.some((line) => line.startsWith("TERM "))).toBe(false);
+    for (const file of [
+      "serve.pid",
+      "worker.pid",
+      "supervisor.pid",
+      "worker-1.pid",
+      "web.pid",
+    ]) {
+      expect(existsSync(path.join(f.runDir, file))).toBe(true);
+    }
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
+
+test("a daemon that fails to spawn removes supervised pool children from this `up`", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, ["up", "--workers", "1:1"], {
+      FAKE_POOL_CHILDREN: "1",
+      FAKE_SPAWN_FAIL_PIDFILE: "web.pid",
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("failed to start web server");
+    expect(r.spawns).toContain("TERM worker pool worker-1");
+    expect(r.spawns).toContain("TERM event runtime");
+    for (const file of [
+      "worker.pid",
+      "supervisor.pid",
+      "worker-1.pid",
+      "worker-1.id",
+    ]) {
+      expect(existsSync(path.join(f.runDir, file))).toBe(false);
+    }
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
+
+test("a non-`up` die never touches pre-existing pidfiles or daemons", () => {
+  const f = makeFixture();
+  try {
+    mkdirSync(f.runDir, { recursive: true });
+    const preexisting = {
+      "serve.pid": "4242\n",
+      "worker.pid": "4243\n",
+      "supervisor.pid": "4244\n",
+      "worker-1.pid": "4245\n",
+      "worker-1.id": "worker_live\n",
+      "web.pid": "4246\n",
+    };
+    for (const [file, body] of Object.entries(preexisting)) {
+      writeFileSync(path.join(f.runDir, file), body, "utf8");
+    }
+    for (const args of [
+      ["tail", "nosuchlog"],
+      ["bogus-action"],
+      ["up", "--no-such-option"],
+    ]) {
+      const r = runStack(f, args, { FAKE_ALIVE: "1" });
+      expect(r.status).not.toBe(0);
+      expect(r.spawns).toEqual([]);
+      for (const [file, body] of Object.entries(preexisting)) {
+        expect(readFileSync(path.join(f.runDir, file), "utf8")).toBe(body);
+      }
+    }
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
 
 test("plain `up` rebuilds a stale web bundle and reports the elapsed time", () => {
   const f = makeFixture({ bundle: "stale" });
