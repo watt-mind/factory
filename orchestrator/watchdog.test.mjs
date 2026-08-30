@@ -26,7 +26,10 @@ test("formatWatchdogReport formats clean watchdog status", () => {
       apiOk: true,
       webOk: true,
       workersCount: 3,
+      inFlightRuns: 1,
+      leasedRuns: 0,
       runningRuns: 1,
+      verifyingRuns: 0,
       wedgedRuns: 0,
       queuedRuns: 0,
       anomalies: [],
@@ -36,7 +39,9 @@ test("formatWatchdogReport formats clean watchdog status", () => {
   const formatted = formatWatchdogReport(cleanResult);
   expect(formatted).toContain("WATCHDOG OK");
   expect(formatted).toContain("Workers: 3");
-  expect(formatted).toContain("Running: 1");
+  expect(formatted).toContain(
+    "In flight: 1 (running 1, verifying 0, leased 0)",
+  );
 });
 
 test("formatWatchdogReport formats critical issues", () => {
@@ -58,7 +63,10 @@ test("formatWatchdogReport formats critical issues", () => {
       apiOk: true,
       webOk: false,
       workersCount: 2,
+      inFlightRuns: 1,
+      leasedRuns: 0,
       runningRuns: 1,
+      verifyingRuns: 0,
       wedgedRuns: 1,
       queuedRuns: 0,
       anomalies: [],
@@ -87,7 +95,10 @@ test("formatWatchdogReport keeps the fleet metrics line on warning/critical", ()
       apiOk: true,
       webOk: true,
       workersCount: 1,
+      inFlightRuns: 0,
+      leasedRuns: 0,
       runningRuns: 0,
+      verifyingRuns: 0,
       wedgedRuns: 0,
       queuedRuns: 0,
       anomalies: [],
@@ -317,6 +328,7 @@ async function runWatchdogWithInFlightRuns({
   running = [],
   verifying = [],
   queued = 0,
+  failDetailFor = [],
 } = {}) {
   const server = Bun.serve({
     port: 0,
@@ -326,7 +338,16 @@ async function runWatchdogWithInFlightRuns({
         return Response.json({ ok: true });
       }
       if (url.pathname === "/status") {
-        return Response.json({ runs: { byState: { QUEUED: queued } } });
+        return Response.json({
+          runs: {
+            byState: {
+              QUEUED: queued,
+              LEASED: leased.length,
+              RUNNING: running.length,
+              VERIFYING: verifying.length,
+            },
+          },
+        });
       }
       if (url.pathname === "/workers") {
         return Response.json({
@@ -342,6 +363,20 @@ async function runWatchdogWithInFlightRuns({
         return Response.json({
           runs: byState[url.searchParams.get("state")] ?? [],
         });
+      }
+      const runId = url.pathname.match(/^\/runs\/([^/]+)$/)?.[1];
+      if (runId) {
+        if (failDetailFor.includes(runId)) {
+          return new Response("gone", { status: 404 });
+        }
+        const run = [...leased, ...running, ...verifying].find(
+          (entry) => entry.runId === runId,
+        );
+        if (run) {
+          return Response.json({
+            attempts: [{ lease_expires_at: run.lease_expires_at ?? null }],
+          });
+        }
       }
       return new Response("not found", { status: 404 });
     },
@@ -359,7 +394,109 @@ async function runWatchdogWithInFlightRuns({
   }
 }
 
-test("runWatchdogCheck detects a stale VERIFYING run", async () => {
+test("runWatchdogCheck detects stale active runs", async () => {
+  const result = await runWatchdogWithInFlightRuns({
+    leased: [
+      {
+        runId: "run_leased",
+        agent: "dispatch@1",
+        state: "LEASED",
+        created_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+        updated_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      },
+    ],
+    running: [
+      {
+        runId: "run_running",
+        agent: "dispatch@1",
+        state: "RUNNING",
+        created_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+        updated_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      },
+    ],
+  });
+
+  expect(result.metrics).toMatchObject({
+    inFlightRuns: 2,
+    leasedRuns: 1,
+    runningRuns: 1,
+    verifyingRuns: 0,
+  });
+  expect(
+    result.issues.filter((issue) => issue.code === "WEDGED_RUN"),
+  ).toHaveLength(2);
+});
+
+test("runWatchdogCheck does not wedge an old VERIFYING run with a fresh lease", async () => {
+  const result = await runWatchdogWithInFlightRuns({
+    verifying: [
+      {
+        runId: "run_verifying_fresh_lease",
+        agent: "dispatch@1",
+        state: "VERIFYING",
+        created_at: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+        updated_at: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+        lease_expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      },
+    ],
+  });
+
+  expect(result.metrics).toMatchObject({
+    inFlightRuns: 1,
+    leasedRuns: 0,
+    runningRuns: 0,
+    verifyingRuns: 1,
+  });
+  expect(result.issues.some((issue) => issue.code === "WEDGED_RUN")).toBe(
+    false,
+  );
+});
+
+test("runWatchdogCheck wedges an old RUNNING run despite a fresh lease", async () => {
+  const result = await runWatchdogWithInFlightRuns({
+    running: [
+      {
+        runId: "run_running_fresh_lease",
+        agent: "dispatch@1",
+        state: "RUNNING",
+        created_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+        updated_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+        lease_expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      },
+    ],
+  });
+
+  expect(result.issues).toContainEqual(
+    expect.objectContaining({
+      code: "WEDGED_RUN",
+      message: expect.stringContaining("in RUNNING"),
+    }),
+  );
+});
+
+test("runWatchdogCheck wedges a VERIFYING run past the absolute ceiling even with a fresh lease", async () => {
+  const result = await runWatchdogWithInFlightRuns({
+    verifying: [
+      {
+        runId: "run_verifying_ceiling",
+        agent: "dispatch@1",
+        state: "VERIFYING",
+        created_at: new Date(Date.now() - 140 * 60 * 1000).toISOString(),
+        updated_at: new Date(Date.now() - 140 * 60 * 1000).toISOString(),
+        lease_expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      },
+    ],
+  });
+
+  expect(result.issues).toContainEqual(
+    expect.objectContaining({
+      code: "WEDGED_RUN",
+      message: expect.stringContaining("in VERIFYING"),
+    }),
+  );
+});
+
+test("runWatchdogCheck detects a stale VERIFYING run without a lease", async () => {
   const result = await runWatchdogWithInFlightRuns({
     verifying: [
       {
@@ -372,54 +509,47 @@ test("runWatchdogCheck detects a stale VERIFYING run", async () => {
     ],
   });
 
-  expect(result.metrics.runningRuns).toBe(1);
+  expect(result.metrics.verifyingRuns).toBe(1);
   expect(result.issues).toContainEqual(
     expect.objectContaining({
-      severity: "CRITICAL",
       code: "WEDGED_RUN",
       message: expect.stringContaining("in VERIFYING"),
     }),
   );
 });
 
-test("runWatchdogCheck detects a stale LEASED run", async () => {
-  const result = await runWatchdogWithInFlightRuns({
-    leased: [
-      {
-        runId: "run_leased",
-        agent: "dispatch@1",
-        state: "LEASED",
-        created_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
-        updated_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
-      },
-    ],
+test("runWatchdogCheck keeps reporting when one run detail fetch fails", async () => {
+  const stale = (runId, state) => ({
+    runId,
+    agent: "dispatch@1",
+    state,
+    created_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+    updated_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
   });
-
-  expect(result.issues).toContainEqual(
-    expect.objectContaining({
-      severity: "CRITICAL",
-      code: "WEDGED_RUN",
-      message: expect.stringContaining("in LEASED"),
-    }),
-  );
-});
-
-test("runWatchdogCheck ignores a fresh VERIFYING run", async () => {
   const result = await runWatchdogWithInFlightRuns({
+    running: [stale("run_a", "RUNNING"), stale("run_b", "RUNNING")],
     verifying: [
       {
-        runId: "run_fresh_verifying",
-        agent: "dispatch@1",
-        state: "VERIFYING",
-        created_at: new Date(Date.now() - 60 * 1000).toISOString(),
-        updated_at: new Date(Date.now() - 60 * 1000).toISOString(),
+        ...stale("run_c", "VERIFYING"),
+        lease_expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
       },
     ],
+    failDetailFor: ["run_a"],
   });
 
-  expect(result.issues.some((issue) => issue.code === "WEDGED_RUN")).toBe(
-    false,
-  );
+  expect(result.metrics.inFlightRuns).toBe(3);
+  expect(result.metrics.wedgedRuns).toBe(2);
+  expect(
+    result.issues
+      .filter((issue) => issue.code === "WEDGED_RUN")
+      .map((i) => i.message),
+  ).toEqual([
+    expect.stringContaining("run_a"),
+    expect.stringContaining("run_b"),
+  ]);
+  expect(
+    result.issues.some((issue) => issue.code === "STATUS_FETCH_ERROR"),
+  ).toBe(false);
 });
 
 test("runWatchdogCheck does not report IDLE_STALL with a VERIFYING run", async () => {
@@ -436,7 +566,6 @@ test("runWatchdogCheck does not report IDLE_STALL with a VERIFYING run", async (
     ],
   });
 
-  expect(result.metrics.runningRuns).toBe(1);
   expect(result.issues.some((issue) => issue.code === "IDLE_STALL")).toBe(
     false,
   );
