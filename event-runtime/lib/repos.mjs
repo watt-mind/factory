@@ -77,6 +77,27 @@ export function resetInRepoConfigCache() {
   ignoredInRepoConfigWarnings.clear();
 }
 
+function inRepoConfigCandidatePaths(repoRoot) {
+  return IN_REPO_CONFIG_PATHS.map((relative) =>
+    path.resolve(repoRoot, relative),
+  );
+}
+
+/** Remove cached overlays and warnings for repos absent from the registry. */
+function pruneInRepoConfigCaches(repoRoots) {
+  const configuredFiles = new Set(
+    repoRoots.flatMap((repoRoot) => inRepoConfigCandidatePaths(repoRoot)),
+  );
+  for (const file of inRepoConfigCache.keys()) {
+    if (!configuredFiles.has(file)) inRepoConfigCache.delete(file);
+  }
+  for (const [key, warning] of ignoredInRepoConfigWarnings) {
+    if (!warning.files.some((file) => configuredFiles.has(file))) {
+      ignoredInRepoConfigWarnings.delete(key);
+    }
+  }
+}
+
 function repoConfigSchema() {
   if (inRepoConfigSchema) return inRepoConfigSchema;
   try {
@@ -123,8 +144,8 @@ function validateInRepoConfigSemantics(config, file) {
  * null; malformed or ambiguous declarations fail closed before host overlay.
  */
 export function loadInRepoConfig(repoRoot = process.cwd()) {
-  const candidates = IN_REPO_CONFIG_PATHS.map((relative) => {
-    const file = path.resolve(repoRoot, relative);
+  const candidatePaths = inRepoConfigCandidatePaths(repoRoot);
+  const candidates = candidatePaths.map((file) => {
     const stat = statSync(file, { throwIfNoEntry: false });
     if (!stat) {
       inRepoConfigCache.delete(file);
@@ -146,6 +167,7 @@ export function loadInRepoConfig(repoRoot = process.cwd()) {
       `${repoRoot}: both .factory.yaml and .factory/config.yaml exist; keep exactly one in-repo config`,
     );
     error.inRepoConfigFingerprint = fingerprint;
+    error.inRepoConfigPaths = candidatePaths;
     throw error;
   }
 
@@ -185,6 +207,7 @@ export function loadInRepoConfig(repoRoot = process.cwd()) {
         ? error
         : new RepoError(`${file}: invalid YAML: ${error.message}`);
     wrapped.inRepoConfigFingerprint = fingerprint;
+    wrapped.inRepoConfigPaths = candidatePaths;
     inRepoConfigCache.set(file, { mtimeMs, size, error: wrapped });
     throw wrapped;
   }
@@ -193,8 +216,11 @@ export function loadInRepoConfig(repoRoot = process.cwd()) {
 function warnInRepoConfigIgnored(repoName, error) {
   const key = `${repoName}\u0000${error.message}`;
   const fingerprint = error.inRepoConfigFingerprint;
-  if (ignoredInRepoConfigWarnings.get(key) === fingerprint) return;
-  ignoredInRepoConfigWarnings.set(key, fingerprint);
+  if (ignoredInRepoConfigWarnings.get(key)?.fingerprint === fingerprint) return;
+  ignoredInRepoConfigWarnings.set(key, {
+    fingerprint,
+    files: error.inRepoConfigPaths ?? [],
+  });
   console.warn(
     `warning: repo ${repoName}: in-repo config ignored, host config applies: ${error.message}`,
   );
@@ -1155,6 +1181,11 @@ export function loadRepos({ root = reposRoot() } = {}) {
   } catch (err) {
     throw new RepoError(`${file}: invalid YAML: ${err.message}`);
   }
+  pruneInRepoConfigCaches(
+    (parsed?.repos ?? [])
+      .filter((entry) => entry?.path)
+      .map((entry) => expandHome(entry.path)),
+  );
   const repos = new Map();
   for (const hostEntry of parsed?.repos ?? []) {
     if (!hostEntry?.name)

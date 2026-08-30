@@ -22,7 +22,7 @@ import {
   stopBounded,
 } from "./serve.mjs";
 import { openDb } from "../lib/db.mjs";
-import { freePort } from "../lib/test-helpers-timing.mjs";
+import { freePort, until } from "../lib/test-helpers-timing.mjs";
 import {
   CLI,
   DEAD_PORT,
@@ -362,17 +362,29 @@ describe("serve command", () => {
       expect(result.admitted).toBe(true);
       // The next tick stalls in the fake CLI; the execFileSync timeout must
       // abort it and record a bounded read failure instead of sleeping 60s.
-      const planError = {
-        get out() {
-          const row = db
-            .query(
-              `SELECT last_plan_error FROM events WHERE event_id = 'linear-stall-1'`,
-            )
-            .get();
-          return String(row?.last_plan_error ?? "");
-        },
+      // The exact reason is not the acceptance criterion and has already
+      // shifted once with the read-refusal work (#1886): the tick may record
+      // the raw ETIMEDOUT, or refuse the read outright once the bounded read
+      // budget is spent. Either is a correct non-wedge outcome, so match the
+      // family of bounded-read refusals rather than one spelling. What stays
+      // strict is the /health assertion below.
+      const planError = () => {
+        const row = db
+          .query(
+            `SELECT last_plan_error FROM events WHERE event_id = 'linear-stall-1'`,
+          )
+          .get();
+        return String(row?.last_plan_error ?? "");
       };
-      expect(await waitFor(planError, "ETIMEDOUT", 15_000)).toBe(true);
+      const reason = await until(
+        "the stalled Linear read to be recorded as bounded",
+        () => {
+          const out = planError();
+          return /ETIMEDOUT|linear_read_|read_budget/.test(out) ? out : null;
+        },
+        { timeoutMs: 15_000 },
+      );
+      expect(reason).toMatch(/ETIMEDOUT|linear_read_|read_budget/);
       // Retries keep stalling one bounded read per tick; a /health probe that
       // lands mid-stall still answers inside the web proxy's 10s budget.
       const started = Date.now();

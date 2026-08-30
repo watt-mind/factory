@@ -328,6 +328,38 @@ describe("run list deadlines (WM-692)", () => {
     }
   });
 
+  test("GET /runs expands ACTIVE and FAILED status tab groups", async () => {
+    const s = await makeServer({ now: () => start });
+    try {
+      for (const state of [
+        "QUEUED",
+        "LEASED",
+        "RUNNING",
+        "VERIFYING",
+        "FAILED",
+        "TIMED_OUT",
+        "REFUSED",
+        "COMPLETED",
+      ]) {
+        insertRun(s.db, `run-tab-${state}`, state);
+      }
+
+      const active = await fetch(s.url("/runs?state=ACTIVE"));
+      expect(active.status).toBe(200);
+      expect((await active.json()).runs.map((run) => run.state).sort()).toEqual(
+        ["QUEUED", "LEASED", "RUNNING", "VERIFYING"].sort(),
+      );
+
+      const failed = await fetch(s.url("/runs?state=FAILED"));
+      expect(failed.status).toBe(200);
+      expect((await failed.json()).runs.map((run) => run.state).sort()).toEqual(
+        ["FAILED", "TIMED_OUT", "REFUSED"].sort(),
+      );
+    } finally {
+      s.close();
+    }
+  });
+
   test("GET /runs keyset-paginates tied timestamps and rejects bad bounds", async () => {
     const s = await makeServer({ now: () => start });
     try {

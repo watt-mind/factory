@@ -66,7 +66,7 @@ export const PROPOSAL_STATUS_HUES: Record<string, string> = {
   approved: "var(--hue-ok)",
   rejected: "var(--hue-err)",
   expired: "var(--hue-warn)",
-  superseded: "var(--hue-idle)",
+  superseded: "var(--hue-verify)",
   resolved: "var(--hue-idle)",
 };
 

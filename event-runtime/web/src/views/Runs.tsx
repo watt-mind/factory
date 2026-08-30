@@ -58,7 +58,7 @@ import {
 } from "../components/RunDetailBlocks";
 import { readPinnedRuns, savePinnedRuns } from "../components/ContextTabs";
 import type { OperatorContext } from "../context";
-import { matchesInFlight, matchesRepo } from "../context";
+import { matchesInFlight, matchesRepo, projectFromContext } from "../context";
 import {
   RUN_FACETS,
   matchesFilterQuery,
@@ -600,6 +600,7 @@ export function Runs({
   const [cancelReason, setCancelReason] = useState("");
   const drilldown = runDrilldownFilters(window.location.hash);
   const drilldownKey = JSON.stringify(drilldown);
+  const contextProject = projectFromContext(context);
   const [runCursor, setRunCursor] = useState<string | null>(null);
 
   const proposalsQ = useQuery({
@@ -624,12 +625,12 @@ export function Runs({
   // different tab, drilldown, or context can hide that list's newest runs.
   useEffect(() => {
     setRunCursor(null);
-  }, [tab, drilldownKey, context.kind]);
+  }, [tab, drilldownKey, contextProject]);
 
   const list = useQuery({
     queryKey: ["runs", fetchAll ? "ALL" : tab, drilldownKey, runCursor],
     queryFn: () =>
-      api.runs(undefined, {
+      api.runs(fetchAll || tab === "ALL" ? undefined : tab, {
         ...(drilldown ?? {}),
         before: runCursor ?? undefined,
       }),
@@ -920,7 +921,11 @@ export function Runs({
   const detail = useQuery({
     queryKey: ["run", selectedId],
     queryFn: () => api.run(selectedId as string),
-    enabled: sel !== null,
+    // The run summary is deliberately bounded. A hash link from Workers can
+    // therefore name a current run which is not in `visible` (or `rows`) at
+    // all. Fetch its canonical detail by id rather than making that deep link
+    // look like an empty Runs list.
+    enabled: selectedId !== null,
     ...refetchIntervals.primary,
   });
 
@@ -1312,7 +1317,11 @@ export function Runs({
         <Table
           role="grid"
           aria-label="Runs"
-          className="w-full table-fixed border-separate border-spacing-0"
+          className={`w-full table-fixed border-separate border-spacing-0 ${
+            visible.length === 0
+              ? "[&_tbody>tr>td>div]:sticky [&_tbody>tr>td>div]:left-0 [&_tbody>tr>td>div]:w-screen"
+              : ""
+          }`}
           style={{
             minWidth: `${listCols.reduce(
               (width, c) => width + (c.key === "state" ? 176 : 112),
@@ -1590,7 +1599,7 @@ export function Runs({
         </Table>
       </ListPane>
 
-      {sel && (
+      {selectedId && (
         <DetailPane
           widthClass="fixed inset-0 z-20 w-full sm:static sm:z-auto sm:w-[440px]"
           title={
@@ -1614,14 +1623,22 @@ export function Runs({
                 className="flex min-w-0 items-center gap-2 truncate font-semibold text-(--text)"
                 aria-current="page"
               >
-                <StateBadge state={sel.state} />
-                <JumpLink
-                  onClick={() => onOpenFull(sel.runId)}
-                  title={`Open ${sel.runId}`}
-                  className="truncate mono"
-                >
-                  {shortId(sel.runId)}
-                </JumpLink>
+                {d ? (
+                  <>
+                    <StateBadge state={d.run.state} />
+                    <JumpLink
+                      onClick={() => onOpenFull(selectedId)}
+                      title={`Open ${selectedId}`}
+                      className="truncate mono"
+                    >
+                      {shortId(selectedId)}
+                    </JumpLink>
+                  </>
+                ) : detail.isError ? (
+                  "Run not found"
+                ) : (
+                  "Loading run…"
+                )}
               </span>
             </nav>
           }
@@ -1683,7 +1700,7 @@ export function Runs({
                   ))}
               </div>
               <div className="flex items-center gap-1.5">
-                <Button onClick={() => onOpenFull(sel.runId)}>
+                <Button onClick={() => onOpenFull(selectedId)}>
                   Expand{" "}
                   <span
                     className="mono ml-1 text-(--text-faint)"
@@ -1692,7 +1709,7 @@ export function Runs({
                     o
                   </span>
                 </Button>
-                <Button onClick={() => toggleRunPin(sel.runId)}>
+                <Button onClick={() => toggleRunPin(selectedId)}>
                   Open in tab{" "}
                   <span
                     className="mono ml-1 text-(--text-faint)"
@@ -1706,9 +1723,9 @@ export function Runs({
           }
           utility={
             <CopyActions
-              id={sel.runId}
+              id={selectedId}
               idLabel="run id"
-              cli={`bun event-runtime/cli.mjs inspect ${sel.runId}`}
+              cli={`bun event-runtime/cli.mjs inspect ${selectedId}`}
               cliLabel="CLI inspect command"
             />
           }
@@ -1716,7 +1733,12 @@ export function Runs({
         >
           {!d && (
             <div className="text-(--text-faint)">
-              {detail.isError ? "Could not load run detail." : "Loading run…"}
+              {detail.isError
+                ? detail.error instanceof ApiError &&
+                  detail.error.status === 404
+                  ? `Run ${selectedId} was not found.`
+                  : "Could not load run detail."
+                : "Loading run…"}
             </div>
           )}
 

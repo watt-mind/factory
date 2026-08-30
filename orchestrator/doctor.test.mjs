@@ -36,6 +36,7 @@ import {
   ossOnboardingDiagnostics,
   parseCliVersion,
   repoToolchainDiagnostics,
+  stackDaemonDiagnostics,
 } from "./doctor.mjs";
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -258,6 +259,197 @@ describe("repo toolchain diagnostics (#1097)", () => {
     // Doctor keeps going: the next repo is still probed.
     expect(rows[1]).toMatchObject({ ok: true, label: "toolchain bun" });
     expect(probes).toBe(1);
+  });
+});
+
+describe("stack daemon diagnostics (#1868)", () => {
+  const root = "/factory/stack";
+  const appEnv = {
+    FACTORY_GH_APP_ID: "123",
+    FACTORY_GH_APP_INSTALLATION_ID: "456",
+    FACTORY_GH_APP_PRIVATE_KEY_PATH: "/tmp/app.pem",
+  };
+  const absentPidFile = () => {
+    const error = new Error("not found");
+    error.code = "ENOENT";
+    throw error;
+  };
+  const pidFileFor = (pid) => (file) =>
+    file.endsWith("gh-app-auth.pid") ? `${pid}\n` : absentPidFile();
+
+  test("fails when configured App auth has no daemon", () => {
+    const rows = stackDaemonDiagnostics({
+      root,
+      env: appEnv,
+      listProcesses: () => [],
+      readPidFile: absentPidFile,
+    });
+    expect(rows).toContainEqual({
+      ok: false,
+      label: "gh-app-auth daemon",
+      detail: "GitHub App auth is configured but no daemon is running",
+      fix: "run `factory up` to start gh-app-auth.mjs --daemon",
+    });
+    expect(
+      rows.find((row) => row.label === "serve.pid identity"),
+    ).toMatchObject({
+      ok: "warn",
+      detail: expect.stringContaining("not applicable"),
+    });
+  });
+
+  test("ignores a foreign daemon when this stack's pidfile owns a healthy daemon", () => {
+    const rows = stackDaemonDiagnostics({
+      root,
+      env: appEnv,
+      listProcesses: () => [
+        {
+          pid: 41,
+          command:
+            "bun /factory/stack/lib/control-plane/gh-app-auth.mjs --daemon",
+        },
+        {
+          pid: 42,
+          command:
+            "bun /factory/other/lib/control-plane/gh-app-auth.mjs --daemon",
+        },
+      ],
+      readPidFile: pidFileFor(41),
+      probeProcess: (pid) => ({
+        alive: true,
+        command: `bun ${pid === 41 ? root : "/factory/other"}/lib/control-plane/gh-app-auth.mjs --daemon`,
+      }),
+    });
+    expect(rows.find((row) => row.label === "gh-app-auth daemon")).toEqual({
+      ok: true,
+      label: "gh-app-auth daemon",
+      detail: "one daemon running (pid 41)",
+      fix: null,
+    });
+  });
+
+  test("fails when a foreign daemon exists but this stack's daemon is missing", () => {
+    const rows = stackDaemonDiagnostics({
+      root,
+      env: appEnv,
+      listProcesses: () => [
+        {
+          pid: 41,
+          command:
+            "bun /factory/other/lib/control-plane/gh-app-auth.mjs --daemon",
+        },
+      ],
+      readPidFile: absentPidFile,
+    });
+    expect(rows.find((row) => row.label === "gh-app-auth daemon")).toEqual({
+      ok: false,
+      label: "gh-app-auth daemon",
+      detail: "GitHub App auth is configured but no daemon is running",
+      fix: "run `factory up` to start gh-app-auth.mjs --daemon",
+    });
+  });
+
+  test("fails when this stack's daemon pidfile points at another process", () => {
+    const rows = stackDaemonDiagnostics({
+      root,
+      env: appEnv,
+      listProcesses: () => [],
+      readPidFile: pidFileFor(41),
+      probeProcess: () => ({
+        alive: true,
+        command: "bun unrelated-worker.mjs",
+      }),
+    });
+    expect(
+      rows.find((row) => row.label === "gh-app-auth daemon"),
+    ).toMatchObject({
+      ok: false,
+      detail:
+        "recycled gh-app-auth.pid — PID 41 belongs to bun unrelated-worker.mjs",
+    });
+  });
+
+  test("fails on duplicate gh-app-auth daemons serving this stack", () => {
+    const rows = stackDaemonDiagnostics({
+      root,
+      env: appEnv,
+      listProcesses: () => [
+        {
+          pid: 41,
+          command:
+            "bun /factory/stack/lib/control-plane/gh-app-auth.mjs --daemon",
+        },
+        {
+          pid: 42,
+          command:
+            "bun /factory/stack/lib/control-plane/gh-app-auth.mjs --daemon",
+        },
+      ],
+      readPidFile: pidFileFor(41),
+      probeProcess: () => ({
+        alive: true,
+        command:
+          "bun /factory/stack/lib/control-plane/gh-app-auth.mjs --daemon",
+      }),
+    });
+    expect(
+      rows.find((row) => row.label === "gh-app-auth daemon"),
+    ).toMatchObject({
+      ok: false,
+      detail: "duplicate daemons — found 2 (41, 42)",
+    });
+  });
+
+  test("reports a live recycled PID separately from a stopped serve", () => {
+    const rows = stackDaemonDiagnostics({
+      env: {},
+      listProcesses: () => [],
+      readPidFile: () => "8080\n",
+      probeProcess: () => ({
+        alive: true,
+        command: "bun unrelated-worker.mjs",
+      }),
+    });
+    expect(
+      rows.find((row) => row.label === "serve.pid identity"),
+    ).toMatchObject({
+      ok: false,
+      detail:
+        "recycled serve.pid — PID 8080 belongs to bun unrelated-worker.mjs",
+    });
+  });
+
+  test("reports a stale PID as not running", () => {
+    const rows = stackDaemonDiagnostics({
+      env: {},
+      listProcesses: () => [],
+      readPidFile: () => "8080\n",
+      probeProcess: () => ({ alive: false }),
+    });
+    expect(
+      rows.find((row) => row.label === "serve.pid identity"),
+    ).toMatchObject({
+      ok: false,
+      detail: "stale serve.pid — PID 8080 is not running",
+    });
+  });
+
+  test("accepts a live PID only when it owns the serve entrypoint", () => {
+    const rows = stackDaemonDiagnostics({
+      env: {},
+      listProcesses: () => [],
+      readPidFile: () => "8080\n",
+      probeProcess: () => ({
+        alive: true,
+        command: "bun /repo/event-runtime/cli.mjs serve --port 7381",
+      }),
+    });
+    expect(rows.find((row) => row.label === "serve.pid identity")).toEqual({
+      ok: true,
+      label: "serve.pid identity",
+      detail: "PID 8080 is event-runtime/cli.mjs serve",
+      fix: null,
+    });
   });
 });
 
