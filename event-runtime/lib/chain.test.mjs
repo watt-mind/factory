@@ -972,6 +972,136 @@ describe("multi-emit chain resolution (WM-119)", () => {
     });
   });
 
+  test("returns the outcome when bookkeeping cannot acquire a held write lock (#1589)", () => {
+    const dir = tmpDir("evrt-chain-bookkeeping-lock-");
+    const file = path.join(dir, "runtime.db");
+    const db = openDb(file);
+    const writer = openDb(file);
+    db.exec("PRAGMA busy_timeout = 10;");
+    seedCompletedRun(db, {
+      runId: "run-bookkeeping-lock",
+      agent: "work-scan@1",
+      input: { repo: "wm/bookkeeping-lock" },
+      artifact: {
+        recommendation: "DISPATCH",
+        repo: "wm/bookkeeping-lock",
+        plan: [{ ticket: "WM-1589" }],
+      },
+    });
+    failInsertOf(db, "chain-run-bookkeeping-lock-WM-1589");
+
+    writer.exec("BEGIN IMMEDIATE;");
+    try {
+      const outcome = resolveChains(db, registry);
+      expect(outcome.emitted).toBe(0);
+      expect(outcome.errors).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("chain-run-bookkeeping-lock-WM-1589"),
+          expect.stringContaining("chain-bookkeeping: database is locked"),
+        ]),
+      );
+      expect(resolvedAtOf(db, "run-bookkeeping-lock")).toBeNull();
+    } finally {
+      writer.exec("ROLLBACK;");
+      writer.close();
+      db.close();
+    }
+  });
+
+  test("a non-busy bookkeeping throw propagates instead of being retried every tick (#1589)", () => {
+    const db = openDb(":memory:");
+    seedCompletedRun(db, {
+      runId: "run-bookkeeping-bug",
+      agent: "work-scan@1",
+      input: { repo: "wm/bookkeeping-bug" },
+      artifact: {
+        recommendation: "DISPATCH",
+        repo: "wm/bookkeeping-bug",
+        plan: [{ ticket: "WM-1591" }],
+      },
+    });
+    failInsertOf(db, "chain-run-bookkeeping-bug-WM-1591");
+    // A permanent bookkeeping bug: the transient marker itself cannot be written.
+    db.exec(
+      `CREATE TRIGGER fail_bookkeeping_bug
+         BEFORE INSERT ON attempt_trace
+         WHEN NEW.run_id = 'run-bookkeeping-bug'
+       BEGIN SELECT RAISE(ABORT, 'constraint failed: attempt_trace'); END;`,
+    );
+
+    expect(() =>
+      resolveChains(db, registry, { maxTransientPasses: 1 }),
+    ).toThrow(/constraint failed: attempt_trace/);
+    expect(resolvedAtOf(db, "run-bookkeeping-bug")).toBeNull();
+    expect(
+      db
+        .query(
+          `SELECT COUNT(*) AS n FROM attempt_trace
+            WHERE run_id = 'run-bookkeeping-bug'`,
+        )
+        .get().n,
+    ).toBe(0);
+  });
+
+  test("records later transient passes and gives up once a bookkeeping lock is released (#1589)", () => {
+    const dir = tmpDir("evrt-chain-bookkeeping-recovery-");
+    const file = path.join(dir, "runtime.db");
+    const db = openDb(file);
+    const writer = openDb(file);
+    db.exec("PRAGMA busy_timeout = 10;");
+    seedCompletedRun(db, {
+      runId: "run-bookkeeping-recovery",
+      agent: "work-scan@1",
+      input: { repo: "wm/bookkeeping-recovery" },
+      artifact: {
+        recommendation: "DISPATCH",
+        repo: "wm/bookkeeping-recovery",
+        plan: [{ ticket: "WM-1590" }],
+      },
+    });
+    failInsertOf(db, "chain-run-bookkeeping-recovery-WM-1590");
+
+    writer.exec("BEGIN IMMEDIATE;");
+    try {
+      expect(
+        resolveChains(db, registry, { maxTransientPasses: 2 }).errors,
+      ).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("chain-bookkeeping: database is locked"),
+        ]),
+      );
+    } finally {
+      writer.exec("ROLLBACK;");
+      writer.close();
+    }
+
+    const first = resolveChains(db, registry, { maxTransientPasses: 2 });
+    expect(first.errors).toHaveLength(1);
+    expect(resolvedAtOf(db, "run-bookkeeping-recovery")).toBeNull();
+    expect(
+      db
+        .query(
+          `SELECT COUNT(*) AS n FROM attempt_trace
+            WHERE run_id = 'run-bookkeeping-recovery'
+              AND json_extract(payload_json, '$.note') = 'chain_transient_error'`,
+        )
+        .get().n,
+    ).toBe(1);
+
+    const last = resolveChains(db, registry, { maxTransientPasses: 2 });
+    expect(last.errors).toEqual(
+      expect.arrayContaining([
+        "chain-run-bookkeeping-recovery: gave up after 2 transient failure(s)",
+      ]),
+    );
+    expect(resolvedAtOf(db, "run-bookkeeping-recovery")).not.toBeNull();
+    expect(chainResolution(db, "run-bookkeeping-recovery")).toMatchObject({
+      reason: "chain_gave_up",
+      passes: 2,
+    });
+    db.close();
+  });
+
   test("a transient failure on one sibling keeps the fan-out open and retries only that sibling (#1458)", () => {
     const db = openDb(":memory:");
     seedCompletedRun(db, {
