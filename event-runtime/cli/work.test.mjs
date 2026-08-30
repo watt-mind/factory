@@ -37,6 +37,27 @@ registerCliTmpCleanup();
 registerTestProcessCleanup(import.meta.url);
 
 const WORKER_POLICY_VERSION = policyVersion();
+const LIVE_STACK = path.resolve(import.meta.dir, "../../bin/live-stack.sh");
+
+/** Capture the shell supervisor's restart events, not just its worker's logs. */
+function spawnReloadSupervisor(args, env) {
+  const child = spawnTracked(
+    "bash",
+    [LIVE_STACK, "__supervise-worker", ...args],
+    {
+      env: { ...process.env, ...env },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  const box = { out: "", child };
+  child.stdout.on("data", (b) => {
+    box.out += b;
+  });
+  child.stderr.on("data", (b) => {
+    box.out += b;
+  });
+  return box;
+}
 
 describe("work command", () => {
   test("work rejects an unsafe idle poll interval", () => {
@@ -715,7 +736,7 @@ describe("work --reload-on-change (WM-213)", () => {
   );
 
   test(
-    "a run in flight defers the reload; the worker restarts only once it is idle",
+    "a run in flight defers reload; its supervisor restarts only once it is idle",
     async () => {
       const { openDb } = await import("../lib/db.mjs");
       const { createRun, transition } = await import("../lib/lifecycle.mjs");
@@ -779,7 +800,7 @@ describe("work --reload-on-change (WM-213)", () => {
       });
 
       const DEADLINE_MS = 30_000;
-      const box = spawnWorker(
+      const box = spawnReloadSupervisor(
         ["--adapter-override", "fake", "--poll-ms", "50", "--reload-on-change"],
         {
           FACTORY_EVENT_HOME: home,
@@ -808,29 +829,41 @@ describe("work --reload-on-change (WM-213)", () => {
         // worker was still alive at that point — asserted, not slept for.
         expect(box.out).not.toContain("run_reload_busy → ");
         expect(box.out).not.toContain("reloading worker");
-        expect(box.out).not.toContain("worker stopped");
+        expect(box.out).not.toContain("[supervisor] worker reloaded");
         expect(box.child.exitCode).toBe(null);
 
         writeFileSync(releaseFile, "go\n", "utf8");
-        const { code, signal } = await exitOf(box.child, DEADLINE_MS);
-        expect({ code, signal, tail: box.out.slice(-600) }).toMatchObject({
-          code: 75,
-          signal: null,
-        });
-        // Order is the guarantee: the run reached a terminal state BEFORE the reload.
+        // Observe the handoff from the component that actually restarts the
+        // worker. The replacement then claims the queued run, proving it was
+        // re-execed only after the held lease was released.
+        expect(
+          await waitFor(
+            box,
+            "[supervisor] worker reloaded (exit 75) — restarting on new code",
+            DEADLINE_MS,
+          ),
+        ).toBe(true);
+        expect(
+          await waitFor(box, "claimed run_reload_waiting", DEADLINE_MS),
+        ).toBe(true);
+        expect(
+          await waitFor(box, "run_reload_waiting → COMPLETED", DEADLINE_MS),
+        ).toBe(true);
+        // Order is the guarantee: the held run reached a terminal state before
+        // the supervisor accepted the reload handoff.
         expect(box.out).toContain("run_reload_busy → COMPLETED");
         expect(box.out.indexOf("run_reload_busy → ")).toBeLessThan(
-          box.out.indexOf("reloading worker"),
+          box.out.indexOf("[supervisor] worker reloaded"),
         );
-        expect(box.out).not.toContain("claimed run_reload_waiting");
         // Exactly one deferral line however many intervals it spanned, and
-        // exactly one exit — counted from the worker's own stop events.
+        // exactly one reload recorded by the supervisor that owns restarts.
         expect(box.out.split("reload deferred until").length - 1).toBe(1);
-        expect(box.out.split("reloading worker (exit 75)").length - 1).toBe(1);
-        expect(box.out.split("worker stopped (").length - 1).toBe(1);
-        expect(box.out).toContain("worker stopped (code_reload)");
+        expect(box.out.split("[supervisor] worker reloaded").length - 1).toBe(
+          1,
+        );
       } finally {
-        box.child.kill("SIGKILL");
+        box.child.kill("SIGTERM");
+        await exitOf(box.child, DEADLINE_MS);
         rmSync(stampRoot, { recursive: true, force: true });
       }
 
