@@ -5,6 +5,7 @@ import {
   noRequiredChecksDiagnostic,
   proveMergeCiFallback,
   resolveRequiredContexts,
+  selectMergeCiRun,
 } from "./merge-ci-proof.mjs";
 
 const HEAD_REF = "feat/WM-243";
@@ -102,6 +103,37 @@ describe("configured merge_ci proof", () => {
       { name: "Verify", status: "completed", conclusion: "success" },
     ],
   };
+
+  test("the selector ignores cancelled runs and requires exactly one live run", () => {
+    const live = fallback.runs[0];
+    const cancelled = {
+      ...live,
+      databaseId: 410,
+      conclusion: "cancelled",
+    };
+
+    expect(
+      selectMergeCiRun({
+        workflow: fallback.workflow,
+        headSha: fallback.headSha,
+        runs: [cancelled, live],
+      }),
+    ).toBe(live);
+    expect(() =>
+      selectMergeCiRun({
+        workflow: fallback.workflow,
+        headSha: fallback.headSha,
+        runs: [live, { ...live, databaseId: 411 }],
+      }),
+    ).toThrow("configured non-cancelled workflow run is missing or ambiguous");
+    expect(() =>
+      selectMergeCiRun({
+        workflow: fallback.workflow,
+        headSha: fallback.headSha,
+        runs: [cancelled],
+      }),
+    ).toThrow("configured non-cancelled workflow run is missing or ambiguous");
+  });
 
   test("Factory PR #409 uses the configured workflow and every exact job", () => {
     expect(
