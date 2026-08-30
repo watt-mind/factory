@@ -2350,8 +2350,10 @@ export function defaultReconcileVerifiedHandoffTicket({
   repo,
   fetchTicket,
   runCli = runLinearCli,
+  mayMutate = () => true,
 }) {
   try {
+    if (!mayMutate()) return false;
     const cur =
       typeof fetchTicket === "function"
         ? fetchTicket(ticket, repo)
@@ -4192,6 +4194,7 @@ export async function executeClaimed(
             repo: repoName,
             ticket: ticketId,
             handoff: verified.handoff,
+            mayMutate: mayMutateClaimedTicket,
           }) === true;
       } catch (err) {
         console.error(

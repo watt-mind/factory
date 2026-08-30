@@ -4074,19 +4074,18 @@ sh -c 'sleep 5 & wait'
 
     test("a false mayMutateClaimedTicket guard makes no reconciliation calls", () => {
       const calls = [];
-      const mayMutateClaimedTicket = () => false;
-      if (mayMutateClaimedTicket()) {
-        defaultReconcileVerifiedHandoffTicket({
-          repo: "factory",
-          ticket: "WM-1498",
-          fetchTicket: () => {
-            calls.push("fetch");
-            return { state: { name: "Todo" } };
-          },
-          runCli: (args) => (calls.push(args), ""),
-        });
-      }
+      const result = defaultReconcileVerifiedHandoffTicket({
+        repo: "factory",
+        ticket: "WM-1498",
+        mayMutate: () => false,
+        fetchTicket: () => {
+          calls.push("fetch");
+          return { state: { name: "Todo" } };
+        },
+        runCli: (args) => (calls.push(args), ""),
+      });
 
+      expect(result).toBe(false);
       expect(calls).toHaveLength(0);
     });
   });
