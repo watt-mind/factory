@@ -320,6 +320,11 @@ test("every section is present and typed on a seeded fixture", async () => {
   expect(doc.sections).toEqual([...SECTIONS]);
   for (const name of SECTIONS) expect(doc[name]).toBeDefined();
   expect(doc.repos).toEqual(["factory"]);
+  for (const name of SECTIONS) expect(doc[name].complete).toBe(true);
+  for (const name of SECTIONS)
+    expect(doc[name].complete).toBe(
+      doc[name].error === null && doc[name].errors.length === 0,
+    );
 
   // queue — dispatchable only, as typed rows
   expect(doc.queue.error).toBeNull();
@@ -639,6 +644,99 @@ test("runtime-database sections fail independently of the tracker", async () => 
   expect(doc.spend.today.runs).toBe(1);
   expect(doc.spend.errors[0]).toMatchObject({ source: "runtime.db" });
   expect(formatAsk(doc)).toContain("partial — runtime.db");
+});
+
+test("per-repo completeness distinguishes healthy, partial, and unavailable", async () => {
+  const repos = [REPO, { ...REPO, name: "other" }];
+  const healthy = {
+    async listDispatchable() {
+      return [{ identifier: "WM-10", title: "Healthy row" }];
+    },
+  };
+  const failing = {
+    async listDispatchable() {
+      throw new Error("tracker unavailable");
+    },
+  };
+
+  const partial = await gatherAsk({
+    ...askArgs(),
+    repos,
+    sections: ["queue"],
+    controlPlaneFor: (repo) => (repo.name === "factory" ? healthy : failing),
+  });
+  expect(partial.queue).toMatchObject({
+    complete: false,
+    error: null,
+    rows: [{ identifier: "WM-10" }],
+  });
+  expect(partial.queue.errors).toHaveLength(1);
+
+  const allFailed = await gatherAsk({
+    ...askArgs(),
+    repos,
+    sections: ["queue"],
+    controlPlaneFor: () => failing,
+  });
+  expect(allFailed.queue.complete).toBe(false);
+  expect(allFailed.queue.error).toContain("tracker unavailable");
+  expect(allFailed.queue.errors).toHaveLength(2);
+
+  const allHealthy = await gatherAsk({
+    ...askArgs(),
+    repos: [REPO],
+    sections: ["queue"],
+    controlPlaneFor: () => healthy,
+  });
+  expect(allHealthy.queue).toMatchObject({
+    complete: true,
+    error: null,
+    errors: [],
+  });
+});
+
+test("a section with no configured repos is incomplete", async () => {
+  const doc = await gatherAsk({
+    ...askArgs(),
+    repos: [],
+    sections: ["queue"],
+  });
+
+  expect(doc.queue).toMatchObject({
+    complete: false,
+    error: "no repositories configured (config/repos.yaml)",
+    errors: [],
+  });
+});
+
+test("runtime sections without a database are incomplete", async () => {
+  const doc = await gatherAsk({
+    ...askArgs(),
+    db: null,
+    sections: ["recent", "noop", "spend"],
+  });
+
+  expect(doc.recent.complete).toBe(false);
+  expect(doc.noop.complete).toBe(false);
+  expect(doc.spend.complete).toBe(false);
+  for (const name of ["recent", "noop", "spend"])
+    expect(doc[name].complete).toBe(
+      doc[name].error === null && doc[name].errors.length === 0,
+    );
+});
+
+test("every emitted section obeys the complete invariant", async () => {
+  const doc = await gatherAsk(
+    askArgs({ controlPlaneFor: () => seedPlane(), db: null }),
+  );
+
+  for (const name of doc.sections) {
+    const section = doc[name];
+    expect(typeof section.complete).toBe("boolean");
+    expect(section.complete).toBe(
+      section.error === null && (section.errors?.length ?? 0) === 0,
+    );
+  }
 });
 
 /**

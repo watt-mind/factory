@@ -28,6 +28,10 @@
  *   never an empty list, while every other section still returns. The command
  *   exits 0 — a partial answer is the point.
  *
+ * JSON consumers must check each section's `complete` field. It is true only
+ * when `error` is null and `errors` is empty; `error === null` alone is not
+ * enough because a section can contain a partial answer and still have rows.
+ *
  * The JSON is the source; the text is rendered from it by `formatAsk`, so the
  * two cannot disagree.
  */
@@ -205,6 +209,17 @@ export function openRuntimeDb(file = dbPath()) {
 }
 
 const emptySection = (extra = {}) => ({ error: null, errors: [], ...extra });
+
+/** Add the final JSON completeness signal after every section has been built. */
+const finalizeSections = (doc) => {
+  for (const name of doc.sections) {
+    const section = doc[name];
+    if (section)
+      section.complete =
+        section.error === null && (section.errors?.length ?? 0) === 0;
+  }
+  return doc;
+};
 
 /**
  * Run `fn` for each repo, collecting rows and per-repo failures.
@@ -589,7 +604,7 @@ export async function gatherAsk({
     if (ownsDb && handle) handle.close();
   }
 
-  return doc;
+  return finalizeSections(doc);
 }
 
 // ---------------------------------------------------------------- render ----
