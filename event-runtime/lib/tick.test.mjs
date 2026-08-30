@@ -107,8 +107,11 @@ describe("tick (OPS-412)", () => {
   test("TICK_SUBSYSTEMS lists every executed runStep in order", async () => {
     const { db } = harness();
     const ran = [];
-    const subsystems = Object.fromEntries(
-      TICK_SUBSYSTEMS.map((name) => [name, () => ran.push(name)]),
+    // Record every runStep lookup, not only names already in TICK_SUBSYSTEMS,
+    // so an unlisted subsystem is caught instead of silently running for real.
+    const subsystems = new Proxy(
+      {},
+      { get: (_target, name) => () => ran.push(String(name)) },
     );
 
     await tick({
@@ -125,8 +128,11 @@ describe("tick (OPS-412)", () => {
   test("tick skips the worker subsystem when withWorker is false", async () => {
     const { db } = harness();
     const ran = [];
-    const subsystems = Object.fromEntries(
-      TICK_SUBSYSTEMS.map((name) => [name, () => ran.push(name)]),
+    // Record every runStep lookup, not only names already in TICK_SUBSYSTEMS,
+    // so an unlisted subsystem is caught instead of silently running for real.
+    const subsystems = new Proxy(
+      {},
+      { get: (_target, name) => () => ran.push(String(name)) },
     );
 
     await tick({
@@ -137,7 +143,6 @@ describe("tick (OPS-412)", () => {
     });
 
     expect(ran).toEqual(TICK_SUBSYSTEMS.filter((name) => name !== "worker"));
-    expect(ran).not.toContain("worker");
   });
 
   for (const failing of TICK_SUBSYSTEMS) {
