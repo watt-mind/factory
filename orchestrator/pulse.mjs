@@ -78,6 +78,9 @@ export async function gatherPulse({
   fetchLinear = true,
   fetchGitHub = true,
   controlPlane,
+  webFetch = globalThis.fetch,
+  workspaceProbe = sh,
+  workspaceCwd = ROOT,
 } = {}) {
   const pulse = {
     timestamp: new Date().toISOString(),
@@ -120,7 +123,7 @@ export async function gatherPulse({
 
   // 2. Web UI Health
   try {
-    const webRes = await fetch(`http://${host}:${webPort}/`, {
+    const webRes = await webFetch(`http://${host}:${webPort}/`, {
       signal: AbortSignal.timeout(2000),
     });
     const ok = webRes.ok || webRes.status === 404; // serving HTTP
@@ -310,16 +313,26 @@ export async function gatherPulse({
 
   // 6. Workspace Freshness
   try {
-    const branchRes = sh(["git", "branch", "--show-current"]);
-    const headRes = sh(["git", "rev-parse", "--short", "HEAD"]);
-    const statusRes = sh(["git", "status", "--porcelain"]);
-    const behindRes = sh([
-      "git",
-      "rev-list",
-      "--count",
-      "HEAD..origin/develop",
-    ]);
-    const aheadRes = sh(["git", "rev-list", "--count", "origin/develop..HEAD"]);
+    const branchRes = workspaceProbe(
+      ["git", "branch", "--show-current"],
+      workspaceCwd,
+    );
+    const headRes = workspaceProbe(
+      ["git", "rev-parse", "--short", "HEAD"],
+      workspaceCwd,
+    );
+    const statusRes = workspaceProbe(
+      ["git", "status", "--porcelain"],
+      workspaceCwd,
+    );
+    const behindRes = workspaceProbe(
+      ["git", "rev-list", "--count", "HEAD..origin/develop"],
+      workspaceCwd,
+    );
+    const aheadRes = workspaceProbe(
+      ["git", "rev-list", "--count", "origin/develop..HEAD"],
+      workspaceCwd,
+    );
 
     pulse.workspace = {
       branch: branchRes.ok ? branchRes.out : "unknown",
