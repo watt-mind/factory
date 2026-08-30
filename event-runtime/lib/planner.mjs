@@ -434,7 +434,7 @@ export function buildRunSpec(
 export function buildEscalatedContinuationSpec(
   registry,
   failedSpec,
-  { runId, operatorAuthorized = false } = {},
+  { runId, operatorAuthorized = false, handoffFailure = null } = {},
 ) {
   if (!runId) throw new Error("tier escalation continuation needs a runId");
   const def = getAgent(registry, failedSpec.agent);
@@ -466,6 +466,9 @@ export function buildEscalatedContinuationSpec(
         rootRunId,
         failedRunId: failedSpec.runId,
         operatorAuthorized: operatorAuthorized === true,
+        ...(typeof handoffFailure === "string" && handoffFailure
+          ? { handoffFailure }
+          : {}),
       },
       ...(failedSpec.approvalPolicy?.dispatchEvidence
         ? {

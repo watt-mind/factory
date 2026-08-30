@@ -344,8 +344,19 @@ describe("registry", () => {
     // wrapper; merge-review and merge-notify document the same artifact
     // nesting, and all three agent definitions are re-pinned. Post-review:
     // merge-fix.md drops the bare-artifact twin examples (re-pinned again).
+    // Regenerated (#1445): merge-fix.md preserves freshly fetched foreign PR
+    // commits, uses an exact force-with-lease, compares the pinned headSha
+    // against live PR evidence, and returns stable `branch_in_flight:` /
+    // `branch_moved:` summary prefixes; merge-fix.json is re-pinned. Prompt
+    // text only.
+    // Regenerated (CLNT-123): dispatch now requires web TypeScript checking,
+    // documents the legacy bunx handoff alias, and receives bounded handoff
+    // diagnostics. Prompt pin only — the definition remains provenance-safe.
+    // Digest recomputed after merging #1521/#1445 (registry inputs).
+    // Regenerated (#1500): dispatch.md files out-of-scope follow-ups with
+    // `tools/ticket.mjs file --from <TICKET>`; dispatch.json is re-pinned.
     const expected =
-      "sha256:96e021246e1e025989f5389835d64edcaea1fcee6f28f303c399d858321dd8f8";
+      "sha256:4c7f4c2ca9d6b154f70cfad4aa4ecd7dfe1b66d64b8f6c4a560be91a1de3af89";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -438,6 +449,35 @@ describe("registry", () => {
     expect(warnings).toEqual([
       expect.stringContaining("not named in overlay_auto_approve"),
     ]);
+  });
+
+  test("merge-fix rebase instructions preserve concurrent branch commits", () => {
+    const prompt = readFileSync(
+      path.join(RUNTIME_ROOT, "agents", "merge-fix.md"),
+      "utf8",
+    );
+    const flat = prompt.replace(/\s+/g, " ");
+
+    expect(flat).toContain('git rebase "origin/<headRef>"');
+    expect(flat).toContain(
+      '"--force-with-lease=<headRef>:${expectedRemoteSha}"',
+    );
+    expect(flat).toContain("MERGE_FIX_IN_FLIGHT_MINUTES");
+    expect(flat).toContain(
+      "Compare `expectedRemoteSha` with the pinned `input.json` `headSha`",
+    );
+    expect(flat).toContain(
+      "gh pr view <pr> --repo <github> --json headRefOid,updatedAt",
+    );
+    expect(flat).toContain(
+      "do not substitute commit author/committer metadata",
+    );
+    expect(flat).toContain(
+      "Never classify the unchanged pinned head as `branch_in_flight`",
+    );
+    expect(flat).toContain("`summary` beginning `branch_in_flight:`");
+    expect(flat).toContain("`summary` beginning `branch_moved:`");
+    expect(flat).toContain("make no retry push");
   });
 
   test("local schedule overlay permits new complete entries and rejects kernel routing changes", () => {
@@ -592,8 +632,13 @@ describe("registry", () => {
     // Regenerated (#1324): dispatch.md includes the factory Prettier handoff
     // check, so its prompt pin legitimately moved; `pack` remains
     // non-enumerable.
+    // Regenerated (CLNT-123): dispatch prompt pin moved for the web typecheck
+    // and bounded handoff-failure continuation instructions; `pack` remains
+    // non-enumerable.
+    // Regenerated (#1500): dispatch.md instructs `file --from <TICKET>` for
+    // out-of-scope follow-ups; prompt pin only.
     expect(computeDefHash(def)).toBe(
-      "sha256:d79f9fde2a0d507bedd8fcea3ddb20024f101ecb96c71c767bcf68a251681db3",
+      "sha256:911fa9110f7330cb8dffe25f6bb32b0fb884320bf35da042ad3067a9e3be8dd9",
     );
   });
 

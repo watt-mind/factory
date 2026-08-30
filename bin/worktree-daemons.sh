@@ -5,7 +5,7 @@
 #   bin/worktree-daemons.sh check [WT]        # exit 0 if healthy, non-zero on dead daemon / anomaly
 #   bin/worktree-daemons.sh anomalies [WT]    # print list of anomalies
 #   bin/worktree-daemons.sh supervise [WT]    # watch daemons and restart dead workers with bounded retries
-#   bin/worktree-daemons.sh rotate-logs [WT]  # rotate oversized .factory/run/*.log files
+#   bin/worktree-daemons.sh rotate-logs [WT]  # copy-truncate live daemon logs; rename stopped logs
 #
 set -euo pipefail
 
@@ -18,46 +18,33 @@ if [[ -z "${_WORKTREE_DAEMONS_LOADED:-}" ]]; then
     source "$(dirname "${BASH_SOURCE[0]}")/worktree-common.sh"
   fi
 
-  # Get file size in bytes portably
-  file_size_bytes() { # <file>
-    local f="$1"
-    if [[ -f "$f" ]]; then
-      wc -c < "$f" | tr -d '[:space:]'
-    else
-      printf '0'
-    fi
+  # Rotate a single daemon log through the shared live-owner-aware helper.
+  # A live daemon keeps its original file descriptor, so it must be
+  # copy-truncated rather than renamed.
+  # Resolve the archive retention count. Mirrors live-stack.sh's guard: a 0 or
+  # non-numeric value would make the prune loop delete every archive.
+  daemon_log_keep() {
+    local keep="${FACTORY_LOG_KEEP:-3}"
+    [[ "$keep" =~ ^[1-9][0-9]*$ ]] || die "FACTORY_LOG_KEEP must be a positive integer"
+    printf '%s\n' "$keep"
   }
 
-  # Rotate a single log file if it exceeds max_bytes (default: 10MB)
   rotate_log_file() { # <logfile> [max_bytes]
     local logfile="$1"
     local max_bytes="${2:-10485760}" # 10MB default
-    if [[ ! -f "$logfile" ]]; then
-      return 0
-    fi
-    local size
-    size=$(file_size_bytes "$logfile")
-    if [[ "$size" =~ ^[0-9]+$ ]] && (( size > max_bytes )); then
-      mv -f "$logfile" "${logfile}.1"
-      touch "$logfile"
-      info "rotated $logfile (${size} bytes -> ${logfile}.1)"
-    fi
+    local keep
+    keep="$(daemon_log_keep)" || exit 1
+    rotate_run_log "$logfile" "$max_bytes" "$keep"
   }
 
-  # Rotate all daemon logs for a worktree if oversized
+  # Rotate all daemon logs through the shared helper, retaining generations.
   rotate_daemon_logs() { # <worktree> [max_bytes]
     local wt="$1"
     local max_bytes="${2:-10485760}"
-    local rdir
+    local rdir keep
+    keep="$(daemon_log_keep)" || exit 1
     rdir="$(run_dir "$wt")"
-    if [[ -d "$rdir" ]]; then
-      local log
-      for log in "$rdir"/serve.log "$rdir"/worker.log "$rdir"/web.log; do
-        if [[ -f "$log" ]]; then
-          rotate_log_file "$log" "$max_bytes"
-        fi
-      done
-    fi
+    rotate_run_logs "$rdir" "$max_bytes" "$keep"
   }
 
   # Check status of daemons in a worktree.
@@ -355,7 +342,7 @@ Commands:
   check [WT]        Exit 0 if healthy, 1 if any daemon is dead or anomalous
   anomalies [WT]    Print list of anomalies
   supervise [WT]    Run supervisor loop (or --once for single pass)
-  rotate-logs [WT]  Rotate oversized log files (> 10MB or custom bytes)
+  rotate-logs [WT]  Copy-truncate live daemon logs or rename stopped logs (> 10MB)
 
 Options:
   --once            Run a single supervisor tick and exit

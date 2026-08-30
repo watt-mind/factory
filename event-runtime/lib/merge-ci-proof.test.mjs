@@ -149,13 +149,13 @@ describe("configured merge_ci proof", () => {
         ...fallback,
         runs: [...fallback.runs, { ...fallback.runs[0], databaseId: 410 }],
       }),
-    ).toThrow("configured workflow run is missing or ambiguous");
+    ).toThrow("configured non-cancelled workflow run is missing or ambiguous");
     expect(() =>
       proveMergeCiFallback({
         ...fallback,
         runs: [{ ...fallback.runs[0], headSha: "b".repeat(40) }],
       }),
-    ).toThrow("configured workflow run is missing or ambiguous");
+    ).toThrow("configured non-cancelled workflow run is missing or ambiguous");
     expect(() =>
       proveMergeCiFallback({
         ...fallback,
@@ -165,5 +165,33 @@ describe("configured merge_ci proof", () => {
         ],
       }),
     ).toThrow("required job Verify is not completed successfully");
+  });
+
+  test("a cancelled Verify success is not merge evidence", () => {
+    const cancelled = {
+      ...fallback.runs[0],
+      databaseId: 410,
+      conclusion: "cancelled",
+    };
+
+    expect(() =>
+      proveMergeCiFallback({
+        ...fallback,
+        runs: [cancelled],
+      }),
+    ).toThrow("configured non-cancelled workflow run is missing or ambiguous");
+
+    expect(
+      proveMergeCiFallback({
+        ...fallback,
+        // Run-list order is newest first. The cancelled run is ignored, so
+        // jobs from the remaining non-cancelled run are authoritative.
+        runs: [cancelled, fallback.runs[0]],
+      }),
+    ).toEqual({
+      runId: 409,
+      workflow: "CI",
+      requiredChecks: ["Shadow runner fleet available", "Verify"],
+    });
   });
 });

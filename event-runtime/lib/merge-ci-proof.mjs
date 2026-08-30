@@ -1,4 +1,12 @@
 const REQUIRED_CHECK_FIELDS = ["name", "bucket", "state"];
+const CANCELLED_RUN_CONCLUSIONS = new Set(["cancelled", "stale"]);
+
+function isCancelledWorkflowRun(run) {
+  return (
+    run?.status === "cancelled" ||
+    CANCELLED_RUN_CONCLUSIONS.has(run?.conclusion)
+  );
+}
 
 export function noRequiredChecksDiagnostic(headRef) {
   if (typeof headRef !== "string" || headRef.length === 0) {
@@ -95,11 +103,19 @@ export function proveMergeCiFallback({
     throw new Error("workflow runs and jobs must be arrays");
   }
 
+  // `gh run list` returns newest first. A newer workflow can supersede and
+  // cancel an older run for the same head SHA, while its old Verify check-run
+  // remains success. That stale success must never be merge evidence.
   const matchingRuns = runs.filter(
-    (run) => run?.workflowName === workflow && run?.headSha === headSha,
+    (run) =>
+      run?.workflowName === workflow &&
+      run?.headSha === headSha &&
+      !isCancelledWorkflowRun(run),
   );
   if (matchingRuns.length !== 1) {
-    throw new Error("configured workflow run is missing or ambiguous");
+    throw new Error(
+      "configured non-cancelled workflow run is missing or ambiguous",
+    );
   }
   const [run] = matchingRuns;
   if (
