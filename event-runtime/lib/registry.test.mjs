@@ -593,7 +593,7 @@ describe("registry", () => {
     // check, so its prompt pin legitimately moved; `pack` remains
     // non-enumerable.
     expect(computeDefHash(def)).toBe(
-        "sha256:d79f9fde2a0d507bedd8fcea3ddb20024f101ecb96c71c767bcf68a251681db3",
+      "sha256:d79f9fde2a0d507bedd8fcea3ddb20024f101ecb96c71c767bcf68a251681db3",
     );
   });
 
