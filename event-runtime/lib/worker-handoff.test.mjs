@@ -423,6 +423,38 @@ describe("handoff verification gate (WM-718)", () => {
     expect(calls.returned).toHaveLength(1);
   });
 
+  test("a rate-limited handoff PR read defers without drafting the PR, returning the ticket, or spending an attempt", async () => {
+    const spec = handoffSpec({ ticket: "WM-1870" });
+    const { db, summary, calls } = await dispatch({
+      spec,
+      description: OWNED,
+      adapter: agent({ files: { "src/feature/impl.txt": "done\n" } }),
+      hooks: {
+        fetchHandoffPullRequest: () => {
+          const error = new Error("GitHub secondary rate limit");
+          error.code = "forge_rate_limited";
+          throw error;
+        },
+      },
+    });
+
+    expect(summary).toMatchObject({
+      terminalState: "QUEUED",
+      reasonCode: "handoff_forge_unavailable",
+    });
+    expect(calls.held).toHaveLength(0);
+    expect(calls.returned).toHaveLength(0);
+    expect(
+      db
+        .query(`SELECT COUNT(*) AS n FROM attempts WHERE run_id = ?`)
+        .get(spec.runId).n,
+    ).toBe(0);
+    expect(
+      db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId)
+        .attempts,
+    ).toBe(0);
+  });
+
   test("a change under event-runtime/web/src/** runs the web build and a red build refuses the handoff", async () => {
     const description = withCommand("bash run-tests.sh");
     const files = {

@@ -485,8 +485,11 @@ export function artifactInventory(storeRoot) {
   for (const sha256 of readdirSync(storeRoot).filter((name) =>
     HEX64.test(name),
   )) {
-    const stat = statSync(path.join(storeRoot, sha256));
-    if (!stat.isFile()) continue;
+    // A concurrent prune may remove the entry between readdir and stat.
+    const stat = statSync(path.join(storeRoot, sha256), {
+      throwIfNoEntry: false,
+    });
+    if (!stat?.isFile()) continue;
     inventory.push({
       sha256,
       sizeBytes: stat.size,

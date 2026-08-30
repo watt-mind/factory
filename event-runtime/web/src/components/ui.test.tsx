@@ -18,6 +18,7 @@ import {
   KVGroup,
   ListToolbar,
   notify,
+  PROPOSAL_STATUS_HUES,
   Section,
   shortId,
   StateBadge,
@@ -25,7 +26,7 @@ import {
   ToastContainer,
   Tooltip,
 } from "./ui";
-import { parseFilterQuery, RUN_FACETS } from "../filterQuery";
+import { parseFilterQuery, PROPOSAL_FACETS, RUN_FACETS } from "../filterQuery";
 import { modal } from "../hooks";
 import { changeInput, typeText } from "../test-render";
 
@@ -723,6 +724,13 @@ describe("getValueHue", () => {
     expect(getValueHue("state", "RUNNING")).toBe("var(--hue-warn)");
     expect(getValueHue("decision", "run")).toBe("var(--hue-info)");
     expect(getValueHue("status", "admitted")).toBe("var(--hue-info)");
+    expect(getValueHue("status", "expired")).toBe(PROPOSAL_STATUS_HUES.expired);
+  });
+
+  test("covers every proposal status offered by the web filter", () => {
+    for (const status of PROPOSAL_FACETS.values?.status ?? []) {
+      expect(PROPOSAL_STATUS_HUES).toHaveProperty(status);
+    }
   });
 });
 
