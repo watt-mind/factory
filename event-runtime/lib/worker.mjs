@@ -2147,8 +2147,8 @@ export function claimedRetryFor(db, runId, attempt) {
 }
 
 /**
- * Verify the operator authorisation against live ticket bytes before an agent
- * can see it. Decision effects mint descriptionHash with hashBytes(description)
+ * Verify the operator authorisation against the run input and live ticket
+ * bytes before an agent can see it. Decision effects mint descriptionHash with hashBytes(description)
  * (UTF-8, no appended newline); keeping the inverse here removes the model's
  * former freedom to choose a different byte recipe.
  *
@@ -2162,11 +2162,37 @@ export function humanDecisionAuthorisationGate(
   const authorisation = input?.humanDecision?.authorisation;
   if (!authorisation) return { ok: true, input };
 
+  // The authorisation is single-use and bound to one ticket: decision effects
+  // mint it with the inbox item's issue/repo refs. A copy carried into another
+  // run's input must never authorise that run.
+  if (
+    String(authorisation.ticket ?? "") !== String(input?.ticket ?? "") ||
+    String(authorisation.repo ?? "") !== String(input?.repo ?? "")
+  ) {
+    return {
+      ok: false,
+      refusal: {
+        decision: "noop",
+        reason: "authorisation_stale:ticket",
+        detail:
+          "humanDecision.authorisation.ticket/repo do not match the run input ticket/repo",
+      },
+      evidence: { descriptionHash: null, ownedPaths: [] },
+    };
+  }
+
   const ticket = fetchTicket(input.ticket, input.repo);
   const description = ticket?.description;
+  const descriptionHash =
+    typeof description === "string" ? hashBytes(description) : null;
+  const ownedPaths =
+    typeof description === "string" ? parseOwnedPaths(description) : [];
+  // Refusal evidence is a fingerprint, never the raw ticket JSON.
+  const evidence = { descriptionHash, ownedPaths };
+
   if (
-    typeof description !== "string" ||
-    authorisation.descriptionHash !== hashBytes(description)
+    descriptionHash === null ||
+    authorisation.descriptionHash !== descriptionHash
   ) {
     return {
       ok: false,
@@ -2176,25 +2202,32 @@ export function humanDecisionAuthorisationGate(
         detail:
           "humanDecision.authorisation.descriptionHash does not match the canonical hashBytes of the current ticket description",
       },
-      evidence: { ticket },
+      evidence,
     };
   }
 
-  const authorisedPaths = new Set(
-    Array.isArray(authorisation.paths) ? authorisation.paths : [],
-  );
-  const missingPaths = parseOwnedPaths(description).filter(
-    (ownedPath) => !authorisedPaths.has(ownedPath),
-  );
-  if (missingPaths.length > 0) {
+  // The operator may narrow the scope (decision-effects authorisedPaths keeps
+  // only the chosen paths), so `paths` must be a non-empty subset of the
+  // ticket's current Owned Paths — "authorisation.paths ∩ Owned Paths" in
+  // docs/event-runtime-inbox.md §3.1. Anything outside Owned Paths means the
+  // ticket's scope moved after approval; an empty set authorises nothing.
+  const authorisedPaths = Array.isArray(authorisation.paths)
+    ? authorisation.paths.filter((entry) => typeof entry === "string")
+    : [];
+  const ownedSet = new Set(ownedPaths);
+  const foreignPaths = authorisedPaths.filter((entry) => !ownedSet.has(entry));
+  if (authorisedPaths.length === 0 || foreignPaths.length > 0) {
     return {
       ok: false,
       refusal: {
         decision: "noop",
         reason: "authorisation_stale:paths",
-        detail: `humanDecision.authorisation.paths does not cover Owned Paths: ${missingPaths.join(", ")}`,
+        detail:
+          authorisedPaths.length === 0
+            ? "humanDecision.authorisation.paths is empty; nothing is authorised"
+            : `humanDecision.authorisation.paths is not a subset of the ticket's Owned Paths: ${foreignPaths.join(", ")}`,
       },
-      evidence: { ticket, missingPaths },
+      evidence,
     };
   }
 
@@ -2207,7 +2240,7 @@ export function humanDecisionAuthorisationGate(
         authorisation: { ...authorisation, verified: true },
       },
     },
-    evidence: { ticket },
+    evidence: { ...evidence, ticket },
   };
 }
 

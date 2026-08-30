@@ -394,7 +394,7 @@ describe("registry", () => {
     // canonical authorisation description hash and path scope before execution;
     // dispatch.md trusts the worker-authenticated verified flag.
     const expected =
-      "sha256:9b985da7b8c58e1f34e3507cd9dec779e11ec98371e8382edfc01f6fbe69195e";
+      "sha256:a3685bcb3f85cb09522de22654860620138003cc5d9fbec8e5fe0dc3349d009c";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -682,7 +682,7 @@ describe("registry", () => {
     // Regenerated (#1337): dispatch trusts the worker-verified authorisation;
     // prompt pin only, `pack` remains non-enumerable.
     expect(computeDefHash(def)).toBe(
-      "sha256:5553c665cbd9578b9bf897b33092ad4bb28318bcf487f03cf6a71295d5a94e29",
+      "sha256:779fa866b66dd5422699118041cfa88e1545d4269468ad987d93e6db169265b7",
     );
   });
 

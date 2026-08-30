@@ -239,11 +239,14 @@ landed without a human.
 
 If the input carries `humanDecision.authorisation` for this ticket, the
 operator has already seen that escalation. The runtime verifies the live
-description and path scope before this agent runs, then sets
-`authorisation.verified: true`. Trust that flag and never recompute the hash
-yourself. Proceed only inside `authorisation.paths` (and the ticket's Owned
-Paths), and quote the authorisation's inbox item id and `decidedAt` in the PR
-body.
+description, the ticket/repo binding, and the path scope (`authorisation.paths`
+must be a non-empty subset of the ticket's Owned Paths) before this agent runs,
+then sets `authorisation.verified: true`. Trust that flag and never recompute
+the hash yourself. If `authorisation.verified` is absent or not exactly `true`,
+the authorisation is unverified: refuse (`reasonCode: "needs_human"`) and never
+proceed on it. When it is `true`, proceed only inside `authorisation.paths`
+(and the ticket's Owned Paths), and quote the authorisation's inbox item id and
+`decidedAt` in the PR body.
 
 If `memos.json` holds a `decision` memo on this subject, the operator has
 ruled on a related question before. **Cite it** — item id, decided-at,

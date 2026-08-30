@@ -302,7 +302,13 @@ Two bindings make it safe:
   dispatching if the description already moved.
 - **Bound to paths.** The re-dispatched agent may modify only
   `authorisation.paths` (∩ the ticket's Owned Paths); anything outside is the
-  ordinary out-of-scope rule.
+  ordinary out-of-scope rule. The operator may narrow the scope, so the worker
+  accepts `paths` as any non-empty subset of the ticket's current Owned Paths
+  and refuses `authorisation_stale:paths` only when the set is empty or names
+  a path outside Owned Paths. The worker also refuses
+  `authorisation_stale:ticket` when `authorisation.ticket`/`repo` differ from
+  the run input. Refusal evidence carries only
+  `{ descriptionHash, ownedPaths }`, never the raw ticket.
 
 An authorisation is single-use: it lives in one run's input. A second refusal
 raises a second item; the operator decides again. Blanket approval per ticket
