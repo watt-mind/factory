@@ -699,7 +699,7 @@ describe("work --reload-on-change (WM-213)", () => {
         expect(box.out).toContain("reloading worker (exit 75)");
         // The log names both stamps so the developer can see what moved.
         expect(box.out).toMatch(
-          /code changed \(nogit:[0-9a-f]+ → nogit:[0-9a-f]+\)/,
+          /code changed \(files:[0-9a-f]+ → files:[0-9a-f]+\)/,
         );
         expect(box.out).toContain("worker stopped (code_reload)");
       } finally {
