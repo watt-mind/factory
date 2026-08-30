@@ -165,6 +165,13 @@ export function validateMemo(
   errors.push(...shape.errors);
   if (!shape.valid) return { valid: false, errors };
 
+  const expiresAt = document.bindings?.expiresAt;
+  if (
+    typeof expiresAt === "string" &&
+    !Number.isFinite(Date.parse(expiresAt))
+  ) {
+    errors.push(`${at}.bindings.expiresAt: not a valid time`);
+  }
   if (hasOwn(document, "provenance") && !allowProvenance) {
     errors.push(`${at}.provenance: agent-supplied provenance is rejected`);
   }

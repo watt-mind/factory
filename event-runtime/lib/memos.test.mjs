@@ -124,6 +124,24 @@ describe("factory.memo/v1 contract", () => {
     expect(validateMemo(decision).valid).toBe(true);
     expect(validateMemo(postmortemDoc({ kind: "decision" })).valid).toBe(false);
   });
+
+  test("rejects an unparsable expiresAt binding at validation time", () => {
+    const naturalLanguage = validateMemo(
+      postmortemDoc({ bindings: { expiresAt: "next sprint" } }),
+    );
+    expect(naturalLanguage.valid).toBe(false);
+    expect(
+      naturalLanguage.errors.some((error) =>
+        error.startsWith("$.bindings.expiresAt:"),
+      ),
+    ).toBe(true);
+
+    const { valid, errors } = validateMemo(
+      postmortemDoc({ bindings: { expiresAt: "2026-99-99T99:99:99Z" } }),
+    );
+    expect(valid).toBe(false);
+    expect(errors).toContain("$.bindings.expiresAt: not a valid time");
+  });
 });
 
 describe("subject normalization", () => {
@@ -676,6 +694,22 @@ describe("verifyResult memo collection", () => {
     expect(out.result.memos).toHaveLength(1);
     expect(out.result.memos[0].document.provenance.runId).toBe("run_memo_test");
     expect(out.result.artifacts[0].kind).toBe("memo");
+  });
+
+  test("rejects an unparsable expiresAt before memo registration", () => {
+    const def = { ...statusDef, emits: { memos: ["postmortem"] } };
+    const dir = writeMemoWorkspace(
+      postmortemDoc({ bindings: { expiresAt: "2026-99-99T99:99:99Z" } }),
+    );
+    expect(() =>
+      verifyResult({
+        spec: makeSpec(),
+        def,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+      }),
+    ).toThrow(ContractViolation);
   });
 
   test("a memo without emits.memos is a contract violation", () => {
