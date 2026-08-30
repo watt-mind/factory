@@ -35,8 +35,10 @@ import {
   RepoBadge,
   STATE_HUES,
   SourceIcon,
+  Table,
   TableWindowFooter,
   Th,
+  rowKeyHandler,
   shortId,
 } from "../components/ui";
 
@@ -390,7 +392,11 @@ export function Chains({
           </>
         }
       >
-        <table className="w-full table-fixed border-separate border-spacing-0">
+        <Table
+          role="grid"
+          aria-label="Chains"
+          className="w-full table-fixed border-separate border-spacing-0"
+        >
           <colgroup>
             {cols.map((column) => (
               <col
@@ -406,8 +412,11 @@ export function Chains({
               />
             ))}
           </colgroup>
-          <thead>
-            <tr className="text-left text-[11px] text-(--text-faint)">
+          <thead role="rowgroup">
+            <tr
+              role="row"
+              className="text-left text-[11px] text-(--text-faint)"
+            >
               {cols.map((column) => {
                 const sort = CHAINS_DISPLAY.sorts.find(
                   (item) => item.column === column.key,
@@ -451,7 +460,7 @@ export function Chains({
               })}
             </tr>
           </thead>
-          <tbody>
+          <tbody role="rowgroup">
             {windowTokens.map((token) => {
               if (token.length === 2) {
                 const [section, sub] = token;
@@ -470,13 +479,17 @@ export function Chains({
               }
               const chain = token[0];
               const selected = chain.correlationId === selectedId;
+              const onActivate = () => onOpenChain(chain.correlationId);
               return (
                 <tr
                   key={chain.correlationId}
+                  role="row"
                   data-chain-id={chain.correlationId}
+                  tabIndex={0}
                   aria-selected={selected}
-                  onClick={() => onOpenChain(chain.correlationId)}
-                  className={`cursor-pointer hover:bg-(--surface-1) ${selected ? "row-selected" : ""}`}
+                  onClick={onActivate}
+                  onKeyDown={rowKeyHandler(onActivate)}
+                  className={`cursor-pointer hover:bg-(--surface-1) focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-(--accent) ${selected ? "row-selected" : ""}`}
                 >
                   <td className="max-w-56 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap">
                     <div
@@ -580,7 +593,7 @@ export function Chains({
               />
             )}
           </tbody>
-        </table>
+        </Table>
       </ListPane>
     </div>
   );

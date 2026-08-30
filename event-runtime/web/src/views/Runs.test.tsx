@@ -649,6 +649,36 @@ describe("Runs component harness: selection & filter retention", () => {
     );
   });
 
+  test("focuses rows and selects a run with Enter or Space", async () => {
+    const onSelectRun = mock(() => {});
+    const r1 = stubListItem("run_keyboard_test", "RUNNING");
+    await withApi(
+      {
+        runs: async () => ({ runs: [r1] }),
+        run: async () => stubDetail(r1.runId, "RUNNING", []),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { container } = renderRuns({ onSelectRun });
+        const row = await waitFor(() => {
+          const element = container
+            .querySelector(`td[title="${r1.runId}"]`)
+            ?.closest("tr");
+          if (!element) throw new Error("row not rendered");
+          return element;
+        });
+
+        row.focus();
+        expect(document.activeElement).toBe(row);
+        fireEvent.keyDown(row, { key: "Enter" });
+        fireEvent.keyDown(row, { key: " " });
+
+        expect(onSelectRun).toHaveBeenCalledWith(r1.runId);
+        expect(onSelectRun).toHaveBeenCalledTimes(2);
+      },
+    );
+  });
+
   test("focusRunId highlights the selected row and renders the detail pane", async () => {
     const r1 = stubListItem("run_selected_1", "RUNNING");
     const detail = stubDetail("run_selected_1", "RUNNING", [

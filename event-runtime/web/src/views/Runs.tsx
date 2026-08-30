@@ -88,6 +88,7 @@ import {
   VerbError,
   copyText,
   copyLink,
+  rowKeyHandler,
   shortId,
 } from "../components/ui";
 import { Button as PrimitiveButton } from "../components/ui";
@@ -1288,6 +1289,8 @@ export function Runs({
         }
       >
         <Table
+          role="grid"
+          aria-label="Runs"
           className="w-full table-fixed border-separate border-spacing-0"
           style={{
             minWidth: `${listCols.reduce(
@@ -1304,8 +1307,8 @@ export function Runs({
               />
             ))}
           </colgroup>
-          <thead>
-            <tr className="text-left">
+          <thead role="rowgroup">
+            <tr role="row" className="text-left">
               {listCols.map((c) => {
                 const sort = displayConfig.sorts.find(
                   (s) => s.column === c.key,
@@ -1340,14 +1343,17 @@ export function Runs({
               })}
             </tr>
           </thead>
-          <tbody>
+          <tbody role="rowgroup">
             {(() => {
               const renderRow = (r: RunListItem) => (
                 <tr
                   key={r.runId}
+                  role="row"
+                  tabIndex={0}
                   onClick={() => onSelectRun(r.runId)}
+                  onKeyDown={rowKeyHandler(() => onSelectRun(r.runId))}
                   aria-selected={r.runId === selectedId}
-                  className={`cursor-pointer hover:bg-(--surface-1) ${rowWash(r.state)} ${r.runId === selectedId ? "row-selected" : ""}`}
+                  className={`cursor-pointer hover:bg-(--surface-1) focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-(--accent) ${rowWash(r.state)} ${r.runId === selectedId ? "row-selected" : ""}`}
                 >
                   <td
                     className="mono max-w-28 overflow-hidden border-b border-(--border) px-3 py-1.5 whitespace-nowrap"

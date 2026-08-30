@@ -132,6 +132,28 @@ describe("Chains list (WM-537)", () => {
     });
   });
 
+  test("focuses rows and opens a chain with Enter or Space", async () => {
+    const onOpenChain = mock(() => {});
+    await withApi({ chains: async () => ({ chains: rows }) }, async () => {
+      const view = renderChains({ onOpenChain });
+      const row = await waitFor(() => {
+        const element = view.container.querySelector(
+          '[data-chain-id="corr-active"]',
+        ) as HTMLTableRowElement | null;
+        if (!element) throw new Error("row not rendered");
+        return element;
+      });
+
+      row.focus();
+      expect(document.activeElement).toBe(row);
+      fireEvent.keyDown(row, { key: "Enter" });
+      fireEvent.keyDown(row, { key: " " });
+
+      expect(onOpenChain).toHaveBeenCalledWith("corr-active");
+      expect(onOpenChain).toHaveBeenCalledTimes(2);
+    });
+  });
+
   test("supports state/is filters and repo operator context", async () => {
     await withApi({ chains: async () => ({ chains: rows }) }, async () => {
       const view = renderChains({ context: { kind: "repo", name: "factory" } });
