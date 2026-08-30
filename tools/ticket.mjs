@@ -265,7 +265,14 @@ export function parseRateLimitHeaders(headers, now = Date.now()) {
 }
 
 export function linearCacheDir() {
-  return process.env.LINEAR_CACHE_DIR || CACHE_DIR;
+  if (process.env.LINEAR_CACHE_DIR) return process.env.LINEAR_CACHE_DIR;
+  // A scoped runtime home owns its own budget capture: tests and isolated
+  // stacks (FACTORY_EVENT_HOME) must never read or spend the operator's
+  // shared ~/.factory budget clock.
+  if (process.env.FACTORY_EVENT_HOME) {
+    return path.join(process.env.FACTORY_EVENT_HOME, "cache", "linear");
+  }
+  return CACHE_DIR;
 }
 
 export function loadLinearBudget() {
@@ -276,6 +283,19 @@ export function loadLinearBudget() {
   } catch {
     return null;
   }
+}
+
+/**
+ * Return the currently actionable Linear rate-limit state, if any.
+ *
+ * A stale cache entry must not hold the control plane offline forever: Linear
+ * gives us a reset clock, and only a future clock represents a live refusal.
+ */
+export function linearRateLimitState(budget, now = Date.now()) {
+  if (!budget?.rateLimited || !budget.resetAt) return null;
+  const resetMs = Date.parse(budget.resetAt);
+  if (!Number.isFinite(resetMs) || resetMs <= now) return null;
+  return { rateLimited: true, resetAt: new Date(resetMs).toISOString() };
 }
 
 export function saveLinearBudget(budget) {
@@ -324,7 +344,10 @@ function recordLinearBudgetFromResponse(res) {
       parsed?.remaining ?? (rateLimited ? 0 : (prior.remaining ?? null)),
     limit: parsed?.limit ?? prior.limit ?? LINEAR_REQUESTS_LIMIT,
     resetAt: parsed?.resetAt ?? prior.resetAt ?? null,
-    rateLimited: Boolean(rateLimited || prior.rateLimited),
+    // A successful response with capacity clears a previous refusal. Keeping
+    // `prior.rateLimited` here made a recovered account appear offline until
+    // somebody manually removed budget.json.
+    rateLimited,
     status: res.status,
   });
 }

@@ -3195,7 +3195,7 @@ describe("buildRunSpec", () => {
       now: 0,
     });
     expect(canonicalJson(spec)).toBe(
-      '{"adapter":"cursor","agent":"dispatch@1","capabilities":["tracker:write","repo:write","github:write"],"defHash":"sha256:779fa866b66dd5422699118041cfa88e1545d4269468ad987d93e6db169265b7","idempotencyKey":"dispatch@1:factory.dispatch-result/v1:sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59:dispatch-baseline","input":{"repo":"factory","ticket":"WM-694"},"inputHash":"sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59","maxAttempts":1,"model":"cursor-grok-4.6-high","modelTier":"strong","outputContract":"factory.dispatch-result/v1","policyVersion":"git:test","promptVersion":"git:test","runId":"run_baseline","schemaVersion":"factory.run-spec/v1","timeoutSeconds":5400,"workspace":{"checkoutDir":"repo","retainOnFailure":true,"type":"worktree"}}',
+      '{"adapter":"cursor","agent":"dispatch@1","capabilities":["tracker:write","repo:write","github:write"],"defHash":"sha256:b629b32521d6f81e9ba798403eeb8db6c7703745e42fd2ffe949d8a52a9d467d","idempotencyKey":"dispatch@1:factory.dispatch-result/v1:sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59:dispatch-baseline","input":{"repo":"factory","ticket":"WM-694"},"inputHash":"sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59","maxAttempts":1,"model":"cursor-grok-4.6-high","modelTier":"strong","outputContract":"factory.dispatch-result/v1","policyVersion":"git:test","promptVersion":"git:test","runId":"run_baseline","schemaVersion":"factory.run-spec/v1","timeoutSeconds":5400,"workspace":{"checkoutDir":"repo","retainOnFailure":true,"type":"worktree"}}',
     );
   });
 
@@ -4383,6 +4383,52 @@ describe("Linear rate limit (WM-878)", () => {
         decision: "refused",
         reason: "linear_rate_limited",
         resetAt,
+      });
+    });
+  });
+
+  test("an active cached Linear budget skips planner reads and logs its reset clock once", () => {
+    withReposRoot(gatedYaml, () => {
+      const db = openDb(":memory:");
+      const ref = admit(db, {
+        type: "factory.dispatch.requested",
+        eventId: "cached-rate-limit-1",
+        correlationId: "cached-rate-limit-1",
+        payload: { repo: "gated", ticket: "WM-1835" },
+      });
+      const resetAt = "2026-08-19T13:00:00.000Z";
+      const logs = [];
+      let ticketReads = 0;
+
+      const counts = planAdmittedEvents(db, registry, {
+        now: NOW,
+        policyVersion: "git:test",
+        linearBudget: { rateLimited: true, resetAt },
+        log: (line) => logs.push(line),
+        dispatch: {
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          fetchTicket: () => {
+            ticketReads += 1;
+            return readyTicket("WM-1835");
+          },
+        },
+      });
+
+      expect(counts).toEqual({ planned: 0, failed: 0, deadLettered: 0 });
+      expect(ticketReads).toBe(0);
+      expect(logs).toEqual([
+        `planner: Linear rate-limited until ${resetAt} — skipping Linear reads`,
+      ]);
+      expect(
+        db
+          .query(
+            `SELECT status, last_plan_error FROM events WHERE event_id = ?`,
+          )
+          .get(ref.eventId),
+      ).toMatchObject({
+        status: "admitted",
+        last_plan_error: `linear_rate_limited: resetAt=${resetAt}`,
       });
     });
   });

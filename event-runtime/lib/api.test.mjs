@@ -595,6 +595,21 @@ describe("environment identity (webui chip)", () => {
       server.close();
     }
   });
+
+  test("health exposes an active Linear rate-limit reset clock", async () => {
+    const nowMs = Date.parse("2026-08-30T12:00:00.000Z");
+    const resetAt = "2026-08-30T12:15:00.000Z";
+    const s = await makeServer({
+      now: () => nowMs,
+      getLinearBudget: () => ({ rateLimited: true, resetAt }),
+    });
+    try {
+      const health = await s.client.health();
+      expect(health.linear).toEqual({ rateLimited: true, resetAt });
+    } finally {
+      s.close();
+    }
+  });
 });
 
 describe("bearer-token auth on the control API (WM-1152)", () => {

@@ -398,6 +398,7 @@ export async function handleIntakeApiRoute({
   nowMs,
   onEvent,
   getTickStats,
+  getLinearBudget,
   send,
   readBody,
   parseJson,
@@ -410,6 +411,14 @@ export async function handleIntakeApiRoute({
       nowMs,
       configured: Boolean(githubSecret),
     });
+    const budget =
+      typeof getLinearBudget === "function" ? getLinearBudget() : null;
+    const resetAt = budget?.resetAt ?? null;
+    const resetMs = resetAt ? Date.parse(resetAt) : NaN;
+    const rateLimited =
+      budget?.rateLimited === true &&
+      Number.isFinite(resetMs) &&
+      resetMs > nowMs;
     return send(200, {
       ok: true,
       policyVersion,
@@ -418,6 +427,7 @@ export async function handleIntakeApiRoute({
       githubWebhookSecret: githubSecret ? "set" : "absent",
       registry: registryHealth ?? null,
       githubIntake,
+      linear: { rateLimited, resetAt },
       tick: {
         lastMs: tickStats?.lastMs ?? 0,
         overruns: tickStats?.overruns ?? 0,

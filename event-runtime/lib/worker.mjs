@@ -2981,11 +2981,22 @@ export function assertHandoffPullRequestBase({
     typeof handoff.runId === "string" && handoff.runId.trim()
       ? bodyLines.some((line) => line.trim() === `run:${handoff.runId.trim()}`)
       : null;
+  const hasUnexpandedRunTrailer =
+    typeof handoff.runId === "string" && handoff.runId.trim()
+      ? bodyLines.some((line) => {
+          const trailer = line.trim();
+          return (
+            trailer === "run:$FACTORY_RUN_ID" ||
+            trailer === "run:${FACTORY_RUN_ID}"
+          );
+        })
+      : null;
   handoff.pr = {
     number: prNumber,
     draft: pr?.isDraft === true,
     hasFixesLine,
     hasRunTrailer,
+    hasUnexpandedRunTrailer,
   };
   handoff.prDraft = handoff.pr.draft;
   if (!actual) {
@@ -3008,6 +3019,14 @@ export function assertHandoffPullRequestBase({
         `handoff_pr_form_invalid: PR #${prNumber} is missing Fixes ${handoff.ticket}`,
       ],
       { reasonCode: "handoff_pr_form_invalid", handoff },
+    );
+  }
+  if (hasUnexpandedRunTrailer) {
+    throw new ContractViolation(
+      [
+        `run_trailer_unexpanded: PR #${prNumber} contains a literal run trailer; append the concrete run ID with printf 'run:%s\\n' "$FACTORY_RUN_ID"`,
+      ],
+      { reasonCode: "run_trailer_unexpanded", handoff },
     );
   }
 }

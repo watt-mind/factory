@@ -43,6 +43,7 @@ import { loadRepos } from "../event-runtime/lib/repos.mjs";
 import { dbPath } from "../event-runtime/lib/config.mjs";
 import { HEARTBEAT_STALE_MS } from "../event-runtime/lib/workers.mjs";
 import { ticketSlug } from "../lib/ticket-slug.mjs";
+import { parseRateLimitReset } from "../tools/ticket.mjs";
 
 export const REAPER_LOG_DIR = path.join(homedir(), ".factory/logs");
 
@@ -174,6 +175,20 @@ function retryDelay(ms, signal) {
   });
 }
 
+function rateLimitError(message, response) {
+  // Linear's reset header is a raw unix epoch; downstream consumers
+  // (Date.parse in the planner cache, budget.json) expect ISO-8601.
+  const resetAt = parseRateLimitReset(
+    response?.headers?.get("x-ratelimit-requests-reset"),
+  );
+  const error = new Error(
+    `linear_rate_limited: resetAt=${resetAt ?? "unknown"}${message ? `: ${message}` : ""}`,
+  );
+  error.rateLimited = true;
+  error.resetAt = resetAt;
+  return error;
+}
+
 /**
  * Send a Linear GraphQL request, retrying transient responses unless cancelled.
  *
@@ -213,8 +228,11 @@ export async function gql(
       });
 
       if (!res.ok) {
+        if (res.status === 429) {
+          throw rateLimitError((await res.text()).slice(0, 500), res);
+        }
         if (
-          [429, 500, 502, 503, 504].includes(res.status) &&
+          [500, 502, 503, 504].includes(res.status) &&
           attempt < retries - 1
         ) {
           await retryDelay(delay, signal);
@@ -228,20 +246,15 @@ export async function gql(
       const data = await res.json();
       if (data.errors && data.errors.length > 0) {
         const msg = JSON.stringify(data.errors);
-        if (
-          msg.toUpperCase().includes("RATELIMITED") &&
-          attempt < retries - 1
-        ) {
-          await retryDelay(delay, signal);
-          delay *= 2;
-          continue;
-        }
+        if (msg.toUpperCase().includes("RATELIMITED"))
+          throw rateLimitError(msg, res);
         throw new Error(msg);
       }
 
       return data.data || {};
     } catch (err) {
       if (signal?.aborted) throw abortReason(signal);
+      if (err?.rateLimited) throw err;
       if (
         attempt < retries - 1 &&
         !(err.message && err.message.startsWith("HTTP 4"))

@@ -289,6 +289,104 @@ describe("serve command", () => {
     expect(health.ok).toBe(true);
   });
 
+  test("a stalled Linear ticket read cannot wedge /health past the tick budget (#1835 AC3)", async () => {
+    const home = tmpDir("evrt-serve-linear-stall-");
+    const reposRoot = tmpDir("evrt-serve-linear-stall-repos-");
+    mkdirSync(path.join(reposRoot, "config"), { recursive: true });
+    writeFileSync(
+      path.join(reposRoot, "config", "repos.yaml"),
+      [
+        "repos:",
+        "  - name: gated",
+        "    path: /tmp/nowhere",
+        "    base: develop",
+        "    team: WM",
+        "    project: Factory",
+        "    worktree_up: bin/up",
+        "    worktree_down: bin/down",
+        "    worktree_root: /tmp/worktrees",
+        "    escalate_paths: []",
+        "",
+      ].join("\n"),
+    );
+    // Minimal literal policy: the registry needs full model tier mappings and
+    // must not inherit the checkout's instance config/policy.yaml.
+    writeFileSync(
+      path.join(reposRoot, "config", "policy.yaml"),
+      [
+        "packs: []",
+        "models:",
+        "  claude: { strong: default, standard: sonnet, light: haiku }",
+        "  pi: { strong: pi-strong, standard: pi-standard, light: pi-light }",
+        "  agy: { strong: agy, standard: agy, light: agy }",
+        "  cursor: { strong: cursor, standard: cursor, light: cursor }",
+        "",
+      ].join("\n"),
+    );
+    // A Linear CLI stand-in that never answers: without a read timeout the
+    // planner's synchronous execFileSync would block the serve event loop for
+    // the child's full lifetime and /health would miss the web proxy's 10s.
+    const slowCli = path.join(home, "slow-linear.mjs");
+    writeFileSync(
+      slowCli,
+      "await new Promise((resolve) => setTimeout(resolve, 60_000));\n",
+    );
+    const port = freePort();
+    const box = spawnServeBox(["--port", port], {
+      FACTORY_EVENT_HOME: home,
+      FACTORY_REPOS_ROOT: reposRoot,
+      FACTORY_LINEAR_CLI: slowCli,
+      FACTORY_LINEAR_READ_TIMEOUT_MS: "1500",
+    });
+    try {
+      expect(await waitFor(box, "control API on", 8000)).toBe(true);
+      const { admitEvent } = await import("../lib/intake.mjs");
+      const { loadRegistry } = await import("../lib/registry.mjs");
+      const db = openDb(path.join(home, "runtime.db"));
+      const result = admitEvent(
+        db,
+        loadRegistry(),
+        {
+          schemaVersion: "factory.event/v1",
+          eventId: "linear-stall-1",
+          type: "factory.dispatch.requested",
+          source: "operator-webhook",
+          subject: "factory",
+          occurredAt: new Date().toISOString(),
+          correlationId: "linear-stall-1",
+          causationId: null,
+          payload: { repo: "gated", ticket: "WM-1835" },
+        },
+        { now: Date.now() },
+      );
+      expect(result.admitted).toBe(true);
+      // The next tick stalls in the fake CLI; the execFileSync timeout must
+      // abort it and record a bounded read failure instead of sleeping 60s.
+      const planError = {
+        get out() {
+          const row = db
+            .query(
+              `SELECT last_plan_error FROM events WHERE event_id = 'linear-stall-1'`,
+            )
+            .get();
+          return String(row?.last_plan_error ?? "");
+        },
+      };
+      expect(await waitFor(planError, "ETIMEDOUT", 15_000)).toBe(true);
+      // Retries keep stalling one bounded read per tick; a /health probe that
+      // lands mid-stall still answers inside the web proxy's 10s budget.
+      const started = Date.now();
+      const res = await fetch(`http://127.0.0.1:${port}/health`, {
+        signal: AbortSignal.timeout(9_000),
+      });
+      expect(res.ok).toBe(true);
+      expect(Date.now() - started).toBeLessThan(9_000);
+    } finally {
+      box.child.kill("SIGTERM");
+      await exitOf(box.child);
+    }
+  }, 60_000);
+
   test("serve clearly warns when FACTORY_CONTROL_API_TOKEN is unset", async () => {
     const home = tmpDir("evrt-serve-no-token-");
     const port = freePort();

@@ -176,74 +176,84 @@ export function createJobRunner({
     running.add(job.name);
     refreshTitle();
     try {
-      // A gate is what makes frequent polling affordable: checking costs one
-      // cheap query, spawning an agent costs budget. Exit 0 = work exists,
-      // 1 = idle, anything else is surfaced rather than silently skipped.
-      if (job.gate_command && shouldProbeGate) {
-        const { code, out } = await probe(job.gate_command);
-        if (code === 1) {
+      try {
+        // A gate is what makes frequent polling affordable: checking costs one
+        // cheap query, spawning an agent costs budget. Exit 0 = work exists,
+        // 1 = idle, anything else is surfaced rather than silently skipped.
+        if (job.gate_command && shouldProbeGate) {
+          const { code, out } = await probe(job.gate_command);
+          if (code === 1) {
+            log(
+              `${c.dim(clock())} ${c.dim("idle")}  ${job.name} ${c.dim(`— ${out.split("\n").pop() || "nothing to do"}`)}`,
+            );
+            return;
+          }
+          if (code !== 0) {
+            onFailed();
+            log(
+              `${c.dim(clock())} ${c.red("GATE FAIL")} ${job.name} ${c.dim(`exit ${code}: ${out.split("\n").pop()}`)}`,
+            );
+            return;
+          }
           log(
-            `${c.dim(clock())} ${c.dim("idle")}  ${job.name} ${c.dim(`— ${out.split("\n").pop() || "nothing to do"}`)}`,
+            `${c.dim(clock())} ${c.green("gate")}  ${job.name} ${c.dim(out.split("\n").pop() || "")}`,
           );
-          return;
         }
-        if (code !== 0) {
-          onFailed();
-          log(
-            `${c.dim(clock())} ${c.red("GATE FAIL")} ${job.name} ${c.dim(`exit ${code}: ${out.split("\n").pop()}`)}`,
-          );
-          return;
-        }
-        log(
-          `${c.dim(clock())} ${c.green("gate")}  ${job.name} ${c.dim(out.split("\n").pop() || "")}`,
-        );
-      }
-
-      const cmd = commandFor(job);
-      const started = Date.now();
-      log(
-        `${c.dim(clock())} ${c.cyan("start")} ${c.bold(job.name)} ${c.dim(cmd)}`,
-      );
-
-      const code = await new Promise((resolve, reject) => {
-        const child = spawnCommand(cmd);
-        const prefix = c.dim("  │ ");
-        const pipe = (stream, color) => {
-          let buf = "";
-          stream.on("data", (data) => {
-            buf += data.toString();
-            const lines = buf.split("\n");
-            buf = lines.pop();
-            for (const line of lines)
-              log(prefix + (color ? color(line) : line));
-          });
-          stream.on("end", () => {
-            if (buf.trim()) log(prefix + (color ? color(buf) : buf));
-          });
-        };
-        pipe(child.stdout);
-        pipe(child.stderr, c.red);
-        child.once("error", reject);
-        child.once("close", resolve);
-      });
-
-      const secs = ((Date.now() - started) / 1000).toFixed(1);
-      if (code === 0) {
-        onCompleted();
-        log(
-          `${c.dim(clock())} ${c.green("done")}  ${job.name} ${c.dim(`(${secs}s)`)}`,
-        );
-      } else {
+      } catch (error) {
         onFailed();
         log(
-          `${c.dim(clock())} ${c.red("FAIL")}  ${job.name} ${c.dim(`exit ${code}, ${secs}s`)}`,
+          `${c.dim(clock())} ${c.red("GATE FAIL")} ${job.name} ${c.dim(error instanceof Error ? error.message : String(error))}`,
+        );
+        return;
+      }
+
+      try {
+        const cmd = commandFor(job);
+        const started = Date.now();
+        log(
+          `${c.dim(clock())} ${c.cyan("start")} ${c.bold(job.name)} ${c.dim(cmd)}`,
+        );
+
+        const code = await new Promise((resolve, reject) => {
+          const child = spawnCommand(cmd);
+          const prefix = c.dim("  │ ");
+          const pipe = (stream, color) => {
+            let buf = "";
+            stream.on("data", (data) => {
+              buf += data.toString();
+              const lines = buf.split("\n");
+              buf = lines.pop();
+              for (const line of lines)
+                log(prefix + (color ? color(line) : line));
+            });
+            stream.on("end", () => {
+              if (buf.trim()) log(prefix + (color ? color(buf) : buf));
+            });
+          };
+          pipe(child.stdout);
+          pipe(child.stderr, c.red);
+          child.once("error", reject);
+          child.once("close", resolve);
+        });
+
+        const secs = ((Date.now() - started) / 1000).toFixed(1);
+        if (code === 0) {
+          onCompleted();
+          log(
+            `${c.dim(clock())} ${c.green("done")}  ${job.name} ${c.dim(`(${secs}s)`)}`,
+          );
+        } else {
+          onFailed();
+          log(
+            `${c.dim(clock())} ${c.red("FAIL")}  ${job.name} ${c.dim(`exit ${code}, ${secs}s`)}`,
+          );
+        }
+      } catch (error) {
+        onFailed();
+        log(
+          `${c.dim(clock())} ${c.red("SPAWN FAIL")} ${job.name} ${c.dim(error instanceof Error ? error.message : String(error))}`,
         );
       }
-    } catch (error) {
-      onFailed();
-      log(
-        `${c.dim(clock())} ${c.red("GATE FAIL")} ${job.name} ${c.dim(error instanceof Error ? error.message : String(error))}`,
-      );
     } finally {
       running.delete(job.name);
       refreshTitle();

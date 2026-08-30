@@ -154,14 +154,18 @@ shell` means the spawn prompt was defective: correct its path/launch details
 
    UX critique: <status>
 
-   run:$FACTORY_RUN_ID
+   run:<concrete run id, e.g. run_0e2d13da-…>
    ```
 
-   `Fixes <TICKET>` and the trailing `run:$FACTORY_RUN_ID` are unchanged
+   `Fixes <TICKET>` and the trailing concrete `run:<run-id>` line are unchanged
    required lines — the `## Validation` section is added between them, never
-   in place of either. Omit the `run:` line only when `$FACTORY_RUN_ID` is
-   unset (an interactive session). `UX critique: <status>` still appears in
-   the body, and the table's UX row carries the same status.
+   in place of either. Append the trailer with
+   `printf 'run:%s\n' "$FACTORY_RUN_ID"`; a quoted heredoc or `--body-file`
+   leaves the literal `run:$FACTORY_RUN_ID` unexpanded and is rejected by
+   handoff verification.
+   Omit the `run:` line only when `$FACTORY_RUN_ID` is unset (an interactive
+   session). `UX critique: <status>` still appears in the body, and the table's
+   UX row carries the same status.
 
    **Every row is an observation, not an assertion.** A row names a command you
    actually ran in `./repo` and records the exit status you actually saw:

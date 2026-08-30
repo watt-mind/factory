@@ -885,12 +885,11 @@ export function Overview({
     queryFn: api.status,
     ...refetchIntervals.primary,
   });
-  // Overview uses the ledger itself rather than a status summary so rows stay
-  // in the exact Inbox order and acknowledgement never needs an optimistic
-  // local rewrite.
+  // Ask for open rows directly: a mixed-status cursor can otherwise spend its
+  // first page on historical resolved items and hide an actionable row here.
   const inbox = useQuery({
-    queryKey: ["inbox", "all"],
-    queryFn: () => api.inbox("all"),
+    queryKey: ["inbox", "open"],
+    queryFn: () => api.inbox("open"),
     ...refetchIntervals.primary,
   });
   const outbox = useQuery({
