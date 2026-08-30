@@ -779,6 +779,31 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     );
   });
 
+  // Regression for #1816: a real key in the environment must not be enough to
+  // open a connection from a test process. The preloaded guard rejects the
+  // fetch itself, so even an in-process Linear client cannot spend budget.
+  test("a real LINEAR_API_KEY in the test environment never reaches api.linear.app", async () => {
+    const previousKey = process.env.LINEAR_API_KEY;
+    process.env.LINEAR_API_KEY = "lin_api_FAKE_REAL_LOOKING_KEY";
+    try {
+      expect(process.env.FACTORY_LINEAR_OFFLINE).toBe("1");
+      expect(globalThis.fetch.__factoryLinearOfflineGuard).toBe(true);
+      await expect(
+        fetch("https://api.linear.app/graphql", {
+          method: "POST",
+          headers: { Authorization: process.env.LINEAR_API_KEY },
+          body: "{}",
+        }),
+      ).rejects.toThrow("linear_offline_guard");
+      expect(() => runLinearCli(["comment", "WM-501", "handoff"])).toThrow(
+        "linear_offline_guard",
+      );
+    } finally {
+      if (previousKey === undefined) delete process.env.LINEAR_API_KEY;
+      else process.env.LINEAR_API_KEY = previousKey;
+    }
+  });
+
   test("missing process credentials never activate the dispatch stub implicitly (WM-533)", async () => {
     const previousHome = process.env.FACTORY_EVENT_HOME;
     const previousKey = process.env.LINEAR_API_KEY;
