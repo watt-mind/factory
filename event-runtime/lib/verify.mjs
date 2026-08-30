@@ -145,16 +145,28 @@ export const HANDOFF_SANDBOX_NAMESPACES = Object.freeze([
  */
 export const HANDOFF_SANDBOX_MARKER = "FACTORY_HANDOFF_SANDBOX";
 
+/**
+ * Upper bound for the guest tmpfs. A tmpfs is only a promise to the guest, but
+ * a runaway suite can fill it all from host RAM/swap, so policy cannot hand
+ * out more than this.
+ */
+export const MAX_HANDOFF_SANDBOX_TMPFS_MB = 8192;
+
+/** Clamp a candidate tmpfs size into [default, max]; anything else -> default. */
+export function clampHandoffSandboxTmpfsMb(value) {
+  if (!Number.isSafeInteger(value) || value < DEFAULT_HANDOFF_SANDBOX_TMPFS_MB)
+    return DEFAULT_HANDOFF_SANDBOX_TMPFS_MB;
+  return Math.min(value, MAX_HANDOFF_SANDBOX_TMPFS_MB);
+}
+
 /** Missing or invalid local policy must not restore the old 256 MiB mount. */
 export function policyHandoffSandboxTmpfsMb(root = reposRoot()) {
   try {
-    const value = Bun.YAML.parse(
-      readFileSync(resolveConfigPath("policy", { root }), "utf8"),
-    )?.sandbox?.tmpfs_mb;
-    return Number.isSafeInteger(value) &&
-      value >= DEFAULT_HANDOFF_SANDBOX_TMPFS_MB
-      ? value
-      : DEFAULT_HANDOFF_SANDBOX_TMPFS_MB;
+    return clampHandoffSandboxTmpfsMb(
+      Bun.YAML.parse(
+        readFileSync(resolveConfigPath("policy", { root }), "utf8"),
+      )?.sandbox?.tmpfs_mb,
+    );
   } catch {
     return DEFAULT_HANDOFF_SANDBOX_TMPFS_MB;
   }
@@ -173,6 +185,7 @@ export const HANDOFF_SANDBOX_INIT = String.raw`
 import os
 import signal
 import sys
+import time
 
 child = os.fork()
 if child == 0:
@@ -196,15 +209,40 @@ while True:
         child_status = status
         break
 
+def reap_all(grace_seconds):
+    # Returns True once no children remain; False if the grace ran out.
+    deadline = time.monotonic() + grace_seconds
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return True
+        except InterruptedError:
+            continue
+        if pid == 0:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+
 try:
     os.kill(-1, signal.SIGTERM)
 except ProcessLookupError:
     pass
-while True:
+if not reap_all(2.0):
+    # A leftover that ignores SIGTERM (or is stuck in a handler) would keep
+    # the sandbox alive past the command; escalate so the worker's reap never
+    # hangs on it.
     try:
-        os.wait()
-    except ChildProcessError:
-        break
+        os.kill(-1, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    while True:
+        try:
+            os.wait()
+        except ChildProcessError:
+            break
+        except InterruptedError:
+            continue
 
 if os.WIFEXITED(child_status):
     sys.exit(os.WEXITSTATUS(child_status))
@@ -368,6 +406,9 @@ export const HANDOFF_SANDBOX_UNAVAILABLE = "sandbox_unavailable";
 
 let sandboxProbeCache = null;
 
+/** Interpreter for the sandbox setup program and PID 1 init. */
+export const HANDOFF_SANDBOX_PYTHON = "/usr/bin/python3";
+
 /**
  * Can this host build the isolation boundary at all? Unprivileged user
  * namespaces are a kernel/distro toggle (`kernel.unprivileged_userns_clone`,
@@ -382,11 +423,19 @@ export function handoffSandboxAvailable({
   spawn = spawnSync,
   cache = true,
   nested = insideHandoffSandbox(),
+  exists = existsSync,
 } = {}) {
   if (nested) return true;
   if (cache && sandboxProbeCache !== null) return sandboxProbeCache;
   let available;
   try {
+    // The setup program runs under /usr/bin/python3 inside the namespace; a
+    // host without it cannot build the boundary either, and must report
+    // `sandbox_unavailable` rather than a bogus red for the ticket's command.
+    if (!exists(HANDOFF_SANDBOX_PYTHON)) {
+      if (cache) sandboxProbeCache = false;
+      return false;
+    }
     const res = spawn(
       "/usr/bin/unshare",
       [
@@ -496,10 +545,7 @@ export function runHandoffCommand({
     path.join(sandboxParent, ".handoff-sandbox-"),
   );
   const gitMounts = handoffGitMounts(root);
-  const sandboxTmpfsMb =
-    Number.isSafeInteger(tmpfsMb) && tmpfsMb >= DEFAULT_HANDOFF_SANDBOX_TMPFS_MB
-      ? tmpfsMb
-      : DEFAULT_HANDOFF_SANDBOX_TMPFS_MB;
+  const sandboxTmpfsMb = clampHandoffSandboxTmpfsMb(tmpfsMb);
   const fd = openSync(logPath, "w");
   let res;
   const startedAt = Date.now();
@@ -552,7 +598,7 @@ export function runHandoffCommand({
             "--pid",
             "--fork",
             "--kill-child=KILL",
-            "/usr/bin/python3",
+            HANDOFF_SANDBOX_PYTHON,
             "-c",
             HANDOFF_SANDBOX_INIT,
             "/bin/bash",
@@ -616,6 +662,58 @@ export function runHandoffCommand({
   };
 }
 
+/**
+ * `bun test` flags that consume the following word. Their values must never
+ * widen the covering set (`--preload ./setup.mjs`, `-t verify`, ...).
+ */
+const BUN_TEST_VALUE_FLAGS = new Set([
+  "--preload",
+  "-r",
+  "--require",
+  "--timeout",
+  "-t",
+  "--test-name-pattern",
+  "--path-ignore-patterns",
+  "--max-concurrency",
+  "--rerun-each",
+  "--reporter",
+  "--reporter-outfile",
+  "--coverage-dir",
+  "--coverage-reporter",
+  "--coverage-threshold",
+  "--env-file",
+  "--cwd",
+  "--filter",
+  "--tsconfig-override",
+  "--define",
+  "-d",
+  "--loader",
+  "-l",
+  "--conditions",
+  "--port",
+  "--inspect",
+  "--inspect-wait",
+  "--inspect-brk",
+  "--concurrent-workers",
+  "--randomize-seed",
+  "--seed",
+  "--main-fields",
+  "--jsx-factory",
+  "--jsx-fragment",
+  "--jsx-import-source",
+  "--jsx-runtime",
+  "--config",
+  "-c",
+]);
+
+/** Filename shapes bun's default discovery treats as tests. */
+const BUN_TEST_FILE_RE =
+  /(?:^|[._-])(?:test|spec)\.(?:[cm]?[jt]sx?)$|(?:^|\/)(?:test|spec)\.[cm]?[jt]sx?$/;
+
+export function isBunTestFile(filePath) {
+  return BUN_TEST_FILE_RE.test(path.posix.basename(filePath));
+}
+
 function bunTestPaths(command) {
   if (typeof command !== "string") return null;
   const paths = [];
@@ -625,9 +723,18 @@ function bunTestPaths(command) {
     if (/[$`'"\\(){}[\]|<>*?]/.test(segment)) return null;
     const words = segment.trim().split(/\s+/);
     if (words[0] !== "bun" || words[1] !== "test") continue;
+    let skipValue = false;
     for (const word of words.slice(2)) {
+      if (skipValue) {
+        // The value of a value-taking flag is never a test path.
+        skipValue = false;
+        continue;
+      }
+      if (word.startsWith("-")) {
+        skipValue = !word.includes("=") && BUN_TEST_VALUE_FLAGS.has(word);
+        continue;
+      }
       if (
-        word.startsWith("-") ||
         /^\d+(?:\.\d+)?$/.test(word) ||
         !(/[/.]/.test(word) || word.endsWith("test"))
       ) {
@@ -650,20 +757,32 @@ function bunTestPaths(command) {
  * True only when every explicit ticket test path is contained by an explicit
  * `bun test` path in repo verify. Unparseable commands and default test
  * discovery return false, preserving the independent ticket check.
+ *
+ * Exact-path matches stand on their own. A ticket path covered only by a
+ * repo-verify DIRECTORY additionally has to be a real file under `root` whose
+ * name matches bun's test pattern: directory discovery only ever runs
+ * `*.test.*` / `*.spec.*` files, so a missing path or a helper module named on
+ * the ticket would NOT actually have been exercised by step 1 — step 2 must
+ * still run for it.
  */
-export function ticketVerifyCoveredByRepoVerify(ticketCommand, repoVerify) {
+export function ticketVerifyCoveredByRepoVerify(
+  ticketCommand,
+  repoVerify,
+  { root = null, exists = existsSync } = {},
+) {
   const ticketPaths = bunTestPaths(ticketCommand);
   const repoPaths = bunTestPaths(repoVerify);
-  return Boolean(
-    ticketPaths &&
-    repoPaths &&
-    ticketPaths.every((ticketPath) =>
-      repoPaths.some(
-        (repoPath) =>
-          ticketPath === repoPath || ticketPath.startsWith(`${repoPath}/`),
-      ),
-    ),
-  );
+  if (!ticketPaths || !repoPaths) return false;
+  return ticketPaths.every((ticketPath) => {
+    if (repoPaths.includes(ticketPath)) return true;
+    const underDirectory = repoPaths.some((repoPath) =>
+      ticketPath.startsWith(`${repoPath}/`),
+    );
+    if (!underDirectory) return false;
+    if (!isBunTestFile(ticketPath)) return false;
+    if (typeof root !== "string" || root === "") return false;
+    return exists(path.join(root, ticketPath));
+  });
 }
 
 /** Best-effort timeout for the pre-diff `git fetch origin <base>` (F4). */
@@ -1477,6 +1596,7 @@ function verifyCompleted({
       ticketVerifyCoveredByRepoVerify: ticketVerifyCoveredByRepoVerify(
         ticketCommand,
         worktreeRecord.verify,
+        { root: worktreePath },
       ),
       reasonCode: null,
     };
