@@ -1053,8 +1053,12 @@ export function Events({
               </p>
             )}
             <p className="mb-3 text-[11px] text-(--text-faint)">
-              Facet counts reflect loaded rows.
-              {fetchAll && " Tab counts reflect loaded rows."}
+              {rows.length} loaded {rows.length === 1 ? "row" : "rows"}
+              {list.hasNextPage && " · more events available"}. Facet counts
+              reflect loaded rows.
+              {fetchAll
+                ? " Status-tab counts reflect loaded rows."
+                : " Status-tab counts reflect all available events."}
             </p>
 
             {(types.length > 1 || sources.length > 1) && (

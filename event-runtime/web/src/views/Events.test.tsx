@@ -97,13 +97,14 @@ describe("Events component harness: selection & detail view", () => {
         status: async () => createStatusFixture(),
       },
       async () => {
-        const { container, getByRole } = renderEvents();
+        const { container, getByRole, getByText } = renderEvents();
 
         await waitFor(() =>
           expect(
             container.querySelector('td[title="evt_newest"]'),
           ).toBeTruthy(),
         );
+        expect(getByText(/1 loaded row · more events available/)).toBeTruthy();
         fireEvent.click(getByRole("button", { name: "Older events" }));
 
         await waitFor(() => {
