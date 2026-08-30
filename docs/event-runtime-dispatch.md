@@ -222,7 +222,7 @@ auto-approval path above is what stops the inbox escalation.
 ## 3. Capacity: one budget, checked at plan and again at execute
 
 **Decision.** One per-repo in-flight cap, shared by both paths: the repo's
-`max_in_flight` in `config/repos.yaml`, falling back to
+[`max_in_flight` in the repository config reference](event-runtime-repos.md#config-reference), falling back to
 `concurrency.max_in_flight_per_repo` in `config/policy.yaml`. The ledger that
 counts against it is the existing one — `lib/worker-leases.mjs`: files under
 `~/.factory/worker-leases/` that independent supervisors already share, live
@@ -341,7 +341,7 @@ collided with a dev server.
 
 Consequences, all inherited from the dispatcher's rules rather than invented:
 
-- **`report_only` repos are never tier-2 targets.** A repo without the
+- **[`report_only` repos](event-runtime-repos.md#config-reference) are never tier-2 targets.** A repo without the
   scripts has a safe concurrency of one human; `tick.mjs` refuses to
   dispatch there and the planner refuses to propose there
   (`repo_report_only`), for the same reason.
@@ -442,7 +442,7 @@ event-runtime-workers.md §5), with one permanent exception:
 - **The develop-targeting merge chain may eventually earn `auto`.** This is
   autonomy the orchestrator path already has — `policy.yaml`'s
   `auto_merge_base: [develop]` with green CI — so the runtime earning it is
-  parity on a track record, not new ground. Escalation rules
+  parity on a track record, not new ground. [Escalation rules](event-runtime-repos.md#config-reference)
   (`escalate_paths`, the judgment list) apply identically; an escalated PR
   is `human_needed`, never `auto`.
 - **The ship chain's deploy-branch merge is PERMANENTLY `watched`.** That
@@ -479,7 +479,7 @@ remain in force.
 Dispatch is re-read immediately before approval: it must still be Todo,
 unassigned, `ai:agent-ready`, inside its lease cap, and disjoint from active
 Owned Paths. `ai:escalated`, security classification, and a ticket path that
-intersects the repo's `escalate_paths` leave the proposal open with a typed
+intersects the repo's [`escalate_paths`](event-runtime-repos.md#config-reference) leave the proposal open with a typed
 reason. Triage apply additionally revalidates its schema and closed action
 registry. Proposal/run-spec mismatches and expired proposals fail closed.
 
