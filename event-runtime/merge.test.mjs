@@ -980,8 +980,16 @@ describe("executable merge command safety (WM-412)", () => {
       );
       expect(result.status, `${mode}: ${result.stderr}`).toBe(0);
       const log = readFileSync(fixture.log, "utf8");
+      expect(log).toContain("--required --json name,bucket,state");
+      if (mode === "green") {
+        expect(log).toContain("gh run list");
+        expect(log).toContain("--event pull_request");
+        expect(log).toContain("gh run view 81");
+      } else {
+        expect(log).not.toContain("gh run list");
+        expect(log).not.toContain("gh run view");
+      }
       expect(log.includes("gh pr merge")).toBe(shouldMerge);
-      expect(log).not.toContain("--event pull_request");
     }
   });
 

@@ -13,6 +13,7 @@ import {
   noRequiredChecksDiagnostic,
   proveMergeCiFallback,
   resolveRequiredContexts,
+  selectMergeCiRun,
 } from "./merge-ci-proof.mjs";
 import { loadRegistry } from "./registry.mjs";
 import { getRepo, loadRepos } from "./repos.mjs";
@@ -107,13 +108,20 @@ function proveRequiredCi({ github, pr, headRef, headSha, repo, factoryRoot }) {
     const green = contexts.every(
       (c) => c.bucket === "pass" && c.state === "SUCCESS",
     );
-    return green
-      ? { ok: true }
-      : { ok: false, reason: "required CI is pending or not green" };
+    if (!green) {
+      return { ok: false, reason: "required CI is pending or not green" };
+    }
   }
-  const repoRecord = getRepo(loadRepos({ root: factoryRoot }), repo);
+  let repoRecord;
+  try {
+    repoRecord = getRepo(loadRepos({ root: factoryRoot }), repo);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return { ok: false, reason: `merge_ci repo record unavailable: ${detail}` };
+  }
   const gate = repoRecord.mergeCi;
   if (!gate) {
+    if (contexts.length > 0) return { ok: true };
     return {
       ok: false,
       reason: `${noRequiredChecksDiagnostic(headRef)}; no merge_ci fallback`,
@@ -138,23 +146,25 @@ function proveRequiredCi({ github, pr, headRef, headSha, repo, factoryRoot }) {
   if (runsRaw.status !== 0) {
     return { ok: false, reason: "merge_ci fallback run list failed" };
   }
+  let run;
   try {
     const runs = JSON.parse(runsRaw.stdout || "[]");
-    const matching = runs.filter(
-      (run) => run.workflowName === gate.workflow && run.headSha === headSha,
-    );
-    if (matching.length !== 1) {
-      return { ok: false, reason: "configured workflow missing or ambiguous" };
-    }
+    run = selectMergeCiRun({ workflow: gate.workflow, headSha, runs });
     const jobsRaw = sh("gh", [
       "run",
       "view",
-      String(matching[0].databaseId),
+      String(run.databaseId),
       "--repo",
       github,
       "--json",
       "jobs",
     ]);
+    if (jobsRaw.status !== 0) {
+      return {
+        ok: false,
+        reason: `configured CI run ${run.databaseId}: job lookup failed`,
+      };
+    }
     const jobs = parseJobs(jobsRaw.stdout);
     proveMergeCiFallback({
       workflow: gate.workflow,
@@ -164,10 +174,11 @@ function proveRequiredCi({ github, pr, headRef, headSha, repo, factoryRoot }) {
       jobs,
     });
     return { ok: true };
-  } catch {
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
     return {
       ok: false,
-      reason: "configured CI checks missing, pending, or red",
+      reason: run ? `configured CI run ${run.databaseId}: ${detail}` : detail,
     };
   }
 }

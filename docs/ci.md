@@ -55,10 +55,11 @@ or `failure` result makes `Verify` fail.
 
 This matters because concurrency cancellation can leave a historical
 `Verify=success` check-run visible for a superseded workflow. The
-merge-proof helper ignores cancelled/superseded runs and requires exactly one
-remaining non-cancelled run for the reviewed head SHA (consumer-side wiring
-tracked in #1553); it never treats that stale check as proof that a merge is
-green.
+merge apply selects the sole non-cancelled configured workflow run for the
+reviewed head SHA; two live runs fail closed rather than trusting list order. When a
+repo configures `merge_ci`, both the branch's required contexts and that run's
+configured required jobs must be green; a stale check from a cancelled run is
+never sufficient merge proof.
 
 ## Dependabot dependency policy
 
