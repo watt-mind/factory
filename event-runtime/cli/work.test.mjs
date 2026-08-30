@@ -68,6 +68,16 @@ describe("work command", () => {
     );
   });
 
+  test("work rejects unsafe drain timeouts before registering", () => {
+    for (const value of ["not-a-number", "0", "-1"]) {
+      const r = runCli(["work", "--drain-timeout", value]);
+      expect(r.status).not.toBe(0);
+      expect(r.all).toContain(
+        "work: --drain-timeout must be an integer between 1 and 3600 seconds",
+      );
+    }
+  });
+
   test("work with unknown --adapter-override exits non-zero with error", () => {
     const r = runCli(["work", "--adapter-override", "nonexistent"]);
     expect(r.status).not.toBe(0);

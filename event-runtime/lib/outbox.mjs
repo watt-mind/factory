@@ -11,8 +11,10 @@ import { tx } from "./db.mjs";
 
 export const DEFAULT_OUTBOX_RETENTION_DAYS = 14;
 export const DEFAULT_OUTBOX_BATCH_SIZE = 500;
-export const DEFAULT_OUTBOX_MAX_ATTEMPTS = 3;
+export const DEFAULT_OUTBOX_MAX_ATTEMPTS = 12;
 export const DEFAULT_OUTBOX_RETRY_BASE_MS = 5_000;
+export const DEFAULT_OUTBOX_RETRY_FACTOR = 2;
+export const DEFAULT_OUTBOX_RETRY_CAP_MS = 5 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function transientFailure(message, retryAt) {
@@ -26,6 +28,23 @@ function retryAtFromFailure(deliveryError) {
   } catch {
     return null;
   }
+}
+
+function jitteredRetryDelay(
+  attempts,
+  { retryBaseMs, retryFactor, retryCapMs, random },
+) {
+  const cappedDelay = Math.min(
+    retryCapMs,
+    retryBaseMs * retryFactor ** (attempts - 1),
+  );
+  const sample = random();
+  if (!Number.isFinite(sample) || sample < 0 || sample > 1) {
+    throw new Error("random must return a number between 0 and 1");
+  }
+  // Equal jitter keeps every retry meaningfully delayed while preventing a
+  // synchronized fleet of workers from retrying at the same instant.
+  return Math.floor(cappedDelay * (0.5 + sample / 2));
 }
 
 export function deliveryErrorMessage(deliveryError) {
@@ -67,8 +86,9 @@ export function sweepPublishedOutbox(
  * Deliver one bounded batch of unpublished outbox events to
  * `sink(envelope, row)` in insertion order. Each successful delivery is
  * stamped. Invalid JSON is deterministic poison and parks immediately. Sink
- * failures retry in order with exponential backoff until `maxAttempts`; the
- * final failure is parked, logged, and allows the following row to proceed.
+ * failures retry in order with capped, jittered exponential backoff until
+ * `maxAttempts`; the final failure is parked, logged, and allows the following
+ * row to proceed.
  *
  * Delivered rows without a delivery error are pruned after a configurable
  * bounded window. Unpublished and parked rows are never eligible for pruning.
@@ -85,6 +105,9 @@ export function publishOutbox(
     batchSize = DEFAULT_OUTBOX_BATCH_SIZE,
     maxAttempts = DEFAULT_OUTBOX_MAX_ATTEMPTS,
     retryBaseMs = DEFAULT_OUTBOX_RETRY_BASE_MS,
+    retryFactor = DEFAULT_OUTBOX_RETRY_FACTOR,
+    retryCapMs = DEFAULT_OUTBOX_RETRY_CAP_MS,
+    random = Math.random,
     log = () => {},
   } = {},
 ) {
@@ -94,13 +117,17 @@ export function publishOutbox(
   if (!Number.isInteger(maxAttempts) || maxAttempts <= 0) {
     throw new Error("maxAttempts must be a positive integer");
   }
-  if (
-    !Number.isFinite(retryBaseMs) ||
-    retryBaseMs < DEFAULT_OUTBOX_RETRY_BASE_MS
-  ) {
-    throw new Error(
-      `retryBaseMs must be at least ${DEFAULT_OUTBOX_RETRY_BASE_MS} milliseconds`,
-    );
+  if (!Number.isFinite(retryBaseMs) || retryBaseMs <= 0) {
+    throw new Error("retryBaseMs must be a positive number of milliseconds");
+  }
+  if (!Number.isFinite(retryFactor) || retryFactor <= 1) {
+    throw new Error("retryFactor must be a number greater than 1");
+  }
+  if (!Number.isFinite(retryCapMs) || retryCapMs <= 0) {
+    throw new Error("retryCapMs must be a positive number of milliseconds");
+  }
+  if (typeof random !== "function") {
+    throw new Error("random must be a function");
   }
 
   const rows = db
@@ -165,7 +192,13 @@ export function publishOutbox(
             ? message
             : transientFailure(
                 message,
-                now + retryBaseMs * 2 ** (attempts - 1),
+                now +
+                  jitteredRetryDelay(attempts, {
+                    retryBaseMs,
+                    retryFactor,
+                    retryCapMs,
+                    random,
+                  }),
               ),
           parked ? 1 : 0,
           new Date(now).toISOString(),
