@@ -396,6 +396,35 @@ test("factory workers executes orchestrator/workers.mjs via CLI", () => {
   expect(result.stdout.toString()).toContain("factory workers");
 });
 
+test("factory logs rotate delegates to live-stack with logs rotate", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "factory-logs-"));
+  const argsFile = path.join(root, "args");
+  const factory = path.join(root, "bin", "factory");
+  const liveStack = path.join(root, "bin", "live-stack.sh");
+  mkdirSync(path.join(root, "bin"), { recursive: true });
+  copyFileSync(FACTORY, factory);
+  writeFileSync(
+    liveStack,
+    `#!/usr/bin/env bash
+printf '%s\\n' "$@" >"$FACTORY_LOGS_TEST_ARGS"
+`,
+  );
+  chmodSync(liveStack, 0o755);
+
+  try {
+    const result = Bun.spawnSync({
+      cmd: ["bash", factory, "logs", "rotate"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, FACTORY_LOGS_TEST_ARGS: argsFile },
+    });
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(argsFile, "utf8")).toBe("logs\nrotate\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("factory approve delegates to event-runtime/cli.mjs", () => {
   const result = Bun.spawnSync({
     cmd: ["bash", FACTORY, "approve"],

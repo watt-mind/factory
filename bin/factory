@@ -156,6 +156,7 @@ case "$cmd" in
   up)           exec bash "$ROOT/bin/live-stack.sh" up "$@" ;;
   down)         exec bash "$ROOT/bin/live-stack.sh" down "$@" ;;
   tail)         exec bash "$ROOT/bin/live-stack.sh" tail "$@" ;;
+  logs)         exec bash "$ROOT/bin/live-stack.sh" logs "$@" ;;
   init)
     # Preserve the existing GitHub control-plane initializer while making the
     # no-argument command scaffold all operator-local config from templates.
@@ -357,6 +358,7 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   up            start live event-runtime stack (API 7381, live worker, and Web UI 7382)
   down          stop live event-runtime stack
   tail          tail live daemon logs (~/.factory/run/{serve,worker,web}.log)
+  logs          manage live daemon logs (factory logs rotate)
   init --control-plane github [--root DIR] [--repo owner/name]
                 scaffold GitHub Issues control-plane defaults
   onboard       print the prompt that connects a repo to factory (#938);
