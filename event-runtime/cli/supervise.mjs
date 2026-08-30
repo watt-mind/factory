@@ -196,12 +196,38 @@ export function startTickLoop(tick, { once, intervalMs, log }) {
     try {
       tick();
     } catch (err) {
-      log(`tick error: ${err.message}`);
+      log(`tick error: ${String(err?.message ?? err)}`);
     }
   };
   const timer = setInterval(guardedTick, intervalMs);
   guardedTick();
   return timer;
+}
+
+/**
+ * Spawn a detached child whose stdout/stderr append to `logFile`. The parent's
+ * copy of the log fd is closed on every path — the child holds its own dup —
+ * so a `spawn()` that throws (EAGAIN, ENOMEM) inside a guarded tick cannot
+ * leak one descriptor per tick and spiral the supervisor into EMFILE.
+ */
+export function spawnDetached(
+  logFile,
+  argv,
+  { cwd, spawn: spawnImpl = spawn } = {},
+) {
+  const out = openSync(logFile, "a");
+  try {
+    const child = spawnImpl(process.execPath, argv, {
+      cwd,
+      detached: true,
+      stdio: ["ignore", out, out],
+      env: process.env,
+    });
+    child.unref();
+    return child;
+  } finally {
+    closeSync(out);
+  }
 }
 
 /**
@@ -359,9 +385,8 @@ export default async function supervise(args) {
     // one exits immediately and the pool silently refuses to grow.
     rmSync(files.drain, { force: true });
     const workerId = newWorkerId();
-    const out = openSync(files.log, "a");
-    const child = spawn(
-      process.execPath,
+    const child = spawnDetached(
+      files.log,
       [
         CLI_PATH,
         "work",
@@ -371,15 +396,8 @@ export default async function supervise(args) {
         "--drain-file",
         files.drain,
       ],
-      {
-        cwd: FACTORY_ROOT,
-        detached: true,
-        stdio: ["ignore", out, out],
-        env: process.env,
-      },
+      { cwd: FACTORY_ROOT },
     );
-    child.unref();
-    closeSync(out);
     writeFileSync(files.pid, `${child.pid}\n`);
     writeFileSync(files.id, `${workerId}\n`);
     const startedAt = Date.now();

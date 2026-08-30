@@ -4,6 +4,7 @@ import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -14,6 +15,7 @@ import { registerWorker } from "../lib/workers.mjs";
 import {
   crashBackoffMs,
   readPool,
+  spawnDetached,
   startTickLoop,
   workerPassthroughArgs,
 } from "./supervise.mjs";
@@ -118,6 +120,45 @@ describe("supervise (WM-226)", () => {
     expect(calls).toBeGreaterThanOrEqual(3);
     expect(lines.length).toBe(calls);
     expect(new Set(lines)).toEqual(new Set(["tick error: transient failure"]));
+  });
+
+  test("a spawn() that throws closes the log fd and the next tick still runs", async () => {
+    const dir = tmpDir("evrt-pool-spawn-throw-");
+    const logFile = path.join(dir, "worker-1.log");
+    const openFds = () => readdirSync("/proc/self/fd").length;
+    const spawnThrows = () => {
+      throw Object.assign(new Error("spawn EAGAIN"), { code: "EAGAIN" });
+    };
+
+    // The parent's copy of the log fd is closed even when spawn() throws:
+    // fifty failed spawns leave the descriptor table where it started.
+    const before = openFds();
+    for (let i = 0; i < 50; i += 1) {
+      expect(() =>
+        spawnDetached(logFile, ["work"], { cwd: dir, spawn: spawnThrows }),
+      ).toThrow("spawn EAGAIN");
+    }
+    expect(openFds()).toBe(before);
+
+    // Inside the guarded loop the failure is logged and the loop keeps ticking.
+    const lines = [];
+    let calls = 0;
+    const timer = startTickLoop(
+      () => {
+        calls += 1;
+        spawnDetached(logFile, ["work"], { cwd: dir, spawn: spawnThrows });
+      },
+      { once: false, intervalMs: 10, log: (line) => lines.push(line) },
+    );
+    try {
+      await until("the tick to fail at least three times", () => calls >= 3, {
+        timeoutMs: 5_000,
+      });
+    } finally {
+      clearInterval(timer);
+    }
+    expect(openFds()).toBe(before);
+    expect(new Set(lines)).toEqual(new Set(["tick error: spawn EAGAIN"]));
   });
 
   test("a transient tick failure is logged and the supervisor keeps ticking", async () => {
