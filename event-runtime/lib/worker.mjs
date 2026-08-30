@@ -85,6 +85,7 @@ import {
 } from "./workspace.mjs";
 import { createInboxItem } from "./inbox.mjs";
 import { persistMergeReviewFromResult } from "./merge-reviews.mjs";
+import { registerMemos } from "./memos.mjs";
 import { templateFor } from "./decision-templates.mjs";
 import {
   DETACHED_SPAWN_OPTIONS,
@@ -4471,6 +4472,11 @@ export async function executeClaimed(
         canonicalJson(receipt),
         iso(currentNow),
       );
+      registerMemos(db, runId, result, {
+        now: currentNow,
+        agent: spec.agent,
+        runState: "COMPLETED",
+      });
       persistMergeReviewFromResult(db, {
         spec,
         result,
