@@ -81,6 +81,42 @@ function ticketSchemaRegistry(eventType: string): AgentsView {
 }
 
 describe("Events component harness: selection & detail view", () => {
+  test("loads older event pages with the cursor and keeps existing rows", async () => {
+    const newest = stubEvent("evt_newest", "admitted");
+    const older = stubEvent("evt_older", "admitted");
+    const pages: Array<{ before?: string }> = [];
+
+    await withApi(
+      {
+        events: async (_status, page = {}) => {
+          pages.push(page);
+          return page.before === "cursor-1"
+            ? { events: [older], nextBefore: null }
+            : { events: [newest], nextBefore: "cursor-1" };
+        },
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { container, getByRole } = renderEvents();
+
+        await waitFor(() =>
+          expect(
+            container.querySelector('td[title="evt_newest"]'),
+          ).toBeTruthy(),
+        );
+        fireEvent.click(getByRole("button", { name: "Older events" }));
+
+        await waitFor(() => {
+          expect(
+            container.querySelector('td[title="evt_newest"]'),
+          ).toBeTruthy();
+          expect(container.querySelector('td[title="evt_older"]')).toBeTruthy();
+        });
+        expect(pages.some((page) => page.before === "cursor-1")).toBe(true);
+      },
+    );
+  });
+
   test("renders an x-ui ticket payload column from its route schema", async () => {
     localStorage.setItem(
       "evrt-display-events",
