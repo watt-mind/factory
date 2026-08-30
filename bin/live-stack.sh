@@ -24,6 +24,10 @@
 #   FACTORY_API_READY_TIMEOUT    # seconds `up` waits for the runtime /health
 #                                # endpoint before tearing its daemons down;
 #                                # default 60
+#   FACTORY_POOL_DRAIN_TIMEOUT   # seconds `down` lets a supervised worker pool
+#                                # drain before ordinary teardown; default 180
+#   FACTORY_WEB_SUPERVISOR_INTERVAL  # seconds between web supervisor ticks;
+#                                   # default 1 (positive decimals allowed)
 #
 # -E: `up` installs an ERR trap that tears down the daemons it started. Without
 # errexit-trace the trap is not inherited by functions or command substitutions,
@@ -177,6 +181,20 @@ LOG_KEEP="${FACTORY_LOG_KEEP:-3}"
 LOG_ROTATE_INTERVAL="${FACTORY_LOG_ROTATE_INTERVAL:-300}"
 LOG_ROTATE_MIN_BYTES=1048576
 API_READY_TIMEOUT="${FACTORY_API_READY_TIMEOUT:-60}"
+POOL_DRAIN_TIMEOUT="${FACTORY_POOL_DRAIN_TIMEOUT:-180}"
+WEB_SUPERVISOR_INTERVAL="${FACTORY_WEB_SUPERVISOR_INTERVAL:-1}"
+
+# These values feed shell arithmetic and sleep below. Validate them before an
+# action can snapshot, spawn, or signal a daemon so malformed environment
+# overrides leave an existing stack untouched.
+validate_timing_knobs() {
+  [[ "$POOL_DRAIN_TIMEOUT" =~ ^[1-9][0-9]*$ ]] ||
+    die "FACTORY_POOL_DRAIN_TIMEOUT must be a positive integer"
+  [[ "$API_READY_TIMEOUT" =~ ^[1-9][0-9]*$ ]] ||
+    die "FACTORY_API_READY_TIMEOUT must be a positive integer"
+  [[ "$WEB_SUPERVISOR_INTERVAL" =~ ^([1-9][0-9]*(\.[0-9]+)?|0\.[0-9]*[1-9][0-9]*)$ ]] ||
+    die "FACTORY_WEB_SUPERVISOR_INTERVAL must be a positive number"
+}
 
 # Reject knob values before anything touches a log. A threshold below 1 MiB
 # would rotate on nearly every tick (and lose the log's recent tail every time);
@@ -198,8 +216,9 @@ rotate_stack_logs() {
   rotate_run_logs "$RUN_DIR" "$LOG_ROTATE_BYTES" "$LOG_KEEP"
 }
 
-# `up` creates these itself once `--dry-run` has had its chance to exit: a dry
-# run must leave no trace on disk.
+# Validate before actions touch disk or daemon lifecycle state. `up` creates
+# these itself once `--dry-run` has had its chance to exit.
+validate_timing_knobs
 if [[ "$ACTION" != "up" ]]; then mkdir -p "$RUN_DIR" "$HOME_DIR"; fi
 REPO="$(repo_root)"
 
@@ -742,7 +761,7 @@ case "$ACTION" in
         rotate_stack_logs
         LOG_ROTATE_CHECKED=$(date +%s)
       fi
-      sleep "${FACTORY_WEB_SUPERVISOR_INTERVAL:-1}"
+      sleep "$WEB_SUPERVISOR_INTERVAL"
     done
     printf '%s [web-supervisor] event runtime stopped; supervisor exiting\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     ;;
@@ -795,7 +814,7 @@ case "$ACTION" in
     # patience; past it we fall through to the ordinary teardown, which is the
     # operator's "stop now" and says so.
     if [[ -f "$RUN_DIR/supervisor.pid" ]] && pid_alive "$RUN_DIR/worker.pid"; then
-      POOL_WAIT="${FACTORY_POOL_DRAIN_TIMEOUT:-180}"
+      POOL_WAIT="$POOL_DRAIN_TIMEOUT"
       info "draining worker pool (up to ${POOL_WAIT}s — runs in flight finish first)"
       term_daemon "$RUN_DIR/worker.pid" "worker pool supervisor"
       DEADLINE=$(( $(date +%s) + POOL_WAIT ))

@@ -372,6 +372,43 @@ test("failed runtime health cleans up only daemons spawned by this `up`", () => 
   }
 }, 20_000);
 
+test("malformed timing knobs fail before `up` snapshots or starts daemons", () => {
+  for (const [env, message] of [
+    [
+      { FACTORY_API_READY_TIMEOUT: "abc" },
+      "FACTORY_API_READY_TIMEOUT must be a positive integer",
+    ],
+    [
+      { FACTORY_WEB_SUPERVISOR_INTERVAL: "soon" },
+      "FACTORY_WEB_SUPERVISOR_INTERVAL must be a positive number",
+    ],
+  ]) {
+    const f = makeFixture();
+    try {
+      const r = runStack(f, ["up"], env);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain(message);
+      expect(r.spawns).toEqual([]);
+      expect(existsSync(f.runDir)).toBe(false);
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test("web supervisor interval accepts a positive decimal", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, ["up", "--dry-run"], {
+      FACTORY_WEB_SUPERVISOR_INTERVAL: "0.5",
+    });
+    expect(r.status).toBe(0);
+    expect(r.spawns).toEqual([]);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test("runtime health allows a slow bind beyond the former 30-attempt budget", () => {
   const f = makeFixture();
   const calls = path.join(f.root, "curl-calls");
@@ -887,6 +924,33 @@ test("`down` gives the pool a bounded wait, then says so instead of hanging", ()
     f.cleanup();
   }
 }, 20_000);
+
+test("malformed pool drain timeout leaves the running stack untouched", () => {
+  const f = makeFixture();
+  try {
+    mkdirSync(f.runDir, { recursive: true });
+    for (const [name, body] of [
+      ["supervisor.pid", "4242\n"],
+      ["worker.pid", "4242\n"],
+      ["serve.pid", "4243\n"],
+    ])
+      writeFileSync(path.join(f.runDir, name), body, "utf8");
+
+    const r = runStack(f, ["down"], {
+      FAKE_ALIVE: "1",
+      FACTORY_POOL_DRAIN_TIMEOUT: "10s",
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(
+      "FACTORY_POOL_DRAIN_TIMEOUT must be a positive integer",
+    );
+    expect(r.spawns).toEqual([]);
+    for (const name of ["supervisor.pid", "worker.pid", "serve.pid"])
+      expect(existsSync(path.join(f.runDir, name))).toBe(true);
+  } finally {
+    f.cleanup();
+  }
+});
 
 test("`down` without a supervisor pidfile is the pre-pool teardown, unchanged", () => {
   const f = makeFixture();
