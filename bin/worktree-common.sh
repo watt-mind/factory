@@ -1060,6 +1060,31 @@ rename_dir_atomic() { # <src> <dst>
   fi
 }
 
+# Write node_modules/.bun-lock-sha as the lowercase hex sha256 of bun.lock
+# (same bytes preflightHandoffDependencies trims after sha256Hex(readFileSync)).
+# A matching stamp lets the handoff preflight skip a redundant frozen install
+# (gh-1694). Missing lockfile or hasher failure leaves no stamp.
+write_bun_lock_stamp() { # <dir>
+  local dir="$1"
+  local lockfile="$dir/bun.lock"
+  local stamp="$dir/node_modules/.bun-lock-sha"
+  local digest=""
+  if [[ ! -f "$lockfile" ]]; then
+    rm -f "$stamp"
+    return 0
+  fi
+  mkdir -p "$dir/node_modules"
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest=$(sha256sum -- "$lockfile") || return 1
+  elif command -v shasum >/dev/null 2>&1; then
+    digest=$(shasum -a 256 -- "$lockfile") || return 1
+  else
+    return 1
+  fi
+  digest=${digest%% *}
+  printf '%s\n' "${digest,,}" > "$stamp"
+}
+
 # File-locked bun install with retry on SQLITE_BUSY (OPS-322).
 # Prevents concurrent worktree bring-ups from racing on bun's global cache DB.
 locked_bun_install() { # <dir>
@@ -1164,7 +1189,10 @@ locked_bun_install() { # <dir>
   [[ -n "$previous_exit_trap" ]] && eval "$previous_exit_trap"
   [[ -n "$previous_int_trap" ]] && eval "$previous_int_trap"
   [[ -n "$previous_term_trap" ]] && eval "$previous_term_trap"
-  if [[ $code -ne 0 ]]; then
+  if [[ $code -eq 0 ]]; then
+    write_bun_lock_stamp "$target_dir"
+  else
+    rm -f "$target_dir/node_modules/.bun-lock-sha"
     printf '%s\n' "$out" >&2
   fi
   return $code
