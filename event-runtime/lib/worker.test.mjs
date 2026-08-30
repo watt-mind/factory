@@ -50,6 +50,7 @@ import { buildPiArgv, execute as executePi } from "./adapters/pi.mjs";
 import { createAdapterRegistry } from "./adapters/index.mjs";
 import { SandboxUnsupportedError } from "./adapters/sandboxed.mjs";
 import { pinRunArtifact } from "./artifacts.mjs";
+import { memoryForge } from "../../lib/forge/index.mjs";
 import { admitEvent } from "./intake.mjs";
 import { planEvent } from "./planner.mjs";
 import { canonicalJson, hashBytes, hashJson } from "./canonical.mjs";
@@ -86,6 +87,7 @@ import {
   DEFAULT_MAX_ENVIRONMENT_RETRIES,
   defaultLocksDir,
   defaultReconcileVerifiedHandoffTicket,
+  defaultHoldPullRequest,
   defaultProjectTierEscalation,
   defaultReturnHandoffTicket,
   defaultUnclaimTicket,
@@ -3312,6 +3314,127 @@ sh -c 'sleep 5 & wait'
     ).toEqual({
       projection_state: "refused",
       projection_error: "ticket_pr_already_open",
+    });
+    db.close();
+  });
+
+  test("tier escalation routes a handoff-verification PR to merge review", async () => {
+    const db = openDb(":memory:");
+    const failedRunId = "run_tier_verify_failed";
+    const continuationRunId = "run_tier_verify_continuation";
+    queueRun(
+      db,
+      makeSpec({
+        runId: continuationRunId,
+        agent: "dispatch@1",
+        input: {
+          repo: "factory",
+          ticket: "watt-mind/factory#1539",
+          modelTier: "strong",
+        },
+        workspace: { type: "worktree", checkoutDir: "repo" },
+        outputContract: "factory.dispatch-result/v1",
+        modelTier: "strong",
+      }),
+    );
+    db.query(
+      `INSERT INTO attempts (run_id, attempt, fencing_token, finished_at, terminal_state, reason_code)
+       VALUES (?, 1, 1, ?, 'FAILED', 'handoff_verification_failed')`,
+    ).run(failedRunId, new Date(T0).toISOString());
+    db.query(
+      `INSERT INTO tier_escalations
+         (root_run_id, failed_run_id, continuation_run_id, repo, ticket,
+          workspace_path, source_workspace_path, projection_state, created_at)
+       VALUES (?, ?, ?, 'factory', 'watt-mind/factory#1539', '/tmp/checkout', '/tmp/wrapper', 'applied', ?)`,
+    ).run(
+      failedRunId,
+      failedRunId,
+      continuationRunId,
+      new Date(T0).toISOString(),
+    );
+
+    const routed = [];
+    // The PR-side effect is asserted through the DEFAULT hold helper against
+    // an in-memory forge (the dispatch stub would otherwise no-op it): the
+    // merge stage skips drafts, so drafting is what stops a refused handoff
+    // from landing without a fix round.
+    const forge = memoryForge({
+      repos: {
+        "watt-mind/factory": {
+          prs: [{ number: 1533, state: "OPEN", isDraft: false }],
+        },
+      },
+    });
+    const summary = await runOnce(
+      db,
+      registry,
+      adapters,
+      opts({
+        dispatch: {
+          holdPullRequest: (args) => defaultHoldPullRequest({ ...args, forge }),
+          locksDir: tmpDir("tier-verify-pr-locks-"),
+          leasesDir: tmpDir("tier-verify-pr-leases-"),
+          fetchTicket: () => ({
+            identifier: "watt-mind/factory#1539",
+            state: { name: "In Progress" },
+            assignee: { id: "factory-owner", name: "Factory" },
+            labels: {
+              nodes: [{ name: "ai:in-progress" }, { name: "tier:strong" }],
+            },
+            description: "## Owned Paths\n- event-runtime/lib/worker.mjs\n",
+          }),
+          fetchViewer: () => ({ id: "factory-owner", name: "Factory" }),
+          findWorkspacePullRequest: () => ({
+            number: 1533,
+            state: "OPEN",
+            isDraft: false,
+          }),
+          fetchInFlight: () => [],
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          reconcileVerifiedHandoffTicket: (args) => (routed.push(args), true),
+        },
+      }),
+    );
+
+    expect(summary).toMatchObject({
+      runId: continuationRunId,
+      terminalState: "REFUSED",
+      reasonCode: "ticket_pr_handoff_verification_failed",
+    });
+    expect(routed).toEqual([
+      expect.objectContaining({
+        repo: "factory",
+        ticket: "watt-mind/factory#1539",
+        reason: "handoff_verification_failed",
+        prNumber: 1533,
+      }),
+    ]);
+    expect(forge.calls).toEqual([
+      expect.objectContaining({
+        op: "prSetDraft",
+        repo: "watt-mind/factory",
+        number: 1533,
+        draft: true,
+      }),
+      expect.objectContaining({
+        op: "prComment",
+        repo: "watt-mind/factory",
+        number: 1533,
+        body: expect.stringContaining("handoff_verification_failed"),
+      }),
+    ]);
+    expect(forge.calls[1].body).toContain("Converted to draft");
+    expect(forge.seed.repos["watt-mind/factory"].prs[0].isDraft).toBe(true);
+    expect(
+      db
+        .query(
+          `SELECT projection_state, projection_error FROM tier_escalations WHERE continuation_run_id = ?`,
+        )
+        .get(continuationRunId),
+    ).toEqual({
+      projection_state: "refused",
+      projection_error: "ticket_pr_handoff_verification_failed",
     });
     db.close();
   });

@@ -107,6 +107,12 @@ When a required test step fails, `bun event-runtime/lib/test-helpers-timing.mjs 
 
 Both required test invocations use `--timeout 20000 --max-concurrency=4`. The 20-second default allows for scheduling delays on a busy self-hosted machine instead of failing unrelated tests at Bun's 5-second default. Tests that encode genuine liveness bounds continue to declare explicit, narrower timeouts; the CLI default does not replace those assertions. Only `Full verification` joins the verify-lane queue; the fast suite's 15-minute job timeout is a runaway guard rather than queue headroom. Timing-bound tests run on the general `shadow` pool.
 
+### Flake ledger
+
+| Test                                                                                                 | Lane                       | Guard                                                                                                                                                                                                                                                                                                                                          | Regression signal                                                                                                                |
+| ---------------------------------------------------------------------------------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `api-runs.test.mjs` — `contended approvals and rejections yield to /health and return typed db_busy` | Fast unit tests (required) | The real SQLite lock test has a `loadAdjustedTimeout(20_000)` ceiling (scaled by `CI_LOAD_FACTOR`); a 409 is accepted only when the lock child had already exited (`exitCode !== null`, sampled synchronously) at the moment the probe was issued; the 503 branch additionally asserts the probe spent the full `busy_timeout` budget (> 4 s). | A live lock that does not return `{ error: "db_busy", retryable: true }` still fails, as does an unresponsive `/health` request. |
+
 Do not add `describe.skipIf(process.env.CI_FAST)` in the unowned spawn suites from this ticket — the name-pattern split is the quarantine. Follow-up work that owns those files can add in-file tags that match the same list.
 
 ## Operational validation
@@ -116,8 +122,25 @@ After changing the workflow:
 1. Require all checks on the PR itself to pass:
 
    ```bash
-   gh pr checks <PR> --watch --fail-fast
+   # --workflow ci.yml: without it the newest run of ANY workflow (CLA,
+   # Security, Browser E2E) is returned and its verdict is not CI's. The run
+   # can lag the push, so retry briefly instead of failing on the first miss.
+   run_id=""
+   for i in $(seq 8); do
+     run_id="$(gh run list --workflow ci.yml --commit <sha> --json databaseId --limit 1 --jq '.[0].databaseId // empty')"
+     test -n "$run_id" && break
+     sleep 15
+   done
+   test -n "$run_id" || { echo "no CI workflow run found for this commit" >&2; exit 1; }
+   gh run watch "$run_id" --exit-status --interval 60
+   gh api "repos/{owner}/{repo}/commits/<sha>/check-runs" \
+     --jq '.check_runs[] | select(.status != "completed" or (.conclusion | IN("success","neutral","skipped") | not)) | .name' \
+     | grep -q . && { echo "not every check-run on <sha> is green" >&2; exit 1; }
    ```
+
+   This uses the REST API. `gh pr checks <PR> --watch --interval 60` is the
+   minimum only when its GraphQL-backed fallback is unavoidable; it otherwise
+   polls GraphQL every 10 seconds by default.
 
 2. After merge, inspect develop runs and confirm five consecutive green runs, including a period when at least three PR workflows were queued concurrently:
 
