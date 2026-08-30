@@ -286,7 +286,12 @@ describe("handoff verification gate (WM-718)", () => {
           returnHandoffTicket: (p) => (calls.returned.push(p), true),
           holdPullRequest: (p) => (calls.held.push(p), true),
           commentTicket: (p) => (calls.comments.push(p), true),
-          fetchHandoffPullRequest: () => ({ baseRefName: "develop" }),
+          // A live PR read always carries the body; an empty one is refused
+          // as a missing Fixes line, so the fixture supplies the minimum.
+          fetchHandoffPullRequest: () => ({
+            baseRefName: "develop",
+            body: `Fixes ${spec.input.ticket}`,
+          }),
           ...hooks,
         },
       }),

@@ -2472,6 +2472,37 @@ function handoffPrNumber(handoff) {
   return null;
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * True when some body line is a `Fixes <ticket>` line (case-insensitive,
+ * tolerant of surrounding whitespace and one trailing punctuation mark).
+ * Accepts the full `owner/repo#n` form, the short `#n` form when the PR
+ * lives in that repository, and Linear ids verbatim. Returns null when the
+ * handoff carries no usable ticket, so the caller reports "unknown" rather
+ * than probing the body for `Fixes null`.
+ */
+function handoffFixesLinePresent({ lines, ticket, github }) {
+  const ref = typeof ticket === "string" ? ticket.trim() : "";
+  if (!ref) return null;
+  const alternatives = [escapeRegExp(ref)];
+  const repoMatch = /^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#([0-9]+)$/.exec(ref);
+  if (
+    repoMatch &&
+    typeof github === "string" &&
+    github.trim().toLowerCase() === repoMatch[1].toLowerCase()
+  ) {
+    alternatives.push(`#${repoMatch[2]}`);
+  }
+  const pattern = new RegExp(
+    `^\\s*fixes\\s+(?:${alternatives.join("|")})\\s*[.,;:]?\\s*$`,
+    "i",
+  );
+  return lines.some((line) => pattern.test(line));
+}
+
 /**
  * Fail the handoff closed if GitHub cannot prove that the PR targets the
  * configured repository base. Kept here, beside the worker's other external
@@ -2506,13 +2537,19 @@ export function assertHandoffPullRequestBase({
   const actual =
     typeof pr?.baseRefName === "string" ? pr.baseRefName.trim() : "";
   handoff.prBase = { expected, actual: actual || null };
-  const hasBody = typeof pr?.body === "string";
-  const hasFixesLine = hasBody
-    ? pr.body.split(/\r?\n/).includes(`Fixes ${handoff.ticket}`)
-    : true;
-  const hasRunTrailer = hasBody
-    ? pr.body.split(/\r?\n/).includes(`run:${handoff.runId}`)
-    : true;
+  // GitHub returns `body: null` for an empty description; treat it as "".
+  const bodyLines = (typeof pr?.body === "string" ? pr.body : "").split(
+    /\r?\n/,
+  );
+  const hasFixesLine = handoffFixesLinePresent({
+    lines: bodyLines,
+    ticket: handoff.ticket,
+    github: handoff.github,
+  });
+  const hasRunTrailer =
+    typeof handoff.runId === "string" && handoff.runId.trim()
+      ? bodyLines.some((line) => line.trim() === `run:${handoff.runId.trim()}`)
+      : null;
   handoff.pr = {
     number: prNumber,
     draft: pr?.isDraft === true,
@@ -2534,7 +2571,7 @@ export function assertHandoffPullRequestBase({
       { reasonCode: "handoff_verification_failed", handoff },
     );
   }
-  if (!hasFixesLine) {
+  if (hasFixesLine === false) {
     throw new ContractViolation(
       [
         `handoff_pr_form_invalid: PR #${prNumber} is missing Fixes ${handoff.ticket}`,
