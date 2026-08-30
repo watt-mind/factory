@@ -278,6 +278,19 @@ export function loadLinearBudget() {
   }
 }
 
+/**
+ * Return the currently actionable Linear rate-limit state, if any.
+ *
+ * A stale cache entry must not hold the control plane offline forever: Linear
+ * gives us a reset clock, and only a future clock represents a live refusal.
+ */
+export function linearRateLimitState(budget, now = Date.now()) {
+  if (!budget?.rateLimited || !budget.resetAt) return null;
+  const resetMs = Date.parse(budget.resetAt);
+  if (!Number.isFinite(resetMs) || resetMs <= now) return null;
+  return { rateLimited: true, resetAt: new Date(resetMs).toISOString() };
+}
+
 export function saveLinearBudget(budget) {
   try {
     mkdirSync(linearCacheDir(), { recursive: true });
@@ -324,7 +337,10 @@ function recordLinearBudgetFromResponse(res) {
       parsed?.remaining ?? (rateLimited ? 0 : (prior.remaining ?? null)),
     limit: parsed?.limit ?? prior.limit ?? LINEAR_REQUESTS_LIMIT,
     resetAt: parsed?.resetAt ?? prior.resetAt ?? null,
-    rateLimited: Boolean(rateLimited || prior.rateLimited),
+    // A successful response with capacity clears a previous refusal. Keeping
+    // `prior.rateLimited` here made a recovered account appear offline until
+    // somebody manually removed budget.json.
+    rateLimited,
     status: res.status,
   });
 }

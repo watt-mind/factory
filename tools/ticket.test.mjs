@@ -44,6 +44,7 @@ import {
   assertLinearNetworkAllowed,
   linearNetworkIsOffline,
 } from "./ticket.mjs";
+import { gql } from "../orchestrator/reaper.mjs";
 
 const LABELS = [
   { id: "l-ready", name: "ai:agent-ready" },
@@ -68,6 +69,34 @@ test("the Linear offline guard rejects api.linear.app before fetch", () => {
       FACTORY_LINEAR_ALLOW_NETWORK: "1",
     }),
   ).not.toThrow();
+});
+
+test("the Linear transport does not retry a 429 rate-limit response", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousKey = process.env.LINEAR_API_KEY;
+  let calls = 0;
+  process.env.LINEAR_API_KEY = "test-key";
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response('{"errors":[{"message":"RATELIMITED"}]}', {
+      status: 429,
+      headers: {
+        "x-ratelimit-requests-remaining": "0",
+        "x-ratelimit-requests-reset": "1786539600",
+      },
+    });
+  };
+
+  try {
+    await expect(gql("query { ping }", {}, { retries: 5 })).rejects.toThrow(
+      "linear_rate_limited",
+    );
+    expect(calls).toBe(1);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.LINEAR_API_KEY;
+    else process.env.LINEAR_API_KEY = previousKey;
+  }
 });
 
 // ------------------------------------------------------------ label math ---

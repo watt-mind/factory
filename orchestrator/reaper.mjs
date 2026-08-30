@@ -174,6 +174,16 @@ function retryDelay(ms, signal) {
   });
 }
 
+function rateLimitError(message, response) {
+  const resetAt = response?.headers?.get("x-ratelimit-requests-reset") ?? null;
+  const error = new Error(
+    `linear_rate_limited: resetAt=${resetAt ?? "unknown"}${message ? `: ${message}` : ""}`,
+  );
+  error.rateLimited = true;
+  error.resetAt = resetAt;
+  return error;
+}
+
 /**
  * Send a Linear GraphQL request, retrying transient responses unless cancelled.
  *
@@ -213,8 +223,11 @@ export async function gql(
       });
 
       if (!res.ok) {
+        if (res.status === 429) {
+          throw rateLimitError((await res.text()).slice(0, 500), res);
+        }
         if (
-          [429, 500, 502, 503, 504].includes(res.status) &&
+          [500, 502, 503, 504].includes(res.status) &&
           attempt < retries - 1
         ) {
           await retryDelay(delay, signal);
@@ -228,20 +241,15 @@ export async function gql(
       const data = await res.json();
       if (data.errors && data.errors.length > 0) {
         const msg = JSON.stringify(data.errors);
-        if (
-          msg.toUpperCase().includes("RATELIMITED") &&
-          attempt < retries - 1
-        ) {
-          await retryDelay(delay, signal);
-          delay *= 2;
-          continue;
-        }
+        if (msg.toUpperCase().includes("RATELIMITED"))
+          throw rateLimitError(msg, res);
         throw new Error(msg);
       }
 
       return data.data || {};
     } catch (err) {
       if (signal?.aborted) throw abortReason(signal);
+      if (err?.rateLimited) throw err;
       if (
         attempt < retries - 1 &&
         !(err.message && err.message.startsWith("HTTP 4"))

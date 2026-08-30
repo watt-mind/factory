@@ -68,6 +68,7 @@ import { loadRepos, reposRoot } from "./repos.mjs";
 import { scheduleView } from "./schedules.mjs";
 import { handleStatusApiRoute, workerCapacityView } from "./status-view.mjs";
 import { loadWorkerPolicy } from "./workers.mjs";
+import { loadLinearBudget } from "../../tools/ticket.mjs";
 
 export {
   isLoopbackHost,
@@ -155,6 +156,7 @@ export function createApi({
   buildArtifactReferenceIndex = artifactReferenceIndex,
   buildArtifactInventory = artifactInventory,
   getTickStats = null,
+  getLinearBudget = loadLinearBudget,
 } = {}) {
   const actor = "operator";
   const staticRegistryLoadedAt = new Date(now()).toISOString();
@@ -282,6 +284,7 @@ export function createApi({
         actor,
         onEvent,
         getTickStats,
+        getLinearBudget,
         send,
         readBody,
         parseJson,

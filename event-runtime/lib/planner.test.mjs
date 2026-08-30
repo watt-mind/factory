@@ -4387,6 +4387,52 @@ describe("Linear rate limit (WM-878)", () => {
     });
   });
 
+  test("an active cached Linear budget skips planner reads and logs its reset clock once", () => {
+    withReposRoot(gatedYaml, () => {
+      const db = openDb(":memory:");
+      const ref = admit(db, {
+        type: "factory.dispatch.requested",
+        eventId: "cached-rate-limit-1",
+        correlationId: "cached-rate-limit-1",
+        payload: { repo: "gated", ticket: "WM-1835" },
+      });
+      const resetAt = "2026-08-19T13:00:00.000Z";
+      const logs = [];
+      let ticketReads = 0;
+
+      const counts = planAdmittedEvents(db, registry, {
+        now: NOW,
+        policyVersion: "git:test",
+        linearBudget: { rateLimited: true, resetAt },
+        log: (line) => logs.push(line),
+        dispatch: {
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          fetchTicket: () => {
+            ticketReads += 1;
+            return readyTicket("WM-1835");
+          },
+        },
+      });
+
+      expect(counts).toEqual({ planned: 0, failed: 0, deadLettered: 0 });
+      expect(ticketReads).toBe(0);
+      expect(logs).toEqual([
+        `planner: Linear rate-limited until ${resetAt} — skipping Linear reads`,
+      ]);
+      expect(
+        db
+          .query(
+            `SELECT status, last_plan_error FROM events WHERE event_id = ?`,
+          )
+          .get(ref.eventId),
+      ).toMatchObject({
+        status: "admitted",
+        last_plan_error: `linear_rate_limited: resetAt=${resetAt}`,
+      });
+    });
+  });
+
   test("one planning pass over 10 candidates makes at most 3 in-flight queries", () => {
     withReposRoot(gatedYaml, () => {
       const db = openDb(":memory:");

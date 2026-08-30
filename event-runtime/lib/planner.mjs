@@ -87,6 +87,8 @@ import {
   LinearRateLimitError,
   isLinearRateLimitMessage,
   isLinearRateLimited,
+  linearRateLimitState,
+  loadLinearBudget,
 } from "../../tools/linear.mjs";
 
 /** In-flight issues list is stable across one scan; 60s is the ticket cap. */
@@ -585,12 +587,33 @@ export function createLinearReadCache() {
  * in-flight lists by team+project for ≤60s. A rate-limit throw is remembered
  * so later candidates in the same pass do not hit Linear again.
  */
-export function wrapLinearReads(dispatch = {}, cache, now) {
+export function wrapLinearReads(
+  dispatch = {},
+  cache,
+  now,
+  configSnapshot = null,
+) {
   const resolveNow = () => {
     const clock = now ?? Date.now;
     return typeof clock === "function" ? clock() : clock;
   };
-  const throwIfLimited = () => {
+  const linearRateLimit = cache.budgetRateLimit ?? null;
+  const repoUsesLinear = (repoOrName) => {
+    if (repoOrName && typeof repoOrName === "object")
+      return repoOrName.controlPlane !== "github";
+    try {
+      return (
+        getRepo(snapshotRepos(configSnapshot), repoOrName).controlPlane !==
+        "github"
+      );
+    } catch {
+      // The normal eligibility proof supplies the useful unknown-repo refusal.
+      return false;
+    }
+  };
+  const throwIfLimited = (repo) => {
+    if (!repoUsesLinear(repo)) return;
+    if (linearRateLimit) throw linearRateLimit;
     if (!cache.rateLimitError) return;
     if (resolveNow() < cache.rateLimitedUntil) throw cache.rateLimitError;
     cache.rateLimitError = null;
@@ -612,7 +635,7 @@ export function wrapLinearReads(dispatch = {}, cache, now) {
   return {
     ...dispatch,
     fetchTicket: (id, repo) => {
-      throwIfLimited();
+      throwIfLimited(repo);
       // Cache per (id, repo): the same identifier read against different
       // control planes is a different lookup.
       const key = repo ? `${repo}::${id}` : id;
@@ -627,7 +650,7 @@ export function wrapLinearReads(dispatch = {}, cache, now) {
       }
     },
     fetchViewer: (repo) => {
-      throwIfLimited();
+      throwIfLimited(repo);
       const key = repo ?? "__default__";
       if (cache.viewers.has(key)) return cache.viewers.get(key);
       try {
@@ -640,7 +663,7 @@ export function wrapLinearReads(dispatch = {}, cache, now) {
       }
     },
     fetchInFlight: (repo) => {
-      throwIfLimited();
+      throwIfLimited(repo);
       const key = `${repo?.team ?? ""}::${repo?.project ?? ""}`;
       const hit = cache.inFlight.get(key);
       const at = resolveNow();
@@ -3065,14 +3088,42 @@ export function planAdmittedEvents(db, registry, opts = {}) {
       `SELECT source, event_id, type FROM events WHERE status = 'admitted' ORDER BY admitted_at, rowid`,
     )
     .all();
-  const cache = opts.linearReadCache ?? createLinearReadCache();
-  const dispatch = wrapLinearReads(opts.dispatch ?? {}, cache, opts.now);
   const configSnapshot = opts.configSnapshot ?? policySnapshot();
+  const cache = opts.linearReadCache ?? createLinearReadCache();
+  // Unit tests must not inherit the operator's shared cache. Production reads
+  // the persisted clock once per planner pass; an injected budget keeps this
+  // deterministic for the rate-limit regression tests.
+  const budget =
+    opts.linearBudget ??
+    (process.env.BUN_TEST || process.env.NODE_ENV === "test"
+      ? null
+      : loadLinearBudget());
+  const limited = linearRateLimitState(budget, resolveNow(opts.now));
+  if (limited) {
+    cache.budgetRateLimit = new LinearRateLimitError(limited.resetAt);
+  } else {
+    cache.budgetRateLimit = null;
+  }
+  const dispatch = wrapLinearReads(
+    opts.dispatch ?? {},
+    cache,
+    opts.now,
+    configSnapshot,
+  );
   const planOpts = { ...opts, dispatch, configSnapshot };
   let planned = 0;
   let failed = 0;
   let deadLettered = 0;
   const log = opts.log ?? console.log;
+  if (limited) {
+    try {
+      log(
+        `planner: Linear rate-limited until ${limited.resetAt} — skipping Linear reads`,
+      );
+    } catch {
+      // Logging must not turn a bounded refusal into a retryable failure.
+    }
+  }
   for (const { source, event_id: eventId, type } of rows) {
     try {
       const outcome = planEvent(db, registry, { source, eventId }, planOpts);
