@@ -114,8 +114,11 @@ shell` means the spawn prompt was defective: correct its path/launch details
    app cannot be driven, record that result rather than guessing.
 
 5. **Never `sleep` to wait for anything.** Poll a condition with a real
-   command. For CI, resolve the head commit's REST-backed workflow run with
-   `gh run list --branch <head> --commit <sha> --json databaseId,status --limit 1`
+   command. For CI, resolve the head commit's REST-backed CI workflow run with
+   `gh run list --workflow ci.yml --commit <sha> --json databaseId --limit 1`
+   (always `--workflow`: without it the newest run of any workflow — CLA,
+   Security, Browser E2E — is returned and its verdict is not CI's; the run
+   can lag the push, so retry for up to ~2 minutes when the list is empty)
    and wait with `gh run watch <run-id> --exit-status --interval 60`; do not
    use `gh pr checks <PR> --watch --interval 60` unless that GraphQL-backed
    fallback is unavoidable; 60 seconds is the minimum because it polls

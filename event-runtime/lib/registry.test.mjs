@@ -386,8 +386,12 @@ describe("registry", () => {
     // Handoff comment; prompt pin only.
     // Regenerated (#1500): dispatch.md files out-of-scope follow-ups with
     // `tools/ticket.mjs file --from <TICKET>`; dispatch.json is re-pinned.
+    // Regenerated (#1581): dispatch.md and ship-apply.md move CI waiting to
+    // REST (`gh run list --workflow ci.yml --commit` + `gh run watch`) and
+    // ship-apply's merge_rc_pr asserts every check-run is green before
+    // merging; prompt pins and one argv template only.
     const expected =
-      "sha256:df06213a7ce4a24be5218bee31968b4a6b75ca6c7144e218015c5c9b5b8e0ea3";
+      "sha256:cf57efc93be0d488db8ff55b8c892d8c52d0da52d7a0112da82ac7596b4f4d3f";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -670,8 +674,10 @@ describe("registry", () => {
     // Handoff comment; `pack` remains non-enumerable.
     // Regenerated (#1500): dispatch.md instructs `file --from <TICKET>` for
     // out-of-scope follow-ups; prompt pin only.
+    // Regenerated (#1581): dispatch.md selects the CI run by workflow and
+    // waits via REST; prompt pin only, `pack` remains non-enumerable.
     expect(computeDefHash(def)).toBe(
-      "sha256:bcb2ad73016ca65076edf59034106044e9603c74edcbc007bd8317444e58276e",
+      "sha256:e7c6ec68b91dc1fe02dcbfcbbd5ec662c47ef92e54656ed71b0e44a931621328",
     );
   });
 

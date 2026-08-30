@@ -108,15 +108,27 @@ Before blocking on product intent, check whether it's already written down — t
 **For CI:**
 
 ```bash
-run_id="$(gh run list --branch <head> --commit <sha> --json databaseId,status --limit 1 --jq '.[0].databaseId // empty')"
-test -n "$run_id" || { echo "no workflow run found for this commit" >&2; exit 1; }
+# Select the CI workflow's run for this exact commit. Without --workflow,
+# `gh run list` returns the newest run of ANY workflow (CLA, Security, ...)
+# and its verdict is not the CI verdict. The run can lag the push by a
+# minute or two, so retry (bounded) instead of failing on the first miss.
+run_id=""
+for i in $(seq 8); do
+  run_id="$(gh run list --workflow ci.yml --commit <sha> --json databaseId --limit 1 --jq '.[0].databaseId // empty')"
+  test -n "$run_id" && break
+  sleep 15
+done
+test -n "$run_id" || { echo "no CI workflow run found for this commit" >&2; exit 1; }
 gh run watch "$run_id" --exit-status --interval 60
 ```
 
 `gh run list` and `gh run watch` use GitHub's REST API. Do not default to
 `gh pr checks <PR> --watch --interval 60`: it polls GraphQL every 10 seconds
 by default and can exhaust the shared GraphQL budget. If it is unavoidable,
-`--interval 60` or greater is mandatory.
+`--interval 60` or greater is mandatory. A green `gh run watch` covers one
+workflow; before a merge that must be fully green, assert every check-run on
+the commit is completed and successful via REST
+(`gh api repos/<owner>/<repo>/commits/<sha>/check-runs`).
 
 **For a dev server, migration, or anything with an observable ready state** — poll the condition on a short interval with a bounded ceiling, so it returns as soon as it is up and still terminates if it never is:
 
