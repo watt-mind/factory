@@ -18,7 +18,12 @@ import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
  * state, so a real hang still fails, just not a slow host.
  */
 const EXECUTE_SPAWN_TIMEOUT_MS = loadAdjustedTimeout(5_000);
-import { composeHandoffVerification, insideHandoffSandbox } from "./verify.mjs";
+import {
+  composeHandoffVerification,
+  ContractViolation,
+  insideHandoffSandbox,
+  verifyResult,
+} from "./verify.mjs";
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
@@ -75,6 +80,7 @@ import {
   codeStampRoot,
   continuationExecutionInput,
   continuationHandoffFailure,
+  escalationHandoffFailure,
   createReloadWatcher,
   DEFAULT_MAX_ENVIRONMENT_RETRIES,
   defaultLocksDir,
@@ -99,6 +105,7 @@ import {
   repositoryIsClean,
   repositoryStatus,
   provisionInstanceLocalConfigs,
+  recoverMissingDispatchResult,
   runClaimPathGitProbe,
   resolveLinearApiKey,
   reconcileTierEscalations,
@@ -1219,13 +1226,130 @@ sh -c 'sleep 5 & wait'
     }
   });
 
-  test("no-result: FAILED/contract_violation", async () => {
+  test("no-result reports the expected absolute path and bounded agent output", async () => {
     const db = openDb(":memory:");
-    const spec = queueRun(db, makeSpec({ input: { repos: ["no-result"] } }));
+    const diagnosticAdapter = {
+      async execute({ workspaceDir }) {
+        writeFileSync(
+          path.join(workspaceDir, ".transcript.json"),
+          `${"discarded-prefix\n".repeat(300)}agent-final-diagnostic\n`,
+        );
+        return { exitCode: 0, timedOut: false };
+      },
+    };
+    const spec = queueRun(db, makeSpec({ adapter: "diagnostic-no-result" }));
+    const o = opts();
 
-    const summary = await runOnce(db, registry, adapters, opts());
+    const summary = await runOnce(
+      db,
+      registry,
+      { "diagnostic-no-result": diagnosticAdapter },
+      o,
+    );
     expect(summary.terminalState).toBe("FAILED");
     expect(summary.reasonCode).toBe("contract_violation");
+    expect(summary.detail).toContain(
+      path.resolve(o.workspacesRoot, `${spec.runId}-a1`, "result.json"),
+    );
+    expect(summary.detail).toContain("agent-final-diagnostic");
+    const outputTail = summary.detail.split(
+      "agent stdout/stderr (last 2 KB): ",
+    )[1];
+    expect(outputTail.length).toBeLessThanOrEqual(2 * 1024);
+  });
+
+  test("dispatch missing-result recovery is exact and requires an open PR Handoff", () => {
+    const workspaceDir = tmpDir("dispatch-result-recovery-");
+    const checkoutPath = tmpDir("dispatch-result-checkout-");
+    const def = getAgent(registry, "dispatch@1");
+    const spec = makeSpec({
+      agent: "dispatch@1",
+      input: { repo: "factory", ticket: "watt-mind/factory#1539" },
+      outputContract: "factory.dispatch-result/v1",
+    });
+    const worktreeRecord = {
+      path: checkoutPath,
+      github: "watt-mind/factory",
+      verify: "bun test event-runtime/lib/worker.test.mjs",
+      handoff: {
+        verificationCommand: "bun test event-runtime/lib/worker.test.mjs",
+      },
+    };
+    const missing = new ContractViolation(["missing_result"]);
+    const openPr = {
+      number: 1533,
+      url: "https://github.com/watt-mind/factory/pull/1533",
+      state: "OPEN",
+    };
+    const headSha = "a".repeat(40);
+
+    const recovered = recoverMissingDispatchResult({
+      error: missing,
+      spec,
+      def,
+      workspaceDir,
+      worktreeRecord,
+      findPullRequest: () => openPr,
+      fetchPullRequest: () => ({
+        body: "Fixes watt-mind/factory#1539\n\n## Handoff\ncomplete",
+        headRefOid: headSha,
+      }),
+    });
+    expect(recovered.candidate).toMatchObject({
+      reasonCode: "worker_recovered_missing_result",
+      artifact: { outcome: "PR_OPEN", prNumber: 1533 },
+      evidence: { headSha },
+    });
+    // The synthesized artifact must satisfy the registered dispatch-result
+    // schema (additionalProperties: false) — no cloned, widened definition.
+    expect(recovered.candidate.artifact).not.toHaveProperty("headSha");
+    expect(recovered).not.toHaveProperty("definition");
+    const verified = verifyResult({
+      spec,
+      def,
+      registry,
+      workspaceDir,
+      attempt: 1,
+      worktreeRecord: {},
+    });
+    expect(verified.kind).toBe("completed");
+    expect(verified.result.artifact.headSha).toBeUndefined();
+    expect(verified.result.evidence.headSha).toBe(headSha);
+
+    for (const { error, findPullRequest, body, recoveredHeadSha = headSha } of [
+      { error: missing, findPullRequest: () => null, body: "## Handoff" },
+      { error: missing, findPullRequest: () => openPr, body: "Fixes #1539" },
+      {
+        error: missing,
+        findPullRequest: () => openPr,
+        body: "## Handoff",
+        recoveredHeadSha: null,
+      },
+      {
+        error: new ContractViolation(["missing_result", "missing_artifact"]),
+        findPullRequest: () => openPr,
+        body: "## Handoff",
+      },
+      {
+        error: new ContractViolation(["missing_artifact"]),
+        findPullRequest: () => openPr,
+        body: "## Handoff",
+      },
+    ]) {
+      rmSync(path.join(workspaceDir, "result.json"), { force: true });
+      expect(
+        recoverMissingDispatchResult({
+          error,
+          spec,
+          def,
+          workspaceDir,
+          worktreeRecord,
+          findPullRequest,
+          fetchPullRequest: () => ({ body, headRefOid: recoveredHeadSha }),
+        }),
+      ).toBeNull();
+      expect(existsSync(path.join(workspaceDir, "result.json"))).toBe(false);
+    }
   });
 
   test("hang: TIMED_OUT with a tiny timeout", async () => {
@@ -2540,6 +2664,48 @@ sh -c 'sleep 5 & wait'
     ).toBe("web_build_failed: error TS7053");
     expect(continuationHandoffFailure(undefined)).toBeNull();
     expect(continuationHandoffFailure([42, null])).toBeNull();
+    const missingResultReason =
+      "contract_violation: missing_result: expected /tmp/run/result.json; agent stdout/stderr (last 2 KB): text; ticket_verify_failed: quoted output";
+    expect(continuationHandoffFailure(missingResultReason)).toBe(
+      missingResultReason,
+    );
+    expect(
+      continuationExecutionInput(
+        { repo: "factory", ticket: "watt-mind/factory#1539" },
+        continuationHandoffFailure(missingResultReason),
+      ).handoffFailure,
+    ).toBe(missingResultReason);
+  });
+
+  test("a handoff_verification_failed run hands its web_build_failed line to the continuation", () => {
+    const violations = [
+      "owned_paths_violation: docs/x.md",
+      "web_build_failed: src/views/Ticket.tsx: error TS7053",
+    ];
+    const error = new ContractViolation(violations, {
+      reasonCode: "handoff_verification_failed",
+    });
+    const failureReason = `handoff_verification_failed: ${violations.join(", ")}`;
+    // The composed reason is prefixed, so the anchored matcher cannot see the
+    // diagnostic in it; the worker must hand over the raw violations instead.
+    expect(continuationHandoffFailure(failureReason)).toBeNull();
+    expect(escalationHandoffFailure(error, failureReason)).toBe(
+      "web_build_failed: src/views/Ticket.tsx: error TS7053",
+    );
+    const missingResultReason =
+      "contract_violation: missing_result: expected /tmp/run/result.json; agent stdout/stderr (last 2 KB): text";
+    expect(
+      escalationHandoffFailure(
+        new ContractViolation(["missing_result"]),
+        missingResultReason,
+      ),
+    ).toBe(missingResultReason);
+    expect(
+      escalationHandoffFailure(
+        new ContractViolation(["missing_artifact"]),
+        "contract_violation: missing_artifact",
+      ),
+    ).toBeNull();
   });
 
   test("tier continuation input carries the worker-observed handoff failure verbatim", () => {
@@ -2781,6 +2947,90 @@ sh -c 'sleep 5 & wait'
     ).toEqual({
       projection_state: "refused",
       projection_error: "ticket_escalation_pr_closed",
+    });
+    db.close();
+  });
+
+  test("tier escalation marks its projection refused when the checkout branch already has a ready PR", async () => {
+    const db = openDb(":memory:");
+    const failedRunId = "run_tier_open_pr_failed";
+    const continuationRunId = "run_tier_open_pr_continuation";
+    queueRun(
+      db,
+      makeSpec({
+        runId: continuationRunId,
+        agent: "dispatch@1",
+        input: {
+          repo: "factory",
+          ticket: "watt-mind/factory#1539",
+          modelTier: "strong",
+        },
+        workspace: { type: "worktree", checkoutDir: "repo" },
+        outputContract: "factory.dispatch-result/v1",
+        modelTier: "strong",
+      }),
+    );
+    db.query(
+      `INSERT INTO tier_escalations
+         (root_run_id, failed_run_id, continuation_run_id, repo, ticket,
+          workspace_path, source_workspace_path, projection_state, created_at)
+       VALUES (?, ?, ?, 'factory', 'watt-mind/factory#1539', '/tmp/checkout', '/tmp/wrapper', 'applied', ?)`,
+    ).run(
+      failedRunId,
+      failedRunId,
+      continuationRunId,
+      new Date(T0).toISOString(),
+    );
+
+    const locksDir = tmpDir("tier-open-pr-locks-");
+    const leasesDir = tmpDir("tier-open-pr-leases-");
+    let claims = 0;
+    const summary = await runOnce(
+      db,
+      registry,
+      adapters,
+      opts({
+        dispatch: {
+          locksDir,
+          leasesDir,
+          fetchTicket: () => ({
+            identifier: "watt-mind/factory#1539",
+            state: { name: "In Progress" },
+            assignee: { id: "factory-owner", name: "Factory" },
+            labels: {
+              nodes: [{ name: "ai:in-progress" }, { name: "tier:strong" }],
+            },
+            description: "## Owned Paths\n- event-runtime/lib/worker.mjs\n",
+          }),
+          fetchViewer: () => ({ id: "factory-owner", name: "Factory" }),
+          findWorkspacePullRequest: () => ({
+            number: 1533,
+            state: "OPEN",
+            isDraft: false,
+          }),
+          fetchInFlight: () => [],
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          claimTicket: () => ((claims += 1), { ok: true }),
+        },
+      }),
+    );
+
+    expect(summary).toMatchObject({
+      runId: continuationRunId,
+      terminalState: "REFUSED",
+      reasonCode: "ticket_pr_already_open",
+    });
+    expect(claims).toBe(0);
+    expect(
+      db
+        .query(
+          `SELECT projection_state, projection_error FROM tier_escalations WHERE continuation_run_id = ?`,
+        )
+        .get(continuationRunId),
+    ).toEqual({
+      projection_state: "refused",
+      projection_error: "ticket_pr_already_open",
     });
     db.close();
   });

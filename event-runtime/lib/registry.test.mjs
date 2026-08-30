@@ -229,6 +229,30 @@ describe("registry", () => {
     }
   });
 
+  test("dispatch documented result envelope validates its registered output schema", () => {
+    const registry = loadRegistry();
+    const def = getAgent(registry, "dispatch@1");
+    const examples = [
+      ...readFileSync(def.promptPath, "utf8").matchAll(
+        /```json\n([\s\S]*?)\n```/g,
+      ),
+    ]
+      .map(([, source]) => JSON.parse(source))
+      .filter(
+        (example) => example.terminalState === "completed" && example.artifact,
+      );
+
+    expect(examples).toHaveLength(1);
+    expect(validate(registry.schemas.agentResult, examples[0])).toEqual({
+      valid: true,
+      errors: [],
+    });
+    expect(validate(def.outputSchema, examples[0].artifact)).toEqual({
+      valid: true,
+      errors: [],
+    });
+  });
+
   test("zero-pack merged-view digest matches the develop baseline", () => {
     // Regenerate with registryDigest(loadRegistry({ packRoots: [] })) on develop.
     // The serializer omits only WM-470's new pack provenance and normalizes
@@ -358,8 +382,10 @@ describe("registry", () => {
     // is filed with `ticket.mjs file --dedupe-key <source issue id>`;
     // triage-apply.json is re-pinned. Prompt text and its pin only — no
     // schema, contract, route, capability, or model tier changed.
+    // Regenerated (#1539): dispatch orders result.json before the final
+    // Handoff comment; prompt pin only.
     const expected =
-      "sha256:847555a80cb0dc6df59d012c1885ab673ad8fef65a8e39af5d04498550d3aa77";
+      "sha256:720af55c39f0287aa93f084f11eb96bc763c934f5cd49cf8f831177aab2a737a";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -638,8 +664,10 @@ describe("registry", () => {
     // Regenerated (CLNT-123): dispatch prompt pin moved for the web typecheck
     // and bounded handoff-failure continuation instructions; `pack` remains
     // non-enumerable.
+    // Regenerated (#1539): dispatch orders result.json before the final
+    // Handoff comment; `pack` remains non-enumerable.
     expect(computeDefHash(def)).toBe(
-      "sha256:440db0b0151fee722647bc17ea2808976c65558e50d36fec0a02cdd754843c88",
+      "sha256:600c6d9b252f1e775aae23caa838313fbb0308fb22f69d9aea0e6c3e446ab19e",
     );
   });
 
