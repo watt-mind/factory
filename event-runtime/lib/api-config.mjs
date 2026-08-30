@@ -4,7 +4,7 @@ import path from "node:path";
 import { FACTORY_ROOT, resolveConfigPath } from "./config.mjs";
 import { loadedExtensions, maskExtensionSecrets } from "./extensions.mjs";
 import { reposView } from "./repos.mjs";
-import { loadNodesConfig, nodesConfigPath } from "./workers-remote.mjs";
+import { loadNodesConfig, nodesConfigPath } from "./nodes-config.mjs";
 import { loadModelTierMap } from "./registry.mjs";
 import { modelTierConfigViewTolerant } from "./runtime-overrides.mjs";
 

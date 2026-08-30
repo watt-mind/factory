@@ -153,6 +153,7 @@ export function createApi({
   // Injectable only so API tests can count cache rebuilds.
   buildArtifactReferenceIndex = artifactReferenceIndex,
   buildArtifactInventory = artifactInventory,
+  getTickStats = null,
 } = {}) {
   const actor = "operator";
   const registryLoadedAt = new Date(now()).toISOString();
@@ -254,6 +255,7 @@ export function createApi({
         nowMs,
         actor,
         onEvent,
+        getTickStats,
         send,
         readBody,
         parseJson,

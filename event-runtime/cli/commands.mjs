@@ -8,6 +8,7 @@ import extend from "./extend.mjs";
 import inbox from "./inbox.mjs";
 import inject from "./inject.mjs";
 import inspect from "./inspect.mjs";
+import plan from "./plan.mjs";
 import proposals from "./proposals.mjs";
 import ps from "./ps.mjs";
 import reject from "./reject.mjs";
@@ -28,6 +29,7 @@ import workers from "./workers.mjs";
 export const COMMANDS = Object.freeze({
   serve,
   work,
+  plan,
   supervise,
   status,
   doctor,

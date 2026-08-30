@@ -136,11 +136,16 @@ export async function controlApi(
 }
 
 export function controlApiFailureCode(err) {
-  return err?.code === "API_UNAUTHORIZED" || err?.status === 401
-    ? "API_UNAUTHORIZED"
-    : err?.code === "API_LOCKED" || err?.status === 503
-      ? "API_LOCKED"
-      : "API_ERROR";
+  if (err?.code === "API_UNAUTHORIZED" || err?.status === 401)
+    return "API_UNAUTHORIZED";
+  if (err?.code === "API_LOCKED" || err?.status === 503) return "API_LOCKED";
+  if (
+    err?.name === "TimeoutError" ||
+    err?.name === "AbortError" ||
+    err?.code === "API_TIMEOUT"
+  )
+    return "API_BUSY";
+  return "API_ERROR";
 }
 
 /**
@@ -251,14 +256,33 @@ export async function runWatchdogCheck({
 
   // 1. Control API Health
   try {
-    await controlApi("/health", { host, port });
+    const health = await controlApi("/health", { host, port });
     metrics.apiOk = true;
+    metrics.tick = health?.tick ?? null;
+    if (health?.tick?.overruns > 0) {
+      issues.push({
+        severity: "WARNING",
+        code: "TICK_OVERRUNS",
+        message: `Control API reported ${health.tick.overruns} tick overrun(s) (last tick: ${health.tick.lastMs}ms)`,
+      });
+    }
   } catch (err) {
-    const code = controlApiFailureCode(err);
+    const isTimeout =
+      err?.name === "TimeoutError" ||
+      err?.name === "AbortError" ||
+      err?.code === "API_TIMEOUT" ||
+      err?.code === "API_BUSY";
+    const code = isTimeout
+      ? "API_BUSY"
+      : controlApiFailureCode(err) === "API_ERROR" && !err?.status
+        ? "API_DOWN"
+        : controlApiFailureCode(err);
     issues.push({
-      severity: "CRITICAL",
-      code: code === "API_ERROR" && !err?.status ? "API_DOWN" : code,
-      message: `Control API on :${port} unavailable: ${err.message}`,
+      severity: isTimeout ? "WARNING" : "CRITICAL",
+      code,
+      message: isTimeout
+        ? `Control API on :${port} busy (timed out while ticking)`
+        : `Control API on :${port} unavailable: ${err.message}`,
     });
   }
 

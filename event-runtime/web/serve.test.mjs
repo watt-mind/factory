@@ -372,4 +372,54 @@ describe("tailnet write authentication", () => {
       await isolatedProxy.exited;
     }
   });
+
+  test("upstream timeout returns 504 with api_busy payload", async () => {
+    const slowApiPort = reservePort();
+    const slowWebPort = reservePort();
+    const slowApi = Bun.serve({
+      hostname: "127.0.0.1",
+      port: slowApiPort,
+      fetch: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        return new Response(JSON.stringify({ ok: true }), {
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const timeoutProxy = Bun.spawn(["bun", path.join(WEB_DIR, "serve.mjs")], {
+      cwd: WEB_DIR,
+      env: {
+        ...process.env,
+        FACTORY_EVENT_PORT: String(slowApiPort),
+        FACTORY_EVENT_WEB_PORT: String(slowWebPort),
+        FACTORY_WEB_PROXY_TIMEOUT_MS: "100",
+        FACTORY_EVENT_WEB_ALLOWED_HOSTS: "",
+        FACTORY_CONTROL_API_TOKEN: "",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    try {
+      await timeoutProxy.stdout.getReader().read();
+      const response = await requestProxy(
+        "GET",
+        "/status",
+        undefined,
+        {},
+        slowWebPort,
+      );
+      expect(response.status).toBe(504);
+      expect(response.headers["retry-after"]).toBe("5");
+      expect(JSON.parse(response.body)).toEqual({
+        error: "api_busy",
+        message: "event runtime is busy",
+      });
+    } finally {
+      timeoutProxy.kill();
+      await timeoutProxy.exited;
+      slowApi.stop(true);
+    }
+  });
 });

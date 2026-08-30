@@ -7,113 +7,14 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { FACTORY_ROOT } from "./config.mjs";
+import {
+  NodeConfigError,
+  nodesConfigPath,
+  expandHome,
+  loadNodesConfig,
+} from "./nodes-config.mjs";
 
-export class NodeConfigError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "NodeConfigError";
-  }
-}
-
-export function nodesConfigPath(root = FACTORY_ROOT) {
-  return (
-    process.env.FACTORY_NODES_CONFIG || path.join(root, "config", "nodes.yaml")
-  );
-}
-
-/** Expand leading ~ in paths */
-export function expandHome(p, home = process.env.HOME) {
-  if (typeof p !== "string") return p;
-  if (p === "~") return home ?? p;
-  if (p.startsWith("~/")) return path.join(home ?? "", p.slice(2));
-  return p;
-}
-
-/**
- * Load and validate remote nodes configuration.
- *
- * @returns {Map<string, {
- *   name: string,
- *   host: string,
- *   user: string | null,
- *   port: number,
- *   factoryRoot: string,
- *   branch: string,
- *   env: Record<string, string | number>,
- *   labels: Record<string, string>,
- *   adapters: string[]
- * }>}
- */
-export function loadNodesConfig({
-  configPath = null,
-  root = FACTORY_ROOT,
-} = {}) {
-  const filePath = configPath || nodesConfigPath(root);
-  if (!existsSync(filePath)) {
-    return new Map();
-  }
-
-  let parsed;
-  try {
-    parsed = Bun.YAML.parse(readFileSync(filePath, "utf8"));
-  } catch (err) {
-    throw new NodeConfigError(
-      `malformed nodes config at ${filePath}: ${err.message}`,
-    );
-  }
-
-  const nodes = new Map();
-  if (!parsed || typeof parsed !== "object" || !parsed.nodes) {
-    return nodes;
-  }
-
-  for (const [name, entry] of Object.entries(parsed.nodes)) {
-    if (!entry || typeof entry !== "object") {
-      throw new NodeConfigError(
-        `invalid node entry for "${name}" in ${filePath}`,
-      );
-    }
-    if (!entry.host || typeof entry.host !== "string") {
-      throw new NodeConfigError(
-        `node "${name}" is missing required "host" property`,
-      );
-    }
-
-    const port = Number(entry.port ?? 22);
-    if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-      throw new NodeConfigError(
-        `node "${name}" has invalid port: ${entry.port}`,
-      );
-    }
-
-    const factoryRoot = entry.factory_root || "~/Develop/factory";
-    const branch = entry.branch || "develop";
-    const user = entry.user || null;
-    const env =
-      entry.env && typeof entry.env === "object" ? { ...entry.env } : {};
-    const labels =
-      entry.labels && typeof entry.labels === "object"
-        ? { ...entry.labels }
-        : {};
-    const adapters = Array.isArray(entry.adapters)
-      ? entry.adapters.map(String)
-      : [];
-
-    nodes.set(name, {
-      name,
-      host: entry.host,
-      user,
-      port,
-      factoryRoot,
-      branch,
-      env,
-      labels,
-      adapters,
-    });
-  }
-
-  return nodes;
-}
+export { NodeConfigError, nodesConfigPath, expandHome, loadNodesConfig };
 
 /**
  * Build safe ssh argv array for child process execution.

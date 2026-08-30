@@ -31,6 +31,7 @@ import {
 import {
   keyGuard,
   refetchIntervals,
+  setApiBusyBackoff,
   THEMES,
   useHashRoute,
   useTheme,
@@ -338,6 +339,18 @@ export function App() {
   // than !connected, so an in-flight /health never flashes an outage.
   const healthPending = health.isPending;
   const healthFailed = !connected && !healthPending;
+
+  useEffect(() => {
+    if (health.data?.tick?.overruns && health.data.tick.overruns > 0) {
+      setApiBusyBackoff(true);
+    } else if (
+      health.data?.tick &&
+      health.data.tick.overruns === 0 &&
+      (health.data.tick.lastMs ?? 0) < 1000
+    ) {
+      setApiBusyBackoff(false);
+    }
+  }, [health.data]);
 
   const status = useQuery({
     queryKey: ["status"],

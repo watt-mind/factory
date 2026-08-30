@@ -441,10 +441,12 @@ export function fetchTickets(
 
 export const api = {
   health: () =>
-    call<{ ok: boolean; policyVersion: string; env: EnvIdentity }>(
-      "GET",
-      "/health",
-    ),
+    call<{
+      ok: boolean;
+      policyVersion: string;
+      env: EnvIdentity;
+      tick?: { lastMs: number; overruns: number };
+    }>("GET", "/health"),
   status: () => call<StatusView>("GET", "/status"),
   events: (status?: string, page: { limit?: number; before?: string } = {}) =>
     call<CursorPage<AdmittedEvent, "events">>(

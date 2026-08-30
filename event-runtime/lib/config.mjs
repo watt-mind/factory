@@ -4,12 +4,13 @@
  * so stopping — or deleting — the runtime never touches the repo checkout or
  * the existing orchestrator's state (docs/event-runtime.md §3).
  */
-import { execFileSync } from "node:child_process";
 import {
   constants as fsConstants,
   copyFileSync,
   existsSync,
   mkdirSync,
+  readFileSync,
+  statSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -193,14 +194,66 @@ let cachedPolicyVersion;
 /** Factory git SHA, recorded on run specs and lifecycle events as provenance. */
 export function policyVersion() {
   if (!cachedPolicyVersion) {
+    if (process.env.FACTORY_POLICY_VERSION) {
+      cachedPolicyVersion = process.env.FACTORY_POLICY_VERSION;
+      return cachedPolicyVersion;
+    }
     try {
-      const sha = execFileSync("git", ["rev-parse", "--short", "HEAD"], {
-        cwd: RUNTIME_ROOT,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim();
-      cachedPolicyVersion = `git:${sha}`;
+      const gitDir = path.join(FACTORY_ROOT, ".git");
+      if (existsSync(gitDir)) {
+        let actualGitDir = gitDir;
+        if (statSync(gitDir).isFile()) {
+          const gitFile = readFileSync(gitDir, "utf8").trim();
+          if (gitFile.startsWith("gitdir:")) {
+            actualGitDir = gitFile.slice(7).trim();
+            if (!path.isAbsolute(actualGitDir)) {
+              actualGitDir = path.resolve(FACTORY_ROOT, actualGitDir);
+            }
+          }
+        }
+        let commonGitDir = actualGitDir;
+        const commondirFile = path.join(actualGitDir, "commondir");
+        if (existsSync(commondirFile)) {
+          const cRel = readFileSync(commondirFile, "utf8").trim();
+          commonGitDir = path.isAbsolute(cRel)
+            ? cRel
+            : path.resolve(actualGitDir, cRel);
+        }
+
+        const headPath = path.join(actualGitDir, "HEAD");
+        if (existsSync(headPath)) {
+          const headContent = readFileSync(headPath, "utf8").trim();
+          if (headContent.startsWith("ref:")) {
+            const refRel = headContent.slice(4).trim();
+            const refPath = path.join(actualGitDir, refRel);
+            const commonRefPath = path.join(commonGitDir, refRel);
+            if (existsSync(refPath)) {
+              const sha = readFileSync(refPath, "utf8").trim().slice(0, 8);
+              cachedPolicyVersion = `git:${sha}`;
+            } else if (existsSync(commonRefPath)) {
+              const sha = readFileSync(commonRefPath, "utf8")
+                .trim()
+                .slice(0, 8);
+              cachedPolicyVersion = `git:${sha}`;
+            } else {
+              const packedPath = path.join(commonGitDir, "packed-refs");
+              if (existsSync(packedPath)) {
+                const packed = readFileSync(packedPath, "utf8");
+                const match = packed.match(
+                  new RegExp(`^([0-9a-f]{7,40})\\s+${refRel}`, "m"),
+                );
+                if (match) cachedPolicyVersion = `git:${match[1].slice(0, 8)}`;
+              }
+            }
+          } else if (/^[0-9a-f]{7,40}$/i.test(headContent)) {
+            cachedPolicyVersion = `git:${headContent.slice(0, 8)}`;
+          }
+        }
+      }
     } catch {
+      /* fallback below */
+    }
+    if (!cachedPolicyVersion) {
       cachedPolicyVersion = "unknown";
     }
   }
