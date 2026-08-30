@@ -116,8 +116,14 @@ After changing the workflow:
 1. Require all checks on the PR itself to pass:
 
    ```bash
-   gh pr checks <PR> --watch --fail-fast
+   run_id="$(gh run list --branch <head> --commit <sha> --json databaseId,status --limit 1 --jq '.[0].databaseId // empty')"
+   test -n "$run_id" || { echo "no workflow run found for this commit" >&2; exit 1; }
+   gh run watch "$run_id" --exit-status --interval 60
    ```
+
+   This uses the REST API. `gh pr checks <PR> --watch --interval 60` is the
+   minimum only when its GraphQL-backed fallback is unavoidable; it otherwise
+   polls GraphQL every 10 seconds by default.
 
 2. After merge, inspect develop runs and confirm five consecutive green runs, including a period when at least three PR workflows were queued concurrently:
 
