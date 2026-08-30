@@ -409,7 +409,15 @@ export function materializeRunHarness({
   // `safeJoin` returns a realpath-canonical destination. Keep the root used
   // for receipt-relative paths in that same namespace so a symlinked workspace
   // parent does not turn an in-workspace harness file into an apparent escape.
-  const canonicalWorkspaceDir = realpathSync(path.resolve(workspaceDir));
+  let canonicalWorkspaceDir;
+  try {
+    canonicalWorkspaceDir = realpathSync(path.resolve(workspaceDir));
+  } catch (err) {
+    throw new HarnessMaterializeError(
+      "harness_unmaterializable",
+      `workspace root ${JSON.stringify(String(workspaceDir))} cannot be resolved: ${err?.message ?? String(err)}`,
+    );
+  }
   const layout = adapter?.HARNESS_LAYOUT;
   const roots = harnessCatalogRoots(registry, factoryRoot);
   const written = [];
