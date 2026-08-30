@@ -8,7 +8,13 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { prCandidateRunIds, PullRequest, Ticket } from "./Ticket";
+import {
+  prCandidateRunIds,
+  prJourneyRefetchInterval,
+  PullRequest,
+  Ticket,
+} from "./Ticket";
+import { refetchIntervals } from "../hooks";
 import { changeInput } from "../test-render";
 import type {
   JourneyRun,
@@ -690,7 +696,11 @@ function prData() {
   return {
     events,
     proposals,
-    runs: { run_scan: scan, run_dispatch: dispatch, run_fix: fix },
+    runs: {
+      run_scan: scan,
+      run_dispatch: dispatch,
+      run_fix: fix,
+    } as Record<string, JourneyRun>,
     schedules: [
       {
         loop: "merge-factory",
@@ -763,6 +773,220 @@ describe("PR journey view", () => {
       </QueryClientProvider>,
     );
     expect(deriveJourney).toHaveBeenCalledTimes(1);
+  });
+
+  // Every feed reports one older page; `olderEvents` is what that page holds.
+  function pagedPrFetch(
+    data: ReturnType<typeof prData>,
+    olderEvents: unknown[],
+    urls: string[],
+    { olderHasNext = false } = {},
+  ) {
+    const json = (body: unknown) =>
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    return (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      urls.push(url);
+      const older = url.includes("before=");
+      const nextBefore = (page: string) =>
+        older ? (olderHasNext ? `${page}-older` : null) : `${page}-before`;
+      if (/\/api\/events/.test(url))
+        return json({
+          events: older ? olderEvents : [data.events[1]],
+          nextBefore: nextBefore("events"),
+        });
+      if (/\/api\/proposals/.test(url))
+        return json({
+          proposals: data.proposals,
+          nextBefore: nextBefore("proposals"),
+        });
+      if (/\/api\/inbox/.test(url))
+        return json({ items: [], nextBefore: nextBefore("inbox") });
+      if (/\/api\/schedules/.test(url)) return json({ schedules: [] });
+      const detail = url.match(/\/api\/runs\/([^/?]+)$/);
+      if (detail) {
+        const run = data.runs[decodeURIComponent(detail[1])];
+        return run ? json(run) : json({ error: "unknown run" });
+      }
+      if (/\/api\/runs(\?|$)/.test(url))
+        return json({
+          runs: Object.values(data.runs).map((run) => ({
+            runId: run.run.runId,
+            state: run.run.state,
+            attempts: 1,
+            agent: run.run.spec.agent,
+            adapter: run.run.spec.adapter,
+            created_at: run.run.created_at,
+            updated_at: run.run.updated_at,
+          })),
+          nextBefore: nextBefore("runs"),
+        });
+      return json({ error: `unexpected ${url}` });
+    }) as typeof fetch;
+  }
+
+  function olderPrEvent(data: ReturnType<typeof prData>) {
+    return {
+      ...data.events[1]!,
+      eventId: "chain-run_scan-older-541",
+      occurredAt: "2026-08-17T19:05:03.000Z",
+      admittedAt: "2026-08-17T19:05:03.000Z",
+    };
+  }
+
+  test("bounds every PR-journey feed and loads an older page without duplicate timeline activity", async () => {
+    const data = prData();
+    const prEvent = data.events[1]!;
+    const urls: string[] = [];
+    globalThis.fetch = pagedPrFetch(data, [prEvent, olderPrEvent(data)], urls);
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, refetchInterval: false } },
+    });
+    const view = render(
+      <QueryClientProvider client={client}>
+        <PullRequest number="541" />
+      </QueryClientProvider>,
+    );
+
+    const loadMore = await view.findByRole("button", {
+      name: "Load more activity",
+    });
+    expect(urls).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/\/api\/events\?limit=200$/),
+        expect.stringMatching(/\/api\/proposals\?status=all&limit=200$/),
+        expect.stringMatching(/\/api\/runs\?limit=200$/),
+        expect.stringMatching(/\/api\/inbox\?status=all&limit=200$/),
+      ]),
+    );
+    // The live region carries the count only; the button is announced once,
+    // as a button, not on every count change.
+    const timeline = view.getByRole("tabpanel", { name: /timeline/i });
+    const initialTimelineItems = timeline.querySelectorAll("li[data-kind]");
+    expect(initialTimelineItems.length).toBeGreaterThan(0);
+    const status = view.getByRole("status");
+    expect(status.getAttribute("aria-live")).toBe("polite");
+    expect(status.textContent).toBe(
+      `Showing the most recent ${initialTimelineItems.length} activity entries`,
+    );
+    expect(status.contains(loadMore)).toBe(false);
+
+    fireEvent.click(loadMore);
+    await waitFor(() =>
+      expect(urls.filter((url) => url.includes("before=")).length).toBe(4),
+    );
+    await waitFor(() =>
+      expect(timeline.querySelectorAll("li[data-kind]").length).toBe(
+        initialTimelineItems.length + 1,
+      ),
+    );
+    // Every feed is exhausted after the older page: the affordance ends.
+    await waitFor(() =>
+      expect(view.getByRole("status").textContent).toBe(
+        `No more activity for PR #541 — showing all ${initialTimelineItems.length + 1} entries.`,
+      ),
+    );
+    expect(
+      view.queryByRole("button", { name: "Load more activity" }),
+    ).toBeNull();
+  });
+
+  test("an older page that adds nothing for this PR ends the load-more affordance", async () => {
+    const data = prData();
+    const urls: string[] = [];
+    // The feeds still have older pages, but none of them mention PR #541.
+    globalThis.fetch = pagedPrFetch(data, [], urls, { olderHasNext: true });
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, refetchInterval: false } },
+    });
+    const view = render(
+      <QueryClientProvider client={client}>
+        <PullRequest number="541" />
+      </QueryClientProvider>,
+    );
+    const loadMore = await view.findByRole("button", {
+      name: "Load more activity",
+    });
+    const timeline = view.getByRole("tabpanel", { name: /timeline/i });
+    const before = timeline.querySelectorAll("li[data-kind]").length;
+
+    fireEvent.click(loadMore);
+    await waitFor(() =>
+      expect(view.getByRole("status").textContent).toBe(
+        `No more activity for PR #541 — showing all ${before} entries.`,
+      ),
+    );
+    expect(timeline.querySelectorAll("li[data-kind]").length).toBe(before);
+    expect(
+      view.queryByRole("button", { name: "Load more activity" }),
+    ).toBeNull();
+    expect(urls.filter((url) => url.includes("before=")).length).toBe(4);
+  });
+
+  test("polls the first page at the fast cadence and backs off once older pages are loaded", async () => {
+    const realFast = refetchIntervals.fast.refetchInterval;
+    const realSecondary = refetchIntervals.secondary.refetchInterval;
+    Object.assign(refetchIntervals.fast, { refetchInterval: () => 20 });
+    Object.assign(refetchIntervals.secondary, {
+      refetchInterval: () => 60_000,
+    });
+    try {
+      expect(prJourneyRefetchInterval({ state: {} })).toBe(20);
+      expect(
+        prJourneyRefetchInterval({ state: { data: { pages: [1] } } }),
+      ).toBe(20);
+      expect(
+        prJourneyRefetchInterval({ state: { data: { pages: [1, 2] } } }),
+      ).toBe(60_000);
+
+      const data = prData();
+      const urls: string[] = [];
+      globalThis.fetch = pagedPrFetch(data, [olderPrEvent(data)], urls);
+      const client = new QueryClient({
+        defaultOptions: { queries: { retry: false, refetchInterval: false } },
+      });
+      const view = render(
+        <QueryClientProvider client={client}>
+          <PullRequest number="541" />
+        </QueryClientProvider>,
+      );
+      const loadMore = await view.findByRole("button", {
+        name: "Load more activity",
+      });
+      const firstPage = (feed: string) =>
+        urls.filter(
+          (url) => url.includes(`/api/${feed}?`) && !url.includes("before="),
+        ).length;
+      // One page loaded: the feeds poll at the fast cadence.
+      await waitFor(() => expect(firstPage("events")).toBeGreaterThan(2));
+
+      fireEvent.click(loadMore);
+      await waitFor(() =>
+        expect(urls.filter((url) => url.includes("before=")).length).toBe(4),
+      );
+      await view.findByText(/No more activity for PR #541/);
+      // Let any poll that was already scheduled at click time land.
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      const settled = {
+        events: firstPage("events"),
+        proposals: firstPage("proposals"),
+        runs: firstPage("runs"),
+      };
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect({
+        events: firstPage("events"),
+        proposals: firstPage("proposals"),
+        runs: firstPage("runs"),
+      }).toEqual(settled);
+    } finally {
+      Object.assign(refetchIntervals.fast, { refetchInterval: realFast });
+      Object.assign(refetchIntervals.secondary, {
+        refetchInterval: realSecondary,
+      });
+    }
   });
 
   test("an unknown PR reads as no runtime activity, and a bad reference as an inline error", async () => {
