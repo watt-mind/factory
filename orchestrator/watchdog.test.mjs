@@ -328,6 +328,7 @@ async function runWatchdogWithInFlightRuns({
   running = [],
   verifying = [],
   queued = 0,
+  failDetailFor = [],
 } = {}) {
   const server = Bun.serve({
     port: 0,
@@ -365,6 +366,9 @@ async function runWatchdogWithInFlightRuns({
       }
       const runId = url.pathname.match(/^\/runs\/([^/]+)$/)?.[1];
       if (runId) {
+        if (failDetailFor.includes(runId)) {
+          return new Response("gone", { status: 404 });
+        }
         const run = [...leased, ...running, ...verifying].find(
           (entry) => entry.runId === runId,
         );
@@ -446,6 +450,106 @@ test("runWatchdogCheck does not wedge an old VERIFYING run with a fresh lease", 
   expect(result.issues.some((issue) => issue.code === "WEDGED_RUN")).toBe(
     false,
   );
+});
+
+test("runWatchdogCheck wedges an old RUNNING run despite a fresh lease", async () => {
+  const result = await runWatchdogWithInFlightRuns({
+    running: [
+      {
+        runId: "run_running_fresh_lease",
+        agent: "dispatch@1",
+        state: "RUNNING",
+        created_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+        updated_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+        lease_expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      },
+    ],
+  });
+
+  expect(result.issues).toContainEqual(
+    expect.objectContaining({
+      code: "WEDGED_RUN",
+      message: expect.stringContaining("in RUNNING"),
+    }),
+  );
+});
+
+test("runWatchdogCheck wedges a VERIFYING run past the absolute ceiling even with a fresh lease", async () => {
+  const result = await runWatchdogWithInFlightRuns({
+    verifying: [
+      {
+        runId: "run_verifying_ceiling",
+        agent: "dispatch@1",
+        state: "VERIFYING",
+        created_at: new Date(Date.now() - 140 * 60 * 1000).toISOString(),
+        updated_at: new Date(Date.now() - 140 * 60 * 1000).toISOString(),
+        lease_expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      },
+    ],
+  });
+
+  expect(result.issues).toContainEqual(
+    expect.objectContaining({
+      code: "WEDGED_RUN",
+      message: expect.stringContaining("in VERIFYING"),
+    }),
+  );
+});
+
+test("runWatchdogCheck detects a stale VERIFYING run without a lease", async () => {
+  const result = await runWatchdogWithInFlightRuns({
+    verifying: [
+      {
+        runId: "run_verifying",
+        agent: "dispatch@1",
+        state: "VERIFYING",
+        created_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+        updated_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      },
+    ],
+  });
+
+  expect(result.metrics.verifyingRuns).toBe(1);
+  expect(result.issues).toContainEqual(
+    expect.objectContaining({
+      code: "WEDGED_RUN",
+      message: expect.stringContaining("in VERIFYING"),
+    }),
+  );
+});
+
+test("runWatchdogCheck keeps reporting when one run detail fetch fails", async () => {
+  const stale = (runId, state) => ({
+    runId,
+    agent: "dispatch@1",
+    state,
+    created_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+    updated_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+  });
+  const result = await runWatchdogWithInFlightRuns({
+    running: [stale("run_a", "RUNNING"), stale("run_b", "RUNNING")],
+    verifying: [
+      {
+        ...stale("run_c", "VERIFYING"),
+        lease_expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      },
+    ],
+    failDetailFor: ["run_a"],
+  });
+
+  expect(result.metrics.inFlightRuns).toBe(3);
+  expect(result.metrics.wedgedRuns).toBe(2);
+  expect(
+    result.issues
+      .filter((issue) => issue.code === "WEDGED_RUN")
+      .map((i) => i.message),
+  ).toEqual([
+    expect.stringContaining("run_a"),
+    expect.stringContaining("run_b"),
+  ]);
+  expect(
+    result.issues.some((issue) => issue.code === "STATUS_FETCH_ERROR"),
+  ).toBe(false);
 });
 
 test("runWatchdogCheck does not report IDLE_STALL with a VERIFYING run", async () => {

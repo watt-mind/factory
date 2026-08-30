@@ -230,7 +230,37 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       ).json();
       expect(secondPage.artifacts).toHaveLength(1);
       expect(secondPage.nextBefore).toBeNull();
-      expect((await fetch(`${base}/artifacts?orphan=maybe`)).status).toBe(422);
+      for (const before of [
+        "%",
+        Buffer.from("not JSON").toString("base64url"),
+        Buffer.from(
+          JSON.stringify({
+            mtime: old.toISOString(),
+            sha256: "not-a-sha256",
+          }),
+        ).toString("base64url"),
+        Buffer.from(
+          JSON.stringify({
+            mtime: "January 1, 2026",
+            sha256: reportHash,
+          }),
+        ).toString("base64url"),
+      ]) {
+        const response = await fetch(
+          `${base}/artifacts?before=${encodeURIComponent(before)}`,
+        );
+        expect(response.status).toBe(422);
+        expect(await response.json()).toEqual({
+          error: "invalid_before",
+          message: "before must be a valid cursor",
+        });
+      }
+      const invalidOrphan = await fetch(`${base}/artifacts?orphan=maybe`);
+      expect(invalidOrphan.status).toBe(422);
+      expect(await invalidOrphan.json()).toEqual({
+        error: "invalid_orphan",
+        message: "orphan must be true or false",
+      });
       for (const limit of ["abc", "0", "501"]) {
         const response = await fetch(`${base}/artifacts?limit=${limit}`);
         expect(response.status).toBe(422);
@@ -238,6 +268,37 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
           error: "invalid_limit",
           message: "limit must be an integer between 1 and 500",
         });
+      }
+
+      for (const { body, error, message } of [
+        {
+          body: null,
+          error: "invalid_body",
+          message: "body must be an object",
+        },
+        {
+          body: { dryRun: "true" },
+          error: "invalid_dry_run",
+          message: "dryRun must be a boolean",
+        },
+        {
+          body: { apply: "true" },
+          error: "invalid_apply",
+          message: "apply must be a boolean",
+        },
+        {
+          body: { apply: true, dryRun: true },
+          error: "conflicting_flags",
+          message: "apply and dryRun cannot both be true",
+        },
+      ]) {
+        const response = await fetch(`${base}/artifacts/prune`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        expect(response.status).toBe(422);
+        expect(await response.json()).toEqual({ error, message });
       }
 
       const dry = await fetch(`${base}/artifacts/prune`, {

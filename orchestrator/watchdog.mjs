@@ -238,6 +238,9 @@ export async function fetchRecentSandboxRefusals({
 
 const IN_FLIGHT_STATES = Object.freeze(["LEASED", "RUNNING", "VERIFYING"]);
 const RUN_LIST_PAGE_SIZE = 200;
+const RUN_DETAIL_CONCURRENCY = 8;
+// Multiple of `stuckMinutes` past which a fresh lease no longer exempts a run.
+const WEDGED_CEILING_FACTOR = 3;
 
 /**
  * Read every page for one active state. The status snapshot below is the
@@ -268,19 +271,35 @@ async function inFlightRunDetails({ host, port }) {
       IN_FLIGHT_STATES.map((state) => allRunsInState(state, { host, port })),
     )
   ).flat();
-  return Promise.all(
-    summaries.map(async (run) => {
-      const detail = await controlApi(
-        `/runs/${encodeURIComponent(run.runId)}`,
-        {
-          host,
-          port,
-        },
-      );
-      const attempt = [...(detail?.attempts ?? [])].at(-1);
-      return { ...run, lease_expires_at: attempt?.lease_expires_at ?? null };
-    }),
-  );
+  const details = [];
+  for (let i = 0; i < summaries.length; i += RUN_DETAIL_CONCURRENCY) {
+    details.push(
+      ...(await Promise.all(
+        summaries
+          .slice(i, i + RUN_DETAIL_CONCURRENCY)
+          .map((run) => runLeaseDetail(run, { host, port })),
+      )),
+    );
+  }
+  return details;
+}
+
+/**
+ * One run's detail fetch failing (404 after a late transition, a timeout)
+ * must not drop the whole metrics block: report the summary with an unknown
+ * lease so the wedge rule falls back to `updated_at` alone.
+ */
+async function runLeaseDetail(run, { host, port }) {
+  try {
+    const detail = await controlApi(`/runs/${encodeURIComponent(run.runId)}`, {
+      host,
+      port,
+    });
+    const attempt = [...(detail?.attempts ?? [])].at(-1);
+    return { ...run, lease_expires_at: attempt?.lease_expires_at ?? null };
+  } catch {
+    return { ...run, lease_expires_at: null };
+  }
 }
 
 export async function runWatchdogCheck({
@@ -390,13 +409,15 @@ export async function runWatchdogCheck({
       const updated = new Date(r.updated_at || r.created_at || now).getTime();
       const ageMin = (now - created) / 60000;
       const quietMin = (now - updated) / 60000;
-      // A lease renewed by the worker is a heartbeat even when the run is
-      // parked in shared CI and has no lifecycle transition to update the run
-      // row. A future expiry proves the current attempt remains live.
-      const freshLease = Date.parse(r.lease_expires_at) > now;
-      return (
-        ageMin > stuckMinutes && quietMin > stuckMinutes / 2 && !freshLease
-      );
+      if (ageMin <= stuckMinutes || quietMin <= stuckMinutes / 2) return false;
+      // A lease renewed by the worker is a heartbeat even when a VERIFYING run
+      // is parked in shared CI and has no lifecycle transition to update the
+      // run row. Only VERIFYING earns that exemption: in LEASED/RUNNING a
+      // renewed lease proves worker liveness, not progress. Past the absolute
+      // ceiling the run is wedged regardless of lease.
+      const freshLease =
+        r.state === "VERIFYING" && Date.parse(r.lease_expires_at) > now;
+      return !freshLease || ageMin > stuckMinutes * WEDGED_CEILING_FACTOR;
     });
 
     metrics.wedgedRuns = wedged.length;

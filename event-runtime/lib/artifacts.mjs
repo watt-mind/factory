@@ -29,7 +29,10 @@ import { canonicalJson, hashJson } from "./canonical.mjs";
 import { confinedRegularFile } from "./workspace.mjs";
 
 const HEX64 = /^[0-9a-f]{64}$/;
+const ARTIFACT_TEMP = /^[0-9a-f]{64}\.tmp\./;
 const SHA256 = /^sha256:([0-9a-f]{64})$/;
+/** Interrupted artifact publishes are eligible for reclamation after one hour. */
+export const ARTIFACT_TEMP_GRACE_MS = 60 * 60 * 1000;
 const TRUSTED_ROOTLESS_SOURCES = new Map([
   ["memo", null],
   ["transcript", ".transcript.json"],
@@ -315,13 +318,28 @@ export function materializeArtifact({
   return { path: dest, sha256: sha256hex, sizeBytes: found.sizeBytes };
 }
 
-/** Every artifact hash any accepted result still points at. */
+/**
+ * Every artifact hash any accepted result still points at.
+ *
+ * A malformed historical result is counted in `hashes.invalid` rather than
+ * thrown. Callers that delete bytes must fail closed when it is non-zero;
+ * read-only callers can continue with the valid rows.
+ *
+ * @returns {Set<string> & { invalid: number }}
+ */
 export function referencedHashes(db) {
   const hashes = new Set();
+  hashes.invalid = 0;
   for (const row of db
     .query(`SELECT result_json, artifact_hash FROM results`)
     .all()) {
-    const result = JSON.parse(row.result_json);
+    let result;
+    try {
+      result = JSON.parse(row.result_json);
+    } catch {
+      hashes.invalid += 1;
+      continue;
+    }
     for (const entry of result.artifacts ?? []) {
       if (entry.sha256) hashes.add(entry.sha256);
     }
@@ -374,7 +392,13 @@ export function artifactReferenceIndex(db) {
     } catch {
       // A catalogue read should still expose the bytes if an old spec is bad.
     }
-    const result = JSON.parse(row.result_json);
+    let result;
+    try {
+      result = JSON.parse(row.result_json);
+    } catch {
+      // A bad historical result must not make the whole catalogue unavailable.
+      continue;
+    }
     for (const entry of result.artifacts ?? []) {
       if (!HEX64.test(entry.sha256 ?? "")) continue;
       const refs = references.get(entry.sha256) ?? [];
@@ -495,18 +519,39 @@ export function listArtifactPage(
  * Store inventory: total bytes, and the orphans — files no accepted result
  * references. Orphans are normal (a failed attempt stores nothing, but a
  * superseded one can leave bytes behind); they are only a problem unattended.
+ * Interrupted publish temp files are separately reported in `tempFiles` and
+ * `tempBytes`; they are not content-addressed artifacts or orphan candidates.
  */
 export function storeStats(db, storeRoot, { now = Date.now() } = {}) {
   if (!existsSync(storeRoot))
-    return { files: 0, bytes: 0, orphans: 0, orphanBytes: 0 };
+    return {
+      files: 0,
+      bytes: 0,
+      orphans: 0,
+      orphanBytes: 0,
+      tempFiles: 0,
+      tempBytes: 0,
+    };
   const referenced = referencedHashes(db);
   let files = 0;
   let bytes = 0;
   let orphans = 0;
   let orphanBytes = 0;
+  let tempFiles = 0;
+  let tempBytes = 0;
   for (const name of readdirSync(storeRoot)) {
+    // A concurrent prune may remove the entry between readdir and stat.
+    const stat = statSync(path.join(storeRoot, name), {
+      throwIfNoEntry: false,
+    });
+    if (!stat?.isFile()) continue;
+    if (ARTIFACT_TEMP.test(name)) {
+      tempFiles += 1;
+      tempBytes += stat.size;
+      continue;
+    }
     if (!HEX64.test(name)) continue;
-    const size = statSync(path.join(storeRoot, name)).size;
+    const size = stat.size;
     files += 1;
     bytes += size;
     if (!referenced.has(name)) {
@@ -519,6 +564,8 @@ export function storeStats(db, storeRoot, { now = Date.now() } = {}) {
     bytes,
     orphans,
     orphanBytes,
+    tempFiles,
+    tempBytes,
     at: new Date(now).toISOString(),
   };
 }
@@ -526,13 +573,19 @@ export function storeStats(db, storeRoot, { now = Date.now() } = {}) {
 /**
  * Delete unreferenced artifacts older than `olderThanMs`. Referenced bytes are
  * never touched: a receipt that points at a deleted file is worse than a full
- * disk, because it turns the audit trail into a lie.
+ * disk, because it turns the audit trail into a lie. Interrupted publish temp
+ * files are also removed after `ARTIFACT_TEMP_GRACE_MS`, regardless of the
+ * result table's health — no result can reference a temp name. A malformed
+ * result fails closed for content-addressed files: none are removed, while
+ * dry-runs still report candidates. `remainingOrphans` counts only
+ * content-addressed orphans left behind; in-grace temp files are not orphans.
  */
 export function pruneArtifacts(
   db,
   storeRoot,
   {
     olderThanMs = 7 * 24 * 60 * 60 * 1000,
+    tempGraceMs = ARTIFACT_TEMP_GRACE_MS,
     now = Date.now(),
     dryRun = false,
   } = {},
@@ -540,27 +593,44 @@ export function pruneArtifacts(
   if (!existsSync(storeRoot))
     return { deleted: 0, freedBytes: 0, remainingOrphans: 0 };
   const referenced = referencedHashes(db);
+  const canDelete = dryRun || referenced.invalid === 0;
   let deleted = 0;
   let freedBytes = 0;
   let remainingOrphans = 0;
   for (const name of readdirSync(storeRoot)) {
-    if (!HEX64.test(name) || referenced.has(name)) continue;
     const file = path.join(storeRoot, name);
-    const stat = statSync(file);
-    if (!stat.isFile()) continue;
-    if (now - stat.mtimeMs < olderThanMs) {
+    // A concurrent prune may remove the entry between readdir and stat.
+    const stat = statSync(file, { throwIfNoEntry: false });
+    if (!stat?.isFile()) continue;
+    const isTemp = ARTIFACT_TEMP.test(name);
+    if (!isTemp && (!HEX64.test(name) || referenced.has(name))) continue;
+    const graceMs = isTemp ? tempGraceMs : olderThanMs;
+    if (now - stat.mtimeMs < graceMs) {
+      // An in-grace temp file is a publish still in flight, not an orphan.
+      if (!isTemp) remainingOrphans += 1;
+      continue;
+    }
+    // Temp files are never referenced by a result, so a malformed row does not
+    // make them ambiguous: reclaim them even when artifact deletion is held.
+    if (!isTemp && !canDelete) {
       remainingOrphans += 1;
       continue;
     }
     freedBytes += stat.size;
     deleted += 1;
     if (dryRun) {
-      remainingOrphans += 1;
+      if (!isTemp) remainingOrphans += 1;
     } else {
       rmSync(file, { force: true });
     }
   }
-  return { deleted, freedBytes, remainingOrphans };
+  const result = {
+    deleted,
+    freedBytes,
+    remainingOrphans,
+  };
+  if (referenced.invalid > 0) result.invalidResults = referenced.invalid;
+  return result;
 }
 
 /**
