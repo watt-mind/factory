@@ -15,8 +15,8 @@ import {
   closeSync,
   existsSync,
   mkdtempSync,
-  mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -1102,12 +1102,72 @@ function boundedTail(text, maxChars = HANDOFF_FAILURE_OUTPUT_MAX_CHARS) {
   return `…${text.slice(-(maxChars - 1))}`;
 }
 
-/** Missing modules in the guest prove the host worktree was not installable. */
-export function handoffFailureReasonCode(obs) {
-  const output = stripAnsi(obs?.output);
-  return /(?:Cannot find package ['"][^'"]+['"](?: from |$)|error:\s*Cannot find module\b)/i.test(
-    output,
-  )
+const MISSING_MODULE_RE = /Cannot find (?:package|module) ['"]([^'"\n]+)['"]/gi;
+
+/** The specifiers a Bun/Node resolver could not find in the guest. */
+export function missingModuleSpecifiers(output) {
+  const specifiers = [];
+  for (const match of stripAnsi(output).matchAll(MISSING_MODULE_RE))
+    specifiers.push(match[1]);
+  return specifiers;
+}
+
+/** `./x`, `../x`, `/x` and `file:` URLs resolve against the tree, not the registry. */
+function isBareSpecifier(specifier) {
+  return !(
+    specifier.startsWith(".") ||
+    specifier.startsWith("/") ||
+    /^(?:file|node|bun):/i.test(specifier)
+  );
+}
+
+/** `@scope/name/sub` -> `@scope/name`; `name/sub` -> `name`. */
+function packageNameOf(specifier) {
+  const parts = specifier.split("/");
+  return specifier.startsWith("@") && parts.length > 1
+    ? `${parts[0]}/${parts[1]}`
+    : parts[0];
+}
+
+/**
+ * The packages the worktree declares (dependencies + devDependencies), or
+ * null when there is no readable manifest to consult.
+ */
+function declaredPackages(worktreePath) {
+  if (!worktreePath) return null;
+  let manifest;
+  try {
+    manifest = JSON.parse(
+      readFileSync(path.join(worktreePath, "package.json"), "utf8"),
+    );
+  } catch {
+    return null;
+  }
+  return new Set([
+    ...Object.keys(manifest?.dependencies ?? {}),
+    ...Object.keys(manifest?.devDependencies ?? {}),
+  ]);
+}
+
+/**
+ * Missing modules in the guest prove the host worktree was not installable —
+ * but only when every missing specifier is a bare package the worktree's
+ * package.json declares. A relative import that does not resolve, or a bare
+ * package the branch forgot to add, is the agent's failure and stays
+ * `handoff_verification_failed`. Without a readable manifest the bare
+ * specifier alone decides, since there is nothing the branch could have
+ * declared it in.
+ */
+export function handoffFailureReasonCode(obs, { worktreePath } = {}) {
+  const specifiers = missingModuleSpecifiers(obs?.output);
+  if (specifiers.length === 0) return "handoff_verification_failed";
+  const declared = declaredPackages(worktreePath);
+  const environmental = specifiers.every(
+    (specifier) =>
+      isBareSpecifier(specifier) &&
+      (declared === null || declared.has(packageNameOf(specifier))),
+  );
+  return environmental
     ? HANDOFF_DEPENDENCIES_MISSING
     : "handoff_verification_failed";
 }
@@ -1154,6 +1214,15 @@ function defaultDependencyInstaller({ cwd, timeoutMs }) {
     timedOut: result.error?.code === "ETIMEDOUT",
     output: `${result.stdout ?? ""}${result.stderr ?? ""}`.trim(),
   };
+}
+
+/** True when node_modules holds anything beyond the preflight's own stamp. */
+function nodeModulesPopulated(nodeModules) {
+  try {
+    return readdirSync(nodeModules).some((entry) => entry !== ".bun-lock-sha");
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1231,10 +1300,12 @@ export function preflightHandoffDependencies({
       };
     }
 
-    // An installer can succeed without making node_modules itself (for
-    // example, a mocked no-op). The stamp is only meaningful alongside it.
-    mkdirSync(nodeModules, { recursive: true });
-    writeFileSync(stamp, `${lockHash}\n`, "utf8");
+    // An installer can exit 0 without populating node_modules (a mocked
+    // no-op, or a bun that silently skipped the install). A stamp on an
+    // empty tree would pin that tree as current and skip every later
+    // preflight, so only stamp what the install actually produced.
+    if (nodeModulesPopulated(nodeModules))
+      writeFileSync(stamp, `${lockHash}\n`, "utf8");
   }
 
   return {
@@ -1930,7 +2001,7 @@ function verifyCompleted({
       obs.source = "ticket";
       handoff.verification = obs;
       if (!obs.passed) {
-        const reasonCode = handoffFailureReasonCode(obs);
+        const reasonCode = handoffFailureReasonCode(obs, { worktreePath });
         refuse(
           reasonCode,
           `ticket_verify_failed: ${handoffWhy(obs)}; sandbox_limits: ${handoffSandboxLimits(obs.sandbox.tmpfsMb)}`,
