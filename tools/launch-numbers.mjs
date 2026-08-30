@@ -9,7 +9,7 @@
  * Two sources, both pinned to `--since` (default 2026-08-03, the first
  * dispatch day named in WM-802):
  *
- *   Linear              tickets dispatched / merged / escalated, human-touch,
+ *   control plane       tickets dispatched / merged / escalated, human-touch,
  *                       median createdAt → completedAt
  *   ~/.factory/logs     tokens by harness, via orchestrator/economics.mjs
  *
@@ -32,6 +32,8 @@ export const DEFAULT_SINCE = "2026-08-03T00:00:00.000Z";
 export const USAGE = `usage: bun tools/launch-numbers.mjs [--json] [--since YYYY-MM-DD]`;
 
 class UsageError extends Error {}
+
+export class UnsupportedControlPlaneError extends Error {}
 
 export const DISPATCH_LABELS = new Set([
   "ai:in-progress",
@@ -370,13 +372,30 @@ export function formatReport(metrics) {
 }
 
 export async function buildLaunchNumbers({
-  gqlFn = (query, variables) => loadControlPlane().raw(query, variables),
+  controlPlane,
+  gqlFn,
   logDir = LOG_DIR,
   since = DEFAULT_SINCE,
   nowMs = Date.now(),
 } = {}) {
   const { iso, ms } = parseSince(since);
-  const issues = await fetchFactoryIssues({ gqlFn, sinceIso: iso });
+  // `gqlFn` remains a test seam for the Linear query path. Production selects
+  // the factory repository's adapter explicitly: the workspace default is
+  // still Linear while factory's own tickets now live on GitHub.
+  const plane =
+    controlPlane ?? (gqlFn ? null : loadControlPlane({ repoName: "factory" }));
+  if (!gqlFn && !["linear", "memory"].includes(plane?.kind)) {
+    throw new UnsupportedControlPlaneError(
+      `${plane?.kind ?? "unknown"} control plane is unsupported; launch-numbers requires a Linear-compatible metrics source`,
+    );
+  }
+  const graphQL = gqlFn ?? ((query, variables) => plane.raw(query, variables));
+  if (typeof graphQL !== "function") {
+    throw new UnsupportedControlPlaneError(
+      `${plane?.kind ?? "unknown"} control plane cannot run the launch metrics query`,
+    );
+  }
+  const issues = await fetchFactoryIssues({ gqlFn: graphQL, sinceIso: iso });
   const loaded = loadTranscriptRuns({ logDir, sinceMs: ms });
   const runs = loaded.ok ? loaded.runs : [];
   return {
@@ -443,7 +462,10 @@ if (import.meta.main) {
   try {
     process.exitCode = await main();
   } catch (error) {
-    if (error instanceof UsageError) {
+    if (
+      error instanceof UsageError ||
+      error instanceof UnsupportedControlPlaneError
+    ) {
       console.error(error.message);
       process.exitCode = 2;
     } else {
