@@ -29,9 +29,14 @@ import {
   createWriteStream,
 } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
-import { homedir, tmpdir } from "node:os";
+import { homedir, hostname, tmpdir } from "node:os";
 import path from "node:path";
 import { loadConfigYaml, ROOT } from "../lib/schedule.mjs";
+import {
+  getRepo,
+  loadRepos,
+  repoDispatchPreflight,
+} from "../event-runtime/lib/repos.mjs";
 import { loadControlPlane } from "../lib/control-plane/index.mjs";
 import { ticketFileName, ticketSlug } from "../lib/ticket-slug.mjs";
 import {
@@ -51,6 +56,27 @@ import {
 import { emitFactoryEvent } from "../lib/emit-event.mjs";
 
 export const DISPATCH_FAILURE_THRESHOLD = 3;
+
+/**
+ * Resolve the raw scheduler entry through the normalized registry, then check
+ * the host toolchain before a dispatcher can read or claim the queue.
+ *
+ * Keeping this seam small makes the pre-claim ordering testable without
+ * starting workers or touching a control plane.
+ */
+export async function preflightDispatchRepo(
+  configuredRepo,
+  {
+    loadReposFn = loadRepos,
+    preflight = repoDispatchPreflight,
+    node = hostname(),
+    ...preflightOptions
+  } = {},
+) {
+  const repo = getRepo(loadReposFn(), configuredRepo.name);
+  const gate = await preflight(repo, { node, ...preflightOptions });
+  return { repo, gate };
+}
 
 /**
  * A failed spawn emits `error` asynchronously and is commonly followed by
@@ -292,16 +318,35 @@ export async function main(argv = process.argv.slice(2)) {
   const expand = (p) => String(p ?? "").replace(/^~/, homedir());
   const cfg = loadConfigYaml("repos");
   const policy = loadConfigYaml("policy");
-  const repo = (cfg.repos ?? []).find((r) => r.name === val("--repo"));
-  if (!repo) {
+  const configuredRepo = (cfg.repos ?? []).find(
+    (r) => r.name === val("--repo"),
+  );
+  if (!configuredRepo) {
     console.error(
       `--repo required; known: ${(cfg.repos ?? []).map((r) => r.name).join(", ")}`,
     );
     process.exit(2);
   }
-  if (repo.report_only) {
+  if (configuredRepo.report_only) {
     console.error(
-      `${repo.name} is report_only — no worktree tooling, dispatch is unsafe here`,
+      `${configuredRepo.name} is report_only — no worktree tooling, dispatch is unsafe here`,
+    );
+    process.exit(2);
+  }
+
+  // This must run before the first queue read, not merely before the inner
+  // claim loop: a failed host constraint must consume neither a tracker query
+  // nor a dispatch slot. `preflightDispatchRepo` also converts map-form YAML
+  // toolchain declarations into the canonical array expected by the gate.
+  const { repo, gate: toolchainGate } =
+    await preflightDispatchRepo(configuredRepo);
+  if (!toolchainGate.ready) {
+    const reasonCodes = toolchainGate.reasons
+      .map((reason) => reason.reason)
+      .filter(Boolean)
+      .join(", ");
+    console.error(
+      `${toolchainGate.refusal}${reasonCodes ? ` [${reasonCodes}]` : ""}`,
     );
     process.exit(2);
   }

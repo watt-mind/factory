@@ -1,10 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { acquireClaimLock, observeChildTermination } from "./tick.mjs";
+import { loadRepos } from "../event-runtime/lib/repos.mjs";
+import {
+  acquireClaimLock,
+  observeChildTermination,
+  preflightDispatchRepo,
+} from "./tick.mjs";
 
 const NOW = 1_750_000_000_000;
 
@@ -16,6 +27,20 @@ function withLock(content, run) {
     return run(lock);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function withDispatchRepo(toolchain, run) {
+  const root = mkdtempSync(path.join(tmpdir(), "factory-tick-toolchain-"));
+  mkdirSync(path.join(root, "config"));
+  writeFileSync(
+    path.join(root, "config", "repos.yaml"),
+    `repos:\n  - name: dispatch-fixture\n    path: /tmp/dispatch-fixture\n${toolchain}`,
+  );
+  try {
+    return await run({ name: "dispatch-fixture" }, () => loadRepos({ root }));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 }
 
@@ -153,5 +178,71 @@ describe("tick resolves its control plane from the repo (#880)", () => {
     ]) {
       expect(SRC).not.toContain(shape);
     }
+  });
+});
+
+describe("tick toolchain preflight (#1096)", () => {
+  test("normalizes a map-form constraint and refuses before dispatch when it fails", async () => {
+    await withDispatchRepo(
+      '    toolchain:\n      node: ">=22 <25"\n',
+      async (configuredRepo, loadReposFn) => {
+        const { repo, gate } = await preflightDispatchRepo(configuredRepo, {
+          loadReposFn,
+          node: "mac-mini",
+          which: async () => "/usr/bin/node",
+          spawn: async () => ({
+            exitCode: 0,
+            stdout: "v18.19.1\n",
+            stderr: "",
+          }),
+        });
+
+        expect(repo.toolchain).toEqual([
+          { executable: "node", constraint: ">=22 <25" },
+        ]);
+        expect(gate.ready).toBe(false);
+        expect(gate.refusal).toContain("node >=22 <25 (observed 18.19.1)");
+        expect(gate.reasons.map((reason) => reason.reason)).toEqual([
+          "repo_toolchain_mismatch",
+        ]);
+      },
+    );
+  });
+
+  test("admits a repo whose normalized constraint passes", async () => {
+    await withDispatchRepo(
+      '    toolchain:\n      bun: ">=1.3 <2"\n',
+      async (configuredRepo, loadReposFn) => {
+        const { gate } = await preflightDispatchRepo(configuredRepo, {
+          loadReposFn,
+          node: "runner",
+          which: async () => "/opt/bun",
+          spawn: async () => ({
+            exitCode: 0,
+            stdout: "1.3.14\n",
+            stderr: "",
+          }),
+        });
+
+        expect(gate.ready).toBe(true);
+        expect(gate.reasons).toEqual([]);
+      },
+    );
+  });
+
+  test("does not probe a repo with no declared toolchain", async () => {
+    await withDispatchRepo("", async (configuredRepo, loadReposFn) => {
+      const { gate } = await preflightDispatchRepo(configuredRepo, {
+        loadReposFn,
+        which: async () => {
+          throw new Error("a no-toolchain repo must not resolve executables");
+        },
+        spawn: async () => {
+          throw new Error("a no-toolchain repo must not spawn probes");
+        },
+      });
+
+      expect(gate).toMatchObject({ ready: true, attested: false, reasons: [] });
+    });
   });
 });
