@@ -112,7 +112,13 @@ function proveRequiredCi({ github, pr, headRef, headSha, repo, factoryRoot }) {
       return { ok: false, reason: "required CI is pending or not green" };
     }
   }
-  const repoRecord = getRepo(loadRepos({ root: factoryRoot }), repo);
+  let repoRecord;
+  try {
+    repoRecord = getRepo(loadRepos({ root: factoryRoot }), repo);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return { ok: false, reason: `merge_ci repo record unavailable: ${detail}` };
+  }
   const gate = repoRecord.mergeCi;
   if (!gate) {
     if (contexts.length > 0) return { ok: true };

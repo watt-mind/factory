@@ -16,7 +16,7 @@ const BASE_SHA = "b".repeat(40);
 const MERGE_SHA = "c".repeat(40);
 const HEAD_REF = "feat/WM-432";
 
-function applyInput() {
+function applyInput(overrides = {}) {
   return {
     repo: "factory",
     github: "watt-mind/factory",
@@ -41,13 +41,14 @@ function applyInput() {
         ambiguous: false,
       },
     ],
+    ...overrides,
   };
 }
 
-function applyCommand(fixture) {
+function applyCommand(fixture, overrides = {}) {
   writeFileSync(
     path.join(fixture.root, "input.json"),
-    `${JSON.stringify(applyInput(), null, 2)}\n`,
+    `${JSON.stringify(applyInput(overrides), null, 2)}\n`,
   );
   return [
     process.execPath,
@@ -217,6 +218,28 @@ describe("merge-apply configured workflow proof", () => {
     expect(log).toContain("run view 81");
     expect(log).not.toContain("run view 80");
     expect(log).toContain("pr merge");
+  });
+
+  test("green required contexts skip an unconfigured repo instead of aborting the apply run", () => {
+    const fixture = commandFixture("merge-apply-green-unconfigured-repo-");
+    installFakes(fixture);
+
+    const result = runCommand(
+      applyCommand(fixture, { repo: "not-in-repos-yaml" }),
+      fixture,
+      commandEnv({ FAKE_REQUIRED_MODE: "green" }),
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    const log = commandLog(fixture);
+    expect(log).toContain("pr checks");
+    expect(log).not.toContain("run list");
+    expect(log).not.toContain("pr merge");
+    const reason = applyResult(fixture).artifact.skipped[0].reason;
+    expect(reason).toContain("merge_ci repo record unavailable:");
+    expect(reason).toContain(
+      'repo "not-in-repos-yaml" is not in config/repos.yaml',
+    );
   });
 
   test("green required contexts fail closed without a non-cancelled configured run", () => {
