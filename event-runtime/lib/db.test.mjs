@@ -18,6 +18,7 @@ import {
   MIGRATIONS,
   assertSchema,
   DB_BUSY_ATTEMPT_TIMEOUT_MS,
+  DB_BUSY_TIMEOUT_MS,
   getSchemaVersion,
   migrateDb,
   openDb,
@@ -33,26 +34,97 @@ import { createIsolatedHome, realFactorySnapshot } from "../test-helpers.mjs";
 
 const freshFile = () => path.join(tmpDir("evrt-db-"), "runtime.db");
 
-describe("retryBusy", () => {
+describe("retryBusy (#1349)", () => {
+  const busyError = () =>
+    Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+
   test("retries busy attempts asynchronously and restores the connection timeout", async () => {
     const db = openDb(":memory:");
+    expect(db.query("PRAGMA busy_timeout").get().timeout).toBe(
+      DB_BUSY_TIMEOUT_MS,
+    );
     let attempts = 0;
-    const busy = Object.assign(new Error("database is locked"), {
-      code: "SQLITE_BUSY",
-    });
+    const busy = busyError();
     await expect(
       retryBusy(
         db,
         () => {
           attempts += 1;
+          expect(db.query("PRAGMA busy_timeout").get().timeout).toBe(
+            DB_BUSY_ATTEMPT_TIMEOUT_MS,
+          );
           throw busy;
         },
         { timeoutMs: 5, minDelayMs: 1, maxDelayMs: 1 },
       ),
     ).rejects.toBe(busy);
     expect(attempts).toBeGreaterThan(1);
+    // Other users of the connection get the plain 5 s timeout back.
     expect(db.query("PRAGMA busy_timeout").get().timeout).toBe(
-      DB_BUSY_ATTEMPT_TIMEOUT_MS,
+      DB_BUSY_TIMEOUT_MS,
+    );
+    db.close();
+  });
+
+  test("returns the first successful attempt's result", async () => {
+    const db = openDb(":memory:");
+    let attempts = 0;
+    const value = await retryBusy(
+      db,
+      () => {
+        attempts += 1;
+        if (attempts < 3) throw busyError();
+        return { attempts };
+      },
+      { minDelayMs: 1, maxDelayMs: 1 },
+    );
+    expect(value).toEqual({ attempts: 3 });
+    db.close();
+  });
+
+  test("non-busy errors propagate immediately", async () => {
+    const db = openDb(":memory:");
+    let attempts = 0;
+    await expect(
+      retryBusy(db, () => {
+        attempts += 1;
+        throw new Error("boom");
+      }),
+    ).rejects.toThrow("boom");
+    expect(attempts).toBe(1);
+    expect(db.query("PRAGMA busy_timeout").get().timeout).toBe(
+      DB_BUSY_TIMEOUT_MS,
+    );
+    db.close();
+  });
+
+  test("a connection tuned below one attempt keeps its fail-fast contract", async () => {
+    const db = openDb(":memory:");
+    db.exec("PRAGMA busy_timeout = 10;");
+    let attempts = 0;
+    const busy = busyError();
+    const startedAt = Date.now();
+    await expect(
+      retryBusy(db, () => {
+        attempts += 1;
+        expect(db.query("PRAGMA busy_timeout").get().timeout).toBe(10);
+        throw busy;
+      }),
+    ).rejects.toBe(busy);
+    // The lowered timeout bounds the whole budget, not just one attempt.
+    expect(attempts).toBe(1);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(db.query("PRAGMA busy_timeout").get().timeout).toBe(10);
+    db.close();
+  });
+
+  test("rejects an asynchronous attempt instead of restoring the timeout under it", async () => {
+    const db = openDb(":memory:");
+    await expect(retryBusy(db, async () => "never")).rejects.toThrow(
+      /must be synchronous/,
+    );
+    expect(db.query("PRAGMA busy_timeout").get().timeout).toBe(
+      DB_BUSY_TIMEOUT_MS,
     );
     db.close();
   });

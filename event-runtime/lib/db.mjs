@@ -631,8 +631,12 @@ function enableWal(db, { attempts = 20, waitMs = 50 } = {}) {
   }
 }
 
+/** Every connection's busy_timeout: plain writers block for up to this long. */
+export const DB_BUSY_TIMEOUT_MS = 5_000;
+/** One retryBusy() attempt: short, so the event loop is pinned briefly. */
 export const DB_BUSY_ATTEMPT_TIMEOUT_MS = 100;
-export const DB_BUSY_RETRY_TIMEOUT_MS = 5_000;
+/** The whole retryBusy() budget across attempts (matches the connection). */
+export const DB_BUSY_RETRY_TIMEOUT_MS = DB_BUSY_TIMEOUT_MS;
 
 export function openDb(file = dbPath()) {
   if (file !== ":memory:") mkdirSync(path.dirname(file), { recursive: true });
@@ -641,7 +645,7 @@ export function openDb(file = dbPath()) {
   // and a second process opening the database concurrently must wait for it
   // rather than failing with SQLITE_BUSY_RECOVERY. Ordering matters here —
   // observed live the moment serve and work became separate processes.
-  db.exec("PRAGMA busy_timeout = 5000;");
+  db.exec(`PRAGMA busy_timeout = ${DB_BUSY_TIMEOUT_MS};`);
   enableWal(db);
   // Set synchronous = FULL (OPS-414): under WAL mode, the default NORMAL only
   // fsyncs at checkpoint boundaries, which can lose recent committed transactions
@@ -652,10 +656,6 @@ export function openDb(file = dbPath()) {
   db.exec("PRAGMA foreign_keys = ON;");
   migrateDb(db);
   assertSchema(db);
-  // Runtime writes must fail quickly rather than pin serve's event loop behind
-  // another process's transaction. Latency-sensitive callers use retryBusy()
-  // to retry these short attempts across event-loop turns.
-  db.exec(`PRAGMA busy_timeout = ${DB_BUSY_ATTEMPT_TIMEOUT_MS};`);
   return db;
 }
 
@@ -700,8 +700,19 @@ export function isBusyError(err) {
 
 /**
  * Retry an idempotent SQLite attempt without holding the event loop for the
- * connection's normal busy timeout. The callback must contain the complete
- * transaction, so a SQLITE_BUSY rollback leaves each retry safe to repeat.
+ * connection's normal busy timeout (#1349).
+ *
+ * Each attempt runs with a short `busy_timeout` (restored afterwards), and a
+ * busy failure sleeps across event-loop turns before trying again, until the
+ * total budget is spent — the same ~5 s a plain writer would block for, but
+ * with /health and other requests served in between. The callback must be
+ * synchronous and contain the complete transaction, so a SQLITE_BUSY rollback
+ * leaves each retry safe to repeat; a thenable is rejected outright because
+ * the timeout is restored as soon as the callback returns.
+ *
+ * A connection whose `busy_timeout` was deliberately lowered below one attempt
+ * keeps its fail-fast contract: that value bounds the attempt, and there is no
+ * retry budget beyond it, so it errors after that single short wait.
  */
 export async function retryBusy(
   db,
@@ -714,13 +725,31 @@ export async function retryBusy(
     random = Math.random,
   } = {},
 ) {
+  if (typeof attempt !== "function")
+    throw new TypeError("retryBusy: attempt must be a function");
+  const connectionTimeout = Number(
+    db.query("PRAGMA busy_timeout").get()?.timeout ?? DB_BUSY_TIMEOUT_MS,
+  );
+  const attemptTimeoutMs = Math.max(
+    0,
+    Math.floor(Math.min(busyTimeoutMs, connectionTimeout)),
+  );
+  // SQLite already waits the connection's own timeout inside that single
+  // attempt, so there is nothing left to retry across turns.
+  const budgetMs = connectionTimeout < busyTimeoutMs ? 0 : timeoutMs;
   const startedAt = Date.now();
   let lastBusyError;
   for (;;) {
     const previousTimeout = db.query("PRAGMA busy_timeout").get().timeout;
-    db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(busyTimeoutMs))};`);
+    db.exec(`PRAGMA busy_timeout = ${attemptTimeoutMs};`);
     try {
-      return attempt();
+      const result = attempt();
+      if (result !== null && typeof result?.then === "function") {
+        throw new TypeError(
+          "retryBusy: attempt must be synchronous (it returned a thenable); the per-attempt busy_timeout is restored as soon as it returns",
+        );
+      }
+      return result;
     } catch (err) {
       if (!isBusyError(err)) throw err;
       lastBusyError = err;
@@ -728,7 +757,7 @@ export async function retryBusy(
       db.exec(`PRAGMA busy_timeout = ${previousTimeout};`);
     }
 
-    const remainingMs = timeoutMs - (Date.now() - startedAt);
+    const remainingMs = budgetMs - (Date.now() - startedAt);
     if (remainingMs <= 0) throw lastBusyError;
     const spread = Math.max(0, maxDelayMs - minDelayMs);
     const delayMs = Math.min(

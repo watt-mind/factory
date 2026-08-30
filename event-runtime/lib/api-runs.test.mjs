@@ -1278,6 +1278,40 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
     expect(rejectAgain.message).toContain("not open");
   });
 
+  test("approval waits for a worker write lock and returns db_busy after its timeout", async () => {
+    const waiting = await planned("approve-waits-for-lock");
+    const lock = await holdWriteLock(s.db.filename, 75);
+    const startedAt = Date.now();
+    const approved = await s.client.approve(waiting.id);
+    const elapsedMs = Date.now() - startedAt;
+    expect(approved).toEqual({ approved: true, runId: waiting.runId });
+    // The lock is held for 75 ms; a lower bound proves the approval actually
+    // waited on it instead of racing past a lock that was never taken.
+    expect(elapsedMs).toBeGreaterThanOrEqual(50);
+    expect(elapsedMs).toBeLessThan(2_000);
+    expect(await lock.exited).toBe(0);
+    expect(await s.client.cancel(waiting.runId, "test cleanup")).toEqual({
+      cancelled: true,
+    });
+
+    // A connection deliberately tuned to fail fast keeps that contract even
+    // though approvals now retry across event-loop turns (#1349): the
+    // lowered busy_timeout bounds the whole retry budget.
+    const timedOut = await planned("approve-busy-timeout");
+    let timeoutLock;
+    try {
+      s.db.exec("PRAGMA busy_timeout = 10;");
+      timeoutLock = await holdWriteLock(s.db.filename, 75);
+      const err = await rejection(s.client.approve(timedOut.id));
+      expect(err.status).toBe(503);
+      expect(err.message).toBe("db_busy");
+      expect(err.body).toEqual({ error: "db_busy", retryable: true });
+    } finally {
+      s.db.exec("PRAGMA busy_timeout = 5000;");
+    }
+    expect(await timeoutLock?.exited).toBe(0);
+  });
+
   test("contended approvals and rejections yield to /health and return typed db_busy", async () => {
     const approvedProposal = await planned("approve-contention");
     const approveLock = await holdWriteLock(s.db.filename, 400);
