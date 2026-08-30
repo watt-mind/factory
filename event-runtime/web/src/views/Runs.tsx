@@ -58,7 +58,7 @@ import {
 } from "../components/RunDetailBlocks";
 import { readPinnedRuns, savePinnedRuns } from "../components/ContextTabs";
 import type { OperatorContext } from "../context";
-import { matchesInFlight, matchesRepo } from "../context";
+import { matchesInFlight, matchesRepo, projectFromContext } from "../context";
 import {
   RUN_FACETS,
   matchesFilterQuery,
@@ -600,6 +600,7 @@ export function Runs({
   const [cancelReason, setCancelReason] = useState("");
   const drilldown = runDrilldownFilters(window.location.hash);
   const drilldownKey = JSON.stringify(drilldown);
+  const contextProject = projectFromContext(context);
   const [runCursor, setRunCursor] = useState<string | null>(null);
 
   const proposalsQ = useQuery({
@@ -624,7 +625,7 @@ export function Runs({
   // different tab, drilldown, or context can hide that list's newest runs.
   useEffect(() => {
     setRunCursor(null);
-  }, [tab, drilldownKey, context.kind]);
+  }, [tab, drilldownKey, contextProject]);
 
   const list = useQuery({
     queryKey: ["runs", fetchAll ? "ALL" : tab, drilldownKey, runCursor],

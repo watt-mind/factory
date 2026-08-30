@@ -234,6 +234,53 @@ describe("Runs API pagination (WM-976)", () => {
     );
   });
 
+  test("resets the cursor when switching repository contexts", async () => {
+    const newest = stubListItem("run-page-new", "COMPLETED", {
+      maxAttempts: undefined,
+      spec: undefined,
+      repos: ["repo-a", "repo-b"],
+    });
+    const older = stubListItem("run-page-old", "FAILED", {
+      maxAttempts: undefined,
+      spec: undefined,
+      repos: ["repo-a"],
+    });
+    const runs = mock(async (_state?: string, filters?: { before?: string }) =>
+      filters?.before
+        ? { runs: [older], nextBefore: null }
+        : { runs: [newest], nextBefore: "older-page" },
+    );
+    await withApi(
+      { runs, status: async () => createStatusFixture() },
+      async () => {
+        const r = renderRuns({ context: { kind: "repo", name: "repo-a" } });
+        await r.findByTitle("run-page-new");
+
+        fireEvent.click(r.getByRole("button", { name: "Older" }));
+        await r.findByTitle("run-page-old");
+        r.rerender(
+          <Runs
+            connected={true}
+            context={{ kind: "repo", name: "repo-b" }}
+            focusRunId={null}
+            onSelectRun={noop}
+            onOpenFull={noop}
+            focusState={null}
+            onFocusStateConsumed={noop}
+            onJumpAgent={noop}
+            onJumpEvent={noop}
+          />,
+        );
+
+        await waitFor(() =>
+          expect(runs).toHaveBeenLastCalledWith(undefined, {
+            before: undefined,
+          }),
+        );
+      },
+    );
+  });
+
   test("returns to the newest page from the pager", async () => {
     const newest = stubListItem("run-page-new", "COMPLETED", {
       maxAttempts: undefined,
