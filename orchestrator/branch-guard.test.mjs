@@ -208,6 +208,38 @@ describe("evaluateBranchGuard", () => {
   });
 });
 
+/**
+ * A `gh` fake speaking the forge's REST dialect (#1422): `repo view` names
+ * the repo, `api repos/o/r/pulls/{n}` returns one pull, and the paged
+ * `api repos/o/r/pulls?state=open&...` list slices `open` by page.
+ */
+function ghRest({ open = [], ...pulls } = {}) {
+  return (_cmd, args) => {
+    const ok = (body) => ({
+      status: 0,
+      stdout: JSON.stringify(body),
+      stderr: "",
+    });
+    if (args[0] === "repo" && args[1] === "view")
+      return ok({ nameWithOwner: "o/r" });
+    if (args[0] === "api") {
+      const one = /^repos\/o\/r\/pulls\/(\d+)$/.exec(args[1]);
+      if (one && pulls[one[1]])
+        return ok({ number: Number(one[1]), ...pulls[one[1]] });
+      const list =
+        /^repos\/o\/r\/pulls\?state=open&per_page=(\d+)&page=(\d+)$/.exec(
+          args[1],
+        );
+      if (list) {
+        const perPage = Number(list[1]);
+        const page = Number(list[2]);
+        return ok(open.slice((page - 1) * perPage, page * perPage));
+      }
+    }
+    return { status: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" };
+  };
+}
+
 describe("gh helper failure modes", () => {
   test("resolveHeadBranch returns null on gh error", () => {
     const run = recorder(() => ({
@@ -219,23 +251,20 @@ describe("gh helper failure modes", () => {
   });
 
   test("resolveHeadBranch returns branch name on success", () => {
-    // The forge reads `--json headRefName` and picks the field itself (WM-836);
-    // the fake answers the way gh does, as JSON.
-    const run = recorder(() => ({
-      status: 0,
-      stdout: JSON.stringify({ headRefName: "feat/my-branch" }) + "\n",
-      stderr: "",
-    }));
+    // The forge resolves the cwd repo once (`gh repo view`), then reads the
+    // PR over REST and picks `headRefName` itself (WM-836, #1422); the fake
+    // answers each spawn the way gh does, as JSON.
+    const run = recorder(ghRest({ 123: { head: { ref: "feat/my-branch" } } }));
     expect(resolveHeadBranch("/fake", 123, run)).toBe("feat/my-branch");
-    expect(run.calls[0].cmd).toBe("gh");
+    expect(run.calls.map((call) => call.cmd)).toEqual(["gh", "gh"]);
     expect(run.calls[0].args).toEqual([
-      "pr",
+      "repo",
       "view",
-      "123",
       "--json",
-      "headRefName",
+      "nameWithOwner",
     ]);
-    expect(run.calls[0].opts.cwd).toBe("/fake");
+    expect(run.calls[1].args).toEqual(["api", "repos/o/r/pulls/123"]);
+    expect(run.calls.every((call) => call.opts.cwd === "/fake")).toBe(true);
   });
 
   test("listOpenPrs returns null on gh failure or JSON parse error", () => {
@@ -255,13 +284,21 @@ describe("gh helper failure modes", () => {
   });
 
   test("listOpenPrs returns array on success", () => {
-    const run = recorder(() => ({
-      status: 0,
-      stdout: JSON.stringify([{ number: 10, headRefName: "feat/x" }]),
-      stderr: "",
-    }));
+    const run = recorder(
+      ghRest({ open: [{ number: 10, head: { ref: "feat/x" } }] }),
+    );
     expect(listOpenPrs("/fake", run)).toEqual([
       { number: 10, headRefName: "feat/x" },
+    ]);
+    expect(run.calls[0].args).toEqual([
+      "repo",
+      "view",
+      "--json",
+      "nameWithOwner",
+    ]);
+    expect(run.calls[1].args).toEqual([
+      "api",
+      "repos/o/r/pulls?state=open&per_page=100&page=1",
     ]);
   });
 });
