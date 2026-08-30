@@ -61,7 +61,7 @@ function emitNextScan(db, { repo, finalSha }) {
   }
 }
 
-function blockAll(landed, { finalSha, kind, reason }, shell = sh) {
+function blockAll(landed, { repo, finalSha, kind, reason }, shell = sh) {
   for (const item of landed) {
     shell("factory", [
       "linear",
@@ -76,12 +76,16 @@ function blockAll(landed, { finalSha, kind, reason }, shell = sh) {
       "ai:in-progress",
       "--remove",
       "agent:claude-code",
+      "--repo",
+      repo,
     ]);
     shell("factory", [
       "linear",
       "comment",
       item.ticket,
       `${kind} after merge ${finalSha}: ${reason}. Branch/worktree preserved; merge barrier remains held.`,
+      "--repo",
+      repo,
     ]);
     shell("factory", [
       "notify",
@@ -90,7 +94,7 @@ function blockAll(landed, { finalSha, kind, reason }, shell = sh) {
   }
 }
 
-function doneArgs(ticket) {
+function doneArgs(ticket, repo) {
   return [
     "linear",
     "state",
@@ -106,11 +110,13 @@ function doneArgs(ticket) {
     "ai:in-progress",
     "--remove",
     "agent:claude-code",
+    "--repo",
+    repo,
   ];
 }
 
-function transitionDone(ticket, shell = sh) {
-  const done = shell("factory", doneArgs(ticket));
+function transitionDone(ticket, repo, shell = sh) {
+  const done = shell("factory", doneArgs(ticket, repo));
   if (done.status === 0) return null;
   const detail = (done.stderr || done.stdout || "unknown failure").trim();
   return `Done transition failed for ${ticket}: ${detail}`;
@@ -352,6 +358,7 @@ export function proveAncestor(github, ancestor, descendant, shell = sh) {
 export function catchUpMergedTickets(
   {
     github,
+    repo,
     base,
     project,
     verifiedSha,
@@ -390,7 +397,7 @@ export function catchUpMergedTickets(
     }
     processed += 1;
     if (!proveAncestor(github, item.mergeSha, verifiedSha, shell)) continue;
-    const failure = transitionDone(item.ticket, shell);
+    const failure = transitionDone(item.ticket, repo, shell);
     if (failure) {
       console.error(failure);
       failures.push(failure);
@@ -716,7 +723,11 @@ export function runMergeVerify({
   });
   if (!ci.ok) {
     if (!ci.reason.startsWith("github_unavailable:")) {
-      blockAll(landed, { finalSha, kind: "CI RED", reason: ci.reason }, shell);
+      blockAll(
+        landed,
+        { repo, finalSha, kind: "CI RED", reason: ci.reason },
+        shell,
+      );
     }
     throw new Error(ci.reason);
   }
@@ -736,7 +747,7 @@ export function runMergeVerify({
       if (!smoked.reason.startsWith("github_unavailable:")) {
         blockAll(
           landed,
-          { finalSha, kind: "SMOKE RED", reason: smoked.reason },
+          { repo, finalSha, kind: "SMOKE RED", reason: smoked.reason },
           shell,
         );
       }
@@ -747,7 +758,7 @@ export function runMergeVerify({
   const doneFailures = [];
   for (const item of landed) {
     cleanupItem({ github, repo, factoryRoot, item, shell });
-    const failure = transitionDone(item.ticket, shell);
+    const failure = transitionDone(item.ticket, repo, shell);
     if (failure) {
       console.error(failure);
       doneFailures.push(failure);
@@ -760,6 +771,7 @@ export function runMergeVerify({
       const caughtUp = catchUpMergedTickets(
         {
           github,
+          repo,
           base,
           project: repoRecord.project,
           verifiedSha: finalSha,

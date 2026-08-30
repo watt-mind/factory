@@ -74,7 +74,9 @@ jobs:
     # dedicated light runners are what turn a silent queue into an explicit
     # failing check. Both pools live on the same host.
     runs-on: [self-hosted, smoke-test]
-    timeout-minutes: 2
+    # Memory can be temporarily reserved by the serialized CodeQL scan. Allow
+    # the bounded headroom wait below to finish before rejecting the CI lane.
+    timeout-minutes: 12
     steps:
       - name: Check shadow runner services
         shell: bash
@@ -116,7 +118,6 @@ jobs:
           memory_floor_kib=$((16 * 1024 * 1024))
 
           temp_available_kib="$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 { print $4 }')"
-          memory_available_kib="$(awk '$1 == "MemAvailable:" { print $2 }' /proc/meminfo)"
           failed=0
 
           if [ -z "$temp_available_kib" ] || [ "$temp_available_kib" -lt "$temp_floor_kib" ]; then
@@ -126,11 +127,35 @@ jobs:
             echo "Runner temp space: $temp_available_kib KiB available at $RUNNER_TEMP."
           fi
 
-          if [ -z "$memory_available_kib" ] || [ "$memory_available_kib" -lt "$memory_floor_kib" ]; then
-            echo "::error::Runner available memory below 16 GiB: ${memory_available_kib:-unknown} KiB MemAvailable."
+          # CodeQL's JVMs reserve memory transiently on this shared host. Poll
+          # for ten minutes rather than making unrelated PRs fail immediately.
+          memory_wait_seconds=600
+          memory_poll_seconds=30
+          memory_deadline=$((SECONDS + memory_wait_seconds))
+          memory_ready=false
+          while :; do
+            memory_available_kib="$(awk '$1 == "MemAvailable:" { print $2 }' /proc/meminfo)"
+            echo "Runner available memory sample: ${memory_available_kib:-unknown} KiB MemAvailable."
+            if [ -n "$memory_available_kib" ] && [ "$memory_available_kib" -ge "$memory_floor_kib" ]; then
+              memory_ready=true
+              break
+            fi
+            if [ "$SECONDS" -ge "$memory_deadline" ]; then
+              break
+            fi
+            remaining_seconds=$((memory_deadline - SECONDS))
+            if [ "$remaining_seconds" -lt "$memory_poll_seconds" ]; then
+              sleep "$remaining_seconds"
+            else
+              sleep "$memory_poll_seconds"
+            fi
+          done
+
+          if [ "$memory_ready" != "true" ]; then
+            echo "::error::Runner available memory remained below 16 GiB for ${memory_wait_seconds}s: ${memory_available_kib:-unknown} KiB MemAvailable."
+            echo "Top RSS processes while memory headroom was unavailable:"
+            ps -eo rss,args --sort=-rss | head -4 || true
             failed=1
-          else
-            echo "Runner available memory: $memory_available_kib KiB MemAvailable."
           fi
 
           exit "$failed"

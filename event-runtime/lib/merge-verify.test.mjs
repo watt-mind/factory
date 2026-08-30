@@ -304,6 +304,11 @@ describe("merge verification GitHub transport handling", () => {
         cmd === "factory" &&
         args.slice(0, 4).join(" ") === "linear state WM-500 Blocked",
     );
+    expect(blocked?.[1].slice(-2)).toEqual(["--repo", "factory"]);
+    const blockedComment = calls.find(
+      ([cmd, args]) => cmd === "factory" && args[1] === "comment",
+    );
+    expect(blockedComment?.[1].slice(-2)).toEqual(["--repo", "factory"]);
     expect(blocked?.[1]).toContain("ai:needs-review");
     expect(blocked?.[1]).toContain("ai:in-progress");
     expect(blocked?.[1]).toContain("agent:claude-code");
@@ -482,6 +487,11 @@ describe("merge verification GitHub transport handling", () => {
     expect(doneCalls[1][1]).toContain("ai:in-progress");
     expect(doneCalls[1][1]).toContain("agent:claude-code");
     expect(
+      doneCalls.every(
+        ([, args]) => args.slice(-2).join(" ") === "--repo factory",
+      ),
+    ).toBe(true);
+    expect(
       calls.some(
         ([cmd, args]) =>
           cmd === "gh" &&
@@ -598,6 +608,7 @@ describe("merge verification GitHub transport handling", () => {
     const outcome = catchUpMergedTickets(
       {
         github: "watt-mind/factory",
+        repo: "factory",
         base: "develop",
         project: "Factory",
         verifiedSha: MERGE_SHA,
@@ -623,6 +634,11 @@ describe("merge verification GitHub transport handling", () => {
       "watt-mind/factory#100",
       "watt-mind/factory#102",
     ]);
+    expect(
+      doneCalls.every(
+        ([, args]) => args.slice(-2).join(" ") === "--repo factory",
+      ),
+    ).toBe(true);
   });
 
   test("catchUpMergedTickets defaults to the documented cap", () => {
@@ -630,6 +646,7 @@ describe("merge verification GitHub transport handling", () => {
     const outcome = catchUpMergedTickets(
       {
         github: "watt-mind/factory",
+        repo: "factory",
         base: "develop",
         project: "Factory",
         verifiedSha: MERGE_SHA,

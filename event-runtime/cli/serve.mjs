@@ -393,6 +393,10 @@ export async function tick({
         logLine(
           `artifacts: pruned ${pruned.deleted} orphan(s), freed ${pruned.freedBytes}B`,
         );
+      if (pruned.invalidResults > 0)
+        logLine(
+          `artifacts: GC held — ${pruned.invalidResults} unparsable results row(s); ${pruned.remainingOrphans} orphan(s) retained`,
+        );
     });
     gcStep("notify", () => {
       const swept = sweepNotifyLog(db, { now });

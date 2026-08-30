@@ -114,6 +114,7 @@ them to native labels of the same spelling.
 | `ai:needs-review` | PR is up; merge stage owns it.                                                        |
 | `ai:blocked`      | Waiting on a human.                                                                   |
 | `ai:escalated`    | Security-relevant (or intent-changing) diff; a human must merge.                      |
+| `ai:landing`      | An external lander owns the branch; merge-scan must not rebase it.                    |
 | `agent:<harness>` | Which harness holds the claim. CLI `claude` maps to `agent:claude-code`.              |
 | `type:*`          | `bug` `feature` `ui-ux` `security` `performance` `maintenance` `docs` `a11y`          |
 | `source:*`        | `agent` `human` `sentry` `client-support`                                             |
@@ -415,6 +416,14 @@ factory ticket raw '<query>' --var key=value
 retry. For anything the verbs do not cover, `raw '<query>' --var k=v`
 beats inventing a new flag. Fallback when the CLI is missing:
 `bun "$FACTORY_ROOT/tools/linear.mjs"`.
+
+### GitHub CLI timeout
+
+The GitHub forge bounds every synchronous `gh` invocation with
+`FACTORY_GH_TIMEOUT_MS`, in milliseconds. It defaults to `30000`; set it to a
+positive integer to override that default. Invalid values emit a warning and
+use `30000` so a malformed environment never leaves a forge caller blocked
+indefinitely. Individual forge calls may still supply their own `timeout`.
 
 ## 14. Loops
 

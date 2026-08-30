@@ -17,6 +17,39 @@ import {
 registerCliTmpCleanup();
 
 describe("status and doctor commands", () => {
+  test("status shows an operator dispatch pause in text and JSON anomalies", async () => {
+    const { status } = await import("../cli.mjs");
+    const writes = [];
+    const originalLog = console.log;
+    console.log = (line) => writes.push(line);
+    const payload = {
+      events: {},
+      policy: { dispatchPaused: true },
+      proposals: {},
+      runs: { byState: {} },
+      anomalies: {},
+    };
+
+    try {
+      await status({ status: async () => payload });
+      expect(writes).toContain(
+        "dispatch   PAUSED (config/policy.yaml dispatch.paused)",
+      );
+
+      writes.length = 0;
+      await status({ status: async () => payload }, ["--json"]);
+      expect(JSON.parse(writes[0]).anomalies).toContain("dispatch_paused");
+
+      writes.length = 0;
+      await status({
+        status: async () => ({ ...payload, policy: { dispatchPaused: false } }),
+      });
+      expect(writes.some((line) => line.startsWith("dispatch"))).toBe(false);
+    } finally {
+      console.log = originalLog;
+    }
+  });
+
   test(
     "status --json reports in-flight counts from a live seeded serve",
     async () => {
@@ -157,6 +190,21 @@ describe("status and doctor commands", () => {
     expect(
       lines.some((l) => l.includes("customAnomaly: something unexpected")),
     ).toBe(true);
+  });
+
+  test("reports an artifact GC hold beside unreferenced artifacts", async () => {
+    const { getAnomalyLines } = await import("../cli.mjs");
+    const lines = getAnomalyLines({
+      artifacts: {
+        orphans: 3,
+        orphanBytes: 2048,
+        invalidResults: 2,
+      },
+    });
+
+    expect(lines).toContain(
+      "unreferenced artifacts: 3 (2048B) — GC held by 2 unparsable result row(s)",
+    );
   });
 
   test(

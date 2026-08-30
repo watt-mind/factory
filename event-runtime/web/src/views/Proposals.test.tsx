@@ -880,6 +880,27 @@ describe("Proposals selection safety under focus and expiry (WM-547)", () => {
 });
 
 describe("Proposals component harness: cross-tab reveal", () => {
+  test("History groups expired proposals when empty status groups are shown", async () => {
+    localStorage.setItem(
+      "evrt-display-proposals-history",
+      JSON.stringify({ groupBy: "status", showEmpty: true }),
+    );
+    const expired = stubProposal("prop_expired_history", "expired", {
+      agent: "expired-history-agent",
+      decided_at: NOW,
+      decided_by: "serve",
+    });
+    api.proposalHistory = async () => ({ proposals: [expired] });
+
+    const r = renderProposals();
+    fireEvent.click(r.getByRole("tab", { name: /^History/i }));
+
+    await waitFor(() => {
+      expect(r.getByText("expired-history-agent")).toBeTruthy();
+      expect(r.getByRole("button", { name: /expired\s+1/i })).toBeTruthy();
+    });
+  });
+
   test("switches tab to History when focusProposalId is a decided proposal", async () => {
     const pOpen = stubProposal("prop_open_1", "open", { agent: "agent-open" });
     const pDecided = stubProposal("prop_decided_1", "approved", {

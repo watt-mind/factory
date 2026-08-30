@@ -488,6 +488,13 @@ read-only `factory.ci-diagnose.requested`; missing or malformed policy means
 watched. The event must have been admitted with source `chain`, and the normal
 proposal, lifecycle, journal, budget, and worker gates remain in force.
 
+`dispatch.paused: true` (shown in `config/policy.example.yaml`) is the
+operator brake for unattended dispatch. A non-operator
+`factory.dispatch.requested` becomes a durable NOOP with reason
+`dispatch_paused`, and the auto-approver leaves an already-open proposal with
+`auto_approval_ineligible:dispatch_paused`. Set `dispatch.paused: false` to
+resume on the next pass; no restart is required.
+
 `factory.ci-diagnose.requested` runs `ci-doctor@2`, which is non-mutating and
 limited to `gh:read`; its downstream `ci-rerun` and `dispatch` edges retain
 their separate approval gates.
@@ -522,6 +529,7 @@ brackets.
 | `merge_policy_invalid`            | Supply valid merge fix rounds, auto-merge bases, and owners.                     |
 | `policy_unknown`                  | Load a policy which supplies a typed refusal reason.                             |
 | `event_type_not_allowlisted`      | Add the supported event type to the explicit allowlist, or use watched approval. |
+| `dispatch_paused`                 | Set `dispatch.paused: false`; the next pass resumes without a restart.           |
 
 **Capacity**
 

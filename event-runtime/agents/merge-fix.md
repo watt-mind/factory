@@ -41,6 +41,26 @@ isolated worktree for the ticket. This is not a general implementation run.
      expectedRemoteSha=$(git rev-parse "origin/<headRef>")
      ```
 
+     Before either rebase, query check runs on that exact
+     `expectedRemoteSha` (not a branch-name lookup). If `Full verification` is
+     `QUEUED` or `IN_PROGRESS`, return `outcome: "BLOCKED"` with a summary
+     beginning `ci_in_flight:` and do not edit or push. Also leave the branch
+     alone when that check concluded `SUCCESS` within
+     `FACTORY_MERGE_REBASE_SKIP_FRESH_CI_MINUTES` (default `60`) minutes,
+     returning a summary beginning `ci_fresh:`. For example, inspect the
+     exact head with:
+
+     ```sh
+     gh api "repos/<github>/commits/${expectedRemoteSha}/check-runs?per_page=100"
+     ```
+
+     A `CONFLICTING` PR still needs a rebase even when CI is running or fresh.
+     Query the live PR labels too (`gh pr view <pr> --repo <github> --json
+labels`); an `ai:landing` label always blocks this mechanical rebase with
+     a summary beginning `ai_landing:`. Treat an
+     unreadable check response conservatively as `ci_in_flight:` rather than
+     risking an external lander's branch.
+
      Compare `expectedRemoteSha` with the pinned `input.json` `headSha`. Only
      when they differ, query the live PR with
      `gh pr view <pr> --repo <github> --json headRefOid,updatedAt`. Refuse with

@@ -575,16 +575,17 @@ export function listArtifactPage(
  * `tempBytes`; they are not content-addressed artifacts or orphan candidates.
  */
 export function storeStats(db, storeRoot, { now = Date.now() } = {}) {
+  const referenced = referencedHashes(db);
   if (!existsSync(storeRoot))
     return {
       files: 0,
       bytes: 0,
       orphans: 0,
       orphanBytes: 0,
+      invalidResults: referenced.invalid,
       tempFiles: 0,
       tempBytes: 0,
     };
-  const referenced = referencedHashes(db);
   let files = 0;
   let bytes = 0;
   let orphans = 0;
@@ -616,6 +617,7 @@ export function storeStats(db, storeRoot, { now = Date.now() } = {}) {
     bytes,
     orphans,
     orphanBytes,
+    invalidResults: referenced.invalid,
     tempFiles,
     tempBytes,
     at: new Date(now).toISOString(),
