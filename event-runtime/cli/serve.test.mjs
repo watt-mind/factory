@@ -16,6 +16,7 @@ import {
   CLI,
   DEAD_PORT,
   assertHealthyLiveServe,
+  cleanupTrackedProcesses,
   editStampRoot,
   exitOf,
   killPool,
@@ -34,6 +35,37 @@ import {
 
 registerCliTmpCleanup();
 registerTestProcessCleanup(import.meta.url);
+
+/**
+ * Every live `serve --adapter-override fake` whose cwd is `cwd`, by pid. Linux
+ * exposes cwd through procfs; lsof provides the equivalent elsewhere. This is
+ * the same ownership signal `bin/worktree-down.sh` sweeps on (#1379).
+ */
+function fakeServesRootedAt(cwd) {
+  const ps = spawnSync("ps", ["-axo", "pid=,command="], { encoding: "utf8" });
+  const serves = [];
+  for (const line of ps.stdout.split("\n")) {
+    const match = line.match(/^\s*(\d+)\s+(.*)$/);
+    if (!match) continue;
+    if (!/cli\.mjs\s+serve\s.*--adapter-override\s+fake(\s|$)/.test(match[2]))
+      continue;
+    serves.push(Number(match[1]));
+  }
+  return serves.filter((pid) => {
+    if (process.platform === "linux") {
+      const link = spawnSync("readlink", [`/proc/${pid}/cwd`], {
+        encoding: "utf8",
+      });
+      return link.status === 0 && link.stdout.trim() === cwd;
+    }
+    const lsof = spawnSync(
+      "lsof",
+      ["-a", "-p", String(pid), "-d", "cwd", "-Fn"],
+      { encoding: "utf8" },
+    );
+    return lsof.stdout.split("\n").includes(`n${cwd}`);
+  });
+}
 
 describe("serve command", () => {
   test("serve --watch re-execs under bun --watch and binds", async () => {
@@ -212,6 +244,53 @@ describe("serve command", () => {
     expect(out).not.toContain('unknown --adapter-override "pi"');
     expect(out).toContain('adapter override: all new run specs use "pi"');
     expect(out).toContain("control API on");
+  });
+
+  test("an aborted test leaves no cwd-bound serve --adapter-override fake behind (#1379)", async () => {
+    // Regression for the orphaned fake serves found on the operator box: a
+    // fake serve started through the shared helper must run detached in its
+    // own process group and die with the test that owned it, even when that
+    // test never reaches its own kill (timeout, thrown assertion). The spawn
+    // is rooted in a throwaway cwd so ownership is asserted the way
+    // worktree-down asserts it: by cwd, not by pidfile.
+    const home = tmpDir("evrt-serve-orphan-");
+    const cwd = tmpDir("evrt-serve-orphan-cwd-");
+    const port = freePort();
+    const child = spawnTracked(
+      "bun",
+      [CLI, "serve", "--adapter-override", "fake", "--port", port],
+      {
+        cwd,
+        env: { ...process.env, FACTORY_EVENT_HOME: home },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let out = "";
+    child.stdout.on("data", (b) => {
+      out += b;
+    });
+    child.stderr.on("data", (b) => {
+      out += b;
+    });
+    const box = {
+      child,
+      get out() {
+        return out;
+      },
+    };
+    expect(await waitFor(box, "control API on", 8000)).toBe(true);
+    expect(fakeServesRootedAt(cwd)).toEqual([child.pid]);
+
+    // Abort the test the way a timed-out/failed test does: the per-test
+    // cleanup hook runs, the test body never calls child.kill().
+    await cleanupTrackedProcesses({ scope: "test" });
+    await exitOf(child);
+
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && fakeServesRootedAt(cwd).length > 0) {
+      await Bun.sleep(25);
+    }
+    expect(fakeServesRootedAt(cwd)).toEqual([]);
   });
 
   test("tick runs notify as an isolated subsystem (WM-65): a throwing notifier step cannot break the tick", async () => {
