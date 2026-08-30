@@ -309,13 +309,21 @@ export async function runWatchdogCheck({
 
   // 3. Workers & Runs Status from API
   try {
-    const [statusRes, workersRes, runningRes, sandboxRefusals] =
-      await Promise.all([
-        controlApi("/status", { host, port }),
-        controlApi("/workers", { host, port }),
-        controlApi("/runs?state=RUNNING", { host, port }),
-        fetchRecentSandboxRefusals({ host, port }),
-      ]);
+    const [
+      statusRes,
+      workersRes,
+      leasedRes,
+      runningRes,
+      verifyingRes,
+      sandboxRefusals,
+    ] = await Promise.all([
+      controlApi("/status", { host, port }),
+      controlApi("/workers", { host, port }),
+      controlApi("/runs?state=LEASED", { host, port }),
+      controlApi("/runs?state=RUNNING", { host, port }),
+      controlApi("/runs?state=VERIFYING", { host, port }),
+      fetchRecentSandboxRefusals({ host, port }),
+    ]);
 
     const workers = workersRes?.workers ?? [];
     metrics.workersCount = workers.length;
@@ -327,7 +335,11 @@ export async function runWatchdogCheck({
       });
     }
 
-    const runs = runningRes?.runs ?? [];
+    const runs = [
+      ...(leasedRes?.runs ?? []),
+      ...(runningRes?.runs ?? []),
+      ...(verifyingRes?.runs ?? []),
+    ];
     metrics.runningRuns = runs.length;
     const now = Date.now();
     const wedged = runs.filter((r) => {

@@ -1,3 +1,4 @@
+import "../test-helpers.mjs";
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-schedules-test-mjs";
 import { describe, expect, test } from "bun:test";
 

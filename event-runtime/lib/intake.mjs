@@ -86,6 +86,58 @@ export function githubWebhookSecret() {
   return process.env.FACTORY_GITHUB_WEBHOOK_SECRET || null;
 }
 
+// GitHub is normally active during the working day, but quiet stretches are
+// expected overnight and at weekends. Twelve hours catches a broken intake
+// during an active day (including this incident's 16-hour outage) without
+// paging for an ordinary short idle period. This is deliberately a process
+// counter: rejected deliveries are not admitted to the immutable event ledger
+// and must never be persisted there as if they were trusted events.
+export const GITHUB_INTAKE_STALE_AFTER_MS = 12 * 60 * 60 * 1000;
+let githubWebhookRejections = 0;
+
+/** Record a GitHub delivery refused before it can enter the event ledger. */
+export function recordGitHubWebhookRejection() {
+  githubWebhookRejections += 1;
+}
+
+/**
+ * Read-only GitHub intake observability for health and status projections.
+ * `lastAdmittedAt` comes from the durable admission ledger; rejected delivery
+ * totals are necessarily process-local because untrusted payloads are never
+ * persisted as events. Staleness requires a prior admission: a configured
+ * intake that has never admitted a delivery reports `lastAdmittedAt: null`
+ * and `stale: false`, so a freshly started runtime is not flagged as broken.
+ */
+export function githubIntakeView(
+  db,
+  {
+    nowMs = Date.now(),
+    configured = Boolean(githubWebhookSecret()),
+    staleAfterMs = GITHUB_INTAKE_STALE_AFTER_MS,
+  } = {},
+) {
+  const row = db
+    .query(
+      `SELECT MAX(admitted_at) AS last_admitted_at
+       FROM events WHERE source = 'github'`,
+    )
+    .get();
+  const lastAdmittedAt = row?.last_admitted_at ?? null;
+  const admittedMs = lastAdmittedAt ? Date.parse(lastAdmittedAt) : Number.NaN;
+  const ageMs = Number.isNaN(admittedMs)
+    ? null
+    : Math.max(0, nowMs - admittedMs);
+  const stale = configured && ageMs !== null && ageMs >= staleAfterMs;
+  return {
+    configured,
+    lastAdmittedAt,
+    ageMs,
+    rejected: githubWebhookRejections,
+    stale,
+    staleAfterMs,
+  };
+}
+
 /**
  * Verify GitHub's `X-Hub-Signature-256: sha256=<hex>` where <hex> is
  * HMAC-SHA256(secret, rawBody) — GitHub's scheme, which signs no timestamp.

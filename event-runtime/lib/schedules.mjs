@@ -224,11 +224,6 @@ export function inFlightRunsForAgent(db, agentRef) {
     .all(agentRef);
 }
 
-/** Is a run for this loop's agent still in flight? (§5 singleton) */
-export function loopInFlight(db, agentRef) {
-  return inFlightRunsForAgent(db, agentRef).length > 0;
-}
-
 /** The newest slot that successfully completed for a loop, or null if never completed (OPS-436). */
 export function lastCompletedSlot(db, loop) {
   const row = db
