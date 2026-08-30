@@ -417,7 +417,9 @@ describe("Inbox view", () => {
     expect(tabs[0]).toContain("2");
     expect(tabs[1]).toContain("Acked");
     expect(tabs[1]).toContain("1");
+    // The Resolved badge comes from its own query, not the Open tab's rows.
     expect(tabs[2]).toContain("Resolved");
+    expect(tabs[2]).toContain("1");
     expect(tabs[3]).toContain("All");
     expect(tabs[3]).toContain("4");
     // Group headers in triage order.
@@ -466,6 +468,86 @@ describe("Inbox view", () => {
     );
   });
 
+  test("renders after Overview cached its single-page open query", async () => {
+    // Overview stores `{ items }` under ["inbox", "open"]; the Inbox cursor
+    // queries must not read that entry as `{ pages }`.
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    client.setQueryData(["inbox", "open"], {
+      items: ledger.filter((entry) => itemStatus(entry) === "open"),
+    });
+    const view = render(
+      <QueryClientProvider client={client}>
+        <Inbox
+          connected
+          focusItemId={null}
+          onSelectItem={() => {}}
+          onJumpRun={() => {}}
+          onJumpProposal={() => {}}
+          onJumpEvent={() => {}}
+        />
+      </QueryClientProvider>,
+    );
+    await waitFor(() => view.getByText("decide X"));
+    expect(view.getByText("WM-2/PR #9")).toBeTruthy();
+    const tabs = view.getAllByRole("tab").map((t) => t.textContent);
+    expect(tabs[0]).toContain("2");
+    expect(tabs[2]).toContain("1");
+    // Overview's cache entry is left intact for Overview.
+    expect(client.getQueryData<unknown>(["inbox", "open"])).toEqual({
+      items: ledger.filter((entry) => itemStatus(entry) === "open"),
+    });
+  });
+
+  test("Resolved badge counts resolved rows while the Open tab is showing", async () => {
+    ledger = [
+      item({ id: "open-a", kind: "BLOCKED", title: "Open A" }),
+      ...Array.from({ length: 3 }, (_, index) =>
+        item({
+          id: `resolved-${index}`,
+          kind: "RC READY",
+          title: `Resolved ${index}`,
+          ackedAt: T1,
+          resolvedAt: T2,
+        }),
+      ),
+    ];
+    const { view } = renderInbox();
+    await waitFor(() => view.getByText("Open A"));
+    expect(view.getByRole("tab", { name: /Resolved/ }).textContent).toContain(
+      "3",
+    );
+    expect(view.getByRole("tab", { name: /All/ }).textContent).toContain("4");
+  });
+
+  test("Open badge excludes expired rows even when /status counts them", async () => {
+    ledger = [
+      item({ id: "active", kind: "BLOCKED", title: "Active decision" }),
+      item({ id: "expired-kind", kind: "proposal_expired", title: "Expired" }),
+    ];
+    // Legacy server: no `expired` field on rows and an open total that still
+    // includes the expired row; the open status has another page.
+    ledger = ledger.map(({ expired: _expired, ...rest }) => rest as InboxItem);
+    api.inbox = mock(async (status, page = {}) => {
+      if (status === "open")
+        return page.before
+          ? { items: [] }
+          : {
+              items: ledger,
+              nextBefore: "open-page-2",
+            };
+      return { items: [] };
+    });
+    api.status = mock(async () => ({
+      inbox: { open: 2, acked: 0 },
+    })) as unknown as typeof api.status;
+    const { view } = renderInbox();
+    await waitFor(() => view.getByText("Active decision"));
+    expect(view.getByRole("tab", { name: /Open/ }).textContent).toContain("1");
+    expect(view.getByRole("button", { name: "Expired (1)" })).toBeTruthy();
+  });
+
   test("hides expired open items by default and shows only them from the Expired chip", async () => {
     ledger = [
       item({ id: "active", kind: "BLOCKED", title: "Active decision" }),
@@ -500,6 +582,17 @@ describe("Inbox view", () => {
     await waitFor(() => view.getByText("Expired by kind"));
     expect(view.getByText("Expired by proposal")).toBeTruthy();
     expect(view.queryByText("Active decision")).toBeNull();
+
+    // The chip count is derived from the open query, so visiting another tab
+    // and coming back does not change it.
+    fireEvent.click(view.getByRole("tab", { name: /Resolved/ }));
+    await waitFor(() =>
+      expect(view.queryByRole("button", { name: /Expired/ })).toBeNull(),
+    );
+    fireEvent.click(view.getByRole("tab", { name: /Open/ }));
+    await waitFor(() =>
+      expect(view.getByRole("button", { name: "Expired (2)" })).toBeTruthy(),
+    );
   });
 
   test("proposal rows show a live right-aligned TTL and hide it without one", async () => {

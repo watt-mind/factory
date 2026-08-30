@@ -801,22 +801,26 @@ export function Inbox({
   const queryClient = useQueryClient();
   // The ledger is paginated. Keep an independent cursor for each status so
   // old resolved rows can never push actionable rows out of the Open tab.
+  // The keys carry an "infinite" segment: Overview caches a single-page
+  // `["inbox", "open"]` entry with a different shape, and sharing a key would
+  // hand this view that plain page instead of `{ pages }`. The `["inbox"]`
+  // prefix is kept so `invalidate()` still refreshes both views.
   const openQuery = useInfiniteQuery({
-    queryKey: ["inbox", "open"],
+    queryKey: ["inbox", "infinite", "open"],
     queryFn: ({ pageParam }) => api.inbox("open", { before: pageParam }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.nextBefore ?? undefined,
     ...refetchIntervals.primary,
   });
   const ackedQuery = useInfiniteQuery({
-    queryKey: ["inbox", "acked"],
+    queryKey: ["inbox", "infinite", "acked"],
     queryFn: ({ pageParam }) => api.inbox("acked", { before: pageParam }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.nextBefore ?? undefined,
     ...refetchIntervals.primary,
   });
   const resolvedQuery = useInfiniteQuery({
-    queryKey: ["inbox", "resolved"],
+    queryKey: ["inbox", "infinite", "resolved"],
     queryFn: ({ pageParam }) => api.inbox("resolved", { before: pageParam }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => lastPage.nextBefore ?? undefined,
@@ -837,11 +841,28 @@ export function Inbox({
     tab === "all"
       ? [openQuery, ackedQuery, resolvedQuery]
       : [inboxQueries[tab]];
-  const items = activeQueries.flatMap(
-    (inbox) => inbox.data?.pages.flatMap((page) => page.items) ?? [],
+  const pageItems = (inbox: typeof openQuery): InboxItem[] =>
+    inbox.data?.pages.flatMap((page) => page.items) ?? [];
+  const openItems = useMemo(() => pageItems(openQuery), [openQuery.data]);
+  const ackedItems = useMemo(() => pageItems(ackedQuery), [ackedQuery.data]);
+  const resolvedItems = useMemo(
+    () => pageItems(resolvedQuery),
+    [resolvedQuery.data],
   );
-  const allItems = [openQuery, ackedQuery, resolvedQuery].flatMap(
-    (inbox) => inbox.data?.pages.flatMap((page) => page.items) ?? [],
+  const items = useMemo(
+    () =>
+      tab === "all"
+        ? [...openItems, ...ackedItems, ...resolvedItems]
+        : tab === "open"
+          ? openItems
+          : tab === "acked"
+            ? ackedItems
+            : resolvedItems,
+    [tab, openItems, ackedItems, resolvedItems],
+  );
+  const allItems = useMemo(
+    () => [...openItems, ...ackedItems, ...resolvedItems],
+    [openItems, ackedItems, resolvedItems],
   );
   const query = {
     isSuccess: activeQueries.every((inbox) => inbox.isSuccess),
@@ -864,43 +885,65 @@ export function Inbox({
 
   const [expiredOnly, setExpiredOnly] = useState(false);
   const [filter, setFilter] = useState("");
+  // Derived from the open pages, not the active tab's rows, so the Expired
+  // chip count is the same whichever tab is showing.
   const expiredOpenItems = useMemo(
     () =>
-      items.filter(
+      openItems.filter(
         (item) =>
           itemStatus(item) === "open" &&
           isExpiredInboxItem(item, proposalsById, now),
       ),
-    [items, now, proposalsById],
+    [openItems, now, proposalsById],
   );
   const counts = useMemo(() => {
+    // Every badge is built from its own status query, independent of the
+    // active tab, so the Resolved badge is right while the Open tab shows.
+    // Expired open items live behind the Expired chip, so the open count
+    // excludes them and open + acked + resolved === all.
+    const liveOpen = openItems.filter(
+      (it) =>
+        itemStatus(it) === "open" &&
+        !isExpiredInboxItem(it, proposalsById, now),
+    ).length;
     const c: Record<InboxTab, number> = {
-      open: 0,
-      acked: 0,
-      resolved: 0,
+      open: liveOpen,
+      acked: ackedItems.filter((it) => itemStatus(it) === "acked").length,
+      resolved: resolvedItems.filter((it) => itemStatus(it) === "resolved")
+        .length,
       all: 0,
     };
-    // Expired open items live behind the Expired chip, so every tab count
-    // excludes them and open + acked + resolved === all.
-    for (const it of items) {
-      if (
-        itemStatus(it) === "open" &&
-        isExpiredInboxItem(it, proposalsById, now)
-      ) {
-        continue;
+    // `/status` is an aggregate rather than a cursor page. Once a status has
+    // more pages than are loaded, its totals are the only untruncated source.
+    // The server's open total already excludes expired rows; subtract any
+    // expired rows found in the loaded pages only when an older server still
+    // counts them (it then omits `item.expired`).
+    const totals = statusQuery.data?.inbox;
+    if (totals) {
+      if (openQuery.hasNextPage) {
+        const serverCountsExpired = openItems.some(
+          (it) => it.expired === undefined,
+        );
+        c.open = Math.max(
+          0,
+          totals.open - (serverCountsExpired ? expiredOpenItems.length : 0),
+        );
       }
-      c[itemStatus(it)] += 1;
-      c.all += 1;
+      if (ackedQuery.hasNextPage) c.acked = totals.acked;
     }
-    // `/status` is an aggregate rather than a cursor page. Its open and acked
-    // totals remain correct even when a status has more than one page.
-    if (statusQuery.data?.inbox) {
-      c.open = statusQuery.data.inbox.open;
-      c.acked = statusQuery.data.inbox.acked;
-      c.all = c.open + c.acked + c.resolved;
-    }
+    c.all = c.open + c.acked + c.resolved;
     return c;
-  }, [items, now, proposalsById, statusQuery.data?.inbox]);
+  }, [
+    openItems,
+    ackedItems,
+    resolvedItems,
+    expiredOpenItems,
+    now,
+    proposalsById,
+    statusQuery.data?.inbox,
+    openQuery.hasNextPage,
+    ackedQuery.hasNextPage,
+  ]);
 
   const byTab = useMemo(
     () =>
