@@ -28,7 +28,7 @@ TICKET=""
 TYPE="feat"
 SLUG=""
 HERE=0
-SEED=1
+SEED="${FACTORY_WORKTREE_SEED:-1}"
 RESEED=0
 LIVE=0
 CHECKOUT_ONLY=0
@@ -40,6 +40,9 @@ PRESERVATION_REPORT="${FACTORY_WORKTREE_PRESERVATION_REPORT:-}"
 EXPECTED_LEASE_FILE="${FACTORY_WORKTREE_EXPECTED_LEASE_FILE:-}"
 EXPECTED_LEASE_PID="${FACTORY_WORKTREE_EXPECTED_LEASE_PID:-}"
 POS=0
+
+[[ "$SEED" == "0" || "$SEED" == "1" ]] \
+  || die "FACTORY_WORKTREE_SEED must be 0 or 1 (got '$SEED')"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -514,9 +517,10 @@ if [[ "$SEED" -eq 1 && ( "$FRESH" -eq 1 || "$RESEED" -eq 1 ) ]]; then
       seed_ok=1
       break
     fi
-    if [[ "$seed_out" =~ "SQLITE_BUSY" || "$seed_out" =~ "database is locked" || "$seed_out" =~ "locked" || "$seed_out" =~ "internal_error" || "$seed_out" =~ "500" || "$seed_out" =~ "409" ]]; then
+    seed_exit=$?
+    if [[ "$seed_exit" -eq 78 || "$seed_out" =~ "SQLITE_BUSY" || "$seed_out" =~ "database is locked" || "$seed_out" =~ "locked" || "$seed_out" =~ "internal_error" || "$seed_out" =~ "500" || "$seed_out" =~ "409" ]]; then
       backoff_delay=$(( 1 << (seed_attempt - 1) ))
-      warn "demo seed hit transient lock/error (attempt $seed_attempt/$max_seed_attempts) — retrying in ${backoff_delay}s"
+      warn "demo seed hit retryable error (attempt $seed_attempt/$max_seed_attempts, exit $seed_exit) — retrying in ${backoff_delay}s"
       sleep "$backoff_delay"
       seed_attempt=$(( seed_attempt + 1 ))
     else

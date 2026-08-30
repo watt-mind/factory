@@ -327,7 +327,7 @@ describe("worktree workspaces (WM-108)", () => {
     mkdirSync(path.join(repoDir, "bin"), { recursive: true });
     writeFileSync(
       path.join(repoDir, "bin", "worktree-up.sh"),
-      `#!/bin/bash\nset -e\nWT="${wtRoot}/$1"\necho "up $1 cwd=$PWD" >> "${callsLog}"\nif [[ -e "$WT/ports" || -e "$WT/run/serve.pid" || -e "$WT/run/worker.pid" || -e "$WT/run/web.pid" ]]; then\n  echo "stale daemon state for $1" >&2\n  exit 9\nfi\nmkdir -p "$WT/run"\nprintf '7740 7741\\n' > "$WT/ports"\ntouch "$WT/run/serve.pid" "$WT/run/worker.pid" "$WT/run/web.pid"\n`,
+      `#!/bin/bash\nset -e\nWT="${wtRoot}/$1"\necho "up $1 cwd=$PWD seed=\${FACTORY_WORKTREE_SEED:-unset}" >> "${callsLog}"\n[[ "\${FACTORY_WORKTREE_SEED:-}" == "0" ]] || { echo "dispatch must disable demo seeding" >&2; exit 10; }\nif [[ -e "$WT/ports" || -e "$WT/run/serve.pid" || -e "$WT/run/worker.pid" || -e "$WT/run/web.pid" ]]; then\n  echo "stale daemon state for $1" >&2\n  exit 9\nfi\nmkdir -p "$WT/run"\nprintf '7740 7741\\n' > "$WT/ports"\ntouch "$WT/run/serve.pid" "$WT/run/worker.pid" "$WT/run/web.pid"\n`,
     );
     writeFileSync(
       path.join(repoDir, "bin", "worktree-down.sh"),
@@ -420,7 +420,7 @@ describe("worktree workspaces (WM-108)", () => {
 
   test("up is delegated to the repo's script; the tree is reachable at ./repo; verify rides along", () => {
     const { dir, worktree } = make("wtrepo", "WM-1", "run_wt1");
-    expect(calls()).toContainEqual(`up WM-1 cwd=${repoDir}`);
+    expect(calls()).toContainEqual(`up WM-1 cwd=${repoDir} seed=0`);
     expect(worktree).toEqual({
       repo: "wtrepo",
       ticket: "WM-1",
@@ -439,6 +439,9 @@ describe("worktree workspaces (WM-108)", () => {
     expect(
       JSON.parse(readFileSync(path.join(dir, ".worktree.json"), "utf8")).ticket,
     ).toBe("WM-1");
+    expect(existsSync(path.join(wtRoot, "WM-1", ".factory", "demo.db"))).toBe(
+      false,
+    );
     expect(destroyWorkspace(dir)).toBe(true);
   });
 
