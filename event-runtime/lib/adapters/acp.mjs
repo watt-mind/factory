@@ -562,7 +562,7 @@ export async function execute({
     let settled = false;
     let timedOut = false;
     let aborted = false;
-    let killTimer = null;
+    let cancelTermination = null;
     let cancelledPermissions = false;
 
     const finishHandshakeError = (err) => {
@@ -594,14 +594,7 @@ export async function execute({
         }
       }
       cancelPendingPermissions();
-      killProcessGroup(child, "SIGTERM");
-      if (!killTimer) {
-        killTimer = setTimeout(
-          () => killProcessGroup(child, "SIGKILL"),
-          killGraceMs,
-        );
-        killTimer.unref?.();
-      }
+      cancelTermination ??= killProcessGroup(child, { killGraceMs });
     };
 
     const rpc = createAcpRpc({
@@ -761,13 +754,8 @@ export async function execute({
         } catch {
           // already closed
         }
-        if (!timedOut && !killTimer) {
-          killProcessGroup(child, "SIGTERM");
-          killTimer = setTimeout(
-            () => killProcessGroup(child, "SIGKILL"),
-            killGraceMs,
-          );
-          killTimer.unref?.();
+        if (!timedOut) {
+          cancelTermination ??= killProcessGroup(child, { killGraceMs });
         }
       })
       .catch((err) => {
@@ -778,14 +766,7 @@ export async function execute({
         } catch {
           // ignore
         }
-        killProcessGroup(child, "SIGTERM");
-        if (!killTimer) {
-          killTimer = setTimeout(
-            () => killProcessGroup(child, "SIGKILL"),
-            killGraceMs,
-          );
-          killTimer.unref?.();
-        }
+        cancelTermination ??= killProcessGroup(child, { killGraceMs });
       });
 
     const termTimer = setTimeout(() => onAbortOrTimeout(true), timeoutMs);
@@ -801,7 +782,7 @@ export async function execute({
       if (settled) return;
       settled = true;
       clearTimeout(termTimer);
-      if (killTimer) clearTimeout(killTimer);
+      cancelTermination?.();
       if (abortSig) abortSig.removeEventListener?.("abort", onAbort);
       cancelPendingPermissions();
       rpc.rejectAll(new Error("ACP child closed"));

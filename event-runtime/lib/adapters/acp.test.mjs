@@ -854,6 +854,22 @@ describe("execute against a fake ACP agent", () => {
     expect(outcome.exitCode).toBeNull();
   });
 
+  test("a child that ignores SIGTERM is SIGKILLed after the grace", async () => {
+    const workspaceDir = ws();
+    const started = Date.now();
+    const outcome = await run(workspaceDir, {
+      behavior: "ignore_sigterm",
+      timeoutMs: 200,
+      killGraceMs: 150,
+    });
+    const elapsed = Date.now() - started;
+    expect(outcome.timedOut).toBe(true);
+    expect(outcome.exitCode).toBeNull();
+    // TERM at 200 ms is ignored; only the KILL escalation settles the run.
+    expect(elapsed).toBeGreaterThanOrEqual(300);
+    expect(elapsed).toBeLessThan(4000);
+  });
+
   const testProcessGroup = process.platform === "win32" ? test.skip : test;
   testProcessGroup("timeout kills a long-lived grandchild", async () => {
     const workspaceDir = ws();

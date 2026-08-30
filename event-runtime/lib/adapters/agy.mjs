@@ -16,6 +16,7 @@ import { spawn } from "node:child_process";
 import { createWriteStream, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
+import { killProcessGroup } from "./child-process.mjs";
 import { PROMPT_SUFFIX, verifiedPrompt } from "./claude.mjs";
 import { FACTORY_ROOT } from "../config.mjs";
 import {
@@ -66,28 +67,11 @@ export const HARNESS_LAYOUT = Object.freeze({
   }),
 });
 
+export { killProcessGroup };
+
 export const KILL_GRACE_MS = 30_000;
 const TEXT_PREVIEW_CHARS = 4000;
 const STDERR_FILE_CHARS = 16_384;
-
-/** Terminate a detached CLI and every subprocess it started (WM-263). */
-export function killProcessGroup(
-  child,
-  signal = "SIGTERM",
-  kill = process.kill,
-) {
-  const pid = child?.pid;
-  if (!pid) return;
-  try {
-    kill(-pid, signal);
-  } catch {
-    try {
-      child.kill(signal);
-    } catch {
-      // already terminated
-    }
-  }
-}
 
 /**
  * How much sooner agy's own print-mode wait expires than the worker's timeout.
@@ -481,16 +465,9 @@ export async function execute({
 
     let timedOut = false;
     let timer = null;
-    let killTimer = null;
+    let cancelTermination = null;
     const terminate = () => {
-      killProcessGroup(child, "SIGTERM");
-      if (!killTimer) {
-        killTimer = setTimeout(
-          () => killProcessGroup(child, "SIGKILL"),
-          killGraceMs,
-        );
-        killTimer.unref?.();
-      }
+      cancelTermination ??= killProcessGroup(child, { killGraceMs });
     };
     if (timeoutMs) {
       timer = setTimeout(() => {
@@ -505,7 +482,7 @@ export async function execute({
 
     child.on("close", async (exitCode) => {
       if (timer) clearTimeout(timer);
-      if (killTimer) clearTimeout(killTimer);
+      cancelTermination?.();
       abortSignal?.removeEventListener("abort", cancel);
       signal?.removeEventListener("abort", cancel);
       await transcriptClosed;
@@ -533,7 +510,7 @@ export async function execute({
 
     child.on("error", (err) => {
       if (timer) clearTimeout(timer);
-      if (killTimer) clearTimeout(killTimer);
+      cancelTermination?.();
       abortSignal?.removeEventListener("abort", cancel);
       signal?.removeEventListener("abort", cancel);
       transcript.destroy();

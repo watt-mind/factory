@@ -267,7 +267,8 @@ The LLM adapter shutdown contract is:
    capture streams on every exit/error path.
 
 Adapters that can create process trees must terminate the relevant process
-group; `command.mjs:killProcessGroup()` is the precedent. Never resolve while a
+group; `child-process.mjs:killProcessGroup()` is the shared helper (TERM, then
+KILL after `killGraceMs`; repeat calls for one child are no-ops). Never resolve while a
 background child remains running.
 
 ### CLI preflight
