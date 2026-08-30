@@ -8,12 +8,17 @@
  */
 import { randomUUID } from "node:crypto";
 import {
+  closeSync,
   existsSync,
+  fchmodSync,
+  fsyncSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -55,6 +60,9 @@ const HOST_KEYS = {
   maxInFlight: "max_in_flight",
   runnerLabels: "runner_labels",
 };
+const HOST_CONFIG_SNAPSHOT = Symbol("host config snapshot");
+
+class HostConfigConflictError extends RepoError {}
 
 function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -89,6 +97,13 @@ function validateFields(value, allowed, required = []) {
     (typeof value.path !== "string" || !value.path.trim())
   )
     return "path must be a non-empty string";
+  if (
+    Object.hasOwn(value, "path") &&
+    !path.isAbsolute(value.path) &&
+    value.path !== "~" &&
+    !value.path.startsWith("~/")
+  )
+    return "path must be absolute or ~-prefixed";
   if (
     Object.hasOwn(value, "controlPlane") &&
     !CONTROL_PLANES.has(value.controlPlane)
@@ -191,14 +206,46 @@ function hostConfigError(message, file) {
  */
 function readHostConfig(root) {
   const file = reposConfigPath(root);
-  if (!existsSync(file)) return { repos: [] };
-  const parsed = Bun.YAML.parse(readFileSync(file, "utf8"));
+  if (!existsSync(file)) {
+    const parsed = { repos: [] };
+    Object.defineProperty(parsed, HOST_CONFIG_SNAPSHOT, {
+      value: { file, contents: null, stat: null },
+    });
+    return parsed;
+  }
+  const contents = readFileSync(file, "utf8");
+  const parsed = Bun.YAML.parse(contents);
   if (!isObject(parsed))
     throw new RepoError(`${file}: repos config must be a YAML mapping`);
   if (parsed.repos === undefined || parsed.repos === null) parsed.repos = [];
   if (!Array.isArray(parsed.repos))
     throw new RepoError(`${file}: repos must be a list`);
+  Object.defineProperty(parsed, HOST_CONFIG_SNAPSHOT, {
+    value: { file, contents, stat: statSync(file) },
+  });
   return parsed;
+}
+
+function hostConfigUnchanged(snapshot) {
+  if (!snapshot?.stat) return !existsSync(snapshot?.file);
+  if (!existsSync(snapshot.file)) return false;
+  const current = statSync(snapshot.file);
+  return (
+    readFileSync(snapshot.file, "utf8") === snapshot.contents &&
+    current.dev === snapshot.stat.dev &&
+    current.ino === snapshot.stat.ino &&
+    current.size === snapshot.stat.size &&
+    current.mtimeMs === snapshot.stat.mtimeMs &&
+    current.ctimeMs === snapshot.stat.ctimeMs
+  );
+}
+
+function assertHostConfigUnchanged(snapshot) {
+  if (!hostConfigUnchanged(snapshot)) {
+    throw new HostConfigConflictError(
+      "config/repos.yaml changed while this request was pending; retry the request",
+    );
+  }
 }
 
 /**
@@ -222,13 +269,26 @@ function writeHostConfig(root, config) {
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
-  const target = path.join(root, "config", "repos.yaml");
+  const snapshot = config[HOST_CONFIG_SNAPSHOT];
+  const target = snapshot?.file ?? reposConfigPath(root);
   mkdirSync(path.dirname(target), { recursive: true });
   const tmp = `${target}.${process.pid}.${randomUUID()}.tmp`;
+  let fd = null;
   try {
-    writeFileSync(tmp, yaml);
+    fd = openSync(tmp, "w", snapshot?.stat?.mode & 0o777 || 0o666);
+    if (snapshot?.stat) fchmodSync(fd, snapshot.stat.mode & 0o777);
+    writeFileSync(fd, yaml);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+    assertHostConfigUnchanged(snapshot);
     renameSync(tmp, target);
+    fd = openSync(path.dirname(target), "r");
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
   } finally {
+    if (fd !== null) closeSync(fd);
     rmSync(tmp, { force: true });
   }
 }
@@ -294,6 +354,8 @@ export function createRepoApi({ repos, db, configRoot = reposRoot() }) {
       mutate(config);
       writeHostConfig(configRoot, config);
     } catch (err) {
+      if (err instanceof HostConfigConflictError)
+        return send(409, { error: err.message });
       if (!(err instanceof RepoError)) throw err;
       return send(422, { error: err.message });
     }

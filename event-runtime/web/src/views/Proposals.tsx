@@ -201,7 +201,7 @@ const HISTORY_DISPLAY: DisplayConfig<Proposal> = {
       label: "Status",
       get: (p) => p.status,
       order: ["approved", "rejected", "expired", "superseded", "resolved"],
-      hue: { ...PROPOSAL_STATUS_HUES, expired: "var(--hue-idle)" },
+      hue: PROPOSAL_STATUS_HUES,
     },
     { key: "agent", label: "Agent", get: (p) => p.agent ?? "" },
   ],

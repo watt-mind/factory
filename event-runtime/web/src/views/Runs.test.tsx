@@ -9,6 +9,7 @@ import {
 } from "bun:test";
 import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { useState } from "react";
+import { ApiError } from "../api";
 import {
   Runs,
   countRunsByTab,
@@ -224,6 +225,53 @@ describe("Runs API pagination (WM-976)", () => {
         fireEvent.click(r.getByRole("button", { name: "Older" }));
         await r.findByTitle("run-page-old");
         fireEvent.click(r.getByRole("tab", { name: /^Completed/i }));
+
+        await waitFor(() =>
+          expect(runs).toHaveBeenLastCalledWith(undefined, {
+            before: undefined,
+          }),
+        );
+      },
+    );
+  });
+
+  test("resets the cursor when switching repository contexts", async () => {
+    const newest = stubListItem("run-page-new", "COMPLETED", {
+      maxAttempts: undefined,
+      spec: undefined,
+      repos: ["repo-a", "repo-b"],
+    });
+    const older = stubListItem("run-page-old", "FAILED", {
+      maxAttempts: undefined,
+      spec: undefined,
+      repos: ["repo-a"],
+    });
+    const runs = mock(async (_state?: string, filters?: { before?: string }) =>
+      filters?.before
+        ? { runs: [older], nextBefore: null }
+        : { runs: [newest], nextBefore: "older-page" },
+    );
+    await withApi(
+      { runs, status: async () => createStatusFixture() },
+      async () => {
+        const r = renderRuns({ context: { kind: "repo", name: "repo-a" } });
+        await r.findByTitle("run-page-new");
+
+        fireEvent.click(r.getByRole("button", { name: "Older" }));
+        await r.findByTitle("run-page-old");
+        r.rerender(
+          <Runs
+            connected={true}
+            context={{ kind: "repo", name: "repo-b" }}
+            focusRunId={null}
+            onSelectRun={noop}
+            onOpenFull={noop}
+            focusState={null}
+            onFocusStateConsumed={noop}
+            onJumpAgent={noop}
+            onJumpEvent={noop}
+          />,
+        );
 
         await waitFor(() =>
           expect(runs).toHaveBeenLastCalledWith(undefined, {
@@ -657,6 +705,61 @@ describe("Runs detail failure banner (WM-93)", () => {
 });
 
 describe("Runs component harness: selection & filter retention", () => {
+  test("fetches and renders an off-page run selected by a direct link", async () => {
+    const runId = "run_outside_summary";
+    const run = mock(async (id: string) => {
+      expect(id).toBe(runId);
+      return stubDetail(runId, "RUNNING", []);
+    });
+
+    await withApi(
+      {
+        runs: async () => ({ runs: [stubListItem("run_newest", "COMPLETED")] }),
+        run,
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderRuns({ focusRunId: runId });
+        await r.findByText("idempotencyKey");
+        expect(run).toHaveBeenCalledTimes(1);
+      },
+    );
+  });
+
+  test("shows a not-found state for a direct link to a pruned run", async () => {
+    const runId = "run_pruned";
+    await withApi(
+      {
+        runs: async () => ({ runs: [] }),
+        run: async () => {
+          throw new ApiError("not_found", 404);
+        },
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderRuns({ focusRunId: runId });
+        expect(await r.findByText(`Run ${runId} was not found.`)).toBeTruthy();
+      },
+    );
+  });
+
+  test("uses one detail fetch for an on-page selected run", async () => {
+    const runId = "run_in_summary";
+    const run = mock(async () => stubDetail(runId, "RUNNING", []));
+    await withApi(
+      {
+        runs: async () => ({ runs: [stubListItem(runId, "RUNNING")] }),
+        run,
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderRuns({ focusRunId: runId });
+        await r.findByText("idempotencyKey");
+        expect(run).toHaveBeenCalledTimes(1);
+      },
+    );
+  });
+
   test("p toggles the selected run in the context strip and the detail action shows its hint", async () => {
     const runId = "run_pin_shortcut";
     sessionStorage.clear();
