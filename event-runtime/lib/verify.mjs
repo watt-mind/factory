@@ -126,6 +126,13 @@ export const HANDOFF_GUEST_PATH =
   "/opt/factory-bin:/usr/local/bin:/usr/bin:/bin";
 /** Where the verified worktree is mounted inside the chroot. */
 export const HANDOFF_GUEST_WORKSPACE = "/workspace";
+export const DEFAULT_HANDOFF_SANDBOX_TMPFS_MB = 1024;
+export const HANDOFF_SANDBOX_NAMESPACES = Object.freeze([
+  "user",
+  "mount",
+  "pid",
+  "network",
+]);
 /**
  * Set in the guest environment so a handoff gate running INSIDE the sandbox
  * knows not to try to build another one. `clone(CLONE_NEWUSER)` is EPERM for
@@ -137,6 +144,74 @@ export const HANDOFF_GUEST_WORKSPACE = "/workspace";
  * environment, cwd confinement and timeout.
  */
 export const HANDOFF_SANDBOX_MARKER = "FACTORY_HANDOFF_SANDBOX";
+
+/** Missing or invalid local policy must not restore the old 256 MiB mount. */
+export function policyHandoffSandboxTmpfsMb(root = reposRoot()) {
+  try {
+    const value = Bun.YAML.parse(
+      readFileSync(resolveConfigPath("policy", { root }), "utf8"),
+    )?.sandbox?.tmpfs_mb;
+    return Number.isSafeInteger(value) &&
+      value >= DEFAULT_HANDOFF_SANDBOX_TMPFS_MB
+      ? value
+      : DEFAULT_HANDOFF_SANDBOX_TMPFS_MB;
+  } catch {
+    return DEFAULT_HANDOFF_SANDBOX_TMPFS_MB;
+  }
+}
+
+function handoffSandboxLimits(tmpfsMb) {
+  return `tmpfs=${tmpfsMb}MiB; namespaces=${HANDOFF_SANDBOX_NAMESPACES.join(",")}`;
+}
+
+/**
+ * PID 1 must reap orphaned test processes. This Python init runs before the
+ * chroot, supervises the setup shell, and terminates/reaps leftovers once the
+ * command returns so a ticket check cannot leave a guest daemon behind.
+ */
+export const HANDOFF_SANDBOX_INIT = String.raw`
+import os
+import signal
+import sys
+
+child = os.fork()
+if child == 0:
+    os.execv(sys.argv[1], sys.argv[1:])
+
+def forward(signum, _frame):
+    try:
+        os.kill(child, signum)
+    except ProcessLookupError:
+        pass
+
+signal.signal(signal.SIGTERM, forward)
+signal.signal(signal.SIGINT, forward)
+child_status = 1
+while True:
+    try:
+        pid, status = os.wait()
+    except InterruptedError:
+        continue
+    if pid == child:
+        child_status = status
+        break
+
+try:
+    os.kill(-1, signal.SIGTERM)
+except ProcessLookupError:
+    pass
+while True:
+    try:
+        os.wait()
+    except ChildProcessError:
+        break
+
+if os.WIFEXITED(child_status):
+    sys.exit(os.WEXITSTATUS(child_status))
+if os.WIFSIGNALED(child_status):
+    sys.exit(128 + os.WTERMSIG(child_status))
+sys.exit(1)
+`;
 
 /** True when this process is itself running inside a handoff sandbox. */
 export function insideHandoffSandbox(env = process.env) {
@@ -164,7 +239,8 @@ export function handoffRuntimeBinaries(which = (name) => Bun.which(name)) {
  *   `.git` file points at, ephemeral /tmp, proc and basic devices;
  * - chroot makes host absolute paths and worktree symlink escapes unreachable.
  *
- * Argument protocol: root, workspace, guest_cwd, git_mount_count, then
+ * Argument protocol: root, workspace, guest_cwd, git_mount_count, tmpfs_mb,
+ * then
  * `git_mount_count` × (host_path, ro|rw), then (name, executable) pairs for
  * the package runners, then the command as the last argument.
  *
@@ -187,7 +263,8 @@ root=$1
 workspace=$2
 guest_cwd=$3
 git_mounts=$4
-shift 4
+tmpfs_mb=$5
+shift 5
 mount --make-rprivate /
 mount -t tmpfs -o mode=0755,size=64m tmpfs "$root"
 mkdir -p "$root/usr" "$root/workspace" "$root/tmp" "$root/dev" \
@@ -201,7 +278,7 @@ mount --make-rslave "$root/usr"
 mount -o remount,bind,ro "$root/usr"
 mount --rbind "$workspace" "$root/workspace"
 mount --make-rslave "$root/workspace"
-mount -t tmpfs -o mode=1777,size=256m tmpfs "$root/tmp"
+mount -t tmpfs -o mode=1777,size="${"$"}{tmpfs_mb}m" tmpfs "$root/tmp"
 mount -t proc proc "$root/proc"
 for dev in null zero random urandom; do
   touch "$root/dev/$dev"
@@ -399,6 +476,7 @@ export function runHandoffCommand({
   runtimeBinaries = handoffRuntimeBinaries(),
   nested = insideHandoffSandbox(),
   sandboxAvailable = () => handoffSandboxAvailable({ nested }),
+  tmpfsMb = policyHandoffSandboxTmpfsMb(),
 }) {
   if (!sandboxAvailable()) throw new SandboxUnavailable();
   const root = realpathSync(worktreePath);
@@ -418,6 +496,10 @@ export function runHandoffCommand({
     path.join(sandboxParent, ".handoff-sandbox-"),
   );
   const gitMounts = handoffGitMounts(root);
+  const sandboxTmpfsMb =
+    Number.isSafeInteger(tmpfsMb) && tmpfsMb >= DEFAULT_HANDOFF_SANDBOX_TMPFS_MB
+      ? tmpfsMb
+      : DEFAULT_HANDOFF_SANDBOX_TMPFS_MB;
   const fd = openSync(logPath, "w");
   let res;
   const startedAt = Date.now();
@@ -470,6 +552,9 @@ export function runHandoffCommand({
             "--pid",
             "--fork",
             "--kill-child=KILL",
+            "/usr/bin/python3",
+            "-c",
+            HANDOFF_SANDBOX_INIT,
             "/bin/bash",
             "-ceu",
             HANDOFF_SANDBOX_SETUP,
@@ -478,6 +563,7 @@ export function runHandoffCommand({
             root,
             guestCwd,
             String(gitMounts.length),
+            String(sandboxTmpfsMb),
             ...gitMounts.flatMap(({ path: gitPath, mode }) => [gitPath, mode]),
             ...runtimeArgs,
             command,
@@ -515,7 +601,11 @@ export function runHandoffCommand({
     cwd: commandCwd,
     confinement: nested
       ? "inherited handoff sandbox (already namespaced + chrooted); minimal env"
-      : "user+mount+pid+network namespace; chroot; minimal env",
+      : `user+mount+pid+network namespace; chroot; ${handoffSandboxLimits(sandboxTmpfsMb)}`,
+    sandbox: {
+      tmpfsMb: sandboxTmpfsMb,
+      namespaces: HANDOFF_SANDBOX_NAMESPACES,
+    },
     elapsedMs,
     exitCode,
     timedOut,
@@ -524,6 +614,56 @@ export function runHandoffCommand({
     tail: outputTail(output),
     logPath,
   };
+}
+
+function bunTestPaths(command) {
+  if (typeof command !== "string") return null;
+  const paths = [];
+  const segments = command.split(/(?:&&|;)/);
+  for (const segment of segments) {
+    // Shell expansion or a pipeline makes the set of executed tests unclear.
+    if (/[$`'"\\(){}[\]|<>*?]/.test(segment)) return null;
+    const words = segment.trim().split(/\s+/);
+    if (words[0] !== "bun" || words[1] !== "test") continue;
+    for (const word of words.slice(2)) {
+      if (
+        word.startsWith("-") ||
+        /^\d+(?:\.\d+)?$/.test(word) ||
+        !(/[/.]/.test(word) || word.endsWith("test"))
+      ) {
+        continue;
+      }
+      const normalized = path.posix.normalize(word);
+      if (
+        normalized === "." ||
+        normalized.startsWith("../") ||
+        path.isAbsolute(normalized)
+      )
+        return null;
+      paths.push(normalized.replace(/\/$/, ""));
+    }
+  }
+  return paths.length > 0 ? paths : null;
+}
+
+/**
+ * True only when every explicit ticket test path is contained by an explicit
+ * `bun test` path in repo verify. Unparseable commands and default test
+ * discovery return false, preserving the independent ticket check.
+ */
+export function ticketVerifyCoveredByRepoVerify(ticketCommand, repoVerify) {
+  const ticketPaths = bunTestPaths(ticketCommand);
+  const repoPaths = bunTestPaths(repoVerify);
+  return Boolean(
+    ticketPaths &&
+    repoPaths &&
+    ticketPaths.every((ticketPath) =>
+      repoPaths.some(
+        (repoPath) =>
+          ticketPath === repoPath || ticketPath.startsWith(`${repoPath}/`),
+      ),
+    ),
+  );
 }
 
 /** Best-effort timeout for the pre-diff `git fetch origin <base>` (F4). */
@@ -633,9 +773,15 @@ export function composeHandoffVerification(handoff) {
     lines.push(commandLine("Verification", primary));
     lines.push(fenceBlock(primary.tail));
     if (primary.source === "repo_verify") {
-      lines.push(
-        "  (no `## Verification Command` parsed on the ticket — the repo `verify:` command stood in for it)",
-      );
+      if (handoff.ticketVerifyCoveredByRepoVerify) {
+        lines.push(
+          "  (ticket verification skipped: its explicit test paths are covered by repo verify)",
+        );
+      } else {
+        lines.push(
+          "  (no `## Verification Command` parsed on the ticket — the repo `verify:` command stood in for it)",
+        );
+      }
     }
   } else if (handoff.reasonCode === "handoff_verification_unspecified") {
     lines.push(
@@ -1328,6 +1474,10 @@ function verifyCompleted({
             output: claim.output ?? null,
           }
         : null,
+      ticketVerifyCoveredByRepoVerify: ticketVerifyCoveredByRepoVerify(
+        ticketCommand,
+        worktreeRecord.verify,
+      ),
       reasonCode: null,
     };
     const refuse = (reasonCode, violation) => {
@@ -1388,7 +1538,13 @@ function verifyCompleted({
     }
 
     // 2. The ticket's exact Verification Command on the final tree.
-    if (ticketCommand) {
+    if (ticketCommand && handoff.ticketVerifyCoveredByRepoVerify) {
+      // Step 1 ran the broader repository test scope on this final tree, so a
+      // second namespaced execution would only duplicate it (and its fixture
+      // scratch space). Keep the worker observation as the ticket evidence.
+      handoff.verification = handoff.repoVerify;
+      handoffChecks.push("ticket_verify_covered_by_repo_verify");
+    } else if (ticketCommand) {
       const obs = runHandoffStep({
         command: ticketCommand,
         cwd: worktreePath,
@@ -1401,7 +1557,7 @@ function verifyCompleted({
       if (!obs.passed) {
         refuse(
           "handoff_verification_failed",
-          `ticket_verify_failed: ${failureWhy(obs)}`,
+          `ticket_verify_failed: ${failureWhy(obs)}; sandbox_limits: ${handoffSandboxLimits(obs.sandbox.tmpfsMb)}`,
         );
       }
       handoffChecks.push("ticket_verify_passed");

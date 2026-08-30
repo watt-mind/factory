@@ -17,6 +17,7 @@ import { execFileSync } from "node:child_process";
 import {
   ContractViolation,
   HANDOFF_HOST_ENV,
+  HANDOFF_SANDBOX_INIT,
   HANDOFF_SANDBOX_SETUP,
   SandboxUnavailable,
   changedFilesSince,
@@ -28,8 +29,10 @@ import {
   handoffGitMounts,
   handoffSandboxAvailable,
   insideHandoffSandbox,
+  policyHandoffSandboxTmpfsMb,
   policyOwnedPathsConformance,
   runHandoffCommand,
+  ticketVerifyCoveredByRepoVerify,
   verifyResult,
 } from "./verify.mjs";
 
@@ -1235,6 +1238,65 @@ describe("worktree baseline verification (WM-334)", () => {
     expect(out.result.verification.checks).toContain("repo_verify_passed");
   });
 
+  test("a ticket test command covered by the repo verify does not run a second sandbox step", () => {
+    const { dir, record } = worktreeWorkspace(
+      "bun test event-runtime/lib --timeout 20000",
+      null,
+    );
+    const testFile = path.join(
+      record.path,
+      "event-runtime",
+      "lib",
+      "covered.test.mjs",
+    );
+    mkdirSync(path.dirname(testFile), { recursive: true });
+    writeFileSync(
+      testFile,
+      'import { expect, test } from "bun:test"; test("covered", () => expect(true).toBe(true));\n',
+    );
+    record.handoff = {
+      verificationCommand:
+        "bun test event-runtime/lib/covered.test.mjs --timeout 30000",
+    };
+
+    const out = verifyResult({
+      spec: dispatchSpec,
+      def: dispatchDef,
+      registry,
+      workspaceDir: dir,
+      attempt: 1,
+      worktreeRecord: record,
+    });
+
+    expect(out.kind).toBe("completed");
+    expect(out.handoff.verification).toBe(out.handoff.repoVerify);
+    expect(out.result.verification.checks).toContain(
+      "ticket_verify_covered_by_repo_verify",
+    );
+    expect(existsSync(path.join(dir, ".verify.ticket.log"))).toBe(false);
+  });
+
+  test("a ticket-step failure names its sandbox limits", () => {
+    const { dir, record } = worktreeWorkspace("true", null);
+    record.handoff = { verificationCommand: "printf ticket-red >&2; exit 7" };
+    try {
+      verifyResult({
+        spec: dispatchSpec,
+        def: dispatchDef,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+        worktreeRecord: record,
+      });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.violations[0]).toContain("ticket_verify_failed");
+      expect(err.violations[0]).toContain("sandbox_limits: tmpfs=1024MiB");
+      expect(err.violations[0]).toContain("namespaces=user,mount,pid,network");
+    }
+  });
+
   test("a timed-out repository verification fails closed without hanging", () => {
     const { dir, record } = worktreeWorkspace("while :; do :; done", null);
     const previous = process.env.FACTORY_REPO_VERIFY_TIMEOUT_MS;
@@ -1477,6 +1539,8 @@ describe("handoff verification helpers (WM-718)", () => {
         "--pid",
         "--fork",
         "--kill-child=KILL",
+        "/usr/bin/python3",
+        HANDOFF_SANDBOX_INIT,
         HANDOFF_SANDBOX_SETUP,
         realpathSync(worktree),
         "/workspace",
@@ -1486,8 +1550,11 @@ describe("handoff verification helpers (WM-718)", () => {
       ]),
     );
     expect(HANDOFF_SANDBOX_SETUP).toContain("/usr/sbin/chroot");
+    expect(HANDOFF_SANDBOX_INIT).toContain("os.wait()");
+    expect(HANDOFF_SANDBOX_INIT).toContain("os.kill(-1, signal.SIGTERM)");
     expect(HANDOFF_SANDBOX_SETUP).toContain('mount --rbind "$workspace"');
     expect(HANDOFF_SANDBOX_SETUP).toContain('mount -t proc proc "$root/proc"');
+    expect(HANDOFF_SANDBOX_SETUP).toContain('size="${tmpfs_mb}m"');
     expect(invocation.options.env).toEqual(HANDOFF_HOST_ENV);
     // GH-967: FACTORY_ROOT (which reposRoot() only reads as a fallback, and
     // which config.mjs derives from its own location anyway) is gone; the
@@ -1721,6 +1788,23 @@ describe("handoff verification helpers (WM-718)", () => {
     expect(obs.output.trim().split("\n").pop().trim()).toBe("1");
   });
 
+  test("the PID-namespace init reaps a forked grandchild", () => {
+    if (insideHandoffSandbox()) return;
+    if (!handoffSandboxAvailable({ cache: false, nested: false })) return;
+    const worktree = realpathSync(tmpDir("evrt-handoff-reap-"));
+    const obs = runHandoffCommand({
+      // The Python child exits without waiting for its forked child. The shell
+      // remains active while polling /proc, so a zombie is observable unless
+      // namespace PID 1 reaps it.
+      command: String.raw`pid=$(/usr/bin/python3 -c 'import os; pid = os.fork(); os.write(1, f"{pid}\n".encode()) if pid else None; os._exit(0)'); for i in $(seq 1 10000); do [ ! -e /proc/$pid ] && exit 0; done; echo unreaped:$pid; exit 1`,
+      cwd: worktree,
+      worktreePath: worktree,
+      logPath: path.join(worktree, "handoff.log"),
+      timeoutMs: 60_000,
+    });
+    expect(obs.passed).toBe(true);
+  });
+
   test("outputTail keeps the last N non-empty lines, ANSI stripped", () => {
     const out = Array.from({ length: 50 }, (_, i) => `line ${i + 1}`).join(
       "\n\n",
@@ -1831,6 +1915,34 @@ describe("handoff verification helpers (WM-718)", () => {
     expect(policyOwnedPathsConformance(root)).toBe("advisory");
     writeFileSync(file, "dispatch: [not: valid\n");
     expect(policyOwnedPathsConformance(root)).toBe("advisory");
+  });
+
+  test("handoff tmpfs policy defaults safely and accepts configured MiB", () => {
+    const root = tmpDir("evrt-handoff-tmpfs-policy-");
+    expect(policyHandoffSandboxTmpfsMb(root)).toBe(1024);
+    mkdirSync(path.join(root, "config"));
+    const file = path.join(root, "config", "policy.yaml");
+    writeFileSync(file, "sandbox:\n  tmpfs_mb: 2048\n");
+    expect(policyHandoffSandboxTmpfsMb(root)).toBe(2048);
+    writeFileSync(file, "sandbox:\n  tmpfs_mb: 512\n");
+    expect(policyHandoffSandboxTmpfsMb(root)).toBe(1024);
+    writeFileSync(file, "sandbox:\n  tmpfs_mb: 1024.5\n");
+    expect(policyHandoffSandboxTmpfsMb(root)).toBe(1024);
+  });
+
+  test("ticket verification coverage requires every test path within repo verify", () => {
+    expect(
+      ticketVerifyCoveredByRepoVerify(
+        "bun test event-runtime/lib/verify.test.mjs --timeout 30000",
+        "bun test event-runtime/lib --timeout 20000 && bun run format:check",
+      ),
+    ).toBe(true);
+    expect(
+      ticketVerifyCoveredByRepoVerify(
+        "bun test event-runtime/lib/verify.test.mjs",
+        "bun test event-runtime/cli.test.mjs",
+      ),
+    ).toBe(false);
   });
 
   test("composeHandoffVerification is built from observation; the agent's claim is only agent-reported", () => {
