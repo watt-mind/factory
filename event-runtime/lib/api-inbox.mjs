@@ -66,7 +66,7 @@ export async function handleInboxApiRoute({
       return send(200, listInboxPage(db, { status, ...listPage(url) }));
     } catch (err) {
       if (err instanceof ApiParameterError) return send(422, err.body);
-      return send(422, { error: err.message });
+      throw err;
     }
   }
 
@@ -143,6 +143,9 @@ function listPage(url) {
     }
     return { limit, before };
   } catch {
-    throw new Error("invalid before cursor");
+    throw new ApiParameterError(
+      "invalid_before",
+      "before must be a valid cursor",
+    );
   }
 }

@@ -939,7 +939,9 @@ same control API the runtime exposes, never directly into the database. That kee
 identical endpoints, with the same audit trail, rather than a reimplementation.
 
 All control-API list endpoints reject non-integer, out-of-range `limit` values
-with `422 { error: "invalid_limit", message }`.
+with `422 { error: "invalid_limit", message }`. `GET /inbox` additionally
+returns `invalid_before` for malformed cursors and `invalid_status` for unknown
+status filters.
 
 **Push notifications (WM-65).** For the operator who is _not_ watching, the
 serve tick carries a push channel (`event-runtime/lib/notify.mjs`) over the
