@@ -320,6 +320,7 @@ WORKTREE_UP_OK=0
 cleanup_worktree_up() {
   local code=$?
   trap - EXIT INT TERM
+  release_worktree_lifecycle_lock
   release_port_allocation_lock
   if [[ "$code" -ne 0 && "$WORKTREE_UP_OK" -ne 1 ]]; then
     [[ "$STARTED_WEB" -eq 1 ]] && term_daemon "$RUN_DIR/web.pid" "web server"
