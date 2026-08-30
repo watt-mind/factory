@@ -53,6 +53,8 @@ describe("supervise (WM-226)", () => {
         "--reload-on-change",
         "--label",
         "node=lab",
+        "--label",
+        "can=infra-exec",
       ]),
     ).toEqual([
       "--adapter-override",
@@ -62,7 +64,10 @@ describe("supervise (WM-226)", () => {
       "--reload-on-change",
       "--label",
       "node=lab",
+      "--label",
+      "can=infra-exec",
     ]);
+    expect(workerPassthroughArgs(["--label"])).toEqual([]);
   });
 
   test("rejects bounds and intervals it cannot honour, naming the flag", () => {
@@ -81,6 +86,31 @@ describe("supervise (WM-226)", () => {
       ["supervise", "--workers", "x", "--once"],
     ]) {
       expect(runCli(args).status).not.toBe(0);
+    }
+  });
+
+  test("rejects malformed worker options before starting the pool", () => {
+    const badPoll = runCli([
+      "supervise",
+      "--workers",
+      "1:1",
+      "--poll-ms",
+      "5s",
+      "--once",
+    ]);
+    expect(badPoll.status).not.toBe(0);
+    expect(badPoll.all).toContain(
+      "supervise: --poll-ms must be an integer between 25 and 5000",
+    );
+
+    for (const args of [
+      ["supervise", "--workers", "1:1", "--once", "--label"],
+      ["supervise", "--workers", "1:1", "--label", "--once"],
+      ["supervise", "--workers", "1:1", "--label", "not-a-label", "--once"],
+    ]) {
+      const result = runCli(args);
+      expect(result.status).not.toBe(0);
+      expect(result.all).toContain("supervise: --label expects key=value");
     }
   });
 

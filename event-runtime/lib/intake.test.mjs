@@ -6,6 +6,7 @@ import {
   admitExternalEvent,
   admitSignedEvent,
   githubIntakeView,
+  translateGitHubEvent,
   verifyWebhook,
 } from "./intake.mjs";
 import { loadRegistry } from "./registry.mjs";
@@ -423,5 +424,75 @@ describe("githubIntakeView", () => {
       ageMs: null,
       stale: false,
     });
+  });
+});
+
+describe("translateGitHubEvent repository slug matching (WM-1803)", () => {
+  const repos = new Map([
+    [
+      "factory",
+      {
+        name: "factory",
+        github: "Watt-Mind/Factory",
+        base: "develop",
+        reportOnly: false,
+      },
+    ],
+  ]);
+  const translate = (event, payload) =>
+    translateGitHubEvent({
+      event,
+      deliveryId: "case-insensitive-delivery",
+      payload,
+      repos,
+      now: NOW,
+    });
+
+  test("admits a pull request when the delivered repository slug differs only by case", () => {
+    expect(
+      translate("pull_request", {
+        action: "opened",
+        pull_request: { base: { ref: "develop" } },
+        repository: { full_name: "watt-mind/factory" },
+      }),
+    ).toMatchObject({
+      ok: true,
+      envelope: {
+        type: "factory.merge.requested",
+        payload: { repo: "factory" },
+      },
+    });
+  });
+
+  test("emits workflow failures for mixed-case repository slugs without changing the delivered slug", () => {
+    expect(
+      translate("workflow_run", {
+        action: "completed",
+        workflow_run: { id: 1803, conclusion: "failure" },
+        repository: { full_name: "wATT-mIND/fACTORY" },
+      }),
+    ).toMatchObject({
+      ok: true,
+      envelope: {
+        type: "github.workflow-run.failed",
+        payload: { repo: "wATT-mIND/fACTORY", runId: 1803 },
+      },
+    });
+  });
+
+  test("keeps empty and non-string repository slugs unconfigured", () => {
+    for (const full_name of ["", "   ", null, 1803]) {
+      expect(
+        translate("pull_request", {
+          action: "opened",
+          pull_request: { base: { ref: "develop" } },
+          repository: { full_name },
+        }),
+      ).toEqual({
+        ok: false,
+        ignored: true,
+        reason: "unconfigured_repo",
+      });
+    }
   });
 });

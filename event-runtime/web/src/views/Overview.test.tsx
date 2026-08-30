@@ -40,6 +40,22 @@ afterEach(() => {
   cleanup();
 });
 
+// Bun restores its fetch mock when each test begins. Reassert the fail-closed
+// DOM-test contract in tests that intentionally exercise an unmocked request.
+function installFetchGuard() {
+  globalThis.fetch = (async (
+    input: Parameters<typeof fetch>[0],
+    init?: Parameters<typeof fetch>[1],
+  ) => {
+    const request = input instanceof Request ? input : null;
+    const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
+    const rawUrl = request?.url ?? String(input);
+    const url = new URL(rawUrl, "http://localhost/");
+    const path = `${url.pathname}${url.search}`.replace(/^\/api(?=\/)/, "");
+    throw new Error(`unmocked api call: ${method} ${path}`);
+  }) as unknown as typeof fetch;
+}
+
 function renderWithClient(ui: React.ReactElement) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -541,6 +557,7 @@ describe("Overview keyboard navigation (WM-292)", () => {
 
 describe("Overview anomaly deck (WM-95, WM-979)", () => {
   test("an incomplete api stub fails closed without reaching the network", async () => {
+    installFetchGuard();
     const originalProposals = api.proposals;
     api.proposals = async () => ({ proposals: [] });
     try {
@@ -555,6 +572,7 @@ describe("Overview anomaly deck (WM-95, WM-979)", () => {
   });
 
   test("the network guard reports mutating methods and normalized api paths", async () => {
+    installFetchGuard();
     await expect(
       globalThis.fetch("/api/events", { method: "POST" }),
     ).rejects.toThrow("unmocked api call: POST /events");
@@ -963,6 +981,28 @@ describe("Overview needs you (WM-596)", () => {
 
       fireEvent.keyDown(document.body, { key: "Enter" });
       expect(onNavigate).toHaveBeenCalledWith("inbox/blocked-0");
+    } finally {
+      restore();
+    }
+  });
+
+  test("requests open inbox rows rather than a mixed-status ledger page", async () => {
+    const calls: string[] = [];
+    const restore = stubNeedsYou([]);
+    api.inbox = async (status) => {
+      calls.push(status ?? "open");
+      return {
+        items:
+          status === "open"
+            ? [inboxItem("open-only", "BLOCKED", "2026-08-17T00:00:00.000Z")]
+            : [],
+      };
+    };
+
+    try {
+      const view = renderOverview();
+      await waitFor(() => view.getByTitle("Attention open-only"));
+      expect(calls).toEqual(["open"]);
     } finally {
       restore();
     }
