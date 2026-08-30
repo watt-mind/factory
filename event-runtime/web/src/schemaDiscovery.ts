@@ -38,6 +38,10 @@ export function groupDiscoveredFields(
 const MAX_SCAN_ROWS = 60;
 const MAX_SCAN_DEPTH = 3;
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 /**
  * Scan rows to auto-discover nested keys from payload, spec.input, labels, limits, etc.
  */
@@ -54,9 +58,9 @@ export function discoverPayloadFields<T>(
 
   function walk(obj: unknown, prefix: string, depth: number) {
     if (depth > MAX_SCAN_DEPTH || obj == null) return;
-    if (typeof obj !== "object" || Array.isArray(obj)) return;
+    if (!isRecord(obj)) return;
 
-    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+    for (const [key, value] of Object.entries(obj)) {
       if (
         key.startsWith("_") ||
         key === "__proto__" ||
@@ -95,7 +99,8 @@ export function discoverPayloadFields<T>(
   }
 
   for (const row of sample) {
-    const r = row as any;
+    if (!isRecord(row)) continue;
+    const r = row;
     if (r.envelope?.payload) walk(r.envelope.payload, "payload", 1);
     else if (r.envelope) walk(r.envelope, "envelope", 1);
 

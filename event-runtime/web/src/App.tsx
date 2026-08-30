@@ -335,9 +335,8 @@ export function App() {
   // null until the first status lands: reading "no workers" off a pending
   // fetch is the same false alarm as flashing "unreachable" on first load.
   const liveWorkers = status.data?.workers?.live ?? null;
-  const stoppedSchedulesCount = (
-    (status.data?.anomalies as any)?.stoppedSchedules ?? []
-  ).length;
+  const stoppedSchedulesCount = (status.data?.anomalies?.stoppedSchedules ?? [])
+    .length;
 
   // Workers is the one badge whose meaning can flip: a stale
   // heartbeat is a worker that is gone while claiming to work, so it
