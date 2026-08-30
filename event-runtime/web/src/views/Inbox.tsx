@@ -844,7 +844,17 @@ export function Inbox({
   const actionableVisible = selectionEnabled ? visible : [];
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkAcking, setBulkAcking] = useState(false);
+  const [bulkAckProgress, setBulkAckProgress] = useState<{
+    completed: number;
+    total: number;
+  } | null>(null);
+  const [bulkAckError, setBulkAckError] = useState<unknown>(null);
   const [bulkResolving, setBulkResolving] = useState(false);
+  const [bulkResolveProgress, setBulkResolveProgress] = useState<{
+    completed: number;
+    total: number;
+  } | null>(null);
+  const [bulkResolveError, setBulkResolveError] = useState<unknown>(null);
   const [bulkResolveOpen, setBulkResolveOpen] = useState(false);
   const [bulkResolveReason, setBulkResolveReason] = useState("");
   const bulkResolveReasonRef = useRef<HTMLTextAreaElement>(null);
@@ -1008,27 +1018,71 @@ export function Inbox({
   };
 
   const openBulkResolve = () => {
+    setBulkResolveError(null);
     setBulkResolveReason("");
     setBulkResolveOpen(true);
   };
 
+  const runBulk = async (
+    items: InboxItem[],
+    operation: (item: InboxItem) => Promise<unknown>,
+    onProgress: (completed: number) => void,
+  ) => {
+    const succeeded = new Set<string>();
+    let failed = 0;
+    let firstError: unknown = undefined;
+    let nextIndex = 0;
+    let completed = 0;
+    const workerCount = Math.min(4, items.length);
+
+    await Promise.all(
+      Array.from({ length: workerCount }, async () => {
+        while (nextIndex < items.length) {
+          const item = items[nextIndex++];
+          try {
+            await operation(item);
+            succeeded.add(item.id);
+          } catch (error) {
+            failed++;
+            if (firstError === undefined) {
+              firstError =
+                error instanceof Error ? error : new Error(String(error));
+            }
+          } finally {
+            completed++;
+            onProgress(completed);
+          }
+        }
+      }),
+    );
+
+    return { succeeded, failed, firstError };
+  };
+
   const handleBulkAck = async () => {
     if (!connected || bulkAcking || ackableSelected.length === 0) return;
+    const items = ackableSelected;
     setBulkAcking(true);
-    let done = 0;
-    let failed = 0;
-    for (const item of ackableSelected) {
-      try {
-        await api.ackInbox(item.id);
-        done++;
-      } catch {
-        failed++;
-      }
-    }
+    setBulkAckError(null);
+    setBulkAckProgress({ completed: 0, total: items.length });
+    const { succeeded, failed, firstError } = await runBulk(
+      items,
+      (item) => api.ackInbox(item.id),
+      (completed) => setBulkAckProgress({ completed, total: items.length }),
+    );
     invalidate();
-    setSelectedIds(new Set());
+    setSelectedIds((previous) => {
+      const next = new Set(previous);
+      for (const id of succeeded) next.delete(id);
+      return next;
+    });
+    setBulkAckError(firstError);
     setBulkAcking(false);
-    notify(`Ack: ${done} done / ${failed} failed`, failed ? "err" : "ok");
+    setBulkAckProgress(null);
+    notify(
+      `Ack: ${succeeded.size} done / ${failed} failed`,
+      failed ? "err" : "ok",
+    );
   };
 
   const handleBulkResolve = async () => {
@@ -1040,23 +1094,32 @@ export function Inbox({
       !reason
     )
       return;
+    const items = resolvableSelected;
     setBulkResolving(true);
-    let done = 0;
-    let failed = 0;
-    for (const item of resolvableSelected) {
-      try {
-        await api.resolveInbox(item.id, reason);
-        done++;
-      } catch {
-        failed++;
-      }
-    }
+    setBulkResolveError(null);
+    setBulkResolveProgress({ completed: 0, total: items.length });
+    const { succeeded, failed, firstError } = await runBulk(
+      items,
+      (item) => api.resolveInbox(item.id, reason),
+      (completed) => setBulkResolveProgress({ completed, total: items.length }),
+    );
     invalidate();
-    setSelectedIds(new Set());
+    setSelectedIds((previous) => {
+      const next = new Set(previous);
+      for (const id of succeeded) next.delete(id);
+      return next;
+    });
+    setBulkResolveError(firstError);
     setBulkResolving(false);
-    setBulkResolveOpen(false);
-    setBulkResolveReason("");
-    notify(`Resolve: ${done} done / ${failed} failed`, failed ? "err" : "ok");
+    setBulkResolveProgress(null);
+    if (failed === 0) {
+      setBulkResolveOpen(false);
+      setBulkResolveReason("");
+    }
+    notify(
+      `Resolve: ${succeeded.size} done / ${failed} failed`,
+      failed ? "err" : "ok",
+    );
   };
 
   // Enter confirms either resolve dialog. Dialog focus parks on its root, so a
@@ -1832,7 +1895,9 @@ export function Inbox({
             disabled={!connected || bulkAcking || ackableSelected.length === 0}
             onClick={() => void handleBulkAck()}
           >
-            {bulkAcking ? "Acking…" : "Ack"}
+            {bulkAcking && bulkAckProgress
+              ? `Acking ${bulkAckProgress.completed}/${bulkAckProgress.total}…`
+              : "Ack"}
             <span
               className="mono ml-1 text-xs text-(--text-faint)"
               aria-hidden="true"
@@ -1854,6 +1919,7 @@ export function Inbox({
               X
             </span>
           </Button>
+          <VerbError error={bulkAckError} />
         </BulkActionBar>
       )}
 
@@ -1872,6 +1938,7 @@ export function Inbox({
             onChange={setBulkResolveReason}
             inputRef={bulkResolveReasonRef}
           />
+          <VerbError error={bulkResolveError} />
           <div className="flex justify-end gap-2">
             <Button onClick={() => setBulkResolveOpen(false)}>Cancel</Button>
             <Button
@@ -1881,8 +1948,8 @@ export function Inbox({
               }
               onClick={() => void handleBulkResolve()}
             >
-              {bulkResolving
-                ? "Resolving…"
+              {bulkResolving && bulkResolveProgress
+                ? `Resolving ${bulkResolveProgress.completed}/${bulkResolveProgress.total}…`
                 : `Resolve ${resolvableSelected.length} items`}
             </Button>
           </div>

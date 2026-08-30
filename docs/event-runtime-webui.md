@@ -1381,7 +1381,9 @@ worktrees a repo owns.
   `#/projects/:name` is shareable per §10.8, and the empty state names the
   file that is empty (`config/repos.yaml`) rather than saying "no results".
 - **Detail panel.** Repository settings are grouped by what they govern, and
-  every group names `config/repos.yaml` as its source. **Dispatch** shows the
+  every group names `config/repos.yaml` as its source; field semantics live in
+  the [repository config reference](event-runtime-repos.md#config-reference).
+  **Dispatch** shows the
   dispatchable/report-only mode, effective max in flight and whether it came
   from the repo or the planner default, base branch, worktree root and script
   capabilities, and the verify command verbatim. **Merge gate** shows the
@@ -1390,8 +1392,8 @@ worktrees a repo owns.
   empty list says so. **Owned paths policy** shows direct source/required-path
   rules and pin manifests, or the default. **Deploy & smoke** shows deploy
   branch, the allow-listed deployment URL/branch/revision field, smoke
-  workflow/URL/deadline. **Security** currently allow-lists only
-  `python_version`, or states that defaults apply. Long path/check lists are
+  workflow/URL/deadline. **Security** shows the allow-listed
+  [`security.python_version`](event-runtime-repos.md#config-reference), or states that defaults apply. Long path/check lists are
   untruncated monospace chips inside their own scrolling containers, and all
   other absent values use the shared empty-value placeholder.
 - **Janitor, Dry before Apply (OPS-362).** `POST /repos/:name/janitor` — §2's

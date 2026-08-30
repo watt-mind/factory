@@ -112,8 +112,12 @@ export function getAnomalyLines(s) {
  */
 export function getPoolLines(pool, s) {
   const started = pool?.supervisor !== null && pool?.supervisor !== undefined;
-  if (!started && (pool?.slots?.length ?? 0) === 0)
-    return { line: null, anomalies: [] };
+  // A leftover `fastExits: 0` crash-loop file (kept across restarts as the
+  // durable backoff counter) is not a slot worth a pool line on its own.
+  const liveSlots = (pool?.slots ?? []).filter(
+    (sl) => sl.hasPidFile || sl.crashLoops > 0,
+  );
+  if (!started && liveSlots.length === 0) return { line: null, anomalies: [] };
 
   const sup = pool.supervisor;
   const supText = !sup
@@ -122,7 +126,13 @@ export function getPoolLines(pool, s) {
       ? `live (pid ${sup.pid})`
       : `DEAD (stale pid ${sup.pid})`;
   const draining = pool.slots.filter((sl) => sl.alive && sl.draining).length;
-  const line = `${pad("pool", 11)}supervisor ${supText}   workers ${pool.size}${draining > 0 ? ` (${draining} draining)` : ""}`;
+  const crashLoops = pool.slots.filter((sl) => sl.crashLoops > 0);
+  const crashText = crashLoops.length
+    ? `   crashLoops ${crashLoops
+        .map((sl) => `slot ${sl.n}: ${sl.crashLoops}`)
+        .join(", ")}`
+    : "";
+  const line = `${pad("pool", 11)}supervisor ${supText}   workers ${pool.size}${draining > 0 ? ` (${draining} draining)` : ""}${crashText}`;
 
   // §13's shape of anomaly: work waiting with nothing left that can grow the
   // pool. The queue is not stuck yet — the live workers may still drain it —

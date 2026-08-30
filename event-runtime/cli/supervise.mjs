@@ -6,6 +6,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -39,7 +40,48 @@ export function slotFiles(dir, n) {
     drain: path.join(dir, `worker-${n}.drain`),
     log: path.join(dir, `worker-${n}.log`),
     id: path.join(dir, `worker-${n}.id`),
+    crashLoop: path.join(dir, `worker-${n}.crash-loop.json`),
   };
+}
+
+const CRASH_LOOP_LIMIT = 3;
+const CRASH_BACKOFF_MS = 2_000;
+const CRASH_BACKOFF_MAX_MS = 60_000;
+
+function readCrashLoop(file) {
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    return {
+      fastExits: Math.max(0, Number(parsed.fastExits) || 0),
+      spawnedAt: Number(parsed.spawnedAt) || null,
+      lastExitedAt: Number(parsed.lastExitedAt) || null,
+      lastExitDurationMs: Number(parsed.lastExitDurationMs) || null,
+      workerId: typeof parsed.workerId === "string" ? parsed.workerId : null,
+      nextAttemptAt: Number(parsed.nextAttemptAt) || null,
+      loggedRetryAt: Number(parsed.loggedRetryAt) || null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeCrashLoop(file, state) {
+  // tmp + rename: a concurrent `status` reads either the previous complete
+  // state or the new one, never a torn file.
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(state)}\n`);
+  renameSync(tmp, file);
+}
+
+export function crashBackoffMs(fastExits) {
+  return Math.min(
+    CRASH_BACKOFF_MS * 2 ** (fastExits - CRASH_LOOP_LIMIT),
+    CRASH_BACKOFF_MAX_MS,
+  );
+}
+
+function remainingSeconds(at, now) {
+  return Math.max(1, Math.ceil((at - now) / 1000));
 }
 
 /** Signal 0 probes without delivering: EPERM still proves the process exists. */
@@ -80,19 +122,26 @@ export function readPool(dir = runDir()) {
   } catch {
     /* dir missing or unreadable: names stays [] from the initializer */
   }
-  const slots = [];
+  const slotNumbers = new Set();
   for (const name of names) {
-    const m = /^worker-(\d+)\.pid$/.exec(name);
+    const m = /^worker-(\d+)\.(?:pid|crash-loop\.json)$/.exec(name);
     if (!m) continue;
-    const n = Number(m[1]);
+    slotNumbers.add(Number(m[1]));
+  }
+  const slots = [];
+  for (const n of slotNumbers) {
     const files = slotFiles(dir, n);
     const pid = readPidFile(files.pid);
+    const crashLoop = readCrashLoop(files.crashLoop);
     slots.push({
       n,
       pid,
+      hasPidFile: existsSync(files.pid),
       alive: pidAlive(pid),
       draining: existsSync(files.drain),
       workerId: readFileTrimmed(files.id),
+      crashLoops: crashLoop?.fastExits ?? 0,
+      nextAttemptAt: crashLoop?.nextAttemptAt ?? null,
     });
   }
   slots.sort((a, b) => a.n - b.n);
@@ -208,6 +257,71 @@ export default async function supervise(args) {
     spawnedAt.delete(n);
   }
 
+  function resetCrashLoop(n, state) {
+    if (state.fastExits === 0 && state.nextAttemptAt === null) return;
+    writeCrashLoop(slotFiles(dir, n).crashLoop, {
+      ...state,
+      fastExits: 0,
+      nextAttemptAt: null,
+      loggedRetryAt: null,
+    });
+    log(`slot ${n} registered past spawn grace — crash-loop counter reset`);
+  }
+
+  function resetRegisteredSlots(now) {
+    for (const slot of readPool(dir).slots) {
+      if (!slot.alive || !slot.workerId) continue;
+      const files = slotFiles(dir, slot.n);
+      const state = readCrashLoop(files.crashLoop);
+      if (
+        !state ||
+        state.fastExits === 0 ||
+        state.workerId !== slot.workerId ||
+        now - (state.spawnedAt ?? now) < spawnGraceMs
+      )
+        continue;
+      const worker = db
+        .query(`SELECT started_at FROM workers WHERE worker_id = ?`)
+        .get(slot.workerId);
+      if (
+        worker &&
+        Number.isFinite(Date.parse(worker.started_at)) &&
+        now - Date.parse(worker.started_at) >= spawnGraceMs
+      )
+        resetCrashLoop(slot.n, state);
+    }
+  }
+
+  function recordExit(slot, now) {
+    const files = slotFiles(dir, slot.n);
+    const state = readCrashLoop(files.crashLoop);
+    const startedAt = spawnedAt.get(slot.n) ?? state?.spawnedAt;
+    const fastExit =
+      !slot.draining &&
+      Number.isFinite(startedAt) &&
+      now - startedAt < spawnGraceMs;
+    releaseSlot(slot.n);
+
+    if (!fastExit) {
+      rmSync(files.crashLoop, { force: true });
+      return null;
+    }
+
+    const fastExits = (state?.fastExits ?? 0) + 1;
+    const nextAttemptAt =
+      fastExits >= CRASH_LOOP_LIMIT ? now + crashBackoffMs(fastExits) : null;
+    writeCrashLoop(files.crashLoop, {
+      fastExits,
+      spawnedAt: null,
+      lastExitedAt: now,
+      lastExitDurationMs: now - startedAt,
+      workerId: slot.workerId ?? state?.workerId ?? null,
+      nextAttemptAt,
+      loggedRetryAt: null,
+    });
+    return { fastExits, nextAttemptAt };
+  }
+
   function spawnSlot(n) {
     const files = slotFiles(dir, n);
     // Never inherit the previous tenant's drain flag: a fresh worker that finds
@@ -237,7 +351,18 @@ export default async function supervise(args) {
     closeSync(out);
     writeFileSync(files.pid, `${child.pid}\n`);
     writeFileSync(files.id, `${workerId}\n`);
-    spawnedAt.set(n, Date.now());
+    const startedAt = Date.now();
+    spawnedAt.set(n, startedAt);
+    const previous = readCrashLoop(files.crashLoop);
+    writeCrashLoop(files.crashLoop, {
+      fastExits: previous?.fastExits ?? 0,
+      spawnedAt: startedAt,
+      lastExitedAt: previous?.lastExitedAt ?? null,
+      lastExitDurationMs: previous?.lastExitDurationMs ?? null,
+      workerId,
+      nextAttemptAt: null,
+      loggedRetryAt: null,
+    });
     return { pid: child.pid, workerId, log: files.log };
   }
 
@@ -261,18 +386,27 @@ export default async function supervise(args) {
   function tick() {
     const now = Date.now();
     for (const s of readPool(dir).slots) {
-      if (s.alive) continue;
+      // A crash-loop state intentionally remains after its pidfile is removed
+      // so status can expose the held slot. It is not a second exit.
+      if (s.alive || !s.hasPidFile) continue;
       log(
         `slot ${s.n} (worker ${s.workerId ?? "?"}, pid ${s.pid ?? "?"}) exited — slot released`,
       );
-      releaseSlot(s.n);
+      recordExit(s, now);
     }
+
+    // A registered worker which survives the boot window is healthy enough to
+    // forget previous fast exits. Check the registry as well as its pid: a
+    // process that never registered has not recovered the pool.
+    resetRegisteredSlots(now);
 
     const alive = readPool(dir).slots.filter((s) => s.alive);
     const observed = poolCounts(db, { now });
-    const pending = alive.filter(
-      (s) => now - (spawnedAt.get(s.n) ?? 0) < spawnGraceMs,
-    ).length;
+    const pending = alive.filter((s) => {
+      const state = readCrashLoop(slotFiles(dir, s.n).crashLoop);
+      const startedAt = spawnedAt.get(s.n) ?? state?.spawnedAt ?? 0;
+      return now - startedAt < spawnGraceMs;
+    }).length;
     const draining = alive.filter((s) => s.draining).length;
     const decision = poolDecision({
       queued: observed.queued,
@@ -291,6 +425,20 @@ export default async function supervise(args) {
       while (taken.has(slot)) slot += 1;
       if (slot > bounds.max) {
         log(`hold — no free slot below max ${bounds.max} [${counts}]`);
+        return decision;
+      }
+      const files = slotFiles(dir, slot);
+      const crashLoop = readCrashLoop(files.crashLoop);
+      if (crashLoop?.nextAttemptAt && crashLoop.nextAttemptAt > now) {
+        if (crashLoop.loggedRetryAt !== crashLoop.nextAttemptAt) {
+          log(
+            `crash-loop slot ${slot}: ${crashLoop.fastExits} fast exits, next attempt in ${remainingSeconds(crashLoop.nextAttemptAt, now)}s [${counts}]`,
+          );
+          writeCrashLoop(files.crashLoop, {
+            ...crashLoop,
+            loggedRetryAt: crashLoop.nextAttemptAt,
+          });
+        }
         return decision;
       }
       const { pid, workerId, log: logFile } = spawnSlot(slot);

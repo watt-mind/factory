@@ -923,9 +923,15 @@ describe("Inbox view", () => {
     ).toBeTruthy();
   });
 
-  test("bulk ack reports a failure for the eligible subset", async () => {
+  test("bulk ack retains failed items and surfaces the first failure", async () => {
+    ledger = [
+      item({ id: "inbox_bulk_success", kind: "BLOCKED" }),
+      item({ id: "inbox_bulk_failure", kind: "BLOCKED", createdAt: T1 }),
+    ];
     api.ackInbox = mock(async (id: string) => {
-      throw new Error(`race: ${id}`);
+      if (id === "inbox_bulk_failure") throw new Error("race lost");
+      ledger = ledger.map((it) => (it.id === id ? { ...it, ackedAt: T2 } : it));
+      return { item: ledger.find((it) => it.id === id)! };
     });
     const { view } = renderInbox();
     await waitFor(() => view.getByLabelText("Select all inbox items"));
@@ -933,10 +939,21 @@ describe("Inbox view", () => {
 
     fireEvent.click(view.getByRole("button", { name: /^Ack$/ }));
 
-    await waitFor(() => expect(api.ackInbox).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(api.ackInbox).toHaveBeenCalledTimes(2));
     expect(
-      view.getByRole("button", { name: "Ack: 0 done / 1 failed" }),
+      view.getByRole("button", { name: "Ack: 1 done / 1 failed" }),
     ).toBeTruthy();
+    expect(view.getByText("race lost")).toBeTruthy();
+    expect(
+      view.getByRole("toolbar", { name: "Bulk actions" }).textContent,
+    ).toContain("1 selected");
+    expect(
+      (
+        view.getByLabelText(
+          "Select inbox item inbox_bulk_failure",
+        ) as HTMLInputElement
+      ).checked,
+    ).toBe(true);
   });
 
   test("background refetch preserves selected ids and prunes ids that leave the tab", async () => {

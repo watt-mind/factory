@@ -3,26 +3,34 @@
 repos:
   # Factory can manage its own checkout. The home-relative paths are portable;
   # change them in config/repos.yaml if your checkout layout differs.
-  - name: factory
-    path: ~/Develop/factory
-    github: watt-mind/factory
-    icon: ph-robot
-    color: orange
-    team: WM
-    project: Factory
+  - name: factory # Stable registry name used by commands and dispatch.
+    path: ~/Develop/factory # Local checkout path; `~` expands to the current home.
+    github: watt-mind/factory # GitHub owner/repo used for promotion PRs.
+    icon: ph-robot # Optional UI icon metadata.
+    color: orange # Optional UI colour metadata.
+    team: WM # Optional tracker team identifier.
+    project: Factory # Optional tracker project name.
     # Which tracker holds this repo's tickets: linear | github | memory.
     # Omit to inherit config/policy.yaml's controlPlane.kind (itself defaulting
     # to linear). Setting it per repo is what lets one factory instance run
     # this repo on GitHub Issues while every other repo it manages stays on
     # Linear — without it the choice is global and moving one moves all.
     # control_plane: github
-    base: develop
-    deploy_branch: main
-    worktree_up: bin/worktree-up.sh
-    worktree_down: bin/worktree-down.sh
-    worktree_root: ~/Develop/.worktrees/factory
-    max_in_flight: 20
-    verify: bun test event-runtime/lib --timeout 20000 && bun build/emit.mjs --check && bun run format:check
+    base: develop # Base branch for promotion PRs; defaults to main.
+    deploy_branch: main # Optional human-reviewed release branch.
+    worktree_up: bin/worktree-up.sh # Script that creates an isolated ticket worktree.
+    worktree_down: bin/worktree-down.sh # Script that tears down an isolated worktree.
+    worktree_root: ~/Develop/.worktrees/factory # Optional root for ticket worktrees.
+    # worktree_warm: bin/worktree-warm.sh # Optional script that warms a worktree template.
+    max_in_flight: 20 # Optional positive per-repository dispatch cap.
+    verify: bun test event-runtime/lib --timeout 20000 && bun build/emit.mjs --check && bun run format:check # Optional local verification command.
+    # smoke_workflow: smoke-prod.yml # Optional post-deploy GitHub Actions workflow.
+    # smoke_url: https://factory.example.com/healthz # Optional post-deploy smoke endpoint.
+    smoke_deadline_seconds: 420 # Optional positive deadline for smoke confirmation.
+    # deployment: # Optional allow-listed deployment identity for verification.
+    #   url: https://factory.example.com # Deployment URL shown to operators.
+    #   branch: main # Branch the deployment represents.
+    #   revision_field: revision # Field carrying the deployed revision.
     # Executables this repo's worktree script and verify command need, with the
     # semver range each must satisfy (WM-316, docs/event-runtime-repos.md §5).
     # Preflight resolves each one on the node and compares versions BEFORE a
@@ -52,13 +60,13 @@ repos:
     toolchain:
       bun: ">=1.3 <2"
       git: ">=2.30"
-    owned_paths_policy:
-      direct:
+    owned_paths_policy: # Optional closure rules for ticket Owned Paths.
+      direct: # Source-glob changes require their generated/output paths.
         - source: shared/**
           requires:
             - dist/**
             - plugins/core/**
-      pin_manifests:
+      pin_manifests: # Pin manifests that must accompany matching path changes.
         - event-runtime/agents/*.json
       # Registry inputs change the tracked zero-pack digest baseline.
       registry_digest:
@@ -69,11 +77,16 @@ repos:
           - event-runtime/schedules.json
         baseline: event-runtime/lib/registry.test.mjs
     merge_ci:
+      # Fallback workflow when GitHub branch protection returns no contexts.
       workflow: CI
+      # Unique checks required from that fallback workflow.
       required_checks:
         - Shadow runner fleet available
         - Verify
-    escalate_paths: []
+    escalate_paths: [] # Paths that require human escalation; empty means none.
+    security: # Optional allow-listed settings for the security audit.
+      python_version: "3.12" # Optional Python version for the security audit.
+
 
   # Add product repositories only to your ignored config/repos.yaml. Start in
   # report-only mode until their isolated worktree lifecycle is proven.
@@ -82,5 +95,5 @@ repos:
   #   github: your-org/example
   #   team: EXAMPLE
   #   base: main
-  #   report_only: true
+  #   report_only: true # Disable ticket dispatch until worktree lifecycle is proven.
   #   verify: bun test

@@ -203,6 +203,35 @@ describe("pool visibility in status/doctor (WM-226)", () => {
     }
   });
 
+  test("a leftover fastExits: 0 crash-loop file after a clean stop prints no pool line", async () => {
+    const { getPoolLines, readPool } = await import("../cli.mjs");
+    const dir = tmpDir("evrt-pool-leftover-");
+    try {
+      // A clean pool stop removes the pidfiles but keeps the durable backoff
+      // counter; on its own that must not fabricate a "supervisor absent" line.
+      writeFileSync(
+        path.join(dir, "worker-1.crash-loop.json"),
+        JSON.stringify({ fastExits: 0, nextAttemptAt: null }),
+      );
+      const view = getPoolLines(readPool(dir), {
+        runs: { byState: { QUEUED: 3 } },
+      });
+      expect(view.line).toBeNull();
+      expect(view.anomalies).toEqual([]);
+
+      // A real backoff counter is still worth showing.
+      writeFileSync(
+        path.join(dir, "worker-1.crash-loop.json"),
+        JSON.stringify({ fastExits: 2, nextAttemptAt: null }),
+      );
+      expect(getPoolLines(readPool(dir), {}).line).toContain(
+        "crashLoops slot 1: 2",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("a live supervisor reports its pool size; a dead one with a queue is an anomaly", async () => {
     const { getPoolLines, readPool } = await import("../cli.mjs");
     const dir = tmpDir("evrt-pool-view-");
@@ -221,6 +250,14 @@ describe("pool visibility in status/doctor (WM-226)", () => {
       // A drained slot is visible while it winds down.
       writeFileSync(path.join(dir, "worker-1.drain"), "scale-down\n");
       expect(getPoolLines(readPool(dir), {}).line).toContain("(1 draining)");
+
+      writeFileSync(
+        path.join(dir, "worker-1.crash-loop.json"),
+        JSON.stringify({ fastExits: 3, nextAttemptAt: Date.now() + 2_000 }),
+      );
+      expect(getPoolLines(readPool(dir), {}).line).toContain(
+        "crashLoops slot 1: 3",
+      );
 
       // A queue with waiting runs and a dead supervisor is the §13 anomaly:
       // nothing is left that can grow the pool behind the workers still up.

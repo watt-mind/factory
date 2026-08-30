@@ -78,15 +78,24 @@ export function ArtifactFull({
     staleTime: 30_000,
   });
 
-  const selectedKinds = selected ? kindsOf(selected) : [];
+  const selectedKinds = useMemo(
+    () => (selected ? kindsOf(selected) : []),
+    [selected],
+  );
   const selectedName = digest ? downloadName(digest, selectedKinds) : "";
   const shortDigest = digest.slice(0, 12);
 
-  const binary = contentQ.data !== undefined && looksBinary(contentQ.data);
-  const preview =
-    contentQ.data === undefined || binary
-      ? null
-      : formattedContent(contentQ.data, selectedKinds);
+  const binary = useMemo(
+    () => contentQ.data !== undefined && looksBinary(contentQ.data),
+    [contentQ.data],
+  );
+  const preview = useMemo(
+    () =>
+      contentQ.data === undefined || binary
+        ? null
+        : formattedContent(contentQ.data, selectedKinds),
+    [contentQ.data, binary, selectedKinds],
+  );
 
   const parsedArtifact = useMemo(
     () => (contentQ.data === undefined ? null : parsedObject(contentQ.data)),
@@ -123,11 +132,13 @@ export function ArtifactFull({
     [preview],
   );
 
-  const matchCount = contentSearch.trim()
-    ? previewLines.filter((line) =>
-        line.toLowerCase().includes(contentSearch.trim().toLowerCase()),
-      ).length
-    : null;
+  const matchCount = useMemo(() => {
+    const search = contentSearch.trim().toLowerCase();
+    return search
+      ? previewLines.filter((line) => line.toLowerCase().includes(search))
+          .length
+      : null;
+  }, [contentSearch, previewLines]);
 
   const toggleRaw = useCallback(() => {
     setArtifactRaw((prev) => {

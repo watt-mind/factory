@@ -15,12 +15,13 @@
  * reaches the CLI's own children, SIGTERM then SIGKILL after a grace period,
  * `--strict-mcp-config` with no config so no MCP server is loaded, and
  * ANTHROPIC_API_KEY stripped so the CLI uses subscription auth rather than
- * billing per token (docs/architecture.md §2.9). They are re-implemented
- * rather than imported because that adapter pulls in the whole event-runtime
- * registry graph, and `node evals/run.mjs` must stand alone.
+ * billing per token (docs/architecture.md §2.9). The process-group termination
+ * primitive is shared with the runtime adapters so its TERM→KILL deduplication
+ * and close-time cancellation stay canonical.
  */
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { killProcessGroup } from "../../event-runtime/lib/adapters/child-process.mjs";
 import { DEFAULT_MODEL } from "./policy.mjs";
 
 export const KILL_GRACE_MS = 30_000;
@@ -118,6 +119,7 @@ export function callClaude({
   allowedTools = [],
   disallowedTools = [],
   killGraceMs = KILL_GRACE_MS,
+  killFn = process.kill,
   spawnFn = spawn,
   env = process.env,
   signal,
@@ -161,16 +163,12 @@ export function callClaude({
     });
 
     let timedOut = false;
-    let killTimer = null;
+    let cancelTermination = null;
     const escalate = () => {
-      killProcessGroup(child, "SIGTERM");
-      if (!killTimer) {
-        killTimer = setTimeout(
-          () => killProcessGroup(child, "SIGKILL"),
-          killGraceMs,
-        );
-        killTimer.unref?.();
-      }
+      cancelTermination ??= killProcessGroup(child, {
+        killGraceMs,
+        kill: killFn,
+      });
     };
     const termTimer = setTimeout(() => {
       timedOut = true;
@@ -185,7 +183,7 @@ export function callClaude({
 
     const finish = (exitCode, error) => {
       clearTimeout(termTimer);
-      if (killTimer) clearTimeout(killTimer);
+      cancelTermination?.();
       signal?.removeEventListener?.("abort", onAbort);
       const parsed = parseCliJson(stdout);
       resolve({
@@ -204,25 +202,6 @@ export function callClaude({
     child.on("error", (error) => finish(null, String(error?.message ?? error)));
     child.on("close", (exitCode) => finish(exitCode, null));
   });
-}
-
-/** Terminate the CLI and everything it started (the adapter's WM-263 rule). */
-export function killProcessGroup(
-  child,
-  signal = "SIGTERM",
-  kill = process.kill,
-) {
-  const pid = child?.pid;
-  if (!pid) return;
-  try {
-    kill(-pid, signal);
-  } catch {
-    try {
-      child.kill(signal);
-    } catch {
-      // already gone
-    }
-  }
 }
 
 /**

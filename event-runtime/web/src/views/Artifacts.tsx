@@ -270,12 +270,15 @@ export function Artifacts({
   onFiltersChange,
   onJumpRun,
   onOpenFull,
+  formatContent = formattedContent,
 }: {
   metrics?: StatusView["artifacts"];
   filters: ArtifactFilters;
   onFiltersChange: (filters: ArtifactFilters) => void;
   onJumpRun: (runId: string) => void;
   onOpenFull?: (digest: string) => void;
+  /** Injectable formatter keeps the expensive preview derivation testable. */
+  formatContent?: typeof formattedContent;
 }) {
   const now = useNow();
   const artifactsQ = useQuery({
@@ -403,15 +406,24 @@ export function Artifacts({
       ),
     [linkedEvents, producerRunIds],
   );
-  const selectedKinds = selected ? kindsOf(selected) : [];
+  const selectedKinds = useMemo(
+    () => (selected ? kindsOf(selected) : []),
+    [selected],
+  );
   const selectedName = selectedSha
     ? downloadName(selectedSha, selectedKinds)
     : "";
-  const binary = contentQ.data !== undefined && looksBinary(contentQ.data);
-  const preview =
-    contentQ.data === undefined || binary
-      ? null
-      : formattedContent(contentQ.data, selectedKinds);
+  const binary = useMemo(
+    () => contentQ.data !== undefined && looksBinary(contentQ.data),
+    [contentQ.data],
+  );
+  const preview = useMemo(
+    () =>
+      contentQ.data === undefined || binary
+        ? null
+        : formatContent(contentQ.data, selectedKinds),
+    [contentQ.data, binary, selectedKinds, formatContent],
+  );
   const parsedArtifact = useMemo(
     () => (contentQ.data === undefined ? null : parsedObject(contentQ.data)),
     [contentQ.data],
@@ -438,12 +450,14 @@ export function Artifacts({
     parsedArtifact !== null &&
     viewApplies(producerAgent?.outputView, parsedArtifact) &&
     !artifactRaw;
-  const previewLines = preview?.split("\n") ?? [];
-  const matchCount = contentSearch.trim()
-    ? previewLines.filter((line) =>
-        line.toLowerCase().includes(contentSearch.trim().toLowerCase()),
-      ).length
-    : null;
+  const previewLines = useMemo(() => preview?.split("\n") ?? [], [preview]);
+  const matchCount = useMemo(() => {
+    const search = contentSearch.trim().toLowerCase();
+    return search
+      ? previewLines.filter((line) => line.toLowerCase().includes(search))
+          .length
+      : null;
+  }, [contentSearch, previewLines]);
 
   const selectArtifact = (sha256: string) => {
     setContentSearch("");

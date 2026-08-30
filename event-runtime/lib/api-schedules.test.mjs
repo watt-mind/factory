@@ -1,5 +1,6 @@
 import { trackTmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-api-schedules-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { handleScheduleApiRoute } from "./api-schedules.mjs";
 import {
   GH_SECRET,
   PV,
@@ -123,6 +124,34 @@ describe("POST /schedules/:loop/run (OPS-401)", () => {
     expect(body.admitted).toBe(true);
     expect(body.loop).toBe("reaper");
     expect(body.decision).toBe("run");
+  });
+
+  test("returns the shared payload mismatch response when admission conflicts", async () => {
+    const response = await handleScheduleApiRoute({
+      route: "POST /schedules/reaper/run",
+      url: new URL("http://127.0.0.1/schedules/reaper/run"),
+      req: { method: "POST" },
+      db: { query: () => ({ get: () => undefined }) },
+      registry: overlayFreeRegistry,
+      send: (status, body) => ({ status, body }),
+      readBody: async () => Buffer.alloc(0),
+      parseJson: () => ({ value: {} }),
+      nowMs: Date.parse("2026-01-01T00:00:00.000Z"),
+      actor: "operator",
+      policyVersion: PV,
+      onEvent: () => {
+        throw new Error("conflicting events must not be planned");
+      },
+      admit: () => ({ admitted: false, duplicate: false, conflict: true }),
+    });
+
+    expect(response).toEqual({
+      status: 409,
+      body: {
+        error: "payload_mismatch",
+        eventId: "manual:reaper:2026-01-01T00:00:00.000Z",
+      },
+    });
   });
 
   test("rejects manual fire when the configured cadence is invalid", async () => {

@@ -874,6 +874,29 @@ describe("GitHub full event-set mapping (WM-1150)", () => {
         eventId: "d-tunnel-alias",
       });
 
+      // A changed redelivery is a conflict, not a validation error. The
+      // /github and tunnel-alias routes share this response behavior.
+      const changedPayload = {
+        ...payload,
+        pull_request: { ...payload.pull_request, number: 701 },
+      };
+      const changedBody = JSON.stringify(changedPayload);
+      const conflict = await fetch(s.url("/github"), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-github-event": "pull_request",
+          "x-github-delivery": "d-tunnel-alias",
+          "x-hub-signature-256": ghSign(changedBody),
+        },
+        body: changedBody,
+      });
+      expect(conflict.status).toBe(409);
+      expect(await conflict.json()).toEqual({
+        error: "payload_mismatch",
+        eventId: "d-tunnel-alias",
+      });
+
       // A bad signature still 401s before parsing on the alias path.
       const forged = await fetch(s.url("/webhooks/github"), {
         method: "POST",

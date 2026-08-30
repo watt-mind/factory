@@ -4,7 +4,12 @@ import { cpSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { memoryForge } from "../../lib/forge/memory.mjs";
 import * as fake from "./adapters/fake.mjs";
-import { admitChainEvent, buildChainInput, resolveChains } from "./chain.mjs";
+import {
+  admitChainEvent,
+  buildChainInput,
+  chainResolution,
+  resolveChains,
+} from "./chain.mjs";
 import { openDb } from "./db.mjs";
 import { admitEvent } from "./intake.mjs";
 import { createRun, transition } from "./lifecycle.mjs";
@@ -717,6 +722,313 @@ describe("multi-emit chain resolution (WM-119)", () => {
     expect(outcome.emitted).toBe(0);
     expect(outcome.errors).toHaveLength(1);
     expect(outcome.errors[0]).toContain('missing key "ticket"');
+    expect(
+      db
+        .query(`SELECT chain_resolved_at FROM runs WHERE run_id = 'run-err-1'`)
+        .get().chain_resolved_at,
+    ).not.toBeNull();
+    expect(chainResolution(db, "run-err-1")).toMatchObject({
+      note: "chain_resolved",
+      reason: "invalid_chain_data",
+    });
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 0,
+      skipped: 0,
+      errors: [],
+    });
+  });
+
+  test("foreign chain-event duplicates resolve and report their collision once", () => {
+    const db = openDb(":memory:");
+    const collisionRegistry = {
+      ...registry,
+      edges: {
+        "collision-edge@1": {
+          recommendationField: "recommendation",
+          edges: {
+            NEXT: {
+              eventType: "factory.work.requested",
+              input: { repo: "$.input.repo" },
+            },
+          },
+        },
+      },
+    };
+    const now = Date.parse("2026-08-30T00:00:00.000Z");
+    seedCompletedRun(db, {
+      runId: "run-foreign-duplicate",
+      agent: "collision-edge@1",
+      input: { repo: "wm/collision" },
+      artifact: { recommendation: "NEXT" },
+    });
+    expect(
+      admitChainEvent(
+        db,
+        collisionRegistry,
+        {
+          schemaVersion: "factory.event/v1",
+          eventId: "chain-run-foreign-duplicate",
+          type: "factory.work.requested",
+          subject: "collision-edge@1",
+          occurredAt: new Date(now).toISOString(),
+          correlationId: "corr-run-foreign-duplicate",
+          causationId: "run-other",
+          payload: { repo: "wm/collision" },
+        },
+        { now },
+      ).admitted,
+    ).toBe(true);
+
+    const outcome = resolveChains(db, collisionRegistry, { now });
+    expect(outcome.emitted).toBe(0);
+    expect(outcome.skipped).toBe(0);
+    expect(outcome.errors).toEqual([
+      "chain-run-foreign-duplicate: duplicate chain event belongs to run-other",
+    ]);
+    expect(
+      db
+        .query(
+          `SELECT chain_resolved_at FROM runs WHERE run_id = 'run-foreign-duplicate'`,
+        )
+        .get().chain_resolved_at,
+    ).not.toBeNull();
+    expect(resolveChains(db, collisionRegistry, { now })).toEqual({
+      emitted: 0,
+      skipped: 0,
+      errors: [],
+    });
+  });
+
+  test("intake conflicts resolve and report their refusal once", () => {
+    const db = openDb(":memory:");
+    const conflictRegistry = {
+      ...registry,
+      edges: {
+        "conflict-edge@1": {
+          recommendationField: "recommendation",
+          edges: {
+            NEXT: {
+              eventType: "factory.work.requested",
+              input: { repo: "$.input.repo" },
+            },
+          },
+        },
+      },
+    };
+    const now = Date.parse("2026-08-30T00:00:00.000Z");
+    seedCompletedRun(db, {
+      runId: "run-intake-conflict",
+      agent: "conflict-edge@1",
+      input: { repo: "wm/expected" },
+      artifact: { recommendation: "NEXT" },
+    });
+    expect(
+      admitChainEvent(
+        db,
+        conflictRegistry,
+        {
+          schemaVersion: "factory.event/v1",
+          eventId: "chain-run-intake-conflict",
+          type: "factory.work.requested",
+          subject: "conflict-edge@1",
+          occurredAt: new Date(now).toISOString(),
+          correlationId: "corr-run-intake-conflict",
+          causationId: "run-other",
+          payload: { repo: "wm/conflicting" },
+        },
+        { now },
+      ).admitted,
+    ).toBe(true);
+
+    const outcome = resolveChains(db, conflictRegistry, { now });
+    expect(outcome.emitted).toBe(0);
+    expect(outcome.skipped).toBe(0);
+    expect(outcome.errors).toEqual([
+      "chain-run-intake-conflict: eventId: already admitted with a different payload",
+    ]);
+    expect(
+      db
+        .query(
+          `SELECT chain_resolved_at FROM runs WHERE run_id = 'run-intake-conflict'`,
+        )
+        .get().chain_resolved_at,
+    ).not.toBeNull();
+    expect(chainResolution(db, "run-intake-conflict")).toMatchObject({
+      reason: "intake_refused",
+      errors: [
+        "chain-run-intake-conflict: eventId: already admitted with a different payload",
+      ],
+    });
+    expect(resolveChains(db, conflictRegistry, { now })).toEqual({
+      emitted: 0,
+      skipped: 0,
+      errors: [],
+    });
+  });
+
+  /** Make intake of one chain child fail like a busy/corrupt database would. */
+  function failInsertOf(db, eventId) {
+    db.exec(
+      `CREATE TRIGGER IF NOT EXISTS fail_${eventId.replace(/[^a-z0-9]/gi, "_")}
+         BEFORE INSERT ON events
+         WHEN NEW.event_id = '${eventId}'
+       BEGIN SELECT RAISE(ABORT, 'database is locked'); END;`,
+    );
+    return () =>
+      db.exec(
+        `DROP TRIGGER IF EXISTS fail_${eventId.replace(/[^a-z0-9]/gi, "_")}`,
+      );
+  }
+
+  function resolvedAtOf(db, runId) {
+    return db
+      .query(`SELECT chain_resolved_at FROM runs WHERE run_id = ?`)
+      .get(runId).chain_resolved_at;
+  }
+
+  test("a transient intake throw leaves the chain step open and lands on a later pass (#1458)", () => {
+    const db = openDb(":memory:");
+    seedCompletedRun(db, {
+      runId: "run-transient",
+      agent: "work-scan@1",
+      input: { repo: "wm/transient" },
+      artifact: {
+        recommendation: "DISPATCH",
+        repo: "wm/transient",
+        plan: [{ ticket: "WM-401" }],
+      },
+    });
+    const heal = failInsertOf(db, "chain-run-transient-WM-401");
+
+    const first = resolveChains(db, registry);
+    expect(first.emitted).toBe(0);
+    expect(first.errors).toHaveLength(1);
+    expect(first.errors[0]).toContain("database is locked");
+    expect(resolvedAtOf(db, "run-transient")).toBeNull();
+    expect(chainResolution(db, "run-transient")).toBeNull();
+
+    heal();
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 1,
+      skipped: 0,
+      errors: [],
+    });
+    expect(resolvedAtOf(db, "run-transient")).not.toBeNull();
+    expect(chainResolution(db, "run-transient")).toMatchObject({
+      reason: "emitted",
+      events: ["chain-run-transient-WM-401"],
+    });
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 0,
+      skipped: 0,
+      errors: [],
+    });
+  });
+
+  test("persistent transient failures give up after the bounded pass count with a recorded reason (#1458)", () => {
+    const db = openDb(":memory:");
+    seedCompletedRun(db, {
+      runId: "run-stuck",
+      agent: "work-scan@1",
+      input: { repo: "wm/stuck" },
+      artifact: {
+        recommendation: "DISPATCH",
+        repo: "wm/stuck",
+        plan: [{ ticket: "WM-402" }],
+      },
+    });
+    failInsertOf(db, "chain-run-stuck-WM-402");
+
+    for (let pass = 1; pass < 3; pass += 1) {
+      const outcome = resolveChains(db, registry, { maxTransientPasses: 3 });
+      expect(outcome.emitted).toBe(0);
+      expect(outcome.errors).toHaveLength(1);
+      expect(resolvedAtOf(db, "run-stuck")).toBeNull();
+    }
+    const last = resolveChains(db, registry, { maxTransientPasses: 3 });
+    expect(last.emitted).toBe(0);
+    expect(last.errors).toHaveLength(2);
+    expect(last.errors[1]).toBe(
+      "chain-run-stuck: gave up after 3 transient failure(s)",
+    );
+    expect(resolvedAtOf(db, "run-stuck")).not.toBeNull();
+    expect(chainResolution(db, "run-stuck")).toMatchObject({
+      reason: "chain_gave_up",
+      passes: 3,
+    });
+    expect(
+      db
+        .query(
+          `SELECT COUNT(*) AS n FROM attempt_trace
+            WHERE run_id = 'run-stuck'
+              AND json_extract(payload_json, '$.note') = 'chain_transient_error'`,
+        )
+        .get().n,
+    ).toBe(3);
+    expect(resolveChains(db, registry, { maxTransientPasses: 3 })).toEqual({
+      emitted: 0,
+      skipped: 0,
+      errors: [],
+    });
+  });
+
+  test("a transient failure on one sibling keeps the fan-out open and retries only that sibling (#1458)", () => {
+    const db = openDb(":memory:");
+    seedCompletedRun(db, {
+      runId: "run-partial-transient",
+      agent: "work-scan@1",
+      input: { repo: "wm/partial-transient" },
+      artifact: {
+        recommendation: "DISPATCH",
+        repo: "wm/partial-transient",
+        plan: [
+          { ticket: "WM-501" },
+          { ticket: "WM-502" },
+          { ticket: "WM-503" },
+        ],
+      },
+    });
+    const heal = failInsertOf(db, "chain-run-partial-transient-WM-502");
+
+    const first = resolveChains(db, registry);
+    expect(first.emitted).toBe(2);
+    expect(first.skipped).toBe(0);
+    expect(first.errors).toEqual([
+      expect.stringContaining(
+        "chain-run-partial-transient-WM-502: database is locked",
+      ),
+    ]);
+    expect(resolvedAtOf(db, "run-partial-transient")).toBeNull();
+    expect(
+      db
+        .query(
+          `SELECT event_id FROM events
+            WHERE causation_id = 'run-partial-transient' ORDER BY event_id`,
+        )
+        .all()
+        .map((row) => row.event_id),
+    ).toEqual([
+      "chain-run-partial-transient-WM-501",
+      "chain-run-partial-transient-WM-503",
+    ]);
+
+    heal();
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 1,
+      skipped: 0,
+      errors: [],
+    });
+    expect(resolvedAtOf(db, "run-partial-transient")).not.toBeNull();
+    expect(chainResolution(db, "run-partial-transient")).toMatchObject({
+      reason: "emitted",
+    });
+    expect(
+      db
+        .query(
+          `SELECT COUNT(*) AS n FROM events WHERE causation_id = 'run-partial-transient'`,
+        )
+        .get().n,
+    ).toBe(3);
   });
 
   test("triage-apply outcome edges route to the correct follow-up", () => {

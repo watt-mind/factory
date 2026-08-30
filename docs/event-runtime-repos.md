@@ -53,6 +53,49 @@ substitute for reviewing the generated local files.
 
 ---
 
+## Config reference
+
+`config/repos.yaml` is a `repos:` list. This table is the contract implemented
+by `loadRepos` in `event-runtime/lib/repos.mjs`; it is also the reference for
+values shown by the runtime UI and used by dispatch. A value without a type
+check is retained as supplied, so use the documented type rather than relying
+on downstream coercion.
+
+| Key                                  | Type                                                           | Default                                  | Invalid value / behaviour                                                                                                           |
+| :----------------------------------- | :------------------------------------------------------------- | :--------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------- |
+| `name`                               | non-empty repository identifier                                | required                                 | Missing or falsy values fail config load.                                                                                           |
+| `path`                               | local path string                                              | required                                 | Missing or falsy values fail config load; a leading `~` expands.                                                                    |
+| `github`                             | GitHub `owner/repo` string                                     | `null`                                   | Retained as supplied; promotion later fails without a non-empty string.                                                             |
+| `base`                               | branch string                                                  | `main`                                   | Retained as supplied; no load-time branch validation.                                                                               |
+| `deploy_branch`                      | branch string                                                  | `null`                                   | Retained as supplied; no load-time branch validation.                                                                               |
+| `team`                               | tracker team identifier                                        | `null`                                   | Retained as supplied.                                                                                                               |
+| `project`                            | tracker project name                                           | `null`                                   | Retained as supplied.                                                                                                               |
+| `icon`                               | UI icon identifier                                             | none                                     | Accepted as registry metadata; the repos reader does not project it.                                                                |
+| `color`                              | UI colour identifier                                           | none                                     | Accepted as registry metadata; the repos reader does not project it.                                                                |
+| `control_plane`                      | `linear`, `memory`, or `github`                                | `null` (inherit policy)                  | Any other value fails config load.                                                                                                  |
+| `report_only`                        | boolean                                                        | `false`                                  | Only literal `true` enables report-only mode; every other value is `false`.                                                         |
+| `max_in_flight`                      | positive finite number                                         | `null` (dispatcher policy fallback)      | A non-number, zero, negative, or non-finite value fails config load.                                                                |
+| `smoke_deadline_seconds`             | positive finite number                                         | `null`                                   | May be top-level or under `deployment`; invalid values fail config load.                                                            |
+| `smoke_workflow`                     | workflow filename/string                                       | `null`                                   | Retained as supplied.                                                                                                               |
+| `smoke_url`                          | URL string                                                     | `null`                                   | Retained as supplied.                                                                                                               |
+| `deployment`                         | object                                                         | `null`                                   | A non-object or array fails config load. `url`, `branch`, and `revision_field` are allow-listed and otherwise retained as supplied. |
+| `worktree_up`                        | repository script path                                         | `null`                                   | Retained as supplied; promotion requires a non-empty string.                                                                        |
+| `worktree_down`                      | repository script path                                         | `null`                                   | Retained as supplied.                                                                                                               |
+| `worktree_root`                      | local directory path                                           | `null`                                   | Retained as supplied, with a leading `~` expanded.                                                                                  |
+| `worktree_warm`                      | repository script path                                         | `null`                                   | Retained as supplied.                                                                                                               |
+| `verify`                             | shell command string                                           | `null`                                   | Retained as supplied.                                                                                                               |
+| `toolchain`                          | executable-to-semver map, or `{ executable, constraint }` list | `null` (no preflight)                    | Invalid structure, executable, duplicate, or non-canonical semver range fails config load; `*` is the only unrestricted range.      |
+| `owned_paths_policy`                 | object                                                         | empty `direct` and `pin_manifests` lists | Unknown keys and malformed `direct`, `pin_manifests`, or `registry_digest` members fail config load.                                |
+| `owned_paths_policy.direct`          | list of `{ source, requires }`                                 | `[]`                                     | Each source and each non-empty requires-list entry must be a non-empty string.                                                      |
+| `owned_paths_policy.pin_manifests`   | list of path globs                                             | `[]`                                     | Each entry must be a non-empty string.                                                                                              |
+| `owned_paths_policy.registry_digest` | `{ inputs, baseline }` object                                  | absent                                   | Unknown keys, an empty/non-string inputs list, or an empty/non-string baseline fails config load.                                   |
+| `merge_ci`                           | `{ workflow, required_checks }` object                         | `null`                                   | Requires a non-empty workflow and unique, non-empty check names; otherwise config load fails.                                       |
+| `escalate_paths`                     | list of non-empty path globs                                   | `null`                                   | Malformed values deliberately load as `null` and are treated as absent at plan time.                                                |
+| `security`                           | object                                                         | `null`                                   | A non-object or array fails config load; only the fields below are projected.                                                       |
+| `security.python_version`            | Python version string                                          | `null`                                   | Retained as supplied; other `security` keys are deliberately not exposed.                                                           |
+
+---
+
 ## 1. The gap, precisely
 
 `config/repos.yaml` is the routing registry, but its `path:` values currently
@@ -98,7 +141,7 @@ repos:
     path: ~/Develop/factory # local default, not a fleet-wide path
     github: watt-mind/factory
     base: develop
-    # worktree_up/down/root, verify, toolchain, etc.
+    # See “Config reference” above for worktree, verify, toolchain, and policy keys.
 ```
 
 A remote worker node extends its existing SSH inventory entry with a managed
