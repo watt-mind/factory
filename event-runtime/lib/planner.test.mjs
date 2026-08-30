@@ -23,6 +23,7 @@ import {
   buildEscalatedContinuationSpec,
   buildRunSpec,
   createLinearReadCache,
+  modelAdapterMismatch,
   DEFAULT_MAX_IN_FLIGHT as PLANNER_DEFAULT_MAX_IN_FLIGHT,
   idempotencyKeyFor,
   pinMemos,
@@ -1222,6 +1223,51 @@ describe("planEvent worktree gate (WM-108)", () => {
         expect(spec.model).toBe(item.model);
       }
     });
+  });
+
+  test("escalated continuation resolves the strong model for the failed spec's own adapter (gh-1704 AC3)", () => {
+    const base = {
+      schemaVersion: "factory.run-spec/v1",
+      runId: "run_light_failed_pi",
+      agent: "dispatch@1",
+      input: { repo: "tiered", ticket: "WM-694", modelTier: "light" },
+      inputHash: hashJson({
+        repo: "tiered",
+        ticket: "WM-694",
+        modelTier: "light",
+      }),
+      workspace: { type: "worktree", checkoutDir: "repo" },
+      adapter: "pi",
+      promptVersion: "git:test",
+      policyVersion: "git:test",
+      outputContract: "factory.dispatch-result/v1",
+      capabilities: ["tracker:write", "repo:write", "github:write"],
+      modelTier: "light",
+      model: "openai-codex/gpt-5.6-luna",
+      timeoutSeconds: 5400,
+      maxAttempts: 1,
+      idempotencyKey: "dispatch-light-pi",
+    };
+    for (const [adapter, strong] of [
+      ["pi", "openai-codex/gpt-5.6-sol"],
+      ["cursor", "cursor-grok-4.6-high"],
+    ]) {
+      const continuation = buildEscalatedContinuationSpec(
+        registry,
+        { ...base, adapter },
+        { runId: `run_strong_${adapter}` },
+      );
+      expect(continuation).toMatchObject({
+        adapter,
+        modelTier: "strong",
+        model: strong,
+      });
+      expect(
+        modelAdapterMismatch(continuation, registry.modelTiers, adapter, {
+          explicitPin: false,
+        }),
+      ).toBeNull();
+    }
   });
 
   test("escalated continuation pins a fresh strong-tier spec and authenticated claim proof", () => {
@@ -2650,30 +2696,140 @@ describe("planEvent model pinning (WM-135)", () => {
     const ref = admit(db, tieredEnvelope());
     const outcome = planEvent(
       db,
-      tieredRegistry({ modelTier: "standard", model: "default" }),
+      tieredRegistry({ modelTier: "standard", model: "claude-opus-4-1" }),
       ref,
       { now: NOW, policyVersion: "git:test" },
     );
     const spec = JSON.parse(outcome.proposal.spec_json);
-    expect(spec.model).toBe("default");
+    expect(spec.model).toBe("claude-opus-4-1");
     expect(spec.modelTier).toBe("standard");
   });
 
-  test("refuses a model override that is not configured for the selected adapter", () => {
+  test("an agent overlay model pin outside the tier map is an explicit pin — planned verbatim, not parked (gh-1704)", () => {
     const db = openDb(":memory:");
+    putOverride(db, {
+      kind: KIND_AGENT,
+      key: "test-tiered@1",
+      patch: { model: "claude-opus-4-1" },
+    });
     const ref = admit(db, tieredEnvelope());
     const outcome = planEvent(
       db,
-      tieredRegistry({
-        modelTier: "standard",
-        model: "openai-codex/gpt-5.6-terra",
-      }),
+      tieredRegistry({ modelTier: "standard" }),
       ref,
       { now: NOW, policyVersion: "git:test" },
     );
-    expect(outcome).toMatchObject({ decision: "human_needed" });
-    expect(outcome.reason).toStartWith("model_adapter_mismatch:");
-    expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(0);
+    expect(outcome.decision).toBe("run");
+    const spec = JSON.parse(outcome.proposal.spec_json);
+    expect(spec).toMatchObject({
+      adapter: "claude",
+      modelTier: "standard",
+      model: "claude-opus-4-1",
+    });
+  });
+
+  test("a tier-resolved model follows an adapter overlay flip and is consistent with that adapter's map (gh-1704)", () => {
+    const db = openDb(":memory:");
+    const modelTiers = {
+      claude: { strong: "default", standard: "sonnet", light: "haiku" },
+      pi: {
+        strong: "openai-codex/gpt-5.6-sol",
+        standard: "openai-codex/gpt-5.6-terra",
+        light: "openai-codex/gpt-5.6-luna",
+      },
+    };
+    putOverride(db, {
+      kind: KIND_EVENT_TYPE,
+      key: "test.tiered.requested",
+      patch: { adapter: "pi" },
+    });
+    const ref = admit(db, tieredEnvelope());
+    const outcome = planEvent(
+      db,
+      tieredRegistry({ modelTier: "standard", modelTiers }),
+      ref,
+      { now: NOW, policyVersion: "git:test" },
+    );
+    expect(outcome.decision).toBe("run");
+    const spec = JSON.parse(outcome.proposal.spec_json);
+    expect(spec).toMatchObject({
+      adapter: "pi",
+      modelTier: "standard",
+      model: "openai-codex/gpt-5.6-terra",
+    });
+    expect(modelAdapterMismatch(spec, modelTiers, spec.adapter)).toBeNull();
+    expect(
+      modelAdapterMismatch(spec, modelTiers, spec.adapter, {
+        explicitPin: false,
+      }),
+    ).toBeNull();
+  });
+
+  describe("modelAdapterMismatch (gh-1704)", () => {
+    const modelTiers = {
+      claude: { strong: "default", standard: "sonnet", light: "haiku" },
+      pi: { standard: "openai-codex/gpt-5.6-terra" },
+    };
+
+    test("a tier-resolved model outside its adapter's map is a mismatch", () => {
+      expect(
+        modelAdapterMismatch(
+          { model: "openai-codex/gpt-5.6-terra" },
+          modelTiers,
+          "claude",
+          { explicitPin: false },
+        ),
+      ).toStartWith("model_adapter_mismatch:");
+    });
+
+    test("an explicit pin is accepted as-is whatever the map says", () => {
+      expect(
+        modelAdapterMismatch(
+          { model: "openai-codex/gpt-5.6-terra" },
+          modelTiers,
+          "claude",
+          { explicitPin: true },
+        ),
+      ).toBeNull();
+    });
+
+    test("unknown provenance: another adapter's tier value is a mismatch, any other value is a pin", () => {
+      expect(
+        modelAdapterMismatch(
+          { model: "openai-codex/gpt-5.6-terra" },
+          modelTiers,
+          "claude",
+        ),
+      ).toStartWith("model_adapter_mismatch:");
+      expect(
+        modelAdapterMismatch(
+          { model: "claude-opus-4-1" },
+          modelTiers,
+          "claude",
+        ),
+      ).toBeNull();
+      expect(
+        modelAdapterMismatch({ model: "sonnet" }, modelTiers, "claude"),
+      ).toBeNull();
+    });
+
+    test("an adapter that takes no model never mismatches one", () => {
+      expect(
+        modelAdapterMismatch(
+          { model: "openai-codex/gpt-5.6-terra" },
+          modelTiers,
+          "fake",
+          { explicitPin: false },
+        ),
+      ).toBeNull();
+    });
+
+    test("a spec without a model is never a mismatch", () => {
+      expect(modelAdapterMismatch({}, modelTiers, "claude")).toBeNull();
+      expect(
+        modelAdapterMismatch({ model: null }, modelTiers, "pi"),
+      ).toBeNull();
+    });
   });
 
   test("a definition declaring nothing produces a spec without model fields — today's behavior (regression)", () => {

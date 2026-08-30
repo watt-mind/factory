@@ -52,6 +52,7 @@ import {
 import {
   getAgent,
   getEventType,
+  MODEL_ADAPTERS,
   MODEL_TIERS,
   resolveModel,
 } from "./registry.mjs";
@@ -114,17 +115,42 @@ export function idempotencyKeyFor(mapping, def, envelope, inputHash) {
 }
 
 /**
- * A RunSpec's concrete model must be one of the configured values for its
- * adapter. Model tiers are portable intent; model names are not. Keep this at
- * the planning boundary so a bad runtime overlay or carried-forward pin parks
- * the event rather than producing a QUEUED run the adapter will reject.
+ * A tier-resolved model must be one of the configured values for its adapter.
+ * Model tiers are portable intent; model names are not. Keep this at the
+ * planning boundary so a bad runtime overlay or carried-forward pin parks the
+ * event rather than producing a QUEUED run the adapter will reject.
+ *
+ * Explicit pins — a definition's `model:` or an agent overlay `model` — are
+ * operator intent: `resolveModel` returns them verbatim and no adapter
+ * publishes a known-model list to check them against, so they are accepted
+ * as-is. `explicitPin` states that provenance when the caller knows it. When
+ * it does not (a stored spec being approved as recorded), a model outside the
+ * adapter's map is refused only when it is a tier value of some *other*
+ * adapter — the signature of a pin carried across an adapter change — and is
+ * otherwise treated as a pin.
+ *
+ * An adapter that takes no model (`fake`, actions) cannot mismatch one: a
+ * model on such a spec is the registered route's pin carried across a
+ * process-wide `--adapter-override`, and that adapter ignores it.
  */
-function modelAdapterMismatch(spec, modelTiers, adapter) {
-  if (spec?.model == null) return null;
+export function modelAdapterMismatch(
+  spec,
+  modelTiers,
+  adapter,
+  { explicitPin } = {},
+) {
+  if (spec?.model == null || explicitPin === true) return null;
+  if (!MODEL_ADAPTERS.has(adapter)) return null;
   const allowed = Object.values(modelTiers?.[adapter] ?? {});
-  return allowed.includes(spec.model)
-    ? null
-    : `model_adapter_mismatch: model ${JSON.stringify(spec.model)} is not configured for adapter ${JSON.stringify(adapter)}`;
+  if (allowed.includes(spec.model)) return null;
+  if (explicitPin === undefined) {
+    const foreignTierValue = Object.entries(modelTiers ?? {}).some(
+      ([name, tiers]) =>
+        name !== adapter && Object.values(tiers ?? {}).includes(spec.model),
+    );
+    if (!foreignTierValue) return null;
+  }
+  return `model_adapter_mismatch: model ${JSON.stringify(spec.model)} is not configured for adapter ${JSON.stringify(adapter)}`;
 }
 
 /**
@@ -2678,6 +2704,12 @@ export function planEvent(
       spec,
       registry.modelTiers,
       mapping.adapter,
+      {
+        explicitPin:
+          plannedDef(getAgent(registry, mapping.agent), {
+            modelOverride: overlayModel,
+          }).model !== undefined,
+      },
     );
     if (modelMismatch)
       return humanNeeded(db, event, modelMismatch, at, ttlSeconds);

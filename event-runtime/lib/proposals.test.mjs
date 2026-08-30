@@ -711,3 +711,161 @@ describe("approveProposal after TTL expiry (§12)", () => {
     expect(getProposal(db, proposal.id).status).toBe("open");
   });
 });
+
+describe("approveProposal adapter/model consistency (gh-1704)", () => {
+  const DISPATCH = "factory.dispatch.requested";
+  /** The registry with the dispatch route flipped to another adapter. */
+  function routedTo(adapter) {
+    return {
+      ...registry,
+      eventTypes: {
+        ...registry.eventTypes,
+        [DISPATCH]: { ...registry.eventTypes[DISPATCH], adapter },
+      },
+    };
+  }
+  function storeSpec(db, proposal, runId, spec) {
+    const json = canonicalJson(spec);
+    const hash = hashJson(spec);
+    db.query(
+      `UPDATE proposals SET spec_json = ?, spec_hash = ? WHERE id = ?`,
+    ).run(json, hash, proposal.id);
+    db.query(
+      `UPDATE runs SET spec_json = ?, spec_hash = ? WHERE run_id = ?`,
+    ).run(json, hash, runId);
+  }
+
+  test("within TTL, a consistent recorded pair is approved as-is even after the route flips adapter", () => {
+    const { db, proposal, runId } = dispatchPlanned();
+    const recorded = getProposal(db, proposal.id).spec;
+    expect(recorded).toMatchObject({
+      adapter: "cursor",
+      model: "cursor-grok-4.6-low-fast",
+    });
+
+    const result = approveProposal(db, routedTo("pi"), proposal.id, {
+      actor: "operator",
+      now: NOW + 1,
+      policyVersion: "git:test",
+    });
+
+    expect(result).toEqual({ approved: true, runId });
+    expect(runState(db, runId)).toBe("QUEUED");
+    expect(
+      JSON.parse(
+        db.query(`SELECT spec_json FROM runs WHERE run_id = ?`).get(runId)
+          .spec_json,
+      ),
+    ).toMatchObject({ adapter: "cursor", model: "cursor-grok-4.6-low-fast" });
+  });
+
+  test("within TTL, the recorded model is checked against the recorded adapter, not the flipped route", () => {
+    const { db, proposal, runId } = dispatchPlanned();
+    // cursor spec carrying pi's light model: consistent with the *route*
+    // (now pi), inconsistent with the adapter the spec will execute on.
+    storeSpec(db, proposal, runId, {
+      ...getProposal(db, proposal.id).spec,
+      model: "openai-codex/gpt-5.6-luna",
+    });
+
+    expect(() =>
+      approveProposal(db, routedTo("pi"), proposal.id, {
+        actor: "operator",
+        now: NOW + 1,
+        policyVersion: "git:test",
+      }),
+    ).toThrow(expect.objectContaining({ code: "model_adapter_mismatch" }));
+    expect(runState(db, runId)).toBe("PROPOSED");
+    expect(getProposal(db, proposal.id).status).toBe("open");
+  });
+
+  test("a registry-version refresh re-resolves a carried model through the fresh adapter", () => {
+    const { db, proposal, runId } = dispatchPlanned();
+    storeSpec(db, proposal, runId, {
+      ...getProposal(db, proposal.id).spec,
+      promptVersion: "old",
+      policyVersion: "old",
+      adapter: "pi",
+      model: "openai-codex/gpt-5.6-luna",
+    });
+
+    const result = approveProposal(db, registry, proposal.id, {
+      actor: "operator",
+      now: NOW + 1,
+      policyVersion: "git:test",
+    });
+
+    expect(result).toMatchObject({ approved: false, replanned: true });
+    expect(result.proposal.spec).toMatchObject({
+      adapter: "cursor",
+      modelTier: "light",
+      model: "cursor-grok-4.6-low-fast",
+      promptVersion: "git:test",
+      policyVersion: "git:test",
+    });
+    expect(getProposal(db, proposal.id).status).toBe("superseded");
+    expect(runState(db, runId)).toBe("PROPOSED");
+  });
+
+  test("a registry-version refresh keeps a still-consistent model and queues the refreshed spec", () => {
+    const { db, proposal, runId } = dispatchPlanned();
+    storeSpec(db, proposal, runId, {
+      ...getProposal(db, proposal.id).spec,
+      promptVersion: "old",
+    });
+
+    const result = approveProposal(db, registry, proposal.id, {
+      actor: "operator",
+      now: NOW + 1,
+      policyVersion: "git:test",
+    });
+
+    expect(result).toEqual({ approved: true, runId });
+    expect(lifecycleOf(db, runId).at(-1).reason).toBe(
+      "approved_after_registry_replan",
+    );
+    expect(
+      JSON.parse(
+        db.query(`SELECT spec_json FROM runs WHERE run_id = ?`).get(runId)
+          .spec_json,
+      ),
+    ).toMatchObject({
+      adapter: "cursor",
+      model: "cursor-grok-4.6-low-fast",
+      promptVersion: "git:test",
+    });
+  });
+
+  test("an explicit definition model pin outside the tier map survives the re-plan instead of being refused", () => {
+    const { db, proposal, runId } = dispatchPlanned();
+    const pinned = {
+      ...registry,
+      agents: new Map(registry.agents),
+    };
+    pinned.agents.set("dispatch@1", {
+      ...registry.agents.get("dispatch@1"),
+      model: "claude-opus-4-1",
+    });
+    // The stored pi pin is dropped by the adapter change, so the fresh spec
+    // takes the definition's own pin — a value in no adapter's tier map.
+    storeSpec(db, proposal, runId, {
+      ...getProposal(db, proposal.id).spec,
+      adapter: "pi",
+      model: "openai-codex/gpt-5.6-luna",
+    });
+
+    const result = approveProposal(db, pinned, proposal.id, {
+      actor: "operator",
+      now: NOW + TTL_MS + 1,
+      policyVersion: "git:test",
+    });
+
+    expect(result).toMatchObject({ approved: false, replanned: true });
+    expect(result.proposal.spec).toMatchObject({
+      adapter: "cursor",
+      modelTier: "light",
+      model: "claude-opus-4-1",
+    });
+    expect(runState(db, runId)).toBe("PROPOSED");
+  });
+});

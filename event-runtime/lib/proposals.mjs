@@ -17,7 +17,8 @@ import { DEFAULT_PROPOSAL_TTL_SECONDS } from "./config.mjs";
 import { txImmediate } from "./db.mjs";
 import { newProposalId } from "./ids.mjs";
 import { runState, transition } from "./lifecycle.mjs";
-import { buildRunSpec } from "./planner.mjs";
+import { buildRunSpec, modelAdapterMismatch } from "./planner.mjs";
+import { plannedDef } from "./runtime-overrides.mjs";
 import { getAgent, getEventType } from "./registry.mjs";
 import { computeDefHash } from "./receipts.mjs";
 
@@ -118,13 +119,20 @@ function ttlReplanOptions(spec, adapter) {
   };
 }
 
-function assertModelMatchesAdapter(spec, registry, adapter) {
-  if (spec?.model == null) return;
-  const allowed = Object.values(registry.modelTiers?.[adapter] ?? {});
-  if (allowed.includes(spec.model)) return;
-  const err = new Error(
-    `model_adapter_mismatch: model ${JSON.stringify(spec.model)} is not configured for adapter ${JSON.stringify(adapter)}`,
+/**
+ * Refuse to queue a spec whose concrete model cannot run on its adapter (a
+ * pi model carried onto a cursor route). `explicitPin` is the provenance of
+ * the model when the caller knows it; see `modelAdapterMismatch`.
+ */
+function assertModelMatchesAdapter(spec, registry, adapter, options) {
+  const mismatch = modelAdapterMismatch(
+    spec,
+    registry.modelTiers,
+    adapter,
+    options,
   );
+  if (!mismatch) return;
+  const err = new Error(mismatch);
   err.code = "model_adapter_mismatch";
   throw err;
 }
@@ -251,11 +259,25 @@ export function approveProposal(
       !registryVersionMismatch &&
       !isExpired(proposal, now)
     ) {
-      assertModelMatchesAdapter(
-        recordedSpec,
-        registry,
-        mapping?.adapter ?? recordedSpec.adapter,
-      );
+      // The recorded spec queues as-is, so its model is checked against the
+      // adapter it was planned for: the spec's own adapter — not the
+      // mapping's, which an overlay may have set differently at plan time
+      // (overlays live in the db, not in `registry`). The one exception is a
+      // process-wide `--adapter-override`, which substitutes execution only:
+      // the model was still resolved for the registered route. defHash
+      // matched above, so the current definition is the one that planned it:
+      // a definition `model:` is a known explicit pin; an overlay pin at plan
+      // time is unknowable.
+      const plannedFor =
+        adapterOverride != null && recordedSpec?.adapter === adapterOverride
+          ? mapping?.adapter
+          : (recordedSpec?.adapter ?? mapping?.adapter);
+      assertModelMatchesAdapter(recordedSpec, registry, plannedFor, {
+        explicitPin:
+          registry.agents.get(recordedSpec?.agent)?.model !== undefined
+            ? true
+            : undefined,
+      });
       return approveRun(db, proposal, envelope, {
         actor,
         now,
@@ -273,13 +295,14 @@ export function approveProposal(
         `proposal ${id} requires re-planning but event type ${envelope.type} is no longer registered`,
       );
     const storedSpec = recordedSpec ?? JSON.parse(proposal.spec_json);
+    const replanOptions = ttlReplanOptions(storedSpec, mapping.adapter);
     const built = {
       ...buildRunSpec(registry, envelope, mapping, {
         runId: proposal.run_id,
         policyVersion,
         adapterOverride,
         now,
-        ...ttlReplanOptions(storedSpec, mapping.adapter),
+        ...replanOptions,
       }),
       // configSnapshot can affect planning and is itself part of specs that
       // explicitly pin it. Keep the pin in the rebuilt spec as well as
@@ -302,7 +325,12 @@ export function approveProposal(
         }
       : built;
     const freshHash = hashJson(fresh);
-    assertModelMatchesAdapter(fresh, registry, mapping.adapter);
+    assertModelMatchesAdapter(fresh, registry, mapping.adapter, {
+      explicitPin:
+        plannedDef(getAgent(registry, mapping.agent), {
+          modelOverride: replanOptions.modelOverride,
+        }).model !== undefined,
+    });
     // Refresh-and-approve only when the caller named a real current version.
     // Replanning with `"unknown"` must not stamp that sentinel onto the
     // recorded spec and queue it.
