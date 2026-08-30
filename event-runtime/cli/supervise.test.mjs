@@ -155,14 +155,28 @@ describe("supervise (WM-226)", () => {
       expect(existsSync(path.join(dir, "supervisor.pid"))).toBe(true);
       rmSync(crashLoop, { recursive: true, force: true });
 
-      const failedTickAt = box.out.lastIndexOf("tick error:");
-      expect(await waitFor(box, "slot released", 10_000)).toBe(true);
-      await until(
-        "supervisor to respawn after the failed tick",
-        () => box.out.slice(failedTickAt).includes("spawn slot 1"),
+      // With the fault gone the loop must still be live: the slot a failing
+      // tick left behind is reaped and the pool is rebuilt on later ticks.
+      const faultClearedAt = box.out.length;
+      const after = () => box.out.slice(faultClearedAt);
+      const respawned = await until(
+        "a worker to occupy slot 1 after the fault cleared",
+        () => readPool(dir).slots.find((s) => s.n === 1 && s.alive) ?? null,
         { timeoutMs: 10_000 },
       );
-      expect(box.out.slice(failedTickAt)).toContain("spawn slot 1");
+      process.kill(respawned.pid, "SIGKILL");
+      await until(
+        "the supervisor to reap the killed slot after the fault cleared",
+        () => after().includes("slot released"),
+        { timeoutMs: 10_000 },
+      );
+      await until(
+        "the supervisor to act on the freed slot after the fault cleared",
+        () => /spawn slot 1|crash-loop slot 1/.test(after()),
+        { timeoutMs: 10_000 },
+      );
+      expect(box.child.exitCode ?? null).toBeNull();
+      expect(existsSync(path.join(dir, "supervisor.pid"))).toBe(true);
     } finally {
       await killPool(box, dir);
       rmSync(home, { recursive: true, force: true });
