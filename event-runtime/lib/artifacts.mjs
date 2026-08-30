@@ -21,6 +21,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -43,12 +44,27 @@ function resultDigest(artifactHash) {
   return SHA256.exec(artifactHash ?? "")?.[1] ?? null;
 }
 
+/** Refresh a deduplicated blob's prune grace period without blocking publish. */
+function refreshArtifactMtime(dest) {
+  try {
+    const now = new Date();
+    utimesSync(dest, now, now);
+  } catch (err) {
+    console.warn(
+      `artifact store mtime refresh failed for ${dest}: ${err?.message ?? err}`,
+    );
+  }
+}
+
 /** Atomically persist bytes whose digest is already known. */
 function storeBytes({ bytes, sha256hex, storeRoot }) {
   mkdirSync(storeRoot, { recursive: true });
   const dest = artifactPath(storeRoot, sha256hex);
   if (existsSync(dest)) {
-    if (hashFile(dest) === sha256hex) return dest;
+    if (hashFile(dest) === sha256hex) {
+      refreshArtifactMtime(dest);
+      return dest;
+    }
     rmSync(dest, { force: true });
   }
 
@@ -153,6 +169,7 @@ export function storeCollected({ entries, storeRoot, workspaceDir = null }) {
     if (existsSync(dest)) {
       const destHash = hashFile(dest);
       if (destHash === entry.sha256) {
+        refreshArtifactMtime(dest);
         return {
           ...entry,
           uri: `file://${dest}`,
