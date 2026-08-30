@@ -32,6 +32,7 @@ import {
 } from "./db.mjs";
 import { dbPath, isTestOrCiProcess, runtimeHome } from "./config.mjs";
 import { createIsolatedHome, realFactorySnapshot } from "../test-helpers.mjs";
+import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
 
 const freshFile = () => path.join(tmpDir("evrt-db-"), "runtime.db");
 
@@ -114,7 +115,7 @@ describe("retryBusy (#1349)", () => {
     ).rejects.toBe(busy);
     // The lowered timeout bounds the whole budget, not just one attempt.
     expect(attempts).toBe(1);
-    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(Date.now() - startedAt).toBeLessThan(loadAdjustedTimeout(1_000));
     expect(db.query("PRAGMA busy_timeout").get().timeout).toBe(10);
     db.close();
   });

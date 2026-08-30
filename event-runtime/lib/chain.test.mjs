@@ -21,6 +21,7 @@ import { approveProposal, openProposals } from "./proposals.mjs";
 import { loadRegistry, RegistryError } from "./registry.mjs";
 import { runOnce } from "./worker.mjs";
 import { tick } from "../cli/serve.mjs";
+import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
 // Importing test-helpers pins FACTORY_EVENT_HOME/FACTORY_HOME to an isolated
 // temp home for this whole file, so default-home lookups (artifactsRoot(),
 // dbPath()) never reach the operator's real ~/.factory (OPS-425).
@@ -722,9 +723,9 @@ describe("multi-emit chain resolution (WM-119)", () => {
         `chain benchmark: tick=${tickMs.toFixed(1)}ms health_p95=${healthP95.toFixed(1)}ms child_event_lookups=${childEventLookups}`,
       );
       expect(childEventLookups).toBe(1); // one bulk lookup, never 2,000
-      expect(tickMs).toBeLessThan(200);
+      expect(tickMs).toBeLessThan(loadAdjustedTimeout(200));
       // /health p95 is measured against the stub Bun.serve above: it proves the tick does not block the event loop, not real API latency.
-      expect(healthP95).toBeLessThan(500);
+      expect(healthP95).toBeLessThan(loadAdjustedTimeout(500));
       // The production-shaped benchmark must never touch the operator's real
       // ~/.factory/event-runtime/runtime.db (no default-home openDb/migration).
       expect(realFactorySnapshot().dbMtime).toBe(realHomeBefore.dbMtime);

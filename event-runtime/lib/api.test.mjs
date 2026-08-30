@@ -46,6 +46,7 @@ import {
   registerTestProcessCleanup,
   spawnTracked,
 } from "./test-helpers-process.mjs";
+import { until } from "./test-helpers-timing.mjs";
 
 registerTestProcessCleanup(import.meta.url);
 
@@ -999,10 +1000,15 @@ describe("serve PID lock (OPS-458)", () => {
       out1 += b;
     });
 
-    const deadline = Date.now() + 8000;
-    while (Date.now() < deadline && !out1.includes("control API on")) {
-      await Bun.sleep(100);
-    }
+    await until(
+      "the first control API startup",
+      () => out1.includes("control API on"),
+      {
+        // `until` applies loadAdjustedTimeout to this ceiling.
+        timeoutMs: 8_000,
+        everyMs: 100,
+      },
+    );
     expect(out1).toContain("control API on");
 
     // Second serve targeting same home should fail immediately
@@ -1040,11 +1046,12 @@ describe("serve PID lock (OPS-458)", () => {
       out3 += b;
     });
 
-    const deadline3 = Date.now() + 8000;
-    while (Date.now() < deadline3 && !out3.includes("control API on")) {
-      await Bun.sleep(100);
-    }
     try {
+      await until(
+        "the replacement control API startup",
+        () => out3.includes("control API on"),
+        { timeoutMs: 8_000, everyMs: 100 },
+      );
       expect(out3).toContain("control API on");
     } finally {
       serve3.kill("SIGTERM");
