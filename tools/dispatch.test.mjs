@@ -17,6 +17,7 @@ async function runDispatch(server, args, extraEnv = {}) {
       FACTORY_CONTROL_API_TOKEN: "dispatch-test-token",
       FACTORY_DISPATCH_POLL_MS: "1",
       FACTORY_DISPATCH_WATCH_TIMEOUT_MS: "20",
+      FACTORY_DISPATCH_WATCH_MAX_MS: "50",
       ...extraEnv,
     },
     stdout: "pipe",
@@ -30,7 +31,11 @@ async function runDispatch(server, args, extraEnv = {}) {
   return { exitCode, stdout, stderr };
 }
 
-function watchServer({ state, reasonCode = "needs_human" } = {}) {
+function watchServer({
+  state,
+  reasonCode = "needs_human",
+  responseShape = "view",
+} = {}) {
   let eventId = null;
   return Bun.serve({
     hostname: "127.0.0.1",
@@ -57,7 +62,17 @@ function watchServer({ state, reasonCode = "needs_human" } = {}) {
       if (url.pathname === "/runs/run-watch-test/trace")
         return Response.json({ entries: [] });
       if (url.pathname === "/runs/run-watch-test")
-        return Response.json({ state, reasonCode });
+        return Response.json(
+          responseShape === "flat"
+            ? { state, reasonCode }
+            : {
+                run: { runId: "run-watch-test", state, attempts: 2 },
+                attempts: [
+                  { attempt: 1, reason_code: "superseded_reason" },
+                  { attempt: 2, reason_code: reasonCode },
+                ],
+              },
+        );
       return new Response("not found", { status: 404 });
     },
   });
@@ -82,6 +97,38 @@ test("FACTORY_DISPATCH_TIMEOUT_MS overrides the default timeout", () => {
   expect(resolveTimeoutMs({ FACTORY_DISPATCH_TIMEOUT_MS: "0" })).toBe(
     DEFAULT_TIMEOUT_MS,
   );
+});
+
+test("dispatch help documents factory as the --repo default", async () => {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => new Response("not reached"),
+  });
+  try {
+    const { exitCode, stdout } = await runDispatch(server, ["--help"]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("Target repository (default: factory)");
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("dispatch prints the configured web UI port in its status hint", async () => {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => Response.json({ admitted: true, eventId: "dispatch-test" }),
+  });
+  try {
+    const { exitCode, stdout } = await runDispatch(server, ["status"], {
+      FACTORY_EVENT_WEB_PORT: "8452",
+    });
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("http://127.0.0.1:8452/#/events");
+  } finally {
+    server.stop(true);
+  }
 });
 
 test("dispatch sends FACTORY_CONTROL_API_TOKEN as a bearer", async () => {
@@ -182,7 +229,7 @@ test("dispatch fails fast with the request path and configured timeout", async (
   }
 });
 
-test.each(["REFUSED", "TIMED_OUT"])(
+test.each(["FAILED", "CANCELLED", "REFUSED", "TIMED_OUT"])(
   "dispatch --watch settles on %s and exits as a failed run",
   async (state) => {
     const server = watchServer({ state, reasonCode: "typed_refusal" });
@@ -216,6 +263,29 @@ test("dispatch --json --watch emits only its final settled object on stdout", as
     });
     expect(stdout.trim().split("\n")).toHaveLength(1);
     expect(stderr).toContain("Streaming live trace");
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("dispatch --watch does not mistake the obsolete flat run response for a run view", async () => {
+  const server = watchServer({
+    state: "COMPLETED",
+    reasonCode: "ok",
+    responseShape: "flat",
+  });
+  try {
+    const { exitCode, stdout } = await runDispatch(server, [
+      "status",
+      "--json",
+      "--watch",
+    ]);
+    expect(exitCode).toBe(2);
+    expect(JSON.parse(stdout)).toMatchObject({
+      runId: "run-watch-test",
+      state: "WATCH_TIMEOUT",
+      reasonCode: "watch_timeout",
+    });
   } finally {
     server.stop(true);
   }

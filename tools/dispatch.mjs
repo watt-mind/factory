@@ -87,7 +87,7 @@ Actions:
   event <type>        Dispatch arbitrary registered event type
 
 Options:
-  --repo <name>       Target repository (default: cwd repo or factory)
+  --repo <name>       Target repository (default: factory)
   --apply             For janitor: execute teardown instead of dry scan
   --payload <json>    Custom JSON payload for 'event' action
   --watch, -w         Stream live run trace to stdout until completion
@@ -205,14 +205,16 @@ async function streamTrace(eventId, runId, json) {
       }
     }
 
-    const run = await api(`/runs/${encodeURIComponent(runId)}`);
-    if (run && TERMINAL_STATES.has(run.state)) {
+    const view = await api(`/runs/${encodeURIComponent(runId)}`);
+    const state = view?.run?.state;
+    if (TERMINAL_STATES.has(state)) {
+      const latestAttempt = view.attempts?.at(-1);
       const result = finalWatchResult(
-        { eventId, runId, state: run.state, reasonCode: run.reasonCode },
+        { eventId, runId, state, reasonCode: latestAttempt?.reason_code },
         json,
       );
       return {
-        exitCode: run.state === "COMPLETED" ? 0 : EXIT.RUN_NOT_COMPLETED,
+        exitCode: state === "COMPLETED" ? 0 : EXIT.RUN_NOT_COMPLETED,
         result,
       };
     }
@@ -373,7 +375,7 @@ async function main() {
     }
   } else {
     progress(
-      `\nView live status: http://127.0.0.1:${port}/#/events`,
+      `\nView live status: http://127.0.0.1:${process.env.FACTORY_EVENT_WEB_PORT || 7382}/#/events`,
       values.json,
     );
   }
