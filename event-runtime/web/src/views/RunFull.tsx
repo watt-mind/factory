@@ -95,7 +95,7 @@ export function RunFull({
       (e) => e.causationId === runId || e.envelope?.causationId === runId,
     );
   }, [eventsQ.data, runId]);
-  // The chain this run belongs to uses the same correlation as each emitted event.
+  // The chain this run belongs to: any event it emitted names the same chain.
   // This used to also try the list row's origin event (source/eventId), but
   // the bounded GET /runs summary (WM-976) dropped both fields off the run
   // row, so that join can never match — the origin-event sidebar row

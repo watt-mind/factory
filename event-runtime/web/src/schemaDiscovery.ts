@@ -100,11 +100,14 @@ export function discoverPayloadFields<T>(
 
   for (const row of sample) {
     if (!isRecord(row)) continue;
-    const r = row;
-    if (r.envelope?.payload) walk(r.envelope.payload, "payload", 1);
-    else if (r.envelope) walk(r.envelope, "envelope", 1);
+    const r: Record<string, unknown> = row;
+    const env = r.envelope;
+    if (isRecord(env) && isRecord(env.payload)) walk(env.payload, "payload", 1);
+    else if (isRecord(env)) walk(env, "envelope", 1);
 
-    if (r.spec?.input) walk(r.spec.input, "spec.input", 1);
+    const spec = r.spec;
+    if (isRecord(spec) && isRecord(spec.input))
+      walk(spec.input, "spec.input", 1);
     if (r.result) walk(r.result, "result", 1);
     if (r.labels) walk(r.labels, "labels", 1);
     if (r.limits) walk(r.limits, "limits", 1);
