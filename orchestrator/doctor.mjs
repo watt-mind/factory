@@ -440,6 +440,7 @@ function defaultProcessProbe(pid) {
 export function stackDaemonDiagnostics({
   env = process.env,
   runDir = env.FACTORY_RUN_DIR || path.join(homedir(), ".factory", "run"),
+  root = factoryRoot(),
   listProcesses = defaultProcessTable,
   readPidFile = (file) => readFileSync(file, "utf8"),
   probeProcess = defaultProcessProbe,
@@ -463,8 +464,18 @@ export function stackDaemonDiagnostics({
   }
   const processes = Array.isArray(table) ? table : (table?.processes ?? []);
   const processTableOk = Array.isArray(table) || table?.ok !== false;
+  const ghAppEntrypoint = path.join(
+    path.resolve(root),
+    "lib",
+    "control-plane",
+    "gh-app-auth.mjs",
+  );
+  const isThisStackGhAppDaemon = (command) => {
+    const value = String(command ?? "");
+    return GH_APP_DAEMON.test(value) && value.includes(ghAppEntrypoint);
+  };
   const ghAppDaemons = processes.filter(({ command }) =>
-    GH_APP_DAEMON.test(String(command ?? "")),
+    isThisStackGhAppDaemon(command),
   );
   if (!processTableOk) {
     diagnostics.push({
@@ -480,27 +491,73 @@ export function stackDaemonDiagnostics({
       detail: `duplicate daemons — found ${ghAppDaemons.length} (${ghAppDaemons.map(({ pid }) => pid).join(", ")})`,
       fix: "stop duplicate gh-app-auth.mjs --daemon processes, leaving exactly one",
     });
-  } else if (ghAppDaemons.length === 1) {
-    diagnostics.push({
-      ok: true,
-      label: "gh-app-auth daemon",
-      detail: `one daemon running (pid ${ghAppDaemons[0].pid})`,
-      fix: null,
-    });
-  } else if (appConfigured) {
-    diagnostics.push({
-      ok: false,
-      label: "gh-app-auth daemon",
-      detail: "GitHub App auth is configured but no daemon is running",
-      fix: "run `factory up` to start gh-app-auth.mjs --daemon",
-    });
   } else {
-    diagnostics.push({
-      ok: "warn",
-      label: "gh-app-auth daemon",
-      detail: "not applicable — GitHub App auth is not configured",
-      fix: null,
-    });
+    const ghAppPidFile = path.join(runDir, "gh-app-auth.pid");
+    let pidText = null;
+    try {
+      pidText = readPidFile(ghAppPidFile);
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        diagnostics.push({
+          ok: appConfigured ? false : "warn",
+          label: "gh-app-auth daemon",
+          detail: appConfigured
+            ? "GitHub App auth is configured but no daemon is running"
+            : "not applicable — GitHub App auth is not configured",
+          fix: appConfigured
+            ? "run `factory up` to start gh-app-auth.mjs --daemon"
+            : null,
+        });
+      } else {
+        diagnostics.push({
+          ok: false,
+          label: "gh-app-auth daemon",
+          detail: `cannot read ${ghAppPidFile} — ${error?.message ?? String(error)}`,
+          fix: "repair or remove the unreadable gh-app-auth.pid, then run `factory up`",
+        });
+      }
+    }
+
+    if (pidText !== null) {
+      const pid = Number(String(pidText).trim());
+      if (!Number.isSafeInteger(pid) || pid <= 0) {
+        diagnostics.push({
+          ok: false,
+          label: "gh-app-auth daemon",
+          detail: `stale gh-app-auth.pid — invalid PID ${JSON.stringify(String(pidText).trim())}`,
+          fix: "remove the stale gh-app-auth.pid and run `factory up`",
+        });
+      } else {
+        let probe;
+        try {
+          probe = probeProcess(pid);
+        } catch (error) {
+          probe = { alive: false, detail: error?.message ?? String(error) };
+        }
+        if (!probe?.alive) {
+          diagnostics.push({
+            ok: false,
+            label: "gh-app-auth daemon",
+            detail: `stale gh-app-auth.pid — PID ${pid} is not running${probe?.detail ? ` (${probe.detail})` : ""}`,
+            fix: "remove the stale gh-app-auth.pid and run `factory up`",
+          });
+        } else if (!isThisStackGhAppDaemon(probe.command)) {
+          diagnostics.push({
+            ok: false,
+            label: "gh-app-auth daemon",
+            detail: `recycled gh-app-auth.pid — PID ${pid} belongs to ${probe.command || "an unidentifiable process"}`,
+            fix: "remove the recycled gh-app-auth.pid and run `factory up`",
+          });
+        } else {
+          diagnostics.push({
+            ok: true,
+            label: "gh-app-auth daemon",
+            detail: `one daemon running (pid ${pid})`,
+            fix: null,
+          });
+        }
+      }
+    }
   }
 
   const servePidFile = path.join(runDir, "serve.pid");
