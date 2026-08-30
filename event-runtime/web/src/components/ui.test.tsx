@@ -732,6 +732,13 @@ describe("getValueHue", () => {
       expect(PROPOSAL_STATUS_HUES).toHaveProperty(status);
     }
   });
+
+  test("keeps superseded distinct from resolved where both statuses render", () => {
+    expect(PROPOSAL_STATUS_HUES.superseded).toBe("var(--hue-verify)");
+    expect(PROPOSAL_STATUS_HUES.superseded).not.toBe(
+      PROPOSAL_STATUS_HUES.resolved,
+    );
+  });
 });
 
 describe("FilterInput autocomplete (OPS-506)", () => {
