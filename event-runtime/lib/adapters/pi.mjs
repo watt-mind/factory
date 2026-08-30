@@ -456,6 +456,10 @@ function attachOutput({
   transcript.on("error", () => {});
   if (stdout) {
     stdout.pipe(transcript);
+  } else {
+    // No stdout means nothing will ever end the transcript; close it now so
+    // execute()'s wait for the stream to finish cannot hang (mirrors acp).
+    transcript.end();
   }
 
   // Live trace: same stdout, line by line. Observational only — a trace
