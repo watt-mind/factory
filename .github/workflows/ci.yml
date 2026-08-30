@@ -683,6 +683,7 @@ jobs:
       EVENT_NAME: ${{ github.event_name }}
       IS_DRAFT: ${{ github.event.pull_request.draft }}
       SELF_HOSTED: ${{ needs.route.outputs.self_hosted }}
+      ROUTE_RESULT: ${{ needs.route.result }}
       HEALTH_RESULT: ${{ needs.shadow-runner-health.result }}
       FAST_RESULT: ${{ needs.fast-unit-tests.result }}
       FULL_RESULT: ${{ needs.verify.result }}
@@ -698,26 +699,34 @@ jobs:
           fi
 
           failed=0
-          if [ "$SELF_HOSTED" = "true" ]; then
-            echo "Shadow runner fleet available=$HEALTH_RESULT"
-            if [ "$HEALTH_RESULT" != "success" ]; then
-              failed=1
-            fi
-          else
-            echo "Cloud runner lane active: shadow runner fleet health check skipped."
-          fi
+          require_success() {
+            local name="$1"
+            local result="$2"
+            echo "$name=$result"
+            case "$result" in
+              success) ;;
+              cancelled|skipped|failure) echo "::error::$name was $result."; failed=1 ;;
+              *) echo "::error::$name did not succeed (result: ${result:-missing})."; failed=1 ;;
+            esac
+          }
 
-          for result in \
-            "Fast unit tests=$FAST_RESULT" \
-            "Full verification=$FULL_RESULT"
-          do
-            echo "$result"
-            if [ "${result##*=}" != "success" ]; then
+          # This job is intentionally `always()` so it reports cancelled and
+          # skipped dependencies instead of inheriting GitHub's implicit
+          # success gate. The cloud lane is the sole expected skipped job.
+          require_success "Route CI lane" "$ROUTE_RESULT"
+          if [ "$SELF_HOSTED" = "true" ]; then
+            require_success "Shadow runner fleet available" "$HEALTH_RESULT"
+          else
+            echo "Shadow runner fleet available=$HEALTH_RESULT (expected skipped on cloud lane)"
+            if [ "$HEALTH_RESULT" != "skipped" ]; then
+              echo "::error::Cloud lane expected Shadow runner fleet available to be skipped."
               failed=1
             fi
-          done
+          fi
+          require_success "Fast unit tests" "$FAST_RESULT"
+          require_success "Full verification" "$FULL_RESULT"
 
           if [ "$failed" -ne 0 ]; then
-            echo "::error::One or more required verification jobs did not succeed."
+            echo "::error::One or more required verification jobs did not succeed; Verify cannot be green."
           fi
           exit "$failed"

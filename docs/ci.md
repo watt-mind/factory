@@ -43,6 +43,22 @@ The event-runtime merge lane is being split into parallel per-PR review with a l
 
 CI and Security use `concurrency.group` keyed by PR number for pull requests and by ref for pushes, with `cancel-in-progress` for both. A newer push to `develop` cancels the older develop run — only the latest develop head is verified — and a newer PR push cancels that PR's older run. Runs never wait in a concurrency group for a _different_ PR, so nothing is dropped across PRs; queueing across PRs happens in GitHub's runner queue for the `verify-lane` label.
 
+### Required Verify umbrella
+
+`Verify` is the required umbrella for the CI test lanes. It uses `if: always()`
+so GitHub evaluates it after every dependency result rather than silently
+skipping it behind the default success gate. Except for `Shadow runner fleet
+available`, which is intentionally `skipped` on the cloud lane, every gating
+dependency (`Route CI lane`, shadow health on self-hosted, `Fast unit tests`,
+and `Full verification`) must conclude `success`. A `cancelled`, `skipped`,
+or `failure` result makes `Verify` fail.
+
+This matters because concurrency cancellation can leave a historical
+`Verify=success` check-run visible for a superseded workflow. The factory
+merge gate rejects cancelled/superseded workflow runs and evaluates the newest
+non-cancelled run for the reviewed head SHA; it never treats that stale check
+as proof that a merge is green.
+
 ## Dependabot dependency policy
 
 Dependabot opens one weekly grouped pull request per npm ecosystem for minor
