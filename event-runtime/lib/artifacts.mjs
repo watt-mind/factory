@@ -356,14 +356,8 @@ export function listArtifacts(
   }).artifacts;
 }
 
-/** Newest-first cursor page for the artifact catalogue HTTP projection. */
-export function listArtifactPage(
-  db,
-  storeRoot,
-  { orphan, kind, search, limit = 100, before = null } = {},
-) {
-  if (!existsSync(storeRoot)) return { artifacts: [], nextBefore: null };
-
+/** Build the result-to-artifact reference index used by catalogue pages. */
+export function artifactReferenceIndex(db) {
   const references = new Map();
   const rows = db
     .query(
@@ -409,22 +403,55 @@ export function listArtifactPage(
       }
     }
   }
+  return references;
+}
 
-  const term = typeof search === "string" ? search.toLowerCase() : null;
+/** Snapshot the artifact files that are currently present in the store. */
+export function artifactInventory(storeRoot) {
+  if (!existsSync(storeRoot)) return [];
   const inventory = [];
   for (const sha256 of readdirSync(storeRoot).filter((name) =>
     HEX64.test(name),
   )) {
     const stat = statSync(path.join(storeRoot, sha256));
     if (!stat.isFile()) continue;
-    const refs = references.get(sha256) ?? [];
+    inventory.push({
+      sha256,
+      sizeBytes: stat.size,
+      mtime: stat.mtime.toISOString(),
+    });
+  }
+  return inventory;
+}
+
+/** Newest-first cursor page for the artifact catalogue HTTP projection. */
+export function listArtifactPage(
+  db,
+  storeRoot,
+  {
+    orphan,
+    kind,
+    search,
+    limit = 100,
+    before = null,
+    references = null,
+    inventory = null,
+  } = {},
+) {
+  const index = references ?? artifactReferenceIndex(db);
+  const files = inventory ?? artifactInventory(storeRoot);
+
+  const term = typeof search === "string" ? search.toLowerCase() : null;
+  const catalogue = [];
+  for (const file of files) {
+    const refs = index.get(file.sha256) ?? [];
     const referenced = refs.length > 0;
     if (orphan !== undefined && orphan === referenced) continue;
     if (kind !== undefined && !refs.some((ref) => ref.kind === kind)) continue;
     if (
       term &&
       ![
-        sha256,
+        file.sha256,
         ...refs.flatMap((ref) => [ref.runId, ref.kind, ref.agent, ref.state]),
       ].some((value) =>
         String(value ?? "")
@@ -433,25 +460,23 @@ export function listArtifactPage(
       )
     )
       continue;
-    inventory.push({
-      sha256,
-      sizeBytes: stat.size,
-      mtime: stat.mtime.toISOString(),
+    catalogue.push({
+      ...file,
       referenced,
       references: refs,
     });
   }
-  inventory.sort(
+  catalogue.sort(
     (a, b) =>
       b.mtime.localeCompare(a.mtime) || a.sha256.localeCompare(b.sha256),
   );
   const afterCursor = before
-    ? inventory.filter(
+    ? catalogue.filter(
         (item) =>
           item.mtime < before.mtime ||
           (item.mtime === before.mtime && item.sha256 > before.sha256),
       )
-    : inventory;
+    : catalogue;
   const page = afterCursor.slice(0, limit + 1);
   const hasNextPage = page.length > limit;
   const artifacts = hasNextPage ? page.slice(0, -1) : page;
