@@ -18,6 +18,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -405,6 +406,18 @@ export function materializeRunHarness({
   );
   if (declaredCount === 0) return [];
 
+  // `safeJoin` returns a realpath-canonical destination. Keep the root used
+  // for receipt-relative paths in that same namespace so a symlinked workspace
+  // parent does not turn an in-workspace harness file into an apparent escape.
+  let canonicalWorkspaceDir;
+  try {
+    canonicalWorkspaceDir = realpathSync(path.resolve(workspaceDir));
+  } catch (err) {
+    throw new HarnessMaterializeError(
+      "harness_unmaterializable",
+      `workspace root ${JSON.stringify(String(workspaceDir))} cannot be resolved: ${err?.message ?? String(err)}`,
+    );
+  }
   const layout = adapter?.HARNESS_LAYOUT;
   const roots = harnessCatalogRoots(registry, factoryRoot);
   const written = [];
@@ -444,7 +457,10 @@ export function materializeRunHarness({
       const src = path.join(factoryRoot, ...srcParts);
       let dest;
       try {
-        dest = safeJoin(workspaceDir, harnessRelDest(kindLayout, name));
+        dest = safeJoin(
+          canonicalWorkspaceDir,
+          harnessRelDest(kindLayout, name),
+        );
       } catch (err) {
         throw new HarnessMaterializeError(
           "harness_unmaterializable",
@@ -477,8 +493,8 @@ export function materializeRunHarness({
       written.push({
         kind,
         name,
-        dest: path.relative(workspaceDir, dest),
-        pins: harnessFilePins(dest, workspaceDir),
+        dest: path.relative(canonicalWorkspaceDir, dest),
+        pins: harnessFilePins(dest, canonicalWorkspaceDir),
       });
     }
   }
