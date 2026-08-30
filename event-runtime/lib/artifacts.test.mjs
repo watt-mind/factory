@@ -613,10 +613,54 @@ describe("store maintenance: referencedHashes, storeStats, pruneArtifacts, pinRu
     expect(pruneArtifacts(db, storeRoot, { now })).toEqual({
       deleted: 1,
       freedBytes: 3,
-      remainingOrphans: 1,
+      remainingOrphans: 0,
     });
     expect(existsSync(oldTemp)).toBe(false);
     expect(existsSync(freshTemp)).toBe(true);
+  });
+
+  test("stale temp files are reclaimed even when a malformed result holds artifact deletion", () => {
+    const db = openDb(":memory:");
+    const { storeRoot, hash: orphanHash } = makeStore("orphan");
+    const now = Date.now();
+    const oldTemp = path.join(storeRoot, `${"b".repeat(64)}.tmp.1.old`);
+    writeFileSync(oldTemp, "old");
+    utimesSync(
+      oldTemp,
+      new Date(now - ARTIFACT_TEMP_GRACE_MS - 1),
+      new Date(now - ARTIFACT_TEMP_GRACE_MS - 1),
+    );
+    db.query(
+      `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+       VALUES (?, 1, '{not json', 'sha256:x', '{}', '{}', ?)`,
+    ).run("run_invalid", new Date().toISOString());
+
+    expect(pruneArtifacts(db, storeRoot, { now, olderThanMs: -1 })).toEqual({
+      deleted: 1,
+      freedBytes: 3,
+      remainingOrphans: 1,
+      invalidResults: 1,
+    });
+    expect(existsSync(oldTemp)).toBe(false);
+    expect(findArtifact(storeRoot, orphanHash)).not.toBeNull();
+  });
+
+  test("stats and prune skip entries that vanish between readdir and stat", () => {
+    const db = openDb(":memory:");
+    const { storeRoot, hash } = makeStore("stays");
+    // A dangling symlink stats like a blob a concurrent prune already removed:
+    // readdir lists it, stat reports ENOENT.
+    const vanished = path.join(storeRoot, "c".repeat(64));
+    symlinkSync(path.join(storeRoot, "never-written"), vanished);
+    expect(storeStats(db, storeRoot)).toMatchObject({
+      files: 1,
+      bytes: 5,
+      orphans: 1,
+    });
+    expect(
+      pruneArtifacts(db, storeRoot, { olderThanMs: -1, dryRun: true }),
+    ).toEqual({ deleted: 1, freedBytes: 5, remainingOrphans: 1 });
+    expect(findArtifact(storeRoot, hash)).not.toBeNull();
   });
 
   test("pinRunArtifact retrieves artifact hash by kind", () => {

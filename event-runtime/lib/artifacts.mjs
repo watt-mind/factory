@@ -540,8 +540,11 @@ export function storeStats(db, storeRoot, { now = Date.now() } = {}) {
   let tempFiles = 0;
   let tempBytes = 0;
   for (const name of readdirSync(storeRoot)) {
-    const stat = statSync(path.join(storeRoot, name));
-    if (!stat.isFile()) continue;
+    // A concurrent prune may remove the entry between readdir and stat.
+    const stat = statSync(path.join(storeRoot, name), {
+      throwIfNoEntry: false,
+    });
+    if (!stat?.isFile()) continue;
     if (ARTIFACT_TEMP.test(name)) {
       tempFiles += 1;
       tempBytes += stat.size;
@@ -571,8 +574,11 @@ export function storeStats(db, storeRoot, { now = Date.now() } = {}) {
  * Delete unreferenced artifacts older than `olderThanMs`. Referenced bytes are
  * never touched: a receipt that points at a deleted file is worse than a full
  * disk, because it turns the audit trail into a lie. Interrupted publish temp
- * files are also removed after `ARTIFACT_TEMP_GRACE_MS`. A malformed result
- * fails closed: no files are removed, while dry-runs still report candidates.
+ * files are also removed after `ARTIFACT_TEMP_GRACE_MS`, regardless of the
+ * result table's health — no result can reference a temp name. A malformed
+ * result fails closed for content-addressed files: none are removed, while
+ * dry-runs still report candidates. `remainingOrphans` counts only
+ * content-addressed orphans left behind; in-grace temp files are not orphans.
  */
 export function pruneArtifacts(
   db,
@@ -593,23 +599,27 @@ export function pruneArtifacts(
   let remainingOrphans = 0;
   for (const name of readdirSync(storeRoot)) {
     const file = path.join(storeRoot, name);
-    const stat = statSync(file);
-    if (!stat.isFile()) continue;
+    // A concurrent prune may remove the entry between readdir and stat.
+    const stat = statSync(file, { throwIfNoEntry: false });
+    if (!stat?.isFile()) continue;
     const isTemp = ARTIFACT_TEMP.test(name);
     if (!isTemp && (!HEX64.test(name) || referenced.has(name))) continue;
     const graceMs = isTemp ? tempGraceMs : olderThanMs;
     if (now - stat.mtimeMs < graceMs) {
-      remainingOrphans += 1;
+      // An in-grace temp file is a publish still in flight, not an orphan.
+      if (!isTemp) remainingOrphans += 1;
       continue;
     }
-    if (!canDelete) {
+    // Temp files are never referenced by a result, so a malformed row does not
+    // make them ambiguous: reclaim them even when artifact deletion is held.
+    if (!isTemp && !canDelete) {
       remainingOrphans += 1;
       continue;
     }
     freedBytes += stat.size;
     deleted += 1;
     if (dryRun) {
-      remainingOrphans += 1;
+      if (!isTemp) remainingOrphans += 1;
     } else {
       rmSync(file, { force: true });
     }
