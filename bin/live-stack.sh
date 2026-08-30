@@ -10,6 +10,7 @@
 #   factory down                 # cleanly stop live daemons (drains the pool first)
 #   factory tail                 # tail all live logs (serve.log, worker.log, web.log)
 #   factory tail worker          # tail a specific daemon log
+#   factory logs rotate          # rotate oversized daemon logs now
 #
 set -euo pipefail
 
@@ -139,6 +140,8 @@ HOME_DIR="${FACTORY_EVENT_HOME:-$HOME/.factory/event-runtime}"
 RUN_DIR="${FACTORY_RUN_DIR:-$HOME/.factory/run}"
 API_PORT="${FACTORY_EVENT_PORT:-7381}"
 WEB_PORT="${FACTORY_EVENT_WEB_PORT:-7382}"
+LOG_ROTATE_BYTES="${FACTORY_LOG_ROTATE_BYTES:-52428800}"
+LOG_KEEP="${FACTORY_LOG_KEEP:-3}"
 
 # `up` creates these itself once `--dry-run` has had its chance to exit: a dry
 # run must leave no trace on disk.
@@ -374,6 +377,11 @@ case "$ACTION" in
     fi
 
     mkdir -p "$RUN_DIR" "$HOME_DIR"
+    [[ "$LOG_ROTATE_BYTES" =~ ^[0-9]+$ ]] || die "FACTORY_LOG_ROTATE_BYTES must be a non-negative integer"
+    [[ "$LOG_KEEP" =~ ^[1-9][0-9]*$ ]] || die "FACTORY_LOG_KEEP must be a positive integer"
+    # This happens before any daemon is spawned. Existing live owners keep
+    # their inode and are copy-truncated; stopped daemons get a cheap rename.
+    rotate_run_logs "$RUN_DIR" "$LOG_ROTATE_BYTES" "$LOG_KEEP"
     # Record what was already running before this invocation starts anything,
     # so a failed `up` can tell its own daemons from the operator's.
     snapshot_up_pidfiles
@@ -599,16 +607,35 @@ case "$ACTION" in
   __supervise-web)
     # The static server normally survives API restarts. If an unrelated
     # uncaught process error does terminate it, keep the UI reachable while the
-    # API daemon is still alive. A bounded one-second check avoids crash-looping
-    # while still recovering before the next operator pulse.
+    # API daemon is still alive. Fast failures back off rather than turning a
+    # port clash into a one-line-per-second log flood.
     WEB_DEV="${1:-0}"
     WEB_CHILD_PID=""
+    WEB_CHILD_STARTED=0
+    WEB_RESTART_DELAY=1
     # A replacement stays in this supervisor's process group rather than being
     # detached. `factory down` can therefore stop the whole group atomically,
     # including a child spawned just before SIGTERM reaches this shell.
     trap 'if [[ -n "$WEB_CHILD_PID" ]]; then kill -TERM "$WEB_CHILD_PID" 2>/dev/null || true; fi; exit 0' TERM INT
     while pid_alive "$RUN_DIR/serve.pid"; do
       if ! pid_alive "$RUN_DIR/web.pid"; then
+        WEB_NOW=$(date +%s)
+        if [[ "$WEB_CHILD_STARTED" -gt 0 ]]; then
+          WEB_AGE=$((WEB_NOW - WEB_CHILD_STARTED))
+          if [[ "$WEB_AGE" -ge 60 ]]; then
+            WEB_RESTART_DELAY=1
+          elif [[ "$WEB_AGE" -le 5 ]]; then
+            printf '%s [web-supervisor] web server failed after %ss; retrying in %ss\n' \
+              "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$WEB_AGE" "$WEB_RESTART_DELAY"
+            sleep "$WEB_RESTART_DELAY"
+            WEB_RESTART_DELAY=$((WEB_RESTART_DELAY * 2))
+            [[ "$WEB_RESTART_DELAY" -le 30 ]] || WEB_RESTART_DELAY=30
+          else
+            # It was not a rapid crash-loop. Keep the next retry prompt while
+            # retaining the explicit 60-second reset for long-lived children.
+            WEB_RESTART_DELAY=1
+          fi
+        fi
         printf '%s [web-supervisor] web server down; restarting\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         if [[ "$WEB_DEV" -eq 1 ]]; then
           (
@@ -624,7 +651,10 @@ case "$ACTION" in
           ) >>"$RUN_DIR/web.log" 2>&1 &
         fi
         WEB_CHILD_PID=$!
+        WEB_CHILD_STARTED=$(date +%s)
         printf '%s\n' "$WEB_CHILD_PID" >"$RUN_DIR/web.pid"
+      elif [[ "$WEB_CHILD_STARTED" -gt 0 ]] && (( $(date +%s) - WEB_CHILD_STARTED >= 60 )); then
+        WEB_RESTART_DELAY=1
       fi
       sleep "${FACTORY_WEB_SUPERVISOR_INTERVAL:-1}"
     done
@@ -737,7 +767,19 @@ case "$ACTION" in
     fi
     ;;
 
+  logs)
+    [[ "${1:-}" == "rotate" && $# -eq 1 ]] || die "usage: factory logs rotate"
+    [[ "$LOG_ROTATE_BYTES" =~ ^[0-9]+$ ]] || die "FACTORY_LOG_ROTATE_BYTES must be a non-negative integer"
+    [[ "$LOG_KEEP" =~ ^[1-9][0-9]*$ ]] || die "FACTORY_LOG_KEEP must be a positive integer"
+    rotate_run_logs "$RUN_DIR" "$LOG_ROTATE_BYTES" "$LOG_KEEP"
+    printf 'total log bytes: %s\n' "$(run_log_total_bytes "$RUN_DIR")"
+    ;;
+
+  status)
+    printf 'total log bytes: %s\n' "$(run_log_total_bytes "$RUN_DIR")"
+    ;;
+
   *)
-    die "unknown action '$ACTION' (expected: up, down, tail)"
+    die "unknown action '$ACTION' (expected: up, down, tail, logs, status)"
     ;;
 esac

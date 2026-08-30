@@ -478,6 +478,70 @@ spawn_daemon() { # <pidfile> <logfile> <workdir> <cmd...>
   fi
 }
 
+# The live stack keeps its logs alongside pidfiles.  Rotate a file in place
+# when one of its owners is still alive: a rename would leave that daemon
+# writing to the old inode forever, defeating the point of rotation.
+run_log_has_live_owner() { # <logfile>
+  local logfile="$1" run_dir stem pidfile
+  run_dir="$(dirname "$logfile")"
+  stem="$(basename "${logfile%.log}")"
+  # web.log is shared by web.pid and web-supervisor.pid; the prefix also
+  # covers worker-N.log / worker-N.pid pool slots.
+  for pidfile in "$run_dir/$stem".pid "$run_dir/$stem"-*.pid; do
+    pid_alive "$pidfile" && return 0
+  done
+  return 1
+}
+
+run_log_size_bytes() { # <logfile>
+  [[ -f "$1" ]] || { printf '0'; return; }
+  wc -c <"$1" | tr -d '[:space:]'
+}
+
+rotate_run_log() { # <logfile> <max-bytes> <keep>
+  local logfile="$1" max_bytes="$2" keep="$3" size i mode
+  [[ -f "$logfile" ]] || return 0
+  size="$(run_log_size_bytes "$logfile")"
+  [[ "$size" =~ ^[0-9]+$ ]] && ((size > max_bytes)) || return 0
+
+  # Keep .1 newest and discard only the oldest retained generation.
+  rm -f "$logfile.$keep"
+  for ((i = keep; i > 1; i--)); do
+    [[ -f "$logfile.$((i - 1))" ]] && mv -f "$logfile.$((i - 1))" "$logfile.$i"
+  done
+
+  if run_log_has_live_owner "$logfile"; then
+    cp -f "$logfile" "$logfile.1"
+    : >"$logfile"
+    mode="copy-truncated live log"
+  else
+    mv -f "$logfile" "$logfile.1"
+    : >"$logfile"
+    mode="moved stopped log"
+  fi
+  info "rotated $logfile (${size} bytes; $mode -> ${logfile}.1)"
+}
+
+rotate_run_logs() { # <run-dir> <max-bytes> <keep>
+  local run_dir="$1" max_bytes="$2" keep="$3" logfile
+  [[ -d "$run_dir" ]] || return 0
+  for logfile in "$run_dir"/*.log; do
+    [[ -f "$logfile" ]] || continue
+    rotate_run_log "$logfile" "$max_bytes" "$keep"
+  done
+}
+
+run_log_total_bytes() { # <run-dir>
+  local run_dir="$1" logfile total=0 size
+  [[ -d "$run_dir" ]] || { printf '0'; return; }
+  for logfile in "$run_dir"/*.log "$run_dir"/*.log.[0-9]*; do
+    [[ -f "$logfile" ]] || continue
+    size="$(run_log_size_bytes "$logfile")"
+    [[ "$size" =~ ^[0-9]+$ ]] && total=$((total + size))
+  done
+  printf '%s' "$total"
+}
+
 # Persist / restore the ports this checkout actually bound (OPS-460).
 read_ports() { # <worktree> → prints "api web"
   local f api="" web="" k v
