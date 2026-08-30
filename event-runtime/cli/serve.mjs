@@ -18,6 +18,7 @@ import {
 import { openDb } from "../lib/db.mjs";
 import { newWorkerId } from "../lib/ids.mjs";
 import { pruneArtifacts } from "../lib/artifacts.mjs";
+import { sweepMemos } from "../lib/memos.mjs";
 import { publishOutbox } from "../lib/outbox.mjs";
 import { autoApproveScheduled, emitDueTicks } from "../lib/schedules.mjs";
 import { autoApproveChains } from "../lib/auto-approval.mjs";
@@ -183,6 +184,13 @@ export async function tick({
   await runStep("GC", () => {
     if (now - lastPrune <= pruneIntervalMs) return;
     try {
+      // Sweep first so memo artifacts become eligible for this GC pass rather
+      // than staying pinned until the next hourly artifact prune.
+      const swept = sweepMemos(db, { now });
+      if (swept.deleted > 0)
+        logLine(
+          `memos: swept ${swept.deleted} expired/retired/superseded memo(s)`,
+        );
       const pruned = pruneArtifacts(db, storeRoot ?? artifactsRoot(), { now });
       if (pruned.deleted > 0)
         logLine(

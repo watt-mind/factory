@@ -14,12 +14,14 @@ import {
 import {
   KIND_DEFAULT_TTL_MS,
   LEARNINGS_MAX,
+  MEMO_RETENTION_MS,
   MEMO_SCHEMA_VERSION,
   learningsToMemos,
   listMemos,
   memoDigest,
   normalizeSubjectId,
   registerMemos,
+  sweepMemos,
   validateMemo,
   withProvenance,
 } from "./memos.mjs";
@@ -256,6 +258,110 @@ describe("registerMemos / listMemos", () => {
         { now: now + KIND_DEFAULT_TTL_MS.postmortem + 1 },
       ),
     ).toHaveLength(0);
+    db.close();
+  });
+
+  test("live SQL filtering keeps the existing mixed-subject fold and applies max", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-18T14:02:11.000Z");
+    const useful = accepted(postmortemDoc({ body: "useful" }), { now });
+    const newer = accepted(postmortemDoc({ body: "newer" }), { now: now + 1 });
+    const expired = accepted(postmortemDoc({ body: "expired" }), { now });
+    const retired = accepted(postmortemDoc({ body: "retired" }), { now });
+    const superseded = accepted(postmortemDoc({ body: "superseded" }), {
+      now,
+    });
+    registerMemos(db, "run_useful", useful.result, { now });
+    registerMemos(db, "run_newer", newer.result, { now: now + 1 });
+    registerMemos(db, "run_expired", expired.result, { now });
+    registerMemos(db, "run_retired", retired.result, { now });
+    registerMemos(db, "run_superseded", superseded.result, { now });
+    db.query(`UPDATE memos SET expires_at = ? WHERE sha256 = ?`).run(
+      now,
+      expired.sha256,
+    );
+    db.query(`UPDATE memos SET retired_at = ? WHERE sha256 = ?`).run(
+      now,
+      retired.sha256,
+    );
+    db.query(`UPDATE memos SET superseded_by = ? WHERE sha256 = ?`).run(
+      newer.sha256,
+      superseded.sha256,
+    );
+    registerMemos(
+      db,
+      "run_consumer",
+      { usedMemos: [{ sha256: useful.sha256, verdict: "useful" }] },
+      { now: now + 2 },
+    );
+
+    const allLive = listMemos(
+      db,
+      { type: "ticket", id: "WM-809" },
+      { now: now + 2 },
+    );
+    expect(allLive.map((row) => row.sha256)).toEqual([
+      useful.sha256,
+      newer.sha256,
+    ]);
+    const live = listMemos(
+      db,
+      { type: "ticket", id: "WM-809" },
+      { now: now + 2, max: 1 },
+    );
+    expect(live.map((row) => row.sha256)).toEqual([useful.sha256]);
+    expect(live[0].usefulCount).toBe(1);
+    db.close();
+  });
+
+  test("sweepMemos removes retained dead memos and their use rows only", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-18T14:02:11.000Z");
+    const expired = accepted(repoNoteDoc({ body: "expired" }), { now });
+    const retired = accepted(repoNoteDoc({ body: "retired" }), { now });
+    const predecessor = accepted(repoNoteDoc({ body: "predecessor" }), { now });
+    const replacement = accepted(repoNoteDoc({ body: "replacement" }), {
+      now: now - MEMO_RETENTION_MS - 1,
+    });
+    const live = accepted(repoNoteDoc({ body: "live" }), { now });
+    for (const [runId, memo] of [
+      ["run_expired", expired],
+      ["run_retired", retired],
+      ["run_predecessor", predecessor],
+      ["run_replacement", replacement],
+      ["run_live", live],
+    ]) {
+      registerMemos(db, runId, memo.result, { now });
+    }
+    db.query(`UPDATE memos SET expires_at = ? WHERE sha256 = ?`).run(
+      now - MEMO_RETENTION_MS - 1,
+      expired.sha256,
+    );
+    db.query(`UPDATE memos SET retired_at = ? WHERE sha256 = ?`).run(
+      now - MEMO_RETENTION_MS - 1,
+      retired.sha256,
+    );
+    db.query(`UPDATE memos SET superseded_by = ? WHERE sha256 = ?`).run(
+      replacement.sha256,
+      predecessor.sha256,
+    );
+    db.query(
+      `INSERT INTO memo_uses (sha256, run_id, verdict, run_state, at)
+       VALUES (?, 'run_use', 'useful', 'COMPLETED', ?)`,
+    ).run(expired.sha256, now);
+    db.query(
+      `INSERT INTO memo_uses (sha256, run_id, verdict, run_state, at)
+       VALUES (?, 'run_use', 'wrong', 'COMPLETED', ?)`,
+    ).run(predecessor.sha256, now);
+
+    expect(sweepMemos(db, { now })).toEqual({ deleted: 3, usesDeleted: 2 });
+    expect(
+      db
+        .query(`SELECT sha256 FROM memos ORDER BY sha256`)
+        .all()
+        .map((row) => row.sha256),
+    ).toEqual([live.sha256, replacement.sha256].sort());
+    expect(db.query(`SELECT COUNT(*) AS n FROM memo_uses`).get().n).toBe(0);
     db.close();
   });
 

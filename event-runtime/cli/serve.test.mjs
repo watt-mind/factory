@@ -242,6 +242,29 @@ describe("serve command", () => {
     expect(chainsRan).toBe(true);
   });
 
+  test("tick sweeps retained memo rows alongside artifact GC and logs the count", async () => {
+    const { tick } = await import("../cli.mjs");
+    const { loadRegistry } = await import("../lib/registry.mjs");
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-18T14:02:11.000Z");
+    db.query(
+      `INSERT INTO memos (sha256, subject_type, subject_id, kind, created_at, expires_at)
+       VALUES (?, 'repo', 'factory', 'repo-note', ?, ?)`,
+    ).run("a".repeat(64), now - 100, now - 31 * 24 * 60 * 60 * 1000);
+    const logs = [];
+    await tick({
+      db,
+      registry: loadRegistry(),
+      now,
+      policyVersion: "git:test",
+      lastPrune: 0,
+      log: (line) => logs.push(line),
+    });
+    expect(db.query(`SELECT COUNT(*) AS n FROM memos`).get().n).toBe(0);
+    expect(logs).toContain("memos: swept 1 expired/retired/superseded memo(s)");
+    db.close();
+  });
+
   test("tick with FACTORY_EVENT_NOTIFY=1 pushes a human_needed park through the stub notifier exactly once", async () => {
     const { delivery } = await runNotifierDeliveryCase();
     expect(delivery.error).toBeNull();
