@@ -1,9 +1,5 @@
 import { test, expect, describe } from "bun:test";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import {
-  loadNodesConfig,
   buildSshArgv,
   executeSsh,
   probeRemoteNode,
@@ -11,78 +7,8 @@ import {
   startRemoteWorker,
   stopRemoteWorker,
   updateRemoteWorker,
-  NodeConfigError,
+  RemoteWorkerConfigError,
 } from "./workers-remote.mjs";
-
-describe("nodes config loader", () => {
-  test("loadNodesConfig parses valid nodes.yaml correctly", () => {
-    const dir = path.join(tmpdir(), `test-nodes-${Date.now()}`);
-    mkdirSync(path.join(dir, "config"), { recursive: true });
-    writeFileSync(
-      path.join(dir, "config", "nodes.yaml"),
-      `
-nodes:
-  mac-mini:
-    host: "mac-mini.local"
-    user: "dev"
-    port: 2222
-    factory_root: "~/Develop/factory"
-    branch: "main"
-    env:
-      FACTORY_EVENT_PORT: 7381
-    labels:
-      node: "mac-mini"
-      arch: "arm64"
-    adapters:
-      - "claude"
-      - "command"
-`,
-    );
-
-    try {
-      const nodes = loadNodesConfig({ root: dir });
-      expect(nodes.size).toBe(1);
-      const node = nodes.get("mac-mini");
-      expect(node).toEqual({
-        name: "mac-mini",
-        host: "mac-mini.local",
-        user: "dev",
-        port: 2222,
-        factoryRoot: "~/Develop/factory",
-        branch: "main",
-        env: { FACTORY_EVENT_PORT: 7381 },
-        labels: { node: "mac-mini", arch: "arm64" },
-        adapters: ["claude", "command"],
-      });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("loadNodesConfig handles missing file gracefully", () => {
-    const nodes = loadNodesConfig({ configPath: "/nonexistent/nodes.yaml" });
-    expect(nodes.size).toBe(0);
-  });
-
-  test("loadNodesConfig rejects invalid node definitions", () => {
-    const dir = path.join(tmpdir(), `test-nodes-err-${Date.now()}`);
-    mkdirSync(path.join(dir, "config"), { recursive: true });
-    writeFileSync(
-      path.join(dir, "config", "nodes.yaml"),
-      `
-nodes:
-  bad-node:
-    port: "invalid"
-`,
-    );
-
-    try {
-      expect(() => loadNodesConfig({ root: dir })).toThrow(NodeConfigError);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-});
 
 describe("ssh argv builder", () => {
   test("buildSshArgv constructs correct arguments", () => {
@@ -233,6 +159,31 @@ describe("remote lifecycle operations", () => {
     expect(res.error).toBe(null);
   });
 
+  test("deployRemoteWorker freezes installs and shell-quotes configured values", () => {
+    let deployScript = null;
+    const ref = 'x"; echo pwned; "';
+    const repoUrl = "ssh://git@example.test/worker's-factory.git";
+    const res = deployRemoteWorker(
+      { ...node, repoUrl },
+      {
+        ref,
+        spawnFn: (args) => {
+          deployScript = args.at(-1);
+          return { exitCode: 0, stdout: "DEPLOY_SUCCESS\n", stderr: "" };
+        },
+      },
+    );
+
+    expect(res.ok).toBe(true);
+    expect(deployScript).toContain("bun install --frozen-lockfile");
+    expect(deployScript).toContain(`git checkout '${ref}'`);
+    expect(deployScript).toContain(`git pull --ff-only origin '${ref}'`);
+    expect(deployScript).toContain(
+      "git clone 'ssh://git@example.test/worker'\"'\"'s-factory.git' .",
+    );
+    expect(deployScript).not.toContain(`git checkout ${ref}`);
+  });
+
   test("startRemoteWorker parses launched PID", () => {
     const mockSpawn = () => ({
       exitCode: 0,
@@ -243,6 +194,47 @@ describe("remote lifecycle operations", () => {
     const res = startRemoteWorker(node, { spawnFn: mockSpawn });
     expect(res.ok).toBe(true);
     expect(res.pid).toBe(88123);
+  });
+
+  test("startRemoteWorker shell-quotes environment, labels, and adapters", () => {
+    let startScript = null;
+    const res = startRemoteWorker(
+      {
+        ...node,
+        env: { TOKEN: "cost$5 and 'quotes'" },
+        labels: { node: "mini; echo pwned" },
+        adapters: ["claude; echo pwned"],
+      },
+      {
+        spawnFn: (args) => {
+          startScript = args.at(-1);
+          return { exitCode: 0, stdout: "START_SUCCESS:88123\n", stderr: "" };
+        },
+      },
+    );
+
+    expect(res.ok).toBe(true);
+    expect(startScript).toContain(
+      "export TOKEN='cost$5 and '\"'\"'quotes'\"'\"'';",
+    );
+    expect(startScript).toContain("--labels 'node=mini; echo pwned'");
+    expect(startScript).toContain("--adapters 'claude; echo pwned'");
+  });
+
+  test("startRemoteWorker rejects an invalid environment key before SSH", () => {
+    let spawnCalls = 0;
+    expect(() =>
+      startRemoteWorker(
+        { ...node, env: { "NOT-VALID": "value" } },
+        {
+          spawnFn: () => {
+            spawnCalls += 1;
+            return { exitCode: 0, stdout: "START_SUCCESS:1", stderr: "" };
+          },
+        },
+      ),
+    ).toThrow(RemoteWorkerConfigError);
+    expect(spawnCalls).toBe(0);
   });
 
   test("stopRemoteWorker handles stop signal and drain", () => {

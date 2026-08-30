@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { afterAll, expect, test } from "bun:test";
+import { until } from "../event-runtime/lib/test-helpers-timing.mjs";
 
 const COMMON = path.resolve(import.meta.dir, "worktree-common.sh");
 const WORKTREE_UP = path.resolve(import.meta.dir, "worktree-up.sh");
@@ -211,6 +212,13 @@ function expectPortBindable(port) {
     socket: { data() {} },
   });
   listener.stop(true);
+}
+
+async function waitForPort(port) {
+  await until(
+    `port ${port} to listen`,
+    () => sh(`port_listening ${port}`).status === 0,
+  );
 }
 
 function mockLsofDir() {
@@ -758,7 +766,7 @@ test("colliding WM-294 and WM-345 startups reserve distinct pairs and stop indep
     expect(rerun.stdout).toContain(`${api1} ${api1 + 1}`);
 
     expect(stop(wt1).status).toBe(0);
-    expect(sh(`port_listening ${api2}`).status).toBe(0);
+    await waitForPort(api2);
     expect(stop(wt2).status).toBe(0);
     expect(sh(`port_listening ${api2}`).status).not.toBe(0);
   } finally {
