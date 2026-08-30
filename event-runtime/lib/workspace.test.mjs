@@ -109,16 +109,16 @@ test("detectWorktreeOwnershipConflict identifies the current run's compound leas
   const databasePath = path.join(root, "runtime.db");
   const db = new Database(databasePath);
   db.exec(`
-    CREATE TABLE runs (run_id TEXT, state TEXT, spec_json TEXT);
+    CREATE TABLE runs (run_id TEXT, state TEXT, spec_json TEXT, attempts INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE attempts (run_id TEXT, attempt INTEGER, lease_owner TEXT);
   `);
   const spec = JSON.stringify({ input: { repo: "factory", ticket: "WM-627" } });
-  db.query(`INSERT INTO runs VALUES (?, ?, ?)`).run(
+  db.query(`INSERT INTO runs (run_id, state, spec_json) VALUES (?, ?, ?)`).run(
     "run_self",
     "RUNNING",
     spec,
   );
-  db.query(`INSERT INTO runs VALUES (?, ?, ?)`).run(
+  db.query(`INSERT INTO runs (run_id, state, spec_json) VALUES (?, ?, ?)`).run(
     "run_done",
     "COMPLETED",
     spec,
@@ -183,7 +183,7 @@ test("detectWorktreeOwnershipConflict identifies the current run's compound leas
 
   const competingDb = new Database(databasePath);
   competingDb
-    .query(`INSERT INTO runs VALUES (?, ?, ?)`)
+    .query(`INSERT INTO runs (run_id, state, spec_json) VALUES (?, ?, ?)`)
     .run("run_other", "FAILED", spec);
   competingDb.close();
   const conflict = detectWorktreeOwnershipConflict({
@@ -198,6 +198,78 @@ test("detectWorktreeOwnershipConflict identifies the current run's compound leas
     runs: [{ runId: "run_other", state: "FAILED" }],
     leases: [],
   });
+});
+
+test("detectWorktreeOwnershipConflict releases only attempts-exhausted FAILED owners", () => {
+  const root = tmpRoot();
+  const databasePath = path.join(root, "runtime.db");
+  const db = new Database(databasePath);
+  db.exec(`
+    CREATE TABLE runs (
+      run_id TEXT,
+      state TEXT,
+      spec_json TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+  const repo = "factory";
+  const insert = (runId, ticket, state, attempts, maxAttempts) =>
+    db.query(`INSERT INTO runs VALUES (?, ?, ?, ?)`).run(
+      runId,
+      state,
+      JSON.stringify({
+        input: { repo, ticket },
+        ...(maxAttempts === undefined ? {} : { maxAttempts }),
+      }),
+      attempts,
+    );
+  insert("run_exhausted", "WM-EXHAUSTED", "FAILED", 3, 3);
+  insert("run_retryable", "WM-RETRYABLE", "FAILED", 2, 3);
+  insert("run_unbounded", "WM-UNBOUNDED", "FAILED", 3, undefined);
+  insert("run_running", "WM-RUNNING", "RUNNING", 1, 3);
+  insert("run_dead", "WM-DEAD", "COMPLETED", 1, 3);
+  insert("run_mixed_exhausted", "WM-MIXED", "FAILED", 3, 3);
+  insert("run_mixed_live", "WM-MIXED", "RUNNING", 1, 3);
+  db.close();
+
+  const staleOwners = [];
+  const detect = (ticket, leases = []) =>
+    detectWorktreeOwnershipConflict({
+      repo,
+      ticket,
+      runId: "run_new",
+      databasePath,
+      leases,
+      staleOwnerLog: (staleRunId) => staleOwners.push(staleRunId),
+    });
+
+  expect(detect("WM-EXHAUSTED")).toBeNull();
+  expect(staleOwners).toEqual(["run_exhausted"]);
+  expect(detect("WM-RETRYABLE")?.runs).toEqual([
+    { runId: "run_retryable", state: "FAILED" },
+  ]);
+  expect(detect("WM-UNBOUNDED")?.runs).toEqual([
+    { runId: "run_unbounded", state: "FAILED" },
+  ]);
+  expect(detect("WM-RUNNING")?.runs).toEqual([
+    { runId: "run_running", state: "RUNNING" },
+  ]);
+  // An exhausted owner beside a live one is not released, so nothing is
+  // announced as stale.
+  expect(detect("WM-MIXED")?.runs).toEqual([
+    { runId: "run_mixed_live", state: "RUNNING" },
+  ]);
+  expect(staleOwners).toEqual(["run_exhausted"]);
+
+  const liveLease = {
+    repo,
+    ticket: "WM-DEAD",
+    owner: "worker_dead_run",
+    pid: process.pid + 1,
+  };
+  expect(detect("WM-DEAD", [liveLease])?.leases).toEqual([
+    { owner: "worker_dead_run", pid: process.pid + 1 },
+  ]);
 });
 
 describe("createWorkspace / destroyWorkspace", () => {

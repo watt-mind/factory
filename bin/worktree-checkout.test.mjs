@@ -1267,7 +1267,7 @@ test("worktree-down --prune removes only clean terminal worktrees and preserves 
   }
 });
 
-test("worktree-down --prune recognizes a merged PR for the worktree branch", () => {
+test("worktree-down --prune recognizes merged GitHub worktrees and preserves dirty ones", () => {
   if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(
     path.join(tmpdir(), "factory-wt-prune-merged-"),
@@ -1275,17 +1275,26 @@ test("worktree-down --prune recognizes a merged PR for the worktree branch", () 
   const mockBin = mkdtempSync(
     path.join(tmpdir(), "factory-wt-prune-merged-bin-"),
   );
-  const ticketId = makeTestTicket("MERGED");
-  const branch = `feat/${ticketId}`;
+  const ticketNumber = (Date.now() % 1_000_000_000) + process.pid;
+  const cleanTicket = `gh-${ticketNumber}`;
+  const dirtyTicket = `gh-${ticketNumber + 1}`;
+  const tickets = [cleanTicket, dirtyTicket];
+  const branches = tickets.map((ticket) => `feat/${ticket}`);
 
   try {
-    const up = Bun.spawnSync({
-      cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
-    });
-    expect(up.exitCode).toBe(0);
+    for (const ticket of tickets) {
+      const up = Bun.spawnSync({
+        cmd: ["bash", UP, ticket, "--checkout-only", "--no-fetch"],
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+      });
+      expect(up.exitCode).toBe(0);
+    }
+    writeFileSync(
+      path.join(tempWtRoot, dirtyTicket, "uncommitted.txt"),
+      "do not remove\n",
+    );
 
     writeFileSync(
       path.join(mockBin, "bun"),
@@ -1294,7 +1303,12 @@ test("worktree-down --prune recognizes a merged PR for the worktree branch", () 
     );
     writeFileSync(
       path.join(mockBin, "gh"),
-      `#!/usr/bin/env bash\n[[ "$*" == *"--head ${branch}"* ]] && printf '1\\n' || printf '0\\n'\n`,
+      `#!/usr/bin/env bash\n${branches
+        .map(
+          (branch) =>
+            `[[ "$*" == *"--head ${branch}"* ]] && { printf '1\\n'; exit 0; }`,
+        )
+        .join("\n")}\nprintf '0\\n'\n`,
       { mode: 0o755 },
     );
     const pruned = Bun.spawnSync({
@@ -1308,16 +1322,22 @@ test("worktree-down --prune recognizes a merged PR for the worktree branch", () 
       },
     });
     expect(pruned.exitCode).toBe(0);
-    expect(existsSync(path.join(tempWtRoot, ticketId))).toBe(false);
+    expect(existsSync(path.join(tempWtRoot, cleanTicket))).toBe(false);
+    expect(existsSync(path.join(tempWtRoot, dirtyTicket))).toBe(true);
   } finally {
-    Bun.spawnSync({
-      cmd: ["bash", DOWN, ticketId, "--force"],
-      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+    rmSync(path.join(tempWtRoot, dirtyTicket, "uncommitted.txt"), {
+      force: true,
     });
+    for (const ticket of tickets) {
+      Bun.spawnSync({
+        cmd: ["bash", DOWN, ticket, "--force"],
+        env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+      });
+    }
     rmSync(tempWtRoot, { recursive: true, force: true });
     rmSync(mockBin, { recursive: true, force: true });
     Bun.spawnSync({
-      cmd: ["git", "branch", "-D", branch],
+      cmd: ["git", "branch", "-D", ...branches],
       cwd: path.resolve(import.meta.dir, ".."),
     });
   }

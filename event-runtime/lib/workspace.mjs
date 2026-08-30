@@ -361,25 +361,37 @@ export function detectWorktreeOwnershipConflict({
   databasePath = dbPath(),
   leasesDir,
   leases = liveWorkerLeases(repo, { dir: leasesDir }),
+  staleOwnerLog = (staleRunId) =>
+    console.warn(`worktree_owner_stale:${staleRunId}`),
 } = {}) {
   const runs = [];
+  const staleOwners = [];
   if (existsSync(databasePath)) {
     let db;
     try {
       db = new Database(databasePath, { readonly: true });
       for (const row of db
-        .query(`SELECT run_id, state, spec_json FROM runs`)
+        .query(`SELECT run_id, state, spec_json, attempts FROM runs`)
         .all()) {
         if (row.run_id === runId || TERMINAL_STATES.has(row.state)) continue;
+        let spec;
         let input;
         try {
-          input = JSON.parse(row.spec_json)?.input;
+          spec = JSON.parse(row.spec_json);
+          input = spec?.input;
         } catch {
           continue;
         }
-        if (input?.repo === repo && input?.ticket === ticket) {
-          runs.push({ runId: row.run_id, state: row.state });
+        if (input?.repo !== repo || input?.ticket !== ticket) continue;
+        if (
+          row.state === "FAILED" &&
+          spec?.maxAttempts != null &&
+          row.attempts >= spec.maxAttempts
+        ) {
+          staleOwners.push(row.run_id);
+          continue;
         }
+        runs.push({ runId: row.run_id, state: row.state });
       }
     } catch (err) {
       return {
@@ -413,7 +425,12 @@ export function detectWorktreeOwnershipConflict({
       return tokenSeparator <= 0 || identity.slice(0, tokenSeparator) !== runId;
     })
     .map((lease) => ({ owner: lease.owner, pid: lease.pid }));
-  if (runs.length === 0 && competingLeases.length === 0) return null;
+  if (runs.length === 0 && competingLeases.length === 0) {
+    // Only announce a release once nothing else still holds the ticket; an
+    // exhausted owner next to a live one is not stale ownership being reclaimed.
+    for (const staleRunId of staleOwners) staleOwnerLog(staleRunId);
+    return null;
+  }
   return {
     reason: "ticket has a non-terminal run or live worker lease",
     runs,
