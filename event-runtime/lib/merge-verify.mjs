@@ -162,6 +162,52 @@ function repositoryName(repository) {
 }
 
 /**
+ * Bounds for the merge catch-up scan. Both list calls are newest-first, and
+ * `projectItems` is a per-issue GraphQL read, so the windows stay small: an
+ * unbounded closed-issue listing is the same shape as the #1061 closed-backlog
+ * stall, on the merge hot path. Older stranded tickets drain across successive
+ * green batches; `closedWithinDays` narrows the issue search to the recent
+ * backlog and `maxItems` caps the ancestry proofs issued per run.
+ */
+export const CATCH_UP_DEFAULTS = Object.freeze({
+  issueLimit: 200,
+  pullLimit: 200,
+  closedWithinDays: 30,
+  maxItems: 25,
+});
+
+function positiveInt(value, fallback, name) {
+  if (value === undefined || value === null) return fallback;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(`merge catch-up ${name} must be a positive integer`);
+  }
+  return n;
+}
+
+function closedSinceDate(now, days) {
+  const since = new Date(now - days * 24 * 60 * 60 * 1000);
+  if (!Number.isFinite(since.getTime())) {
+    throw new Error("merge catch-up received an invalid clock");
+  }
+  return since.toISOString().slice(0, 10);
+}
+
+/**
+ * Canonical ticket form for dedupe: `owner/repo#N`, `#N`, and `N` all name
+ * the same GitHub issue, so a landed ticket recorded in any of those forms
+ * still excludes its catch-up twin. Other trackers compare case-insensitively.
+ */
+export function normalizeTicket(ticket, github) {
+  const text = String(ticket ?? "").trim();
+  const match = /^(?:([\w.-]+\/[\w.-]+))?#?(\d+)$/.exec(text);
+  if (match && (!match[1] || match[1].toLowerCase() === github.toLowerCase())) {
+    return `${github.toLowerCase()}#${Number(match[2])}`;
+  }
+  return text.toLowerCase();
+}
+
+/**
  * Find closed project issues that a merged PR closed before (or at) the
  * batch commit whose base CI just passed. Two bounded GraphQL reads avoid an
  * N+1 PR lookup across a potentially large historical backlog.
@@ -172,12 +218,26 @@ export function listCatchUpItems({
   project,
   verifiedSha,
   shell = sh,
-  // gh paginates until it reaches the limit or exhausts the connection. This
-  // ceiling is deliberately far above any practical project size so an old
-  // stranded ticket cannot remain permanently hidden behind a newest-first
-  // 1,000-item window.
-  limit = 1_000_000,
+  issueLimit,
+  pullLimit,
+  closedWithinDays,
+  now = Date.now(),
 }) {
+  const issueCap = positiveInt(
+    issueLimit,
+    CATCH_UP_DEFAULTS.issueLimit,
+    "issueLimit",
+  );
+  const pullCap = positiveInt(
+    pullLimit,
+    CATCH_UP_DEFAULTS.pullLimit,
+    "pullLimit",
+  );
+  const days = positiveInt(
+    closedWithinDays,
+    CATCH_UP_DEFAULTS.closedWithinDays,
+    "closedWithinDays",
+  );
   const issues = readGhJson(
     "list closed issues for merge catch-up",
     shell("gh", [
@@ -187,8 +247,10 @@ export function listCatchUpItems({
       github,
       "--state",
       "closed",
+      "--search",
+      `closed:>=${closedSinceDate(now, days)}`,
       "--limit",
-      String(limit),
+      String(issueCap),
       "--json",
       "number,projectItems",
     ]),
@@ -204,7 +266,7 @@ export function listCatchUpItems({
       "--state",
       "merged",
       "--limit",
-      String(limit),
+      String(pullCap),
       "--json",
       "number,baseRefName,mergeCommit,mergedAt,closingIssuesReferences",
     ]),
@@ -261,6 +323,7 @@ export function listCatchUpItems({
       });
     }
   }
+  // Oldest issue first so a capped run drains the backlog from the far end.
   return [...items.values()].sort((a, b) => a.issue - b.issue);
 }
 
@@ -286,21 +349,46 @@ export function proveAncestor(github, ancestor, descendant, shell = sh) {
   );
 }
 
-function catchUpMergedTickets(
-  { github, base, project, verifiedSha, excludeTickets = [] },
+export function catchUpMergedTickets(
+  {
+    github,
+    base,
+    project,
+    verifiedSha,
+    excludeTickets = [],
+    issueLimit,
+    pullLimit,
+    closedWithinDays,
+    maxItems,
+    now,
+  },
   shell = sh,
 ) {
-  const excluded = new Set(excludeTickets);
+  const cap = positiveInt(maxItems, CATCH_UP_DEFAULTS.maxItems, "maxItems");
+  const excluded = new Set(
+    excludeTickets.map((ticket) => normalizeTicket(ticket, github)),
+  );
   const failures = [];
   let reconciled = 0;
+  let processed = 0;
+  let deferred = 0;
   for (const item of listCatchUpItems({
     github,
     base,
     project,
     verifiedSha,
     shell,
+    issueLimit,
+    pullLimit,
+    closedWithinDays,
+    now,
   })) {
-    if (excluded.has(item.ticket)) continue;
+    if (excluded.has(normalizeTicket(item.ticket, github))) continue;
+    if (processed >= cap) {
+      deferred += 1;
+      continue;
+    }
+    processed += 1;
     if (!proveAncestor(github, item.mergeSha, verifiedSha, shell)) continue;
     const failure = transitionDone(item.ticket, shell);
     if (failure) {
@@ -310,7 +398,7 @@ function catchUpMergedTickets(
       reconciled += 1;
     }
   }
-  return { reconciled, failures };
+  return { reconciled, failures, processed, deferred };
 }
 
 /**
@@ -598,6 +686,7 @@ export function runMergeVerify({
   pause = wait,
   pollAttempts = 90,
   repoRecord: configuredRepoRecord,
+  catchUp = {},
 } = {}) {
   const input = JSON.parse(readFileSync(path.join(cwd, "input.json"), "utf8"));
   const { repo, github, base, landed, finalSha } = input;
@@ -675,11 +764,15 @@ export function runMergeVerify({
           project: repoRecord.project,
           verifiedSha: finalSha,
           excludeTickets: landed.map((item) => item.ticket),
+          ...catchUp,
         },
         shell,
       );
       doneFailures.push(...caughtUp.failures);
       catchUpSummary = `reconciled ${caughtUp.reconciled} previously stranded ticket(s)`;
+      if (caughtUp.deferred > 0) {
+        catchUpSummary += ` (${caughtUp.deferred} deferred to the next green batch)`;
+      }
     } catch (err) {
       // The current batch already has exact green proof. A catch-up listing
       // failure must not strand it in turn; the next green batch retries the
