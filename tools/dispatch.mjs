@@ -16,6 +16,20 @@ import { unauthorizedMessage } from "../event-runtime/lib/client.mjs";
 
 export const DEFAULT_PORT = 7381;
 export const DEFAULT_TIMEOUT_MS = 30_000;
+export const DEFAULT_POLL_MS = 500;
+export const DEFAULT_WATCH_TIMEOUT_MS = 10_000;
+export const EXIT = {
+  CONTROL_API_ERROR: 1,
+  RUN_NOT_COMPLETED: 2,
+  NO_PROPOSAL: 3,
+};
+const TERMINAL_STATES = new Set([
+  "COMPLETED",
+  "FAILED",
+  "CANCELLED",
+  "REFUSED",
+  "TIMED_OUT",
+]);
 
 export function resolvePort(env = process.env) {
   return env.FACTORY_EVENT_PORT ? Number(env.FACTORY_EVENT_PORT) : DEFAULT_PORT;
@@ -28,9 +42,28 @@ export function resolveTimeoutMs(env = process.env) {
     : DEFAULT_TIMEOUT_MS;
 }
 
+function positiveEnv(env, name, fallback) {
+  const value = Number(env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+export function resolvePollMs(env = process.env) {
+  return positiveEnv(env, "FACTORY_DISPATCH_POLL_MS", DEFAULT_POLL_MS);
+}
+
+export function resolveWatchTimeoutMs(env = process.env) {
+  return positiveEnv(
+    env,
+    "FACTORY_DISPATCH_WATCH_TIMEOUT_MS",
+    DEFAULT_WATCH_TIMEOUT_MS,
+  );
+}
+
 const port = resolvePort();
 const BASE_URL = `http://127.0.0.1:${port}`;
 const timeoutMs = resolveTimeoutMs();
+const pollMs = resolvePollMs();
+const watchTimeoutMs = resolveWatchTimeoutMs();
 
 const HELP = `factory dispatch — swift event-runtime task dispatcher
 
@@ -50,6 +83,12 @@ Options:
   --watch, -w         Stream live run trace to stdout until completion
   --json              Output raw JSON response
   --help, -h          Show this help
+
+Exit status:
+  0                  Event run completed
+  1                  Control API or command error
+  2                  Event run settled in a non-COMPLETED state
+  3                  Event was admitted but the planner produced no run
 `;
 
 function die(msg, code = 1) {
@@ -99,14 +138,30 @@ async function api(path, options = {}) {
   }
 }
 
-async function streamTrace(runId) {
-  console.log(
+function progress(message, json) {
+  (json ? console.error : console.log)(message);
+}
+
+function finalWatchResult({ eventId, runId, state, reasonCode }, json) {
+  const result = { eventId, runId, state, reasonCode: reasonCode ?? null };
+  if (json) console.log(JSON.stringify(result));
+  else {
+    const subject = runId ? `Run ${runId}` : `Event ${eventId}`;
+    console.log(
+      `\n==> ${subject} settled: ${state} (${result.reasonCode || "ok"})`,
+    );
+  }
+  return result;
+}
+
+async function streamTrace(eventId, runId, json) {
+  progress(
     `\n==> Streaming live trace for run ${runId} (Ctrl+C to detach)...\n`,
+    json,
   );
   let since = 0;
-  let finished = false;
 
-  while (!finished) {
+  while (true) {
     const trace = await api(
       `/runs/${encodeURIComponent(runId)}/trace?since=${since}&limit=100`,
     );
@@ -124,40 +179,46 @@ async function streamTrace(runId) {
         else if (entry.data?.tool) detail = `[tool: ${entry.data.tool}]`;
         else detail = JSON.stringify(entry.data || {});
 
-        console.log(`[${time}] ${type.padEnd(14)} ${detail}`);
+        progress(`[${time}] ${type.padEnd(14)} ${detail}`, json);
       }
     }
 
     const run = await api(`/runs/${encodeURIComponent(runId)}`);
-    if (run && ["COMPLETED", "FAILED", "CANCELLED"].includes(run.state)) {
-      // Not `finished = true`: the `break` below exits the loop directly, so
-      // the while(!finished) condition is never re-evaluated after this branch.
-      console.log(
-        `\n==> Run ${runId} settled: ${run.state} (${run.reasonCode || "ok"})`,
+    if (run && TERMINAL_STATES.has(run.state)) {
+      const result = finalWatchResult(
+        { eventId, runId, state: run.state, reasonCode: run.reasonCode },
+        json,
       );
-      if (run.state !== "COMPLETED") {
-        process.exit(1);
-      }
-      break;
+      return {
+        exitCode: run.state === "COMPLETED" ? 0 : EXIT.RUN_NOT_COMPLETED,
+        result,
+      };
     }
 
-    await new Promise((r) => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, pollMs));
   }
 }
 
-async function findRunForEvent(source, eventId, maxWaitMs = 10000) {
+async function findRunForEvent(source, eventId, maxWaitMs = watchTimeoutMs) {
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
-    const res = await api(`/proposals`);
+    const res = await api(`/proposals?status=all`);
     const proposal = (res.proposals || []).find(
       (p) => p.eventSource === source && p.eventId === eventId,
     );
     if (proposal?.runId) {
-      return proposal.runId;
+      return { runId: proposal.runId };
     }
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, pollMs));
   }
-  return null;
+  const events = await api(`/events`);
+  const event = (events.events || []).find(
+    (entry) => entry.source === source && entry.eventId === eventId,
+  );
+  return {
+    runId: null,
+    reasonCode: event?.lastPlanError || "no_proposal",
+  };
 }
 
 async function main() {
@@ -235,28 +296,50 @@ async function main() {
     body: JSON.stringify(envelope),
   });
 
-  if (values.json) {
+  if (values.json && !values.watch) {
     console.log(JSON.stringify(res, null, 2));
     return;
   }
 
-  console.log(`✓ Admitted event ${res.eventId} (type: ${eventType})`);
-  console.log(`  Source:  ${envelope.source}`);
-  console.log(`  Subject: ${envelope.subject}`);
-  console.log(`  Payload: ${JSON.stringify(payload)}`);
+  progress(`✓ Admitted event ${res.eventId} (type: ${eventType})`, values.json);
+  progress(`  Source:  ${envelope.source}`, values.json);
+  progress(`  Subject: ${envelope.subject}`, values.json);
+  progress(`  Payload: ${JSON.stringify(payload)}`, values.json);
 
   if (values.watch) {
-    console.log(`\nWaiting for planner to assign proposal and run...`);
-    const runId = await findRunForEvent(envelope.source, envelope.eventId);
-    if (runId) {
-      await streamTrace(runId);
-    } else {
-      console.log(
-        `Event admitted. Check status via: factory events ps or web UI http://127.0.0.1:${port}`,
+    progress(
+      `\nWaiting for planner to assign proposal and run...`,
+      values.json,
+    );
+    const planned = await findRunForEvent(envelope.source, envelope.eventId);
+    if (planned.runId) {
+      const watched = await streamTrace(
+        envelope.eventId,
+        planned.runId,
+        values.json,
       );
+      process.exitCode = watched.exitCode;
+    } else {
+      const result = finalWatchResult(
+        {
+          eventId: envelope.eventId,
+          runId: null,
+          state: "NOOP",
+          reasonCode: planned.reasonCode,
+        },
+        values.json,
+      );
+      if (!values.json)
+        console.log(
+          `Event admitted but planner produced no run: ${result.reasonCode}`,
+        );
+      process.exitCode = EXIT.NO_PROPOSAL;
     }
   } else {
-    console.log(`\nView live status: http://127.0.0.1:${port}/#/events`);
+    progress(
+      `\nView live status: http://127.0.0.1:${port}/#/events`,
+      values.json,
+    );
   }
 }
 
