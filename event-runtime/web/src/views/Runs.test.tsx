@@ -200,6 +200,72 @@ describe("Runs API pagination (WM-976)", () => {
       },
     );
   });
+
+  test("resets the cursor when switching status tabs", async () => {
+    const newest = stubListItem("run-page-new", "COMPLETED", {
+      maxAttempts: undefined,
+      spec: undefined,
+    });
+    const older = stubListItem("run-page-old", "FAILED", {
+      maxAttempts: undefined,
+      spec: undefined,
+    });
+    const runs = mock(async (_state?: string, filters?: { before?: string }) =>
+      filters?.before
+        ? { runs: [older], nextBefore: null }
+        : { runs: [newest], nextBefore: "older-page" },
+    );
+    await withApi(
+      { runs, status: async () => createStatusFixture() },
+      async () => {
+        const r = renderRuns();
+        await r.findByTitle("run-page-new");
+
+        fireEvent.click(r.getByRole("button", { name: "Older" }));
+        await r.findByTitle("run-page-old");
+        fireEvent.click(r.getByRole("tab", { name: /^Completed/i }));
+
+        await waitFor(() =>
+          expect(runs).toHaveBeenLastCalledWith(undefined, {
+            before: undefined,
+          }),
+        );
+      },
+    );
+  });
+
+  test("returns to the newest page from the pager", async () => {
+    const newest = stubListItem("run-page-new", "COMPLETED", {
+      maxAttempts: undefined,
+      spec: undefined,
+    });
+    const older = stubListItem("run-page-old", "FAILED", {
+      maxAttempts: undefined,
+      spec: undefined,
+    });
+    const runs = mock(async (_state?: string, filters?: { before?: string }) =>
+      filters?.before
+        ? { runs: [older], nextBefore: null }
+        : { runs: [newest], nextBefore: "older-page" },
+    );
+    await withApi(
+      { runs, status: async () => createStatusFixture() },
+      async () => {
+        const r = renderRuns();
+        await r.findByTitle("run-page-new");
+
+        fireEvent.click(r.getByRole("button", { name: "Older" }));
+        await r.findByTitle("run-page-old");
+        fireEvent.click(r.getByRole("button", { name: "Newest" }));
+
+        await waitFor(() =>
+          expect(runs).toHaveBeenLastCalledWith(undefined, {
+            before: undefined,
+          }),
+        );
+      },
+    );
+  });
 });
 
 function ticketSchemaRegistry(): AgentsView {

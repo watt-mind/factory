@@ -619,6 +619,13 @@ export function Runs({
   // A project / In-flight filter is client-side; fetching only the active
   // status tab would make every other tab's badge a factory-wide lie.
   const fetchAll = context.kind !== "all" || drilldown !== null;
+
+  // A cursor identifies a boundary in one particular list. Carrying it into a
+  // different tab, drilldown, or context can hide that list's newest runs.
+  useEffect(() => {
+    setRunCursor(null);
+  }, [tab, drilldownKey, context.kind]);
+
   const list = useQuery({
     queryKey: ["runs", fetchAll ? "ALL" : tab, drilldownKey, runCursor],
     queryFn: () =>
@@ -1532,12 +1539,17 @@ export function Runs({
               range={[windowStart, windowEnd, tokens.length]}
               move={moveWindow}
             />
-            {nextBefore && (
+            {(nextBefore || runCursor) && (
               <tr>
                 <td>
-                  <button onClick={() => setRunCursor(nextBefore)}>
-                    Older
-                  </button>
+                  {runCursor && (
+                    <button onClick={() => setRunCursor(null)}>Newest</button>
+                  )}
+                  {nextBefore && (
+                    <button onClick={() => setRunCursor(nextBefore)}>
+                      Older
+                    </button>
+                  )}
                 </td>
               </tr>
             )}
