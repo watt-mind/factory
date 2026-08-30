@@ -21,10 +21,19 @@ if [[ -z "${_WORKTREE_DAEMONS_LOADED:-}" ]]; then
   # Rotate a single daemon log through the shared live-owner-aware helper.
   # A live daemon keeps its original file descriptor, so it must be
   # copy-truncated rather than renamed.
+  # Resolve the archive retention count. Mirrors live-stack.sh's guard: a 0 or
+  # non-numeric value would make the prune loop delete every archive.
+  daemon_log_keep() {
+    local keep="${FACTORY_LOG_KEEP:-3}"
+    [[ "$keep" =~ ^[1-9][0-9]*$ ]] || die "FACTORY_LOG_KEEP must be a positive integer"
+    printf '%s\n' "$keep"
+  }
+
   rotate_log_file() { # <logfile> [max_bytes]
     local logfile="$1"
     local max_bytes="${2:-10485760}" # 10MB default
-    local keep="${FACTORY_LOG_KEEP:-3}"
+    local keep
+    keep="$(daemon_log_keep)" || exit 1
     rotate_run_log "$logfile" "$max_bytes" "$keep"
   }
 
@@ -32,7 +41,8 @@ if [[ -z "${_WORKTREE_DAEMONS_LOADED:-}" ]]; then
   rotate_daemon_logs() { # <worktree> [max_bytes]
     local wt="$1"
     local max_bytes="${2:-10485760}"
-    local rdir keep="${FACTORY_LOG_KEEP:-3}"
+    local rdir keep
+    keep="$(daemon_log_keep)" || exit 1
     rdir="$(run_dir "$wt")"
     rotate_run_logs "$rdir" "$max_bytes" "$keep"
   }

@@ -245,6 +245,39 @@ test("rotate_log_file and rotate_daemon_logs rotate oversized logs", () => {
   }
 });
 
+test("rotate_daemon_logs rejects a non-positive FACTORY_LOG_KEEP", () => {
+  const testDir = mkdtempSync(path.join(tmpdir(), "log-keep-guard-test-"));
+  const runDir = path.join(testDir, ".factory", "run");
+  const serveLog = path.join(runDir, "serve.log");
+  mkdirSync(runDir, { recursive: true });
+
+  try {
+    writeFileSync(serveLog, "x".repeat(500));
+    writeFileSync(`${serveLog}.1`, "archived\n");
+
+    for (const keep of ["0", "abc", "-1", "3x"]) {
+      const rotRes = sh(`rotate_daemon_logs "${testDir}" 300`, {
+        FACTORY_LOG_KEEP: keep,
+      });
+      expect(rotRes.status).not.toBe(0);
+      expect(rotRes.stderr).toContain(
+        "FACTORY_LOG_KEEP must be a positive integer",
+      );
+      // Nothing rotated or pruned when the knob is rejected.
+      expect(readFileSync(serveLog, "utf8").length).toBe(500);
+      expect(readFileSync(`${serveLog}.1`, "utf8")).toBe("archived\n");
+    }
+
+    const okRes = sh(`rotate_log_file "${serveLog}" 300`, {
+      FACTORY_LOG_KEEP: "2",
+    });
+    expect(okRes.status).toBe(0);
+    expect(readFileSync(serveLog, "utf8").length).toBe(0);
+  } finally {
+    rmSync(testDir, { recursive: true, force: true });
+  }
+});
+
 test("rotate_daemon_logs copy-truncates a live daemon log", async () => {
   const testDir = mkdtempSync(path.join(tmpdir(), "live-log-rotate-test-"));
   const runDir = path.join(testDir, ".factory", "run");
@@ -261,7 +294,7 @@ test("rotate_daemon_logs copy-truncates a live daemon log", async () => {
       cmd: [
         "bash",
         "-c",
-        'exec > "$1"; printf "before\\n"; : > "$2"; while [[ ! -f "$3" ]]; do :; done; printf "after\\n"',
+        'exec > "$1"; printf "before\\n"; : > "$2"; while [[ ! -f "$3" ]]; do sleep 0.01; done; printf "after\\n"',
         "bash",
         serveLog,
         ready,
