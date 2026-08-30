@@ -286,11 +286,22 @@ const IDEMPOTENCY_TRIGGER_MARKER = ":trigger:";
 function idempotencyFamily(db, idempotencyKey) {
   return db
     .query(
-      `SELECT run_id, idempotency_key, state, created_at, rowid
+      `SELECT run_id, idempotency_key, state, created_at, rowid,
+              CASE WHEN state NOT IN ('COMPLETED', 'REFUSED', 'TIMED_OUT', 'CANCELLED')
+                         AND (
+                           state <> 'FAILED'
+                           -- Keep this FAILED clause aligned with
+                           -- planner.mjs:liveRunForInput.
+                           OR (
+                             json_extract(spec_json, '$.maxAttempts') IS NULL
+                             OR attempts < json_extract(spec_json, '$.maxAttempts')
+                           )
+                         )
+                   THEN 1 ELSE 0 END AS idempotency_active
        FROM runs
       WHERE idempotency_key = ?
          OR instr(idempotency_key, ? || ?) = 1
-      ORDER BY CASE WHEN state IN ('COMPLETED', 'REFUSED', 'TIMED_OUT', 'CANCELLED') THEN 1 ELSE 0 END,
+      ORDER BY idempotency_active DESC,
                created_at DESC, rowid DESC`,
     )
     .all(idempotencyKey, idempotencyKey, IDEMPOTENCY_TRIGGER_MARKER);
@@ -325,7 +336,7 @@ export function resolveIdempotency(
   const family = idempotencyFamily(db, idempotencyKey);
   if (family.length === 0) return null;
 
-  const active = family.find((run) => !TERMINAL_STATES.has(run.state));
+  const active = family.find((run) => run.idempotency_active);
   if (active) return active;
 
   const run = family[0];
