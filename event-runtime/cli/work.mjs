@@ -100,8 +100,14 @@ export default async function work(args) {
   const adapterNames = adapterOverride
     ? [adapterOverride]
     : Object.keys(adapters);
+  const startedAt = Date.now();
 
-  registerWorker(db, { workerId, labels, adapters: adapterNames });
+  registerWorker(db, {
+    workerId,
+    labels,
+    adapters: adapterNames,
+    now: startedAt,
+  });
   log(`worker ${workerId} on ${hostname()} (db ${dbPath()}, policy ${pv})`);
   if (Object.keys(labels).length > 0) log(`labels: ${JSON.stringify(labels)}`);
   if (!sandboxReport.available)
@@ -138,9 +144,16 @@ export default async function work(args) {
   // so a loop-driven heartbeat would mark every legitimately busy worker as
   // stale — and the doctor's "stalled worker" check exists precisely to tell
   // busy apart from dead.
+  const workerHeartbeat = (options) =>
+    heartbeat(db, workerId, {
+      ...options,
+      labels,
+      adapters: adapterNames,
+      startedAt,
+    });
   const beat = setInterval(
     () =>
-      heartbeat(db, workerId, {
+      workerHeartbeat({
         state: inFlight ? "busy" : "idle",
         runId: inFlight,
       }),
@@ -185,7 +198,7 @@ export default async function work(args) {
           );
           return finish("drain_requested");
         }
-        heartbeat(db, workerId, {
+        workerHeartbeat({
           state: inFlight ? "busy" : "idle",
           runId: inFlight,
         });
@@ -212,7 +225,7 @@ export default async function work(args) {
           continue;
         }
         inFlight = claim.runId;
-        heartbeat(db, workerId, { state: "busy", runId: claim.runId });
+        workerHeartbeat({ state: "busy", runId: claim.runId });
         log(
           `claimed ${claim.runId} attempt ${claim.attempt} (${claim.spec.agent})`,
         );

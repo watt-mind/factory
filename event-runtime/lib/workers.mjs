@@ -49,7 +49,7 @@ function pruneHostWorkers(db, { host, workerId, now }) {
      WHERE host = ?
        AND worker_id != ?
        AND (
-         (state = 'stopped' AND stopped_at < ?)
+         (state = 'stopped' AND COALESCE(stopped_at, last_seen) < ?)
          OR (state != 'stopped' AND last_seen < ?)
        )
        AND ${unleasedWorker}`,
@@ -90,7 +90,14 @@ export function registerWorker(
 export function heartbeat(
   db,
   workerId,
-  { state = "idle", runId = null, now = Date.now() } = {},
+  {
+    state = "idle",
+    runId = null,
+    labels = {},
+    adapters = [],
+    now = Date.now(),
+    startedAt = now,
+  } = {},
 ) {
   const at = iso(now);
   const { changes } = db
@@ -102,11 +109,21 @@ export function heartbeat(
 
   db.query(
     `INSERT INTO workers (worker_id, host, pid, labels_json, adapters, started_at, last_seen, state, current_run)
-     VALUES (?, ?, ?, '{}', '', ?, ?, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(worker_id) DO UPDATE SET
        last_seen = excluded.last_seen, state = excluded.state,
        current_run = excluded.current_run`,
-  ).run(workerId, hostname(), process.pid, at, at, state, runId);
+  ).run(
+    workerId,
+    hostname(),
+    process.pid,
+    JSON.stringify(labels),
+    adapters.join(","),
+    iso(startedAt),
+    at,
+    state,
+    runId,
+  );
 }
 
 /** Clean exit: recorded, so a stopped worker is distinguishable from a dead one. */
@@ -162,7 +179,7 @@ export function pruneWorkers(
       .query(
         `DELETE FROM workers
          WHERE (
-           (state = 'stopped' AND stopped_at < ?)
+           (state = 'stopped' AND COALESCE(stopped_at, last_seen) < ?)
            OR (state != 'stopped' AND last_seen < ?)
          )
          AND ${unleasedWorker}`,
