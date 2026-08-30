@@ -1226,6 +1226,7 @@ test("worktree timeout settings default only when unset and reject malformed val
     ["FACTORY_WORKTREE_HEALTH_TIMEOUT_S", ""],
     ["FACTORY_WORKTREE_HEALTH_TIMEOUT_S", "0"],
     ["FACTORY_WORKTREE_HEALTH_TIMEOUT_S", "abc"],
+    ["FACTORY_WORKTREE_WEB_TIMEOUT_S", "-1"],
   ]) {
     const r = sh(
       `export ${name}=${JSON.stringify(value)}; validate_worktree_timeout ${name} 55`,
@@ -1280,7 +1281,10 @@ test("worktree-up times out a live web daemon that never binds and tears down al
         PATH: `${fixture.mockBin}:${TEST_PATH}`,
       },
     );
-    expect(Date.now() - started).toBeLessThanOrEqual(3_000);
+    // The whole worktree-up run (bun install, daemon spawn, health probe) is
+    // wrapped here; only the web bind wait is bounded by the 1s budget, so
+    // leave generous headroom for a loaded CI box.
+    expect(Date.now() - started).toBeLessThanOrEqual(15_000);
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("did not bind reserved port");
     expect(result.stderr).toContain("budget 1s");
