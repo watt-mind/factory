@@ -179,6 +179,24 @@ export function tabForRunState(state: string): RunTab {
   return "ALL";
 }
 
+export function countRunsByTab(
+  runs: readonly Pick<RunListItem, "state">[],
+): Record<RunTab, number> {
+  const counts: Record<RunTab, number> = {
+    ALL: 0,
+    ACTIVE: 0,
+    COMPLETED: 0,
+    FAILED: 0,
+    CANCELLED: 0,
+  };
+  for (const run of runs) {
+    counts.ALL += 1;
+    const stateTab = tabForRunState(run.state);
+    if (stateTab !== "ALL") counts[stateTab] += 1;
+  }
+  return counts;
+}
+
 const RUN_DRILLDOWN_POPULATIONS = new Set<RunListFilters["population"]>([
   "created",
   "terminal",
@@ -935,37 +953,31 @@ export function Runs({
     },
   });
 
-  const byState = statusQ.data?.runs?.byState ?? {};
-  const tabCount = (t: RunTab) => {
+  const byState = statusQ.data?.runs?.byState;
+  const tabCounts = useMemo((): Record<RunTab, number> => {
     if (filter.trim()) {
-      return t === "ALL"
-        ? filteredScoped.length
-        : filteredScoped.filter((r) => matchesRunTab(r.state, t)).length;
+      return countRunsByTab(filteredScoped);
     }
     if (fetchAll) {
-      return t === "ALL"
-        ? scoped.length
-        : scoped.filter((r) => matchesRunTab(r.state, t)).length;
+      return countRunsByTab(scoped);
     }
-    if (t === "ALL")
-      return Object.values(byState).reduce((n, v) => n + (v ?? 0), 0);
-    if (t === "ACTIVE")
-      return (
-        (byState.QUEUED ?? 0) +
-        (byState.LEASED ?? 0) +
-        (byState.RUNNING ?? 0) +
-        (byState.VERIFYING ?? 0)
-      );
-    if (t === "FAILED")
-      return (
-        (byState.FAILED ?? 0) +
-        (byState.TIMED_OUT ?? 0) +
-        (byState.REFUSED ?? 0)
-      );
-    if (t === "COMPLETED") return byState.COMPLETED ?? 0;
-    if (t === "CANCELLED") return byState.CANCELLED ?? 0;
-    return 0;
-  };
+    const counts: Record<RunTab, number> = {
+      ALL: 0,
+      ACTIVE: 0,
+      COMPLETED: 0,
+      FAILED: 0,
+      CANCELLED: 0,
+    };
+    for (const [state, count] of Object.entries(byState ?? {})) {
+      const value = count ?? 0;
+      counts.ALL += value;
+      const stateTab = tabForRunState(state);
+      if (stateTab !== "ALL") counts[stateTab] += value;
+    }
+    return counts;
+  }, [byState, fetchAll, filter, filteredScoped, scoped]);
+
+  const tabCount = (t: RunTab) => tabCounts[t];
 
   const selectTab = (t: RunTab) => {
     setTab(t);
