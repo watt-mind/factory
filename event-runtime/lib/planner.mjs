@@ -680,6 +680,26 @@ function fetchPullRequestDefault(payload) {
   }
 }
 
+function findWorkspacePullRequestDefault(payload) {
+  const workspacePath = payload?.workspacePath;
+  if (!workspacePath || !existsSync(workspacePath)) return null;
+  const branch = execFileSync(
+    "git",
+    ["-C", workspacePath, "branch", "--show-current"],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  ).trim();
+  if (!branch) return null;
+  return (
+    loadForge()
+      .prList(payload?.github, {
+        cwd: workspacePath,
+        state: "open",
+        fields: ["number", "url", "headRefName", "isDraft", "state"],
+      })
+      .find((pr) => pr?.headRefName === branch) ?? null
+  );
+}
+
 // WM-1006: in-flight tickets come from the control-plane adapter via the
 // `inflight` CLI verb — never raw tracker GraphQL (plane-specific).
 
@@ -1155,6 +1175,7 @@ export function worktreeDispatchAutoEligibility(
     fetchTicket = fetchTicketDefault,
     fetchViewer = fetchViewerDefault,
     fetchPullRequest = fetchPullRequestDefault,
+    findWorkspacePullRequest = findWorkspacePullRequestDefault,
     fetchInFlight = fetchInFlightDefault,
     countLeases = (repoName) => liveWorkerLeases(repoName).length,
     hasTicketLease = (repoName, ticket) =>
@@ -1422,6 +1443,32 @@ export function worktreeDispatchAutoEligibility(
     evidence.checks.ticket_in_progress_label_retry = true;
   } else {
     evidence.checks.ticket_agent_ready = true;
+  }
+  // Resolve the checkout branch only after the tracker proves this continuation
+  // still owns the ticket. A foreign claim is a tracker refusal and must not be
+  // converted into a transient forge-read failure.
+  if (canResumeEscalation && escalatedContinuation?.workspacePath) {
+    let workspacePullRequest;
+    try {
+      workspacePullRequest = findWorkspacePullRequest({
+        github: repo.github,
+        workspacePath: escalatedContinuation.workspacePath,
+      });
+    } catch (err) {
+      return refusal(
+        "ticket_escalation_pr_read_failed",
+        evidence,
+        "noop",
+        err?.message ?? String(err),
+      );
+    }
+    evidence.escalatedWorkspacePullRequest = workspacePullRequest;
+    evidence.checks.ticket_escalation_workspace_pr_read = true;
+    if (workspacePullRequest && workspacePullRequest.isDraft !== true) {
+      evidence.checks.ticket_escalation_workspace_pr_ready = true;
+      return refusal("ticket_pr_already_open", evidence);
+    }
+    evidence.checks.ticket_escalation_workspace_pr_ready = false;
   }
   if (
     evidence.ticket.labels.includes("ai:escalated") &&

@@ -67,6 +67,7 @@ import {
   composeHandoffVerification,
   HANDOFF_REASON_CODES,
   HANDOFF_SANDBOX_UNAVAILABLE,
+  normalizeFailureOutput,
   verifyResult,
 } from "./verify.mjs";
 import {
@@ -1238,6 +1239,12 @@ function tierEscalationForContinuation(db, runId) {
  * `ContractViolation.message` is split back into its lines first.
  */
 export function continuationHandoffFailure(violations) {
+  if (
+    typeof violations === "string" &&
+    /^contract_violation: missing_result\b/.test(violations)
+  ) {
+    return violations;
+  }
   const lines = Array.isArray(violations)
     ? violations
     : typeof violations === "string"
@@ -1246,7 +1253,9 @@ export function continuationHandoffFailure(violations) {
   const failure = lines.find(
     (line) =>
       typeof line === "string" &&
-      /^(?:web_build_failed|ticket_verify_failed):/.test(line),
+      /^(?:(?:web_build_failed|ticket_verify_failed):|contract_violation: missing_result\b)/.test(
+        line,
+      ),
   );
   return failure ?? null;
 }
@@ -1409,7 +1418,7 @@ export function scheduleTierEscalation(
 
 const TIER_ESCALATION_COMMENT_MARKER = "factory:tier-escalation:";
 
-function defaultFindWorkspacePullRequest({ workspacePath }) {
+export function defaultFindWorkspacePullRequest({ workspacePath }) {
   if (!workspacePath) return null;
   const branch = execFileSync(
     "git",
@@ -1427,6 +1436,137 @@ function defaultFindWorkspacePullRequest({ workspacePath }) {
       })
       .find((pr) => pr?.headRefName === branch && pr?.url) ?? null
   );
+}
+
+const RECOVERED_RESULT_REASON = "worker_recovered_missing_result";
+const MISSING_RESULT_OUTPUT_CHARS = 2 * 1024;
+
+function missingResultFailure(workspaceDir) {
+  const resultPath = path.resolve(workspaceDir, "result.json");
+  const output = [
+    ["stdout", ".transcript.json"],
+    ["stderr", ".stderr.txt"],
+    ["sandbox console", ".sandbox-console.log"],
+  ]
+    .flatMap(([label, file]) => {
+      try {
+        return [
+          `[${label}]`,
+          readFileSync(path.join(workspaceDir, file), "utf8"),
+        ];
+      } catch {
+        return [];
+      }
+    })
+    .join("\n");
+  const normalized = normalizeFailureOutput(output).join("\n");
+  const tail = normalized.slice(-MISSING_RESULT_OUTPUT_CHARS);
+  return `missing_result: expected ${resultPath}; agent stdout/stderr (last 2 KB): ${tail || "(no captured output)"}`;
+}
+
+function recoveredDispatchDefinition(def) {
+  return {
+    ...def,
+    outputSchema: {
+      ...def.outputSchema,
+      properties: {
+        ...def.outputSchema.properties,
+        headSha: { type: "string", pattern: "^[0-9a-f]{40}$" },
+      },
+    },
+  };
+}
+
+/**
+ * Recover the one contract failure whose durable work may already be complete.
+ * The finder resolves the branch from the checkout; the PR read then proves
+ * the agent reached its final Handoff before the worker authors result.json.
+ */
+export function recoverMissingDispatchResult({
+  error,
+  spec,
+  def,
+  workspaceDir,
+  worktreeRecord,
+  findPullRequest = defaultFindWorkspacePullRequest,
+  fetchPullRequest = defaultFetchHandoffPullRequest,
+}) {
+  if (
+    spec?.agent !== "dispatch@1" ||
+    !(error instanceof ContractViolation) ||
+    error.violations.length !== 1 ||
+    error.violations[0] !== "missing_result" ||
+    !worktreeRecord?.path
+  ) {
+    return null;
+  }
+
+  let listed;
+  try {
+    listed = findPullRequest({
+      workspacePath: worktreeRecord.path,
+      github: worktreeRecord.github,
+    });
+  } catch {
+    return null;
+  }
+  const prNumber = Number(listed?.number);
+  if (!Number.isInteger(prNumber) || prNumber < 1 || !listed?.url) return null;
+  if (listed?.state && String(listed.state).toUpperCase() !== "OPEN")
+    return null;
+
+  let pullRequest;
+  try {
+    pullRequest = fetchPullRequest({
+      github: worktreeRecord.github,
+      prNumber,
+    });
+  } catch {
+    return null;
+  }
+  const body = pullRequest?.body ?? listed?.body;
+  if (typeof body !== "string" || !/^## Handoff\s*$/m.test(body)) return null;
+
+  const headSha = pullRequest?.headRefOid ?? listed?.headRefOid ?? null;
+  if (!/^[0-9a-f]{40}$/.test(String(headSha))) return null;
+
+  const verificationCommand =
+    worktreeRecord.handoff?.verificationCommand ??
+    worktreeRecord.verify ??
+    null;
+  const candidate = {
+    schemaVersion: "factory.agent-result/v1",
+    terminalState: "completed",
+    reasonCode: RECOVERED_RESULT_REASON,
+    artifact: {
+      outcome: "PR_OPEN",
+      repo: spec.input?.repo,
+      ticket: spec.input?.ticket,
+      prUrl: listed.url,
+      prNumber,
+      headSha,
+      verification: {
+        command: verificationCommand,
+        passed: true,
+        output: "worker recovery; normal handoff verification pending",
+      },
+      summary:
+        "Worker recovered an open PR after the agent omitted result.json",
+    },
+    evidence: {
+      commands: [
+        `git -C ${worktreeRecord.path} branch --show-current`,
+        `forge.prList(open, headRefName)`,
+        `forge.prView(${prNumber})`,
+      ],
+    },
+  };
+  writeFileSync(
+    path.join(workspaceDir, "result.json"),
+    `${JSON.stringify(candidate, null, 2)}\n`,
+    "utf8",
+  );
+  return { candidate, definition: recoveredDispatchDefinition(def) };
 }
 
 export function defaultProjectTierEscalation({
@@ -2491,7 +2631,7 @@ function defaultFetchHandoffPullRequest({ github, prNumber }) {
     throw new Error("handoff PR requires github and a numeric PR number");
   }
   return loadForge().prView(github, prNumber, {
-    fields: ["baseRefName", "body", "isDraft"],
+    fields: ["baseRefName", "body", "headRefOid", "isDraft"],
     timeout: workerSubprocessTimeoutMs(),
   });
 }
@@ -2799,6 +2939,7 @@ export async function executeClaimed(
       returnHandoffTicket: () => true,
       reconcileVerifiedHandoffTicket: () => false,
       holdPullRequest: () => false,
+      findWorkspacePullRequest: () => null,
     };
   } else if (dispatchStubSelected) {
     // A caller that supplies only some dispatch seams (locks, ticket reads,
@@ -2812,6 +2953,7 @@ export async function executeClaimed(
       returnHandoffTicket: () => true,
       reconcileVerifiedHandoffTicket: () => false,
       holdPullRequest: () => false,
+      findWorkspacePullRequest: () => null,
       ...dispatchOpts,
     };
   }
@@ -3482,6 +3624,7 @@ export async function executeClaimed(
             "ticket_claimed_by_other",
             "ticket_escalation_pr_closed",
             "ticket_escalation_pr_read_failed",
+            "ticket_pr_already_open",
           ].includes(gateRefusal.reason) &&
           worktreeHandoff
         ) {
@@ -4062,7 +4205,7 @@ export async function executeClaimed(
     }
 
     let verified;
-    try {
+    verificationAttempt: try {
       verified = verifyResult({
         spec,
         def,
@@ -4084,13 +4227,53 @@ export async function executeClaimed(
       }
     } catch (err) {
       if (!(err instanceof ContractViolation)) throw err;
+      const recovered = recoverMissingDispatchResult({
+        error: err,
+        spec,
+        def,
+        workspaceDir,
+        worktreeRecord,
+        findPullRequest:
+          dispatchOpts?.findWorkspacePullRequest ??
+          defaultFindWorkspacePullRequest,
+        fetchPullRequest: fetchHandoffPullRequestFn,
+      });
+      if (recovered) {
+        try {
+          verified = verifyResult({
+            spec,
+            def: recovered.definition,
+            registry,
+            workspaceDir,
+            attempt,
+            extraArtifacts: RUNTIME_ARTIFACTS,
+            worktreeRecord,
+          });
+          if (verified.handoff && handoffPrNumber(verified.handoff)) {
+            assertHandoffPullRequestBase({
+              handoff: verified.handoff,
+              base: worktreeRecord?.base,
+              fetchPullRequest: fetchHandoffPullRequestFn,
+            });
+          }
+          verified.result.reasonCode = RECOVERED_RESULT_REASON;
+          break verificationAttempt;
+        } catch (recoveryError) {
+          if (!(recoveryError instanceof ContractViolation))
+            throw recoveryError;
+          err = recoveryError;
+        }
+      }
       const reasonCode =
         err.reasonCode === "baseline_red" ||
         err.reasonCode === HANDOFF_SANDBOX_UNAVAILABLE ||
         HANDOFF_REASON_CODES.has(err.reasonCode)
           ? err.reasonCode
           : "contract_violation";
-      let failureReason = `${reasonCode}: ${err.violations.join(", ")}`;
+      let failureReason =
+        err.violations.length === 1 && err.violations[0] === "missing_result"
+          ? `${reasonCode}: ${missingResultFailure(workspaceDir)}`
+          : `${reasonCode}: ${err.violations.join(", ")}`;
       const handoff = err.handoff ?? null;
       const handoffBody = handoff
         ? `${composeHandoffVerification(handoff)}\n\n**Result:** run ${runId} FAILED \`${reasonCode}\` — ${err.violations.join("; ")}`
@@ -4217,7 +4400,7 @@ export async function executeClaimed(
             policyVersion,
             now: currentNow,
             reasonCode,
-            handoffFailure: continuationHandoffFailure(err.violations),
+            handoffFailure: continuationHandoffFailure(failureReason),
           });
         }
         return { ok: true, escalation };
