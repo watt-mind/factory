@@ -480,6 +480,43 @@ describe("human inbox ledger (WM-285)", () => {
     expect(() => retryInboxDecision(db, item.id)).toThrow("already applied");
   });
 
+  test("whitespace-only required text is rejected before a response is recorded", () => {
+    const db = openDb(":memory:");
+    const request = decision([
+      { id: "answer", label: "Answer", effect: "answer" },
+    ]);
+    request.fields = [
+      { id: "reply", kind: "text", label: "Reply", required: true },
+    ];
+    createInboxItem(
+      db,
+      {
+        kind: "ESCALATED",
+        title: "answer",
+        refs: { issue: "WM-1" },
+        decision: request,
+      },
+      { id: "whitespace_response" },
+    );
+
+    try {
+      decideInboxItem(db, "whitespace_response", {
+        schemaVersion: "factory.decision-response/v1",
+        requestHash: decisionRequestHash(request),
+        optionId: "answer",
+        fields: { reply: " \n " },
+      });
+      throw new Error("expected invalid response");
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: "invalid_response",
+        status: 400,
+        errors: ["$.fields.reply: required text must not be empty"],
+      });
+    }
+    expect(getInboxItem(db, "whitespace_response").response).toBeNull();
+  });
+
   test("each failed retry advances a durable attempt token", () => {
     const db = openDb(":memory:");
     const request = decision([

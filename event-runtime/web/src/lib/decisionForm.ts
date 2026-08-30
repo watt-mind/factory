@@ -41,7 +41,7 @@ export function fieldErrors(
     const value = values[field.id];
     if (field.kind === "text") {
       if (typeof value !== "string") errors[field.id] = "Enter text.";
-      else if (field.required && value.length === 0)
+      else if (field.required && value.trim().length === 0)
         errors[field.id] = `${field.label} is required.`;
       else if (value.length > (field.maxLength ?? 2000))
         errors[field.id] =
