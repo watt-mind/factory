@@ -21,6 +21,7 @@ const EXECUTE_SPAWN_TIMEOUT_MS = loadAdjustedTimeout(5_000);
 import {
   composeHandoffVerification,
   ContractViolation,
+  HANDOFF_DEPENDENCIES_MISSING,
   insideHandoffSandbox,
   verifyResult,
 } from "./verify.mjs";
@@ -2860,6 +2861,9 @@ sh -c 'sleep 5 & wait'
     expect(classifyFailureCause("lease_expired")).toBe("environment");
     expect(classifyFailureCause("linear_unconfigured")).toBe("environment");
     expect(classifyFailureCause("registry_stale")).toBe("environment");
+    expect(classifyFailureCause(HANDOFF_DEPENDENCIES_MISSING)).toBe(
+      "environment",
+    );
     expect(classifyFailureCause("agent_exit_1")).toBe("agent_error");
     expect(classifyFailureCause("contract_violation")).toBe("agent_error");
     for (const reason of [
@@ -2904,6 +2908,7 @@ sh -c 'sleep 5 & wait'
       "timeout",
       "lease_expired",
       "adapter_error",
+      HANDOFF_DEPENDENCIES_MISSING,
       "needs_human",
       "policy_denied:Bash",
       "cancelled",

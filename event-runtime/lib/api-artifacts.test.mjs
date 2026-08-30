@@ -52,6 +52,7 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
     mkdirSync(store, { recursive: true });
     const firstHash = "a".repeat(64);
     const secondHash = "b".repeat(64);
+    const missingHash = "c".repeat(64);
     writeFileSync(path.join(store, firstHash), "first", "utf8");
 
     const db = openDb(path.join(home, "runtime.db"));
@@ -75,8 +76,31 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       JSON.stringify({ artifacts: [{ kind: "report", sha256: firstHash }] }),
       createdAt,
     );
+    db.query(
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'COMPLETED', ?, ?)`,
+    ).run(
+      "run_missing",
+      "idem-missing",
+      JSON.stringify({ agent: "cache-agent@1" }),
+      "spec-hash",
+      createdAt,
+      createdAt,
+    );
+    db.query(
+      `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+       VALUES (?, 1, ?, 'sha256:result', '{}', '{}', ?)`,
+    ).run(
+      "run_missing",
+      JSON.stringify({ artifacts: [{ kind: "report", sha256: missingHash }] }),
+      createdAt,
+    );
 
     let indexBuilds = 0;
+    const indexedHashes = [];
+    // Frozen clock: the 10 s inventory TTL must not lapse mid-test on a
+    // loaded runner, or the rebuild count below would drift.
+    const frozenNowMs = Date.parse("2026-01-02T03:04:05.000Z");
     const server = startApi({
       db,
       registry,
@@ -84,9 +108,12 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       policyVersion: PV,
       port: 0,
       env: { name: "test", home, adapter: "fake" },
-      buildArtifactReferenceIndex(currentDb) {
+      now: () => frozenNowMs,
+      buildArtifactReferenceIndex(currentDb, inventory) {
         indexBuilds += 1;
-        return artifactReferenceIndex(currentDb);
+        const index = artifactReferenceIndex(currentDb, inventory);
+        indexedHashes.push([...index.keys()]);
+        return index;
       },
     });
     await new Promise((resolve) => server.on("listening", resolve));
@@ -94,6 +121,33 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
     try {
       await fetch(`${base}/artifacts`);
       await fetch(`${base}/artifacts`);
+      expect(indexBuilds).toBe(1);
+      expect(indexedHashes[0]).not.toContain(missingHash);
+
+      // Lease bookkeeping must not invalidate the result-derived cache.
+      db.query(`UPDATE runs SET updated_at = ? WHERE run_id = ?`).run(
+        "2026-01-02T03:05:05.000Z",
+        "run_first",
+      );
+      await fetch(`${base}/artifacts`);
+      expect(indexBuilds).toBe(1);
+
+      // State is not result-derived: it must be fresh without rebuilding.
+      db.query(`UPDATE runs SET state = ? WHERE run_id = ?`).run(
+        "CANCELLED",
+        "run_first",
+      );
+      const cancelled = await (
+        await fetch(`${base}/artifacts?search=CANCELLED`)
+      ).json();
+      expect(cancelled.artifacts.map((artifact) => artifact.sha256)).toEqual([
+        firstHash,
+      ]);
+      expect(cancelled.artifacts[0].references[0].state).toBe("CANCELLED");
+      expect(
+        (await (await fetch(`${base}/artifacts?search=COMPLETED`)).json())
+          .artifacts,
+      ).toEqual([]);
       expect(indexBuilds).toBe(1);
 
       writeFileSync(path.join(store, secondHash), "second", "utf8");
@@ -122,6 +176,9 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       expect(refreshed.artifacts.map((artifact) => artifact.sha256)).toContain(
         secondHash,
       );
+      expect(
+        refreshed.artifacts.find((artifact) => artifact.sha256 === firstHash),
+      ).toEqual(expect.objectContaining({ referenced: true }));
     } finally {
       server.close();
       db.close();
@@ -327,6 +384,11 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       });
       expect(existsSync(path.join(store, orphanHash))).toBe(false);
       expect(existsSync(path.join(store, reportHash))).toBe(true);
+      expect(
+        (await (await fetch(`${base}/artifacts`)).json()).artifacts.map(
+          (artifact) => artifact.sha256,
+        ),
+      ).not.toContain(orphanHash);
     } finally {
       server.close();
       db.close();

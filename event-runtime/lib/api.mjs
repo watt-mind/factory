@@ -158,6 +158,8 @@ export function createApi({
 } = {}) {
   const actor = "operator";
   const staticRegistryLoadedAt = new Date(now()).toISOString();
+  // GET /artifacts snapshots the inventory for 10 s, so an out-of-band blob
+  // removal can remain listed until that snapshot expires.
   const storeStatsTtlMs = 10_000;
   let cachedStoreStats = null;
   let cachedStoreStatsAt = 0;
@@ -186,22 +188,38 @@ export function createApi({
     cachedArtifactInventoryAt = 0;
   }
 
+  function sameArtifactShaSet(previous, current) {
+    if (previous.length !== current.length) return false;
+    const seen = new Set(previous.map((entry) => entry.sha256));
+    return current.every((entry) => seen.has(entry.sha256));
+  }
+
   function getArtifactPage(options, nowMs) {
     const storeRoot = artifactsRoot(env?.home);
     const resultsRowid =
       db.query(`SELECT MAX(rowid) AS rowid FROM results`).get().rowid ?? 0;
     const resultsChanged = resultsRowid !== cachedArtifactResultsRowid;
-    if (resultsChanged) {
-      cachedArtifactReferences = buildArtifactReferenceIndex(db);
-      cachedArtifactResultsRowid = resultsRowid;
-    }
-    if (
+    const inventoryStale =
       resultsChanged ||
       !cachedArtifactInventory ||
-      nowMs - cachedArtifactInventoryAt >= storeStatsTtlMs
-    ) {
-      cachedArtifactInventory = buildArtifactInventory(storeRoot);
+      nowMs - cachedArtifactInventoryAt >= storeStatsTtlMs;
+    let inventoryChanged = false;
+    if (inventoryStale) {
+      const inventory = buildArtifactInventory(storeRoot);
+      // A TTL refresh that finds the same blob set leaves the reference
+      // index valid: only a changed sha set can add or drop references.
+      inventoryChanged =
+        !cachedArtifactInventory ||
+        !sameArtifactShaSet(cachedArtifactInventory, inventory);
+      cachedArtifactInventory = inventory;
       cachedArtifactInventoryAt = nowMs;
+    }
+    if (resultsChanged || inventoryChanged || !cachedArtifactReferences) {
+      cachedArtifactReferences = buildArtifactReferenceIndex(
+        db,
+        cachedArtifactInventory,
+      );
+      cachedArtifactResultsRowid = resultsRowid;
     }
     return listArtifactPage(db, storeRoot, {
       ...options,
