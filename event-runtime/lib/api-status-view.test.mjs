@@ -200,6 +200,14 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
       ).run(`prop-piling-reaper-${i}`, `clock:reaper:${i}`, atIso);
     }
 
+    // A GitHub delivery admitted 90 seconds ago supplies the intake freshness
+    // projection without changing the numeric event-status counts.
+    const githubAdmittedAt = new Date(nowMs - 90_000).toISOString();
+    db.query(
+      `INSERT INTO events (source, event_id, type, subject, status, payload_hash, occurred_at, received_at, admitted_at, envelope_json)
+       VALUES ("github", "delivery-status-1", "github.pull_request", "watt-mind/factory", "admitted", "dummy-hash", ?, ?, ?, "{}")`,
+    ).run(githubAdmittedAt, githubAdmittedAt, githubAdmittedAt);
+
     const s = await makeServer({
       db,
       secret: "sec",
@@ -218,6 +226,19 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
         extractDirectProperties(statusViewBlock).sort();
       expect(Object.keys(status).sort()).toEqual(expectedStatusKeys);
       expect(status.inbox).toEqual({ open: 0, acked: 0, byKind: {} });
+      expect(status.githubIntake).toEqual({
+        configured: true,
+        lastAdmittedAt: githubAdmittedAt,
+        ageMs: 90_000,
+        rejected: 0,
+        stale: false,
+        staleAfterMs: 12 * 60 * 60 * 1000,
+      });
+      expect(Object.keys(status.githubIntake).sort()).toEqual(
+        extractDirectProperties(
+          extractInterfaceBlock(typesSrc, "GithubIntakeStatus"),
+        ).sort(),
+      );
 
       // StatusView.env matches EnvIdentity
       const envIdentityBlock = extractInterfaceBlock(typesSrc, "EnvIdentity");
@@ -317,6 +338,20 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
           lastError: "failed to plan",
         },
       ]);
+    } finally {
+      s.close();
+    }
+  });
+
+  test("GET /status reports GitHub intake as unconfigured without a webhook secret", async () => {
+    const s = await makeServer({ githubSecret: null });
+    try {
+      const status = await (await fetch(s.url("/status"))).json();
+      expect(status.githubIntake).toMatchObject({
+        configured: false,
+        ageMs: null,
+        stale: false,
+      });
     } finally {
       s.close();
     }
