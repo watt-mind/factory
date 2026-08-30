@@ -73,6 +73,32 @@ test("formatWatchdogReport formats critical issues", () => {
   expect(formatted).toContain("WEB_DOWN");
 });
 
+test("formatWatchdogReport keeps the fleet metrics line on warning/critical", () => {
+  const formatted = formatWatchdogReport({
+    ok: false,
+    issues: [
+      {
+        severity: "CRITICAL",
+        code: "FLEET_OFFLINE",
+        message: "5 CI runs queued with 0 online shadow runners",
+      },
+    ],
+    metrics: {
+      apiOk: true,
+      webOk: true,
+      workersCount: 1,
+      runningRuns: 0,
+      wedgedRuns: 0,
+      queuedRuns: 0,
+      anomalies: [],
+      fleetQueued: 5,
+      fleetOnlineShadows: 0,
+    },
+  });
+  expect(formatted).toContain("FLEET_OFFLINE");
+  expect(formatted).toContain("Fleet: queued 5 | online shadows 0");
+});
+
 test("SCAN_LOOP_AGENTS is exactly the set the confinement gate can refuse", () => {
   // Derive from the shipped definitions: a new non-mutating workspace-only
   // agent must be added here, or its refusals go unnoticed the way #1250's
@@ -389,6 +415,40 @@ test("runWatchdogCheck warns when the shadow fleet forge check fails", async () 
       severity: "WARNING",
       code: "FLEET_CHECK_ERROR",
       message: "Shadow fleet check failed: gh: HTTP 401",
+    });
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("runWatchdogCheck survives a throwing loadForge as FLEET_CHECK_ERROR", async () => {
+  // A forge that throws on construction (bad config, missing gh) must not
+  // kill the whole watchdog: steps 1-3 still report and the fleet check is
+  // a WARNING, not an uncaught exception.
+  const server = watchdogCheckServer();
+  const forge = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error("forge config: no host configured");
+      },
+    },
+  );
+
+  try {
+    const result = await runWatchdogCheck({
+      port: server.port,
+      webPort: server.port,
+      forge,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.metrics.apiOk).toBe(true);
+    expect(result.metrics.webOk).toBe(true);
+    expect(result.metrics.fleetCheck).toBe("error");
+    expect(result.issues).toContainEqual({
+      severity: "WARNING",
+      code: "FLEET_CHECK_ERROR",
+      message: "Shadow fleet check failed: forge config: no host configured",
     });
   } finally {
     server.stop(true);
