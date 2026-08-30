@@ -921,6 +921,8 @@ function workerSubprocessTimeoutMs() {
 
 /** Worktree vanished between agent finish and handoff verify (`realpath` ENOENT). */
 const HANDOFF_WORKTREE_MISSING = "handoff_worktree_missing";
+/** GitHub read exhausted its bounded rate-limit retry during handoff. */
+export const HANDOFF_FORGE_UNAVAILABLE = "handoff_forge_unavailable";
 /** Non-`ContractViolation` throw from `verifyResult` / `assertHandoffPullRequestBase`. */
 const VERIFICATION_INTERNAL_ERROR = "verification_internal_error";
 
@@ -939,6 +941,7 @@ const ENVIRONMENT_FAILURES = new Set([
   // Same family: the worktree is gone, so continuation/retry must not treat
   // the throw as an agent red (#1663).
   HANDOFF_WORKTREE_MISSING,
+  HANDOFF_FORGE_UNAVAILABLE,
 ]);
 const isAgentHandoffFailure = (reasonCode) =>
   HANDOFF_REASON_CODES.has(reasonCode) &&
@@ -1534,7 +1537,7 @@ export function scheduleTierEscalation(
 
 const TIER_ESCALATION_COMMENT_MARKER = "factory:tier-escalation:";
 
-export function defaultFindWorkspacePullRequest({ workspacePath }) {
+export function defaultFindWorkspacePullRequest({ workspacePath, forge }) {
   if (!workspacePath) return null;
   const branch = execFileSync(
     "git",
@@ -1542,16 +1545,43 @@ export function defaultFindWorkspacePullRequest({ workspacePath }) {
     { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
   ).trim();
   if (!branch) return null;
-  return (
-    loadForge()
-      .prList(null, {
-        cwd: workspacePath,
-        state: "open",
-        fields: ["number", "url", "headRefName"],
+  const pullRequest = (forge ?? loadForge())
+    .prList(null, {
+      cwd: workspacePath,
+      state: "open",
+      fields: ["number", "url", "headRefName"],
+      timeout: workerSubprocessTimeoutMs(),
+    })
+    .find((pr) => pr?.headRefName === branch && pr?.url);
+  if (pullRequest) return pullRequest;
+
+  // A local branch alone is not resumable evidence. Confirm that this exact
+  // head exists at origin before producing the BLOCKED recovery artifact.
+  // A hung or failing ls-remote must not wedge recovery: bound it like the
+  // prList call above and treat any failure as "no pushed branch".
+  let remote;
+  try {
+    remote = execFileSync(
+      "git",
+      [
+        "-C",
+        workspacePath,
+        "ls-remote",
+        "--heads",
+        "origin",
+        `refs/heads/${branch}`,
+      ],
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
         timeout: workerSubprocessTimeoutMs(),
-      })
-      .find((pr) => pr?.headRefName === branch && pr?.url) ?? null
-  );
+        killSignal: "SIGKILL",
+      },
+    ).trim();
+  } catch {
+    return null;
+  }
+  return remote ? { pushedBranch: branch } : null;
 }
 
 const MISSING_RESULT_OUTPUT_CHARS = 2 * 1024;
@@ -1612,8 +1642,47 @@ export function recoverMissingDispatchResult({
       workspacePath: worktreeRecord.path,
       github: worktreeRecord.github,
     });
-  } catch {
+  } catch (err) {
+    if (err?.code === "forge_rate_limited") {
+      throw new ContractViolation(
+        ["handoff_forge_unavailable: GitHub rate limited recovery PR lookup"],
+        { reasonCode: HANDOFF_FORGE_UNAVAILABLE },
+      );
+    }
     return null;
+  }
+  if (typeof listed?.pushedBranch === "string" && listed.pushedBranch) {
+    const base = worktreeRecord.base ?? "<configured-base>";
+    const resumeCommand = `gh pr create --base ${base} --title "..." --body "Fixes ${spec.input?.ticket}"`;
+    const candidate = {
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      reasonCode: "pushed_branch_no_pr",
+      artifact: {
+        outcome: "BLOCKED",
+        repo: spec.input?.repo,
+        ticket: spec.input?.ticket,
+        prUrl: null,
+        prNumber: null,
+        verification: { command: null, passed: false, output: "" },
+        summary: `Branch ${listed.pushedBranch} is pushed but has no PR; resume with ${resumeCommand}`,
+      },
+      evidence: {
+        branch: listed.pushedBranch,
+        resumeCommand,
+        commands: [
+          `git -C ${worktreeRecord.path} branch --show-current`,
+          `git -C ${worktreeRecord.path} ls-remote --heads origin refs/heads/${listed.pushedBranch}`,
+          "forge.prList(open, headRefName)",
+        ],
+      },
+    };
+    writeFileSync(
+      path.join(workspaceDir, "result.json"),
+      `${JSON.stringify(candidate, null, 2)}\n`,
+      "utf8",
+    );
+    return { candidate, retainWorkspace: true };
   }
   const prNumber = Number(listed?.number);
   if (!Number.isInteger(prNumber) || prNumber < 1 || !listed?.url) return null;
@@ -1626,7 +1695,13 @@ export function recoverMissingDispatchResult({
       github: worktreeRecord.github,
       prNumber,
     });
-  } catch {
+  } catch (err) {
+    if (err?.code === "forge_rate_limited") {
+      throw new ContractViolation(
+        ["handoff_forge_unavailable: GitHub rate limited recovery PR read"],
+        { reasonCode: HANDOFF_FORGE_UNAVAILABLE },
+      );
+    }
     return null;
   }
   const body = pullRequest?.body ?? listed?.body;
@@ -2115,6 +2190,7 @@ function deferTransientDispatchGate(
     policyVersion,
     now,
     reasonCode,
+    expectFrom = "RUNNING",
     maxRequeues = DEFAULT_MAX_TRANSIENT_GATE_REQUEUES,
     random = Math.random,
   },
@@ -2143,10 +2219,26 @@ function deferTransientDispatchGate(
 
     const requeueNumber = prior + 1;
     const backoffMs = claimLockBackoffMs(requeueNumber, random);
+    // VERIFYING normally only reaches a terminal state. A transient forge
+    // read is different: preserve the legal lifecycle journal without
+    // finalizing (or charging) this attempt, then use the same QUEUED
+    // transient-gate record as the pre-execution path.
+    if (expectFrom === "VERIFYING") {
+      transition(db, {
+        runId,
+        to: "FAILED",
+        expectFrom,
+        actor: owner,
+        reason: `handoff_transient:${reasonCode}`,
+        attempt,
+        policyVersion,
+        now: currentNow,
+      });
+    }
     transition(db, {
       runId,
       to: "QUEUED",
-      expectFrom: "RUNNING",
+      expectFrom: expectFrom === "VERIFYING" ? "FAILED" : expectFrom,
       actor: owner,
       reason: `dispatch_gate_transient:${reasonCode}:${requeueNumber}:backoff_${backoffMs}ms`,
       attempt,
@@ -2958,6 +3050,14 @@ export function assertHandoffPullRequestBase({
   try {
     pr = fetchPullRequest({ github: handoff.github, prNumber });
   } catch (err) {
+    if (err?.code === "forge_rate_limited") {
+      throw new ContractViolation(
+        [
+          `handoff_forge_unavailable: GitHub rate limited PR #${prNumber} base read`,
+        ],
+        { reasonCode: HANDOFF_FORGE_UNAVAILABLE, handoff },
+      );
+    }
     throw new ContractViolation(
       [
         `pr_base_unreadable: could not read base for PR #${prNumber}: ${String(err?.message ?? err)}`,
@@ -4645,6 +4745,7 @@ export async function executeClaimed(
     }
 
     let verified;
+    let recovery = null;
     verificationAttempt: try {
       verified = verifyResultFn({
         spec,
@@ -4670,18 +4771,27 @@ export async function executeClaimed(
         return failVerificationInternal(err);
       }
       let activeError = err;
-      const recovered = recoverMissingDispatchResult({
-        error: err,
-        spec,
-        def,
-        workspaceDir,
-        worktreeRecord,
-        findPullRequest:
-          dispatchOpts?.findWorkspacePullRequest ??
-          defaultFindWorkspacePullRequest,
-        fetchPullRequest: fetchHandoffPullRequestFn,
-      });
+      let recovered;
+      try {
+        recovered = recoverMissingDispatchResult({
+          error: err,
+          spec,
+          def,
+          workspaceDir,
+          worktreeRecord,
+          findPullRequest:
+            dispatchOpts?.findWorkspacePullRequest ??
+            defaultFindWorkspacePullRequest,
+          fetchPullRequest: fetchHandoffPullRequestFn,
+        });
+      } catch (recoveryError) {
+        if (!(recoveryError instanceof ContractViolation)) {
+          return failVerificationInternal(recoveryError);
+        }
+        activeError = recoveryError;
+      }
       if (recovered) {
+        recovery = recovered;
         try {
           verified = verifyResultFn({
             spec,
@@ -4708,10 +4818,37 @@ export async function executeClaimed(
           activeError = recoveryError;
         }
       }
+      if (activeError.reasonCode === HANDOFF_FORGE_UNAVAILABLE) {
+        const deferred = deferTransientDispatchGate(db, {
+          runId,
+          attempt,
+          fencingToken,
+          owner,
+          policyVersion,
+          now: nowFn,
+          reasonCode: HANDOFF_FORGE_UNAVAILABLE,
+          expectFrom: "VERIFYING",
+          maxRequeues: Number.isInteger(dispatchOpts?.maxTransientGateRequeues)
+            ? Math.max(0, dispatchOpts.maxTransientGateRequeues)
+            : DEFAULT_MAX_TRANSIENT_GATE_REQUEUES,
+          random: dispatchOpts?.random ?? Math.random,
+        });
+        if (deferred?.fenced) return { fenced: true };
+        if (deferred?.requeued) {
+          return {
+            runId,
+            attempt,
+            terminalState: "QUEUED",
+            reasonCode: HANDOFF_FORGE_UNAVAILABLE,
+            requeueAfterMs: deferred.backoffMs,
+          };
+        }
+      }
       const reasonCode =
         activeError.reasonCode === "baseline_red" ||
         activeError.reasonCode === HANDOFF_SANDBOX_UNAVAILABLE ||
         activeError.reasonCode === HANDOFF_DEPENDENCIES_MISSING ||
+        activeError.reasonCode === HANDOFF_FORGE_UNAVAILABLE ||
         HANDOFF_REASON_CODES.has(activeError.reasonCode)
           ? activeError.reasonCode
           : "contract_violation";
@@ -5174,7 +5311,7 @@ export async function executeClaimed(
       cleanupWorkspace();
       return { fenced: true };
     }
-    cleanupWorkspace();
+    cleanupWorkspace({ retainWorkspace: recovery?.retainWorkspace === true });
     return {
       runId,
       attempt,

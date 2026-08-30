@@ -86,6 +86,7 @@ import {
   escalationHandoffFailure,
   createReloadWatcher,
   DEFAULT_MAX_ENVIRONMENT_RETRIES,
+  defaultFindWorkspacePullRequest,
   defaultLocksDir,
   defaultReconcileVerifiedHandoffTicket,
   defaultHoldPullRequest,
@@ -100,6 +101,7 @@ import {
   extendRunDeadline,
   forceFailRun,
   HarnessMaterializeError,
+  HANDOFF_FORGE_UNAVAILABLE,
   humanDecisionAuthorisationGate,
   LEASE_GRACE_SECONDS,
   policyMaxRunMinutes,
@@ -2054,6 +2056,50 @@ sh -c 'sleep 5 & wait'
     expect(verified.result.artifact.headSha).toBeUndefined();
     expect(verified.result.evidence.headSha).toBe(headSha);
 
+    rmSync(path.join(workspaceDir, "result.json"), { force: true });
+    const pushedNoPr = recoverMissingDispatchResult({
+      error: missing,
+      spec,
+      def,
+      workspaceDir,
+      worktreeRecord: { ...worktreeRecord, base: "develop" },
+      findPullRequest: () => ({ pushedBranch: "feat/gh-1539" }),
+    });
+    expect(pushedNoPr).toMatchObject({ retainWorkspace: true });
+    expect(pushedNoPr.candidate).toMatchObject({
+      reasonCode: "pushed_branch_no_pr",
+      artifact: {
+        outcome: "BLOCKED",
+        prUrl: null,
+        prNumber: null,
+        verification: { command: null, passed: false },
+      },
+      evidence: {
+        branch: "feat/gh-1539",
+        resumeCommand: expect.stringContaining("gh pr create --base develop"),
+      },
+    });
+    expect(pushedNoPr.candidate.artifact.summary).toContain(
+      "gh pr create --base develop",
+    );
+
+    expect(() =>
+      recoverMissingDispatchResult({
+        error: missing,
+        spec,
+        def,
+        workspaceDir,
+        worktreeRecord,
+        findPullRequest: () => {
+          const rateLimit = new Error("rate limited");
+          rateLimit.code = "forge_rate_limited";
+          throw rateLimit;
+        },
+      }),
+    ).toThrow(
+      expect.objectContaining({ reasonCode: HANDOFF_FORGE_UNAVAILABLE }),
+    );
+
     for (const { error, findPullRequest, body, recoveredHeadSha = headSha } of [
       { error: missing, findPullRequest: () => null, body: "## Handoff" },
       { error: missing, findPullRequest: () => openPr, body: "Fixes #1539" },
@@ -3321,6 +3367,7 @@ sh -c 'sleep 5 & wait'
     expect(classifyFailureCause("handoff_worktree_missing")).toBe(
       "environment",
     );
+    expect(classifyFailureCause(HANDOFF_FORGE_UNAVAILABLE)).toBe("environment");
     expect(classifyFailureCause("agent_exit_1")).toBe("agent_error");
     expect(classifyFailureCause("contract_violation")).toBe("agent_error");
     for (const reason of [
@@ -5841,5 +5888,66 @@ describe("registry reload worker outcomes", () => {
       "failure:fatal:agent_unregistered_after_reload",
       "failure:fatal:agent_unregistered_after_reload",
     ]);
+  });
+});
+
+describe("defaultFindWorkspacePullRequest", () => {
+  const gitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: "t",
+    GIT_AUTHOR_EMAIL: "t@example.com",
+    GIT_COMMITTER_NAME: "t",
+    GIT_COMMITTER_EMAIL: "t@example.com",
+  };
+  const git = (cwd, ...args) =>
+    execFileSync("git", ["-C", cwd, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: gitEnv,
+    });
+
+  function seedWorkspace(branch) {
+    const workspacePath = tmpDir("evrt-find-pr-workspace-");
+    git(workspacePath, "init", "-q", "-b", "main");
+    writeFileSync(path.join(workspacePath, "seed.txt"), "seed\n");
+    git(workspacePath, "add", "seed.txt");
+    git(workspacePath, "commit", "-q", "-m", "seed");
+    git(workspacePath, "checkout", "-q", "-b", branch);
+    return workspacePath;
+  }
+
+  test("reports a branch that exists at origin as pushed", () => {
+    const branch = "feat/gh-1870-pushed";
+    const workspacePath = seedWorkspace(branch);
+    const origin = tmpDir("evrt-find-pr-origin-");
+    git(origin, "init", "-q", "--bare");
+    git(workspacePath, "remote", "add", "origin", origin);
+    git(workspacePath, "push", "-q", "origin", branch);
+
+    const found = defaultFindWorkspacePullRequest({
+      workspacePath,
+      forge: { prList: () => [] },
+    });
+    expect(found).toEqual({ pushedBranch: branch });
+  });
+
+  test("treats a failing ls-remote as no pushed branch (WM-1870 review)", () => {
+    const workspacePath = seedWorkspace("feat/gh-1870-unreachable");
+    // Unreachable origin: ls-remote exits non-zero. The finder must swallow
+    // the failure (bounded, SIGKILL on timeout) instead of throwing out of
+    // missing-result recovery.
+    git(
+      workspacePath,
+      "remote",
+      "add",
+      "origin",
+      path.join(workspacePath, "no-such-origin"),
+    );
+    expect(
+      defaultFindWorkspacePullRequest({
+        workspacePath,
+        forge: { prList: () => [] },
+      }),
+    ).toBeNull();
   });
 });
