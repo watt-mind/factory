@@ -276,7 +276,10 @@ locked_bun_install "${testDir}"`,
   }
 });
 
-test("multiple contenders race to reclaim a stale pid-less lock and all succeed", async () => {
+test("multiple contenders race to reclaim a stale pid-less lock and none crash", async () => {
+  // Contract (gh-1373): exactly one contender owns the lock at a time; every
+  // contender either wins the reclaim (exit 0) or reports the documented
+  // "lock held" timeout. No contender may crash on a half-reclaimed lock.
   const testDirs = [
     createTempProject(),
     createTempProject(),
@@ -285,10 +288,11 @@ test("multiple contenders race to reclaim a stale pid-less lock and all succeed"
   ];
   const lockDir = makeTestLockDir("test-pidless-race");
   mkdirSync(lockDir, { recursive: true });
+  const deadlineMs = 30_000;
 
   try {
-    const runContender = (dir) =>
-      Bun.spawn(
+    const runContender = async (dir) => {
+      const proc = Bun.spawn(
         ["bash", "-c", `source "${COMMON}"\nlocked_bun_install "${dir}"`],
         {
           stdout: "pipe",
@@ -300,12 +304,33 @@ test("multiple contenders race to reclaim a stale pid-less lock and all succeed"
             FACTORY_LOCK_MAX_WAIT: "10",
           },
         },
-      ).exited;
+      );
+      const stderrPromise = new Response(proc.stderr).text();
+      let timer;
+      const deadline = new Promise((resolve) => {
+        timer = setTimeout(() => resolve("deadline"), deadlineMs);
+      });
+      const outcome = await Promise.race([proc.exited, deadline]);
+      clearTimeout(timer);
+      if (outcome === "deadline") {
+        proc.kill("SIGKILL");
+        await proc.exited;
+        return { code: "deadline", stderr: await stderrPromise };
+      }
+      return { code: outcome, stderr: await stderrPromise };
+    };
 
     const results = await Promise.all(testDirs.map(runContender));
-    for (const code of results) {
-      expect(code).toBe(0);
+    for (const { code, stderr } of results) {
+      expect(code).not.toBe("deadline");
+      if (code !== 0) {
+        // The only permitted non-zero outcome is the documented lock-held
+        // timeout; anything else is a crash on a half-reclaimed lock.
+        expect(stderr).toContain("timed out waiting for bun install lock");
+      }
+      expect(stderr).not.toContain("No such file or directory");
     }
+    expect(results.filter(({ code }) => code === 0).length).toBeGreaterThan(0);
     expect(existsSync(lockDir)).toBe(false);
   } finally {
     for (const d of testDirs) rmSync(d, { recursive: true, force: true });

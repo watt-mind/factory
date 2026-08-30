@@ -10,7 +10,7 @@
  */
 import { canonicalJson, hashJson } from "./canonical.mjs";
 import { DEFAULT_PROPOSAL_TTL_SECONDS } from "./config.mjs";
-import { tx, txImmediate } from "./db.mjs";
+import { txImmediate } from "./db.mjs";
 import { newProposalId } from "./ids.mjs";
 import { runState, transition } from "./lifecycle.mjs";
 import { buildRunSpec } from "./planner.mjs";
@@ -261,7 +261,7 @@ export function rejectProposal(
   id,
   { actor, reason, now = Date.now(), policyVersion = "unknown" } = {},
 ) {
-  return tx(db, () => {
+  return txImmediate(db, () => {
     const proposal = db.query(`SELECT * FROM proposals WHERE id = ?`).get(id);
     if (!proposal) throw new Error(`unknown proposal ${id}`);
     if (proposal.status !== "open")

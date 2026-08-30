@@ -121,6 +121,21 @@ describe("splitConfigSecrets", () => {
     }
   });
 
+  test("deletes forbidden heuristic subtrees from config", () => {
+    const values = JSON.parse(
+      '{"__proto__":{"token":"x"},"constructor":{"apiKey":"y"},"nested":{"prototype":{"secret":"z"}}}',
+    );
+    const { config, secrets } = splitConfigSecrets(values);
+
+    expect(config).toEqual({ nested: {} });
+    expect(Object.hasOwn(config, "__proto__")).toBe(false);
+    expect(Object.hasOwn(config, "constructor")).toBe(false);
+    expect(Object.hasOwn(secrets, "__proto__")).toBe(false);
+    expect(Object.hasOwn(secrets, "constructor")).toBe(false);
+    expect(secrets).toEqual({});
+    expect({}.token).toBeUndefined();
+  });
+
   test("does not traverse constructor.prototype config keys", () => {
     const { secrets } = splitConfigSecrets(
       JSON.parse('{"constructor":{"prototype":{"apiKey":"x"}}}'),
@@ -129,16 +144,83 @@ describe("splitConfigSecrets", () => {
     expect(Object.hasOwn(secrets, "constructor")).toBe(false);
   });
 
-  test("ignores explicit secret paths containing forbidden segments", () => {
-    const values = JSON.parse(
-      '{"nested":{"value":"x"},"constructor":{"prototype":{"apiKey":"y"}}}',
+  test("deletes forbidden nested heuristic subtrees from config", () => {
+    const { config, secrets } = splitConfigSecrets(
+      JSON.parse('{"nested":{"prototype":{"secret":"x"}}}'),
     );
-    const { secrets } = splitConfigSecrets(values, [
+    expect(config).toEqual({ nested: {} });
+    expect(Object.hasOwn(config.nested, "prototype")).toBe(false);
+    expect(secrets).toEqual({});
+    expect({}.secret).toBeUndefined();
+  });
+
+  test("deletes explicit secret paths containing forbidden segments", () => {
+    const values = JSON.parse(
+      '{"nested":{"__proto__":{"value":"x"}},"constructor":{"apiKey":"y"}}',
+    );
+    const { config, secrets } = splitConfigSecrets(values, [
       { path: ["nested", "__proto__", "value"] },
-      { path: ["constructor", "prototype", "apiKey"] },
+      { path: ["constructor", "apiKey"] },
     ]);
-    expect(Object.prototype.token).toBeUndefined();
-    expect(Object.prototype.apiKey).toBeUndefined();
+    expect(config).toEqual({ nested: {} });
+    expect(secrets).toEqual({});
+    expect({}.value).toBeUndefined();
+    expect({}.apiKey).toBeUndefined();
+  });
+
+  test("strips forbidden keys from objects inside arrays", () => {
+    const { config, secrets } = splitConfigSecrets(
+      JSON.parse('{"items":[{"__proto__":{"x":1},"name":"a"},"scalar",7]}'),
+    );
+    expect(config).toEqual({ items: [{ name: "a" }, "scalar", 7] });
+    expect(Object.hasOwn(config.items[0], "__proto__")).toBe(false);
+    expect(secrets).toEqual({});
+    expect({}.x).toBeUndefined();
+  });
+
+  test("strips forbidden keys from objects inside nested arrays", () => {
+    const { config } = splitConfigSecrets(
+      JSON.parse(
+        '{"rows":[[{"constructor":{"y":2},"id":1}],[[{"prototype":{"z":3}}]]]}',
+      ),
+    );
+    expect(config).toEqual({ rows: [[{ id: 1 }], [[{}]]] });
+    expect(Object.hasOwn(config.rows[0][0], "constructor")).toBe(false);
+    expect(Object.hasOwn(config.rows[1][0][0], "prototype")).toBe(false);
+  });
+
+  test("deletes explicit secret paths that pass through an array element", () => {
+    const values = JSON.parse(
+      '{"items":[{"nested":{"__proto__":{"value":"x"}},"token":"t"}]}',
+    );
+    const { config, secrets } = splitConfigSecrets(values, [
+      { path: ["items", "0", "nested", "__proto__", "value"] },
+      { path: ["items", "0", "token"] },
+    ]);
+    expect(config).toEqual({ items: [{ nested: {} }] });
+    expect(Object.hasOwn(config.items[0].nested, "__proto__")).toBe(false);
+    expect(Object.hasOwn(secrets, "__proto__")).toBe(false);
+    expect(secrets).toEqual({ items: { 0: { token: "t" } } });
+    expect({}.value).toBeUndefined();
+  });
+
+  test("preserves legitimate arrays, including forbidden names as scalar elements", () => {
+    const { config, secrets } = splitConfigSecrets({
+      allowed: ["__proto__", "constructor", "prototype"],
+      items: [{ name: "a", tags: ["x", "y"] }, { name: "b" }],
+      matrix: [
+        [1, 2],
+        [3, 4],
+      ],
+    });
+    expect(config).toEqual({
+      allowed: ["__proto__", "constructor", "prototype"],
+      items: [{ name: "a", tags: ["x", "y"] }, { name: "b" }],
+      matrix: [
+        [1, 2],
+        [3, 4],
+      ],
+    });
     expect(secrets).toEqual({});
   });
 

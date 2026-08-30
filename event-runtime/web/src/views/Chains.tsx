@@ -18,6 +18,7 @@ import { CustomCell } from "../components/CustomCell";
 import type { FilterFacets } from "../filterQuery";
 import { matchesFilterQuery, parseFilterQuery } from "../filterQuery";
 import {
+  pollingOptions,
   tableTokens,
   useDisplayOptions,
   useListKeys,
@@ -284,7 +285,7 @@ export function Chains({
   const list = useQuery({
     queryKey: ["chains", "24h", 100],
     queryFn: () => api.chains("24h", 100),
-    refetchInterval: 3000,
+    ...pollingOptions(3_000),
   });
   const parsed = useMemo(
     () => parseFilterQuery(filter, CHAIN_FACETS),

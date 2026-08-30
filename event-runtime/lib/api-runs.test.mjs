@@ -18,6 +18,7 @@ import {
   mergeTicketSupply,
   scanTicketSupply,
   setTicketDetailControlPlane,
+  ticketJourneyView,
   ticketIndexView,
   ticketSupplyView,
 } from "./api-runs.mjs";
@@ -646,6 +647,12 @@ describe("ticket journey join (WM-595)", () => {
           "sha256:result-merge",
           "2026-01-01T11:01:00.000Z",
         );
+      await s.client.replay(
+        envelope({
+          eventId: "pr-linked-merge",
+          payload: { pr: 595 },
+        }),
+      );
 
       const response = await fetch(s.url("/runs?ticket=WM-595"));
       expect(response.status).toBe(200);
@@ -660,6 +667,9 @@ describe("ticket journey join (WM-595)", () => {
       expect(journey.events.map((event) => event.eventId)).toContain(
         "ticket-dispatch",
       );
+      expect(journey.events.map((event) => event.eventId)).toContain(
+        "pr-linked-merge",
+      );
       expect(journey.runs.map((run) => run.run.runId)).toEqual([
         "run_ticket",
         "run_merge",
@@ -670,6 +680,128 @@ describe("ticket journey join (WM-595)", () => {
       expect((await unknown.json()).activity).toBe(false);
       const invalid = await fetch(s.url("/runs?ticket=not-a-ticket"));
       expect(invalid.status).toBe(422);
+    } finally {
+      s.close();
+    }
+  });
+
+  test("keeps unrelated records out without issuing unrestricted table reads", async () => {
+    const s = await makeServer();
+    try {
+      await s.client.replay(
+        envelope({
+          eventId: "ticket-json-only",
+          payload: { ticket: "WM-1328" },
+        }),
+      );
+      await s.client.replay(
+        envelope({
+          eventId: "unrelated-ticket",
+          subject: "WM-999",
+          payload: { ticket: "WM-999" },
+        }),
+      );
+      const spec = (ticket) =>
+        JSON.stringify({
+          schemaVersion: "factory.run-spec/v1",
+          runId: "ignored",
+          agent: "dispatch@1",
+          input: { repo: "factory", ticket },
+        });
+      for (const [runId, ticket] of [
+        ["run-json-only", "WM-1328"],
+        ["run-unrelated", "WM-999"],
+      ]) {
+        s.db
+          .query(
+            `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
+          )
+          .run(
+            runId,
+            `${runId}-key`,
+            spec(ticket),
+            `sha256:${runId}`,
+            "COMPLETED",
+            "2026-01-01T10:00:00.000Z",
+            "2026-01-01T10:01:00.000Z",
+          );
+      }
+      const guardedDb = {
+        query(sql) {
+          if (
+            /SELECT \* FROM (events|proposals|runs|results) ORDER BY/i.test(sql)
+          )
+            throw new Error(`unrestricted ticket journey query: ${sql}`);
+          return s.db.query(sql);
+        },
+      };
+      const journey = ticketJourneyView(guardedDb, "WM-1328");
+      expect(journey.events.map((event) => event.eventId)).toEqual([
+        "ticket-json-only",
+      ]);
+      expect(journey.runs.map((run) => run.run.runId)).toEqual([
+        "run-json-only",
+      ]);
+    } finally {
+      s.close();
+    }
+  });
+
+  test("journey proposals keep TTL expiry and null spec", async () => {
+    const s = await makeServer();
+    try {
+      await s.client.replay(
+        envelope({
+          eventId: "ticket-expiry",
+          payload: { ticket: "WM-1328" },
+        }),
+      );
+      s.db
+        .query(
+          `INSERT INTO proposals (id, event_source, event_id, decision, spec_json, spec_hash, status, reason, created_at, ttl_seconds)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "prop-expired",
+          "linear",
+          "ticket-expiry",
+          "human_needed",
+          JSON.stringify({ input: { repo: "factory", ticket: "WM-1328" } }),
+          "sha256:prop-expired",
+          "open",
+          "needs a human",
+          "2026-01-01T10:00:00.000Z",
+          60,
+        );
+      s.db
+        .query(
+          `INSERT INTO proposals (id, event_source, event_id, decision, status, created_at, ttl_seconds)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "prop-no-spec",
+          "linear",
+          "ticket-expiry",
+          "noop",
+          "open",
+          "2026-01-01T10:00:00.000Z",
+          3600,
+        );
+      const nowMs = Date.parse("2026-01-01T10:30:00.000Z");
+      const journey = ticketJourneyView(s.db, "WM-1328", { nowMs });
+      const byId = Object.fromEntries(
+        journey.proposals.map((proposal) => [proposal.id, proposal]),
+      );
+      expect(byId["prop-expired"].expired).toBe(true);
+      expect(byId["prop-expired"].status).toBe("open");
+      expect(byId["prop-no-spec"].expired).toBe(false);
+      expect(byId["prop-no-spec"].spec).toBeNull();
+      expect(
+        ticketJourneyView(s.db, "WM-1328", {
+          nowMs: Date.parse("2026-01-01T10:00:30.000Z"),
+        }).proposals.find((proposal) => proposal.id === "prop-expired").expired,
+      ).toBe(false);
     } finally {
       s.close();
     }
@@ -1131,6 +1263,21 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
     expect(again.message).toContain("not open");
   });
 
+  test("reject an open proposal → run CANCELLED", async () => {
+    const prop = await planned("rej-1");
+    const rejected = await s.client.reject(prop.id, "not today");
+    expect(rejected.rejected).toBe(true);
+
+    const run = await s.client.run(prop.runId);
+    expect(run.run.state).toBe("CANCELLED");
+    expect(run.lifecycle.at(-1).reason).toBe("proposal_rejected");
+    expect(run.lifecycle.at(-1).actor).toBe("operator");
+
+    const rejectAgain = await rejection(s.client.reject(prop.id, "again"));
+    expect(rejectAgain.status).toBe(409);
+    expect(rejectAgain.message).toContain("not open");
+  });
+
   test("approval waits for a worker write lock and returns db_busy after its timeout", async () => {
     const waiting = await planned("approve-waits-for-lock");
     const lock = await holdWriteLock(s.db.filename, 75);
@@ -1147,6 +1294,9 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
       cancelled: true,
     });
 
+    // A connection deliberately tuned to fail fast keeps that contract even
+    // though approvals now retry across event-loop turns (#1349): the
+    // lowered busy_timeout bounds the whole retry budget.
     const timedOut = await planned("approve-busy-timeout");
     let timeoutLock;
     try {
@@ -1162,19 +1312,32 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
     expect(await timeoutLock?.exited).toBe(0);
   });
 
-  test("reject an open proposal → run CANCELLED", async () => {
-    const prop = await planned("rej-1");
-    const rejected = await s.client.reject(prop.id, "not today");
-    expect(rejected.rejected).toBe(true);
+  test("contended approvals and rejections yield to /health and return typed db_busy", async () => {
+    const approvedProposal = await planned("approve-contention");
+    const approveLock = await holdWriteLock(s.db.filename, 400);
+    const approval = s.client.approve(approvedProposal.id);
+    await new Promise((resolve) => setImmediate(resolve));
+    const healthStartedAt = Date.now();
+    const health = await fetch(s.url("/health"));
+    expect(health.status).toBe(200);
+    expect(Date.now() - healthStartedAt).toBeLessThan(500);
+    expect(await approval).toEqual({
+      approved: true,
+      runId: approvedProposal.runId,
+    });
+    expect(await approveLock.exited).toBe(0);
+    expect(
+      await s.client.cancel(approvedProposal.runId, "test cleanup"),
+    ).toEqual({ cancelled: true });
 
-    const run = await s.client.run(prop.runId);
-    expect(run.run.state).toBe("CANCELLED");
-    expect(run.lifecycle.at(-1).reason).toBe("proposal_rejected");
-    expect(run.lifecycle.at(-1).actor).toBe("operator");
-
-    const rejectAgain = await rejection(s.client.reject(prop.id, "again"));
-    expect(rejectAgain.status).toBe(409);
-    expect(rejectAgain.message).toContain("not open");
+    const rejectedProposal = await planned("reject-contention");
+    const rejectLock = await holdWriteLock(s.db.filename, 6_000);
+    const startedAt = Date.now();
+    const err = await rejection(s.client.reject(rejectedProposal.id, "locked"));
+    expect(err.status).toBe(503);
+    expect(err.body).toEqual({ error: "db_busy", retryable: true });
+    expect(Date.now() - startedAt).toBeGreaterThan(4_000);
+    expect(await rejectLock.exited).toBe(0);
   });
 
   test("cancel a QUEUED run → 200; cancel again → 409; unknown run → 404", async () => {

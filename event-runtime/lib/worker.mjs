@@ -2703,6 +2703,41 @@ export async function executeClaimed(
   // auditor needs, so it must not be attached to the success path alone.
   // Null until admission runs, and null for every confined run.
   let filesystemConfinementReceipt = null;
+  // The recorder is built before the main `try` so terminal-error reporting
+  // can use it; its construction prepares a statement and must therefore
+  // never throw out of executeClaimed (§14: trace failures stay invisible to
+  // the attempt). Fall back to a no-op recorder with the same call surface.
+  const recorder = (() => {
+    try {
+      return traceRecorder(db, { runId, attempt });
+    } catch (err) {
+      console.error(
+        `[worker] trace recorder unavailable for run ${runId} attempt ${attempt}: ${err?.message ?? String(err)}`,
+      );
+      const noop = () => {};
+      noop.stats = () => ({ recorded: 0, dropped: 0 });
+      return noop;
+    }
+  })();
+  const recordTerminalError = (operation, err) => {
+    const message = err?.message ?? String(err);
+    console.error(
+      `[worker] terminal ${operation} failed for run ${runId} attempt ${attempt}: ${message}`,
+    );
+    // `lifecycle` is the nearest supported trace kind to a terminal error.
+    try {
+      recorder("lifecycle", {
+        terminalError: true,
+        operation,
+        runId,
+        attempt,
+        message,
+      });
+    } catch {
+      // A terminal error must still be reported when trace storage is down.
+    }
+    return message;
+  };
 
   const refuseTerminal = (
     reasonCode,
@@ -3363,7 +3398,6 @@ export async function executeClaimed(
     // Real wall-clock per event — NOT the claim-time `now`. Trace timestamps
     // are the one place frozen time defeats the feature: "what is the agent
     // doing right now" needs to say when each step actually happened.
-    const recorder = traceRecorder(db, { runId, attempt });
     const onTrace = (kind, payload) => {
       try {
         recorder(kind, payload);
@@ -3475,6 +3509,7 @@ export async function executeClaimed(
       const terminalState = db
         .query(`SELECT state FROM runs WHERE run_id = ?`)
         .get(runId)?.state;
+      let unclaimError;
       if (mayMutateClaimedTicket()) {
         try {
           unclaimTicketFn({
@@ -3483,8 +3518,8 @@ export async function executeClaimed(
             why: terminalState === "FAILED" ? "force_failed" : "cancelled",
             log: null,
           });
-        } catch {
-          /* intentionally ignored */
+        } catch (err) {
+          unclaimError = recordTerminalError("unclaimTicket", err);
         }
       }
       cleanupWorkspace();
@@ -3514,14 +3549,20 @@ export async function executeClaimed(
               currentNow,
               attemptUsage,
             );
-          } catch {
-            // ignore
+          } catch (err) {
+            return {
+              finishError: recordTerminalError("finishAttempt", err),
+            };
           }
         }
         return { ok: true };
       });
       if (res?.fenced) return { fenced: true };
-      return { cancelled: true };
+      return {
+        cancelled: true,
+        ...(unclaimError ? { unclaimError } : {}),
+        ...(res?.finishError ? { finishError: res.finishError } : {}),
+      };
     }
 
     const { exitCode, timedOut, policyDenials = [] } = outcome ?? {};
@@ -4190,10 +4231,11 @@ export async function executeClaimed(
               : "adapter_error";
     const journalReason = `${reasonCode}: ${err?.message ?? String(err)}`;
     let res;
+    let terminalError;
     try {
       res = failTerminal("FAILED", journalReason, reasonCode);
-    } catch {
-      // if failTerminal could not transition, continue
+    } catch (err) {
+      terminalError = recordTerminalError("failTerminal", err);
     }
     cleanupWorkspace({ retainWorkspace: retain });
     if (res?.fenced) return { fenced: true };
@@ -4203,6 +4245,7 @@ export async function executeClaimed(
       terminalState: "FAILED",
       reasonCode,
       error: err?.message,
+      ...(terminalError ? { terminalError } : {}),
     };
   } finally {
     stopCancellationMonitor();

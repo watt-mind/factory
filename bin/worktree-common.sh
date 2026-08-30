@@ -863,6 +863,17 @@ run_bun_install_trap() { # <trap-definition>
   eval "$1"
 }
 
+# Atomic rename(2) of a directory: succeeds only when <dst> is absent (or an
+# empty directory, which no live holder ever owns). Never nests <src> inside an
+# existing <dst> the way a bare `mv` would.
+rename_dir_atomic() { # <src> <dst>
+  if mv --version >/dev/null 2>&1; then
+    mv -T "$1" "$2" 2>/dev/null
+  else
+    bun -e 'require("node:fs").renameSync(process.argv[1], process.argv[2])' "$1" "$2" 2>/dev/null
+  fi
+}
+
 # File-locked bun install with retry on SQLITE_BUSY (OPS-322).
 # Prevents concurrent worktree bring-ups from racing on bun's global cache DB.
 locked_bun_install() { # <dir>
@@ -877,7 +888,20 @@ locked_bun_install() { # <dir>
   [[ "$stale_after" =~ ^[0-9]+$ ]] || die "FACTORY_LOCK_STALE_AFTER must be numeric (got '$stale_after')"
   mkdir -p "$(dirname "$lock_dir")"
 
-  while ! mkdir "$lock_dir" 2>/dev/null; do
+  # Ownership is published atomically with the claim: the pid is written into a
+  # private claim directory that is then rename(2)d onto the lock path. There is
+  # no window in which a live holder owns a pid-less lock, so a contender that
+  # reclaims a pid-less directory can never pull the lock out from under a
+  # holder that is still publishing (gh-1373).
+  local claim_dir="${lock_dir}.claim.$$.$RANDOM"
+  rm -rf "$claim_dir"
+  mkdir "$claim_dir"
+  printf '%s\n' "$$" > "$claim_dir/pid"
+
+  while :; do
+    if [[ ! -e "$lock_dir" ]] && rename_dir_atomic "$claim_dir" "$lock_dir"; then
+      break
+    fi
     local holder="" now lock_mtime=0 lock_age=0 reclaim=0
     holder=$(cat "$lock_dir/pid" 2>/dev/null || true)
     now=$(date +%s)
@@ -887,8 +911,9 @@ locked_bun_install() { # <dir>
         reclaim=1
       fi
     else
-      # A new holder needs a moment between mkdir and publishing its pid. Only
-      # reclaim a pid-less/malformed lock once that grace period has elapsed.
+      # Holders publish their pid atomically with the claim, so a pid-less lock
+      # is stale by construction. The grace period is kept only for holders
+      # running an older helper that still publishes the pid after mkdir.
       if stat -f '%m' "$lock_dir" >/dev/null 2>&1; then
         lock_mtime=$(stat -f '%m' "$lock_dir" 2>/dev/null || printf '0')
       else
@@ -903,11 +928,11 @@ locked_bun_install() { # <dir>
 
     if [[ "$reclaim" -eq 1 ]]; then
       local stale_candidate="${lock_dir}.stale.$$.$RANDOM"
-      if mv "$lock_dir" "$stale_candidate" 2>/dev/null; then
+      if rename_dir_atomic "$lock_dir" "$stale_candidate"; then
         local stale_holder
         stale_holder=$(cat "$stale_candidate/pid" 2>/dev/null || true)
         if [[ "$stale_holder" =~ ^[0-9]+$ ]] && kill -0 "$stale_holder" 2>/dev/null; then
-          mv "$stale_candidate" "$lock_dir" 2>/dev/null || rm -rf "$stale_candidate"
+          rename_dir_atomic "$stale_candidate" "$lock_dir" || rm -rf "$stale_candidate"
         else
           rm -rf "$stale_candidate"
         fi
@@ -916,16 +941,14 @@ locked_bun_install() { # <dir>
     fi
 
     if (( now - start_time >= max_wait )); then
+      rm -rf "$claim_dir"
       die "timed out waiting for bun install lock ($lock_dir)"
     fi
     sleep 0.1
   done
 
-  # Publish ownership atomically so contenders never observe a partially
-  # written pid file. Traps are restored before returning to the caller.
-  local pid_tmp="$lock_dir/pid.$$.$RANDOM"
-  printf '%s\n' "$$" > "$pid_tmp"
-  mv "$pid_tmp" "$lock_dir/pid"
+  # The lock directory now carries this process's pid. Traps are restored
+  # before returning to the caller.
   local previous_exit_trap previous_int_trap previous_term_trap
   previous_exit_trap=$(trap -p EXIT || true)
   previous_int_trap=$(trap -p INT || true)

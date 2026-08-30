@@ -8,11 +8,12 @@
  * `./input.json` → `./result.json` PROMPT_SUFFIX contract, cwd = workspace),
  * enforces the run spec's timeout with
  * TERM→KILL(killGraceMs), strips API keys so the CLI authenticates against the
- * session/subscription instead of per-token billing, and captures full stdout as
- * the `.transcript.json` artifact.
+ * session/subscription instead of per-token billing, captures full stdout as
+ * the `.transcript.json` artifact, and preserves a bounded stderr tail for
+ * failed runs.
  */
 import { spawn } from "node:child_process";
-import { createWriteStream } from "node:fs";
+import { createWriteStream, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { PROMPT_SUFFIX, verifiedPrompt } from "./claude.mjs";
@@ -67,6 +68,26 @@ export const HARNESS_LAYOUT = Object.freeze({
 
 export const KILL_GRACE_MS = 30_000;
 const TEXT_PREVIEW_CHARS = 4000;
+const STDERR_FILE_CHARS = 16_384;
+
+/** Terminate a detached CLI and every subprocess it started (WM-263). */
+export function killProcessGroup(
+  child,
+  signal = "SIGTERM",
+  kill = process.kill,
+) {
+  const pid = child?.pid;
+  if (!pid) return;
+  try {
+    kill(-pid, signal);
+  } catch {
+    try {
+      child.kill(signal);
+    } catch {
+      // already terminated
+    }
+  }
+}
 
 /**
  * How much sooner agy's own print-mode wait expires than the worker's timeout.
@@ -393,6 +414,7 @@ export async function execute({
       cwd: workspaceDir,
       env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
     });
 
     const transcript = createWriteStream(
@@ -408,6 +430,14 @@ export async function execute({
     });
     if (child.stdout) {
       child.stdout.pipe(transcript);
+    }
+
+    let stderrBuf = "";
+    if (child.stderr) {
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk) => {
+        stderrBuf = (stderrBuf + chunk).slice(-STDERR_FILE_CHARS);
+      });
     }
 
     let finalUsage = null;
@@ -451,30 +481,61 @@ export async function execute({
 
     let timedOut = false;
     let timer = null;
+    let killTimer = null;
+    const terminate = () => {
+      killProcessGroup(child, "SIGTERM");
+      if (!killTimer) {
+        killTimer = setTimeout(
+          () => killProcessGroup(child, "SIGKILL"),
+          killGraceMs,
+        );
+        killTimer.unref?.();
+      }
+    };
     if (timeoutMs) {
       timer = setTimeout(() => {
         timedOut = true;
-        child.kill("SIGTERM");
-        setTimeout(() => child.kill("SIGKILL"), killGraceMs).unref();
+        terminate();
       }, timeoutMs);
     }
 
-    const cancel = () => {
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), killGraceMs).unref();
-    };
+    const cancel = () => terminate();
     abortSignal?.addEventListener("abort", cancel, { once: true });
     signal?.addEventListener("abort", cancel, { once: true });
 
     child.on("close", async (exitCode) => {
       if (timer) clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       abortSignal?.removeEventListener("abort", cancel);
       signal?.removeEventListener("abort", cancel);
       await transcriptClosed;
+      if (exitCode !== 0 && stderrBuf) {
+        try {
+          writeFileSync(
+            path.join(workspaceDir, ".stderr.txt"),
+            stderrBuf,
+            "utf8",
+          );
+        } catch {
+          // workspace may already be gone; trace still carries the tail
+        }
+        try {
+          onTrace?.("lifecycle", {
+            note: "adapter_stderr",
+            text: clip(stderrBuf),
+          });
+        } catch {
+          // observability
+        }
+      }
       resolve({ exitCode, timedOut, usage: finalUsage });
     });
 
     child.on("error", (err) => {
+      if (timer) clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
+      abortSignal?.removeEventListener("abort", cancel);
+      signal?.removeEventListener("abort", cancel);
       transcript.destroy();
       reject(err);
     });

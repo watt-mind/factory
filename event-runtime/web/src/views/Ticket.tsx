@@ -11,6 +11,7 @@ import { api } from "../api";
 import { goPrefixActive } from "../goSequence";
 import {
   keyGuard,
+  pollingOptions,
   refetchIntervals,
   useListKeys,
   useNow,
@@ -1136,7 +1137,7 @@ export function Ticket({
     queryFn: () => fetchTicketJourney(normalized!),
     enabled: valid,
     // fetchTicketJourney uses raw fetch() and bypasses the ETag wrapper in api.ts, so it stays at 5s.
-    refetchInterval: 5000,
+    ...pollingOptions(5_000),
   });
   const schedules = useQuery({
     queryKey: ["schedules"],
@@ -1149,7 +1150,7 @@ export function Ticket({
     queryFn: () => fetchTicketDetail(normalized!),
     enabled: valid,
     staleTime: 15_000,
-    refetchInterval: 30_000,
+    ...pollingOptions(30_000),
   });
 
   if (!ticketId || ticketId.trim() === "")
