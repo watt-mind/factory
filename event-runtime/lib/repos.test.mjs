@@ -27,6 +27,7 @@ import {
   repoDispatchPreflight,
   repoDispatchPreflightSync,
   repoReadiness,
+  resetInRepoConfigCache,
   reposView,
   resolvePromotionTarget,
   selectMergeCheckGate,
@@ -108,6 +109,37 @@ describe("factory.repo/v1 in-repo configuration", () => {
 
   test("returns null when a repository has no in-repo config", () => {
     expect(loadInRepoConfig(repositoryRoot(null, null))).toBeNull();
+  });
+
+  test("caches unchanged in-repo config files and invalidates changed or removed files", () => {
+    const root = repositoryRoot(".factory.yaml", IN_REPO_YAML);
+    const file = path.join(root, ".factory.yaml");
+    const originalParse = Bun.YAML.parse;
+    let parseCount = 0;
+    resetInRepoConfigCache();
+    Bun.YAML.parse = (...args) => {
+      parseCount += 1;
+      return originalParse(...args);
+    };
+
+    try {
+      expect(loadInRepoConfig(root).base).toBe("develop");
+      expect(loadInRepoConfig(root).base).toBe("develop");
+      expect(parseCount).toBe(1);
+
+      writeFileSync(file, IN_REPO_YAML.replace("base: develop", "base: main"));
+      expect(loadInRepoConfig(root).base).toBe("main");
+      expect(parseCount).toBe(2);
+
+      rmSync(file);
+      expect(loadInRepoConfig(root)).toBeNull();
+      writeFileSync(file, IN_REPO_YAML);
+      expect(loadInRepoConfig(root).base).toBe("develop");
+      expect(parseCount).toBe(3);
+    } finally {
+      Bun.YAML.parse = originalParse;
+      resetInRepoConfigCache();
+    }
   });
 
   test("fails closed for ambiguous, malformed, unknown, and semantically invalid config", () => {
@@ -321,9 +353,7 @@ describe("factory.repo/v1 in-repo configuration", () => {
     const originalWarn = console.warn;
     console.warn = (...args) => warnings.push(args.join(" "));
     let repos;
-    try {
-      repos = loadRepos({
-        root: factoryRoot(`repos:
+    const root = factoryRoot(`repos:
   - name: broken
     path: ${broken}
     base: main
@@ -333,10 +363,22 @@ describe("factory.repo/v1 in-repo configuration", () => {
   - name: healthy
     path: ${healthy}
     base: main
-`),
+`);
+    resetInRepoConfigCache();
+    try {
+      repos = loadRepos({ root });
+      expect(loadRepos({ root }).get("broken")).toMatchObject({
+        base: "main",
+        verify: "host verify",
       });
+      writeFileSync(
+        path.join(broken, ".factory.yaml"),
+        "schemaVersion: factory.repo/v1\nsecurity:\n  gitleaks_args: --no-git\n# changed\n",
+      );
+      loadRepos({ root });
     } finally {
       console.warn = originalWarn;
+      resetInRepoConfigCache();
     }
 
     // The broken checkout keeps its host config verbatim...
@@ -350,9 +392,10 @@ describe("factory.repo/v1 in-repo configuration", () => {
       base: "develop",
       worktreeUp: "bin/worktree-up.sh",
     });
-    expect(warnings).toHaveLength(1);
+    expect(warnings).toHaveLength(2);
     expect(warnings[0]).toMatch(/repo broken: in-repo config ignored/);
     expect(warnings[0]).toMatch(/host-owned "security"/);
+    expect(warnings[1]).toMatch(/host-owned "security"/);
   });
 });
 
