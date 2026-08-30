@@ -25,6 +25,7 @@ import { reposRoot } from "./repos.mjs";
 import { contractViewRel, validateArtifactView } from "./artifact-view.mjs";
 import { PANELS_DIR, loadPanelDir, mergePanels } from "./panel-view.mjs";
 import { HarnessPinError, verifyHarnessPins } from "./pins.mjs";
+import { MODEL_ADAPTERS } from "./model-adapters.mjs";
 
 export class RegistryError extends Error {
   constructor(message) {
@@ -564,8 +565,10 @@ export const MODEL_TIERS = ["strong", "standard", "light"];
 export const DEFAULT_MODEL = "default";
 
 /** Adapters that accept a model at all. command/actions/fake take none: a
- * declared tier there resolves to null (not applicable), never an error. */
-export const MODEL_ADAPTERS = new Set(["claude", "pi", "agy", "cursor"]);
+ * declared tier there resolves to null (not applicable), never an error.
+ * Defined in the import-free lib/model-adapters.mjs (GH-1736) so
+ * adapters/sandboxed.mjs can read it without pulling in this loader. */
+export { MODEL_ADAPTERS };
 
 /**
  * Compose independently persisted runtime tier cells over the tracked policy
