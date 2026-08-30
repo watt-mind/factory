@@ -24,11 +24,45 @@
 # reinstalls only what bun decides is stale, and re-seeds only on --reseed.
 source "$(dirname "${BASH_SOURCE[0]}")/worktree-common.sh"
 
+# seed_demo_data <worktree> <api-port> <prefix>
+# Runs event-runtime/demo/seed.mjs with a bounded retry. The status is
+# captured directly from the command substitution (`|| seed_exit=$?`, which also
+# survives `set -e`) — an `if cmd; then` wrapper would leave `$?` reporting the
+# compound's (always-zero) status and make the retry arm unreachable (#1758). Exit 78 is the seed's typed adapter-probe
+# timeout; transient store contention is matched on output. Anything else dies.
+seed_demo_data() { # <worktree> <api-port> <prefix>
+  local wt="$1" api_port="$2" prefix="$3"
+  local seed_attempt=1 max_seed_attempts=5 seed_ok=0 seed_out="" seed_exit=0
+  local backoff_delay
+  while [[ $seed_attempt -le $max_seed_attempts ]]; do
+    seed_exit=0
+    seed_out=$(cd "$wt" && bun event-runtime/demo/seed.mjs --port "$api_port" --prefix "$prefix" 2>&1) || seed_exit=$?
+    if [[ $seed_exit -eq 0 ]]; then
+      printf '%s\n' "$seed_out"
+      seed_ok=1
+      break
+    fi
+    if [[ "$seed_exit" -eq 78 || "$seed_out" =~ "SQLITE_BUSY" || "$seed_out" =~ "database is locked" || "$seed_out" =~ "locked" || "$seed_out" =~ "internal_error" || "$seed_out" =~ "500" || "$seed_out" =~ "409" ]]; then
+      backoff_delay=$(( 1 << (seed_attempt - 1) ))
+      warn "demo seed hit retryable error (attempt $seed_attempt/$max_seed_attempts, exit $seed_exit) — retrying in ${backoff_delay}s"
+      sleep "$backoff_delay"
+      seed_attempt=$(( seed_attempt + 1 ))
+    else
+      printf '%s\n' "$seed_out" >&2
+      die "seed failed (exit $seed_exit) — see output above"
+    fi
+  done
+  if [[ "$seed_ok" -ne 1 ]]; then
+    printf '%s\n' "$seed_out" >&2
+    die "seed failed after $max_seed_attempts attempts — see output above"
+  fi
+}
+
 TICKET=""
 TYPE="feat"
 SLUG=""
 HERE=0
-SEED=1
+SEED="${FACTORY_WORKTREE_SEED:-1}"
 RESEED=0
 LIVE=0
 CHECKOUT_ONLY=0
@@ -40,6 +74,9 @@ PRESERVATION_REPORT="${FACTORY_WORKTREE_PRESERVATION_REPORT:-}"
 EXPECTED_LEASE_FILE="${FACTORY_WORKTREE_EXPECTED_LEASE_FILE:-}"
 EXPECTED_LEASE_PID="${FACTORY_WORKTREE_EXPECTED_LEASE_PID:-}"
 POS=0
+
+[[ "$SEED" == "0" || "$SEED" == "1" ]] \
+  || die "FACTORY_WORKTREE_SEED must be 0 or 1 (got '$SEED')"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -504,30 +541,7 @@ if [[ "$SEED" -eq 1 && ( "$FRESH" -eq 1 || "$RESEED" -eq 1 ) ]]; then
   PREFIX="demo"
   [[ "$RESEED" -eq 1 && "$FRESH" -eq 0 ]] && PREFIX="demo-$(date +%s)"
   info "seeding demo data (prefix $PREFIX)"
-  seed_attempt=1
-  max_seed_attempts=5
-  seed_ok=0
-  seed_out=""
-  while [[ $seed_attempt -le $max_seed_attempts ]]; do
-    if seed_out=$(cd "$WT" && bun event-runtime/demo/seed.mjs --port "$API_PORT" --prefix "$PREFIX" 2>&1); then
-      printf '%s\n' "$seed_out"
-      seed_ok=1
-      break
-    fi
-    if [[ "$seed_out" =~ "SQLITE_BUSY" || "$seed_out" =~ "database is locked" || "$seed_out" =~ "locked" || "$seed_out" =~ "internal_error" || "$seed_out" =~ "500" || "$seed_out" =~ "409" ]]; then
-      backoff_delay=$(( 1 << (seed_attempt - 1) ))
-      warn "demo seed hit transient lock/error (attempt $seed_attempt/$max_seed_attempts) — retrying in ${backoff_delay}s"
-      sleep "$backoff_delay"
-      seed_attempt=$(( seed_attempt + 1 ))
-    else
-      printf '%s\n' "$seed_out" >&2
-      die "seed failed — see output above"
-    fi
-  done
-  if [[ "$seed_ok" -ne 1 ]]; then
-    printf '%s\n' "$seed_out" >&2
-    die "seed failed after $max_seed_attempts attempts — see output above"
-  fi
+  seed_demo_data "$WT" "$API_PORT" "$PREFIX"
 elif [[ "$SEED" -eq 1 ]]; then
   info "existing database found — not reseeding (use --reseed for a fresh set)"
 else

@@ -57,6 +57,8 @@ const flag = (name) => {
 const port = Number(flag("--port") ?? process.env.FACTORY_EVENT_PORT ?? 7381);
 const prefix = flag("--prefix") ?? "demo";
 const pollMs = Number(flag("--poll-ms") ?? 300);
+const adapterProbeTimeoutMs = 30_000;
+const ADAPTER_PROBE_TIMEOUT_EXIT_CODE = 78;
 if (!Number.isInteger(pollMs) || pollMs < 25 || pollMs > 5_000) {
   console.error("seed: --poll-ms must be an integer between 25 and 5000");
   process.exit(2);
@@ -156,28 +158,38 @@ async function until(what, fn, { timeoutMs = 30_000, everyMs = pollMs } = {}) {
     if (value) return value;
     await sleep(everyMs);
   }
-  throw new Error(`timed out waiting for ${what}`);
+  throw Object.assign(new Error(`timed out waiting for ${what}`), {
+    code: "SEED_TIMEOUT",
+    what,
+  });
 }
 
-async function proposalFor(eventId, { agent, status = "open" } = {}) {
-  return until(`proposal for ${agent ?? eventId}`, async () => {
-    const { proposals } = await client.proposals(
-      status === "open" ? undefined : "all",
-    );
-    return proposals.find((p) => {
-      if (status !== "all" && p.status !== status) return false;
-      const eventMatches =
-        p.spec?.idempotencyKey?.includes(eventId) ||
-        p.reason?.includes(eventId) ||
-        p.eventId === eventId ||
-        (p.spec?.input && JSON.stringify(p.spec.input).includes(eventId));
-      if (agent) {
-        const agentMatches = p.spec?.agent === agent || p.agent === agent;
-        return agentMatches && eventMatches;
-      }
-      return eventMatches;
-    });
-  });
+async function proposalFor(
+  eventId,
+  { agent, status = "open", timeoutMs } = {},
+) {
+  return until(
+    `proposal for ${agent ?? eventId}`,
+    async () => {
+      const { proposals } = await client.proposals(
+        status === "open" ? undefined : "all",
+      );
+      return proposals.find((p) => {
+        if (status !== "all" && p.status !== status) return false;
+        const eventMatches =
+          p.spec?.idempotencyKey?.includes(eventId) ||
+          p.reason?.includes(eventId) ||
+          p.eventId === eventId ||
+          (p.spec?.input && JSON.stringify(p.spec.input).includes(eventId));
+        if (agent) {
+          const agentMatches = p.spec?.agent === agent || p.agent === agent;
+          return agentMatches && eventMatches;
+        }
+        return eventMatches;
+      });
+    },
+    { timeoutMs },
+  );
 }
 
 async function openProposalFor(eventId, options = {}) {
@@ -248,7 +260,20 @@ try {
 // planning time, so probe with a throwaway event and inspect its proposal.
 const probeId = `${prefix}-adapter-probe`;
 await replay(envelope("adapter-probe", ["ok"]));
-const probe = await openProposalFor(probeId);
+let probe;
+try {
+  probe = await openProposalFor(probeId, {
+    timeoutMs: adapterProbeTimeoutMs,
+  });
+} catch (err) {
+  if (err?.code === "SEED_TIMEOUT") {
+    console.error(
+      `seed_probe_timeout: no proposal for ${probeId} within ${adapterProbeTimeoutMs}ms`,
+    );
+    process.exit(ADAPTER_PROBE_TIMEOUT_EXIT_CODE);
+  }
+  throw err;
+}
 if (probe.spec?.adapter !== "fake") {
   await client.reject(
     probe.id,

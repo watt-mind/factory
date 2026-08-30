@@ -190,6 +190,30 @@ describe("worker registry and heartbeats (OPS-233)", () => {
     expect(w.stale).toBe(false); // stopped is not stale — it left on purpose
   });
 
+  test("heartbeats persist skipped-run diagnostics and clear them when omitted", () => {
+    const d = db();
+    registerWorker(d, { workerId: "w1" });
+    const skipped = [
+      { runId: "run_unplaced", reason: "placement did not match" },
+    ];
+
+    heartbeat(d, "w1", { skipped });
+    expect(listWorkers(d)[0].skipped).toEqual(skipped);
+
+    heartbeat(d, "w1");
+    expect(listWorkers(d)[0].skipped).toEqual([]);
+  });
+
+  test("worker skipped diagnostics require string run IDs and reasons", () => {
+    const d = db();
+    expect(() => registerWorker(d, { workerId: "w1", skipped: [{}] })).toThrow(
+      /string runId and reason/,
+    );
+    expect(() => heartbeat(d, "w1", { skipped: "not-an-array" })).toThrow(
+      /must be an array/,
+    );
+  });
+
   test("a silent worker goes stale; holding a run makes it a doctor anomaly", () => {
     const d = db();
     const started = Date.now();
