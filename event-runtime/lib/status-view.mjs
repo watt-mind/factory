@@ -7,6 +7,7 @@ import { artifactsRoot } from "./config.mjs";
 import { usageSpend } from "./db.mjs";
 import { hookDecisionCounts } from "./hooks.mjs";
 import { inboxCounts } from "./inbox.mjs";
+import { githubIntakeView } from "./intake.mjs";
 import { ambiguousOpenProposalRuns, openProposals } from "./proposals.mjs";
 import { proposalsPilingUp, scheduleView } from "./schedules.mjs";
 import {
@@ -250,6 +251,10 @@ export function statusView(
   const runs = { ...runCounts(db), spend: usageSpend(db, { now: nowMs }) };
 
   const configAnomalies = [];
+  const githubIntake = githubIntakeView(db, {
+    nowMs,
+    configured: Boolean(githubSecret),
+  });
   if (!secret)
     configAnomalies.push(
       "FACTORY_EVENT_SECRET is unset (webhook intake disabled)",
@@ -257,6 +262,15 @@ export function statusView(
   if (!githubSecret) {
     configAnomalies.push(
       "FACTORY_GITHUB_WEBHOOK_SECRET is unset (GitHub webhook intake disabled)",
+    );
+  }
+  if (githubIntake.stale) {
+    const age =
+      githubIntake.ageMs === null
+        ? "no GitHub delivery has been admitted"
+        : `last admission was ${githubIntake.ageMs}ms ago`;
+    configAnomalies.push(
+      `GitHub webhook intake is stale (${age}; threshold ${githubIntake.staleAfterMs}ms)`,
     );
   }
   if (policyVersion === "unknown")

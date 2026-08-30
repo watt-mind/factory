@@ -147,7 +147,13 @@ export function pinMemos(
   db,
   def,
   payload,
-  { now = Date.now(), descriptionHash, headSha } = {},
+  {
+    now = Date.now(),
+    descriptionHash,
+    headSha,
+    artifactStore = artifactsRoot(),
+    onArtifactMissing,
+  } = {},
 ) {
   const declarations = def?.memos;
   if (!Array.isArray(declarations) || declarations.length === 0) return payload;
@@ -171,6 +177,8 @@ export function pinMemos(
         descriptionHash:
           decl.subject.type === "ticket" ? descriptionHash : undefined,
         headSha: decl.subject.type === "repo" ? headSha : undefined,
+        artifactStore,
+        onArtifactMissing,
       },
     );
     for (const row of folded) {
@@ -2109,6 +2117,7 @@ export function planEvent(
     artifactStore = artifactsRoot(),
     dispatch = {},
     configSnapshot = null,
+    log = console.log,
   } = {},
 ) {
   // Dispatch gate for tier-2 worktree agents (WM-108), evaluated BEFORE the
@@ -2179,7 +2188,8 @@ export function planEvent(
       resetAt: worktreeEligibility.resetAt ?? null,
     };
   }
-  return txImmediate(db, () => {
+  const missingArtifactRetirements = [];
+  const outcome = txImmediate(db, () => {
     const event = db
       .query(`SELECT * FROM events WHERE source = ? AND event_id = ?`)
       .get(source, eventId);
@@ -2512,6 +2522,8 @@ export function planEvent(
           descriptionHash:
             worktreeEligibility?.evidence?.ticket?.descriptionHash,
           headSha: payload.repoPin?.sha ?? null,
+          artifactStore,
+          onArtifactMissing: (memo) => missingArtifactRetirements.push(memo),
         });
       } catch (err) {
         return humanNeeded(
@@ -2697,6 +2709,23 @@ export function planEvent(
     setEventStatus(db, event, "planned");
     return { decision: "run", proposal, runId };
   });
+  // Emit only after the enclosing planning transaction commits. A later
+  // planning error rolls the retirement back and must not leave a false or
+  // duplicate line in serve.log.
+  for (const memo of missingArtifactRetirements) {
+    const subject = `${memo.subject.type}:${memo.subject.id}`;
+    const producer = memo.inboxItemId
+      ? `inbox_item_id=${memo.inboxItemId}`
+      : `run_id=${memo.runId ?? "null"}`;
+    try {
+      log(
+        `memo retired artifact_missing sha256=${memo.sha256} subject=${subject} ${producer}`,
+      );
+    } catch {
+      // Observability is best-effort after the durable decision is made.
+    }
+  }
+  return outcome;
 }
 
 /**
