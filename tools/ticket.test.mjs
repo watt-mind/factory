@@ -1034,6 +1034,15 @@ function spawnTicketOutsideRepo(args, { controlPlane } = {}) {
 const spawnFileOutsideRepo = (args, options) =>
   spawnTicketOutsideRepo(["file", ...args], options);
 
+test("queue --repo rejects an unknown repository before reporting queue usage", () => {
+  const result = spawnTicketOutsideRepo(["queue", "--repo", "nosuch"]);
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain('unknown --repo "nosuch"');
+  expect(result.stderr).toContain("known: factory");
+  expect(result.stderr).not.toContain("usage: queue");
+  expect(result.ghCalls).toBe("");
+});
+
 test("file refuses an unresolvable workspace with both routing flags", () => {
   const result = spawnFileOutsideRepo(["--title", "finding"]);
   expect(result.exitCode).toBe(1);
