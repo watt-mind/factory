@@ -56,6 +56,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "./api-test-helpers.mjs";
+import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
 
 const makeServer = async (...args) => {
   const result = await makeApiServer(...args);
@@ -1467,33 +1468,55 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
     expect(await timeoutLock?.exited).toBe(0);
   });
 
-  test("contended approvals and rejections yield to /health and return typed db_busy", async () => {
-    const approvedProposal = await planned("approve-contention");
-    const approveLock = await holdWriteLock(s.db.filename, 400);
-    const approval = s.client.approve(approvedProposal.id);
-    await new Promise((resolve) => setImmediate(resolve));
-    const healthStartedAt = Date.now();
-    const health = await fetch(s.url("/health"));
-    expect(health.status).toBe(200);
-    expect(Date.now() - healthStartedAt).toBeLessThan(500);
-    expect(await approval).toEqual({
-      approved: true,
-      runId: approvedProposal.runId,
-    });
-    expect(await approveLock.exited).toBe(0);
-    expect(
-      await s.client.cancel(approvedProposal.runId, "test cleanup"),
-    ).toEqual({ cancelled: true });
+  test(
+    "contended approvals and rejections yield to /health and return typed db_busy",
+    async () => {
+      const approvedProposal = await planned("approve-contention");
+      const approveLock = await holdWriteLock(s.db.filename, 400);
+      const approval = s.client.approve(approvedProposal.id);
+      await new Promise((resolve) => setImmediate(resolve));
+      const healthStartedAt = Date.now();
+      const health = await fetch(s.url("/health"));
+      expect(health.status).toBe(200);
+      expect(Date.now() - healthStartedAt).toBeLessThan(500);
+      expect(await approval).toEqual({
+        approved: true,
+        runId: approvedProposal.runId,
+      });
+      expect(await approveLock.exited).toBe(0);
+      expect(
+        await s.client.cancel(approvedProposal.runId, "test cleanup"),
+      ).toEqual({ cancelled: true });
 
-    const rejectedProposal = await planned("reject-contention");
-    const rejectLock = await holdWriteLock(s.db.filename, 6_000);
-    const startedAt = Date.now();
-    const err = await rejection(s.client.reject(rejectedProposal.id, "locked"));
-    expect(err.status).toBe(503);
-    expect(err.body).toEqual({ error: "db_busy", retryable: true });
-    expect(Date.now() - startedAt).toBeGreaterThan(4_000);
-    expect(await rejectLock.exited).toBe(0);
-  });
+      const rejectedProposal = await planned("reject-contention");
+      const rejectLock = await holdWriteLock(s.db.filename, 6_000);
+      // Snapshot liveness synchronously, before the probe is issued: the
+      // child's exit is observed through `exitCode`, which Bun updates without
+      // an event-loop turn, so this cannot lag behind the probe start.
+      const lockLiveAtProbeStart = rejectLock.exitCode === null;
+      const probeStartedAt = Date.now();
+      const err = await rejection(
+        s.client.reject(rejectedProposal.id, "locked"),
+      );
+      const probeFinishedAt = Date.now();
+      expect(await rejectLock.exited).toBe(0);
+
+      if (err.status === 409) {
+        // A contended runner can be descheduled long enough for the child lock
+        // to release before this probe starts. That is a stale-probe outcome,
+        // not evidence that the live-lock path failed to return `db_busy`.
+        expect(lockLiveAtProbeStart).toBe(false);
+        expect(err.message).toContain("not open");
+      } else {
+        expect(err.status).toBe(503);
+        expect(err.body).toEqual({ error: "db_busy", retryable: true });
+        // The lock outlives busy_timeout (5 s), so a live-lock probe must have
+        // spent the whole retry budget before giving up.
+        expect(probeFinishedAt - probeStartedAt).toBeGreaterThan(4_000);
+      }
+    },
+    loadAdjustedTimeout(20_000),
+  );
 
   test("cancel a QUEUED run → 200; cancel again → 409; unknown run → 404", async () => {
     const prop = await planned("can-1");
