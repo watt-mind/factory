@@ -156,14 +156,23 @@ export function ownedPathsClosureGuard(
   }
 }
 
-export async function fetchReadyIssues(repo) {
-  return loadControlPlane().listDispatchable({
+export async function fetchReadyIssues(
+  repo,
+  resolveControlPlane = loadControlPlane,
+) {
+  return resolveControlPlane({ repoName: repo.name }).listDispatchable({
     team: repo.team,
     project: repo.project,
   });
 }
 
-export async function demote(issue, _triageStateId, gaps, apply) {
+export async function demote(
+  issue,
+  repo,
+  gaps,
+  apply,
+  resolveControlPlane = loadControlPlane,
+) {
   if (!apply) return;
 
   const body =
@@ -174,7 +183,7 @@ export async function demote(issue, _triageStateId, gaps, apply) {
     `\n\nMoved back to \`Triage\` and the label was removed so it isn't picked up for dispatch. ` +
     `A triage pass needs to add the missing section(s) before re-labeling \`ai:agent-ready\`.`;
 
-  const cp = loadControlPlane();
+  const cp = resolveControlPlane({ repoName: repo.name });
   await cp.transition(issue.identifier, "Triage", {
     remove: [AI_AGENT_READY],
   });
@@ -253,7 +262,7 @@ export async function main(argv = process.argv.slice(2)) {
 
       if (args.apply) {
         try {
-          await demote(issue, null, gaps, true);
+          await demote(issue, repo, gaps, true);
           console.log(`      -> demoted to Triage, ai:agent-ready removed`);
         } catch (err) {
           console.log(`      ! failed: ${err.message || err}`);

@@ -11,7 +11,13 @@
  * genuine catch (CLNT-871/872's shape) and the false positives that got cut.
  */
 import { test, expect } from "bun:test";
-import { ownedPathsClosureGuard, templateGaps } from "./label-guard.mjs";
+import { controlPlaneKindFromRepo } from "../lib/control-plane/index.mjs";
+import {
+  demote,
+  fetchReadyIssues,
+  ownedPathsClosureGuard,
+  templateGaps,
+} from "./label-guard.mjs";
 
 const FULL_SPEC = `## Problem & Context
 
@@ -31,6 +37,40 @@ Something is broken and it matters.
 
 test("a real §5 spec passes with no gaps", () => {
   expect(templateGaps(FULL_SPEC)).toEqual([]);
+});
+
+test("listing and demotion select the control plane configured for the repo", async () => {
+  const repo = { name: "factory", team: "WM", project: "Factory" };
+  expect(controlPlaneKindFromRepo(repo.name)).toBe("github");
+  const calls = [];
+  const cp = {
+    listDispatchable: async (filters) => {
+      calls.push({ method: "listDispatchable", filters });
+      return [{ identifier: "#1555" }];
+    },
+    transition: async (...args) => calls.push({ method: "transition", args }),
+    comment: async (...args) => calls.push({ method: "comment", args }),
+  };
+  const resolveControlPlane = (options) => {
+    calls.push({ method: "loadControlPlane", options });
+    return cp;
+  };
+
+  const issues = await fetchReadyIssues(repo, resolveControlPlane);
+  await demote(issues[0], repo, ["Owned Paths"], true, resolveControlPlane);
+
+  expect(calls.filter((call) => call.method === "loadControlPlane")).toEqual([
+    { method: "loadControlPlane", options: { repoName: "factory" } },
+    { method: "loadControlPlane", options: { repoName: "factory" } },
+  ]);
+  expect(calls).toContainEqual({
+    method: "listDispatchable",
+    filters: { team: "WM", project: "Factory" },
+  });
+  expect(calls).toContainEqual({
+    method: "transition",
+    args: ["#1555", "Triage", { remove: ["ai:agent-ready"] }],
+  });
 });
 
 test("a malformed registry digest policy is rendered as a guard message", () => {
