@@ -527,8 +527,9 @@ Store size and memo counts join `status`.
 ### 6.2 Fold size
 
 Per-subject growth is bounded three ways: `supersedes` (a producer replacing
-its own earlier note on the same subject+kind — `run-postmortem` always
-supersedes the previous postmortem for the same ticket), kind-default expiry
+its own earlier note on the same subject+kind — the ledger enforces this
+subject+kind confinement — `run-postmortem` always supersedes the previous
+postmortem for the same ticket), kind-default expiry
 (`postmortem` 30 days, `decision` 90 days, `flake` 14 days; a binding, when
 present, always wins), and the consumer's `max`. `listMemos` orders newest
 first, so a runaway producer degrades to "the last N notes", never to an

@@ -473,13 +473,35 @@ function insertMemoRow(db, { sha256, document }, { now }) {
     descriptionHash,
     headSha,
   );
+  let superseded = false;
+  let supersedesIgnored;
   if (supersedes) {
-    db.query(
-      `UPDATE memos SET superseded_by = ?
-       WHERE sha256 = ? AND superseded_by IS NULL`,
-    ).run(sha256, supersedes);
+    const update = db
+      .query(
+        `UPDATE memos SET superseded_by = ?
+       WHERE sha256 = ?
+         AND subject_type = ?
+         AND subject_id = ?
+         AND kind = ?
+         AND superseded_by IS NULL`,
+      )
+      .run(sha256, supersedes, subject.type, subject.id, document.kind);
+    superseded = update.changes > 0;
+    if (!superseded) {
+      supersedesIgnored = supersedes;
+      console.warn(
+        `memos: ignored supersedes ${supersedes}; predecessor is unknown, already superseded, or does not match ${subject.type}:${subject.id} ${document.kind}`,
+      );
+    }
   }
-  return { sha256, inserted: true, subject, kind: document.kind };
+  return {
+    sha256,
+    inserted: true,
+    subject,
+    kind: document.kind,
+    superseded,
+    ...(supersedesIgnored ? { supersedesIgnored } : {}),
+  };
 }
 
 /**

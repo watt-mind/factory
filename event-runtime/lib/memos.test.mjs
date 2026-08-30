@@ -274,7 +274,11 @@ describe("registerMemos / listMemos", () => {
       }),
       { runId: "run_b", now: now + 1000 },
     );
-    registerMemos(db, "run_b", second.result, { now: now + 1000 });
+    const registered = registerMemos(db, "run_b", second.result, {
+      now: now + 1000,
+    });
+    expect(registered[0]).toMatchObject({ superseded: true });
+    expect(registered[0].supersedesIgnored).toBeUndefined();
     const live = listMemos(
       db,
       { type: "ticket", id: "WM-809" },
@@ -290,6 +294,81 @@ describe("registerMemos / listMemos", () => {
     expect(all.find((row) => row.sha256 === first.sha256).supersededBy).toBe(
       second.sha256,
     );
+    db.close();
+  });
+
+  test("ignores supersedes targets with a different subject or kind", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-18T14:02:11.000Z");
+    const decision = accepted(
+      postmortemDoc({
+        subject: { type: "ticket", id: "WM-1" },
+        kind: "decision",
+        precedentOnly: true,
+      }),
+      { now },
+    );
+    registerMemos(db, "run_decision", decision.result, { now });
+
+    const crossSubject = accepted(
+      repoNoteDoc({ supersedes: decision.sha256 }),
+      { runId: "run_note", now: now + 1000 },
+    );
+    const crossSubjectResult = registerMemos(
+      db,
+      "run_note",
+      crossSubject.result,
+      {
+        now: now + 1000,
+      },
+    );
+    expect(crossSubjectResult[0]).toMatchObject({
+      superseded: false,
+      supersedesIgnored: decision.sha256,
+    });
+    expect(
+      listMemos(db, { type: "ticket", id: "WM-1" }, { now: now + 1000 }),
+    ).toHaveLength(1);
+
+    const crossKind = accepted(
+      postmortemDoc({
+        subject: { type: "ticket", id: "WM-1" },
+        supersedes: decision.sha256,
+      }),
+      { runId: "run_postmortem", now: now + 2000 },
+    );
+    const crossKindResult = registerMemos(
+      db,
+      "run_postmortem",
+      crossKind.result,
+      {
+        now: now + 2000,
+      },
+    );
+    expect(crossKindResult[0]).toMatchObject({
+      superseded: false,
+      supersedesIgnored: decision.sha256,
+    });
+    expect(
+      listMemos(db, { type: "ticket", id: "WM-1" }, { now: now + 2000 }),
+    ).toHaveLength(2);
+    db.close();
+  });
+
+  test("reports an unknown supersedes target without rejecting the memo", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-18T14:02:11.000Z");
+    const unknown = "a".repeat(64);
+    const memo = accepted(postmortemDoc({ supersedes: unknown }), { now });
+    const registered = registerMemos(db, "run_unknown", memo.result, { now });
+    expect(registered[0]).toMatchObject({
+      inserted: true,
+      superseded: false,
+      supersedesIgnored: unknown,
+    });
+    expect(
+      listMemos(db, { type: "ticket", id: "WM-809" }, { now }),
+    ).toHaveLength(1);
     db.close();
   });
 
