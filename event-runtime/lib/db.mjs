@@ -582,6 +582,16 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    version: 20,
+    name: "github_intake_freshness_index",
+    up(db) {
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_events_source_admitted
+          ON events (source, admitted_at);
+      `);
+    },
+  },
 ];
 
 export const CURRENT_SCHEMA_VERSION =
