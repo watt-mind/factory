@@ -28,6 +28,7 @@ import { handleChainApiRoute } from "./api-chain.mjs";
 import { handleConfigApiRoute } from "./api-config.mjs";
 import { handleMetricsApiRoute } from "./api-metrics.mjs";
 import { handlePanelsApiRoute } from "./api-panels.mjs";
+import { createRepoApi } from "./api-repos.mjs";
 import { handleRegistryApiRoute } from "./api-registry.mjs";
 import {
   handleRunApiRoute,
@@ -167,6 +168,7 @@ export function createApi({
   let cachedArtifactResultsRowid = null;
   let cachedArtifactInventory = null;
   let cachedArtifactInventoryAt = 0;
+  const repoApi = createRepoApi({ repos, db, configRoot });
 
   function getStoreStats(nowMs) {
     if (cachedStoreStats && nowMs - cachedStoreStatsAt < storeStatsTtlMs)
@@ -275,7 +277,7 @@ export function createApi({
         githubSecret,
         policyVersion,
         env,
-        repos,
+        repos: repoApi.repos,
         workerPolicy,
         workerRunDir,
         nowMs,
@@ -467,6 +469,10 @@ export function createApi({
       }
       if (url.pathname === "/panels") {
         const result = handlePanelsApiRoute(common);
+        if (result !== false) return result;
+      }
+      if (url.pathname === "/repos" || url.pathname.startsWith("/repos/")) {
+        const result = await repoApi.handle(common);
         if (result !== false) return result;
       }
       if (
