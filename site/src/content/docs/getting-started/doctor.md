@@ -25,6 +25,7 @@ factory doctor
    - Repository checkout freshness and tracker connectivity
 3. **Agent harnesses:**
    - Claude Code, Codex, Gemini, Cursor, and Pi availability
+   - Hermes Agent's ACP adapter is listed by `factory events adapters` when configured
    - Missing optional harnesses are reported as warnings
 4. **Isolation and runtime:**
    - Docker, Colima, or supported micro-VM availability

@@ -21,10 +21,10 @@ hands one agent one ticket in one worktree, re-runs the verification command
 itself, and holds the merge until CI and a reviewer agree. That is this.
 
 factory drives the coding agents you already use — Claude Code, Codex, Gemini
-/ Antigravity, Cursor, Pi. The tracker is the control plane, GitHub is the
-source of truth, and CI is the reward signal. Nothing merges because an agent
-said it was done; it merges because the tests passed and a reviewer (agent or
-human) approved.
+/ Antigravity, Cursor, Pi, and Hermes Agent via ACP. The tracker is the control
+plane, GitHub is the source of truth, and CI is the reward signal. Nothing
+merges because an agent said it was done; it merges because the tests passed
+and a reviewer (agent or human) approved.
 
 [![The factory's Graph view: every registered event route and recommendation edge in a running instance, laid out as a directed graph.](docs/screenshots/15-graph.jpg)](docs/screenshots/15-graph.jpg)
 
@@ -56,7 +56,8 @@ bin/factory onboard --repo ~/Develop/yourapp | pbcopy
 ```
 
 Paste it into Claude Code, Codex, Gemini, Cursor, or Pi with your repository
-open. It surveys the repo, wires up the control plane, files the first
+open. Hermes Agent can run the same work through the event runtime's ACP
+adapter. It surveys the repo, wires up the control plane, files the first
 agent-ready ticket, and stops at a gate it cannot talk its way past:
 `factory doctor` and `factory queue` green.
 
@@ -181,14 +182,15 @@ The **content** is portable; only the **packaging** is not. `SKILL.md` is a
 shared workflow format, command bodies are Markdown, and each harness gets its
 native agent manifest.
 
-| Harness     | Context                   | Skills              | Commands                    | Agents                |
-| :---------- | :------------------------ | :------------------ | :-------------------------- | :-------------------- |
-| Claude Code | `CLAUDE.md` → `AGENTS.md` | plugin `skills/`    | plugin `commands/`          | plugin `agents/`      |
-| Codex       | `AGENTS.md` (native)      | `~/.agents/skills/` | — (use `@factory-*` skills) | `~/.codex/agents/`    |
-| Gemini CLI  | `GEMINI.md` → `AGENTS.md` | `~/.gemini/skills/` | —                           | `~/.gemini/agents/`   |
-| Antigravity | shares `~/.gemini/`       | via Gemini          | —                           | via Gemini            |
-| Cursor      | `.cursor/rules/`          | —                   | `~/.cursor/commands/`       | `~/.cursor/agents/`   |
-| Pi          | `AGENTS.md` (native)      | `dist/pi/skills/`   | `dist/pi/prompts/`          | `~/.pi/agent/agents/` |
+| Harness      | Context                   | Skills                | Commands                    | Agents                |
+| :----------- | :------------------------ | :-------------------- | :-------------------------- | :-------------------- |
+| Claude Code  | `CLAUDE.md` → `AGENTS.md` | plugin `skills/`      | plugin `commands/`          | plugin `agents/`      |
+| Codex        | `AGENTS.md` (native)      | `~/.agents/skills/`   | — (use `@factory-*` skills) | `~/.codex/agents/`    |
+| Gemini CLI   | `GEMINI.md` → `AGENTS.md` | `~/.gemini/skills/`   | —                           | `~/.gemini/agents/`   |
+| Antigravity  | shares `~/.gemini/`       | via Gemini            | —                           | via Gemini            |
+| Cursor       | `.cursor/rules/`          | —                     | `~/.cursor/commands/`       | `~/.cursor/agents/`   |
+| Pi           | `AGENTS.md` (native)      | `dist/pi/skills/`     | `dist/pi/prompts/`          | `~/.pi/agent/agents/` |
+| Hermes Agent | ACP v1; `AGENTS.md` floor | — (not yet supported) | `.hermes/commands/`         | `.hermes/agents/`     |
 
 > [!IMPORTANT]
 > **The plugin is a convenience layer, not the safety floor.** It reaches
@@ -279,13 +281,13 @@ is added there in the future, it must carry explicit terms; placement under
 
 Complete guides, concepts, and API references are hosted at **[watt-mind.github.io/factory](https://watt-mind.github.io/factory/)**.
 
-| Guide                                                                              | What it covers                                                    |
-| :--------------------------------------------------------------------------------- | :---------------------------------------------------------------- |
-| [Getting Started](https://watt-mind.github.io/factory/getting-started/quickstart/) | Connect a repository, run the onboarding prompt, offline demo     |
-| [Core Concepts](https://watt-mind.github.io/factory/concepts/the-loop/)            | The loop, owned paths, verification model, and control planes     |
-| [Harnesses & Agents](https://watt-mind.github.io/factory/harnesses/overview/)      | Claude Code, Codex, Gemini, Cursor, Pi, and specialist agents     |
-| [Operator Guide](https://watt-mind.github.io/factory/operator/event-runtime/)      | Running the event-runtime sidecar, multi-repo fleets, web console |
-| [Reference & Protocol](https://watt-mind.github.io/factory/reference/protocol/)    | The non-negotiable agent operating contract and CLI reference     |
+| Guide                                                                              | What it covers                                                        |
+| :--------------------------------------------------------------------------------- | :-------------------------------------------------------------------- |
+| [Getting Started](https://watt-mind.github.io/factory/getting-started/quickstart/) | Connect a repository, run the onboarding prompt, offline demo         |
+| [Core Concepts](https://watt-mind.github.io/factory/concepts/the-loop/)            | The loop, owned paths, verification model, and control planes         |
+| [Harnesses & Agents](https://watt-mind.github.io/factory/harnesses/overview/)      | Claude Code, Codex, Gemini, Cursor, Pi, Hermes Agent, and specialists |
+| [Operator Guide](https://watt-mind.github.io/factory/operator/event-runtime/)      | Running the event-runtime sidecar, multi-repo fleets, web console     |
+| [Reference & Protocol](https://watt-mind.github.io/factory/reference/protocol/)    | The non-negotiable agent operating contract and CLI reference         |
 
 ## Contributing
 

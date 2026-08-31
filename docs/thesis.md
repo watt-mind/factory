@@ -95,8 +95,9 @@ extensions.
   product is the factory. Generality is documented so an extension author
   knows where to plug in, not so the homepage hedges.
 - **Not harness-native.** Content lives in `shared/` and is emitted into
-  Claude Code, Codex, Cursor, Pi, and Gemini. The plugin is a convenience
-  layer. The floor is `AGENTS.md`.
+  Claude Code, Codex, Cursor, Pi, and Gemini; Hermes Agent connects through
+  the event runtime's ACP adapter. The plugin is a convenience layer. The
+  floor is `AGENTS.md`.
 - **Not a replacement for Linear, Git, or CI.** Those are the authorities.
   The factory holds no business state of its own: `tick.mjs` re-reads Linear
   on every decision; the PR is the artifact; CI is the signal that a change
