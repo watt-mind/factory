@@ -514,6 +514,93 @@ test("comment retry recognizes the clamped, stamped body that GitHub landed", as
   }
 });
 
+// Production shape, not a fixture shape: a control plane that exposes no
+// actor at all (linear, memory, or a github adapter whose identity read
+// failed) still returns `user` on every listed comment. Missing identity must
+// therefore refine nothing rather than veto the body match — otherwise every
+// timed-out-but-landed comment is posted twice.
+test("comment retry trusts the body match when the plane exposes no actor", async () => {
+  const beforeAttribution = process.env.FACTORY_COMMENT_ATTRIBUTION;
+  const beforeRunId = process.env.FACTORY_RUN_ID;
+  process.env.FACTORY_COMMENT_ATTRIBUTION = "1";
+  process.env.FACTORY_RUN_ID = "run-no-actor";
+  try {
+    const calls = { comment: 0, listComments: 0 };
+    const body = "explain the move";
+    const cp = {
+      kind: "github",
+      async comment() {
+        calls.comment += 1;
+        throw new Error("gh timed out after 15000ms");
+      },
+      async listComments() {
+        calls.listComments += 1;
+        return [{ body: clampGithubBody(stampRun(body)), user: { id: "123" } }];
+      },
+    };
+
+    await expect(commentWithRetry(cp, "WM-910", body)).resolves.toBeUndefined();
+    expect(calls).toEqual({ comment: 1, listComments: 1 });
+  } finally {
+    if (beforeAttribution === undefined)
+      delete process.env.FACTORY_COMMENT_ATTRIBUTION;
+    else process.env.FACTORY_COMMENT_ATTRIBUTION = beforeAttribution;
+    if (beforeRunId === undefined) delete process.env.FACTORY_RUN_ID;
+    else process.env.FACTORY_RUN_ID = beforeRunId;
+  }
+});
+
+// The github adapter resolves its identity lazily, with a request; the guard
+// must await that verb, not read a property that is always undefined on it.
+test("comment retry awaits an async actor and re-posts on a real mismatch", async () => {
+  const calls = { comment: 0, listComments: 0, actor: 0 };
+  const cp = {
+    kind: "github",
+    async actor() {
+      calls.actor += 1;
+      return { id: "322488792", name: "watt-mind-factory[bot]" };
+    },
+    async comment() {
+      calls.comment += 1;
+      if (calls.comment === 1) throw new Error("gh timed out after 15000ms");
+    },
+    async listComments() {
+      calls.listComments += 1;
+      return [{ body: "explain the move", user: { id: "10578603" } }];
+    },
+  };
+
+  await expect(
+    commentWithRetry(cp, "WM-910", "explain the move"),
+  ).resolves.toBeUndefined();
+  expect(calls).toEqual({ comment: 2, listComments: 1, actor: 1 });
+});
+
+// An identity read that throws must degrade to the body match, never to a
+// duplicate post.
+test("comment retry falls back to the body match when the actor read fails", async () => {
+  const calls = { comment: 0, listComments: 0 };
+  const cp = {
+    kind: "github",
+    async actor() {
+      throw new Error("github graphql timed out after 15000ms");
+    },
+    async comment() {
+      calls.comment += 1;
+      throw new Error("gh timed out after 15000ms");
+    },
+    async listComments() {
+      calls.listComments += 1;
+      return [{ body: "explain the move", user: { id: "123" } }];
+    },
+  };
+
+  await expect(
+    commentWithRetry(cp, "WM-910", "explain the move"),
+  ).resolves.toBeUndefined();
+  expect(calls).toEqual({ comment: 1, listComments: 1 });
+});
+
 test("comment retry does not mistake another actor's identical comment for ours", async () => {
   const calls = { comment: 0, listComments: 0 };
   const cp = {
@@ -535,23 +622,39 @@ test("comment retry does not mistake another actor's identical comment for ours"
   expect(calls).toEqual({ comment: 2, listComments: 1 });
 });
 
+// Ticket item (c) — a replayed transition must not re-post its rationale — is
+// satisfied structurally: `transitionThenComment` retries the transition and
+// the comment as two separate mutations, and routes the comment half through
+// `commentWithRetry`, so the rationale can never reach `cp.comment` twice
+// without the landed-check running. Exercise both halves timing out at once,
+// which is the only shape in which the pairing could double-post.
 test("a transition retried after its response times out posts its rationale once", async () => {
-  const calls = { transition: 0, comment: 0 };
+  const calls = { transition: 0, comment: 0, listComments: 0 };
+  const posted = [];
   const cp = {
     kind: "github",
+    actor: { id: "322488792" },
     async transition() {
       calls.transition += 1;
       if (calls.transition === 1) throw new Error("gh timed out after 15000ms");
     },
-    async comment() {
+    async comment(_key, body) {
       calls.comment += 1;
+      posted.push(body);
+      // Landed on the timeline, then the response timed out.
+      throw new Error("gh timed out after 15000ms");
+    },
+    async listComments() {
+      calls.listComments += 1;
+      return posted.map((body) => ({ body, user: { id: "322488792" } }));
     },
   };
 
   await expect(
     transitionThenComment(cp, "WM-910", "Todo", {}, "explain the move"),
   ).resolves.toBeUndefined();
-  expect(calls).toEqual({ transition: 2, comment: 1 });
+  expect(calls).toEqual({ transition: 2, comment: 1, listComments: 1 });
+  expect(posted).toEqual(["explain the move"]);
 });
 
 test("answer retries a timed-out comment without repeating its transition", async () => {
