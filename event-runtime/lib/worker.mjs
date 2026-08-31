@@ -3476,6 +3476,8 @@ export async function executeClaimed(
     resolveLinearKey = resolveLinearApiKey,
     policyRoot = FACTORY_ROOT,
     sandboxAvailability,
+    materializeWorktree,
+    localNotifyFetch,
     verifyResult: verifyResultFn = verifyResult,
   } = {},
 ) {
@@ -4540,6 +4542,7 @@ export async function executeClaimed(
         ticketLeaseOwner,
         workerLeasesDir: leasesDir,
         worktreeHandoff,
+        materializeWorktree,
       });
     } catch (err) {
       // Missing declared inputs are permanent: re-queuing cannot repopulate an
@@ -4793,6 +4796,7 @@ export async function executeClaimed(
               home: workerEventHome,
               port: workerEventPort,
               token: workerControlToken,
+              fetchFn: localNotifyFetch,
             })
           : { delivered: [], undelivered: [] };
         if (notificationDrain.undelivered.length && mayMutateClaimedTicket()) {
