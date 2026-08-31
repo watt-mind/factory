@@ -53,9 +53,88 @@ import {
   linearBudgetStatus,
   loadLinearBudget,
 } from "../tools/linear.mjs";
+import { readWorkflowRuns } from "./ci.mjs";
 
 export const MIN_BUN_VERSION = "1.1.0";
 export const MIN_GIT_VERSION = "2.40.0";
+export const BASE_BRANCH_CI_TIMEOUT_MS = 10_000;
+export const BASE_BRANCH_CI_RUN_LIMIT = 20;
+
+const defaultWorkflowRunList = (repo, options) =>
+  readWorkflowRuns({ repo, ...options });
+
+/**
+ * Report whether a repository's base branch has a healthy completed Actions
+ * run. The reader is injectable so doctor tests never need GitHub access.
+ */
+export function baseBranchCiDiagnostics({
+  repos = [],
+  runList = defaultWorkflowRunList,
+} = {}) {
+  return repos.map((repo) => {
+    const label = "base branch CI";
+    if (!repo.github) {
+      return {
+        ok: "info",
+        label,
+        detail: "skipped — no GitHub repository configured",
+        fix: null,
+      };
+    }
+
+    const branch = repo.base || "main";
+    const runs = (() => {
+      try {
+        return runList(repo.github, {
+          branch,
+          limit: BASE_BRANCH_CI_RUN_LIMIT,
+          timeout: BASE_BRANCH_CI_TIMEOUT_MS,
+        });
+      } catch {
+        // An injected reader may throw while the production helper returns null.
+        return null;
+      }
+    })();
+    if (runs === null) {
+      return {
+        ok: "info",
+        label,
+        detail: `${branch} — skipped, GitHub Actions could not be read`,
+        fix: null,
+      };
+    }
+
+    const latest = runs.find((run) => run.status === "completed");
+    if (!latest) {
+      return {
+        ok: "info",
+        label,
+        detail: `${branch} — skipped, no completed Actions history`,
+        fix: null,
+      };
+    }
+
+    const workflow = latest.workflowName || latest.name || "unnamed workflow";
+    const runId = latest.databaseId ?? "unknown";
+    const runRef = latest.url
+      ? `run #${runId} (${latest.url})`
+      : `run #${runId}`;
+    if (latest.conclusion === "success") {
+      return {
+        ok: true,
+        label,
+        detail: `${branch} — ${workflow} succeeded (${runRef})`,
+        fix: null,
+      };
+    }
+    return {
+      ok: "warn",
+      label,
+      detail: `${branch} — ${workflow} ${latest.conclusion ?? "without a conclusion"} (${runRef})`,
+      fix: "open the run, repair the failing workflow, then re-run `factory doctor`",
+    };
+  });
+}
 
 /** Extract the numeric component from ordinary CLI version output. */
 export function parseCliVersion(output) {
@@ -836,9 +915,9 @@ const c = {
 
 let failures = 0;
 const check = (ok, label, detail, fix) => {
-  if (ok === "warn") {
+  if (ok === "warn" || ok === "info") {
     console.log(
-      `  ${c.yellow("!")} ${label}${detail ? c.dim("  " + detail) : ""}`,
+      `  ${ok === "warn" ? c.yellow("!") : c.dim("-")} ${label}${detail ? c.dim("  " + detail) : ""}`,
     );
     if (fix) console.log(`      ${c.dim(fix)}`);
     return;
@@ -960,6 +1039,10 @@ if (import.meta.main) {
     // Node-local: independent of whether the checkout exists. A mismatch is
     // diagnosable here instead of only as a dispatch refusal.
     for (const row of await repoToolchainDiagnostics({ repos: [repo] })) {
+      check(row.ok, row.label, row.detail, row.fix);
+    }
+
+    for (const row of baseBranchCiDiagnostics({ repos: [repo] })) {
       check(row.ok, row.label, row.detail, row.fix);
     }
 

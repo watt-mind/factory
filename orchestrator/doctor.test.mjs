@@ -29,6 +29,9 @@ import {
   CHROME_HEADLESS_WRAPPER,
 } from "./doctor-browser.mjs";
 import {
+  BASE_BRANCH_CI_RUN_LIMIT,
+  BASE_BRANCH_CI_TIMEOUT_MS,
+  baseBranchCiDiagnostics,
   compareCliVersions,
   chainAutoApprovalPolicyDiagnostic,
   defaultControlApiProbe,
@@ -52,6 +55,81 @@ const fakeChrome = (dir, body) => {
   chmodSync(p, 0o755);
   return p;
 };
+
+describe("base branch CI diagnostics (#1928)", () => {
+  const repo = {
+    name: "factory",
+    github: "watt-mind/factory",
+    base: "develop",
+  };
+
+  test("reports a successful latest completed run with the bounded shared reader", () => {
+    const calls = [];
+    const rows = baseBranchCiDiagnostics({
+      repos: [repo],
+      runList: (name, options) => {
+        calls.push({ name, options });
+        return [
+          { status: "queued" },
+          {
+            status: "completed",
+            conclusion: "success",
+            databaseId: 42,
+            workflowName: "CI",
+            url: "https://github.com/watt-mind/factory/actions/runs/42",
+          },
+        ];
+      },
+    });
+
+    expect(calls).toEqual([
+      {
+        name: "watt-mind/factory",
+        options: {
+          branch: "develop",
+          limit: BASE_BRANCH_CI_RUN_LIMIT,
+          timeout: BASE_BRANCH_CI_TIMEOUT_MS,
+        },
+      },
+    ]);
+    expect(rows).toEqual([
+      expect.objectContaining({
+        ok: true,
+        label: "base branch CI",
+        detail: expect.stringContaining("CI succeeded"),
+      }),
+    ]);
+  });
+
+  test("warns with workflow and run URL when the latest completed run is red", () => {
+    const rows = baseBranchCiDiagnostics({
+      repos: [repo],
+      runList: () => [
+        {
+          status: "completed",
+          conclusion: "failure",
+          workflowName: "CI",
+          url: "https://github.com/watt-mind/factory/actions/runs/99",
+        },
+      ],
+    });
+
+    expect(rows[0]).toMatchObject({ ok: "warn", label: "base branch CI" });
+    expect(rows[0].detail).toContain("CI failure");
+    expect(rows[0].detail).toContain("actions/runs/99");
+  });
+
+  test("skips without failing when Actions has no completed history", () => {
+    const rows = baseBranchCiDiagnostics({ repos: [repo], runList: () => [] });
+
+    expect(rows).toEqual([
+      expect.objectContaining({
+        ok: "info",
+        detail: "develop — skipped, no completed Actions history",
+      }),
+    ]);
+  });
+});
 
 describe("OSS onboarding diagnostics (WM-957)", () => {
   test("parses and compares ordinary CLI versions", () => {
