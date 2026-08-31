@@ -179,7 +179,8 @@ function commentBodyMatches(comment, expected, actor) {
  */
 async function resolveCommentActor(cp) {
   try {
-    const actor = typeof cp?.actor === "function" ? await cp.actor() : cp?.actor;
+    const actor =
+      typeof cp?.actor === "function" ? await cp.actor() : cp?.actor;
     return actor ?? null;
   } catch {
     return null;
