@@ -32,6 +32,7 @@ import {
   retryControlPlaneMutation,
   transitionThenComment,
   getTicketWithRetry,
+  unclaimTicket,
   fileTicket,
   closureCheckMessages,
   descriptionReplacementRequest,
@@ -467,6 +468,38 @@ test("ticket state and label reads retry one GraphQL timeout", async () => {
     retryControlPlaneMutation(cp, () => cp.transition("WM-910", "Todo")),
   ).resolves.toBeUndefined();
   expect(calls).toEqual({ getTicket: 2, transition: 2 });
+});
+
+test("unclaim retries its ticket read after a GraphQL timeout", async () => {
+  const calls = { getTicket: 0, transition: [] };
+  const cp = {
+    kind: "linear",
+    async getTicket() {
+      calls.getTicket += 1;
+      if (calls.getTicket === 1)
+        throw new Error("linear graphql timed out after 15000ms");
+      return { labels: [{ name: "ai:in-progress" }] };
+    },
+    async transition(...args) {
+      calls.transition.push(args);
+    },
+  };
+
+  await expect(unclaimTicket(cp, "WM-910")).resolves.toBeUndefined();
+  expect(calls).toEqual({
+    getTicket: 2,
+    transition: [
+      [
+        "WM-910",
+        "Todo",
+        {
+          add: ["ai:agent-ready"],
+          remove: ["ai:in-progress", "ai:blocked"],
+          unassign: true,
+        },
+      ],
+    ],
+  });
 });
 
 test("ticket timeout retry preserves non-timeout errors", async () => {

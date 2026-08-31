@@ -139,6 +139,7 @@ export async function retryControlPlaneMutation(
       await backoff(CONTROL_PLANE_MUTATION_RETRY_BACKOFF_MS);
     }
   }
+  throw new Error("unreachable: control-plane mutation retry loop exhausted");
 }
 
 /** Transition first, so a promotion rationale is never posted for a failed move. */
@@ -155,6 +156,16 @@ export async function setLabelsWithRetry(cp, key, options) {
 /** Read a ticket through the same timeout recovery used by state mutations. */
 export async function getTicketWithRetry(cp, key) {
   return retryControlPlaneMutation(cp, () => cp.getTicket(key));
+}
+
+/** Release a ticket only after its labels have been read through retry policy. */
+export async function unclaimTicket(cp, key) {
+  const issue = await getTicketWithRetry(cp, key);
+  const currentNames = (issue.labels ?? []).map((label) => label.name);
+  const { add, remove } = releaseLabels(currentNames, { to: "Todo" });
+  await retryControlPlaneMutation(cp, () =>
+    cp.transition(key, "Todo", { add, remove, unassign: true }),
+  );
 }
 
 /**
@@ -871,12 +882,7 @@ const VERBS = {
     if (!positional[0]) throw new Error(`usage: unclaim <ISSUE-ID>`);
     const key = normalizeTicketRef(positional[0]);
     const cp = controlPlane(key);
-    const issue = await cp.getTicket(key);
-    const currentNames = (issue.labels ?? []).map((label) => label.name);
-    const { add, remove } = releaseLabels(currentNames, { to: "Todo" });
-    await retryControlPlaneMutation(cp, () =>
-      cp.transition(key, "Todo", { add, remove, unassign: true }),
-    );
+    await unclaimTicket(cp, key);
     out(
       { ok: true, identifier: key, state: "Todo" },
       `unclaimed ${key} -> Todo`,
@@ -910,7 +916,7 @@ const VERBS = {
       throw new Error(`usage: answer <ISSUE-ID> [--] "<text>"`);
     const key = normalizeTicketRef(positional[0]);
     const cp = controlPlane(key);
-    const issue = await cp.getTicket(key);
+    const issue = await getTicketWithRetry(cp, key);
     if (issue.state?.name?.toLowerCase() === "blocked")
       await retryControlPlaneMutation(cp, () => cp.transition(key, "Todo"));
     await cp.comment(key, text);
@@ -924,7 +930,7 @@ const VERBS = {
     const key = normalizeTicketRef(positional[0]);
     const cp = controlPlane(key);
     if (has("replace")) {
-      const issue = await cp.getTicket(key);
+      const issue = await getTicketWithRetry(cp, key);
       const description = String(rawDetail).trim();
       const current = String(issue.description ?? "").trim();
       if (description === current) {
