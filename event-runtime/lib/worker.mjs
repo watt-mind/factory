@@ -3381,6 +3381,10 @@ export function assertHandoffPullRequestBase({
   handoff.pr = {
     number: prNumber,
     draft: pr?.isDraft === true,
+    headSha:
+      typeof pr?.headRefOid === "string" && pr.headRefOid.trim()
+        ? pr.headRefOid.trim()
+        : null,
     hasFixesLine,
     hasRunTrailer,
     hasUnexpandedRunTrailer,

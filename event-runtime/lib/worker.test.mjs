@@ -6213,22 +6213,33 @@ sh -c 'sleep 5 & wait'
       runId: "run-1504",
     };
     const valid = { ...base };
+    const headSha = "a".repeat(40);
     assertHandoffPullRequestBase({
       handoff: valid,
       base: "develop",
       fetchPullRequest: () => ({
         baseRefName: "develop",
         isDraft: false,
+        headRefOid: headSha,
         body: "Fixes watt-mind/factory#1504\n\nImplemented\n\nrun:run-1504",
       }),
     });
     expect(valid.pr).toEqual({
       number: 77,
       draft: false,
+      headSha,
       hasFixesLine: true,
       hasRunTrailer: true,
       hasUnexpandedRunTrailer: false,
     });
+    expect(
+      composeHandoffVerification({
+        ...valid,
+        verification: null,
+        repoVerify: null,
+        webBuild: null,
+      }),
+    ).toContain("head SHA: aaaaaaaaaaaa");
 
     const warningOnly = { ...base };
     assertHandoffPullRequestBase({
@@ -6242,10 +6253,19 @@ sh -c 'sleep 5 & wait'
     });
     expect(warningOnly.pr).toMatchObject({
       draft: true,
+      headSha: null,
       hasFixesLine: true,
       hasRunTrailer: false,
       hasUnexpandedRunTrailer: false,
     });
+    expect(
+      composeHandoffVerification({
+        ...warningOnly,
+        verification: null,
+        repoVerify: null,
+        webBuild: null,
+      }),
+    ).toContain("head SHA: unknown");
 
     const missingFixes = { ...base };
     expect(() =>
