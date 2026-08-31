@@ -56,7 +56,7 @@ Raising `--print-timeout` alone would trade a short hang for a long one: a wedge
 
 **Status:** fixed — watch whether profile-lock errors drop in the next friction window.
 
-### F-12 · Agents use the schpet `linear` CLI instead of `tools/linear.mjs`
+### F-12 · Agents use the schpet `linear` CLI instead of `tools/ticket.mjs`
 
 **Seen:** `linear issue comment CLNT-526 --body` (×23, wrong syntax — needs `comment add`), `linear issue query ...` (×28, filter type errors), plus ×18 Linear MCP `list_issues` validation failures.
 

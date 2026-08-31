@@ -132,7 +132,7 @@ const TEXT_PREVIEW_CHARS = 4000;
 //   write  every agent-result contract requires ./result.json; without it a run
 //          fails contract_violation:missing_result before doing anything (OPS-518)
 //   bash   the entire scan fleet works by shelling out — work/triage/sweep/
-//          unblock scans call tools/linear.mjs, merge/ship scans call gh and
+//          unblock scans call tools/ticket.mjs, merge/ship scans call gh and
 //          git, ci-doctor and disk-diagnose call gh/ssh. Without a shell they
 //          refuse with "reads could not be performed with the available tools"
 //          (WM-301, run_e881a392)

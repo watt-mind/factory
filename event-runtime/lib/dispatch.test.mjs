@@ -27,7 +27,7 @@ const PV = "git:test-pv";
 // Hermetic fixtures: repos.yaml + policy.yaml under a temp FACTORY_REPOS_ROOT,
 // fake worktree scripts that log every call (the tier-2 provider delegates to
 // them, docs/event-runtime-dispatch.md §5), and injected Linear readers — the
-// gate's transport is tools/linear.mjs in production, never exercised here.
+// gate's transport is tools/ticket.mjs in production, never exercised here.
 const fixtures = [];
 let repoDir;
 let wtRoot;
@@ -111,7 +111,7 @@ afterAll(() => {
   for (const dir of fixtures) rmSync(dir, { recursive: true, force: true });
 });
 
-/** A ticket exactly as `tools/linear.mjs get --json` reports one. */
+/** A ticket exactly as `tools/ticket.mjs get --json` reports one. */
 const readyTicket = (overrides = {}) => ({
   identifier: "WM-500",
   title: "a fully specified ticket",
