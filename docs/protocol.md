@@ -232,6 +232,10 @@ open) and at least every 20 minutes, saying what changed. After 45 minutes
 of silence the ticket is reclaimed.
 
 **Verification is a gate.** Run the ticket's exact Verification Command.
+When a handoff changes `event-runtime/lib/**`, the worker also runs
+`bun test event-runtime/lib --timeout 20000` unless that exact lib suite (or
+an explicit parent suite) is already covered by the ticket command. Narrow
+single-file commands are therefore still safe to use for ticket verification.
 For a ticket that changes `event-runtime/web/src/**`, run
 `cd event-runtime/web && bun x tsc --noEmit` before the ticket command as
 well (the root `bun run check` runs it too, once `event-runtime/web` has had

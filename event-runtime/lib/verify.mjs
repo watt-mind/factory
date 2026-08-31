@@ -99,7 +99,8 @@ export class ContractViolation extends Error {
  * (3 of 10 PRs on 2026-08-18 failed CI on exactly the check the ticket named).
  * The repo `verify:` gate below is deliberately a subset of CI (WM-528), so
  * it let those through. This is the same check made honest: the WORKER runs
- * the ticket's own Verification Command, the web build when the diff reaches
+ * the ticket's own Verification Command, the full lib suite when the diff
+ * reaches `event-runtime/lib/**`, the web build when it reaches
  * `event-runtime/web/src/**`, and compares the diff with the ticket's Owned
  * Paths — and authors the Verification line itself.
  */
@@ -110,11 +111,15 @@ export const HANDOFF_REASON_CODES = new Set([
   "handoff_verification_unspecified",
   "handoff_owned_paths_violation",
   "handoff_pr_form_invalid",
+  "event_runtime_lib_verify_failed",
   HANDOFF_DEPENDENCIES_MISSING,
 ]);
 export const HANDOFF_TAIL_LINES = 40;
 /** reasonCode the worker stamps on a result.json it synthesized itself (#1592). */
 export const RECOVERED_RESULT_REASON = "worker_recovered_missing_result";
+export const HANDOFF_EVENT_RUNTIME_LIB_PREFIX = "event-runtime/lib/";
+export const HANDOFF_EVENT_RUNTIME_LIB_VERIFY_COMMAND =
+  "bun test event-runtime/lib --timeout 20000";
 export const HANDOFF_WEB_SRC_PREFIX = "event-runtime/web/src/";
 export const HANDOFF_WEB_BUILD_DIR = "event-runtime/web";
 export const HANDOFF_WEB_BUILD_COMMAND = "bun run build";
@@ -814,6 +819,23 @@ export function ticketVerifyCoveredByRepoVerify(
   });
 }
 
+/**
+ * A ticket's explicit `bun test` target covers the lib backstop only when it
+ * names event-runtime/lib itself or one of its parent directories. A focused
+ * test inside lib is deliberately not enough: the backstop protects the rest
+ * of the suite from narrow ticket commands.
+ */
+function ticketVerifyCoversEventRuntimeLibSuite(ticketCommand) {
+  const ticketPaths = bunTestPaths(ticketCommand);
+  return (
+    ticketPaths?.some(
+      (ticketPath) =>
+        ticketPath === HANDOFF_EVENT_RUNTIME_LIB_PREFIX.slice(0, -1) ||
+        HANDOFF_EVENT_RUNTIME_LIB_PREFIX.startsWith(`${ticketPath}/`),
+    ) ?? false
+  );
+}
+
 /** Best-effort timeout for the pre-diff `git fetch origin <base>` (F4). */
 const FETCH_BASE_TIMEOUT_MS = 10_000;
 
@@ -979,6 +1001,21 @@ export function composeHandoffVerification(handoff) {
     if (!handoff.webBuild.passed) lines.push(fenceBlock(handoff.webBuild.tail));
   } else if (handoff.diff?.ok) {
     lines.push(`- Web build: skipped (no ${HANDOFF_WEB_SRC_PREFIX}** changes)`);
+  }
+  if (handoff.eventRuntimeLibVerify) {
+    lines.push(
+      commandLine(
+        `Event-runtime lib suite (${HANDOFF_EVENT_RUNTIME_LIB_PREFIX}** changed)`,
+        handoff.eventRuntimeLibVerify,
+      ),
+    );
+    if (!handoff.eventRuntimeLibVerify.passed)
+      lines.push(fenceBlock(handoff.eventRuntimeLibVerify.tail));
+  } else if (handoff.diff?.ok) {
+    const why = handoff.ticketVerifyCoversEventRuntimeLibSuite
+      ? "ticket command already covers it"
+      : `no ${HANDOFF_EVENT_RUNTIME_LIB_PREFIX}** changes`;
+    lines.push(`- Event-runtime lib suite: skipped (${why})`);
   }
   if (handoff.diff?.ok) {
     const n = handoff.diff.files.length;
@@ -1874,6 +1911,7 @@ function verifyCompleted({
       runId: spec.runId,
       verification: null,
       repoVerify: null,
+      eventRuntimeLibVerify: null,
       webBuild: null,
       diff: null,
       ownedPaths,
@@ -1896,6 +1934,8 @@ function verifyCompleted({
         worktreeRecord.verify,
         { root: worktreePath },
       ),
+      ticketVerifyCoversEventRuntimeLibSuite:
+        ticketVerifyCoversEventRuntimeLibSuite(ticketCommand),
       reasonCode: null,
     };
     const refuse = (reasonCode, violation) => {
@@ -1938,6 +1978,9 @@ function verifyCompleted({
       base: worktreeRecord.base ?? null,
     });
     const files = handoff.diff.files ?? [];
+    const needsEventRuntimeLibVerify = files.some((file) =>
+      file.startsWith(HANDOFF_EVENT_RUNTIME_LIB_PREFIX),
+    );
     const needsWebBuild =
       files.some((file) => file.startsWith(HANDOFF_WEB_SRC_PREFIX)) &&
       existsSync(
@@ -2012,7 +2055,31 @@ function verifyCompleted({
       handoff.verification = handoff.repoVerify;
     }
 
-    // 3. tsc + vite for anything under event-runtime/web/src/** — the check
+    // 3. The full event-runtime/lib suite for a changed lib file. A ticket
+    // command that explicitly names lib (or a parent suite) already ran it.
+    if (
+      needsEventRuntimeLibVerify &&
+      !handoff.ticketVerifyCoversEventRuntimeLibSuite
+    ) {
+      const obs = runHandoffStep({
+        command: HANDOFF_EVENT_RUNTIME_LIB_VERIFY_COMMAND,
+        cwd: worktreePath,
+        worktreePath,
+        logPath: path.join(workspaceDir, ".verify.event-runtime-lib.log"),
+        timeoutMs: verifyTimeoutMs,
+      });
+      obs.source = "event_runtime_lib";
+      handoff.eventRuntimeLibVerify = obs;
+      if (!obs.passed) {
+        refuse(
+          "event_runtime_lib_verify_failed",
+          `event_runtime_lib_verify_failed: ${handoffWhy(obs)}`,
+        );
+      }
+      handoffChecks.push("event_runtime_lib_verify_passed");
+    }
+
+    // 4. tsc + vite for anything under event-runtime/web/src/** — the check
     //    #593 failed on, regardless of what the ticket's command covers.
     if (needsWebBuild) {
       const obs = runHandoffStep({

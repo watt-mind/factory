@@ -1327,6 +1327,124 @@ describe("worktree baseline verification (WM-334)", () => {
     expect(existsSync(path.join(dir, ".verify.ticket.log"))).toBe(false);
   });
 
+  function commitHandoffDiff(record, changedPath) {
+    record.base = "develop";
+    const git = (...args) => execFileSync("git", args, { cwd: record.path });
+    git("init", "-q", "-b", "develop");
+    git("config", "user.email", "t@t");
+    git("config", "user.name", "t");
+    writeFileSync(path.join(record.path, "README.md"), "base\n");
+    git("add", "-A");
+    git("commit", "-qm", "base");
+    git("update-ref", "refs/remotes/origin/develop", "HEAD");
+    git("checkout", "-qb", "feat/x");
+    const file = path.join(record.path, changedPath);
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, "changed\n");
+    git("add", "-A");
+    git("commit", "-qm", "work");
+  }
+
+  test("a lib change runs the full lib suite after a narrow ticket command and refuses its failure", () => {
+    const { dir, record } = worktreeWorkspace("repo-verify", null);
+    record.handoff = { verificationCommand: "ticket-narrow" };
+    commitHandoffDiff(record, "event-runtime/lib/changed.mjs");
+    const calls = [];
+
+    try {
+      verifyResult({
+        spec: dispatchSpec,
+        def: dispatchDef,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+        worktreeRecord: record,
+        runHandoffCommandFn: ({ command }) => {
+          calls.push(command);
+          return {
+            passed: command !== "bun test event-runtime/lib --timeout 20000",
+            exitCode:
+              command === "bun test event-runtime/lib --timeout 20000" ? 1 : 0,
+            output:
+              command === "bun test event-runtime/lib --timeout 20000"
+                ? "regression outside the focused ticket test"
+                : "ok",
+            sandbox: { tmpfsMb: 1024 },
+          };
+        },
+      });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.reasonCode).toBe("event_runtime_lib_verify_failed");
+    }
+    expect(calls).toEqual([
+      "repo-verify",
+      "ticket-narrow",
+      "bun test event-runtime/lib --timeout 20000",
+    ]);
+  });
+
+  test("a non-lib change skips the event-runtime lib backstop", () => {
+    const { dir, record } = worktreeWorkspace("repo-verify", null);
+    record.handoff = { verificationCommand: "ticket-narrow" };
+    commitHandoffDiff(record, "docs/note.md");
+    const calls = [];
+    const out = verifyResult({
+      spec: dispatchSpec,
+      def: dispatchDef,
+      registry,
+      workspaceDir: dir,
+      attempt: 1,
+      worktreeRecord: record,
+      runHandoffCommandFn: ({ command }) => {
+        calls.push(command);
+        return {
+          passed: true,
+          exitCode: 0,
+          output: "ok",
+          sandbox: { tmpfsMb: 1024 },
+        };
+      },
+    });
+
+    expect(out.kind).toBe("completed");
+    expect(calls).toEqual(["repo-verify", "ticket-narrow"]);
+  });
+
+  test("a ticket command that covers the lib suite does not duplicate the backstop", () => {
+    const { dir, record } = worktreeWorkspace("repo-verify", null);
+    record.handoff = {
+      verificationCommand:
+        "bun test event-runtime/lib --timeout 20000 && bun run lint",
+    };
+    commitHandoffDiff(record, "event-runtime/lib/changed.mjs");
+    const calls = [];
+    const out = verifyResult({
+      spec: dispatchSpec,
+      def: dispatchDef,
+      registry,
+      workspaceDir: dir,
+      attempt: 1,
+      worktreeRecord: record,
+      runHandoffCommandFn: ({ command }) => {
+        calls.push(command);
+        return {
+          passed: true,
+          exitCode: 0,
+          output: "ok",
+          sandbox: { tmpfsMb: 1024 },
+        };
+      },
+    });
+
+    expect(out.kind).toBe("completed");
+    expect(calls).toEqual([
+      "repo-verify",
+      "bun test event-runtime/lib --timeout 20000 && bun run lint",
+    ]);
+  });
+
   test("missing dependencies install before the injected step-1 sandbox runner", () => {
     const { dir, record } = worktreeWorkspace("step-1", null);
     writeFileSync(
