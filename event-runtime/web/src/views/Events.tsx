@@ -4,7 +4,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { retriggerEnvelope } from "../templates";
 import {
@@ -32,7 +32,6 @@ import {
 } from "../displayOptions";
 import { DisplayOptions, exportJson } from "../components/DisplayOptions";
 import { CustomCell } from "../components/CustomCell";
-import { EventEnvelopeView } from "../components/EventEnvelopeView";
 import {
   CausationGlyphs,
   EventHoverCard,
@@ -75,6 +74,7 @@ import {
   ListToolbar,
   ListPane,
   DetailPane,
+  JsonBlock,
   JumpLink,
   KV,
   ListEmpty,
@@ -91,6 +91,19 @@ import {
   shortId,
 } from "../components/ui";
 import { Button as PrimitiveButton } from "../components/ui";
+
+/**
+ * The envelope renderer pulls in the schema-derived ArtifactView (WM-455) for
+ * routes that declare an input view, and Events is an eager view with a
+ * budgeted entry chunk (vite.config.ts). Fetch it on demand, exactly as
+ * RunDetailBlocks does for the same renderer; until the chunk lands the raw
+ * JSON block stands in, which is what the detail pane showed before.
+ */
+const EventEnvelopeView = lazy(() =>
+  import("../components/EventEnvelopeView").then((m) => ({
+    default: m.EventEnvelopeView,
+  })),
+);
 
 function removeTokensFromQuery(
   filter: string,
@@ -1757,11 +1770,13 @@ export function Events({
           })()}
 
           <Section title="Envelope">
-            <EventEnvelopeView
-              envelope={sel.envelope}
-              inputView={inputViewByEventType.get(sel.type)}
-              now={now}
-            />
+            <Suspense fallback={<JsonBlock value={sel.envelope} />}>
+              <EventEnvelopeView
+                envelope={sel.envelope}
+                inputView={inputViewByEventType.get(sel.type)}
+                now={now}
+              />
+            </Suspense>
           </Section>
 
           <VerbError error={requeue.error ?? replay.error} />
