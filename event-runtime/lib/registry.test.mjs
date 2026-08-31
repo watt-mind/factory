@@ -446,7 +446,7 @@ describe("registry", () => {
     // Regenerated (#2149): added the editorial agent definitions, their event
     // types, and the editorial lifecycle edges.
     const expected =
-      "sha256:70b8b939eed642d22ddee2c94c7278a0f9c4fea7c737194038f0e145291847fa";
+      "sha256:4935065888a9ef13e0a7aee5e528d5366c190f94874b90a3274074eda7520640";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
