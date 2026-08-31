@@ -21,7 +21,19 @@
  * — the caller allocates an ephemeral port and passes it in, so the probe
  * never depends on a fixed local port being free. Prints `PROBE_OK` and exits
  * 0 when every invariant holds.
+ *
+ * Owning its state means owning its ENVIRONMENT too. A child process inherits
+ * only what the parent happens to export, and repo-verify runs the suite in
+ * the handoff sandbox with a scrubbed environment and no operator home
+ * mounted. So the probe establishes both facts it needs itself: the hermetic
+ * runtime home (via `test-helpers.mjs`, whose import sets FACTORY_EVENT_HOME —
+ * without it `runtimeHome` fail-closes on a test process) and a dispatch
+ * registry pinned to this checkout (below). Both used to arrive by accident
+ * from the developer box and were absent under repo-verify (#2031).
  */
+// Import first: its side effect must land before any runtime module reads the
+// environment.
+import "../test-helpers.mjs";
 import assert from "node:assert/strict";
 import {
   mkdirSync,
@@ -32,6 +44,7 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { policySnapshot } from "../lib/planner.mjs";
 import { claimNext, executeClaimed } from "../lib/worker.mjs";
 import { openDb } from "../lib/db.mjs";
 import { createRun, transition } from "../lib/lifecycle.mjs";
@@ -52,6 +65,29 @@ process.on("exit", () => {
   for (const dir of tmpDirs.reverse())
     rmSync(dir, { recursive: true, force: true });
 });
+
+// `config/repos.example.yaml` — the live registry fallback — pins `factory` to
+// `~/Develop/factory`, which the dispatch gate's owned-path closure check
+// reads. Repoint it at the checkout under test so the check runs against a
+// real factory tree here as well as on a developer box.
+const dispatchConfigSnapshot = () => {
+  const checkout = path.resolve(new URL("../..", import.meta.url).pathname);
+  const registryConfig = Bun.YAML.parse(
+    readFileSync(path.join(checkout, "config/repos.example.yaml"), "utf8"),
+  );
+  for (const entry of registryConfig?.repos ?? []) {
+    if (entry?.name === "factory") entry.path = checkout;
+  }
+  const root = tmp("evrt-local-notify-throw-config-");
+  mkdirSync(path.join(root, "config"), { recursive: true });
+  // JSON is valid YAML and the loader uses the same parser, so the example
+  // round-trips without a serializer.
+  writeFileSync(
+    path.join(root, "config", "repos.yaml"),
+    `${JSON.stringify(registryConfig, null, 2)}\n`,
+  );
+  return policySnapshot(root);
+};
 
 const registry = loadRegistry();
 const db = openDb(":memory:");
@@ -110,6 +146,7 @@ const localNotifyFetch = async (url, init) => {
 };
 const description = "## Owned Paths\n- event-runtime/lib/worker.mjs\n";
 const dispatch = {
+  configSnapshot: dispatchConfigSnapshot(),
   locksDir: tmp("evrt-local-notify-throw-locks-"),
   leasesDir: tmp("evrt-local-notify-throw-leases-"),
   fetchTicket: () => ({
