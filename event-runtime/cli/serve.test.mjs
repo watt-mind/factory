@@ -22,6 +22,7 @@ import {
   stopBounded,
 } from "./serve.mjs";
 import { openDb } from "../lib/db.mjs";
+import { startPlannerWorker } from "../lib/planner-worker.mjs";
 import { freePort, until } from "../lib/test-helpers-timing.mjs";
 import {
   CLI,
@@ -46,6 +47,26 @@ import {
 
 registerCliTmpCleanup();
 registerTestProcessCleanup(import.meta.url);
+
+test("planner worker exit is logged and exposed as dead", async () => {
+  const home = tmpDir("evrt-planner-exit-");
+  const logs = [];
+  const planner = startPlannerWorker({
+    eventHome: home,
+    log: (line) => logs.push(line),
+  });
+  try {
+    await planner.worker.terminate();
+    expect(planner.state()).toMatchObject({ alive: false, stale: true });
+    expect(
+      logs.some((line) =>
+        /^planner worker thread exited with code \d+$/.test(line),
+      ),
+    ).toBe(true);
+  } finally {
+    await planner.stop();
+  }
+});
 
 /**
  * Every live `serve --adapter-override fake` whose cwd is `cwd`, by pid. Linux

@@ -542,13 +542,48 @@ function resolveNow(now) {
 }
 
 // The web proxy gives /health 10 seconds. The planner tick runs its Linear
-// CLI reads synchronously on the serve event loop, so a single stalled child
-// must abort well inside that budget or serve wedges (#1835 AC3). The env
-// override exists for the serve regression test, not for operators.
+// CLI reads synchronously on the serve event loop, so all Linear reads in one
+// pass share this wall-clock budget and must finish well inside it or serve
+// wedges (#1835 AC3). Each child receives only the remaining pass time. The
+// env override exists for the serve regression test, not for operators.
 const LINEAR_READ_TIMEOUT_MS = (() => {
   const n = Number(process.env.FACTORY_LINEAR_READ_TIMEOUT_MS);
   return Number.isFinite(n) && n > 0 ? n : 8_000;
 })();
+
+class LinearReadBudgetExceededError extends Error {
+  constructor() {
+    super("linear_read_budget_exhausted");
+    this.name = "LinearReadBudgetExceededError";
+  }
+}
+
+function createLinearReadBudget({
+  now = Date.now,
+  timeoutMs = LINEAR_READ_TIMEOUT_MS,
+} = {}) {
+  const clock = typeof now === "function" ? now : () => now;
+  return { deadline: clock() + timeoutMs, now: clock };
+}
+
+function linearReadTimeout(readBudget) {
+  if (!readBudget) return LINEAR_READ_TIMEOUT_MS;
+  const remaining = Math.floor(readBudget.deadline - readBudget.now());
+  if (remaining <= 0) throw new LinearReadBudgetExceededError();
+  return Math.min(LINEAR_READ_TIMEOUT_MS, remaining);
+}
+
+function isLinearReadDeferred(err) {
+  return (
+    isLinearRateLimited(err) || err instanceof LinearReadBudgetExceededError
+  );
+}
+
+function linearReadDeferredReason(err) {
+  return err instanceof LinearReadBudgetExceededError
+    ? "linear_read_budget_exhausted"
+    : "linear_rate_limited";
+}
 
 function linearCli() {
   // Test seam: point the planner's ticket reads at a stand-in CLI.
@@ -592,6 +627,7 @@ export function createLinearReadCache() {
     rateLimitError: null,
     rateLimitedUntil: 0,
     inFlightCalls: 0,
+    linearReadBudget: null,
   };
 }
 
@@ -632,6 +668,10 @@ export function wrapLinearReads(
     cache.rateLimitError = null;
     cache.rateLimitedUntil = 0;
   };
+  const throwIfReadBudgetExhausted = (repo) => {
+    if (!repoUsesLinear(repo)) return;
+    linearReadTimeout(cache.linearReadBudget);
+  };
   const remember = (err) => {
     if (!isLinearRateLimited(err)) return;
     cache.rateLimitError = err;
@@ -653,8 +693,9 @@ export function wrapLinearReads(
       // control planes is a different lookup.
       const key = repo ? `${repo}::${id}` : id;
       if (cache.tickets.has(key)) return cache.tickets.get(key);
+      throwIfReadBudgetExhausted(repo);
       try {
-        const value = fetchTicket(id, repo);
+        const value = fetchTicket(id, repo, cache.linearReadBudget);
         cache.tickets.set(key, value);
         return value;
       } catch (err) {
@@ -662,12 +703,13 @@ export function wrapLinearReads(
         throw err;
       }
     },
-    fetchViewer: (repo) => {
+    fetchViewer: (repo, ...args) => {
       throwIfLimited(repo);
       const key = repo ?? "__default__";
       if (cache.viewers.has(key)) return cache.viewers.get(key);
+      throwIfReadBudgetExhausted(repo);
       try {
-        const value = fetchViewer(repo);
+        const value = fetchViewer(repo, ...args, cache.linearReadBudget);
         cache.viewers.set(key, value);
         return value;
       } catch (err) {
@@ -681,9 +723,10 @@ export function wrapLinearReads(
       const hit = cache.inFlight.get(key);
       const at = resolveNow();
       if (hit && at - hit.at < IN_FLIGHT_CACHE_TTL_MS) return hit.value;
+      throwIfReadBudgetExhausted(repo);
       try {
         cache.inFlightCalls += 1;
-        const value = fetchInFlight(repo);
+        const value = fetchInFlight(repo, cache.linearReadBudget);
         cache.inFlight.set(key, { value, at });
         return value;
       } catch (err) {
@@ -694,7 +737,7 @@ export function wrapLinearReads(
   };
 }
 
-function fetchTicketDefault(ticketId, repo) {
+function fetchTicketDefault(ticketId, repo, readBudget = null) {
   try {
     // Pass --repo so tools/ticket.mjs resolves the ticket's OWN control plane
     // (linear for CLNT repos, github for factory) instead of falling back to
@@ -707,10 +750,12 @@ function fetchTicketDefault(ticketId, repo) {
       execFileSync("bun", args, {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
-        timeout: LINEAR_READ_TIMEOUT_MS,
+        timeout: linearReadTimeout(readBudget),
       }),
     );
   } catch (err) {
+    if (readBudget && readBudget.deadline - readBudget.now() <= 0)
+      throw new LinearReadBudgetExceededError();
     throwIfLinearCliRateLimited(err);
     const stderr = String(err?.stderr ?? "");
     if (stderr.includes("no such issue")) return null;
@@ -721,7 +766,11 @@ function fetchTicketDefault(ticketId, repo) {
   }
 }
 
-function fetchViewerDefault(repoName, configSnapshot = null) {
+function fetchViewerDefault(
+  repoName,
+  configSnapshot = null,
+  readBudget = null,
+) {
   try {
     const repo = repoName
       ? getRepo(snapshotRepos(configSnapshot), repoName)
@@ -737,7 +786,7 @@ function fetchViewerDefault(repoName, configSnapshot = null) {
     const out = execFileSync("bun", args, {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
-      timeout: LINEAR_READ_TIMEOUT_MS,
+      timeout: linearReadTimeout(readBudget),
     });
     const parsed = JSON.parse(out);
     if (repo?.controlPlane === "github") {
@@ -750,6 +799,8 @@ function fetchViewerDefault(repoName, configSnapshot = null) {
     }
     return parsed?.viewer ?? null;
   } catch (err) {
+    if (readBudget && readBudget.deadline - readBudget.now() <= 0)
+      throw new LinearReadBudgetExceededError();
     throwIfLinearCliRateLimited(err);
     const stderr = String(err?.stderr ?? "");
     throw new Error(
@@ -881,7 +932,7 @@ function ownedPathsClosureDetails(repoName, repo, ticketDescription) {
   });
 }
 
-function fetchInFlightDefault(repoConfig) {
+function fetchInFlightDefault(repoConfig, readBudget = null) {
   try {
     // --repo so ticket.mjs resolves this repo's own control plane (a Linear
     // team/project query against the GitHub plane fails as a project-title
@@ -899,11 +950,13 @@ function fetchInFlightDefault(repoConfig) {
     const out = execFileSync("bun", args, {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
-      timeout: LINEAR_READ_TIMEOUT_MS,
+      timeout: linearReadTimeout(readBudget),
     });
     const rows = JSON.parse(out);
     return Array.isArray(rows) ? rows : [];
   } catch (err) {
+    if (readBudget && readBudget.deadline - readBudget.now() <= 0)
+      throw new LinearReadBudgetExceededError();
     throwIfLinearCliRateLimited(err);
     const stderr = String(err?.stderr ?? "");
     throw new Error(
@@ -2390,14 +2443,16 @@ export function planEvent(
               },
             );
           } catch (err) {
-            if (!isLinearRateLimited(err)) throw err;
+            if (!isLinearReadDeferred(err)) throw err;
+            const reason = linearReadDeferredReason(err);
             worktreeEligibility = {
               ok: false,
-              rateLimited: true,
+              linearReadDeferred: true,
+              reason,
               resetAt: err.resetAt ?? null,
               refusal: {
                 decision: "retry_later",
-                reason: "linear_rate_limited",
+                reason,
                 detail: err.message,
               },
             };
@@ -2406,8 +2461,9 @@ export function planEvent(
       }
     }
   }
-  if (worktreeEligibility?.rateLimited) {
-    const detail = worktreeEligibility.refusal?.detail ?? "linear_rate_limited";
+  if (worktreeEligibility?.linearReadDeferred) {
+    const reason = worktreeEligibility.reason;
+    const detail = worktreeEligibility.refusal?.detail ?? reason;
     try {
       db.query(
         `UPDATE events SET last_plan_error = ? WHERE source = ? AND event_id = ?`,
@@ -2417,7 +2473,7 @@ export function planEvent(
     }
     return {
       decision: "refused",
-      reason: "linear_rate_limited",
+      reason,
       resetAt: worktreeEligibility.resetAt ?? null,
     };
   }
@@ -3106,6 +3162,12 @@ export function planAdmittedEvents(db, registry, opts = {}) {
     .all();
   const configSnapshot = opts.configSnapshot ?? policySnapshot();
   const cache = opts.linearReadCache ?? createLinearReadCache();
+  cache.linearReadBudget =
+    opts.linearReadBudget ??
+    createLinearReadBudget({
+      now: opts.linearReadClock ?? Date.now,
+      timeoutMs: opts.linearReadTimeoutMs ?? LINEAR_READ_TIMEOUT_MS,
+    });
   // Production reads the persisted clock once per planner pass; an injected
   // budget keeps the rate-limit regression tests deterministic. The cache
   // path itself is scoped by FACTORY_EVENT_HOME (tools/ticket.mjs), so test
@@ -3140,7 +3202,11 @@ export function planAdmittedEvents(db, registry, opts = {}) {
   for (const { source, event_id: eventId, type } of rows) {
     try {
       const outcome = planEvent(db, registry, { source, eventId }, planOpts);
-      if (outcome?.reason === "linear_rate_limited") continue;
+      if (
+        outcome?.reason === "linear_rate_limited" ||
+        outcome?.reason === "linear_read_budget_exhausted"
+      )
+        continue;
       if (
         type === "factory.dispatch.requested" &&
         outcome?.decision === "noop" &&

@@ -432,6 +432,7 @@ export async function handleIntakeApiRoute({
         lastMs: tickStats?.lastMs ?? 0,
         overruns: tickStats?.overruns ?? 0,
       },
+      planner: tickStats?.planner ?? null,
     });
   }
 
