@@ -1030,6 +1030,15 @@ export function composeHandoffVerification(handoff) {
   }
   if (handoff.repoVerify && handoff.repoVerify !== primary)
     lines.push(commandLine("Repo verify", handoff.repoVerify));
+  if (handoff.repoVerify?.executionContext) {
+    lines.push(`- Repo verify context: ${handoff.repoVerify.executionContext}`);
+    const failingTests = handoff.repoVerify.failingTests ?? [];
+    lines.push(
+      failingTests.length > 0
+        ? `- Repo verify failing tests: ${failingTests.map((name) => `\`${name}\``).join(", ")}`
+        : "- Repo verify failing tests: none parseable",
+    );
+  }
   lines.push(
     ...optionalStepLines({
       label: "Web build",
@@ -1143,6 +1152,24 @@ export const HANDOFF_FAILURE_OUTPUT_MAX_CHARS = 2 * 1024;
 // as the failure (WM-918's own registry test says "reads bun (fail) and ✗").
 const REPO_VERIFY_TEST_FAILURE_LINE = /^\s*(?:\(fail\)|✗)/i;
 const REPO_VERIFY_ERROR_LINE = /\berror\b/i;
+
+/**
+ * Extract runner-reported failing test names for the handoff record. Keeping
+ * this separate from the diagnostic excerpt makes the original observation
+ * useful to triage without asking it to parse a truncated failure message.
+ */
+export function repoVerifyFailingTests(output) {
+  return [
+    ...new Set(
+      stripAnsi(output)
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => REPO_VERIFY_TEST_FAILURE_LINE.test(line))
+        .map((line) => line.replace(REPO_VERIFY_TEST_FAILURE_LINE, "").trim())
+        .filter(Boolean),
+    ),
+  ];
+}
 
 function boundedDiagnostic(lines) {
   const excerpt = [];
@@ -2047,6 +2074,12 @@ function verifyCompleted({
       obs.source = "repo_verify";
       handoff.repoVerify = obs;
       if (!obs.passed) {
+        // This is deliberately failure-only: successful repo verification
+        // retains its existing pass path and emits only repo_verify_passed.
+        // The marker lets triage distinguish this observation from a later
+        // clean-checkout reproduction at the same commit.
+        obs.executionContext = "dispatch_worktree";
+        obs.failingTests = repoVerifyFailingTests(obs.output);
         const baselineStillRed =
           !obs.timedOut &&
           matchesRedBaseline(worktreeRecord.baseline, obs.output);

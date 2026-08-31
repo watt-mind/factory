@@ -1080,6 +1080,10 @@ describe("worktree baseline verification (WM-334)", () => {
       expect(err.violations[0]).toContain("error: expected 400, received 200");
       // A passing test whose name contains "(fail)" is not a failure marker.
       expect(err.violations[0]).not.toContain("(pass) timing-test registry");
+      expect(err.handoff.repoVerify.executionContext).toBe("dispatch_worktree");
+      expect(err.handoff.repoVerify.failingTests).toEqual([
+        "totals > rejects an invalid total",
+      ]);
     }
 
     const verifyLog = readFileSync(path.join(dir, ".verify.log"), "utf8");
@@ -1923,6 +1927,10 @@ describe("worktree baseline verification (WM-334)", () => {
         expect(err.violations).toEqual([
           "repo_verify_failed: timed out after 25ms",
         ]);
+        expect(err.handoff.repoVerify.executionContext).toBe(
+          "dispatch_worktree",
+        );
+        expect(err.handoff.repoVerify.failingTests).toEqual([]);
         expect(Date.now() - started).toBeLessThan(1_000);
       }
     } finally {
@@ -2865,6 +2873,24 @@ describe("handoff verification helpers (WM-718)", () => {
     expect(lines.filter((l) => l.startsWith("- Verification:"))).toHaveLength(
       1,
     );
+  });
+
+  test("composeHandoffVerification identifies a failed repo verify's worktree and tests", () => {
+    const body = composeHandoffVerification({
+      repoVerify: {
+        source: "repo_verify",
+        command: "bun test event-runtime/lib",
+        exitCode: 1,
+        passed: false,
+        tail: "(fail) x > y",
+        executionContext: "dispatch_worktree",
+        failingTests: ["x > y"],
+      },
+      diff: { ok: false, error: "base unresolved" },
+    });
+
+    expect(body).toContain("- Repo verify context: dispatch_worktree");
+    expect(body).toContain("- Repo verify failing tests: `x > y`");
   });
 
   test("composeHandoffVerification reports optional steps as unknown when the diff is unavailable", () => {
