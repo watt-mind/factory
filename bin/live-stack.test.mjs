@@ -313,7 +313,10 @@ function runStack(fixture, args, extraEnv = {}) {
 const spawnFor = (spawns, pidfile) =>
   spawns.find((line) => line.includes(`pid=${pidfile}`)) ?? "";
 
-async function startLockOwningGhAppProcess(fixture) {
+async function startLockOwningGhAppProcess(
+  fixture,
+  daemonArgument = "--daemon",
+) {
   const script = path.join(
     fixture.root,
     "lib",
@@ -323,7 +326,7 @@ async function startLockOwningGhAppProcess(fixture) {
   mkdirSync(path.dirname(script), { recursive: true });
   writeFileSync(script, "setInterval(() => {}, 60_000);\n", "utf8");
   const child = Bun.spawn({
-    cmd: [process.execPath, script, "--daemon"],
+    cmd: [process.execPath, script, daemonArgument],
     stdout: "ignore",
     stderr: "ignore",
   });
@@ -334,7 +337,7 @@ async function startLockOwningGhAppProcess(fixture) {
       stdout: "pipe",
       stderr: "ignore",
     }).stdout.toString();
-    if (command.trim().endsWith(`${script} --daemon`)) {
+    if (command.trim().endsWith(`${script} ${daemonArgument}`)) {
       writeFileSync(
         path.join(fixture.root, "gh-app-token.json.lock"),
         `${child.pid}\n`,
@@ -384,6 +387,57 @@ test("`up` adopts a lock-owning GitHub App daemon when its pidfile is missing", 
     await stopProcess(daemon);
     f.cleanup();
   }
+});
+
+test("`up` adopts a lock-owning --daemon-held GitHub App process", async () => {
+  const f = makeFixture();
+  const daemon = await startLockOwningGhAppProcess(f, "--daemon-held");
+  try {
+    const r = runStack(f, ["up"], {
+      FACTORY_GH_APP_ID: "test-app",
+      FACTORY_GH_APP_PRIVATE_KEY_PATH: "/tmp/test-key",
+      FACTORY_HOME: f.root,
+      FACTORY_ROOT: f.root,
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(
+      `GitHub App token daemon already running (adopted pid ${daemon.pid})`,
+    );
+    expect(readFileSync(path.join(f.runDir, "gh-app-auth.pid"), "utf8")).toBe(
+      `${daemon.pid}\n`,
+    );
+    expect(spawnFor(r.spawns, "gh-app-auth.pid")).toBe("");
+  } finally {
+    await stopProcess(daemon);
+    f.cleanup();
+  }
+});
+
+test("gh_app_daemon_command_matches accepts --daemon and --daemon-held", () => {
+  const repo = path.resolve(import.meta.dir, "..");
+  const script = `${repo}/lib/control-plane/gh-app-auth.mjs`;
+  const result = Bun.spawnSync({
+    cmd: [
+      "bash",
+      "-uc",
+      `REPO="$2"
+# Isolate the matcher + the release-root helper it calls.
+eval "$(sed -n '/^gh_app_release_root()/,/^}/p; /^gh_app_daemon_command_matches()/,/^}/p' "$1")"
+gh_app_daemon_command_matches "bun $3 --daemon"
+gh_app_daemon_command_matches "bun $3 --daemon-held"
+! gh_app_daemon_command_matches "bun $3 --daemon-other"
+! gh_app_daemon_command_matches "bun $3 --daemonize"
+`,
+      "bash",
+      LIVE_STACK,
+      repo,
+      script,
+    ],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(result.stderr.toString()).toBe("");
+  expect(result.exitCode).toBe(0);
 });
 
 test("untracking the only pidfile remains safe under nounset", () => {

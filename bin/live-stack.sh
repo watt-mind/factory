@@ -313,7 +313,7 @@ gh_app_release_root() {
 
 gh_app_daemon_command_matches() { # <ps command>
   local command="$1" script release_root relative release_id
-  [[ "$command" =~ ^([^[:space:]]*/)?bun[[:space:]]+([^[:space:]]+)[[:space:]]+--daemon$ ]] \
+  [[ "$command" =~ ^([^[:space:]]*/)?bun[[:space:]]+([^[:space:]]+)[[:space:]]+--daemon(-held)?$ ]] \
     || return 1
   script="${BASH_REMATCH[2]}"
   [[ "$script" == "$REPO/lib/control-plane/gh-app-auth.mjs" ]] && return 0
@@ -366,6 +366,15 @@ wait_for_started_gh_app_daemon() { # <spawned pid>
     owner="$(cat "$(gh_app_lock_file)" 2>/dev/null || true)"
     if [[ "$owner" == "$started_pid" ]] \
       && pid_alive "$RUN_DIR/gh-app-auth.pid"; then
+      return 0
+    fi
+    # Wrapper still alive: lock file now names the --daemon-held grandchild
+    # that actually holds flock. Rewrite the pidfile so down/cleanup signal
+    # the lock owner, but keep tracking so a later up-failure still stops it.
+    if pid_alive "$RUN_DIR/gh-app-auth.pid" \
+      && [[ "$owner" =~ ^[0-9]+$ ]] \
+      && gh_app_daemon_pid_is_valid "$owner"; then
+      printf '%s\n' "$owner" >"$RUN_DIR/gh-app-auth.pid"
       return 0
     fi
     if winner="$(gh_app_daemon_pid)"; then
