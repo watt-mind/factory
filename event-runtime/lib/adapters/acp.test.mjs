@@ -40,6 +40,7 @@ import {
   registerTestProcessCleanup,
   trackProcessGroupForPid,
 } from "../test-helpers-process.mjs";
+import { until } from "../test-helpers-timing.mjs";
 
 registerTestProcessCleanup(import.meta.url);
 
@@ -970,31 +971,32 @@ describe("execute against a fake ACP agent", () => {
         ACP_FAKE_ERROR_FILE: fixtureErrorFile,
       },
     });
-    let pid = null;
-    for (let i = 0; i < 200; i += 1) {
-      if (existsSync(pidFile)) {
-        const candidate = Number(readFileSync(pidFile, "utf8"));
-        if (Number.isInteger(candidate) && candidate > 0) {
-          pid = candidate;
-          trackProcessGroupForPid(pid);
-          break;
-        }
-      }
-      await new Promise((r) => setTimeout(r, 10));
-    }
-    if (pid === null) {
-      let outcomeError = null;
+    let pid;
+    try {
+      pid = await until(
+        "ACP grandchild PID file",
+        () => {
+          if (!existsSync(pidFile)) return null;
+          const candidate = Number(readFileSync(pidFile, "utf8"));
+          return Number.isInteger(candidate) && candidate > 0
+            ? candidate
+            : null;
+        },
+        { timeoutMs: 2_000, everyMs: 10 },
+      );
+      trackProcessGroupForPid(pid);
+    } catch (error) {
       try {
         await pending;
-      } catch (error) {
-        outcomeError = error;
+      } catch {
+        // The polling error below identifies the missing fixture signal.
       }
       const fixtureError = existsSync(fixtureErrorFile)
         ? readFileSync(fixtureErrorFile, "utf8")
         : "fixture wrote no diagnostic";
       throw new Error(
         `ACP grandchild fixture did not write ${pidFile}: ${fixtureError}`,
-        { cause: outcomeError },
+        { cause: error },
       );
     }
     expect(pid).toBeGreaterThan(0);
