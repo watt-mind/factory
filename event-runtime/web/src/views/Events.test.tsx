@@ -93,6 +93,36 @@ function ticketSchemaRegistry(eventType: string): AgentsView {
   });
 }
 
+/**
+ * Two agents declare the same event type. The top-level route names the
+ * agent with no input view; the other agent ships one. The fallback must
+ * not steal the type.
+ */
+function twoAgentsOneEventTypeRegistry(): AgentsView {
+  return createAgentsFixture({
+    agents: [
+      {
+        ref: "routed-agent@1",
+        eventTypes: [{ type: "shared.event" }],
+      },
+      {
+        ref: "other-agent@1",
+        eventTypes: [{ type: "shared.event" }],
+        outputView: {
+          schemaVersion: "factory.artifact-view/v1",
+          title: "Wrong agent output",
+          input: {
+            title: "Stolen input view",
+            summary: "/repo",
+            sections: [],
+          },
+        },
+      },
+    ] as unknown as AgentsView["agents"],
+    eventTypes: [{ type: "shared.event", agent: "routed-agent@1" }],
+  });
+}
+
 describe("Events component harness: selection & detail view", () => {
   test("successful detail replay is one-shot until a different event is selected", async () => {
     const replay = mock(async (_envelope: unknown) => ({
@@ -278,6 +308,40 @@ describe("Events component harness: selection & detail view", () => {
             r.getByRole("link", { name: "FOO-12" }).getAttribute("href"),
           ).toBe("#/tickets/FOO-12"),
         );
+      },
+    );
+  });
+
+  test("does not attach another agent's input view to a type already claimed by a top-level route", async () => {
+    const event = stubEvent("evt_claimed_type", "admitted", {
+      type: "shared.event",
+      envelope: {
+        schemaVersion: "factory.event/v1",
+        eventId: "evt_claimed_type",
+        type: "shared.event",
+        source: "github",
+        payload: { repo: "watt-mind/factory" },
+      },
+    });
+
+    await withApi(
+      {
+        events: async () => ({ events: [event] }),
+        status: async () => createStatusFixture(),
+        agents: async () => twoAgentsOneEventTypeRegistry(),
+      },
+      async () => {
+        const r = renderEvents({
+          focusEvent: { source: "github", eventId: event.eventId },
+        });
+        await waitFor(() =>
+          expect(
+            r
+              .getByRole("link", { name: "watt-mind/factory" })
+              .getAttribute("href"),
+          ).toBe("https://github.com/watt-mind/factory"),
+        );
+        expect(r.queryByText("Stolen input view")).toBeNull();
       },
     );
   });

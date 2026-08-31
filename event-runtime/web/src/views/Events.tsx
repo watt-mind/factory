@@ -541,6 +541,7 @@ export function Events({
     const registry = agentsQ.data;
     const byRef = new Map(registry?.agents.map((agent) => [agent.ref, agent]));
     const views = new Map<string, ArtifactView>();
+    const claimed = new Set<string>();
     const add = (type: string, agent: AgentDef | undefined) => {
       const input = agent?.outputView?.input;
       if (input && agent?.outputView) {
@@ -551,11 +552,16 @@ export function Events({
         });
       }
     };
-    for (const route of registry?.eventTypes ?? [])
+    // A top-level route claims the type even when the named agent has no
+    // input view. The per-agent fallback must not then attach a different
+    // agent's presentation to a type the index already assigned.
+    for (const route of registry?.eventTypes ?? []) {
+      claimed.add(route.type);
       add(route.type, route.agent ? byRef.get(route.agent) : undefined);
+    }
     for (const agent of registry?.agents ?? []) {
       for (const route of agent.eventTypes) {
-        if (!views.has(route.type)) add(route.type, agent);
+        if (!claimed.has(route.type)) add(route.type, agent);
       }
     }
     return views;

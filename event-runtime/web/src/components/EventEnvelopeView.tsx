@@ -65,21 +65,26 @@ export function EventEnvelopeView({
     saveArtifactRaw(next);
     setRawState(next);
   };
-  const payload = asRecord(envelope)?.payload ?? envelope;
+  // Payload is only a nested record. Falling back to the envelope itself
+  // would print schemaVersion / eventId / type as if they were payload fields.
+  const payload = asRecord(asRecord(envelope)?.payload);
 
-  if (inputView) {
+  if (inputView && payload) {
     return (
       <ArtifactPanel
         artifact={payload}
         view={inputView}
         raw={raw}
         onRawChange={setRaw}
+        rawFallback={<JsonBlock value={envelope} />}
       />
     );
   }
 
-  const fields = asRecord(payload);
-  if (!fields) return <JsonBlock value={envelope} />;
+  // No payload record: the envelope is the thing to read, not a field list
+  // that relabels metadata as payload.
+  if (!payload) return <JsonBlock value={envelope} />;
+  const fields = payload;
   const repo = text(fields.repo);
   const runId = text(fields.runId);
 
@@ -91,7 +96,7 @@ export function EventEnvelopeView({
       {raw ? (
         <JsonBlock value={envelope} />
       ) : (
-        <dl className="space-y-1.5 text-[12px]">
+        <dl className="space-y-1.5 text-[12px]" aria-label="Payload">
           {Object.entries(fields).map(([key, value]) => (
             <div
               key={key}
@@ -130,6 +135,9 @@ function FieldValue({
   runId: string | null;
   now: number;
 }) {
+  if (value === undefined) {
+    return <span className="text-(--text-faint)">—</span>;
+  }
   const valueText = text(value);
   if (valueText === null) {
     return (

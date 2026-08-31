@@ -74,4 +74,73 @@ describe("EventEnvelopeView", () => {
     expect(r.getByText("Routed input")).toBeTruthy();
     expect(r.getByText("watt-mind/factory")).toBeTruthy();
   });
+
+  test("Raw prints the envelope in both the semantic and input-view branches", () => {
+    const envelope = {
+      schemaVersion: "factory.event/v1",
+      eventId: "evt_raw_scope",
+      type: "demo.type",
+      payload: { repo: "watt-mind/factory" },
+    };
+    const inputView = {
+      schemaVersion: "factory.artifact-view/v1" as const,
+      title: "Routed input",
+      summary: "/repo",
+      sections: [],
+    };
+
+    for (const view of [undefined, inputView]) {
+      const r = renderWithClient(
+        <EventEnvelopeView
+          now={Date.now()}
+          envelope={envelope}
+          inputView={view}
+        />,
+      );
+      fireEvent.click(r.getByRole("button", { name: "Raw" }));
+      const rawJson =
+        Array.from(r.container.querySelectorAll("pre"))
+          .map((el) => el.textContent ?? "")
+          .find((text) => text.includes("evt_raw_scope")) ?? "";
+      expect(rawJson).toContain('"schemaVersion"');
+      expect(rawJson).toContain('"evt_raw_scope"');
+      expect(rawJson).toContain('"demo.type"');
+      cleanup();
+      localStorage.clear();
+    }
+  });
+
+  test("a payload-less envelope is JSON, not a field list of envelope metadata", () => {
+    const r = renderWithClient(
+      <EventEnvelopeView
+        now={Date.now()}
+        envelope={{
+          schemaVersion: "factory.event/v1",
+          eventId: "evt_no_payload",
+          type: "demo.type",
+        }}
+      />,
+    );
+
+    expect(r.container.querySelector("dl")).toBeNull();
+    expect(r.queryByRole("button", { name: "Raw" })).toBeNull();
+    expect(r.container.querySelector("pre")?.textContent).toContain(
+      "evt_no_payload",
+    );
+  });
+
+  test("undefined payload fields render an em dash rather than an empty cell", () => {
+    const r = renderWithClient(
+      <EventEnvelopeView
+        now={Date.now()}
+        envelope={{
+          payload: { repo: "watt-mind/factory", optional: undefined },
+        }}
+      />,
+    );
+
+    const row = r.getByText("optional").closest("div");
+    expect(row?.textContent).toContain("—");
+    expect(row?.querySelector("dd")?.textContent).toBe("—");
+  });
 });
