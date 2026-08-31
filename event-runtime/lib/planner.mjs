@@ -31,6 +31,11 @@ import { liveWorkerLeases } from "../../lib/worker-leases.mjs";
 import { findArtifact, pinRunArtifact } from "./artifacts.mjs";
 import { canonicalJson, hashBytes, hashJson } from "./canonical.mjs";
 import { resolveConfigPath } from "./config.mjs";
+import {
+  DEFAULT_DISPATCH_SECURITY,
+  loadRuntimePolicy,
+  policyDispatchSecurity,
+} from "./runtime-policy.mjs";
 import { isTrustedAssociation } from "./triage.mjs";
 import { listMemos } from "./memos.mjs";
 import {
@@ -824,20 +829,8 @@ export function policyOwnedPathsCollision(root = reposRoot(), snapshot = null) {
   return value === "advisory" ? "advisory" : DEFAULT_OWNED_PATHS_COLLISION;
 }
 
-/**
- * Whether a `type:security` ticket may enter the dispatch loop (WM-1060).
- * `excluded` (the fail-closed default) keeps the historical behavior: only an
- * operator-sourced dispatch may work a security ticket. `auto` lets the normal
- * work loop dispatch them too — safe because the merge lane still refuses to
- * merge any PR whose ticket holds a security flag (merge-plan §escalation), so
- * a security ticket becomes a PR held for human merge, never an auto-merge. The
- * `escalate_paths` sensitive-file gate is unaffected and still applies.
- */
-export const DEFAULT_DISPATCH_SECURITY = "excluded";
-export function policyDispatchSecurity(root = reposRoot(), snapshot = null) {
-  const value = loadRuntimePolicy(root, snapshot)?.dispatch?.security_tickets;
-  return value === "auto" ? "auto" : DEFAULT_DISPATCH_SECURITY;
-}
+/** Re-exported from ./runtime-policy.mjs (single source of truth). */
+export { DEFAULT_DISPATCH_SECURITY, policyDispatchSecurity };
 
 /** Whether unattended dispatch admission is temporarily paused by an operator. */
 export const DEFAULT_DISPATCH_PAUSED = false;
@@ -957,18 +950,6 @@ function loadRepoEscalatePaths(repoName, root = reposRoot(), snapshot = null) {
     );
   }
   return [...new Set(repo.escalatePaths.map((item) => item.trim()))];
-}
-
-function loadRuntimePolicy(root = reposRoot(), snapshot = null) {
-  if (snapshot) return snapshot.policy;
-  const file = resolveConfigPath("policy", { root });
-  if (!existsSync(file)) return null;
-  try {
-    const parsed = Bun.YAML.parse(readFileSync(file, "utf8"));
-    return parsed && typeof parsed === "object" ? parsed : null;
-  } catch {
-    return null;
-  }
 }
 
 function defaultBudgetRefusal(root = reposRoot(), snapshot = null) {
