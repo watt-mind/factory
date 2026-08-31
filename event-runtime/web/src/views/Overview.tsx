@@ -72,16 +72,9 @@ const OverviewNeedsYou = lazy(async () => {
     onAck,
     onMore,
   }: OverviewNeedsYouProps) {
-    // The ledger defaults to oldest-first, but Overview is a live attention
-    // surface: preserve its shared triage groups while leading with fresh work.
-    const groups = useMemo(
-      () =>
-        groupItems(items).map(({ group, items: groupItems }) => ({
-          group,
-          items: [...groupItems].reverse(),
-        })),
-      [items],
-    );
+    // groupItems() already orders each group newest-first, which is what this
+    // live attention surface wants: lead with fresh work.
+    const groups = useMemo(() => groupItems(items), [items]);
     const navigable = useMemo(
       () => [
         ...groups.flatMap(({ items: groupItems }) =>
