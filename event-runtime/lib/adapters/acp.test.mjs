@@ -1,5 +1,6 @@
 import { tmpDir } from "../../test-support/tmp.mjs?file=event-runtime-lib-adapters-acp-test-mjs";
 import { afterAll, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import {
   existsSync,
@@ -998,5 +999,33 @@ describe("execute against a fake ACP agent", () => {
       alive = false;
     }
     expect(alive).toBe(false);
+  });
+});
+
+describe("acp.mjs standalone import (GH-1939)", () => {
+  test("loads and initializes with no prior claude.mjs import in the module graph", () => {
+    const acpPath = path.resolve(import.meta.dir, "acp.mjs");
+    const home = tmpDir("evrt-acp-standalone-home-");
+    const env = { ...process.env, FACTORY_EVENT_HOME: home };
+    delete env.FACTORY_ROOT;
+    delete env.FACTORY_REPOS_ROOT;
+    delete env.FACTORY_CONTROL_API_TOKEN;
+
+    // Import acp.mjs first and alone: no prior claude.mjs load anywhere in
+    // this process's module graph. Before GH-1939 this deadlocked/threw
+    // because acp.mjs pulled KILL_GRACE_MS (and friends) from claude.mjs,
+    // which in turn depends back on the adapter registry during its own
+    // initialization — a cycle. acp.mjs must be a self-contained leaf.
+    const result = spawnSync(
+      "bun",
+      [
+        "-e",
+        `const m = await import(${JSON.stringify(acpPath)}); if (m.KILL_GRACE_MS !== 30_000) { console.error("KILL_GRACE_MS=" + m.KILL_GRACE_MS); process.exit(1); } console.log("ok");`,
+      ],
+      { encoding: "utf8", env },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe("ok");
   });
 });
