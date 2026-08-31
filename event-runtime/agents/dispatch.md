@@ -119,8 +119,11 @@ new ticket.
 
    Before the critic navigates, verify the fixture with
    `curl -fsS http://127.0.0.1:<web>/api/runs`: it must return HTTP 200 and a
-   `runs` payload. The critic must then observe the same successful
-   `GET /api/runs` and live run data in the browser before issuing `SHIP` or
+   `runs` payload. If the curl cannot connect (connection refused or no
+   listener), or `bin/worktree-up.sh` reported the web UI unavailable, report
+   `blocked — worktree web UI unavailable (baseline web build failed)` in the
+   Handoff and do not launch the critic. The critic must then observe the same
+   successful `GET /api/runs` and live run data in the browser before issuing `SHIP` or
    `FIX-FIRST`. A 401 or 403 is an **auth-fixture failure**, not a genuinely
    unassessable flow: report `required — NOT-ASSESSED, auth fixture failure
 (GET /api/runs HTTP <status>)` in the Handoff. Use
@@ -256,7 +259,7 @@ shell` means the spawn prompt was defective: correct its path/launch details
    ## Handoff
    - PR: <url>
    - Verification: `<exact command>` — pass, <one-line result>
-   - UX critique: required — SHIP | required — FIX-FIRST unresolved | required — NOT-ASSESSED, auth fixture failure (GET /api/runs HTTP 401/403) | required — NOT-ASSESSED, authenticated fixture succeeded (GET /api/runs HTTP 200); <genuinely unassessable reason> | blocked — <reason> | skipped — <reason>; evidence: <page URL or screenshot path, when required>
+   - UX critique: required — SHIP | required — FIX-FIRST unresolved | required — NOT-ASSESSED, auth fixture failure (GET /api/runs HTTP 401/403) | required — NOT-ASSESSED, authenticated fixture succeeded (GET /api/runs HTTP 200); <genuinely unassessable reason> | blocked — worktree web UI unavailable (baseline web build failed) | blocked — <reason> | skipped — <reason>; evidence: <page URL or screenshot path, when required>
    - Files: <n> changed, all within Owned Paths
    - Risks: <reviewer focus, or "none known">
    ```

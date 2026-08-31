@@ -270,6 +270,9 @@ describe("registry", () => {
     expect(prompt).toContain("auth-fixture failure");
     expect(prompt).toContain("HTTP 401/403");
     expect(prompt).toContain("genuinely unassessable");
+    expect(prompt).toContain(
+      "blocked — worktree web UI unavailable (baseline web build failed)",
+    );
   });
 
   test("zero-pack merged-view digest matches the develop baseline", () => {
@@ -432,8 +435,10 @@ describe("registry", () => {
     // CLI and re-pins its definition; the prompt pin is a registry input.
     // Regenerated (#2013): dispatch documents draft PR readiness and refreshes
     // its prompt pin; the registry digest follows it.
+    // Regenerated (#2071): unavailable worktree web UIs are blocked before a
+    // UX critic can misclassify a connection failure as an auth-fixture issue.
     const expected =
-      "sha256:3d12b762b3946e9e6e95e033d28f628affa970e27bf4633c695b2d8be0b11013";
+      "sha256:2f271e47dad4a9e1b03ba3f1febed267b1ae97968828934bcaa855b28dcf6a86";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -734,8 +739,10 @@ describe("registry", () => {
     // prompt pin only, `pack` remains non-enumerable.
     // Regenerated (#2013): dispatch documents draft PR readiness; prompt pin
     // only, `pack` remains non-enumerable.
+    // Regenerated (#2071): dispatch blocks an unavailable web UI before UX
+    // critique, then re-pins the prompt definition.
     expect(computeDefHash(def)).toBe(
-      "sha256:4a12ffc0fa80ad8b97a9757361ee319589c3567de36f8d9aa33ef917ff26a4d2",
+      "sha256:1843e0a20438d74a3ec58d766c020a13c4677da3da00b72e907fd02e4f3dfe00",
     );
   });
 
