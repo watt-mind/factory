@@ -74,7 +74,11 @@ import {
   claimLabels,
   appendIssueDetail,
 } from "../lib/control-plane/index.mjs";
-import { releaseLabels } from "../lib/control-plane/labels.mjs";
+import {
+  clampGithubBody,
+  releaseLabels,
+  stampRun,
+} from "../lib/control-plane/labels.mjs";
 import {
   parseOwnedPaths,
   ownedPathsClosureGaps,
@@ -141,14 +145,28 @@ export async function retryControlPlaneMutation(
   throw new Error("unreachable: control-plane mutation retry loop exhausted");
 }
 
-function commentBodyMatches(body, expected) {
-  if (body === expected) return true;
+function commentBodyMatches(comment, expected, actor) {
+  const body = String(comment?.body ?? "");
+  const landedBodies = new Set([
+    expected,
+    stampRun(expected),
+    clampGithubBody(expected),
+    clampGithubBody(stampRun(expected)),
+  ]);
+  if (!landedBodies.has(body)) return false;
+
+  const authorId = comment?.user?.id;
+  if (authorId) return Boolean(actor?.id) && authorId === actor.id;
+
+  // A comment list without author metadata cannot distinguish a human's
+  // identical text from our timed-out write. The optional run trailer is the
+  // only ownership evidence in that case; otherwise replay rather than lose a
+  // rationale that may never have landed.
   const runId = process.env.FACTORY_RUN_ID;
   return (
     process.env.FACTORY_COMMENT_ATTRIBUTION === "1" &&
     Boolean(runId) &&
-    !expected.includes(`run:${runId}`) &&
-    body === `${expected}\n\nrun:${runId}`
+    body.endsWith(`run:${runId}`)
   );
 }
 
@@ -164,7 +182,9 @@ export async function commentWithRetry(cp, key, body) {
   return retryControlPlaneMutation(cp, async () => {
     if (retrying) {
       const comments = await getCommentsWithRetry(cp, key);
-      if (comments.some((comment) => commentBodyMatches(comment.body, body)))
+      if (
+        comments.some((comment) => commentBodyMatches(comment, body, cp.actor))
+      )
         return;
     }
     retrying = true;

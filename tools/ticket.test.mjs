@@ -30,6 +30,7 @@ import {
   formatComments,
   parsePositionalArgs,
   retryControlPlaneMutation,
+  commentWithRetry,
   transitionThenComment,
   getTicketWithRetry,
   triageTicket,
@@ -53,6 +54,7 @@ import {
   linearNetworkIsOffline,
 } from "./ticket.mjs";
 import { gql } from "../orchestrator/reaper.mjs";
+import { clampGithubBody, stampRun } from "../lib/control-plane/labels.mjs";
 
 const LABELS = [
   { id: "l-ready", name: "ai:agent-ready" },
@@ -452,12 +454,13 @@ test("state comment retry does not repeat a timed-out comment that landed", asyn
   const comments = [];
   const cp = {
     kind: "github",
+    actor: { id: "factory-app" },
     async transition() {
       calls.transition += 1;
     },
     async comment(_key, body) {
       calls.comment += 1;
-      comments.push({ body });
+      comments.push({ body, user: { id: "factory-app" } });
       throw new Error("gh timed out after 15000ms");
     },
     async listComments() {
@@ -470,7 +473,85 @@ test("state comment retry does not repeat a timed-out comment that landed", asyn
     transitionThenComment(cp, "WM-910", "Todo", {}, "explain the move"),
   ).resolves.toBeUndefined();
   expect(calls).toEqual({ transition: 1, comment: 1, listComments: 1 });
-  expect(comments).toEqual([{ body: "explain the move" }]);
+  expect(comments).toEqual([
+    { body: "explain the move", user: { id: "factory-app" } },
+  ]);
+});
+
+test("comment retry recognizes the clamped, stamped body that GitHub landed", async () => {
+  const beforeAttribution = process.env.FACTORY_COMMENT_ATTRIBUTION;
+  const beforeRunId = process.env.FACTORY_RUN_ID;
+  process.env.FACTORY_COMMENT_ATTRIBUTION = "1";
+  process.env.FACTORY_RUN_ID = "run-ticket-clamp";
+  try {
+    const calls = { comment: 0, listComments: 0 };
+    const body = "x".repeat(70_000);
+    const landed = clampGithubBody(stampRun(body));
+    const cp = {
+      kind: "github",
+      async comment() {
+        calls.comment += 1;
+        throw new Error("gh timed out after 15000ms");
+      },
+      async listComments() {
+        calls.listComments += 1;
+        return [
+          {
+            body: landed,
+          },
+        ];
+      },
+    };
+
+    await expect(commentWithRetry(cp, "WM-910", body)).resolves.toBeUndefined();
+    expect(calls).toEqual({ comment: 1, listComments: 1 });
+  } finally {
+    if (beforeAttribution === undefined)
+      delete process.env.FACTORY_COMMENT_ATTRIBUTION;
+    else process.env.FACTORY_COMMENT_ATTRIBUTION = beforeAttribution;
+    if (beforeRunId === undefined) delete process.env.FACTORY_RUN_ID;
+    else process.env.FACTORY_RUN_ID = beforeRunId;
+  }
+});
+
+test("comment retry does not mistake another actor's identical comment for ours", async () => {
+  const calls = { comment: 0, listComments: 0 };
+  const cp = {
+    kind: "github",
+    actor: { id: "factory-app" },
+    async comment() {
+      calls.comment += 1;
+      if (calls.comment === 1) throw new Error("gh timed out after 15000ms");
+    },
+    async listComments() {
+      calls.listComments += 1;
+      return [{ body: "explain the move", user: { id: "human" } }];
+    },
+  };
+
+  await expect(
+    commentWithRetry(cp, "WM-910", "explain the move"),
+  ).resolves.toBeUndefined();
+  expect(calls).toEqual({ comment: 2, listComments: 1 });
+});
+
+test("a transition retried after its response times out posts its rationale once", async () => {
+  const calls = { transition: 0, comment: 0 };
+  const cp = {
+    kind: "github",
+    async transition() {
+      calls.transition += 1;
+      if (calls.transition === 1) throw new Error("gh timed out after 15000ms");
+    },
+    async comment() {
+      calls.comment += 1;
+    },
+  };
+
+  await expect(
+    transitionThenComment(cp, "WM-910", "Todo", {}, "explain the move"),
+  ).resolves.toBeUndefined();
+  expect(calls).toEqual({ transition: 2, comment: 1 });
 });
 
 test("answer retries a timed-out comment without repeating its transition", async () => {
