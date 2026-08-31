@@ -153,6 +153,7 @@ import {
 import {
   EMPTY_POLICY_ROOT,
   adapters,
+  dispatchConfigSnapshot,
   freshRoot,
   insertStalledWorker,
   linkEvent,
@@ -3814,6 +3815,9 @@ sh -c 'sleep 5 & wait'
       linkEvent(db, spec.runId, { type: "factory.dispatch.requested" });
       const o = opts({
         dispatch: {
+          // Pin the registry's factory checkout to this tree: the example
+          // registry's ~/Develop/factory is absent under repo-verify (#2031).
+          configSnapshot: dispatchConfigSnapshot(),
           locksDir: tmpDir("tier-skip-locks-"),
           leasesDir: tmpDir("tier-skip-leases-"),
           fetchTicket: () => ({
@@ -3917,6 +3921,7 @@ sh -c 'sleep 5 & wait'
     linkEvent(db, spec.runId, { type: "factory.dispatch.requested" });
     const o = opts({
       dispatch: {
+        configSnapshot: dispatchConfigSnapshot(),
         locksDir: tmpDir("tier-retained-locks-"),
         leasesDir: tmpDir("tier-retained-leases-"),
         fetchTicket: () => ({
@@ -4022,6 +4027,7 @@ sh -c 'sleep 5 & wait'
         });
       },
       dispatch: {
+        configSnapshot: dispatchConfigSnapshot(),
         locksDir: tmpDir("tier-handoff-locks-"),
         leasesDir: tmpDir("tier-handoff-leases-"),
         fetchTicket: () => ({
@@ -6367,6 +6373,7 @@ sh -c 'sleep 5 & wait'
       };
     };
     const dispatchSeams = (calls) => ({
+      configSnapshot: dispatchConfigSnapshot(),
       locksDir: tmpDir("evrt-pr-ready-locks-"),
       leasesDir: tmpDir("evrt-pr-ready-leases-"),
       fetchTicket: () => ({
