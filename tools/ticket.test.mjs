@@ -29,7 +29,9 @@ import {
   formatComment,
   formatComments,
   parsePositionalArgs,
+  retryControlPlaneMutation,
   transitionThenComment,
+  getTicketWithRetry,
   fileTicket,
   closureCheckMessages,
   descriptionReplacementRequest,
@@ -439,6 +441,46 @@ test("state does not post a comment when the transition fails", async () => {
     transitionThenComment(cp, "WM-910", "Todo", {}, "do not post"),
   ).rejects.toThrow("transition rejected");
   expect(calls).toEqual(["transition"]);
+});
+
+test("ticket state and label reads retry one GraphQL timeout", async () => {
+  const calls = { getTicket: 0, transition: 0 };
+  const cp = {
+    kind: "linear",
+    async getTicket() {
+      calls.getTicket += 1;
+      if (calls.getTicket === 1)
+        throw new Error("linear graphql timed out after 15000ms");
+      return { labels: [] };
+    },
+    async transition() {
+      calls.transition += 1;
+      if (calls.transition === 1)
+        throw new Error("linear graphql timed out after 15000ms");
+    },
+  };
+
+  await expect(getTicketWithRetry(cp, "WM-910")).resolves.toEqual({
+    labels: [],
+  });
+  await expect(
+    retryControlPlaneMutation(cp, () => cp.transition("WM-910", "Todo")),
+  ).resolves.toBeUndefined();
+  expect(calls).toEqual({ getTicket: 2, transition: 2 });
+});
+
+test("ticket timeout retry preserves non-timeout errors", async () => {
+  const error = new Error("transition rejected");
+  const cp = {
+    kind: "linear",
+    async transition() {
+      throw error;
+    },
+  };
+
+  await expect(
+    retryControlPlaneMutation(cp, () => cp.transition("WM-910", "Todo")),
+  ).rejects.toBe(error);
 });
 
 // ------------------------------------------------------------- file verb ---

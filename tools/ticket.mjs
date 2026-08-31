@@ -116,10 +116,9 @@ function graphqlTimeoutMessage(controlPlane, error) {
 }
 
 /**
- * State and label writes are idempotent, so one timed-out GraphQL attempt can
- * be retried without replaying comments or ticket creation. Keep this at the
- * CLI boundary: it covers both configured control planes while their adapters
- * retain ownership of their respective transports.
+ * Idempotent state/label reads and transitions are safe to retry once after a
+ * timeout. Keep this at the CLI boundary: it covers both configured control
+ * planes while their adapters retain ownership of their respective transports.
  */
 export async function retryControlPlaneMutation(
   controlPlane,
@@ -151,6 +150,11 @@ export async function transitionThenComment(cp, key, state, options, comment) {
 /** Apply a complete label delta through the same retry policy as state writes. */
 export async function setLabelsWithRetry(cp, key, options) {
   await retryControlPlaneMutation(cp, () => cp.setLabels(key, options));
+}
+
+/** Read a ticket through the same timeout recovery used by state mutations. */
+export async function getTicketWithRetry(cp, key) {
+  return retryControlPlaneMutation(cp, () => cp.getTicket(key));
 }
 
 /**
@@ -870,7 +874,9 @@ const VERBS = {
     const issue = await cp.getTicket(key);
     const currentNames = (issue.labels ?? []).map((label) => label.name);
     const { add, remove } = releaseLabels(currentNames, { to: "Todo" });
-    await cp.transition(key, "Todo", { add, remove, unassign: true });
+    await retryControlPlaneMutation(cp, () =>
+      cp.transition(key, "Todo", { add, remove, unassign: true }),
+    );
     out(
       { ok: true, identifier: key, state: "Todo" },
       `unclaimed ${key} -> Todo`,
@@ -891,7 +897,9 @@ const VERBS = {
       throw new Error(`usage: triage <ISSUE-ID> --comment "<text>"`);
     const key = normalizeTicketRef(positional[0]);
     const cp = controlPlane(key);
-    await cp.transition(key, "Triage", { remove: ["ai:agent-ready"] });
+    await retryControlPlaneMutation(cp, () =>
+      cp.transition(key, "Triage", { remove: ["ai:agent-ready"] }),
+    );
     if (comment.trim()) await cp.comment(key, comment);
     out({ ok: true, identifier: key }, `${key} -> Triage`);
   },
@@ -904,7 +912,7 @@ const VERBS = {
     const cp = controlPlane(key);
     const issue = await cp.getTicket(key);
     if (issue.state?.name?.toLowerCase() === "blocked")
-      await cp.transition(key, "Todo");
+      await retryControlPlaneMutation(cp, () => cp.transition(key, "Todo"));
     await cp.comment(key, text);
     out({ ok: true, identifier: key }, `answered ${key}`);
   },
@@ -965,7 +973,7 @@ const VERBS = {
     const add = flagAll("add"),
       remove = flagAll("remove");
     if (!add.length && !remove.length) {
-      const issue = await cp.getTicket(key);
+      const issue = await getTicketWithRetry(cp, key);
       const current = (issue.labels ?? []).map((l) => l.name);
       out(current, current.join(" ") || "(none)");
       return;
@@ -997,7 +1005,7 @@ const VERBS = {
     }
     const key = normalizeTicketRef(positional[0]);
     const cp = controlPlane(key);
-    const issue = await cp.getTicket(key);
+    const issue = await getTicketWithRetry(cp, key);
 
     if (add.includes("ai:agent-ready")) {
       const gaps = closureCheckMessages(issue);
