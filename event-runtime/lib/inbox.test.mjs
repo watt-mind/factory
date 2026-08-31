@@ -15,6 +15,7 @@ import {
   inboxCounts,
   listInboxItems,
   markInboxDelivered,
+  MAX_PARKED_INBOX_AGE_MS,
   reconcileInbox,
   retryInboxDecision,
   resolveInboxItem,
@@ -1526,6 +1527,103 @@ describe("human inbox ledger (WM-285)", () => {
       { id: "gh-b", resolvedBy: "auto:stale_ref" },
     ]);
     expect(getInboxItem(db, "gh-c").resolvedAt).toBeNull();
+  });
+
+  test("reconciles merged and closed referenced pull requests", async () => {
+    const db = openDb(":memory:");
+    createInboxItem(
+      db,
+      {
+        kind: "BLOCKED",
+        title: "merged",
+        refs: { repo: "factory", pr: "PR#17" },
+      },
+      { id: "merged-pr", now: 1000 },
+    );
+    createInboxItem(
+      db,
+      {
+        kind: "ESCALATED",
+        title: "closed",
+        refs: { repo: "factory", pr: "PR#18" },
+      },
+      { id: "closed-pr", now: 1000 },
+    );
+
+    await expect(
+      reconcileInbox(db, {
+        now: 60_000,
+        fetchPullRequest: async ({ github, pr }) => {
+          expect(github).toBe("watt-mind/factory");
+          return { state: pr === 17 ? "MERGED" : "CLOSED" };
+        },
+      }),
+    ).resolves.toEqual([
+      { id: "merged-pr", resolvedBy: "auto:pr_merged" },
+      { id: "closed-pr", resolvedBy: "auto:pr_closed" },
+    ]);
+  });
+
+  test("supersedes an older parked item when a newer run owns its ticket", () => {
+    const db = openDb(":memory:");
+    createInboxItem(
+      db,
+      {
+        kind: "BLOCKED",
+        title: "old parked dispatch",
+        refs: { issue: "watt-mind/factory#1158" },
+      },
+      { id: "old-park", now: 1000 },
+    );
+    const at = new Date(2000).toISOString();
+    db.query(
+      `INSERT INTO runs
+       (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at, subject)
+       VALUES ('run-new', 'new-subject', '{}', 'sha256:test', 'PROPOSED', 0, ?, ?, 'watt-mind/factory#1158')`,
+    ).run(at, at);
+
+    expect(reconcileInbox(db, { now: 3000 })).toEqual([
+      { id: "old-park", resolvedBy: "auto:superseded" },
+    ]);
+  });
+
+  test("supersedes an older parked item when a newer ticket event is admitted", () => {
+    const db = openDb(":memory:");
+    createInboxItem(
+      db,
+      {
+        kind: "human_needed",
+        title: "old parked event",
+        refs: { issue: "watt-mind/factory#1158" },
+      },
+      { id: "old-event-park", now: 1000 },
+    );
+    const at = new Date(2000).toISOString();
+    db.query(
+      `INSERT INTO events
+       (source, event_id, type, subject, occurred_at, received_at, envelope_json, payload_hash, status, admitted_at)
+       VALUES ('github', 'new-ticket-event', 'factory.dispatch.requested', 'watt-mind/factory#1158', ?, ?, '{}', 'sha256:test', 'admitted', ?)`,
+    ).run(at, at, at);
+
+    expect(reconcileInbox(db, { now: 3000 })).toEqual([
+      { id: "old-event-park", resolvedBy: "auto:superseded" },
+    ]);
+  });
+
+  test("expires an old parked item with no actionable referent", () => {
+    const db = openDb(":memory:");
+    createInboxItem(
+      db,
+      { kind: "BLOCKED", title: "orphaned park" },
+      {
+        id: "orphaned-park",
+        now: 1000,
+      },
+    );
+
+    expect(reconcileInbox(db, { now: 1000 + MAX_PARKED_INBOX_AGE_MS })).toEqual(
+      [{ id: "orphaned-park", resolvedBy: "auto:stale_ref" }],
+    );
   });
 
   test("an escalation on a REFUSED run survives reconcile — it is born terminal", async () => {

@@ -29,6 +29,7 @@
  */
 import { spawn } from "node:child_process";
 import { createInboxItem, deliverInboxItem } from "./inbox.mjs";
+import { loadRepos } from "./repos.mjs";
 import { txImmediate } from "./db.mjs";
 import { templateFor } from "./decision-templates.mjs";
 import { proposalSubject } from "./proposal-subject.mjs";
@@ -161,22 +162,63 @@ function alreadyNotified(db, kind, target) {
  *
  * @returns {Array<{ kind: string, dedupKind?: string, target: string, title: string, message?: string, refs: object, source: string }>}
  */
-/** Ticket/repo the parked event's own envelope already names, if any. */
+const COMPOUND_EVENT_ISSUE =
+  /([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#\d+)(?:$|[\s:)\]])/g;
+
+function regexEscape(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function issueFromEventId(eventId) {
+  if (typeof eventId !== "string") return {};
+  // Event coordinates prefix a configured GitHub issue with an opaque chain
+  // id. Resolve against the registry rather than greedily treating that
+  // prefix as part of an owner name (owners themselves may contain hyphens).
+  let issue;
+  try {
+    const github = [...loadRepos().values()]
+      .map((repo) => repo.github)
+      .filter(
+        (repo) =>
+          typeof repo === "string" &&
+          new RegExp(`${regexEscape(repo)}#\\d+$`).test(eventId),
+      )
+      .sort((a, b) => b.length - a.length)[0];
+    if (github)
+      issue = eventId.match(new RegExp(`(${regexEscape(github)}#\\d+)$`))?.[1];
+  } catch {
+    // Registry availability is not required for direct GitHub coordinates.
+  }
+  if (!issue) {
+    const matches = [...eventId.matchAll(COMPOUND_EVENT_ISSUE)];
+    const candidate = matches.at(-1)?.[1];
+    if (candidate && candidate === eventId) issue = candidate;
+  }
+  if (!issue) return {};
+  return { issue, repo: issue.slice(0, issue.lastIndexOf("#")) };
+}
+
+/** Ticket/repo the parked event's own envelope or coordinate names, if any. */
 function eventRefs(row) {
   let payload;
   try {
     payload = JSON.parse(row.envelopeJson ?? "{}")?.payload;
   } catch {
-    return {};
+    return issueFromEventId(row.eventId);
   }
-  if (!payload || typeof payload !== "object") return {};
+  const coordinate = issueFromEventId(row.eventId);
+  if (!payload || typeof payload !== "object") return coordinate;
   return {
     ...(typeof payload.ticket === "string" && payload.ticket
       ? { issue: payload.ticket }
-      : {}),
+      : coordinate.issue
+        ? { issue: coordinate.issue }
+        : {}),
     ...(typeof payload.repo === "string" && payload.repo
       ? { repo: payload.repo }
-      : {}),
+      : coordinate.repo
+        ? { repo: coordinate.repo }
+        : {}),
   };
 }
 

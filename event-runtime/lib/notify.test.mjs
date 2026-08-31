@@ -575,6 +575,25 @@ describe("notify (WM-65)", () => {
     expect(outcome.error).toContain("timed out after 250ms");
   });
 
+  test("extracts a GitHub issue from a compound parked-event coordinate", () => {
+    const db = openDb(":memory:");
+    insertEvent(db, {
+      eventId: "chain-run_123-watt-mind/factory#1158",
+      status: "human_needed",
+    });
+
+    expect(pendingNotifications(db)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          refs: expect.objectContaining({
+            issue: "watt-mind/factory#1158",
+            repo: "watt-mind/factory",
+          }),
+        }),
+      ]),
+    );
+  });
+
   test("a missing notifier binary resolves as a failure instead of throwing", async () => {
     const outcome = await sendNotification(
       "/nonexistent/notifier-binary",

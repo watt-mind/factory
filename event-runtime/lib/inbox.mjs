@@ -10,6 +10,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { loadControlPlane } from "../../lib/control-plane/index.mjs";
+import { loadForge } from "../../lib/forge/index.mjs";
 import { hashJson } from "./canonical.mjs";
 import { ApiParameterError } from "./api-params.mjs";
 import {
@@ -24,6 +25,7 @@ import {
 } from "./decision-templates.mjs";
 import { txImmediate } from "./db.mjs";
 import { registerInboxDecisionMemos } from "./memos.mjs";
+import { loadRepos } from "./repos.mjs";
 
 export const INBOX_KINDS = Object.freeze([
   "BLOCKED",
@@ -1527,6 +1529,8 @@ export async function deliverInboxItem(
 
 const LINEAR_POLL_INTERVAL_MS = 60_000;
 const linearPollAt = new WeakMap();
+/** Unactionable parked notices must not remain in the operator queue forever. */
+export const MAX_PARKED_INBOX_AGE_MS = 48 * 60 * 60 * 1000;
 const TERMINAL_RUN_STATES = new Set([
   "COMPLETED",
   "FAILED",
@@ -1551,6 +1555,87 @@ function prNumber(ref) {
     /^(?:PR\s*)?#?(\d+)$/i.exec(ref.trim()) ??
     /\/pull\/(\d+)(?:[/?#]|$)/.exec(ref);
   return match ? Number(match[1]) : null;
+}
+
+function githubRepoFor(refs) {
+  const issueRepo =
+    typeof refs.issue === "string"
+      ? /^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#\d+$/.exec(refs.issue.trim())?.[1]
+      : null;
+  if (issueRepo) return issueRepo;
+  if (typeof refs.repo !== "string" || refs.repo.trim() === "") return null;
+  if (refs.repo.includes("/")) return refs.repo;
+  try {
+    return loadRepos().get(refs.repo)?.github ?? null;
+  } catch {
+    // A missing or malformed local repository registry must not make an
+    // otherwise unrelated inbox sweep fail.
+    return null;
+  }
+}
+
+function defaultFetchPullRequest({ github, pr }) {
+  return loadForge().prView(github, pr, { fields: ["state"] });
+}
+
+async function fetchReferencedInboxPullRequests(rows, fetchPullRequest) {
+  const unique = new Map();
+  for (const { refs } of rows) {
+    const pr = prNumber(refs.pr);
+    const github = githubRepoFor(refs);
+    if (pr && github) unique.set(`${github}#${pr}`, { github, pr });
+  }
+  const fetched = await Promise.all(
+    [...unique.entries()].map(async ([key, request]) => {
+      try {
+        return [key, await fetchPullRequest(request)];
+      } catch {
+        // A deleted PR or rate-limited repository must not stall unrelated
+        // inbox reconciliation. The next poll can retry this one referent.
+        return [key, null];
+      }
+    }),
+  );
+  return new Map(fetched.filter(([, pull]) => pull));
+}
+
+function hasNewerSubjectRun(db, subject, createdAt) {
+  if (typeof subject !== "string" || subject.trim() === "") return false;
+  const newerRun = db
+    .query(
+      `SELECT 1 FROM runs
+       WHERE subject = ? AND created_at > ?
+       LIMIT 1`,
+    )
+    .get(subject, createdAt);
+  if (newerRun) return true;
+  return Boolean(
+    db
+      .query(
+        `SELECT 1 FROM events
+         WHERE subject = ? AND admitted_at > ?
+           AND status IN ('admitted', 'planned', 'human_needed')
+         LIMIT 1`,
+      )
+      .get(subject, createdAt),
+  );
+}
+
+function staleParkedItem(db, row, refs, now) {
+  if (!new Set(["BLOCKED", "human_needed"]).has(row.kind)) return false;
+  const createdAt = Date.parse(row.created_at);
+  if (!Number.isFinite(createdAt) || now - createdAt < MAX_PARKED_INBOX_AGE_MS)
+    return false;
+  if (refs.eventSource && refs.eventId) {
+    const event = db
+      .query("SELECT 1 FROM events WHERE source = ? AND event_id = ?")
+      .get(refs.eventSource, refs.eventId);
+    return !event;
+  }
+  // A parked row without an event, ticket, PR, proposal, or run cannot be
+  // acted on or reconciled later. Keep referent-backed asks for their normal
+  // reconciliation paths instead of expiring them merely because they age.
+  return !refs.issue && !refs.pr && !refs.proposalId && !refs.runId;
 }
 
 function completedShipProposal(db, proposalId) {
@@ -1715,6 +1800,7 @@ export function reconcileInbox(
     now = Date.now(),
     linearIssues = fetchLinearInboxIssues,
     controlPlane = loadControlPlane,
+    fetchPullRequest = defaultFetchPullRequest,
   } = {},
 ) {
   const resolved = [];
@@ -1758,6 +1844,7 @@ export function reconcileInbox(
             };
           });
   const linearRows = [];
+  const prRows = [];
   for (const row of rows) {
     // Pending decisions are not skipped: once the referent stops waiting the
     // ask is moot and resolveInboxItem records it as superseded (auto:*).
@@ -1791,6 +1878,9 @@ export function reconcileInbox(
       if (event && event.status !== "human_needed")
         resolvedBy = "auto:event_requeued";
     }
+    if (!resolvedBy && hasNewerSubjectRun(db, refs.issue, row.created_at)) {
+      resolvedBy = "auto:superseded";
+    }
     // A run-progress notice about a run that has already finished is stale.
     // This never applies to an open ask: the operator still owes an answer.
     if (
@@ -1807,6 +1897,10 @@ export function reconcileInbox(
         resolvedReason = "stale_ref";
       }
     }
+    if (!resolvedBy && staleParkedItem(db, row, refs, now)) {
+      resolvedBy = "auto:stale_ref";
+      resolvedReason = "stale_ref";
+    }
     if (!resolvedBy) continue;
     resolveInboxItem(db, row.id, {
       now,
@@ -1822,6 +1916,14 @@ export function reconcileInbox(
   for (const row of rows) {
     const refs = parseObject(row.refs_json);
     if (
+      refs.pr &&
+      row.kind !== "CI RED" &&
+      !resolved.some((entry) => entry.id === row.id) &&
+      !prRows.some((entry) => entry.row.id === row.id)
+    ) {
+      prRows.push({ row, refs });
+    }
+    if (
       refs.issue &&
       !resolved.some((entry) => entry.id === row.id) &&
       !linearRows.some((entry) => entry.row.id === row.id)
@@ -1830,16 +1932,34 @@ export function reconcileInbox(
     }
   }
 
-  if (linearRows.length === 0) return resolved;
+  if (linearRows.length === 0 && prRows.length === 0) return resolved;
   const lastPoll = linearPollAt.get(db) ?? -Infinity;
   if (now - lastPoll < LINEAR_POLL_INTERVAL_MS) return resolved;
   linearPollAt.set(db, now);
-  return Promise.resolve(
-    fetchReferencedInboxIssues(linearRows, linearIssues, controlPlane),
-  )
-    .then((issues) => {
+  return Promise.all([
+    linearRows.length
+      ? fetchReferencedInboxIssues(linearRows, linearIssues, controlPlane)
+      : [],
+    prRows.length
+      ? fetchReferencedInboxPullRequests(prRows, fetchPullRequest)
+      : new Map(),
+  ])
+    .then(([issues, pulls]) => {
       const byId = new Map(issues.map((issue) => [issue.identifier, issue]));
-      for (const { row, refs } of linearRows) {
+      for (const row of rows) {
+        if (resolved.some((entry) => entry.id === row.id)) continue;
+        const refs = parseObject(row.refs_json);
+        const pr = prNumber(refs.pr);
+        const github = githubRepoFor(refs);
+        const pull = pr && github ? pulls.get(`${github}#${pr}`) : null;
+        if (["MERGED", "CLOSED"].includes(pull?.state)) {
+          const resolvedBy =
+            pull.state === "MERGED" ? "auto:pr_merged" : "auto:pr_closed";
+          resolveInboxItem(db, row.id, { now, resolvedBy });
+          resolved.push({ id: row.id, resolvedBy });
+          continue;
+        }
+        if (!refs.issue) continue;
         const issue = byId.get(refs.issue);
         if (!issue) continue;
         const stale = issueIsClosed(issue);
