@@ -780,9 +780,17 @@ function dispatchToolchainEligibility(
   payload,
   { configSnapshot = null, toolchain = {} } = {},
 ) {
+  let repos;
+  try {
+    repos = snapshotRepos(configSnapshot);
+  } catch (err) {
+    // A registry failure is not an unknown-repo lookup. Avoid a toolchain
+    // probe; the worktree gate records its typed refusal and evidence.
+    return { registryInvalid: true, error: err };
+  }
   let repo;
   try {
-    repo = getRepo(snapshotRepos(configSnapshot), payload?.repo);
+    repo = getRepo(repos, payload?.repo);
   } catch (err) {
     // An unknown repo is not a toolchain fact: leave it to the worktree gate,
     // which refuses it as `human_needed repo_unknown` with full evidence.
@@ -1108,9 +1116,21 @@ export function worktreeDispatchAutoEligibility(
   // Keep it in the proof so bypasses are auditable alongside every other
   // dispatch admission fact.
   evidence.checks.operator_authorized = operatorAuthorized === true;
+  let repos;
+  try {
+    repos = snapshotRepos(configSnapshot);
+  } catch (err) {
+    evidence.checks.repo_registry_valid = false;
+    return refusal(
+      `repo_registry_invalid: ${err.message}`,
+      evidence,
+      "human_needed",
+    );
+  }
+  evidence.checks.repo_registry_valid = true;
   let repo;
   try {
-    repo = getRepo(snapshotRepos(configSnapshot), payload?.repo);
+    repo = getRepo(repos, payload?.repo);
   } catch (err) {
     evidence.checks.repo_found = false;
     return refusal(`repo_unknown: ${err.message}`, evidence, "human_needed");

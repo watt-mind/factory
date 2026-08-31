@@ -2432,10 +2432,44 @@ describe("planEvent worktree gate (WM-108)", () => {
       expect(result.refusal).toMatchObject({
         decision: "human_needed",
       });
-      expect(result.refusal.reason).toMatch(/^repo_unknown: /);
+      expect(result.refusal.reason).toMatch(/^repo_registry_invalid: /);
       expect(result.refusal.reason).toContain(
         "repo malformed max_in_flight must be a positive number",
       );
+      expect(result.evidence.checks).toMatchObject({
+        repo_registry_valid: false,
+      });
+      expect(result.evidence.checks.repo_found).toBeUndefined();
+    });
+  });
+
+  test("a declared repo with an invalid unrelated registry stanza → human_needed repo_registry_invalid", () => {
+    const healthyRepo =
+      `repos:\n  - name: healthy\n    path: /tmp/healthy\n    base: develop\n` +
+      `    team: WM\n    project: Factory\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+      `    worktree_root: /tmp/worktrees\n    escalate_paths: []\n` +
+      `  - name: malformed\n    path: /tmp/malformed\n    max_in_flight: many\n`;
+    withReposRoot(healthyRepo, () => {
+      const db = openDb(":memory:");
+      const ref = admit(db, {
+        type: "factory.dispatch.requested",
+        eventId: "registry-invalid",
+        correlationId: "registry-invalid",
+        payload: { repo: "healthy", ticket: "WM-694" },
+      });
+      const outcome = planEvent(db, registry, ref, {
+        now: NOW,
+        dispatch: tierDispatch(),
+        toolchain: {
+          cache: new Map(),
+          which: () => {
+            throw new Error("invalid registry must not probe toolchain");
+          },
+        },
+      });
+      expect(outcome.decision).toBe("human_needed");
+      expect(outcome.reason).toMatch(/^repo_registry_invalid: /);
+      expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(0);
     });
   });
 
