@@ -25,22 +25,28 @@ const WORKTREE_DAEMONS = path.resolve(import.meta.dir, "worktree-daemons.sh");
 
 // Private port band for this test run (WM-113). Fixed in-band ports (7752,
 // 7772, …) collide with real runtimes, leftover servers, and concurrent CI
-// jobs — EADDRINUSE before the assertion even runs. Instead, probe random
-// even bases in the ephemeral-ish 20000–60000 range until every offset the
-// fixtures bind is free, and pass the band to the scripts via
-// FACTORY_PORT_BASE / FACTORY_PORT_SPAN. No absolute ports below.
+// jobs — EADDRINUSE before the assertion even runs. Keep test ports below the
+// Linux ephemeral range and pass the band to the scripts via
+// FACTORY_PORT_BASE / FACTORY_PORT_SPAN.
 const PORT_SPAN = 200;
+const PORT_PICK_MIN = 10000;
+const PORT_PICK_COUNT = 11000;
 const FIXTURE_OFFSETS = [
   352, 353, 360, 361, 362, 363, 364, 365, 366, 367, 372, 373, 374, 375, 396,
   397,
 ];
+const DELAYED_HEALTH_PORT_SPAN = 3;
+const DELAYED_HEALTH_OFFSETS = Array.from(
+  { length: DELAYED_HEALTH_PORT_SPAN * 2 },
+  (_, offset) => offset,
+);
 
-function offsetsBindable(base) {
-  for (const off of FIXTURE_OFFSETS) {
+function offsetsBindable(base, offsets) {
+  for (const offset of offsets) {
     try {
       const l = Bun.listen({
         hostname: "127.0.0.1",
-        port: base + off,
+        port: base + offset,
         socket: { data() {} },
       });
       l.stop(true);
@@ -51,47 +57,30 @@ function offsetsBindable(base) {
   return true;
 }
 
-function pickPortBase() {
+function overlapsExcludedRange(base, offsets, { start, end }) {
+  const first = base + Math.min(...offsets);
+  const last = base + Math.max(...offsets);
+  return first <= end && start <= last;
+}
+
+function pickFreeBase(offsets, excludedRanges = []) {
   for (let i = 0; i < 50; i++) {
-    // Even base in 20000–59998 so every slot in the band stays even.
-    const candidate = 20000 + 2 * Math.floor(Math.random() * 20000);
-    if (offsetsBindable(candidate)) return candidate;
+    // Even base in 10000–31998 keeps all fixture offsets below 32768.
+    const candidate =
+      PORT_PICK_MIN + 2 * Math.floor(Math.random() * PORT_PICK_COUNT);
+    if (
+      !excludedRanges.some((range) =>
+        overlapsExcludedRange(candidate, offsets, range),
+      ) &&
+      offsetsBindable(candidate, offsets)
+    ) {
+      return candidate;
+    }
   }
   throw new Error("could not find a free port band for worktree-common tests");
 }
 
-// The delayed worktree-up fixtures start real daemons. Give every fixture its
-// own API/web pair rather than letting WM-1763 resolve to the production
-// default band. Keep both sockets open while probing so the pair is known to
-// be available together before the fixture hands it to worktree-up.
-function pickDelayedHealthPort() {
-  for (let i = 0; i < 50; i++) {
-    const candidate = 20000 + 2 * Math.floor(Math.random() * 20000);
-    let api;
-    let web;
-    try {
-      api = Bun.listen({
-        hostname: "127.0.0.1",
-        port: candidate,
-        socket: { data() {} },
-      });
-      web = Bun.listen({
-        hostname: "127.0.0.1",
-        port: candidate + 1,
-        socket: { data() {} },
-      });
-      return candidate;
-    } catch {
-      // Try another pair when either API or web is in use.
-    } finally {
-      web?.stop(true);
-      api?.stop(true);
-    }
-  }
-  throw new Error("could not find a free API/web pair for delayed health");
-}
-
-const PORT_BASE = pickPortBase();
+const PORT_BASE = pickFreeBase(FIXTURE_OFFSETS);
 const PORT_RESERVATION_ROOT = mkdtempSync(
   path.join(tmpdir(), "factory-port-reservations-"),
 );
@@ -241,7 +230,11 @@ function delayedHealthFixture({
   workerExitsImmediately = false,
 } = {}) {
   const fixture = worktreeUpFixture();
-  const portBase = pickDelayedHealthPort();
+  // Reserve enough adjacent pairs for allocate_api_port to recover if the
+  // preferred pair is claimed after this probe, and never overlap BAND_ENV.
+  const portBase = pickFreeBase(DELAYED_HEALTH_OFFSETS, [
+    { start: PORT_BASE, end: PORT_BASE + 2 * PORT_SPAN - 1 },
+  ]);
   const fakeBun = path.join(fixture.mockBin, "bun");
   mkdirSync(path.join(fixture.root, "event-runtime", "web"), {
     recursive: true,
@@ -337,7 +330,7 @@ function runDelayedHealthWorktreeUp(fixture, timeout, resume = false) {
       FACTORY_WT_ROOT: fixture.worktrees,
       FACTORY_LOCK_DIR: path.join(fixture.root, ".locks", "bun-install"),
       FACTORY_PORT_BASE: String(fixture.portBase),
-      FACTORY_PORT_SPAN: "1",
+      FACTORY_PORT_SPAN: String(DELAYED_HEALTH_PORT_SPAN),
       FACTORY_PORT_RESERVATION_ROOT: path.join(fixture.root, ".locks", "ports"),
       FACTORY_WORKTREE_HEALTH_TIMEOUT_S: String(timeout),
       FAKE_HEALTH_DELAY_MS: "2000",
@@ -1346,6 +1339,40 @@ test("worktree-up accepts a worker that survives the startup grace", () => {
   }
 });
 
+test("worktree-up falls back when a delayed-health fixture's preferred pair is taken", () => {
+  const fixture = delayedHealthFixture();
+  const ticketChecksum = Number(
+    execFileSync("cksum", { input: "WM-1763", encoding: "utf8" }).split(" ")[0],
+  );
+  const preferredApiPort =
+    fixture.portBase + 2 * (ticketChecksum % DELAYED_HEALTH_PORT_SPAN);
+  const stolenApiPort = Bun.listen({
+    hostname: "127.0.0.1",
+    port: preferredApiPort,
+    socket: { data() {} },
+  });
+  try {
+    const result = runDelayedHealthWorktreeUp(fixture, 5);
+    expect(result.status).toBe(0);
+    const ports = readFileSync(
+      path.join(fixture.worktrees, "WM-1763", ".factory", "run", "ports"),
+      "utf8",
+    );
+    const apiPort = Number(ports.match(/^api=(\d+)$/m)?.[1]);
+    expect(apiPort).toBe(
+      fixture.portBase +
+        ((preferredApiPort - fixture.portBase + 2) %
+          (2 * DELAYED_HEALTH_PORT_SPAN)),
+    );
+  } finally {
+    stolenApiPort.stop(true);
+    stopFixtureDaemons(fixture);
+    rmSync(fixture.root, { recursive: true, force: true });
+    rmSync(fixture.worktrees, { recursive: true, force: true });
+    rmSync(fixture.mockBin, { recursive: true, force: true });
+  }
+});
+
 test("worktree-up times out a live web daemon that never binds and tears down all daemons", () => {
   const fixture = delayedHealthFixture({ webNeverBinds: true });
   const webPidFile = path.join(fixture.root, "web-daemon.pid");
@@ -1359,7 +1386,7 @@ test("worktree-up times out a live web daemon that never binds and tears down al
         FACTORY_WT_ROOT: fixture.worktrees,
         FACTORY_LOCK_DIR: path.join(fixture.root, ".locks", "bun-install"),
         FACTORY_PORT_BASE: String(fixture.portBase),
-        FACTORY_PORT_SPAN: "1",
+        FACTORY_PORT_SPAN: String(DELAYED_HEALTH_PORT_SPAN),
         FACTORY_PORT_RESERVATION_ROOT: path.join(
           fixture.root,
           ".locks",
