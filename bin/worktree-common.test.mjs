@@ -40,6 +40,9 @@ const DELAYED_HEALTH_OFFSETS = Array.from(
   { length: DELAYED_HEALTH_PORT_SPAN * 2 },
   (_, offset) => offset,
 );
+// Offsets are contiguous from 0, so the count doubles as the band width
+// (last offset + 1). If DELAYED_HEALTH_OFFSETS ever grows sparse, use
+// Math.max(...DELAYED_HEALTH_OFFSETS) + 1 instead.
 const DELAYED_HEALTH_BAND_WIDTH = DELAYED_HEALTH_OFFSETS.length;
 const delayedHealthFixtureRanges = [];
 
@@ -130,6 +133,26 @@ test("delayed-health exclusions retain every issued fixture port band", () => {
     { start: 12000, end: 12005 },
     { start: 14000, end: 14005 },
   ]);
+});
+
+test("delayed-health exclusions default arg accumulates fixture bands pushed at runtime", () => {
+  const saved = delayedHealthFixtureRanges.slice();
+  try {
+    delayedHealthFixtureRanges.length = 0;
+    const bandA = delayedHealthPortBand(16000);
+    const bandB = delayedHealthPortBand(18000);
+    delayedHealthFixtureRanges.push(bandA);
+    delayedHealthFixtureRanges.push(bandB);
+
+    expect(delayedHealthExcludedRanges()).toEqual([
+      { start: PORT_BASE, end: PORT_BASE + 2 * PORT_SPAN - 1 },
+      bandA,
+      bandB,
+    ]);
+  } finally {
+    delayedHealthFixtureRanges.length = 0;
+    delayedHealthFixtureRanges.push(...saved);
+  }
 });
 
 afterAll(() => {
