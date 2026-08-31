@@ -614,7 +614,24 @@ function linearCli() {
   // Test seam: point the planner's ticket reads at a stand-in CLI.
   return (
     process.env.FACTORY_LINEAR_CLI ||
-    path.join(FACTORY_ROOT, "tools", "linear.mjs")
+    path.join(FACTORY_ROOT, "tools", "ticket.mjs")
+  );
+}
+
+const DEPRECATED_LINEAR_SHIM_NOTICE =
+  "tools/linear.mjs is deprecated — use tools/ticket.mjs (or `factory ticket`)";
+
+function linearReadFailureReason(err) {
+  const stderr = String(err?.stderr ?? "");
+  const underlyingStderr = stderr
+    .trim()
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && line !== DEPRECATED_LINEAR_SHIM_NOTICE)
+    .pop();
+  return (
+    underlyingStderr ||
+    (linearReadTimedOut(err) ? "linear read timed out" : err.message)
   );
 }
 
@@ -802,10 +819,9 @@ function fetchTicketDefault(ticketId, repo, { readBudget = null } = {}) {
     const stderr = String(err?.stderr ?? "");
     if (stderr.includes("no such issue")) return null;
     throwIfLinearReadBudgetExhausted(err, readBudget);
-    throw new Error(
-      `linear_read_failed: ${stderr.trim().split("\n").pop() || err.message}`,
-      { cause: err },
-    );
+    throw new Error(`linear_read_failed: ${linearReadFailureReason(err)}`, {
+      cause: err,
+    });
   }
 }
 
@@ -846,11 +862,9 @@ function fetchViewerDefault(
     if (err instanceof LinearReadBudgetExceededError) throw err;
     throwIfLinearCliRateLimited(err);
     throwIfLinearReadBudgetExhausted(err, readBudget);
-    const stderr = String(err?.stderr ?? "");
-    throw new Error(
-      `linear_read_failed: ${stderr.trim().split("\n").pop() || err.message}`,
-      { cause: err },
-    );
+    throw new Error(`linear_read_failed: ${linearReadFailureReason(err)}`, {
+      cause: err,
+    });
   }
 }
 
@@ -1007,11 +1021,9 @@ function fetchInFlightDefault(repoConfig, { readBudget = null } = {}) {
     if (err instanceof LinearReadBudgetExceededError) throw err;
     throwIfLinearCliRateLimited(err);
     throwIfLinearReadBudgetExhausted(err, readBudget);
-    const stderr = String(err?.stderr ?? "");
-    throw new Error(
-      `linear_read_failed: ${stderr.trim().split("\n").pop() || err.message}`,
-      { cause: err },
-    );
+    throw new Error(`linear_read_failed: ${linearReadFailureReason(err)}`, {
+      cause: err,
+    });
   }
 }
 

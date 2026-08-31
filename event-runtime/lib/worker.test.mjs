@@ -18,6 +18,14 @@ import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
  * state, so a real hang still fails, just not a slow host.
  */
 const EXECUTE_SPAWN_TIMEOUT_MS = loadAdjustedTimeout(5_000);
+
+/**
+ * Ceiling for the isolated-process local-notify drain probe (GH-2011). It
+ * spawns a Bun child that loads the worker module graph, which is comfortably
+ * under a second on a quiet box and demonstrably slower on a contended one.
+ * Scaling it weakens no assertion: the probe's own asserts decide the verdict.
+ */
+const LOCAL_NOTIFY_PROBE_TIMEOUT_MS = loadAdjustedTimeout(20_000);
 import {
   composeHandoffVerification,
   ContractViolation,
@@ -40,6 +48,7 @@ import {
 } from "node:fs";
 import * as nodeFs from "node:fs";
 const realReadFileSync = nodeFs.readFileSync;
+import { createServer } from "node:net";
 import { homedir } from "node:os";
 import path from "node:path";
 import {
@@ -336,112 +345,48 @@ describe("worker", () => {
     expect(violations).toEqual([]);
   });
 
-  test("drains a worktree adapter's local notifications and reports an undelivered one after the adapter throws", async () => {
-    const db = openDb(":memory:");
-    const home = tmpDir("evrt-local-notify-throw-");
-    const runId = "run_local_notify_adapter_throw";
-    const ticket = "watt-mind/factory#1973";
-    queueRun(
-      db,
-      makeSpec({
-        runId,
-        input: { repo: "factory", ticket },
-        workspace: { type: "worktree" },
-      }),
-    );
-    const claim = claimNext(db, opts());
-    const materializeCalls = [];
-    const posted = [];
-    const comments = [];
-    const localNotifyFetch = async (url, init) => {
-      posted.push({ url, init });
-      return new Response("{}", { status: posted.length === 1 ? 201 : 503 });
-    };
-    const description = "## Owned Paths\n- event-runtime/lib/worker.mjs\n";
-    const dispatch = {
-      locksDir: tmpDir("evrt-local-notify-throw-locks-"),
-      leasesDir: tmpDir("evrt-local-notify-throw-leases-"),
-      fetchTicket: () => ({
-        identifier: ticket,
-        state: { name: "Todo" },
-        assignee: null,
-        labels: { nodes: [{ name: "ai:agent-ready" }] },
-        description,
-      }),
-      fetchInFlight: () => [],
-      countLeases: () => 0,
-      budgetRefusal: () => null,
-      claimTicket: () => ({ ok: true }),
-      commentTicket: (args) => comments.push(args),
-    };
-    const throwingAdapter = {
-      async execute() {
-        const outbox = path.join(home, "outbox", `${runId}.jsonl`);
-        mkdirSync(path.dirname(outbox), { recursive: true });
-        writeFileSync(
-          outbox,
-          ["delivered notification", "retained notification"]
-            .map((title) =>
-              JSON.stringify({
-                schemaVersion: "factory.local-notify-outbox/v1",
-                runId,
-                kind: "BLOCKED",
-                title: `BLOCKED watt-mind/factory#1973: ${title}`,
-                refs: { issue: ticket, repo: "factory" },
-                source: `agent:${runId}`,
-              }),
-            )
-            .join("\n") + "\n",
-        );
-        throw new Error("adapter threw");
-      },
-    };
-
-    try {
-      const summary = await executeClaimed(
-        db,
-        registry,
-        { fake: throwingAdapter },
-        claim,
-        opts({
-          dispatch,
-          env: {
-            FACTORY_EVENT_HOME: home,
-            FACTORY_EVENT_PORT: "7499",
-            FACTORY_CONTROL_API_TOKEN: "worker-token",
-          },
-          materializeWorktree: (args) => {
-            materializeCalls.push(args);
-            return { injected: true };
-          },
-          localNotifyFetch,
-        }),
-      );
-
-      expect(summary).toMatchObject({ terminalState: "FAILED" });
-      expect(materializeCalls).toHaveLength(1);
-      expect(posted).toHaveLength(2);
-      expect(posted[0].url).toBe("http://127.0.0.1:7499/inbox");
-      expect(JSON.parse(posted[0].init.body)).toMatchObject({
-        title: "BLOCKED watt-mind/factory#1973: delivered notification",
-        refs: { issue: ticket, repo: "factory" },
+  // The drain-on-throw behaviour is a whole-`executeClaimed` scenario, and in
+  // process it was load- and order-sensitive: four dispatch-worktree
+  // repo-verify gates failed on it in one morning (GH-2011) while every
+  // isolated re-run passed, because the surrounding suite mutates
+  // module-level fixtures this scenario reads through `executeClaimed`. The
+  // probe therefore runs as its own Bun process, which owns that state; every
+  // assertion lives there and each one names the invariant it guards. The
+  // inbox port is allocated ephemerally here (bind :0, read it back, close)
+  // and passed in, so nothing depends on a fixed local port being free.
+  test(
+    "drains a worktree adapter's local notifications and reports an undelivered one after the adapter throws (isolated process)",
+    async () => {
+      const port = await new Promise((resolve, reject) => {
+        const probe = createServer();
+        probe.once("error", reject);
+        probe.listen(0, "127.0.0.1", () => {
+          const assigned = probe.address().port;
+          probe.close(() => resolve(assigned));
+        });
       });
-      expect(comments).toEqual([
-        expect.objectContaining({
-          repo: "factory",
-          ticket,
-          body: expect.stringContaining(
-            "BLOCKED watt-mind/factory#1973: retained notification",
-          ),
-        }),
-      ]);
-      expect(
-        readFileSync(path.join(home, "outbox", `${runId}.jsonl`), "utf8"),
-      ).toContain("BLOCKED watt-mind/factory#1973: retained notification");
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
+      const script = new URL(
+        "../test-support/local-notify-drain-probe.mjs",
+        import.meta.url,
+      ).pathname;
+
+      const proc = Bun.spawnSync({
+        cmd: ["bun", script, String(port)],
+        stdout: "pipe",
+        stderr: "pipe",
+        cwd: new URL("../..", import.meta.url).pathname,
+      });
+      const stdout = proc.stdout.toString();
+      const stderr = proc.stderr.toString();
+      if (proc.exitCode !== 0) {
+        throw new Error(
+          `local-notify drain probe failed (exit ${proc.exitCode}):\n${stderr}${stdout}`,
+        );
+      }
+      expect(stdout).toContain("PROBE_OK");
+    },
+    LOCAL_NOTIFY_PROBE_TIMEOUT_MS,
+  );
 
   test("keeps exactly one local notify drain in the adapter finally to prevent double delivery", () => {
     // Two drain sites could race the same outbox read/truncate cycle and
