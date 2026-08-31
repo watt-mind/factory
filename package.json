@@ -83,6 +83,8 @@
     "format:check": "prettier --check .",
     "format": "prettier --write .",
     "test": "bun test",
+    "cells:test": "bun test event-runtime/lib/editorial-cells-unit.test.mjs",
+    "cells:deploy": "celld deploy cells --bucket ${CELLD_BUCKET:-s3://factory-cells} --endpoint ${S3_ENDPOINT:-https://cd4a8238b8fc54de39e31da1fb0ee657.r2.cloudflarestorage.com} --region auto",
     "docs:dev": "cd site && bun run dev",
     "docs:build": "cd site && bun run build",
     "lint": "bun run lint:cycles && eslint .",
