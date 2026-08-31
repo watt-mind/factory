@@ -15,8 +15,10 @@ import { memoryControlPlane } from "../../lib/control-plane/index.mjs";
 import {
   TICKET_DETAIL_CACHE_LIMIT,
   TICKET_DETAIL_CACHE_TTL_MS,
+  RUN_LIST_MAX_LIMIT,
   RUN_SUBJECT_CACHE_LIMIT,
   RUN_SUBJECT_CACHE_TTL_MS,
+  RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST,
   RUN_SUBJECT_RESOLVE_TIMEOUT_MS,
   runSubjectResolutionSettled,
   setRunSubjectResolveTimeoutMs,
@@ -619,13 +621,18 @@ describe("run list human identity (#2025, #2058)", () => {
       let remaining = RUN_SUBJECT_CACHE_LIMIT + 1;
       let hotPageBefore = null;
       while (remaining > 0) {
-        const pageSize = Math.min(200, remaining);
-        const batches = Math.ceil(pageSize / 8);
+        const pageSize = Math.min(RUN_LIST_MAX_LIMIT, remaining);
+        const batches = Math.ceil(
+          pageSize / RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST,
+        );
         const pageBefore = before;
-        if (remaining <= 200) hotPageBefore = pageBefore;
+        if (remaining <= RUN_LIST_MAX_LIMIT) hotPageBefore = pageBefore;
         let nextBefore = null;
         for (let batch = 0; batch < batches; batch += 1) {
-          const page = await s.client.runs({ limit: 200, before: pageBefore });
+          const page = await s.client.runs({
+            limit: RUN_LIST_MAX_LIMIT,
+            before: pageBefore,
+          });
           if (batch === 0) nextBefore = page.nextBefore;
           await runSubjectResolutionSettled();
         }
@@ -644,7 +651,7 @@ describe("run list human identity (#2025, #2058)", () => {
       // a recently resolved entry still takes the within-TTL cached path.
       expect(bySubject[evicted].subjectTitle).toBeNull();
       const hotView = await s.client.runs({
-        limit: 200,
+        limit: RUN_LIST_MAX_LIMIT,
         before: hotPageBefore,
       });
       expect(
@@ -759,20 +766,24 @@ describe("run list human identity (#2025, #2058)", () => {
       await s.client.runs();
       await s.client.runs();
       expect(runSubjectResolutionSettled()).toBe(inFlight);
-      expect(calls.length).toBeLessThanOrEqual(8);
+      expect(calls.length).toBeLessThanOrEqual(
+        RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST,
+      );
 
       release();
       await inFlight;
-      // One batch is capped at 8 distinct tickets even though 20 rows are
+      // One batch is capped at the exported subject-resolution limit even though 20 rows are
       // unresolved, and the extra polls above added nothing to it.
-      expect(calls).toHaveLength(8);
-      expect(new Set(calls).size).toBe(8);
+      expect(calls).toHaveLength(RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST);
+      expect(new Set(calls).size).toBe(RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST);
 
       const second = await s.client.runs();
       const secondResolved = second.runs.filter(
         (run) => run.subjectTitle,
       ).length;
-      expect(secondResolved).toBeLessThanOrEqual(8);
+      expect(secondResolved).toBeLessThanOrEqual(
+        RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST,
+      );
       expect(secondResolved).toBeGreaterThan(0);
 
       // A later poll picks up the next batch, converging on full resolution
@@ -1774,7 +1785,7 @@ describe("recent-ticket index (WM-821)", () => {
         expect(response.status).toBe(422);
         expect(await response.json()).toMatchObject({
           error: "invalid_limit",
-          message: "limit must be an integer between 1 and 200",
+          message: `limit must be an integer between 1 and ${RUN_LIST_MAX_LIMIT}`,
         });
       }
 
