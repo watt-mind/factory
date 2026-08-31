@@ -824,7 +824,7 @@ export async function reapDeadDispatchWorktrees(
     for (const { runId, repo: repoName, ticket } of db
       .query(DEAD_DISPATCH_WORKTREE_SQL)
       .all()) {
-      const key = `${repoName} ${ticket}`;
+      const key = `${repoName}\0${ticket}`;
       if (seen.has(key)) continue;
       seen.add(key);
 
