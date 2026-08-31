@@ -42,6 +42,7 @@ import {
   clampHandoffSandboxTmpfsMb,
   isBunTestFile,
   insideHandoffSandbox,
+  handoffVerifySmokeErrorAnnotation,
   handoffSandboxFacts,
   policyHandoffSandboxTmpfsMb,
   policyOwnedPathsConformance,
@@ -2225,6 +2226,8 @@ describe("handoff verification helpers (WM-718)", () => {
   test("sandboxed verify smoke delegates to the production handoff seam and names its facts", () => {
     const worktree = tmpDir("evrt-handoff-smoke-");
     const calls = [];
+    const confinement =
+      "env scrubbed; HOME=/tmp/home; workspace=/workspace; user+mount+pid+network namespace; chroot; tmpfs=1024MiB";
     const observation = runHandoffVerifySmoke({
       command: "bun test event-runtime/lib --timeout 20000",
       cwd: worktree,
@@ -2237,6 +2240,7 @@ describe("handoff verification helpers (WM-718)", () => {
           passed: true,
           exitCode: 0,
           output: "2333 pass\n0 fail\n",
+          confinement,
           sandbox: {
             tmpfsMb: 1024,
             namespaces: HANDOFF_SANDBOX_NAMESPACES,
@@ -2254,12 +2258,27 @@ describe("handoff verification helpers (WM-718)", () => {
         timeoutMs: 600_000,
       },
     ]);
-    expect(observation.sandboxFacts).toBe(
-      "Handoff sandbox facts: env scrubbed; HOME=/tmp/home; workspace=/workspace; namespaces=user,mount,pid,network; tmpfs=1024MiB.",
-    );
-    expect(handoffSandboxFacts({ sandbox: {} })).toContain(
-      "env scrubbed; HOME=/tmp/home; workspace=/workspace",
-    );
+    expect(observation.sandboxFacts).toContain(confinement);
+    expect(
+      handoffSandboxFacts({
+        confinement:
+          "inherited handoff sandbox; minimal env; HOME=/tmp/nested-home; workspace=/tmp/nested-worktree",
+        sandbox: {},
+      }),
+    ).toContain("HOME=/tmp/nested-home; workspace=/tmp/nested-worktree");
+  });
+
+  test("sandboxed smoke maps an unavailable sandbox to a lane-specific annotation", () => {
+    expect(
+      handoffVerifySmokeErrorAnnotation(new SandboxUnavailable(), {
+        lane: "self-hosted",
+      }),
+    ).toBe("::error::sandbox_unavailable on self-hosted runner");
+    expect(
+      handoffVerifySmokeErrorAnnotation(new Error("unrelated failure"), {
+        lane: "github-hosted",
+      }),
+    ).toBeNull();
   });
 
   test("ticket commands get a credential-free environment and namespace/chroot confinement", () => {
@@ -2536,6 +2555,9 @@ describe("handoff verification helpers (WM-718)", () => {
       });
       expect(obs.passed).toBe(true);
       expect(obs.confinement).toContain("inherited handoff sandbox");
+      expect(handoffSandboxFacts(obs)).toContain(
+        `HOME=${process.env.HOME ?? "/tmp/home"}; workspace=${worktree}`,
+      );
       expect(invocation.args).not.toContain("/usr/bin/unshare");
       expect(invocation.args).toEqual([
         "--signal=TERM",

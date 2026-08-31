@@ -680,8 +680,8 @@ export function runHandoffCommand({
     command,
     cwd: commandCwd,
     confinement: nested
-      ? "inherited handoff sandbox (already namespaced + chrooted); minimal env"
-      : `user+mount+pid+network namespace; chroot; ${handoffSandboxLimits(sandboxTmpfsMb)}`,
+      ? `inherited handoff sandbox (already namespaced + chrooted); minimal env; HOME=${process.env.HOME ?? "/tmp/home"}; workspace=${commandCwd}`
+      : `env scrubbed; HOME=/tmp/home; workspace=/workspace; user+mount+pid+network namespace; chroot; ${handoffSandboxLimits(sandboxTmpfsMb)}`,
     sandbox: {
       tmpfsMb: sandboxTmpfsMb,
       namespaces: HANDOFF_SANDBOX_NAMESPACES,
@@ -703,13 +703,28 @@ export function runHandoffCommand({
  * from the worker's production handoff boundary.
  */
 export function handoffSandboxFacts(observation) {
+  const confinement =
+    typeof observation?.confinement === "string" &&
+    observation.confinement.trim().length > 0
+      ? observation.confinement.trim()
+      : "confinement=unknown";
   const namespaces = Array.isArray(observation?.sandbox?.namespaces)
     ? observation.sandbox.namespaces.join(",")
     : HANDOFF_SANDBOX_NAMESPACES.join(",");
   const tmpfs = Number.isSafeInteger(observation?.sandbox?.tmpfsMb)
     ? `${observation.sandbox.tmpfsMb}MiB`
     : "unknown";
-  return `Handoff sandbox facts: env scrubbed; HOME=/tmp/home; workspace=/workspace; namespaces=${namespaces}; tmpfs=${tmpfs}.`;
+  return `Handoff sandbox facts: ${confinement}; namespaces=${namespaces}; tmpfs=${tmpfs}.`;
+}
+
+/** Map the expected unavailable-sandbox refusal to a GitHub annotation. */
+export function handoffVerifySmokeErrorAnnotation(error, { lane } = {}) {
+  if (error?.reasonCode !== HANDOFF_SANDBOX_UNAVAILABLE) return null;
+  const runner =
+    typeof lane === "string" && lane.trim().length > 0
+      ? lane.trim()
+      : "unknown";
+  return `::error::sandbox_unavailable on ${runner} runner`;
 }
 
 /**

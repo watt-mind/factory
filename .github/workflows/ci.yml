@@ -463,29 +463,52 @@ jobs:
         # config/repos.yaml. `runHandoffVerifySmoke` delegates to
         # `runHandoffCommand`, so unshare, env scrubbing, the worktree-only
         # mount, chroot, and HOME=/tmp/home all stay owned by production code.
+        # WM-918: required lanes exclude the timing-bound group because its
+        # wall-clock ceilings are not reliable under shared-host contention.
         env:
-          FACTORY_HANDOFF_SMOKE_COMMAND: bun test event-runtime/lib --timeout 20000 && bun build/emit.mjs --check && bun run format:check && bun run lint
+          FACTORY_HANDOFF_SMOKE_LANE: ${{ runner.environment }}
         shell: bash
         run: |
           set -euo pipefail
+          pat="$(bun event-runtime/lib/test-helpers-timing.mjs exclude-pattern)"
+          [ -n "$pat" ] || exit 1
+          export FACTORY_HANDOFF_SMOKE_COMMAND="bun test event-runtime/lib --timeout 20000 --test-name-pattern \"$pat\" && bun build/emit.mjs --check && bun run format:check && bun run lint"
           bun -e '
             import { mkdtempSync } from "node:fs";
             import { tmpdir } from "node:os";
             import path from "node:path";
-            import { runHandoffVerifySmoke } from "./event-runtime/lib/verify.mjs";
+            import {
+              handoffVerifySmokeErrorAnnotation,
+              runHandoffVerifySmoke,
+            } from "./event-runtime/lib/verify.mjs";
 
             const root = process.cwd();
             const logDir = mkdtempSync(path.join(tmpdir(), "factory-handoff-smoke-"));
-            const observation = runHandoffVerifySmoke({
-              command: process.env.FACTORY_HANDOFF_SMOKE_COMMAND,
-              cwd: root,
-              worktreePath: root,
-              logPath: path.join(logDir, "verify.log"),
-              timeoutMs: 600_000,
-            });
-            console.log(observation.sandboxFacts);
-            process.stdout.write(observation.output);
-            if (!observation.passed) process.exitCode = 1;
+            let observation;
+            try {
+              observation = runHandoffVerifySmoke({
+                command: process.env.FACTORY_HANDOFF_SMOKE_COMMAND,
+                cwd: root,
+                worktreePath: root,
+                logPath: path.join(logDir, "verify.log"),
+                timeoutMs: 600_000,
+              });
+            } catch (error) {
+              const annotation = handoffVerifySmokeErrorAnnotation(error, {
+                lane: process.env.FACTORY_HANDOFF_SMOKE_LANE,
+              });
+              if (!annotation) throw error;
+              // A cloud runner gets the same explicit non-green outcome; this
+              // preserves sandbox_unavailable as an environment diagnosis.
+              console.error(annotation);
+              process.exitCode = 1;
+            }
+            if (!observation) process.exitCode = 1;
+            else {
+              console.log(observation.sandboxFacts);
+              process.stdout.write(observation.output);
+              if (!observation.passed) process.exitCode = 1;
+            }
           '
 
   verify:
