@@ -43,6 +43,7 @@ import {
   insideHandoffSandbox,
   policyHandoffSandboxTmpfsMb,
   policyOwnedPathsConformance,
+  repoVerifyFailingTests,
   runHandoffCommand,
   ticketVerifyCoveredByRepoVerify,
   verifyResult,
@@ -1080,6 +1081,10 @@ describe("worktree baseline verification (WM-334)", () => {
       expect(err.violations[0]).toContain("error: expected 400, received 200");
       // A passing test whose name contains "(fail)" is not a failure marker.
       expect(err.violations[0]).not.toContain("(pass) timing-test registry");
+      expect(err.handoff.repoVerify.executionContext).toBe("dispatch_worktree");
+      expect(err.handoff.repoVerify.failingTests).toEqual([
+        "totals > rejects an invalid total",
+      ]);
     }
 
     const verifyLog = readFileSync(path.join(dir, ".verify.log"), "utf8");
@@ -1923,6 +1928,10 @@ describe("worktree baseline verification (WM-334)", () => {
         expect(err.violations).toEqual([
           "repo_verify_failed: timed out after 25ms",
         ]);
+        expect(err.handoff.repoVerify.executionContext).toBe(
+          "dispatch_worktree",
+        );
+        expect(err.handoff.repoVerify.failingTests).toEqual([]);
         expect(Date.now() - started).toBeLessThan(1_000);
       }
     } finally {
@@ -1930,6 +1939,43 @@ describe("worktree baseline verification (WM-334)", () => {
         delete process.env.FACTORY_REPO_VERIFY_TIMEOUT_MS;
       else process.env.FACTORY_REPO_VERIFY_TIMEOUT_MS = previous;
     }
+  });
+});
+
+describe("repoVerifyFailingTests", () => {
+  test("strips bun's trailing timing suffix so repeated names dedup", () => {
+    const output = [
+      "(fail) totals > rejects an invalid total [12.34ms]",
+      "(fail) totals > rejects an invalid total [1.2s]",
+      "✗ widgets > renders without a crash [0.9ms]",
+    ].join("\n");
+    expect(repoVerifyFailingTests(output)).toEqual([
+      "totals > rejects an invalid total",
+      "widgets > renders without a crash",
+    ]);
+  });
+
+  test("caps the name list so a broad regression cannot blow the comment budget", () => {
+    const lines = Array.from(
+      { length: 45 },
+      (_, i) => `(fail) suite > case ${i}`,
+    );
+    const result = repoVerifyFailingTests(lines.join("\n"));
+    expect(result).toHaveLength(21);
+    expect(result.slice(0, 20)).toEqual(
+      Array.from({ length: 20 }, (_, i) => `suite > case ${i}`),
+    );
+    expect(result.at(-1)).toBe("…and 25 more");
+  });
+
+  test("does not truncate a list at exactly the cap", () => {
+    const lines = Array.from(
+      { length: 20 },
+      (_, i) => `(fail) suite > case ${i}`,
+    );
+    const result = repoVerifyFailingTests(lines.join("\n"));
+    expect(result).toHaveLength(20);
+    expect(result.at(-1)).toBe("suite > case 19");
   });
 });
 
@@ -2885,6 +2931,43 @@ describe("handoff verification helpers (WM-718)", () => {
     expect(body).toContain("- agent-reported: `bun test` — pass, all green");
     expect(lines.filter((l) => l.startsWith("- Verification:"))).toHaveLength(
       1,
+    );
+  });
+
+  test("composeHandoffVerification identifies a failed repo verify's worktree and tests", () => {
+    const body = composeHandoffVerification({
+      repoVerify: {
+        source: "repo_verify",
+        command: "bun test event-runtime/lib",
+        exitCode: 1,
+        passed: false,
+        tail: "(fail) x > y",
+        executionContext: "dispatch_worktree",
+        failingTests: ["x > y"],
+      },
+      diff: { ok: false, error: "base unresolved" },
+    });
+
+    expect(body).toContain("- Repo verify context: dispatch_worktree");
+    expect(body).toContain("- Repo verify failing tests: `x > y`");
+  });
+
+  test("composeHandoffVerification escapes backticks in a test name and leaves the overflow marker unquoted", () => {
+    const body = composeHandoffVerification({
+      repoVerify: {
+        source: "repo_verify",
+        command: "bun test event-runtime/lib",
+        exitCode: 1,
+        passed: false,
+        tail: "(fail) x > y",
+        executionContext: "dispatch_worktree",
+        failingTests: ["uses `backtick` in the name", "…and 5 more"],
+      },
+      diff: { ok: false, error: "base unresolved" },
+    });
+
+    expect(body).toContain(
+      "- Repo verify failing tests: `uses 'backtick' in the name`, …and 5 more",
     );
   });
 
