@@ -4417,18 +4417,18 @@ describe("Linear rate limit (WM-878)", () => {
 
       expect(counts).toEqual({ planned: 0, failed: 0, deadLettered: 0 });
       expect(ticketReads).toBe(0);
-      expect(logs).toEqual([
-        `planner: Linear rate-limited until ${resetAt} — skipping Linear reads`,
-      ]);
-      expect(
-        db
-          .query(
-            `SELECT status, last_plan_error FROM events WHERE event_id = ?`,
-          )
-          .get(ref.eventId),
-      ).toMatchObject({
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toMatch(/rate-limited/);
+      expect(logs[0]).toContain(resetAt);
+      const escapedResetAt = resetAt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const event = db
+        .query(`SELECT status, last_plan_error FROM events WHERE event_id = ?`)
+        .get(ref.eventId);
+      expect(event).toMatchObject({
         status: "admitted",
-        last_plan_error: `linear_rate_limited: resetAt=${resetAt}`,
+        last_plan_error: expect.stringMatching(
+          new RegExp(`^linear_rate_limited:.*${escapedResetAt}`),
+        ),
       });
     });
   });

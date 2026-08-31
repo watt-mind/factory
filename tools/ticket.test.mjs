@@ -42,6 +42,8 @@ import {
   InstanceConfigMissingError,
   __resetLinearReposCache,
   assertLinearNetworkAllowed,
+  LinearOfflineGuardError,
+  LINEAR_OFFLINE_GUARD_EXIT,
   linearNetworkIsOffline,
 } from "./ticket.mjs";
 import { gql } from "../orchestrator/reaper.mjs";
@@ -56,13 +58,21 @@ const LABELS = [
   { id: "l-review", name: "ai:needs-review" },
 ];
 
-test("the Linear offline guard rejects api.linear.app before fetch", () => {
+test("the Linear offline guard identifies its trigger and escape hatch", () => {
   expect(linearNetworkIsOffline({ FACTORY_LINEAR_OFFLINE: "1" })).toBe(true);
-  expect(() =>
+  let thrown;
+  try {
     assertLinearNetworkAllowed("https://api.linear.app/graphql", {
       FACTORY_LINEAR_OFFLINE: "1",
-    }),
-  ).toThrow("linear_offline_guard");
+    });
+  } catch (err) {
+    thrown = err;
+  }
+  expect(thrown).toBeInstanceOf(LinearOfflineGuardError);
+  expect(thrown?.message).toBe(
+    "linear_offline_guard: Linear network access is disabled by FACTORY_LINEAR_OFFLINE=1; set FACTORY_LINEAR_ALLOW_NETWORK=1 to allow Linear network access",
+  );
+  expect(thrown?.exitCode).toBe(LINEAR_OFFLINE_GUARD_EXIT);
   expect(() =>
     assertLinearNetworkAllowed("https://api.linear.app/graphql", {
       FACTORY_LINEAR_OFFLINE: "1",
@@ -71,11 +81,50 @@ test("the Linear offline guard rejects api.linear.app before fetch", () => {
   ).not.toThrow();
 });
 
+test("the Linear transport fails offline before credential lookup or retry", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousKey = process.env.LINEAR_API_KEY;
+  const previousOffline = process.env.FACTORY_LINEAR_OFFLINE;
+  const previousAllow = process.env.FACTORY_LINEAR_ALLOW_NETWORK;
+  let calls = 0;
+  delete process.env.LINEAR_API_KEY;
+  process.env.FACTORY_LINEAR_OFFLINE = "1";
+  delete process.env.FACTORY_LINEAR_ALLOW_NETWORK;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response("{}", { status: 200 });
+  };
+
+  try {
+    let thrown;
+    try {
+      await gql("query { ping }", {}, { retries: 5 });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(LinearOfflineGuardError);
+    expect(thrown?.exitCode).toBe(LINEAR_OFFLINE_GUARD_EXIT);
+    expect(calls).toBe(0);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.LINEAR_API_KEY;
+    else process.env.LINEAR_API_KEY = previousKey;
+    if (previousOffline === undefined)
+      delete process.env.FACTORY_LINEAR_OFFLINE;
+    else process.env.FACTORY_LINEAR_OFFLINE = previousOffline;
+    if (previousAllow === undefined)
+      delete process.env.FACTORY_LINEAR_ALLOW_NETWORK;
+    else process.env.FACTORY_LINEAR_ALLOW_NETWORK = previousAllow;
+  }
+});
+
 test("the Linear transport does not retry a 429 rate-limit response", async () => {
   const previousFetch = globalThis.fetch;
   const previousKey = process.env.LINEAR_API_KEY;
+  const previousAllow = process.env.FACTORY_LINEAR_ALLOW_NETWORK;
   let calls = 0;
   process.env.LINEAR_API_KEY = "test-key";
+  process.env.FACTORY_LINEAR_ALLOW_NETWORK = "1";
   globalThis.fetch = async () => {
     calls += 1;
     return new Response('{"errors":[{"message":"RATELIMITED"}]}', {
@@ -102,6 +151,9 @@ test("the Linear transport does not retry a 429 rate-limit response", async () =
     globalThis.fetch = previousFetch;
     if (previousKey === undefined) delete process.env.LINEAR_API_KEY;
     else process.env.LINEAR_API_KEY = previousKey;
+    if (previousAllow === undefined)
+      delete process.env.FACTORY_LINEAR_ALLOW_NETWORK;
+    else process.env.FACTORY_LINEAR_ALLOW_NETWORK = previousAllow;
   }
 });
 
@@ -1059,9 +1111,14 @@ test("file --from <Linear-id> --team reaches the Linear plane from an unresolvab
     "--title",
     "finding",
   ]);
-  expect(result.exitCode).toBe(1);
-  // The default (Linear) plane was selected and went looking for its key.
-  expect(result.stderr).toContain("LINEAR_API_KEY not found");
+  expect(result.exitCode).toBe(LINEAR_OFFLINE_GUARD_EXIT);
+  // The default (Linear) plane was selected, but offline mode wins before
+  // credential lookup so the operator gets an actionable refusal instead.
+  expect(result.stderr).toContain(
+    "linear_offline_guard: Linear network access is disabled by FACTORY_LINEAR_OFFLINE=1",
+  );
+  expect(result.stderr).toContain("FACTORY_LINEAR_ALLOW_NETWORK=1");
+  expect(result.stderr).not.toContain("LINEAR_API_KEY not found");
   expect(result.stderr).not.toContain("--repo <name> or --from <owner/repo#N>");
   expect(result.ghCalls).toBe("");
 });

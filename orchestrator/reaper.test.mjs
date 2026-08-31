@@ -13,9 +13,11 @@ describe("Linear GraphQL cancellation", () => {
   test("forwards an AbortSignal to fetch and stops retrying when aborted", async () => {
     const previousFetch = globalThis.fetch;
     const previousKey = process.env.LINEAR_API_KEY;
+    const previousAllow = process.env.FACTORY_LINEAR_ALLOW_NETWORK;
     const controller = new AbortController();
     let observed;
     process.env.LINEAR_API_KEY = "test-key";
+    process.env.FACTORY_LINEAR_ALLOW_NETWORK = "1";
     globalThis.fetch = (_url, options) => {
       observed = options.signal;
       return new Promise((_, reject) =>
@@ -42,6 +44,9 @@ describe("Linear GraphQL cancellation", () => {
       globalThis.fetch = previousFetch;
       if (previousKey === undefined) delete process.env.LINEAR_API_KEY;
       else process.env.LINEAR_API_KEY = previousKey;
+      if (previousAllow === undefined)
+        delete process.env.FACTORY_LINEAR_ALLOW_NETWORK;
+      else process.env.FACTORY_LINEAR_ALLOW_NETWORK = previousAllow;
     }
   });
 });

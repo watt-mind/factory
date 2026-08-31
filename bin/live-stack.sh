@@ -11,7 +11,7 @@
 #   factory tail                 # tail all live logs (serve.log, worker.log, web.log)
 #   factory tail worker          # tail a specific daemon log
 #   factory logs rotate          # rotate oversized daemon logs now
-#   factory status               # report total bytes held by daemon logs (+ archives)
+#   factory status               # report control API and registry health plus log bytes
 #
 # Log rotation knobs (read by `up`, `logs rotate`, and the web supervisor tick):
 #   FACTORY_LOG_ROTATE_BYTES     # rotate a daemon log once it exceeds this many
@@ -204,6 +204,30 @@ validate_timing_knobs() {
     die "FACTORY_WORKER_READY_TIMEOUT must be a non-negative integer"
   [[ "$WEB_SUPERVISOR_INTERVAL" =~ ^([1-9][0-9]*(\.[0-9]+)?|0\.[0-9]*[1-9][0-9]*)$ ]] ||
     die "FACTORY_WEB_SUPERVISOR_INTERVAL must be a positive number"
+}
+
+print_health_status() {
+  local health health_lines
+  if ! health="$(curl -sf -m 3 "http://127.0.0.1:$API_PORT/health" 2>/dev/null)"; then
+    printf 'control API: unreachable on :%s\n' "$API_PORT"
+    return 0
+  fi
+  if ! health_lines="$(printf '%s' "$health" | bun -e '
+const health = JSON.parse(await Bun.stdin.text());
+const registry = health?.registry;
+const compact = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+console.log("control API: reachable");
+console.log(`registry: stamp ${registry?.stamp ?? "unknown"}; loaded ${registry?.loadedAt ?? "unknown"}`);
+console.log(`registry reload: ${registry?.lastReloadError?.message ? compact(registry.lastReloadError.message) : "none"}`);
+if (Object.hasOwn(health ?? {}, "planner")) {
+  const planner = health.planner;
+  console.log(`planner: last success ${planner?.lastSuccessAt ?? planner?.lastPlannedAt ?? planner?.lastPlanAt ?? planner?.lastCompletedAt ?? planner?.lastRunAt ?? planner?.lastAt ?? "unknown"}`);
+}
+' 2>/dev/null)"; then
+    printf 'control API: invalid health response on :%s\n' "$API_PORT"
+    return 0
+  fi
+  printf '%s\n' "$health_lines"
 }
 
 # Reject knob values before anything touches a log. A threshold below 1 MiB
@@ -922,6 +946,7 @@ case "$ACTION" in
     ;;
 
   status)
+    print_health_status
     printf 'total log bytes: %s\n' "$(run_log_total_bytes "$RUN_DIR")"
     ;;
 

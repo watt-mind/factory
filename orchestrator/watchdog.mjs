@@ -33,6 +33,10 @@ import { budgetExhausted } from "../lib/spend.mjs";
 import { loadForge } from "../lib/forge/index.mjs";
 import { resolveConfigPath } from "../event-runtime/lib/config.mjs";
 import { reposRoot } from "../event-runtime/lib/repos.mjs";
+import {
+  codeStamp,
+  REGISTRY_STAMP_PATHS,
+} from "../event-runtime/lib/worker.mjs";
 
 const c = {
   bold: (s) => `\x1b[1m${s}\x1b[0m`,
@@ -92,6 +96,81 @@ export const SANDBOX_REFUSAL_DETAIL_CONCURRENCY = 4;
 export const SANDBOX_REFUSAL_BUDGET_MS = 5_000;
 export const CONTROL_API_TIMEOUT_MS = 3_000;
 export const FLEET_CHECK_TIMEOUT_MS = 10_000;
+export const PLANNER_STALE_MS = 5 * 60 * 1000;
+
+function timestampMs(value) {
+  if (typeof value === "number" && Number.isFinite(value))
+    return value < 1_000_000_000_000 ? value * 1000 : value;
+  const parsed = Date.parse(String(value ?? ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function admittedEventCount(status) {
+  const admitted = status?.events?.admitted;
+  if (Number.isFinite(admitted) && admitted >= 0) return admitted;
+  if (Number.isFinite(admitted?.count) && admitted.count >= 0)
+    return admitted.count;
+  return 0;
+}
+
+/**
+ * Decide whether a reachable serve is also running the current registry and,
+ * when it reports one, a planner able to drain admitted work.  Older serves
+ * did not expose `planner`, so its absence remains a compatible liveness
+ * result rather than a fabricated failure.
+ */
+export function assessServeHealth(
+  health,
+  {
+    expectedRegistryStamp = codeStamp(undefined, REGISTRY_STAMP_PATHS),
+    queuedEvents = 0,
+    now = Date.now(),
+    plannerStaleMs = PLANNER_STALE_MS,
+  } = {},
+) {
+  const issues = [];
+  const registry = health?.registry;
+  if (
+    registry?.stamp &&
+    expectedRegistryStamp &&
+    registry.stamp !== expectedRegistryStamp
+  ) {
+    issues.push({
+      severity: "CRITICAL",
+      code: "REGISTRY_STALE",
+      message: `Control API registry ${registry.stamp} differs from local ${expectedRegistryStamp}`,
+    });
+  }
+  if (registry?.lastReloadError?.message) {
+    issues.push({
+      severity: "WARNING",
+      code: "REGISTRY_RELOAD_ERROR",
+      message: `Control API registry reload failed: ${registry.lastReloadError.message}`,
+    });
+  }
+
+  if (health && Object.hasOwn(health, "planner") && queuedEvents > 0) {
+    const planner = health.planner;
+    // #1903 landed the canonical `lastPlannedAt` recency field on /health;
+    // the old guess chain over speculative field names is gone with it.
+    const lastAt = timestampMs(planner?.lastPlannedAt);
+    if (lastAt === null) {
+      issues.push({
+        severity: "WARNING",
+        code: "PLANNER_UNAVAILABLE",
+        message: `${queuedEvents} admitted event(s) are queued but planner recency is unavailable`,
+      });
+    } else if (now - lastAt > plannerStaleMs) {
+      issues.push({
+        severity: "CRITICAL",
+        code: "PLANNER_STALE",
+        message: `${queuedEvents} admitted event(s) are queued; planner last succeeded ${Math.round((now - lastAt) / 60000)}m ago`,
+      });
+    }
+  }
+
+  return { ok: issues.length === 0, issues };
+}
 
 /**
  * Read a control-API endpoint with the loopback bearer and a bounded timeout.
@@ -324,10 +403,11 @@ export async function runWatchdogCheck({
     sandboxRefusals: [],
     anomalies: [],
   };
+  let health = null;
 
   // 1. Control API Health
   try {
-    const health = await controlApi("/health", { host, port });
+    health = await controlApi("/health", { host, port });
     metrics.apiOk = true;
     metrics.tick = health?.tick ?? null;
     if (health?.tick?.overruns > 0) {
@@ -433,6 +513,10 @@ export async function runWatchdogCheck({
     }
 
     metrics.queuedRuns = byState.QUEUED ?? 0;
+    const serveHealth = assessServeHealth(health, {
+      queuedEvents: admittedEventCount(statusRes),
+    });
+    issues.push(...serveHealth.issues);
     metrics.sandboxRefusals = sandboxRefusals;
     if (metrics.sandboxRefusals.length > 0) {
       const agents = [
@@ -1055,8 +1139,18 @@ export function liveIdleWatchdogDeps({
       // retry separates "wedged" from "was mid-tick when we asked".
       for (const attempt of [0, 1]) {
         try {
-          await api("/health", { timeoutMs: 15000 });
-          return true;
+          const health = await api("/health", { timeoutMs: 15000 });
+          let queuedEvents = 0;
+          // The planner block is new; do not add a status read for older
+          // serves that cannot report planner recency yet.
+          if (Object.hasOwn(health ?? {}, "planner")) {
+            queuedEvents = admittedEventCount(await api("/status"));
+          }
+          // Gate the idle loop on planner recency only: a reachable serve on
+          // last-good code (REGISTRY_STALE) can still plan and drain work, so
+          // the watchdog report surfaces it without halting injection here.
+          const { issues } = assessServeHealth(health, { queuedEvents });
+          return !issues.some((issue) => issue.code?.startsWith("PLANNER_"));
         } catch {
           if (attempt === 1) return false;
         }

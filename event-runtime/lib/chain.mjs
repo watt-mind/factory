@@ -46,6 +46,20 @@ export class ChainTerminalError extends Error {
   }
 }
 
+/**
+ * A well-formed path whose value is simply absent. Distinct from a structural
+ * defect (unknown root, malformed expression): for a `whenPath` this is how a
+ * rule says "condition not met", so the edge is skipped rather than the chain
+ * terminated. It stays a ChainTerminalError so input mappings — which require
+ * every mapped path to resolve — keep terminating as before.
+ */
+export class ChainPathAbsentError extends ChainTerminalError {
+  constructor(message) {
+    super(message);
+    this.name = "ChainPathAbsentError";
+  }
+}
+
 function isTerminalError(err) {
   return err instanceof ChainTerminalError || err instanceof SyntaxError;
 }
@@ -75,14 +89,14 @@ function resolvePath(expr, context) {
   let value = context[root];
   for (const segment of segments) {
     if (value === null || typeof value !== "object" || !(segment in value)) {
-      throw new ChainTerminalError(
+      throw new ChainPathAbsentError(
         `chain input path "${expr}" resolves to nothing`,
       );
     }
     value = value[segment];
   }
   if (value === undefined)
-    throw new ChainTerminalError(
+    throw new ChainPathAbsentError(
       `chain input path "${expr}" resolves to nothing`,
     );
   return value;
@@ -245,14 +259,21 @@ export function resolveChains(
                 }
                 return [key, candidate];
               })
-              .filter(([, candidate]) => {
+              .filter(([key, candidate]) => {
                 if (candidate.whenPath === undefined) return true;
                 try {
                   return (
                     resolvePath(candidate.whenPath, selectionContext) !== null
                   );
-                } catch {
-                  return false;
+                } catch (err) {
+                  // A well-formed path with no value is the rule's own way of
+                  // saying "condition not met" — skip the edge. Only a
+                  // structural defect terminates the chain.
+                  if (err instanceof ChainPathAbsentError) return false;
+                  throw new ChainTerminalError(
+                    `chain edge "${key}" whenPath "${candidate.whenPath}" failed: ${err.message}`,
+                    err.reason,
+                  );
                 }
               });
           })();
