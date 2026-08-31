@@ -5063,6 +5063,9 @@ export async function executeClaimed(
         attempt,
         terminalState: "FAILED",
         reasonCode,
+        ...(res?.tierEscalationSkip
+          ? { tierEscalationSkip: res.tierEscalationSkip }
+          : {}),
         ...(res?.escalation
           ? {
               escalatedRunId: res.escalation.continuation_run_id,
@@ -5394,6 +5397,9 @@ export async function executeClaimed(
         reasonCode,
         detail: failureReason,
         ...(handoff ? { handoff } : {}),
+        ...(res?.tierEscalationSkip
+          ? { tierEscalationSkip: res.tierEscalationSkip }
+          : {}),
         ...(res?.escalation
           ? {
               escalatedRunId: res.escalation.continuation_run_id,
@@ -6086,10 +6092,14 @@ export function cancelRun(
     reason = "operator_cancel",
     now = () => Date.now(),
     policyVersion,
+    unclaimTierEscalation = defaultUnclaimTicket,
+    cleanupTierEscalationWorkspace = ({ sourceWorkspacePath, repo }) =>
+      destroyWorkspace(sourceWorkspacePath, { repoName: repo }),
   } = {},
 ) {
   const currentNow = resolveNow(now);
-  return txImmediate(db, () => {
+  const active = ACTIVE_EXECUTIONS.get(runId);
+  const outcome = txImmediate(db, () => {
     const run = db
       .query(`SELECT state, attempts FROM runs WHERE run_id = ?`)
       .get(runId);
@@ -6129,12 +6139,61 @@ export function cancelRun(
       actor,
       now: currentNow,
     });
-    const active = ACTIVE_EXECUTIONS.get(runId);
+    const escalation = tierEscalationForContinuation(db, runId);
+    const escalationRefused = escalation
+      ? refuseTierEscalationClaim(db, escalation, reason)
+      : false;
     if (active) {
       active.abort(reason);
     }
-    return { ...result, proposalClose };
+    return { ...result, proposalClose, escalation, escalationRefused };
   });
+  const { escalation, escalationRefused, ...cancelledRun } = outcome;
+
+  // An executing continuation owns its ticket/workspace cleanup and responds
+  // to the abort above. An APPROVED/QUEUED continuation has no executor to do
+  // that work, so cancellation must consume the durable ownership transfer.
+  // Keep tracker/filesystem effects outside the SQLite write transaction.
+  if (!escalation || active) return cancelledRun;
+
+  let claimReleased = false;
+  let claimReleaseError = null;
+  try {
+    claimReleased =
+      unclaimTierEscalation({
+        repo: escalation.repo,
+        ticket: escalation.ticket,
+        why: reason,
+        log: null,
+      }) === true;
+  } catch (err) {
+    claimReleaseError = err?.message ?? String(err);
+  }
+
+  let workspaceCleaned = false;
+  let workspaceCleanupError = null;
+  try {
+    workspaceCleaned =
+      cleanupTierEscalationWorkspace({
+        sourceWorkspacePath: escalation.sourceWorkspacePath,
+        workspacePath: escalation.workspacePath,
+        repo: escalation.repo,
+        ticket: escalation.ticket,
+      }) === true;
+  } catch (err) {
+    workspaceCleanupError = err?.message ?? String(err);
+  }
+
+  return {
+    ...cancelledRun,
+    escalationCancellation: {
+      projectionRefused: escalationRefused,
+      claimReleased,
+      workspaceCleaned,
+      ...(claimReleaseError ? { claimReleaseError } : {}),
+      ...(workspaceCleanupError ? { workspaceCleanupError } : {}),
+    },
+  };
 }
 
 /**

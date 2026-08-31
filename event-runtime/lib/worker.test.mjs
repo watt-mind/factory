@@ -3843,6 +3843,109 @@ sh -c 'sleep 5 & wait'
     });
   });
 
+  test("failed dispatch skips an In Review continuation but schedules one for an active ticket", async () => {
+    const executeFailure = async (reviewed) => {
+      const db = openDb(":memory:");
+      let ticketState = "Todo";
+      const ticket = "watt-mind/factory#2006";
+      const comments = [];
+      const spec = queueRun(
+        db,
+        makeSpec({
+          runId: `run_tier_failed_${reviewed ? "reviewed" : "active"}`,
+          agent: "dispatch@1",
+          input: { repo: "factory", ticket },
+          workspace: {
+            type: "worktree",
+            checkoutDir: "repo",
+            retainOnFailure: true,
+          },
+          outputContract: "factory.dispatch-result/v1",
+          modelTier: "light",
+          maxAttempts: 1,
+        }),
+      );
+      linkEvent(db, spec.runId, { type: "factory.dispatch.requested" });
+      const o = opts({
+        dispatch: {
+          locksDir: tmpDir("tier-skip-locks-"),
+          leasesDir: tmpDir("tier-skip-leases-"),
+          fetchTicket: () => ({
+            identifier: ticket,
+            state: { name: ticketState },
+            assignee: ticketState === "Todo" ? null : { name: "hdkiller" },
+            labels: {
+              nodes: [
+                {
+                  name:
+                    ticketState === "Todo"
+                      ? "ai:agent-ready"
+                      : "ai:in-progress",
+                },
+              ],
+            },
+            description:
+              "## Owned Paths\n- event-runtime/lib/worker.mjs\n\n## Verification Command\n`bun test event-runtime/lib/worker.test.mjs`\n",
+          }),
+          fetchInFlight: () => [],
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          claimTicket: () => ((ticketState = "In Progress"), { ok: true }),
+          commentTicket: (entry) => comments.push(entry),
+          projectTierEscalation: () => true,
+          findWorkspacePullRequest: () => null,
+        },
+        materializeWorktree: () => ({
+          path: tmpDir("tier-skip-checkout-"),
+        }),
+      });
+      const claim = claimNext(db, o);
+      const result = await executeClaimed(
+        db,
+        registry,
+        {
+          fake: {
+            async execute() {
+              if (reviewed) ticketState = "In Review";
+              return { exitCode: 1, timedOut: false };
+            },
+          },
+        },
+        claim,
+        o,
+      );
+      const continuations = db
+        .query(`SELECT * FROM tier_escalations ORDER BY created_at`)
+        .all();
+      db.close();
+      return { result, comments, continuations };
+    };
+
+    const reviewed = await executeFailure(true);
+    expect(reviewed.result).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "agent_exit_1",
+      tierEscalationSkip: "ticket_in_review",
+    });
+    expect(reviewed.continuations).toEqual([]);
+    expect(reviewed.comments).toContainEqual(
+      expect.objectContaining({
+        body: expect.stringContaining(
+          "Tier escalation skipped: ticket is already In Review",
+        ),
+      }),
+    );
+
+    const active = await executeFailure(false);
+    expect(active.result).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "agent_exit_1",
+      escalatedRunId: expect.any(String),
+    });
+    expect(active.result.tierEscalationSkip).toBeUndefined();
+    expect(active.continuations).toHaveLength(1);
+  });
+
   test("continuation handoff failures are matched per violation, anchored at its start", () => {
     const quoted =
       "repo_verify_failed: (fail) x\nweb_build_failed: quoted inside output";
@@ -4530,6 +4633,76 @@ sh -c 'sleep 5 & wait'
     expect(calls.at(-1)[2]).toContain(
       "https://github.com/watt-mind/factory/pull/1281",
     );
+  });
+
+  test("cancelRun releases an unstarted tier continuation claim and retained worktree ownership", () => {
+    const db = openDb(":memory:");
+    const failed = queueRun(
+      db,
+      makeSpec({
+        runId: "run_cancel_tier_failed",
+        agent: "dispatch@1",
+        input: { repo: "factory", ticket: "watt-mind/factory#2006" },
+        workspace: {
+          type: "worktree",
+          checkoutDir: "repo",
+          retainOnFailure: true,
+        },
+        modelTier: "light",
+        maxAttempts: 1,
+      }),
+    );
+    linkEvent(db, failed.runId);
+    const escalation = scheduleTierEscalation(db, registry, failed, {
+      workspacePath: "/retained/factory-2006",
+      sourceWorkspacePath: "/workspace/run-2006",
+      continuationRunId: "run_cancel_tier_continuation",
+      reasonCode: "agent_exit_1",
+    });
+    const unclaims = [];
+    const cleanups = [];
+
+    const result = cancelRun(db, escalation.continuation_run_id, {
+      actor: "operator",
+      policyVersion: "test",
+      now: T0,
+      unclaimTierEscalation: (entry) => (unclaims.push(entry), true),
+      cleanupTierEscalationWorkspace: (entry) => (cleanups.push(entry), true),
+    });
+
+    expect(runState(db, escalation.continuation_run_id)).toBe("CANCELLED");
+    expect(result.escalationCancellation).toEqual({
+      projectionRefused: true,
+      claimReleased: true,
+      workspaceCleaned: true,
+    });
+    expect(unclaims).toEqual([
+      {
+        repo: "factory",
+        ticket: "watt-mind/factory#2006",
+        why: "operator_cancel",
+        log: null,
+      },
+    ]);
+    expect(cleanups).toEqual([
+      {
+        sourceWorkspacePath: "/workspace/run-2006",
+        workspacePath: "/retained/factory-2006",
+        repo: "factory",
+        ticket: "watt-mind/factory#2006",
+      },
+    ]);
+    expect(
+      db
+        .query(
+          `SELECT projection_state, projection_error FROM tier_escalations WHERE continuation_run_id = ?`,
+        )
+        .get(escalation.continuation_run_id),
+    ).toEqual({
+      projection_state: "refused",
+      projection_error: "operator_cancel",
+    });
+    db.close();
   });
 
   test("adapter_error with maxAttempts 1 requeues and succeeds without consuming the agent budget", async () => {
