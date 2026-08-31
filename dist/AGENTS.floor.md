@@ -194,6 +194,13 @@ A tool result is not paid for once. It stays in the context window and is re-sen
 
 Factory-spawned sessions get their **own isolated headless Chrome** (via `--mcp-config`, `config/mcp/claude.json` in the factory repo) — a temp profile per session, screenshots served as capped webp. There is nothing to share and nothing to fight over.
 
+**Tab routing across concurrent subagents.** In harnesses sharing a browser pane (e.g. Claude Browser pane), all subagents in a session share a single flat tab pool and one global fronted tab. Calls omitting `tabId` race on whatever tab a sibling fronted, silently reading or writing another ticket's app (misdiagnosed as product or auth bugs).
+
+- **Pass `tabId` explicitly on every browser call** — `navigate`, `get_page_text`, `read_page`, `computer`, `javascript_tool`. Explicit `tabId` routes correctly; omitting it targets the fronted tab, which any sibling can steal.
+- **Own a tab from `tabs_create`** and never rely on the fronted tab — fronting is global mutable state.
+- **Assert origin before trusting a read** — verify the host/port in the page output matches your ticket's app before acting on page text or screenshots.
+- **Re-read after reload** — reading immediately after `location.reload()` can return the pre-reload DOM; take a second read before concluding a session or auth state is invalid.
+
 If an IDE browser tool reports a stale/missing tab, its tab listing disagrees with navigation, or a call deadlocks, use **one bounded recovery**: record the backend/tool/URL and exact error (or the harness timeout with no result), call `list_pages`/`tabs` once, discard every cached tab ID, select or create a page from the fresh result, and navigate once. If listing and navigation still disagree or either call times out, that browser backend is unavailable — never retry it in a loop.
 
 Use an independent isolated headless backend when the harness provides one (the factory Chrome DevTools MCP or Pi `chrome_devtools_*`), rather than reusing the broken IDE registry. Let the backend own the browser lifecycle whenever possible. On display-less Linux, launch through the factory wrapper. If `FACTORY_ROOT` is unset, do not guess its location: run `factory doctor`, record that the fallback is not configured, and stop browser recovery. For a CDP-capable fallback driver, kept in one managed shell session:
