@@ -109,6 +109,25 @@ new ticket.
    running app and write every screenshot to `artifactDir` rather than `/tmp`
    or another workspace path.
 
+   **Worktree web fixture.** Read `<worktree>/.factory/run/ports` for the
+   allocated `api` and `web` ports. The provisioned static proxy is already
+   running; do not start a server or a second proxy. Direct the critic to
+   `http://127.0.0.1:<web>/#/runs`; the login route is **none**. The worktree
+   proxy, not the browser, holds the control bearer and injects it for
+   same-origin `/api` reads. Never pass, print, or ask the critic to set
+   `FACTORY_CONTROL_API_TOKEN` or an `Authorization` header.
+
+   Before the critic navigates, verify the fixture with
+   `curl -fsS http://127.0.0.1:<web>/api/runs`: it must return HTTP 200 and a
+   `runs` payload. The critic must then observe the same successful
+   `GET /api/runs` and live run data in the browser before issuing `SHIP` or
+   `FIX-FIRST`. A 401 or 403 is an **auth-fixture failure**, not a genuinely
+   unassessable flow: report `required — NOT-ASSESSED, auth fixture failure
+(GET /api/runs HTTP <status>)` in the Handoff. Use
+   `required — NOT-ASSESSED, authenticated fixture succeeded (GET /api/runs
+HTTP 200); <genuinely unassessable reason>` only after the authenticated
+   fixture was observed and the flow itself could not be assessed.
+
    Screenshot evidence must survive workspace cleanup. For every screenshot the
    critic creates, calculate its SHA-256 and declare it in the outer
    `result.json` as `{ "kind": "ux-screenshot", "path": "ux-artifacts/<file>" }`
@@ -233,7 +252,7 @@ shell` means the spawn prompt was defective: correct its path/launch details
    ## Handoff
    - PR: <url>
    - Verification: `<exact command>` — pass, <one-line result>
-   - UX critique: required — SHIP | required — FIX-FIRST unresolved | required — NOT-ASSESSED, <reason> | blocked — <reason> | skipped — <reason>; evidence: <page URL or screenshot path, when required>
+   - UX critique: required — SHIP | required — FIX-FIRST unresolved | required — NOT-ASSESSED, auth fixture failure (GET /api/runs HTTP 401/403) | required — NOT-ASSESSED, authenticated fixture succeeded (GET /api/runs HTTP 200); <genuinely unassessable reason> | blocked — <reason> | skipped — <reason>; evidence: <page URL or screenshot path, when required>
    - Files: <n> changed, all within Owned Paths
    - Risks: <reviewer focus, or "none known">
    ```

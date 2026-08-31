@@ -31,7 +31,7 @@
     }
   ],
   "pins": {
-    "agents/dispatch.md": "sha256:d6bcafb9e2daab29ffcfc837f851063712d21f3011e4f29d21bdba4f1bb34214",
+    "agents/dispatch.md": "sha256:28b2639252a55058e978c00464c81e59bf9947ef8dd1c292dd24c39f23a1f9a8",
     "schemas/dispatch.input.json": "sha256:2909f2898723c796669716a0f9c185ec262bdbea20a948754c6228384f88e6e6",
     "schemas/dispatch.output.json": "sha256:a8d8cd5816eb8d7da832da59120bc1f028623edf1a9a9e180348d897621dfff1"
   }

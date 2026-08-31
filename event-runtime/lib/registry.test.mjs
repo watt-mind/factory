@@ -260,6 +260,18 @@ describe("registry", () => {
     });
   });
 
+  test("dispatch prompt gives UX critics the authenticated worktree Runs fixture", () => {
+    const prompt = getAgent(loadRegistry(), "dispatch@1").promptText;
+    expect(prompt).toContain(".factory/run/ports");
+    expect(prompt).toContain("do not start a server or a second proxy");
+    expect(prompt).toContain("/#/runs");
+    expect(prompt).toContain("GET /api/runs");
+    expect(prompt).toContain("HTTP 200");
+    expect(prompt).toContain("auth-fixture failure");
+    expect(prompt).toContain("HTTP 401/403");
+    expect(prompt).toContain("genuinely unassessable");
+  });
+
   test("zero-pack merged-view digest matches the develop baseline", () => {
     // Regenerate with registryDigest(loadRegistry({ packRoots: [] })) on develop.
     // The serializer omits only WM-470's new pack provenance and normalizes
@@ -413,10 +425,13 @@ describe("registry", () => {
     // grammar and its prompt pin changes; the registry digest follows it.
     // Regenerated (#2023): dispatch declares UX screenshots as durable
     // result artifacts and cites their content-addressed identifiers.
+    // Regenerated (#2057): dispatch gives UX critics the worktree's
+    // authenticated Runs fixture and distinguishes an auth-fixture 401/403
+    // from a genuinely unassessable flow; dispatch.json is re-pinned.
     // Regenerated (#2035): triage-scan names ticket.mjs as the active ticket
     // CLI and re-pins its definition; the prompt pin is a registry input.
     const expected =
-      "sha256:db13f68023714db1485bd79cc1359169f5d7056fcc1e44db307c6748e48fedfe";
+      "sha256:d7990996b96367144944af86799c85cb1448aba9c0b7c38cd3cdfee451b433ec";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -712,8 +727,11 @@ describe("registry", () => {
     // Regenerated (#1925): dispatch specifies the exact Fixes-line grammar;
     // its prompt pin legitimately changes while `pack` remains non-enumerable.
     // #2023 adds durable UX screenshot artifact declarations to that prompt.
+    // Regenerated (#2057): dispatch names the authenticated worktree Runs
+    // fixture and the explicit auth-fixture NOT-ASSESSED classification;
+    // prompt pin only, `pack` remains non-enumerable.
     expect(computeDefHash(def)).toBe(
-      "sha256:d71406671c4b9addd6b5184f18eb2919b0d2b40d57640bffc56927c3e3e9231d",
+      "sha256:de6c15bb144b71b99530807f819e0a5246c9c4442c8bf8d4d2162cd3ced63463",
     );
   });
 
