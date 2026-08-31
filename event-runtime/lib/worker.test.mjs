@@ -120,6 +120,7 @@ import {
   reconcileTierEscalations,
   scheduleTierEscalation,
   sweepOrphanedLocalNotifyOutbox,
+  tierEscalationContinuationGuard,
   tierEscalationEligibility,
   retryRun,
   runLinearCli,
@@ -3789,6 +3790,57 @@ sh -c 'sleep 5 & wait'
         "agent_exit_1",
       ).eligible,
     ).toBe(false);
+  });
+
+  test("tier escalation skips work already handed to review but keeps active claims eligible", () => {
+    const spec = makeSpec({
+      agent: "dispatch@1",
+      input: { repo: "factory", ticket: "watt-mind/factory#2006" },
+      workspace: { type: "worktree", checkoutDir: "repo" },
+      modelTier: "light",
+    });
+    const inReview = tierEscalationContinuationGuard(spec, "agent_exit_1", {
+      fetchTicket: () => ({ state: { name: "In Review" } }),
+    });
+    expect(inReview).toMatchObject({
+      eligible: true,
+      skip: true,
+      reason: "ticket_in_review",
+    });
+    const db = openDb(":memory:");
+    queueRun(db, spec);
+    linkEvent(db, spec.runId);
+    expect(
+      scheduleTierEscalation(db, registry, spec, {
+        workspacePath: "/retained/factory-2006",
+        sourceWorkspacePath: "/workspace/run-2006",
+        continuationRunId: "run_tier_in_review",
+        reasonCode: "agent_exit_1",
+        continuationGuard: inReview,
+      }),
+    ).toBeNull();
+    expect(
+      db.query(`SELECT * FROM runs WHERE run_id = 'run_tier_in_review'`).get(),
+    ).toBeNull();
+    db.close();
+    for (const state of ["Todo", "In Progress"]) {
+      expect(
+        tierEscalationContinuationGuard(spec, "agent_exit_1", {
+          fetchTicket: () => ({ state: { name: state } }),
+        }),
+      ).toMatchObject({ eligible: true, skip: false });
+    }
+    expect(
+      tierEscalationContinuationGuard(spec, "agent_exit_1", {
+        fetchTicket: () => ({ state: { name: "In Progress" } }),
+        workspacePath: "/retained/factory-2006",
+        findPullRequest: () => ({ isDraft: false }),
+      }),
+    ).toMatchObject({
+      eligible: true,
+      skip: true,
+      reason: "retained_pr_open",
+    });
   });
 
   test("continuation handoff failures are matched per violation, anchored at its start", () => {

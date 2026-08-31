@@ -1035,6 +1035,52 @@ export function tierEscalationEligibility(spec, reasonCode) {
 }
 
 /**
+ * Decide whether an otherwise eligible tier escalation still owns work to do.
+ *
+ * The failed agent can hand a ticket to review before its worker observes a
+ * failed handoff verification. Do not let that late failure create a stronger
+ * continuation which races the retained PR's review/fix lane.
+ */
+export function tierEscalationContinuationGuard(
+  spec,
+  reasonCode,
+  {
+    fetchTicket,
+    findPullRequest = defaultFindWorkspacePullRequest,
+    workspacePath,
+  } = {},
+) {
+  const eligibility = tierEscalationEligibility(spec, reasonCode);
+  if (!eligibility.eligible) return { ...eligibility, skip: false };
+
+  let ticket;
+  try {
+    ticket = fetchTicket?.(spec.input?.ticket, spec.input?.repo);
+  } catch {
+    // Preserve the existing continuation behavior when the tracker cannot be
+    // read. The continuation's claim-time gate still performs its own
+    // fail-closed tracker proof before it can execute.
+    ticket = null;
+  }
+  if (ticket?.state?.name === "In Review") {
+    return { ...eligibility, skip: true, reason: "ticket_in_review" };
+  }
+
+  let pullRequest;
+  try {
+    pullRequest = workspacePath ? findPullRequest?.({ workspacePath }) : null;
+  } catch {
+    // PR discovery is an additional ownership signal, not a reason to drop a
+    // recoverable continuation when the forge is temporarily unavailable.
+    pullRequest = null;
+  }
+  if (pullRequest?.isDraft === false) {
+    return { ...eligibility, skip: true, reason: "retained_pr_open" };
+  }
+  return { ...eligibility, skip: false };
+}
+
+/**
  * Layer the RunSpec-derived dispatch identity onto the adapter environment.
  *
  * Any `dispatch@<version>` agent qualifies. Identity keys are only emitted when
@@ -1642,6 +1688,7 @@ export function scheduleTierEscalation(
     continuationRunId = newRunId(),
     reasonCode,
     handoffFailure = null,
+    continuationGuard = null,
   } = {},
 ) {
   const rootRunId = failedSpec.rootRunId ?? failedSpec.runId;
@@ -1650,6 +1697,7 @@ export function scheduleTierEscalation(
     .get(rootRunId);
   if (existing) return existing;
   if (!tierEscalationEligibility(failedSpec, reasonCode).eligible) return null;
+  if (continuationGuard?.skip) return null;
   if (!workspacePath || !sourceWorkspacePath)
     throw new Error("tier escalation requires the retained workspace paths");
 
@@ -1765,7 +1813,7 @@ export function defaultFindWorkspacePullRequest({ workspacePath, forge }) {
     .prList(null, {
       cwd: workspacePath,
       state: "open",
-      fields: ["number", "url", "headRefName"],
+      fields: ["number", "url", "headRefName", "isDraft"],
       timeout: workerSubprocessTimeoutMs(),
     })
     .find((pr) => pr?.headRefName === branch && pr?.url);
@@ -3648,6 +3696,23 @@ export async function executeClaimed(
         })
       : null;
 
+  const commentTierEscalationSkip = (reason) => {
+    if (!reason || !mayMutateClaimedTicket()) return;
+    const why =
+      reason === "ticket_in_review"
+        ? "ticket is already In Review"
+        : "the retained worktree already has an open non-draft PR";
+    try {
+      commentTicketFn({
+        repo: repoName,
+        ticket: ticketId,
+        body: `Tier escalation skipped: ${why}; failed run \`${runId}\` remains with the existing review handoff.`,
+      });
+    } catch {
+      /* The terminal run remains recorded even if tracker commentary fails. */
+    }
+  };
+
   const abortController = new AbortController();
   ACTIVE_EXECUTIONS.set(runId, {
     abort: (reason) => abortController.abort(reason),
@@ -3675,8 +3740,17 @@ export async function executeClaimed(
   };
 
   /** Terminal failure-shaped write: classify, finalize, and budget any retry atomically. */
-  const failTerminal = (to, journalReason, reasonCode, beforeTerminal) =>
-    txImmediate(db, () => {
+  const failTerminal = (to, journalReason, reasonCode, beforeTerminal) => {
+    const escalationGuard = tierEscalationDue(reasonCode)
+      ? tierEscalationContinuationGuard(spec, reasonCode, {
+          fetchTicket: fetchTicketFn,
+          findPullRequest:
+            dispatchOpts?.findWorkspacePullRequest ??
+            defaultFindWorkspacePullRequest,
+          workspacePath: worktreePath ?? checkoutPath,
+        })
+      : null;
+    const result = txImmediate(db, () => {
       const currentNow = nowFn();
       if (!assertCurrentToken(db, runId, fencingToken)) {
         recordFencedAttempt(db, {
@@ -3726,7 +3800,7 @@ export async function executeClaimed(
           policyVersion,
           now: nowFn(),
         });
-      } else if (tierEscalationEligibility(spec, reasonCode).eligible) {
+      } else if (escalationGuard?.eligible && !escalationGuard.skip) {
         escalation = scheduleTierEscalation(db, registry, spec, {
           workspacePath: worktreePath ?? checkoutPath,
           sourceWorkspacePath: workspaceDir,
@@ -3734,6 +3808,7 @@ export async function executeClaimed(
           policyVersion,
           now: currentNow,
           reasonCode,
+          continuationGuard: escalationGuard,
         });
       }
       return {
@@ -3741,8 +3816,15 @@ export async function executeClaimed(
         cause: decision.cause,
         requeued: decision.retry,
         escalation,
+        tierEscalationSkip:
+          !decision.retry && escalationGuard?.skip
+            ? escalationGuard.reason
+            : null,
       };
     });
+    commentTierEscalationSkip(result?.tierEscalationSkip);
+    return result;
+  };
 
   let def = null;
   try {
@@ -5158,6 +5240,15 @@ export async function executeClaimed(
         ? `${composeHandoffVerification(handoff)}\n\n**Result:** run ${runId} FAILED \`${reasonCode}\` — ${activeError.violations.join("; ")}`
         : null;
       const escalating = tierEscalationDue(reasonCode);
+      const escalationGuard = escalating
+        ? tierEscalationContinuationGuard(spec, reasonCode, {
+            fetchTicket: fetchTicketFn,
+            findPullRequest:
+              dispatchOpts?.findWorkspacePullRequest ??
+              defaultFindWorkspacePullRequest,
+            workspacePath: worktreePath ?? checkoutPath,
+          })
+        : null;
       // WM-718: the PR is the agent's, already opened; the structural hold is
       // to draft it and quote the observed failure where the reviewer looks.
       if (
@@ -5271,7 +5362,7 @@ export async function executeClaimed(
             policyVersion,
             now: nowFn(),
           });
-        } else if (tierEscalationEligibility(spec, reasonCode).eligible) {
+        } else if (escalationGuard?.eligible && !escalationGuard.skip) {
           escalation = scheduleTierEscalation(db, registry, spec, {
             workspacePath: worktreePath ?? checkoutPath,
             sourceWorkspacePath: workspaceDir,
@@ -5280,11 +5371,20 @@ export async function executeClaimed(
             now: currentNow,
             reasonCode,
             handoffFailure: continuationFailure,
+            continuationGuard: escalationGuard,
           });
         }
-        return { ok: true, escalation };
+        return {
+          ok: true,
+          escalation,
+          tierEscalationSkip:
+            !decision.retry && escalationGuard?.skip
+              ? escalationGuard.reason
+              : null,
+        };
       });
       const projection = projectScheduledEscalation(res?.escalation);
+      commentTierEscalationSkip(res?.tierEscalationSkip);
       if (!res?.escalation) cleanupWorkspace({ retainWorkspace: retain });
       if (res?.fenced) return { fenced: true };
       return {
