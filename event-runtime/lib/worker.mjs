@@ -3001,16 +3001,19 @@ function escapeRegExp(value) {
 
 /**
  * Finds a valid `Fixes <ticket>` first line (case-insensitive, tolerant of
- * surrounding whitespace and one trailing punctuation mark), and otherwise
- * preserves the first Fixes-like line for a corrective violation. Accepts the
- * full `owner/repo#n` form, the short `#n` form when the PR lives in that
- * repository, and Linear ids verbatim. Returns null when the handoff carries
- * no usable ticket, so the caller reports "unknown" rather than probing the
- * body for `Fixes null`.
+ * surrounding whitespace and one trailing punctuation mark). A body may open
+ * with blank lines, so "first" means the first non-empty line. When no such
+ * line is found the result distinguishes the two correctable shapes: a
+ * well-formed Fixes line that sits somewhere further down (`misplacedLine` —
+ * move it to the top) from a Fixes-like line that is malformed
+ * (`malformedLine` — rewrite it). Accepts the full `owner/repo#n` form, the
+ * short `#n` form when the PR lives in that repository, and Linear ids
+ * verbatim. Returns null when the handoff carries no usable ticket, so the
+ * caller reports "unknown" rather than probing the body for `Fixes null`.
  */
 function handoffFixesLine({ lines, ticket, github }) {
   const ref = typeof ticket === "string" ? ticket.trim() : "";
-  if (!ref) return { present: null, malformedLine: null };
+  if (!ref) return { present: null, malformedLine: null, misplacedLine: null };
   const alternatives = [escapeRegExp(ref)];
   const repoMatch = /^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#([0-9]+)$/.exec(ref);
   if (
@@ -3024,11 +3027,16 @@ function handoffFixesLine({ lines, ticket, github }) {
     `^\\s*fixes\\s+(?:${alternatives.join("|")})\\s*[.,;:]?\\s*$`,
     "i",
   );
-  const firstLine = lines[0] ?? "";
-  if (pattern.test(firstLine)) return { present: true, malformedLine: null };
+  const firstLine = lines.find((line) => line.trim() !== "") ?? "";
+  if (pattern.test(firstLine))
+    return { present: true, malformedLine: null, misplacedLine: null };
+  const misplacedLine = lines.find((line) => pattern.test(line)) ?? null;
+  if (misplacedLine !== null)
+    return { present: false, malformedLine: null, misplacedLine };
   return {
     present: false,
     malformedLine: lines.find((line) => /^\s*fixes\b/i.test(line)) ?? null,
+    misplacedLine: null,
   };
 }
 
@@ -3121,11 +3129,18 @@ export function assertHandoffPullRequestBase({
     );
   }
   if (hasFixesLine === false) {
-    const malformedDetail = fixesLine.malformedLine
-      ? ` has malformed Fixes line ${JSON.stringify(fixesLine.malformedLine)}; expected exactly Fixes ${handoff.ticket}`
-      : ` has no Fixes line for ${handoff.ticket}`;
+    let formDetail;
+    if (fixesLine.misplacedLine !== null) {
+      // The line is correct — only its position is wrong. Saying "malformed"
+      // here would quote the expectation back as the offence.
+      formDetail = ` has ${JSON.stringify(fixesLine.misplacedLine.trim())} but it must be the first line of the PR body`;
+    } else if (fixesLine.malformedLine) {
+      formDetail = ` has malformed Fixes line ${JSON.stringify(fixesLine.malformedLine)}; expected exactly Fixes ${handoff.ticket}`;
+    } else {
+      formDetail = ` has no Fixes line for ${handoff.ticket}`;
+    }
     throw new ContractViolation(
-      [`handoff_pr_form_invalid: PR #${prNumber}${malformedDetail}`],
+      [`handoff_pr_form_invalid: PR #${prNumber}${formDetail}`],
       { reasonCode: "handoff_pr_form_invalid", handoff },
     );
   }
