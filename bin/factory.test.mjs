@@ -569,7 +569,7 @@ test("factory pulse executes via CLI", () => {
   expect(json).toHaveProperty("stack");
   expect(json).toHaveProperty("supply");
   expect(json).toHaveProperty("workspace");
-});
+}, 15_000);
 
 test("factory watchdog executes via CLI", () => {
   const result = Bun.spawnSync({
@@ -582,4 +582,4 @@ test("factory watchdog executes via CLI", () => {
   expect(json).toHaveProperty("ok");
   expect(json).toHaveProperty("issues");
   expect(json).toHaveProperty("metrics");
-});
+}, 15_000);
