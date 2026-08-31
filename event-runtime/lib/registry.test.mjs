@@ -437,8 +437,12 @@ describe("registry", () => {
     // its prompt pin; the registry digest follows it.
     // Regenerated (#2071): unavailable worktree web UIs are blocked before a
     // UX critic can misclassify a connection failure as an auth-fixture issue.
+    // Regenerated (#2076): ci-log-capture pins the failed workflow attempt via
+    // an auditable script, records expected missing logs as a completed
+    // no-artifact outcome, and only chains a diagnosis when a ci-log artifact
+    // was captured.
     const expected =
-      "sha256:2f271e47dad4a9e1b03ba3f1febed267b1ae97968828934bcaa855b28dcf6a86";
+      "sha256:5e787a02b59c4816c24abde6225cb568673d85f9d1fa3a6a1706d4468ca35015";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 

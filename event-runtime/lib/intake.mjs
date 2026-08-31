@@ -202,7 +202,9 @@ function repoForSlug(repos, slug) {
  *                 (short name); `report_only` repos never yield it.
  *   workflow_run  completed + failure on a configured repo → the EXISTING
  *                 `github.workflow-run.failed` shape ci-log-capture consumes
- *                 ({repo: owner/name slug, runId}); report_only repos included.
+ *                 ({repo: owner/name slug, runId, runAttempt?}); report_only
+ *                 repos included. The attempt keeps a later re-run from
+ *                 replacing the failed attempt's capture target.
  *
  * eventId is GitHub's delivery GUID, so at-least-once delivery dedupes on the
  * (source, eventId) key like every other admission. Anything else is a typed
@@ -280,15 +282,28 @@ export function translateGitHubEvent({
     if (!repo) return { ok: false, ignored: true, reason: "unconfigured_repo" };
     if (run.id === undefined || run.id === null)
       return { ok: false, ignored: false, reason: "malformed_payload" };
+    // A malformed attempt is not a malformed event: the run id — the thing
+    // the capture actually needs — is intact, so drop the attempt and let
+    // ci-log-capture take its no-attempt fallback rather than losing the
+    // failure entirely.
+    const attempt =
+      Number.isInteger(run.run_attempt) && run.run_attempt >= 1
+        ? run.run_attempt
+        : null;
     return {
       ok: true,
       // The existing shape ci-log-capture@1 consumes: the GitHub slug, not the
-      // short name — see schemas/ci-log-capture.input.json.
+      // short name — see schemas/ci-log-capture.input.json. Including the
+      // webhook's attempt also makes each re-run a distinct input hash.
       envelope: {
         ...base,
         type: "github.workflow-run.failed",
         subject: "ci",
-        payload: { repo: slug, runId: run.id },
+        payload: {
+          repo: slug,
+          runId: run.id,
+          ...(attempt === null ? {} : { runAttempt: attempt }),
+        },
       },
     };
   }

@@ -464,20 +464,37 @@ describe("translateGitHubEvent repository slug matching (WM-1803)", () => {
     });
   });
 
-  test("emits workflow failures for mixed-case repository slugs without changing the delivered slug", () => {
+  test("emits workflow failures with their attempt for mixed-case repository slugs", () => {
     expect(
       translate("workflow_run", {
         action: "completed",
-        workflow_run: { id: 1803, conclusion: "failure" },
+        workflow_run: { id: 1803, run_attempt: 2, conclusion: "failure" },
         repository: { full_name: "wATT-mIND/fACTORY" },
       }),
     ).toMatchObject({
       ok: true,
       envelope: {
         type: "github.workflow-run.failed",
-        payload: { repo: "wATT-mIND/fACTORY", runId: 1803 },
+        payload: { repo: "wATT-mIND/fACTORY", runId: 1803, runAttempt: 2 },
       },
     });
+  });
+
+  // The run id is what the capture needs; a junk attempt only costs the pin,
+  // so the event still admits and ci-log-capture takes its fallback (#2076).
+  test("degrades an unusable run_attempt to the no-attempt fallback instead of rejecting", () => {
+    for (const run_attempt of [0, -1, 1.5, "2", null, {}]) {
+      const outcome = translate("workflow_run", {
+        action: "completed",
+        workflow_run: { id: 2076, run_attempt, conclusion: "failure" },
+        repository: { full_name: "watt-mind/factory" },
+      });
+      expect(outcome.ok).toBe(true);
+      expect(outcome.envelope.payload).toEqual({
+        repo: "watt-mind/factory",
+        runId: 2076,
+      });
+    }
   });
 
   test("keeps empty and non-string repository slugs unconfigured", () => {
