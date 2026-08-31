@@ -800,6 +800,21 @@ export const RUN_SUBJECT_CACHE_TTL_MS = 30_000;
 // not cached, so they stay eligible next time around).
 const RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST = 8;
 const RUN_SUBJECT_RESOLVE_CONCURRENCY = 4;
+// One control-plane read that hangs (a GitHub Projects GraphQL stall was
+// measured at 15s on the live host) must not pin the background batch open
+// past the point where the next poll would have refreshed it anyway.
+export const RUN_SUBJECT_RESOLVE_TIMEOUT_MS = 5_000;
+let runSubjectResolveTimeoutMs = RUN_SUBJECT_RESOLVE_TIMEOUT_MS;
+
+/** Test seam: shrink the per-call bound so a timeout is cheap to exercise. */
+export function setRunSubjectResolveTimeoutMs(ms) {
+  runSubjectResolveTimeoutMs = ms ?? RUN_SUBJECT_RESOLVE_TIMEOUT_MS;
+}
+
+// At most one background resolution batch at a time. The Runs page polls every
+// few seconds; without this guard a cold cache would stack a fresh fan-out on
+// every poll while the previous one is still waiting on the tracker.
+let runSubjectResolutionInFlight = null;
 
 // GET /runs is polled frequently. Resolve each distinct ticket once per short
 // window (including misses) so duplicate rows and the detail view never turn a
@@ -811,6 +826,7 @@ const runSubjectCache = createLruCache({
 
 export function clearRunSubjectCache() {
   runSubjectCache.clear();
+  runSubjectResolutionInFlight = null;
 }
 
 function runSubjectLabel(subject) {
@@ -865,23 +881,65 @@ function runIdentity(row, spec) {
   };
 }
 
-async function resolveRunSubjects(
-  runs,
-  { nowMs = Date.now(), controlPlane } = {},
-) {
+/**
+ * Fill run identities from the subject cache only. Pure and synchronous: the
+ * request path never awaits a tracker read (#2058), because a single stalled
+ * GitHub Projects GraphQL call used to hold GET /runs open for 15s+ and blow
+ * the web proxy's 10s budget (504 api_busy). A cache miss stays a bare
+ * subject with a null title; `scheduleRunSubjectResolution` fills it in
+ * out-of-band so the next poll renders the title.
+ *
+ * Returns the set of still-unresolved ticket ids, for the caller to schedule.
+ */
+function applyCachedRunSubjects(runs, nowMs) {
   const unresolved = new Set();
   for (const run of runs) {
     const ticket = normalizeTicketId(run.ticketSubject);
     if (!ticket || run.subjectTitle) continue;
     const cached = runSubjectCache.get(ticket, nowMs);
-    if (cached) {
-      Object.assign(run, cached);
-    } else {
-      unresolved.add(ticket);
-    }
+    if (cached) Object.assign(run, cached);
+    else unresolved.add(ticket);
   }
-  if (unresolved.size === 0) return runs;
+  return unresolved;
+}
 
+/**
+ * Bound one tracker read. A control plane that never answers (or answers in
+ * 15s) must not pin a background batch open, so every getTicket races a timer
+ * and the loser is treated as a miss. The timer is unref'd so a pending probe
+ * never holds the process open.
+ */
+async function getTicketWithTimeout(plane, ticket) {
+  const controller =
+    typeof AbortController === "function" ? new AbortController() : null;
+  let timer = null;
+  // Prefer the title-only verb where the plane has one. The full `getTicket`
+  // also pays a Projects v2 status read, an edit-history query and a ready-pin
+  // read -- measured at ~8s per ticket on the live host -- and none of that is
+  // rendered on the Runs page. Planes without it (linear, memory) fall back to
+  // `getTicket`, which is a single request for them anyway.
+  const read = (
+    typeof plane.getTicketTitle === "function"
+      ? plane.getTicketTitle
+      : plane.getTicket
+  ).bind(plane);
+  try {
+    return await Promise.race([
+      read(ticket, { signal: controller?.signal }),
+      new Promise((_resolve, reject) => {
+        timer = setTimeout(() => {
+          controller?.abort();
+          reject(new Error(`run subject resolution timed out for ${ticket}`));
+        }, runSubjectResolveTimeoutMs);
+        timer?.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function resolveRunSubjectBatch(tickets, { nowMs, controlPlane }) {
   let plane;
   try {
     plane = await ticketDetailControlPlane(controlPlane);
@@ -889,15 +947,12 @@ async function resolveRunSubjects(
     plane = null;
   }
 
-  const toResolve = [...unresolved].slice(
-    0,
-    RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST,
-  );
+  const toResolve = tickets.slice(0, RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST);
 
   async function resolveOne(ticket) {
     let data = { subjectTitle: null, subjectUrl: runSubjectUrl(ticket) };
     try {
-      const issue = await plane?.getTicket(ticket);
+      const issue = plane ? await getTicketWithTimeout(plane, ticket) : null;
       data = {
         subjectTitle:
           typeof issue?.title === "string" && issue.title.trim()
@@ -909,26 +964,62 @@ async function resolveRunSubjects(
             : runSubjectUrl(ticket),
       };
     } catch {
-      // A tracker outage degrades to the bare persisted subject. Cache the
-      // miss briefly as well, otherwise every 5s poll retries the outage.
+      // A tracker outage (or a read that blew the per-call timeout) degrades
+      // to the bare persisted subject. Cache the miss briefly as well,
+      // otherwise every 5s poll retries the outage.
     }
+    // Stamped with the request's clock, not wall time: reads use the server
+    // clock, and a mixed pair would make every entry look instantly stale
+    // under a fixed test clock.
     runSubjectCache.set(ticket, data, nowMs);
   }
 
   // Chunked loop: at most RUN_SUBJECT_RESOLVE_CONCURRENCY in flight at once,
   // and never more than RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST tickets total for
-  // this request. Anything left in `unresolved` beyond the cap is simply not
-  // resolved here -- it stays a bare subject until a later poll picks it up.
+  // this batch. Anything left over is simply not resolved here -- it stays a
+  // bare subject until a later poll schedules the next batch.
   for (let i = 0; i < toResolve.length; i += RUN_SUBJECT_RESOLVE_CONCURRENCY) {
     const chunk = toResolve.slice(i, i + RUN_SUBJECT_RESOLVE_CONCURRENCY);
     await Promise.all(chunk.map((ticket) => resolveOne(ticket)));
   }
-  for (const run of runs) {
-    const ticket = normalizeTicketId(run.ticketSubject);
-    const cached = ticket ? runSubjectCache.get(ticket, nowMs) : null;
-    if (cached && !run.subjectTitle) Object.assign(run, cached);
-  }
+}
+
+/**
+ * Fire-and-forget the capped/chunked resolver after the response is on the
+ * wire. Only one batch runs at a time: a Runs page polling every 5s with a
+ * cold cache must not stack a new fan-out on top of a batch that is still
+ * waiting on the tracker. Rejections are swallowed here so a background
+ * failure can never surface as an unhandled rejection.
+ */
+function scheduleRunSubjectResolution(
+  unresolved,
+  { nowMs, controlPlane } = {},
+) {
+  if (!unresolved || unresolved.size === 0) return null;
+  if (runSubjectResolutionInFlight) return runSubjectResolutionInFlight;
+  const batch = resolveRunSubjectBatch([...unresolved], { nowMs, controlPlane })
+    .catch(() => {})
+    .finally(() => {
+      if (runSubjectResolutionInFlight === batch)
+        runSubjectResolutionInFlight = null;
+    });
+  runSubjectResolutionInFlight = batch;
+  return batch;
+}
+
+/**
+ * Serve subject titles from cache and top the cache up in the background.
+ * Synchronous by construction -- see `applyCachedRunSubjects`.
+ */
+function resolveRunSubjects(runs, { nowMs = Date.now(), controlPlane } = {}) {
+  const unresolved = applyCachedRunSubjects(runs, nowMs);
+  scheduleRunSubjectResolution(unresolved, { nowMs, controlPlane });
   return runs;
+}
+
+/** Test seam: the in-flight background batch, or null. */
+export function runSubjectResolutionSettled() {
+  return runSubjectResolutionInFlight ?? Promise.resolve();
 }
 
 class ListQueryError extends Error {
@@ -2493,7 +2584,7 @@ export async function handleRunApiRoute({
         agent: url.searchParams.get("agent") ?? undefined,
       };
       const view = runsView(db, filters, runPage(url));
-      await resolveRunSubjects(view.runs, { nowMs });
+      resolveRunSubjects(view.runs, { nowMs });
       return send(200, view);
     } catch (err) {
       if (err instanceof ListQueryError) return send(422, err.body);
@@ -2628,7 +2719,7 @@ export async function handleRunApiRoute({
       readArtifactHead,
     });
     if (!view) return send(404, { error: `unknown run ${runGet[1]}` });
-    await resolveRunSubjects([view.identity], { nowMs });
+    resolveRunSubjects([view.identity], { nowMs });
     return send(200, view);
   }
 

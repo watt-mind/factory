@@ -16,6 +16,9 @@ import {
   TICKET_DETAIL_CACHE_LIMIT,
   TICKET_DETAIL_CACHE_TTL_MS,
   RUN_SUBJECT_CACHE_TTL_MS,
+  RUN_SUBJECT_RESOLVE_TIMEOUT_MS,
+  runSubjectResolutionSettled,
+  setRunSubjectResolveTimeoutMs,
   clearObservedModelCache,
   clearRunSubjectCache,
   clearTicketDetailCache,
@@ -463,13 +466,28 @@ describe("run list deadlines (WM-692)", () => {
   });
 });
 
-describe("run list human identity (#2025)", () => {
+describe("run list human identity (#2025, #2058)", () => {
   afterEach(() => {
     setTicketDetailControlPlane(null);
+    setRunSubjectResolveTimeoutMs(null);
     clearRunSubjectCache();
   });
 
-  test("enriches distinct ticket subjects once and falls back to the origin type", async () => {
+  const insertRunInto = (db, runId, agent, subject, at) => {
+    db.query(
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at, subject)
+       VALUES (?, ?, ?, 'sha256:test', 'RUNNING', 1, ?, ?, ?)`,
+    ).run(
+      runId,
+      `idem-${runId}`,
+      JSON.stringify({ agent, adapter: "pi", input: {} }),
+      at,
+      at,
+      subject,
+    );
+  };
+
+  test("serves subjects from cache and fills titles from the background batch", async () => {
     const calls = [];
     setTicketDetailControlPlane({
       async getTicket(ticket) {
@@ -485,21 +503,8 @@ describe("run list human identity (#2025)", () => {
     let nowMs = Date.parse("2026-08-31T10:00:00.000Z");
     const s = await makeServer({ now: () => nowMs });
     const at = new Date(nowMs).toISOString();
-    const insertRun = (runId, agent, subject) => {
-      s.db
-        .query(
-          `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at, subject)
-           VALUES (?, ?, ?, 'sha256:test', 'RUNNING', 1, ?, ?, ?)`,
-        )
-        .run(
-          runId,
-          `idem-${runId}`,
-          JSON.stringify({ agent, adapter: "pi", input: {} }),
-          at,
-          at,
-          subject,
-        );
-    };
+    const insertRun = (runId, agent, subject) =>
+      insertRunInto(s.db, runId, agent, subject, at);
     try {
       insertRun("run_ticket_a", "dispatch@1", "watt-mind/factory#2025");
       insertRun("run_ticket_b", "merge-review@1", "watt-mind/factory#2025");
@@ -519,9 +524,30 @@ describe("run list human identity (#2025)", () => {
         )
         .run(at);
 
+      // #2058: the request path never awaits the tracker. A cold cache
+      // returns bare subjects rather than holding the response open.
       const first = await s.client.runs();
-      const byId = Object.fromEntries(
+      const coldById = Object.fromEntries(
         first.runs.map((run) => [run.runId, run]),
+      );
+      expect(coldById.run_ticket_a).toMatchObject({
+        ticketSubject: "watt-mind/factory#2025",
+        subjectLabel: "factory#2025",
+        subjectTitle: null,
+      });
+      expect(coldById.run_sweep).toMatchObject({
+        agentKind: "work-scan",
+        ticketSubject: null,
+        subjectLabel: null,
+        originType: "factory.sweep.requested",
+        originLabel: "sweep",
+      });
+
+      await runSubjectResolutionSettled();
+
+      const second = await s.client.runs();
+      const byId = Object.fromEntries(
+        second.runs.map((run) => [run.runId, run]),
       );
       expect(byId.run_ticket_a).toMatchObject({
         agent: "dispatch@1",
@@ -531,17 +557,14 @@ describe("run list human identity (#2025)", () => {
         subjectTitle: "Show useful run identities",
         subjectUrl: "https://github.com/watt-mind/factory/issues/2025",
       });
+      expect(byId.run_ticket_b.subjectTitle).toBe("Show useful run identities");
+      // A tracker failure degrades to the bare subject, and the miss is
+      // cached so the next poll does not retry the outage.
       expect(byId.run_unresolved).toMatchObject({
         subjectLabel: "WM-999",
         subjectTitle: null,
       });
-      expect(byId.run_sweep).toMatchObject({
-        agentKind: "work-scan",
-        ticketSubject: null,
-        subjectLabel: null,
-        originType: "factory.sweep.requested",
-        originLabel: "sweep",
-      });
+      // Each distinct ticket read exactly once, duplicates included.
       expect(calls.sort()).toEqual(["WM-999", "watt-mind/factory#2025"]);
 
       const detail = await s.client.run("run_ticket_a");
@@ -551,21 +574,80 @@ describe("run list human identity (#2025)", () => {
         subjectTitle: "Show useful run identities",
       });
       await s.client.runs();
+      await runSubjectResolutionSettled();
       expect(calls).toHaveLength(2);
 
       nowMs += RUN_SUBJECT_CACHE_TTL_MS + 1;
       await s.client.runs();
+      await runSubjectResolutionSettled();
       expect(calls).toHaveLength(4);
     } finally {
       s.close();
     }
   });
 
-  test("caps unresolved ticket resolution per request instead of fanning out to every row", async () => {
+  test("responds immediately, and without an unhandled rejection, when the plane never answers", async () => {
+    const rejections = [];
+    const onUnhandled = (err) => rejections.push(err);
+    process.on("unhandledRejection", onUnhandled);
+    setRunSubjectResolveTimeoutMs(40);
+    let started = 0;
+    setTicketDetailControlPlane({
+      getTicket() {
+        started += 1;
+        // Never settles: the live symptom was a GitHub Projects GraphQL read
+        // that hung for 15s and blew the web proxy's 10s budget.
+        return new Promise(() => {});
+      },
+    });
+    const nowMs = Date.parse("2026-08-31T10:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    const at = new Date(nowMs).toISOString();
+    try {
+      for (let i = 0; i < 5; i += 1)
+        insertRunInto(
+          s.db,
+          `run_stall_${i}`,
+          "dispatch@1",
+          `watt-mind/factory#${4000 + i}`,
+          at,
+        );
+
+      const startedAt = Date.now();
+      const view = await s.client.runs();
+      const elapsedMs = Date.now() - startedAt;
+      expect(elapsedMs).toBeLessThan(100);
+      expect(view.runs).toHaveLength(5);
+      for (const run of view.runs) {
+        expect(run.subjectTitle).toBeNull();
+        expect(run.subjectLabel).toMatch(/^factory#40\d\d$/);
+      }
+      expect(started).toBeGreaterThan(0);
+
+      // The per-call bound turns the stall into a cached miss instead of a
+      // batch that never finishes.
+      await runSubjectResolutionSettled();
+      const after = await s.client.runs();
+      expect(after.runs.every((run) => run.subjectTitle === null)).toBe(true);
+
+      await Bun.sleep(20);
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      s.close();
+    }
+  });
+
+  test("keeps one background batch in flight and caps it per batch", async () => {
     const calls = [];
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
     setTicketDetailControlPlane({
       async getTicket(ticket) {
         calls.push(ticket);
+        await gate;
         return {
           identifier: ticket,
           title: `Title for ${ticket}`,
@@ -578,49 +660,98 @@ describe("run list human identity (#2025)", () => {
     const at = new Date(nowMs).toISOString();
     const ticketCount = 20;
     try {
-      for (let i = 0; i < ticketCount; i += 1) {
-        s.db
-          .query(
-            `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at, subject)
-             VALUES (?, ?, ?, 'sha256:test', 'RUNNING', 1, ?, ?, ?)`,
-          )
-          .run(
-            `run_cap_${i}`,
-            `idem-run_cap_${i}`,
-            JSON.stringify({ agent: "dispatch@1", adapter: "pi", input: {} }),
-            at,
-            at,
-            `watt-mind/factory#${3000 + i}`,
-          );
-      }
+      for (let i = 0; i < ticketCount; i += 1)
+        insertRunInto(
+          s.db,
+          `run_cap_${i}`,
+          "dispatch@1",
+          `watt-mind/factory#${3000 + i}`,
+          at,
+        );
 
-      // Cold-cache first request: at most 8 distinct tickets get resolved
-      // inline, no matter how many distinct unresolved subjects are in the
-      // page -- an unbounded fan-out here is exactly the shape that has
-      // caused tracker rate-limit incidents.
+      // Cold cache: bare subjects, and one capped batch scheduled behind the
+      // response. An unbounded fan-out here is the shape that has caused two
+      // tracker rate-limit incidents.
       const first = await s.client.runs();
-      expect(calls.length).toBeLessThanOrEqual(8);
-      const firstResolvedCount = first.runs.filter(
-        (run) => run.subjectTitle,
-      ).length;
-      expect(firstResolvedCount).toBeLessThanOrEqual(8);
-      expect(firstResolvedCount).toBeGreaterThan(0);
-      expect(first.runs.length).toBe(ticketCount);
+      expect(first.runs).toHaveLength(ticketCount);
+      expect(first.runs.every((run) => run.subjectTitle === null)).toBe(true);
 
-      // A later poll picks up more of the previously-unresolved tickets
-      // (cache misses are not cached, so they stay eligible), converging on
-      // full resolution across a few polls without ever exceeding the cap
-      // in a single request.
-      const callsAfterFirst = calls.length;
+      // Further polls while that batch is still waiting on the tracker must
+      // not stack another fan-out on top of it.
+      const inFlight = runSubjectResolutionSettled();
+      await s.client.runs();
+      await s.client.runs();
+      expect(runSubjectResolutionSettled()).toBe(inFlight);
+      expect(calls.length).toBeLessThanOrEqual(8);
+
+      release();
+      await inFlight;
+      // One batch is capped at 8 distinct tickets even though 20 rows are
+      // unresolved, and the extra polls above added nothing to it.
+      expect(calls).toHaveLength(8);
+      expect(new Set(calls).size).toBe(8);
+
       const second = await s.client.runs();
-      expect(calls.length - callsAfterFirst).toBeLessThanOrEqual(8);
-      const secondResolvedCount = second.runs.filter(
+      const secondResolved = second.runs.filter(
         (run) => run.subjectTitle,
       ).length;
-      expect(secondResolvedCount).toBeGreaterThan(firstResolvedCount);
+      expect(secondResolved).toBeLessThanOrEqual(8);
+      expect(secondResolved).toBeGreaterThan(0);
+
+      // A later poll picks up the next batch, converging on full resolution
+      // across a few polls without ever exceeding the cap in one batch.
+      await runSubjectResolutionSettled();
+      const third = await s.client.runs();
+      expect(
+        third.runs.filter((run) => run.subjectTitle).length,
+      ).toBeGreaterThan(secondResolved);
+    } finally {
+      release?.();
+      s.close();
+    }
+  });
+
+  test("prefers the plane's title-only read over the expensive getTicket", async () => {
+    const cheap = [];
+    let expensive = 0;
+    setTicketDetailControlPlane({
+      async getTicketTitle(ticket) {
+        cheap.push(ticket);
+        return {
+          identifier: ticket,
+          title: "Cheap title",
+          url: "https://github.com/watt-mind/factory/issues/2058",
+        };
+      },
+      async getTicket() {
+        expensive += 1;
+        throw new Error("getTicket must not be used for display-only titles");
+      },
+    });
+    const nowMs = Date.parse("2026-08-31T10:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    const at = new Date(nowMs).toISOString();
+    try {
+      insertRunInto(
+        s.db,
+        "run_cheap",
+        "dispatch@1",
+        "watt-mind/factory#2058",
+        at,
+      );
+      await s.client.runs();
+      await runSubjectResolutionSettled();
+      const view = await s.client.runs();
+      expect(view.runs[0].subjectTitle).toBe("Cheap title");
+      expect(cheap).toEqual(["watt-mind/factory#2058"]);
+      expect(expensive).toBe(0);
     } finally {
       s.close();
     }
+  });
+
+  test("bounds each background read well under the proxy budget", () => {
+    expect(RUN_SUBJECT_RESOLVE_TIMEOUT_MS).toBeLessThanOrEqual(5_000);
   });
 });
 
