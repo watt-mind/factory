@@ -541,14 +541,14 @@ function resolveNow(now) {
   return typeof now === "function" ? now() : now;
 }
 
-// The web proxy gives /health 10 seconds. The planner tick runs its Linear
-// CLI reads synchronously on the serve event loop, so all Linear reads in one
-// pass share this wall-clock budget and must finish well inside it or serve
-// wedges (#1835 AC3). Each child receives only the remaining pass time. The
-// env override exists for the serve regression test, not for operators.
+// Planning runs in the planner worker, not the serve loop. Bound each event's
+// Linear CLI reads so one stalled ticket cannot delay the next event forever;
+// the default leaves room for normal control-plane reads without holding an
+// operator's planner pass hostage. Operators may set the positive millisecond
+// FACTORY_LINEAR_READ_TIMEOUT_MS environment variable to tune this deadline.
 const LINEAR_READ_TIMEOUT_MS = (() => {
   const n = Number(process.env.FACTORY_LINEAR_READ_TIMEOUT_MS);
-  return Number.isFinite(n) && n > 0 ? n : 8_000;
+  return Number.isFinite(n) && n > 0 ? n : 25_000;
 })();
 
 /**
@@ -3205,16 +3205,15 @@ export function planAdmittedEvents(db, registry, opts = {}) {
     .all();
   const configSnapshot = opts.configSnapshot ?? policySnapshot();
   const cache = opts.linearReadCache ?? createLinearReadCache();
-  cache.linearReadBudget =
-    opts.linearReadBudget ??
+  const createEventReadBudget = () =>
     createLinearReadBudget({
       now: opts.linearReadClock ?? Date.now,
       timeoutMs: opts.linearReadTimeoutMs ?? LINEAR_READ_TIMEOUT_MS,
     });
-  // Production reads the persisted clock once per planner pass; an injected
-  // budget keeps the rate-limit regression tests deterministic. The cache
-  // path itself is scoped by FACTORY_EVENT_HOME (tools/ticket.mjs), so test
-  // processes never observe the operator's shared budget capture.
+  // Keep ticket/in-flight/rate-limit caches for the pass, but give every
+  // event its own deadline. A prior stalled event must not consume later
+  // candidates' read time and turn an otherwise healthy batch into a
+  // retry_later livelock.
   const budget = opts.linearBudget ?? loadLinearBudget();
   const limited = linearRateLimitState(budget, resolveNow(opts.now));
   if (limited) {
@@ -3243,6 +3242,7 @@ export function planAdmittedEvents(db, registry, opts = {}) {
     }
   }
   for (const { source, event_id: eventId, type } of rows) {
+    cache.linearReadBudget = createEventReadBudget();
     try {
       const outcome = planEvent(db, registry, { source, eventId }, planOpts);
       if (

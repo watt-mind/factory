@@ -18,6 +18,8 @@ import {
   stalledWorkers,
 } from "./workers.mjs";
 
+const LINEAR_READ_BUDGET_STALLED_AFTER_MS = 5 * 60_000;
+
 function eventCounts(db) {
   const counts = {
     admitted: 0,
@@ -222,6 +224,15 @@ export function statusView(
       eventId: row.event_id,
       lastError: row.last_plan_error,
     }));
+  const stalledLinearReadBudgets = db
+    .query(
+      `SELECT source, event_id FROM events
+       WHERE status = 'admitted'
+         AND last_plan_error = 'linear_read_budget_exhausted'
+         AND admitted_at < ?
+       ORDER BY admitted_at, rowid`,
+    )
+    .all(new Date(nowMs - LINEAR_READ_BUDGET_STALLED_AFTER_MS).toISOString());
 
   const fleet = workerCapacityView(db, nowMs, {
     workerPolicy,
@@ -296,6 +307,11 @@ export function statusView(
   if (policyVersion === "unknown")
     configAnomalies.push("policyVersion is unknown");
   if (fleet.policyError) configAnomalies.push(fleet.policyError);
+  for (const row of stalledLinearReadBudgets) {
+    configAnomalies.push(
+      `Admitted event ${row.source}:${row.event_id} has been deferred for Linear read-budget exhaustion for over ${LINEAR_READ_BUDGET_STALLED_AFTER_MS / 60_000} minutes`,
+    );
+  }
   // Registry-load anomalies that are deliberately not load errors — today
   // only artifact-view sidecars that do not fit their schema (WM-454).
   configAnomalies.push(...(registry?.anomalies ?? []));

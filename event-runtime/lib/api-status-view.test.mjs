@@ -182,6 +182,10 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
       `INSERT INTO events (source, event_id, type, subject, status, payload_hash, occurred_at, received_at, correlation_id, plan_failures, last_plan_error, admitted_at, envelope_json)
        VALUES ("test", "evt-dead-1", "test.type", "test", "dead_lettered", "dummy-hash", ?, ?, "corr-1", 3, "failed to plan", ?, "{}")`,
     ).run(atIso, atIso, atIso);
+    db.query(
+      `INSERT INTO events (source, event_id, type, subject, status, payload_hash, occurred_at, received_at, correlation_id, plan_failures, last_plan_error, admitted_at, envelope_json)
+       VALUES ("test", "evt-budget-1", "test.type", "test", "admitted", "dummy-hash", ?, ?, "corr-2", 0, "linear_read_budget_exhausted", ?, "{}")`,
+    ).run(atIso, atIso, new Date(nowMs - 5 * 60_000 - 1).toISOString());
 
     // Proposals piling up for a scheduled loop
     for (let i = 1; i <= 4; i++) {
@@ -330,6 +334,9 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
 
       // Remaining anomaly primitives
       expect(Array.isArray(status.anomalies.configuration)).toBe(true);
+      expect(status.anomalies.configuration).toContain(
+        "Admitted event test:evt-budget-1 has been deferred for Linear read-budget exhaustion for over 5 minutes",
+      );
       expect(status.anomalies.expiredOpenProposals).toEqual(["prop-expired-1"]);
       expect(typeof status.anomalies.staleLeases).toBe("number");
       expect(typeof status.anomalies.unpublishedOutbox).toBe("number");
