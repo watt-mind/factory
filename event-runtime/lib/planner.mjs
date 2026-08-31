@@ -551,6 +551,13 @@ const LINEAR_READ_TIMEOUT_MS = (() => {
   return Number.isFinite(n) && n > 0 ? n : 8_000;
 })();
 
+/**
+ * The whole-tick Linear read budget is spent. `linearReadTimeout` raises this
+ * *before* spawning the child, so it surfaces from inside the same `try` that
+ * wraps the read: every such catch must rethrow it untouched. Rewrapping it as
+ * `linear_read_failed` would turn a deferrable "come back next tick" into a
+ * hard dead-letter on every read past the deadline (#1890).
+ */
 class LinearReadBudgetExceededError extends Error {
   constructor() {
     super("linear_read_budget_exhausted");
@@ -787,6 +794,8 @@ function fetchTicketDefault(ticketId, repo, { readBudget = null } = {}) {
       }),
     );
   } catch (err) {
+    // Budget exhaustion is deferrable, not a read failure (see the class).
+    if (err instanceof LinearReadBudgetExceededError) throw err;
     throwIfLinearCliRateLimited(err);
     const stderr = String(err?.stderr ?? "");
     if (stderr.includes("no such issue")) return null;
@@ -831,6 +840,8 @@ function fetchViewerDefault(
     }
     return parsed?.viewer ?? null;
   } catch (err) {
+    // Budget exhaustion is deferrable, not a read failure (see the class).
+    if (err instanceof LinearReadBudgetExceededError) throw err;
     throwIfLinearCliRateLimited(err);
     throwIfLinearReadBudgetExhausted(err, readBudget);
     const stderr = String(err?.stderr ?? "");
@@ -986,6 +997,8 @@ function fetchInFlightDefault(repoConfig, { readBudget = null } = {}) {
     const rows = JSON.parse(out);
     return Array.isArray(rows) ? rows : [];
   } catch (err) {
+    // Budget exhaustion is deferrable, not a read failure (see the class).
+    if (err instanceof LinearReadBudgetExceededError) throw err;
     throwIfLinearCliRateLimited(err);
     throwIfLinearReadBudgetExhausted(err, readBudget);
     const stderr = String(err?.stderr ?? "");
