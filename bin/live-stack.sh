@@ -41,6 +41,7 @@ set -eEuo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/worktree-common.sh"
 
+# >>> up-pidfile-tracking
 # `up` can start several detached daemons before an endpoint health check
 # proves the stack is usable. Keep this invocation's pidfiles separate from
 # pre-existing daemons: an error must clean up what we started, but never tear
@@ -107,6 +108,7 @@ untrack_up_pidfile() { # <pidfile>
     UP_STARTED_LABELS=()
   fi
 }
+# <<< up-pidfile-tracking
 
 track_up_pool_pidfiles() {
   local pidfile label

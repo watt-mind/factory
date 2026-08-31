@@ -23,6 +23,36 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 const LIVE_STACK = path.resolve(import.meta.dir, "live-stack.sh");
+const UP_PIDFILE_TRACKING_START = "# >>> up-pidfile-tracking";
+const UP_PIDFILE_TRACKING_END = "# <<< up-pidfile-tracking";
+
+function extractMarkedBlock(source, startMarker, endMarker) {
+  const start = source.indexOf(startMarker);
+  if (start === -1) {
+    throw new Error(`missing extraction marker: ${startMarker}`);
+  }
+  const contentStart = source.indexOf("\n", start);
+  if (contentStart === -1) {
+    throw new Error(`missing extraction marker line ending: ${startMarker}`);
+  }
+  const end = source.indexOf(endMarker, contentStart + 1);
+  if (end === -1) {
+    throw new Error(`missing extraction marker: ${endMarker}`);
+  }
+  const block = source.slice(contentStart + 1, end).trim();
+  if (!block) {
+    throw new Error(
+      `empty extraction block between ${startMarker} and ${endMarker}`,
+    );
+  }
+  return block;
+}
+
+const upPidfileTrackingBlock = extractMarkedBlock(
+  readFileSync(LIVE_STACK, "utf8"),
+  UP_PIDFILE_TRACKING_START,
+  UP_PIDFILE_TRACKING_END,
+);
 
 /**
  * worktree-common.sh replaced by recorders: no daemon is ever started.
@@ -445,7 +475,7 @@ test("untracking the only pidfile remains safe under nounset", () => {
     cmd: [
       "bash",
       "-uc",
-      `source <(sed -n '48,109p' "$1")
+      `source <(printf '%s\\n' "$3")
 UP_STARTED_PIDFILES=("$2")
 UP_STARTED_LABELS=("GitHub App token daemon")
 untrack_up_pidfile "$2"
@@ -454,12 +484,22 @@ untrack_up_pidfile "$2"
       "bash",
       LIVE_STACK,
       "/tmp/only.pid",
+      upPidfileTrackingBlock,
     ],
     stdout: "pipe",
     stderr: "pipe",
   });
   expect(result.exitCode).toBe(0);
   expect(result.stderr.toString()).toBe("");
+});
+
+test("pidfile tracking extraction rejects missing or empty markers", () => {
+  expect(() =>
+    extractMarkedBlock("# start\nbody\n", "# start", "# end"),
+  ).toThrow("missing extraction marker: # end");
+  expect(() =>
+    extractMarkedBlock("# start\n# end\n", "# start", "# end"),
+  ).toThrow("empty extraction block");
 });
 
 test("`up` keeps the existing live GitHub App daemon pidfile behavior", () => {

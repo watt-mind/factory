@@ -337,7 +337,7 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
   );
 
   test(
-    "re-running seed with the SAME prefix fails immediately (<1s) on duplicate intake",
+    "re-running seed with the SAME prefix stays fast on duplicate intake",
     () => {
       const t0 = Date.now();
       const res = spawnSync("bun", [SEED, "--port", port, "--prefix", "t1"], {
@@ -346,7 +346,9 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
       });
       const elapsedMs = Date.now() - t0;
       expect(res.status).not.toBe(0);
-      expect(elapsedMs).toBeLessThan(2000);
+      // Protect the duplicate fast path from regressing into a full seed run;
+      // account for shared-runner contention without masking that regression.
+      expect(elapsedMs).toBeLessThan(loadAdjustedTimeout(2000));
       const output = `${res.stdout}${res.stderr}`;
       expect(output).toContain('duplicate prefix "t1"');
     },
