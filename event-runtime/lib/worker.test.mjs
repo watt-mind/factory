@@ -1761,6 +1761,14 @@ sh -c 'sleep 5 & wait'
     expect(inbox.kind).toBe("ESCALATED");
     expect(inbox.source).toBe(`agent:${spec.runId}`);
     expect(inbox.dedupe_key).toBe(`ESCALATED:${spec.runId}`);
+    expect(inbox.title).toBe(
+      `Escalated: run ${spec.runId} — stopped because an operator decision is required before it can proceed`,
+    );
+    expect(inbox.body).toContain(
+      `What happened: A escalated item needs attention for run ${spec.runId}.`,
+    );
+    expect(inbox.body).toContain("Reason code: needs_human.");
+    expect(inbox.body).toContain("Option effects:");
     expect(JSON.parse(inbox.decision_json).schemaVersion).toBe(
       "factory.decision-request/v1",
     );
@@ -1949,6 +1957,11 @@ sh -c 'sleep 5 & wait'
             repo: "factory",
             pr: 42,
           },
+          approvalPolicy: {
+            dispatchEvidence: {
+              ticket: { title: "Choose a supported answer" },
+            },
+          },
         }),
       );
       const summary = await runOnce(
@@ -1970,9 +1983,21 @@ sh -c 'sleep 5 & wait'
       });
       expect(item.dedupe_key).toBe("ESCALATED:WM-390");
       if (valid) {
-        expect(item.title).toBe(authored.question);
+        expect(item.title).toBe(
+          'Escalated: WM-390 "Choose a supported answer" — stopped because an operator decision is required before it can proceed',
+        );
+        expect(item.body).toContain(
+          'What happened: A escalated item needs attention for WM-390 "Choose a supported answer".',
+        );
+        expect(item.body).toContain("Reason code: needs_human.");
+        expect(item.body).toContain("Question: Which answer should unblock WM-390?");
+        expect(item.body).toContain(
+          "Answer the agent — records the operator's reply for the agent.",
+        );
+        expect(item.body).toContain(
+          "Not now — keeps the item resolved without changing the referenced work.",
+        );
         expect(JSON.parse(item.decision_json)).toEqual(authored);
-        expect(item.body).toBeNull();
       } else {
         expect(JSON.parse(item.decision_json)).not.toEqual(invalid);
         expect(item.body).toContain("recommended");
