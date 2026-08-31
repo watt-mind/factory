@@ -4,7 +4,9 @@ import path from "node:path";
 import { expect, test } from "bun:test";
 import {
   assertNoImportCycles,
+  findImportCycles,
   resolveRelativeImport,
+  SOURCE_ROOT,
 } from "./check-import-cycles.mjs";
 
 function withFixture(callback) {
@@ -46,4 +48,31 @@ test("resolveRelativeImport keeps a real empty module", () => {
 
     expect(resolveRelativeImport(importer, "./empty.mjs")).toBe(emptyModule);
   });
+});
+
+test("cycle discovery does not depend on directory entry order", () => {
+  // The detector reports one cycle per multi-cycle SCC, so which cycle it
+  // reports follows the DFS start order. sourceFiles() sorts for that reason:
+  // without it the discovered set (and therefore the staleness check) varies
+  // with filesystem order, and the baseline fails on some machines.
+  const modules = {
+    "alpha.mjs": 'import "./beta.mjs";\n',
+    "beta.mjs": 'import "./gamma.mjs";\n',
+    "gamma.mjs": 'import "./alpha.mjs";\nimport "./beta.mjs";\n',
+  };
+  const discover = (creationOrder) =>
+    withFixture((fixture) => {
+      for (const name of creationOrder)
+        writeFileSync(path.join(fixture, name), modules[name]);
+      return findImportCycles(fixture)
+        .map((cycle) => cycle.map((file) => path.basename(file)).join(" -> "))
+        .sort();
+    });
+
+  const names = Object.keys(modules);
+  expect(discover(names)).toEqual(discover([...names].reverse()));
+});
+
+test("the repository baseline matches the cycles found under sorted order", () => {
+  expect(() => assertNoImportCycles(SOURCE_ROOT)).not.toThrow();
 });

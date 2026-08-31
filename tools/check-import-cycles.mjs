@@ -18,7 +18,10 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-const SOURCE_ROOT = path.resolve(import.meta.dirname, "../event-runtime/lib");
+export const SOURCE_ROOT = path.resolve(
+  import.meta.dirname,
+  "../event-runtime/lib",
+);
 const WORD = /[A-Za-z0-9_$]/;
 
 // These pre-existing cycles are a deliberately narrow baseline while #1952
@@ -33,7 +36,6 @@ const KNOWN_BASELINE_CYCLES = new Set([
   "auto-approval.mjs -> proposals.mjs -> planner.mjs -> auto-approval.mjs",
   "auto-approval.mjs -> registry.mjs -> schedules.mjs -> proposals.mjs -> planner.mjs -> auto-approval.mjs",
   "adapters/agy.mjs -> adapters/claude.mjs -> registry.mjs -> schedules.mjs -> proposals.mjs -> planner.mjs -> runtime-overrides.mjs -> adapters/index.mjs -> adapters/agy.mjs",
-  "adapters/cursor.mjs -> registry.mjs -> schedules.mjs -> proposals.mjs -> planner.mjs -> runtime-overrides.mjs -> adapters/index.mjs -> adapters/cursor.mjs",
   "planner.mjs -> registry.mjs -> schedules.mjs -> proposals.mjs -> planner.mjs",
   "planner.mjs -> schedules.mjs -> proposals.mjs -> planner.mjs",
   "planner.mjs -> runtime-overrides.mjs -> registry.mjs -> schedules.mjs -> proposals.mjs -> planner.mjs",
@@ -142,8 +144,13 @@ export function staticSpecifiers(source) {
 }
 
 function sourceFiles(root) {
+  // Sort explicitly: readdirSync returns filesystem order, and this detector
+  // reports one cycle per multi-cycle SCC, so which cycle it reports depends on
+  // the DFS start order. An unsorted list makes the baseline (and therefore the
+  // staleness check) non-deterministic across machines.
   return readdirSync(root, { recursive: true })
     .filter((entry) => entry.endsWith(".mjs"))
+    .sort()
     .map((entry) => path.join(root, entry));
 }
 
@@ -248,7 +255,7 @@ function runSelfTest() {
       'export { value } from "./first.mjs";\n',
     );
     try {
-      assertNoImportCycles(fixture);
+      assertNoImportCycles(fixture, new Set());
       throw new Error("self-test fixture did not fail cycle detection");
     } catch (error) {
       if (
