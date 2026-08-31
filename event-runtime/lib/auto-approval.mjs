@@ -685,6 +685,10 @@ function chainPredecessorReason(db, registry, candidate, envelope) {
   return null;
 }
 
+// Malformed history envelopes are permanent rows: warn about each event_id
+// once per process instead of on every approval tick.
+const warnedMalformedMergeFixEvents = new Set();
+
 function durableFixRoundReason(db, candidate, input, policy) {
   const cap = policy.maxFixRounds ?? 0;
   // A fix round is "spent" only when a merge-fix run for this PR actually
@@ -696,20 +700,39 @@ function durableFixRoundReason(db, candidate, input, policy) {
   // The indexed event type/source predicate and payload prefilter leave JS to
   // parse only entries for this exact PR, and the cap means a full history
   // cannot make this lookup unbounded.
-  const malformed = db
+  // Cheap indexed existence probe first: in the common all-valid history the
+  // per-tick cost stops here, and the detail scan below runs only when a
+  // malformed envelope is actually present.
+  const hasMalformed = db
     .query(
-      `SELECT e.event_id FROM events e
-       WHERE e.source = 'chain'
-         AND e.type = 'factory.merge-fix.requested'
-         AND e.event_id != ?
-         AND json_valid(e.envelope_json) = 0
-       LIMIT ?`,
+      `SELECT EXISTS(
+         SELECT 1 FROM events e
+         WHERE e.source = 'chain'
+           AND e.type = 'factory.merge-fix.requested'
+           AND e.event_id != ?
+           AND json_valid(e.envelope_json) = 0
+       ) AS present`,
     )
-    .all(candidate.event_id, cap);
-  for (const row of malformed) {
-    console.warn(
-      `Skipping malformed merge-fix history envelope for event ${row.event_id}`,
-    );
+    .get(candidate.event_id).present;
+  if (hasMalformed) {
+    const malformed = db
+      .query(
+        `SELECT e.event_id FROM events e
+         WHERE e.source = 'chain'
+           AND e.type = 'factory.merge-fix.requested'
+           AND e.event_id != ?
+           AND json_valid(e.envelope_json) = 0
+         ORDER BY e.rowid DESC
+         LIMIT ?`,
+      )
+      .all(candidate.event_id, cap);
+    for (const row of malformed) {
+      if (warnedMalformedMergeFixEvents.has(row.event_id)) continue;
+      warnedMalformedMergeFixEvents.add(row.event_id);
+      console.warn(
+        `Skipping malformed merge-fix history envelope for event ${row.event_id}`,
+      );
+    }
   }
 
   const rows = db
@@ -728,6 +751,7 @@ function durableFixRoundReason(db, candidate, input, policy) {
                   THEN json_extract(e.envelope_json, '$.payload.github') END = ?
          AND CASE WHEN json_valid(e.envelope_json)
                   THEN json_extract(e.envelope_json, '$.payload.pr') END = ?
+       ORDER BY e.rowid DESC
        LIMIT ?`,
     )
     .all(candidate.event_id, input.repo, input.github, input.pr, cap);
