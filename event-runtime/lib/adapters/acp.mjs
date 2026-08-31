@@ -21,24 +21,18 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 import { Readable } from "node:stream";
 import { transcriptMaxBytes } from "../config.mjs";
-import {
-  HARNESS_LAYOUT as CLAUDE_HARNESS_LAYOUT,
-  KILL_GRACE_MS as CLAUDE_KILL_GRACE_MS,
-  PROMPT_SUFFIX,
-  PUSH_CREDENTIAL_ENV,
-  killProcessGroup,
-  safeChildEnvironment,
-  verifiedPrompt,
-} from "./claude.mjs";
-import { boundedTranscriptStream } from "./child-process.mjs";
+import { PUSH_CREDENTIAL_ENV, safeChildEnvironment } from "./child-env.mjs";
+import { boundedTranscriptStream, killProcessGroup } from "./child-process.mjs";
 import { refuseSandbox } from "./sandboxed.mjs";
 
-export { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV, killProcessGroup };
+export { PUSH_CREDENTIAL_ENV, killProcessGroup };
 
 /** ACP v1 major version. Agents that answer anything else are refused. */
 export const PROTOCOL_VERSION = 1;
 
-export const KILL_GRACE_MS = CLAUDE_KILL_GRACE_MS;
+// Keep this leaf module independent of Claude's initialization order. Importing
+// Claude's equivalent creates a cycle through its registry dependency.
+export const KILL_GRACE_MS = 30_000;
 
 export const SANDBOX_SUPPORT = "unsupported";
 
@@ -46,10 +40,38 @@ export const SANDBOX_DEFERRAL_REASON =
   "acp wraps host-authenticated coding agents (first target: claude-code-acp) whose binary, subscription OAuth, and permission surface have no Gondolin guest translation yet (WM-313 deferral; see lib/adapters/acp.mjs)";
 
 /**
- * First target is Claude Code via ACP, so harness packaging matches claude.
- * Not part of the WM-837 contract.
+ * First target is Claude Code via ACP, so its harness packaging is preserved
+ * locally rather than importing Claude during this module's initialization.
  */
-export const HARNESS_LAYOUT = CLAUDE_HARNESS_LAYOUT;
+export const HARNESS_LAYOUT = Object.freeze({
+  skills: Object.freeze({
+    source: (name) => ["plugins", "core", "skills", name],
+    dest: (name) => [".claude", "skills", name],
+    type: "dir",
+  }),
+  commands: Object.freeze({
+    source: (name) => ["plugins", "core", "commands", `${name}.md`],
+    dest: (name) => [".claude", "commands", `${name}.md`],
+    type: "file",
+  }),
+  subagents: Object.freeze({
+    source: (name) => ["plugins", "core", "agents", `${name}.md`],
+    dest: (name) => [".claude", "agents", `${name}.md`],
+    type: "file",
+  }),
+});
+
+export const PROMPT_SUFFIX =
+  "\n\n---\nInput is at ./input.json. Write ./result.json per the factory.agent-result/v1 contract. Work only inside this directory.";
+
+function verifiedPrompt(def, adapter) {
+  if (typeof def?.promptText !== "string") {
+    throw new Error(
+      `${adapter}: definition ${def?.ref ?? "<unknown>"} has no verified promptText (registry-loaded definitions only)`,
+    );
+  }
+  return def.promptText + PROMPT_SUFFIX;
+}
 
 /** Shipped default — the Zed `claude-code-acp` binary on PATH. */
 export const DEFAULT_ACP_CONFIG = Object.freeze({
