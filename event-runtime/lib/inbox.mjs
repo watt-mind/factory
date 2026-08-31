@@ -1547,10 +1547,13 @@ const RUN_PROGRESS_KINDS = new Set(["CI RED", "SMOKE RED", "CIRCUIT BREAKER"]);
 // automatically when the ticket moves on; an ESCALATED ask or any other kind
 // names something an operator still has to look at.
 const PARKED_KINDS = new Set(["BLOCKED", "human_needed"]);
-// A busy inbox must not read every distinct PR on every poll. The offset is
-// kept per database so deferred, oldest-first referents are reached next poll.
+// A busy inbox must not read every distinct PR on every poll. The cursor is
+// kept per database and holds the last `owner/repo#pr` key actually read, so
+// the next poll resumes after it in sorted key order. Keying on the referent
+// rather than a numeric offset keeps the rotation stable when the pending set
+// grows, shrinks or reorders between polls.
 const PR_FETCH_LIMIT = 8;
-const prFetchOffset = new WeakMap();
+const prFetchCursor = new WeakMap();
 
 /** An ask the operator has been handed and has not answered yet. */
 function hasPendingDecision(row) {
@@ -1582,11 +1585,23 @@ function githubRepoFor(refs) {
   }
 }
 
-async function defaultFetchPullRequest({ github, pr }) {
+/**
+ * REST reports `state` as "open"/"closed" and flags a merge only via
+ * `merged_at`; the reconciler speaks the GraphQL vocabulary. Normalise here so
+ * a merged pull request is never mistaken for a still-open one.
+ */
+export function normalizePullRequestState(pull) {
+  if (pull?.merged_at || pull?.merged === true) return "MERGED";
+  const state = typeof pull?.state === "string" ? pull.state.toUpperCase() : "";
+  if (state === "CLOSED" || state === "MERGED") return state;
+  return "OPEN";
+}
+
+export async function defaultFetchPullRequest({ github, pr, api }) {
   // makeGhApi uses ghSpawn, rather than the forge's spawnSync transport, so
   // the serve loop yields while GitHub answers this read.
-  const pull = await makeGhApi()("GET", `repos/${github}/pulls/${pr}`);
-  return { state: pull.state };
+  const pull = await (api ?? makeGhApi())("GET", `repos/${github}/pulls/${pr}`);
+  return { state: normalizePullRequestState(pull) };
 }
 
 async function fetchReferencedInboxPullRequests(rows, fetchPullRequest, db) {
@@ -1605,15 +1620,22 @@ async function fetchReferencedInboxPullRequests(rows, fetchPullRequest, db) {
       return [key, null];
     }
   };
-  const entries = [...unique.entries()];
+  const entries = [...unique.entries()].sort(([a], [b]) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  );
   if (entries.length === 0) return new Map();
-  const offset = prFetchOffset.get(db) ?? 0;
-  const start = offset % entries.length;
+  const cursor = prFetchCursor.get(db);
+  // Resume after the last key actually read. A key that has since disappeared
+  // still orders the remainder correctly, and an unseen list simply starts at
+  // the beginning.
+  const resumeAt =
+    typeof cursor === "string" ? entries.findIndex(([key]) => key > cursor) : 0;
+  const start = resumeAt === -1 ? 0 : resumeAt;
   const selected = Array.from(
     { length: Math.min(PR_FETCH_LIMIT, entries.length) },
     (_, index) => entries[(start + index) % entries.length],
   );
-  prFetchOffset.set(db, (start + selected.length) % entries.length);
+  prFetchCursor.set(db, selected[selected.length - 1][0]);
   const fetched = await Promise.all(selected.map(fetchOne));
   return new Map(fetched.filter(([, pull]) => pull));
 }
