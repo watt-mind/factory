@@ -403,6 +403,69 @@ function ticketSchemaRegistry(): AgentsView {
 }
 
 describe("Runs sortable columns (OPS-492)", () => {
+  test("shows agent kinds and enriched subjects with an origin fallback", async () => {
+    const ticketRun = Object.assign(
+      stubListItem("run_ticket_identity", "RUNNING", {
+        agent: "dispatch@1",
+      }),
+      {
+        agentKind: "dispatch",
+        ticketSubject: "watt-mind/factory#2025",
+        subjectLabel: "factory#2025",
+        subjectTitle: "Show useful run identities",
+        subjectUrl: "https://github.com/watt-mind/factory/issues/2025",
+      },
+    );
+    const sweepRun = Object.assign(
+      stubListItem("run_sweep_identity", "COMPLETED", {
+        agent: "work-scan@1",
+      }),
+      {
+        agentKind: "work-scan",
+        ticketSubject: null,
+        subjectLabel: null,
+        subjectTitle: null,
+        subjectUrl: null,
+        originType: "factory.sweep.requested",
+        originLabel: "sweep",
+      },
+    );
+
+    await withApi(
+      {
+        runs: async () => ({ runs: [ticketRun, sweepRun] }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const view = renderRuns();
+        await waitFor(() =>
+          expect(
+            view.getByRole("columnheader", { name: /Subject/ }),
+          ).toBeTruthy(),
+        );
+        expect(view.getAllByText("dispatch").length).toBeGreaterThan(0);
+        expect(view.getAllByText("work-scan").length).toBeGreaterThan(0);
+        expect(
+          [...view.container.querySelectorAll("thead th")]
+            .map((header) => header.textContent?.replace(/[↕↑↓×]/g, "").trim())
+            .slice(0, 4),
+        ).toEqual(["Run", "Agent", "Subject", "State"]);
+        const ticket = view.getByRole("link", {
+          name: "factory#2025 — Show useful run identities",
+        });
+        expect(ticket.getAttribute("href")).toBe(
+          "https://github.com/watt-mind/factory/issues/2025",
+        );
+        expect(ticket.getAttribute("title")).toBe(
+          "factory#2025 — Show useful run identities · Open watt-mind/factory#2025",
+        );
+        expect(
+          view.getByText("sweep").parentElement?.getAttribute("title"),
+        ).toBe("factory.sweep.requested");
+      },
+    );
+  });
+
   test("renders an x-ui ticket input column from its run agent schema", async () => {
     localStorage.setItem(
       "evrt-display-runs",
@@ -639,7 +702,7 @@ describe("Runs Duration column (WM-871)", () => {
           headers.indexOf("Remaining") + 1,
         );
         expect(r.container.querySelector("table")?.style.minWidth).toBe(
-          `${(headers.length - 1) * 112 + 176}px`,
+          `${(headers.length - 2) * 112 + 176 + 320}px`,
         );
         expect(cellFor(r, "run_completed", "Duration").textContent).toBe(
           "2m 30s",
@@ -810,9 +873,13 @@ describe("Runs component harness: selection & filter retention", () => {
 
         // The detail pane, not presence in the bounded list page, controls
         // the comparison rail.
-        expect(r.queryByRole("columnheader", { name: /^Agent/ })).toBeNull();
         expect(r.getByRole("columnheader", { name: /^Run/ })).toBeTruthy();
+        expect(r.getByRole("columnheader", { name: /^Agent/ })).toBeTruthy();
+        expect(r.getByRole("columnheader", { name: /^Subject/ })).toBeTruthy();
         expect(r.getByRole("columnheader", { name: /^State/ })).toBeTruthy();
+        expect(
+          r.queryByRole("columnheader", { name: /^Remaining/ }),
+        ).toBeNull();
 
         const actions = r.getByTestId("palette-probe").textContent ?? "";
         for (const label of [
@@ -1696,9 +1763,13 @@ describe("Runs copy chords and hints (WM-233)", () => {
         expect(cls).not.toContain("overflow-hidden");
         // The fixed table layout must reserve room for the badge and link.
         expect(cls).toMatch(/\bmin-w-/);
-        expect(
-          cell!.closest("table")?.querySelectorAll("col")[1]?.className,
-        ).toContain("w-44");
+        const table = cell!.closest("table")!;
+        const stateIndex = [...table.querySelectorAll("thead th")].findIndex(
+          (header) => header.textContent?.startsWith("State"),
+        );
+        expect(table.querySelectorAll("col")[stateIndex]?.className).toContain(
+          "w-44",
+        );
         // The row must still not wrap — that is the point of this PR.
         expect(cls).toContain("whitespace-nowrap");
 

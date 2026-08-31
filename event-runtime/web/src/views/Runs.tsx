@@ -233,6 +233,75 @@ export function runDrilldownFilters(hash: string): RunListFilters | null {
  */
 const rowModel = (r: RunListItem) => pinnedModelText(r.adapter, r.model);
 
+export interface RunIdentityFields {
+  agentKind?: string | null;
+  ticketSubject?: string | null;
+  subjectLabel?: string | null;
+  subjectTitle?: string | null;
+  subjectUrl?: string | null;
+  originType?: string | null;
+  originLabel?: string | null;
+}
+
+type IdentityRun = RunListItem & RunIdentityFields;
+
+export function runAgentKind(agent: string, identity?: RunIdentityFields) {
+  return identity?.agentKind || agent.replace(/@\d+$/, "");
+}
+
+/** Ticket/title when present; origin event type for subject-less chain runs. */
+export function RunSubject({ identity }: { identity?: RunIdentityFields }) {
+  const subject = identity?.subjectLabel ?? identity?.originLabel ?? null;
+  if (!subject) return <span>{EMPTY}</span>;
+  const fullSubject = identity?.subjectTitle
+    ? `${subject} — ${identity.subjectTitle}`
+    : subject;
+  const content = (
+    <>
+      <span>{subject}</span>
+      {identity?.subjectTitle && (
+        <span className="text-(--text-dim)"> — {identity.subjectTitle}</span>
+      )}
+    </>
+  );
+  return identity?.subjectUrl ? (
+    <a
+      href={identity.subjectUrl}
+      target="_blank"
+      rel="noreferrer"
+      onClick={(event) => event.stopPropagation()}
+      className="hover:text-(--accent) hover:underline"
+      title={`${fullSubject} · Open ${identity.ticketSubject ?? subject}`}
+    >
+      {content}
+    </a>
+  ) : (
+    <span title={identity?.originType ?? identity?.ticketSubject ?? undefined}>
+      {content}
+    </span>
+  );
+}
+
+/** The shared human-readable identity used by the full-run header. */
+export function RunHumanIdentity({
+  agent,
+  identity,
+}: {
+  agent: string;
+  identity?: RunIdentityFields;
+}) {
+  return (
+    <span className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+      <span className="mono shrink-0 font-semibold">
+        {runAgentKind(agent, identity)}
+      </span>
+      <span className="min-w-0 break-words">
+        <RunSubject identity={identity} />
+      </span>
+    </span>
+  );
+}
+
 /** The budget deadline shared by the Remaining display and its sort order. */
 const remainingDeadline = (r: RunListItem): string => {
   if (r.deadlineAt) return r.deadlineAt;
@@ -289,6 +358,15 @@ const RUNS_DISPLAY: DisplayConfig<RunListItem> = {
     },
     { key: "agent", label: "Agent", get: (r) => r.agent, column: "agent" },
     {
+      key: "subject",
+      label: "Subject",
+      get: (r) => {
+        const identity = r as IdentityRun;
+        return identity.subjectLabel ?? identity.originLabel ?? "";
+      },
+      column: "subject",
+    },
+    {
       key: "adapter",
       label: "Adapter",
       get: (r) => r.adapter,
@@ -330,10 +408,11 @@ const RUNS_DISPLAY: DisplayConfig<RunListItem> = {
   ],
   columns: [
     { key: "run", label: "Run", always: true },
+    { key: "agent", label: "Agent" },
+    { key: "subject", label: "Subject" },
     { key: "state", label: "State" },
     { key: "remaining", label: "Remaining" },
     { key: "duration", label: "Duration" },
-    { key: "agent", label: "Agent" },
     { key: "adapter", label: "Adapter" },
     { key: "model", label: "Model" },
     { key: "attempts", label: "Attempts" },
@@ -894,20 +973,11 @@ export function Runs({
       selectedId ? (visible.find((r) => r.runId === selectedId) ?? null) : null,
     [visible, selectedId],
   );
-  // A side pane turns the list into a compact comparison rail. Keep the five
-  // decision-bearing columns instead of forcing a horizontal scrollbar; the
-  // pane and the unselected list retain every configured column.
+  // A side pane turns the list into a compact comparison rail. Identity comes
+  // first there too: "what is this run?" matters before its secondary clocks.
   const listCols = selectedId
     ? cols.filter((c) =>
-        [
-          "run",
-          "state",
-          "remaining",
-          "duration",
-          "reason",
-          "origin",
-          "updated",
-        ].includes(c.key),
+        ["run", "agent", "subject", "state", "reason"].includes(c.key),
       )
     : cols;
   const show = useMemo(() => new Set(listCols.map((c) => c.key)), [listCols]);
@@ -1342,7 +1412,9 @@ export function Runs({
           }`}
           style={{
             minWidth: `${listCols.reduce(
-              (width, c) => width + (c.key === "state" ? 176 : 112),
+              (width, c) =>
+                width +
+                (c.key === "state" ? 176 : c.key === "subject" ? 320 : 112),
               0,
             )}px`,
           }}
@@ -1351,7 +1423,13 @@ export function Runs({
             {listCols.map((c) => (
               <col
                 key={c.key}
-                className={c.key === "state" ? "w-44" : "w-28"}
+                className={
+                  c.key === "state"
+                    ? "w-44"
+                    : c.key === "subject"
+                      ? "w-80"
+                      : "w-28"
+                }
               />
             ))}
           </colgroup>
@@ -1414,6 +1492,21 @@ export function Runs({
                       onJumpRun={onOpenFull}
                     />
                   </td>
+                  {show.has("agent") && (
+                    <td className="max-w-32 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)">
+                      <AgentHoverCard
+                        agentRef={r.agent}
+                        onJumpAgent={onJumpAgent}
+                      >
+                        {runAgentKind(r.agent, r as IdentityRun)}
+                      </AgentHoverCard>
+                    </td>
+                  )}
+                  {show.has("subject") && (
+                    <td className="max-w-80 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text)">
+                      <RunSubject identity={r as IdentityRun} />
+                    </td>
+                  )}
                   {/*
                     State cell carries no `max-w-*`/`truncate` (WM-505): its content is a
                     bounded-length badge plus an optional `proposal` jump link, and
@@ -1459,14 +1552,6 @@ export function Runs({
                   {show.has("duration") && (
                     <td className="max-w-24 overflow-hidden whitespace-nowrap border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
                       <DurationCell r={r} now={now} />
-                    </td>
-                  )}
-                  {show.has("agent") && (
-                    <td className="max-w-32 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)">
-                      <AgentHoverCard
-                        agentRef={r.agent}
-                        onJumpAgent={onJumpAgent}
-                      />
                     </td>
                   )}
                   {show.has("adapter") && (
