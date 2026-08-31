@@ -3375,30 +3375,26 @@ export function assertHandoffPullRequestBase({
  * its full CI lane. The handoff's state is updated only after `gh pr ready`
  * succeeds, making the worker-authored handoff comment an observation of the
  * final PR state rather than the draft state it had during local verification.
+ *
+ * Best effort, like the handoff comment itself: the run is already verified by
+ * the time this is called, so a transient forge error must not fail it, redraft
+ * anything, or bounce the ticket. On failure the handoff keeps `draft: true`,
+ * the comment truthfully records `draft: yes`, and this returns false.
  */
 export function defaultMarkHandoffPullRequestReady({ handoff, forge = null }) {
   if (handoff?.pr?.draft !== true) return false;
   const prNumber = handoffPrNumber(handoff);
-  if (!handoff.github || !prNumber) {
-    throw new ContractViolation(
-      [
-        "pr_ready_unverifiable: handoff requires GitHub repository and numeric PR number",
-      ],
-      { reasonCode: "handoff_verification_failed", handoff },
-    );
-  }
-  forge ??= loadForge();
+  if (!handoff.github || !prNumber) return false;
   try {
+    forge ??= loadForge();
     forge.prSetDraft(handoff.github, prNumber, false, {
       timeout: workerSubprocessTimeoutMs(),
     });
   } catch (err) {
-    throw new ContractViolation(
-      [
-        `pr_ready_failed: could not mark PR #${prNumber} ready for review: ${String(err?.message ?? err)}`,
-      ],
-      { reasonCode: "handoff_verification_failed", handoff },
+    console.error(
+      `[worker] could not mark PR #${prNumber} ready for review: ${String(err?.message ?? err)}`,
     );
+    return false;
   }
   handoff.pr.draft = false;
   handoff.prDraft = false;
@@ -5097,7 +5093,6 @@ export async function executeClaimed(
           base: worktreeRecord?.base,
           fetchPullRequest: fetchHandoffPullRequestFn,
         });
-        markHandoffPullRequestReadyFn({ handoff: verified.handoff });
       }
     } catch (err) {
       if (!(err instanceof ContractViolation)) {
@@ -5141,7 +5136,6 @@ export async function executeClaimed(
               base: worktreeRecord?.base,
               fetchPullRequest: fetchHandoffPullRequestFn,
             });
-            markHandoffPullRequestReadyFn({ handoff: verified.handoff });
           }
           verified.result.reasonCode = RECOVERED_RESULT_REASON;
           break verificationAttempt;
@@ -5482,6 +5476,14 @@ export async function executeClaimed(
         reasonCode: verified.reasonCode,
         receipt: res.receipt,
       };
+    }
+
+    // The run is accepted: neither failed nor refused. Only now may the PR
+    // leave draft — a refused handoff must not be promoted — and promoting it
+    // before the handoff comment is composed keeps that comment an observation
+    // of the PR's final state.
+    if (verified.handoff && handoffPrNumber(verified.handoff)) {
+      markHandoffPullRequestReadyFn({ handoff: verified.handoff });
     }
 
     // WM-718: the Handoff's Verification line is worker-authored. Post what
