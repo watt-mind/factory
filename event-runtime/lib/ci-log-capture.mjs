@@ -48,7 +48,15 @@ const DETAIL_LIMIT = 400;
  * closed, or the run was cancelled before any job produced a log.
  */
 const EXPECTED_MISSING =
-  /HTTP (?:404|410)|not found|no logs|log[s]? (?:have )?expired|cancell?ed/i;
+  /(?:^|\n)(?:.*\bHTTP (?:404|410)\b.*|no logs(?: found)?(?: for (?:this )?run)?|logs? (?:have )?expired|run (?:was )?cancell?ed)\b/im;
+
+/**
+ * A missing-log response must never conceal a failure to make the request.
+ * GitHub deliberately masks some authorization failures as 404, so this
+ * check deliberately wins over `EXPECTED_MISSING` below.
+ */
+const EXPECTED_FAULT =
+  /HTTP (?:401|403)\b|bad credentials|rate limit|context cancell?ed|context deadline exceeded|connection refused|timeout|gh auth login|EAI_AGAIN|ENOTFOUND|auth(?:entication|orization)?|permission|forbidden|access denied|resource not accessible/i;
 
 /**
  * The pinned-attempt argv, and the legacy fallback when the event carries no
@@ -119,7 +127,11 @@ export function captureCiLog({
   if (!captured && existsSync(logPath)) unlinkSync(logPath);
 
   const detail = String(stderr ?? "");
-  if (!captured && exitCode !== 0 && !EXPECTED_MISSING.test(detail)) {
+  if (
+    !captured &&
+    exitCode !== 0 &&
+    (EXPECTED_FAULT.test(detail) || !EXPECTED_MISSING.test(detail))
+  ) {
     return {
       ok: false,
       captured: NO_CAPTURE,

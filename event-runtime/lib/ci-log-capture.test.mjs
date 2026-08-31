@@ -118,6 +118,26 @@ describe("ci-log-capture command (#2076)", () => {
     }
   });
 
+  test("auth and network failures do not masquerade as missing logs", () => {
+    for (const stderr of [
+      "HTTP 401: Bad credentials",
+      "HTTP 403: rate limit exceeded",
+      'Post "https://api.github.com/repos/watt-mind/factory": context canceled',
+      "HTTP 404: Not Found: Resource not accessible by integration (permission denied)",
+    ]) {
+      const cwd = tmpDir("evrt-ci-log-capture-fault-taxonomy-");
+      const outcome = captureCiLog({
+        cwd,
+        input: INPUT,
+        spawn: fakeGh({ stderr, exitCode: 1 }),
+      });
+
+      expect(outcome.ok).toBe(false);
+      expect(outcome.exitCode).toBe(1);
+      expect(existsSync(path.join(cwd, "result.json"))).toBe(false);
+    }
+  });
+
   test("an empty log on a clean exit is no_logs, not a zero-byte artifact", () => {
     const cwd = tmpDir("evrt-ci-log-capture-empty-");
     captureCiLog({ cwd, input: INPUT, spawn: fakeGh({ stdout: "" }) });
