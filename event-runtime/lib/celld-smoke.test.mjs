@@ -1,6 +1,6 @@
 import { describe, it, beforeAll, afterAll, expect } from "bun:test";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, cpSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CellClient, VersionConflictError } from "./cell-client.mjs";
@@ -69,12 +69,7 @@ describe("celld structured REST/RPC & multi-agent durability", () => {
     mkdirSync(TMP_TEST_DIR, { recursive: true });
 
     // Copy cells project files into the test storage dir so celld dev finds wrangler.jsonc & src
-    mkdirSync(path.join(TMP_TEST_DIR, "src"), { recursive: true });
-    const wranglerContent = await Bun.file(path.join(CELLS_DIR, "wrangler.jsonc")).text();
-    const srcContent = await Bun.file(path.join(CELLS_DIR, "src/index.mjs")).text();
-
-    await Bun.write(path.join(TMP_TEST_DIR, "wrangler.jsonc"), wranglerContent);
-    await Bun.write(path.join(TMP_TEST_DIR, "src/index.mjs"), srcContent);
+    cpSync(CELLS_DIR, TMP_TEST_DIR, { recursive: true });
 
     celldProcess = startCelld(TEST_PORT, TMP_TEST_DIR);
 

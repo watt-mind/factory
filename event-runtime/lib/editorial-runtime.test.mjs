@@ -1,6 +1,6 @@
 import { describe, it, beforeAll, afterAll, expect } from "bun:test";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, cpSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SiteCellClient, ArticleCellClient } from "./editorial-cells.mjs";
@@ -49,13 +49,7 @@ describe("Editorial Agent Runtime Vertical Slice", () => {
   beforeAll(async () => {
     if (existsSync(TMP_TEST_DIR)) rmSync(TMP_TEST_DIR, { recursive: true, force: true });
     mkdirSync(TMP_TEST_DIR, { recursive: true });
-    mkdirSync(path.join(TMP_TEST_DIR, "src"), { recursive: true });
-
-    const wranglerContent = await Bun.file(path.join(CELLS_DIR, "wrangler.jsonc")).text();
-    const srcContent = await Bun.file(path.join(CELLS_DIR, "src/index.mjs")).text();
-
-    await Bun.write(path.join(TMP_TEST_DIR, "wrangler.jsonc"), wranglerContent);
-    await Bun.write(path.join(TMP_TEST_DIR, "src/index.mjs"), srcContent);
+    cpSync(CELLS_DIR, TMP_TEST_DIR, { recursive: true });
 
     celldProcess = startCelld(TEST_PORT, TMP_TEST_DIR);
     const healthy = await waitForHealth();
