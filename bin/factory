@@ -287,7 +287,10 @@ case "$cmd" in
       _notify_status=$?
       set -e
       if [[ "$_notify_status" -eq 0 ]]; then exit 0; fi
-      if [[ "${FACTORY_DISPATCH:-}" == 1 && ( "$_notify_status" -eq 10 || "$_notify_status" -eq 11 ) && -z "${FACTORY_CONTROL_API_TOKEN:-}" && -n "${FACTORY_RUN_ID:-}" && -n "${FACTORY_EVENT_HOME:-}" ]]; then
+      # Only a terminal HTTP rejection (10) is queued. Status 11 means the
+      # runtime was unreachable, which WM-759 routes to the direct transport
+      # below so a human is paged now rather than after the worker drains.
+      if [[ "${FACTORY_DISPATCH:-}" == 1 && "$_notify_status" -eq 10 && -z "${FACTORY_CONTROL_API_TOKEN:-}" && -n "${FACTORY_RUN_ID:-}" && -n "${FACTORY_EVENT_HOME:-}" ]]; then
         if bun "$ROOT/lib/notify.mjs" --queue-local >/dev/null; then
           echo "notify: control API rejected request; queued_local for worker handoff" >&2
           exit 0

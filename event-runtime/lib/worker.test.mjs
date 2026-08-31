@@ -200,6 +200,42 @@ describe("worker", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
+  test("drains the local notify outbox from the adapter finally so a throw cannot strand an escalation", () => {
+    // The drain used to sit after the adapter try/finally: an adapter that
+    // threw skipped it, and the retained escalation was never delivered and
+    // never reported on the ticket. Ordering is still load-bearing — the
+    // drain has to run after the adapter has fully stopped writing — so the
+    // call must live inside that `finally`, not before it and not after the
+    // block.
+    const source = readFileSync(
+      new URL("./worker.mjs", import.meta.url),
+      "utf8",
+    );
+    const marker =
+      "    } finally {\n      stopDeadlineMonitor();\n      stopCancellationMonitor();\n";
+    const start = source.indexOf(marker);
+    expect(start).toBeGreaterThan(-1);
+    const open = source.indexOf("{", start);
+    let depth = 0;
+    let end = -1;
+    for (let i = open; i < source.length; i += 1) {
+      if (source[i] === "{") depth += 1;
+      else if (source[i] === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+      }
+    }
+    expect(end).toBeGreaterThan(open);
+    const finallyBody = source.slice(open, end);
+    expect(finallyBody).toContain("await drainLocalNotifyOutbox({");
+    expect(finallyBody).toContain("commentTicketFn({");
+    // Exactly one drain call site, and it is the one inside the finally.
+    expect(source.split("await drainLocalNotifyOutbox({")).toHaveLength(2);
+  });
+
   test("retains an undelivered local notification for handoff recovery", async () => {
     const home = tmpDir("evrt-local-notify-retained-");
     const runId = "run_1558_retained";

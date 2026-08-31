@@ -4668,35 +4668,43 @@ export async function executeClaimed(
     } finally {
       stopDeadlineMonitor();
       stopCancellationMonitor();
-    }
-
-    // The agent may have retained a notification because it deliberately lacks
-    // the control bearer. Drain only after its process has exited, so no writer
-    // can race the read/truncate cycle. A delivery failure is recorded on the
-    // ticket but never replaces the agent's primary terminal outcome.
-    const notificationDrain = isWorktree
-      ? await drainLocalNotifyOutbox({
-          runId,
-          home: workerEventHome,
-          port: workerEventPort,
-          token: workerControlToken,
-        })
-      : { delivered: [], undelivered: [] };
-    if (notificationDrain.undelivered.length && mayMutateClaimedTicket()) {
+      // The agent may have retained a notification because it deliberately
+      // lacks the control bearer. Drain in `finally` so an adapter throw can
+      // never strand a retained escalation, and only after the adapter has
+      // fully stopped, so no writer races the read/truncate cycle. Neither the
+      // drain nor its ticket comment may throw: the agent's primary terminal
+      // outcome (or error) always wins.
       try {
-        const messages = notificationDrain.undelivered
-          .slice(0, 10)
-          .map(({ title, error }) => `- ${JSON.stringify(title)} — ${error}`)
-          .join("\n");
-        commentTicketFn({
-          repo: repoName,
-          ticket: ticketId,
-          body:
-            `## Notification outbox\n` +
-            `Worker could not deliver ${notificationDrain.undelivered.length} retained notification(s); intended text:\n${messages}`,
-        });
-      } catch {
-        // The retained outbox remains the recovery source if the tracker is down.
+        const notificationDrain = isWorktree
+          ? await drainLocalNotifyOutbox({
+              runId,
+              home: workerEventHome,
+              port: workerEventPort,
+              token: workerControlToken,
+            })
+          : { delivered: [], undelivered: [] };
+        if (notificationDrain.undelivered.length && mayMutateClaimedTicket()) {
+          try {
+            const messages = notificationDrain.undelivered
+              .slice(0, 10)
+              .map(
+                ({ title, error }) => `- ${JSON.stringify(title)} — ${error}`,
+              )
+              .join("\n");
+            commentTicketFn({
+              repo: repoName,
+              ticket: ticketId,
+              body:
+                `## Notification outbox\n` +
+                `Worker could not deliver ${notificationDrain.undelivered.length} retained notification(s); intended text:\n${messages}`,
+            });
+          } catch {
+            // The retained outbox remains the recovery source if the tracker
+            // is down.
+          }
+        }
+      } catch (err) {
+        recordTerminalError("drainLocalNotifyOutbox", err);
       }
     }
 
