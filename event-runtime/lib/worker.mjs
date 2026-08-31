@@ -1419,8 +1419,7 @@ function createRefusalInboxItem(db, spec, result, { now }) {
   const presentation = synthesizeInboxItem({
     kind: "ESCALATED",
     title:
-      result.decision?.question ??
-      `ESCALATED ${subject}: ${result.reasonCode}`,
+      result.decision?.question ?? `ESCALATED ${subject}: ${result.reasonCode}`,
     body,
     reasonCode: result.reasonCode,
     ticketTitle: spec.approvalPolicy?.dispatchEvidence?.ticket?.title,

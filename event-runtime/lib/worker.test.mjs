@@ -1990,7 +1990,9 @@ sh -c 'sleep 5 & wait'
           'What happened: A escalated item needs attention for WM-390 "Choose a supported answer".',
         );
         expect(item.body).toContain("Reason code: needs_human.");
-        expect(item.body).toContain("Question: Which answer should unblock WM-390?");
+        expect(item.body).toContain(
+          "Question: Which answer should unblock WM-390?",
+        );
         expect(item.body).toContain(
           "Answer the agent — records the operator's reply for the agent.",
         );
