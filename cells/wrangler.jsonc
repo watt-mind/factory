@@ -8,14 +8,14 @@
     "bindings": [
       {
         "name": "GENERIC_CELL",
-        "class_name": "GenericCell"
-      }
-    ]
+        "class_name": "GenericCell",
+      },
+    ],
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["GenericCell"]
-    }
-  ]
+      "new_sqlite_classes": ["GenericCell"],
+    },
+  ],
 }
