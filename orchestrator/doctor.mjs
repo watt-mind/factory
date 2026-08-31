@@ -940,59 +940,55 @@ export function stackDaemonDiagnostics({
   return diagnostics;
 }
 
-const ROOT = factoryRoot();
-installLinearBudgetCapture();
-const argv = process.argv.slice(2);
-const val = (f) => {
-  const i = argv.indexOf(f);
-  return i === -1 ? null : argv[i + 1];
-};
-const only = (val("--repo") || "")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-
-const expand = (p) => String(p ?? "").replace(/^~/, homedir());
-const cfg = Bun.YAML.parse(
-  readFileSync(path.join(ROOT, "config/repos.yaml"), "utf8"),
-);
-const repos = (cfg.repos ?? []).filter(
-  (r) => !only.length || only.includes(r.name),
-);
-
-// Commits behind origin/<base> before the main checkout is worth flagging.
-const BEHIND_WARN = 10;
-
-const c = {
-  dim: (s) => `\x1b[2m${s}\x1b[0m`,
-  bold: (s) => `\x1b[1m${s}\x1b[0m`,
-  green: (s) => `\x1b[32m${s}\x1b[0m`,
-  red: (s) => `\x1b[31m${s}\x1b[0m`,
-  yellow: (s) => `\x1b[33m${s}\x1b[0m`,
-};
-
-let failures = 0;
-const check = (ok, label, detail, fix) => {
-  if (ok === "warn" || ok === "info") {
-    console.log(
-      `  ${ok === "warn" ? c.yellow("!") : c.dim("-")} ${label}${detail ? c.dim("  " + detail) : ""}`,
-    );
-    if (fix) console.log(`      ${c.dim(fix)}`);
-    return;
-  }
-  console.log(
-    `  ${ok ? c.green("✓") : c.red("✗")} ${label}${detail ? c.dim("  " + detail) : ""}`,
-  );
-  if (!ok) {
-    failures++;
-    if (fix) console.log(`      ${c.bold("fix:")} ${fix}`);
-  }
-};
-
-const sh = (cmd, cwd) =>
-  spawnSync("/bin/bash", ["-lc", cmd], { cwd, encoding: "utf8" });
-
 if (import.meta.main) {
+  const ROOT = factoryRoot();
+  installLinearBudgetCapture();
+  const argv = process.argv.slice(2);
+  const val = (f) => {
+    const i = argv.indexOf(f);
+    return i === -1 ? null : argv[i + 1];
+  };
+  const only = (val("--repo") || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const expand = (p) => String(p ?? "").replace(/^~/, homedir());
+  const cfg = Bun.YAML.parse(
+    readFileSync(path.join(ROOT, "config/repos.yaml"), "utf8"),
+  );
+  const repos = (cfg.repos ?? []).filter(
+    (r) => !only.length || only.includes(r.name),
+  );
+
+  // Commits behind origin/<base> before the main checkout is worth flagging.
+  const BEHIND_WARN = 10;
+  const c = {
+    dim: (s) => `\x1b[2m${s}\x1b[0m`,
+    bold: (s) => `\x1b[1m${s}\x1b[0m`,
+    green: (s) => `\x1b[32m${s}\x1b[0m`,
+    red: (s) => `\x1b[31m${s}\x1b[0m`,
+    yellow: (s) => `\x1b[33m${s}\x1b[0m`,
+  };
+  let failures = 0;
+  const check = (ok, label, detail, fix) => {
+    if (ok === "warn" || ok === "info") {
+      console.log(
+        `  ${ok === "warn" ? c.yellow("!") : c.dim("-")} ${label}${detail ? c.dim("  " + detail) : ""}`,
+      );
+      if (fix) console.log(`      ${c.dim(fix)}`);
+      return;
+    }
+    console.log(
+      `  ${ok ? c.green("✓") : c.red("✗")} ${label}${detail ? c.dim("  " + detail) : ""}`,
+    );
+    if (!ok) {
+      failures++;
+      if (fix) console.log(`      ${c.bold("fix:")} ${fix}`);
+    }
+  };
+  const sh = (cmd, cwd) =>
+    spawnSync("/bin/bash", ["-lc", cmd], { cwd, encoding: "utf8" });
+
   // ------------------------------------------------------------------ machine ---
   console.log(c.bold("\nmachine"));
   const controlPlaneKind = controlPlaneKindFromPolicy(ROOT);
