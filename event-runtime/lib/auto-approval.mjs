@@ -891,6 +891,8 @@ function noteOpenReason(db, id, reason) {
 const PASSES = new WeakMap();
 /** Per database: `${run_id}\0${registryVersion}` → held verdict for a registry-stale row (#1706). */
 const STALE_VERDICTS = new WeakMap();
+/** Per database: the next open proposal id from which a pass starts. */
+const ROUND_ROBIN_CURSORS = new WeakMap();
 
 function staleVerdictsFor(db) {
   let memo = STALE_VERDICTS.get(db);
@@ -899,6 +901,15 @@ function staleVerdictsFor(db) {
     STALE_VERDICTS.set(db, memo);
   }
   return memo;
+}
+
+function roundRobinCursorFor(db) {
+  let cursor = ROUND_ROBIN_CURSORS.get(db);
+  if (!cursor) {
+    cursor = { nextProposalId: null };
+    ROUND_ROBIN_CURSORS.set(db, cursor);
+  }
+  return cursor;
 }
 
 /** The registry version a recorded proposal spec pins, or null when unpinned. */
@@ -946,12 +957,15 @@ function staleRevisitJitter(row, revisitMs) {
  * fault is a typed reason on the proposal or an `errors` entry.
  *
  * Per tick the pass evaluates at most `maxRows` rows; the rest are counted in
- * `skipped`. A registry-stale row whose evaluation left it open is memoised per
+ * `skipped`; `deadlineSkipped` is the subset truncated by the pass deadline.
+ * Rows begin at the proposal after the previous pass stopped, so a slow open
+ * row cannot repeatedly starve the rest of the backlog. A registry-stale row
+ * whose evaluation left it open is memoised per
  * (run_id, registryVersion) and skipped — without touching the control plane —
  * until `staleRevisitMs` elapses, the registry version changes, or the row is
  * re-planned into a fresh proposal (#1706). `memoised` counts those skips.
  *
- * @returns {Promise<{ approved: Array<{ proposalId: string, runId: string }>, open: Array<{ proposalId: string, reason: string }>, errors: Array<{ proposalId: string|null, reason: string, message: string }>, skipped: number, memoised: number }>}
+ * @returns {Promise<{ approved: Array<{ proposalId: string, runId: string }>, open: Array<{ proposalId: string, reason: string }>, errors: Array<{ proposalId: string|null, reason: string, message: string }>, skipped: number, deadlineSkipped: number, memoised: number }>}
  */
 export function autoApproveChains(db, registry, options = {}) {
   const state = PASSES.get(db) ?? { tail: null };
@@ -1021,7 +1035,9 @@ async function runPass(
         : DEFAULT_CHAIN_AUTO_APPROVAL_DEADLINE_MS;
     const passStartedAt = Date.now();
     const memo = staleVerdictsFor(db);
+    const cursor = roundRobinCursorFor(db);
     let skipped = 0;
+    let deadlineSkipped = 0;
     let memoised = 0;
     let evaluated = 0;
     // One in-flight read per repo for the whole pass, shared across every
@@ -1048,9 +1064,21 @@ async function runPass(
         reason: "pass_failed",
         message: String(err?.message ?? err),
       });
-      return { approved, open, errors, skipped, memoised };
+      return { approved, open, errors, skipped, deadlineSkipped, memoised };
     }
-    if (rows.length === 0) return { approved, open, errors, skipped, memoised };
+    if (rows.length === 0)
+      return { approved, open, errors, skipped, deadlineSkipped, memoised };
+
+    const cursorIndex = rows.findIndex(
+      (row) => row.id === cursor.nextProposalId,
+    );
+    const orderedRows =
+      cursorIndex > 0
+        ? [...rows.slice(cursorIndex), ...rows.slice(0, cursorIndex)]
+        : rows;
+    // A complete pass wraps back to its starting point. Resource-truncated
+    // passes replace this with the first row they could not evaluate.
+    let nextProposalId = null;
 
     // Read this once per pass, rather than once per row. Passing the same
     // snapshot to the guard avoids a second policy read; the next pass reads
@@ -1071,7 +1099,7 @@ async function runPass(
       if (live.get(key) !== held.proposalId) memo.delete(key);
     }
 
-    for (const row of rows) {
+    for (const row of orderedRows) {
       if (paused) {
         noteOpenReason(db, row.id, "dispatch_paused");
         skipped += 1;
@@ -1087,6 +1115,7 @@ async function runPass(
       }
       if (evaluated >= limit) {
         skipped += 1;
+        nextProposalId ??= row.id;
         continue;
       }
       // Check immediately before the potentially remote eligibility read. A
@@ -1094,6 +1123,8 @@ async function runPass(
       // same pass.
       if (Date.now() - passStartedAt >= passDeadlineMs) {
         skipped += 1;
+        deadlineSkipped += 1;
+        nextProposalId ??= row.id;
         continue;
       }
       evaluated += 1;
@@ -1186,7 +1217,8 @@ async function runPass(
         hold("pass_row_failed");
       }
     }
-    return { approved, open, errors, skipped, memoised };
+    cursor.nextProposalId = nextProposalId ?? orderedRows[0].id;
+    return { approved, open, errors, skipped, deadlineSkipped, memoised };
   } finally {
     marker.settled = true;
   }
