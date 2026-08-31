@@ -3230,7 +3230,6 @@ describe("buildRunSpec", () => {
     const spec = buildRunSpec(registry, dispatch, mapping, {
       runId: "run_baseline",
       policyVersion: "git:test",
-      now: 0,
     });
     // Regenerated (#2071): unavailable worktree web UIs now block UX critique.
     expect(canonicalJson(spec)).toBe(
@@ -3244,7 +3243,6 @@ describe("buildRunSpec", () => {
     const spec = buildRunSpec(registry, envelope(), mapping, {
       runId: "run_defhash",
       policyVersion: "git:test",
-      now: NOW,
     });
     // Present and computed with the canonical helper the worker's
     // claim-time verifyDefHash consumes.
@@ -3254,7 +3252,6 @@ describe("buildRunSpec", () => {
     const again = buildRunSpec(registry, envelope(), mapping, {
       runId: "run_defhash_2",
       policyVersion: "git:test",
-      now: NOW,
     });
     expect(again.defHash).toBe(spec.defHash);
     // Changes when attested definition content changes.
@@ -3267,7 +3264,7 @@ describe("buildRunSpec", () => {
       synthetic,
       envelope(),
       synthetic.eventTypes["factory.status-report.requested"],
-      { runId: "run_defhash_3", policyVersion: "git:test", now: NOW },
+      { runId: "run_defhash_3", policyVersion: "git:test" },
     );
     expect(mutated.defHash).not.toBe(spec.defHash);
     // Per-ticket model/model-tier overrides must NOT redefine the attested
@@ -3275,16 +3272,15 @@ describe("buildRunSpec", () => {
     const overridden = buildRunSpec(registry, envelope(), mapping, {
       runId: "run_defhash_4",
       policyVersion: "git:test",
-      now: NOW,
       modelTierOverride: "strong",
       modelOverride: "openai-codex/gpt-5.6-terra",
     });
     expect(overridden.defHash).toBe(spec.defHash);
   });
 
-  test("is pure and honors adapterOverride", () => {
+  test("is clock-independent and honors adapterOverride", () => {
     const mapping = registry.eventTypes["factory.status-report.requested"];
-    const opts = { runId: "run_x", policyVersion: "git:abc", now: NOW };
+    const opts = { runId: "run_x", policyVersion: "git:abc" };
     const a = buildRunSpec(registry, envelope(), mapping, opts);
     const b = buildRunSpec(registry, envelope(), mapping, opts);
     expect(hashJson(a)).toBe(hashJson(b));
@@ -3310,7 +3306,6 @@ describe("buildRunSpec", () => {
     const spec = buildRunSpec(synthetic, envelope(), mapping, {
       runId: "run_harness_pins",
       policyVersion: "git:test",
-      now: NOW,
     });
 
     expect(spec.harness).toEqual({ commands: ["factory-ticket"] });

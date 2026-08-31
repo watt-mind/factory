@@ -359,7 +359,6 @@ export function approveProposal(
         runId: proposal.run_id,
         policyVersion,
         adapterOverride,
-        now,
         ...replanOptions,
       }),
       // configSnapshot can affect planning and is itself part of specs that

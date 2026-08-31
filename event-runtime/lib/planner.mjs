@@ -2723,7 +2723,6 @@ export function planEvent(
         runId,
         policyVersion,
         adapterOverride,
-        now,
         approvalPolicy,
         modelTierOverride,
         modelOverride: overlayModel,

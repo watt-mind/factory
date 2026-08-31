@@ -30,7 +30,25 @@ export function idempotencyKeyFor(mapping, def, envelope, inputHash) {
   return `${def.ref}:${def.output_contract}:${parts.join(":")}`;
 }
 
-/** Return a typed mismatch when a tier model belongs to another adapter. */
+/**
+ * A tier-resolved model must be one of the configured values for its adapter.
+ * Model tiers are portable intent; model names are not. Keep this at the
+ * planning boundary so a bad runtime overlay or carried-forward pin parks the
+ * event rather than producing a QUEUED run the adapter will reject.
+ *
+ * Explicit pins — a definition's `model:` or an agent overlay `model` — are
+ * operator intent: `resolveModel` returns them verbatim and no adapter
+ * publishes a known-model list to check them against, so they are accepted
+ * as-is. `explicitPin` states that provenance when the caller knows it. When
+ * it does not (a stored spec being approved as recorded), a model outside the
+ * adapter's map is refused only when it is a tier value of some *other*
+ * adapter — the signature of a pin carried across an adapter change — and is
+ * otherwise treated as a pin.
+ *
+ * An adapter that takes no model (`fake`, actions) cannot mismatch one: a
+ * model on such a spec is the registered route's pin carried across a
+ * process-wide `--adapter-override`, and that adapter ignores it.
+ */
 export function modelAdapterMismatch(
   spec,
   modelTiers,
@@ -146,7 +164,11 @@ export function normalizeHarness(raw, source = "harness") {
   return out;
 }
 
-/** Pure assembly of the §5.2 RunSpec from a registered mapping. */
+/**
+ * Pure assembly of the §5.2 RunSpec from a registered mapping. It has no
+ * clock-dependent inputs: the planner and proposal re-planner must construct
+ * the model-tier block byte-identically, so it lives in this shared module.
+ */
 export function buildRunSpec(
   registry,
   envelope,
@@ -207,6 +229,13 @@ export function buildRunSpec(
     promptVersion: policyVersion,
     policyVersion,
     outputContract: def.output_contract,
+    // Attested definition pin (WM-1056): the content sha256 of the registered
+    // agent definition, computed with the same helper the worker's claim-time
+    // verifyDefHash and the receipt seam use. Pinned at plan time so a proposal
+    // that crosses a registry reload is compared against the exact def it was
+    // planned against. Computed from `def`, NOT `planned`, so per-ticket
+    // model/model-tier overrides never redefine the attested definition or make
+    // otherwise identical planner inputs nondeterministic.
     defHash: computeDefHash(def),
     capabilities: def.capabilities.services,
     ...(def.mutating === false &&
@@ -221,6 +250,8 @@ export function buildRunSpec(
           return { harness, ...(harnessPins ? { harnessPins } : {}) };
         })()
       : {}),
+    // Initial planning and proposal re-planning must use this exact tier/model
+    // resolution. Keeping it here prevents either path from drifting.
     ...(modelTierOverride !== undefined ||
     planned.model_tier !== undefined ||
     planned.model !== undefined
