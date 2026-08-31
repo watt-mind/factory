@@ -62,7 +62,7 @@ const T1 = "2026-08-17T11:00:00.000Z";
 const T2 = "2026-08-17T12:00:00.000Z";
 
 describe("inbox pure helpers", () => {
-  test("groups by triage kind and drops empty groups, oldest first inside a group", () => {
+  test("groups by triage kind and drops empty groups, newest first inside a group", () => {
     const rows = [
       item({ id: "i-ci", kind: "CI RED", createdAt: T2 }),
       item({ id: "i-blocked-new", kind: "BLOCKED", createdAt: T2 }),
@@ -72,9 +72,9 @@ describe("inbox pure helpers", () => {
     const groups = groupItems(rows);
     expect(groups.map((g) => g.group.id)).toEqual(["decide", "red"]);
     expect(groups[0].items.map((i) => i.id)).toEqual([
-      "i-blocked-old",
-      "i-decision",
       "i-blocked-new",
+      "i-decision",
+      "i-blocked-old",
     ]);
     expect(groups[1].items.map((i) => i.id)).toEqual(["i-ci"]);
   });

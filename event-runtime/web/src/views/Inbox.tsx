@@ -297,7 +297,7 @@ function InboxDetailFallback({
   );
 }
 
-/** Group in triage order, oldest first inside a group; empty groups are dropped. */
+/** Group in triage order, newest first inside a group; empty groups are dropped. */
 export function groupItems(
   items: InboxItem[],
 ): { group: InboxGroup; items: InboxItem[] }[] {
@@ -314,7 +314,7 @@ export function groupItems(
     .map((g) => ({
       group: g,
       items: [...byGroup.get(g.id)!].sort((a, b) =>
-        a.createdAt.localeCompare(b.createdAt),
+        b.createdAt.localeCompare(a.createdAt),
       ),
     }));
 }
