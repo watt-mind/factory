@@ -3,10 +3,10 @@ import "../test-helpers.mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { insideHandoffSandbox } from "./verify.mjs";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { hashJson } from "./canonical.mjs";
+import { hashJson, sha256Hex } from "./canonical.mjs";
 import { openDb } from "./db.mjs";
 import { lifecycleOf } from "./lifecycle.mjs";
 import {
@@ -205,7 +205,15 @@ describe("handoff verification gate (WM-718)", () => {
   }
 
   /** A fake dispatch agent: writes files, commits, claims whatever it likes. */
-  function agent({ files = {}, claim = {}, prNumber = 77 }) {
+  function agent({
+    files = {},
+    workspaceFiles = {},
+    artifacts = [],
+    claim = {},
+    prNumber = 77,
+    uxCritique,
+    onWorkspace,
+  }) {
     return {
       async execute({ spec, workspaceDir }) {
         writeFileSync(
@@ -217,6 +225,12 @@ describe("handoff verification gate (WM-718)", () => {
           mkdirSync(path.dirname(path.join(repo, rel)), { recursive: true });
           writeFileSync(path.join(repo, rel), content);
         }
+        for (const [rel, content] of Object.entries(workspaceFiles)) {
+          const file = path.join(workspaceDir, rel);
+          mkdirSync(path.dirname(file), { recursive: true });
+          writeFileSync(file, content);
+        }
+        onWorkspace?.(workspaceDir);
         execFileSync("git", ["add", "-A"], { cwd: repo });
         execFileSync(
           "git",
@@ -244,7 +258,7 @@ describe("handoff verification gate (WM-718)", () => {
                 ...claim,
               },
               summary: `implemented ${spec.input.ticket}`,
-              uxCritique: {
+              uxCritique: uxCritique ?? {
                 status: "skipped",
                 verdict: null,
                 evidence: [],
@@ -253,6 +267,7 @@ describe("handoff verification gate (WM-718)", () => {
               },
             },
             evidence: { commands: ["bash run-tests.sh"] },
+            artifacts,
           })}\n`,
         );
         return { exitCode: 0, timedOut: false };
@@ -262,6 +277,7 @@ describe("handoff verification gate (WM-718)", () => {
 
   async function dispatch({ spec, adapter, description, hooks = {} }) {
     const db = openDb(":memory:");
+    const artifactStore = tmpDir("evrt-handoff-artifacts-");
     queueRun(db, spec);
     const calls = { unclaim: [], returned: [], held: [], comments: [] };
     const summary = await runOnce(
@@ -269,6 +285,7 @@ describe("handoff verification gate (WM-718)", () => {
       registry,
       { fake: adapter },
       opts({
+        artifactStore,
         dispatch: {
           locksDir: tmpDir("evrt-handoff-locks-"),
           leasesDir: tmpDir("evrt-handoff-leases-"),
@@ -296,7 +313,7 @@ describe("handoff verification gate (WM-718)", () => {
         },
       }),
     );
-    return { db, summary, calls };
+    return { db, summary, calls, artifactStore };
   }
 
   test("a fake agent that leaves a failing test is refused handoff_verification_failed: no result row, ticket back to Todo + agent-ready, PR held, tail in the receipt", async () => {
@@ -401,6 +418,55 @@ describe("handoff verification gate (WM-718)", () => {
       "- Verification: `echo repo_verified` — exit 0 (pass)",
     );
     expect(calls.comments[0].body).toContain("repo `verify:` command stood in");
+  });
+
+  test("declared UX screenshots are content-addressed before workspace cleanup and their evidence stays durable", async () => {
+    const screenshot = Buffer.from("fake-png-bytes");
+    const sha256 = sha256Hex(screenshot);
+    let screenshotPath;
+    const spec = handoffSpec({ ticket: "WM-2023" });
+    const { artifactStore, db, summary } = await dispatch({
+      spec,
+      description: withCommand("bash run-tests.sh"),
+      adapter: agent({
+        files: {
+          "run-tests.sh": "echo ux handoff verified\n",
+          "src/feature/impl.txt": "done\n",
+        },
+        workspaceFiles: { "ux-artifacts/runs.png": screenshot },
+        artifacts: [{ kind: "ux-screenshot", path: "ux-artifacts/runs.png" }],
+        uxCritique: {
+          status: "required",
+          verdict: "SHIP",
+          evidence: [`sha256:${sha256}`],
+          rounds: 1,
+          prReady: true,
+        },
+        onWorkspace: (workspaceDir) => {
+          screenshotPath = path.join(workspaceDir, "ux-artifacts/runs.png");
+        },
+      }),
+    });
+
+    expect(summary.terminalState).toBe("COMPLETED");
+    const result = JSON.parse(
+      db
+        .query(`SELECT result_json FROM results WHERE run_id = ?`)
+        .get(spec.runId).result_json,
+    );
+    const stored = result.artifacts.find(
+      (entry) => entry.kind === "ux-screenshot",
+    );
+    const storedPath = path.join(artifactStore, sha256);
+    expect(stored).toEqual({
+      kind: "ux-screenshot",
+      sha256,
+      uri: `file://${storedPath}`,
+      sizeBytes: screenshot.length,
+    });
+    expect(result.artifact.uxCritique.evidence).toEqual([`sha256:${sha256}`]);
+    expect(existsSync(screenshotPath)).toBe(false);
+    expect(readFileSync(storedPath)).toEqual(screenshot);
   });
 
   test("a PR targeting the wrong base fails handoff verification and is returned", async () => {

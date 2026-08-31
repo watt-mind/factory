@@ -100,12 +100,27 @@ new ticket.
    critic concluded, and a critic that never ran concluded nothing.
 
    Spawn the `factory-ux-critic` subagent after verification and before opening
-   the PR. Its prompt must spell out `worktree: <absolute path>` plus the exact
+   the PR. Before spawning it, create `./ux-artifacts/` at the run workspace
+   root (beside `repo`, never inside it) and pass its absolute path as
+   `artifactDir: <absolute workspace path>/ux-artifacts` in the prompt. Its
+   prompt must also spell out `worktree: <absolute path>` plus the exact
    dev-server command and this worktree's port (or simulator/Electron target),
    login route, ticket criteria, flow, and persona. The critic must use the
-   running app. A valid `SHIP` or `FIX-FIRST` report cites at least one observed
-   page URL or screenshot path; without browser evidence, treat it as
-   `NOT-ASSESSED`, never as approval.
+   running app and write every screenshot to `artifactDir` rather than `/tmp`
+   or another workspace path.
+
+   Screenshot evidence must survive workspace cleanup. For every screenshot the
+   critic creates, calculate its SHA-256 and declare it in the outer
+   `result.json` as `{ "kind": "ux-screenshot", "path": "ux-artifacts/<file>" }`.
+   In `artifact.uxCritique.evidence`, cite the matching durable identifier as
+   `sha256:<64-hex-digest>`, never the workspace screenshot path. The worker
+   copies declared artifacts to its content-addressed store before teardown, so
+   that identifier resolves after the workspace is gone. Keep observed
+   dev-server URLs only as explicitly ephemeral records (for example,
+   `ephemeral-url:http://127.0.0.1:7497/runs`), never as durable screenshot
+   evidence. A valid `SHIP` or `FIX-FIRST` report cites at least one observed
+   page URL or stored screenshot identifier; without browser evidence, treat it
+   as `NOT-ASSESSED`, never as approval.
 
    Resolve in-scope `FIX-FIRST` findings and re-run the critic, for at most two
    review rounds. A startup `BLOCKED - environment mismatch or unresponsive

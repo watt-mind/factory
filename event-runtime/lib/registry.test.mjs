@@ -411,8 +411,10 @@ describe("registry", () => {
     // in-flight/fresh Full verification; merge-fix re-checks that CI guard.
     // Regenerated (#1925): dispatch spells out the exact first-line Fixes
     // grammar and its prompt pin changes; the registry digest follows it.
+    // Regenerated (#2023): dispatch declares UX screenshots as durable
+    // result artifacts and cites their content-addressed identifiers.
     const expected =
-      "sha256:dde1373788b1ecea1e8c11d130c42b0a0fa93ff0df2c9616a50beba6e556c10a";
+      "sha256:90c2596362835cdc75a13a0c8bb52f64423078b2ed61ce448c321256c67f4b01";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -707,8 +709,9 @@ describe("registry", () => {
     // so quoted PR-body files cannot leave the environment variable literal.
     // Regenerated (#1925): dispatch specifies the exact Fixes-line grammar;
     // its prompt pin legitimately changes while `pack` remains non-enumerable.
+    // #2023 adds durable UX screenshot artifact declarations to that prompt.
     expect(computeDefHash(def)).toBe(
-      "sha256:c9c95b3482cd08600d034c5524a7dade9330010ef711edfbca35ca161e607628",
+      "sha256:5feb08bd0bf15a3a355a8e211f47a7ba58b07546a6c43a4cbab00e151b5fb1c6",
     );
   });
 
