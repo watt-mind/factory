@@ -759,7 +759,7 @@ export default async function start() {
 
     expect(logs).toEqual(
       expect.arrayContaining([
-        "proposal staleness: skipped 0 pending chain row(s) (0 memoised registry-stale); expired 1 unreplannable scheduler row(s)",
+        "proposal staleness: skipped 0 pending chain row(s) (0 memoised registry-stale; 0 deadline-truncated); expired 1 unreplannable scheduler row(s)",
       ]),
     );
     db.close();
