@@ -232,18 +232,21 @@ export async function tick({
   subsystems = {},
   skipPlan = false,
   proposalSweepLimit,
+  onStep = () => {},
 } = {}) {
   const tickStart = Date.now();
   const stepMs = {};
   let expiredScheduledProposals = 0;
   const runStep = async (name, fn) => {
     const start = Date.now();
+    onStep({ name, startedAt: start });
     try {
       await (subsystems[name] ?? fn)();
     } catch (err) {
       logLine(`tick ${name}: ${err.message}`);
     } finally {
       stepMs[name] = Date.now() - start;
+      onStep({ name: null, finishedAt: Date.now() });
     }
   };
 
@@ -282,12 +285,12 @@ export async function tick({
   });
 
   await runStep("auto-approve-chains", async () => {
-    const { worktreeDispatchAutoEligibility } =
+    const { worktreeDispatchAutoEligibilityAsync } =
       await import("../lib/planner.mjs");
     const auto = await autoApproveChains(db, registry, {
       now,
       policyVersion: pv,
-      dispatchEligibility: worktreeDispatchAutoEligibility,
+      dispatchEligibility: worktreeDispatchAutoEligibilityAsync,
       dispatch: db ? db : null,
     });
     for (const a of auto.approved)
@@ -642,6 +645,9 @@ export default async function serve(args) {
   let tickOverruns = 0;
   let lastTickMs = 0;
   let lastOverrunAt = null;
+  let lastTickAt = null;
+  let currentTickStep = null;
+  let tickStartedAt = null;
   let plannerWorker = null;
 
   function getTickStats() {
@@ -651,7 +657,13 @@ export default async function serve(args) {
         .get() != null;
     return {
       lastMs: lastTickMs,
+      lastTickMs,
       overruns: tickOverruns,
+      tickOverruns,
+      lastTickAt,
+      currentStep: currentTickStep,
+      stallMs:
+        busy && tickStartedAt ? Math.max(0, Date.now() - tickStartedAt) : 0,
       ...(lastOverrunAt ? { lastOverrunAt } : {}),
       planner: plannerWorker?.state({ queued }) ?? null,
     };
@@ -668,6 +680,7 @@ export default async function serve(args) {
     }
     busy = true;
     const start = Date.now();
+    tickStartedAt = start;
     try {
       registryRef.poll();
       const result = await tick({
@@ -683,10 +696,14 @@ export default async function serve(args) {
         announceProposals,
         announceTransitions,
         skipPlan: !noPlanner,
+        onStep: ({ name }) => {
+          currentTickStep = name;
+        },
       });
       lastPrune = result.lastPrune;
       const duration = Date.now() - start;
       lastTickMs = duration;
+      lastTickAt = new Date().toISOString();
       if (duration > 1000) {
         tickOverruns++;
         lastOverrunAt = new Date().toISOString();
@@ -698,6 +715,8 @@ export default async function serve(args) {
       log(`tick error: ${err.message}`);
     } finally {
       busy = false;
+      currentTickStep = null;
+      tickStartedAt = null;
     }
   }
 

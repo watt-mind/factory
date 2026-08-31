@@ -742,6 +742,171 @@ function fetchInFlightDefault(repoConfig, { readBudget = null } = {}) {
   }
 }
 
+// The general planner and execute-time gate intentionally retain their
+// synchronous public contract (several non-serve callers rely on it). Chain
+// auto-approval runs on serve's event loop, so it uses this async reader set
+// instead. Keeping the boundary explicit prevents a Promise from silently
+// becoming a successful or failed synchronous eligibility verdict.
+export const AUTO_APPROVAL_CONTROL_PLANE_READ_TIMEOUT_MS = (() => {
+  const value = Number(process.env.FACTORY_AUTO_APPROVAL_READ_TIMEOUT_MS);
+  return Number.isFinite(value) && value > 0 ? value : 5_000;
+})();
+
+async function spawnRead(args, timeoutMs) {
+  const proc = Bun.spawn(args, {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    timeout: timeoutMs,
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  if (exitCode !== 0) {
+    const err = new Error(stderr.trim() || `command exited ${exitCode}`);
+    err.stderr = stderr;
+    err.stdout = stdout;
+    err.status = exitCode;
+    throw err;
+  }
+  return stdout;
+}
+
+function autoApprovalReadTimeout(readBudget) {
+  return Math.min(
+    AUTO_APPROVAL_CONTROL_PLANE_READ_TIMEOUT_MS,
+    linearReadTimeout(readBudget),
+  );
+}
+
+async function fetchTicketAsync(ticketId, repo, { readBudget = null } = {}) {
+  try {
+    const args = [linearCli(), "get", ticketId, "--json"];
+    if (repo) args.push("--repo", repo);
+    return JSON.parse(
+      await spawnRead(["bun", ...args], autoApprovalReadTimeout(readBudget)),
+    );
+  } catch (err) {
+    if (err instanceof LinearReadBudgetExceededError) throw err;
+    throwIfLinearCliRateLimited(err);
+    const stderr = String(err?.stderr ?? "");
+    if (stderr.includes("no such issue")) return null;
+    throwIfLinearReadBudgetExhausted(err, readBudget);
+    throw new Error(`linear_read_failed: ${linearReadFailureReason(err)}`, {
+      cause: err,
+    });
+  }
+}
+
+async function fetchViewerAsync(
+  repoName,
+  configSnapshot = null,
+  { readBudget = null } = {},
+) {
+  try {
+    const repo = repoName
+      ? getRepo(snapshotRepos(configSnapshot), repoName)
+      : null;
+    const query =
+      repo?.controlPlane === "github" ? "/user" : "query{ viewer{ id name } }";
+    const args = [linearCli(), "raw", query];
+    if (repoName) args.push("--repo", repoName);
+    const parsed = JSON.parse(
+      await spawnRead(["bun", ...args], autoApprovalReadTimeout(readBudget)),
+    );
+    return repo?.controlPlane === "github"
+      ? parsed?.id == null
+        ? null
+        : { id: String(parsed.id), name: parsed.login ?? parsed.name ?? null }
+      : (parsed?.viewer ?? null);
+  } catch (err) {
+    if (err instanceof LinearReadBudgetExceededError) throw err;
+    throwIfLinearCliRateLimited(err);
+    throwIfLinearReadBudgetExhausted(err, readBudget);
+    throw new Error(`linear_read_failed: ${linearReadFailureReason(err)}`, {
+      cause: err,
+    });
+  }
+}
+
+async function fetchInFlightAsync(repoConfig, { readBudget = null } = {}) {
+  try {
+    const args = [
+      linearCli(),
+      "inflight",
+      "--team",
+      String(repoConfig.team),
+      "--project",
+      String(repoConfig.project),
+      "--json",
+    ];
+    if (repoConfig.name) args.push("--repo", repoConfig.name);
+    const rows = JSON.parse(
+      await spawnRead(["bun", ...args], autoApprovalReadTimeout(readBudget)),
+    );
+    return Array.isArray(rows) ? rows : [];
+  } catch (err) {
+    if (err instanceof LinearReadBudgetExceededError) throw err;
+    throwIfLinearCliRateLimited(err);
+    throwIfLinearReadBudgetExhausted(err, readBudget);
+    throw new Error(`linear_read_failed: ${linearReadFailureReason(err)}`, {
+      cause: err,
+    });
+  }
+}
+
+async function fetchPullRequestAsync(payload) {
+  try {
+    const pull = JSON.parse(
+      await spawnRead(
+        ["gh", "api", `repos/${payload?.github}/pulls/${payload?.pr}`],
+        AUTO_APPROVAL_CONTROL_PLANE_READ_TIMEOUT_MS,
+      ),
+    );
+    return { state: pull.state?.toUpperCase(), headRefOid: pull.head?.sha };
+  } catch (err) {
+    const stderr = String(err?.stderr ?? "");
+    if (/not found|no pull request/i.test(stderr)) return null;
+    throw new Error(
+      `github_read_failed: ${stderr.trim().split("\n").pop() || err.message}`,
+      { cause: err },
+    );
+  }
+}
+
+async function findWorkspacePullRequestAsync(payload) {
+  const workspacePath = payload?.workspacePath;
+  if (!workspacePath || !existsSync(workspacePath)) return null;
+  const branch = (
+    await spawnRead(
+      ["git", "-C", workspacePath, "branch", "--show-current"],
+      AUTO_APPROVAL_CONTROL_PLANE_READ_TIMEOUT_MS,
+    )
+  ).trim();
+  if (!branch) return null;
+  const pulls = JSON.parse(
+    await spawnRead(
+      [
+        "gh",
+        "pr",
+        "list",
+        "--repo",
+        String(payload?.github),
+        "--head",
+        branch,
+        "--state",
+        "open",
+        "--json",
+        "number,url,headRefName,isDraft,state",
+      ],
+      AUTO_APPROVAL_CONTROL_PLANE_READ_TIMEOUT_MS,
+    ),
+  );
+  return Array.isArray(pulls) ? (pulls[0] ?? null) : null;
+}
+
 /**
  * The serve loop evaluates every admitted event in one tick. Keep the mutable
  * config view consistent within that tick and avoid re-parsing both YAML files
@@ -1572,6 +1737,77 @@ export function worktreeDispatchAutoEligibility(
     );
   }
   return { ok: true, evidence };
+}
+
+/**
+ * Async counterpart for the serve-loop chain approval path. The historical
+ * synchronous gate remains in place for planner and execute-time consumers
+ * outside that loop; changing it would turn their established result contract
+ * into Promises. All control-plane readers used here yield through Bun.spawn.
+ */
+export async function worktreeDispatchAutoEligibilityAsync(
+  payload,
+  options = {},
+) {
+  const readBudget = options.readBudget ?? null;
+  const fetchTicket =
+    options.fetchTicket ??
+    ((ticket, repo) => fetchTicketAsync(ticket, repo, { readBudget }));
+  const fetchViewer =
+    options.fetchViewer ??
+    ((repo, snapshot) => fetchViewerAsync(repo, snapshot, { readBudget }));
+  const fetchInFlight =
+    options.fetchInFlight ??
+    ((repo) => fetchInFlightAsync(repo, { readBudget }));
+  const fetchPullRequest = options.fetchPullRequest ?? fetchPullRequestAsync;
+  const findWorkspacePullRequest =
+    options.findWorkspacePullRequest ?? findWorkspacePullRequestAsync;
+
+  const ticket = await fetchTicket(payload?.ticket, payload?.repo);
+  const viewer = ticket?.assignee
+    ? await fetchViewer(payload?.repo, options.configSnapshot)
+    : null;
+  let repo = null;
+  try {
+    repo = getRepo(snapshotRepos(options.configSnapshot), payload?.repo);
+  } catch {
+    // The synchronous gate below owns the typed invalid-repo refusal.
+  }
+  const escalation = options.escalatedContinuation;
+  const failedPullRequest = Number.isInteger(
+    escalation?.failedRunArtifact?.prNumber,
+  )
+    ? await fetchPullRequest({
+        github: repo?.github,
+        pr: escalation.failedRunArtifact.prNumber,
+      })
+    : null;
+  const workspacePullRequest = escalation?.workspacePath
+    ? await findWorkspacePullRequest({
+        github: repo?.github,
+        workspacePath: escalation.workspacePath,
+      })
+    : null;
+  const resolved = {
+    ...options,
+    fetchTicket: () => ticket,
+    fetchViewer: () => viewer,
+    fetchPullRequest: () => failedPullRequest,
+    findWorkspacePullRequest: () => workspacePullRequest,
+  };
+  // Keep the expensive in-flight query behind every local/ticket/claim/path
+  // refusal. A malformed or no-longer-ready ticket must not consume another
+  // scarce control-plane read merely because chain approval is asynchronous.
+  const beforeInFlight = worktreeDispatchAutoEligibility(payload, {
+    ...resolved,
+    fetchInFlight: () => [],
+  });
+  if (!beforeInFlight.ok || !repo || !ticket) return beforeInFlight;
+  const inFlight = await fetchInFlight(repo);
+  return worktreeDispatchAutoEligibility(payload, {
+    ...resolved,
+    fetchInFlight: () => inFlight,
+  });
 }
 
 /**

@@ -35,6 +35,7 @@ import {
   policyMergeBatchSize,
   wrapLinearReads,
   worktreeDispatchAutoEligibility,
+  worktreeDispatchAutoEligibilityAsync,
   worktreeDispatchGate,
   worktreeMergeFixEligibility,
 } from "./planner.mjs";
@@ -1165,6 +1166,21 @@ describe("planEvent worktree gate (WM-108)", () => {
     budgetRefusal: () => null,
     fetchTicket: () => tierTicket(tierLabels),
     fetchInFlight: () => [],
+  });
+
+  test("async dispatch eligibility awaits control-plane readers without changing the synchronous gate contract (#2123)", async () => {
+    let ticketReads = 0;
+    const result = await worktreeDispatchAutoEligibilityAsync(
+      { repo: "not-configured", ticket: "WM-2123" },
+      {
+        fetchTicket: async () => {
+          ticketReads += 1;
+          return tierTicket();
+        },
+      },
+    );
+    expect(ticketReads).toBe(1);
+    expect(result.refusal?.reason).toMatch(/^repo_unknown: /);
   });
 
   test("ticket-scoped human-needed refusals deduplicate unchanged bodies and supersede changed ones", () => {

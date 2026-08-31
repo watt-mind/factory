@@ -11,6 +11,7 @@ import {
   CHAIN_AUTO_APPROVAL_EVENT_TYPES,
   DEFAULT_STALE_CHAIN_REVISIT_MS,
   CHAIN_AUTO_APPROVAL_REASON,
+  DEFAULT_CHAIN_AUTO_APPROVAL_DEADLINE_MS,
   loadChainAutoApprovalPolicy,
 } from "./auto-approval.mjs";
 import { canonicalJson, hashJson } from "./canonical.mjs";
@@ -2355,6 +2356,30 @@ describe("chain auto approval (WM-357)", () => {
     ).toBe(backlog.length);
   });
 
+  test("an asynchronous dispatch recheck yields and the pass defers remaining rows at its deadline (#2123)", async () => {
+    const db = openDb(":memory:");
+    const backlog = Array.from({ length: 3 }, (_, index) =>
+      dispatchSeed(db, `deadline-${index}`, { ticket: `WM-${21230 + index}` }),
+    );
+    let checks = 0;
+    const result = await auto(db, {
+      deadlineMs: 100,
+      dispatchEligibility: async () => {
+        checks += 1;
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        return dispatchOk();
+      },
+      runtimeGuard: () => null,
+    });
+
+    expect(DEFAULT_CHAIN_AUTO_APPROVAL_DEADLINE_MS).toBe(2_000);
+    expect(checks).toBe(1);
+    expect(result.approved).toEqual([
+      { proposalId: backlog[0].id, runId: backlog[0].runId },
+    ]);
+    expect(result.skipped).toBe(2);
+  });
+
   test("registry-stale rows are evaluated once per (run, registryVersion) and then memoised (#1706)", async () => {
     const db = openDb(":memory:");
     const backlog = Array.from({ length: 60 }, (_, i) =>
@@ -2399,7 +2424,7 @@ describe("chain auto approval (WM-357)", () => {
     // The hold expires, and a registry bump re-evaluates immediately.
     const revisited = await auto(db, {
       ...options,
-      now: now + DEFAULT_STALE_CHAIN_REVISIT_MS,
+      now: now + Math.ceil(DEFAULT_STALE_CHAIN_REVISIT_MS * 1.1) + 1,
     });
     expect(revisited.memoised).toBe(0);
     expect(revisited.open).toHaveLength(backlog.length);

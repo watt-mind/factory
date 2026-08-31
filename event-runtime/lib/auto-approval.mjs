@@ -60,6 +60,16 @@ const ENVIRONMENT_FAILURE_REASONS = new Set([
 ]);
 const RUNTIME_POLICY_LOAD_ERROR = Symbol("runtime_policy_load_error");
 
+/** Leave the remainder of a one-second serve cadence to local tick work. */
+export const DEFAULT_CHAIN_AUTO_APPROVAL_DEADLINE_MS = 2_000;
+
+function chainAutoApprovalDeadlineMs() {
+  const value = Number(process.env.FACTORY_CHAIN_AUTO_APPROVAL_DEADLINE_MS);
+  return Number.isFinite(value) && value > 0
+    ? value
+    : DEFAULT_CHAIN_AUTO_APPROVAL_DEADLINE_MS;
+}
+
 function loadRuntimePolicy(root = reposRoot()) {
   const file = chainApprovalPolicyPath(root);
   if (!existsSync(file)) return null;
@@ -256,10 +266,7 @@ function dispatchSafe(
     return "dispatch_recheck_deferred";
   }
 
-  let result;
-  try {
-    result = dispatchEligibility(envelope.payload, dispatch);
-  } catch (err) {
+  const failed = (err) => {
     const message = String(err?.message ?? err);
     console.error(`dispatch_recheck_failed: ${message}`);
     if (isLinearRateLimited(err) || isLinearRateLimitMessage(message)) {
@@ -272,33 +279,44 @@ function dispatchSafe(
       return "dispatch_recheck_deferred";
     }
     return `dispatch_recheck_failed:${clipReason(message)}`;
+  };
+  const checked = (result) => {
+    if (!result?.ok)
+      return `dispatch_ineligible:${result?.refusal?.reason ?? "unknown"}`;
+
+    const expectedEvidenceHash =
+      stableChainApprovalPolicyForHash(approvalPolicy)?.dispatchEvidenceHash;
+    if (!expectedEvidenceHash)
+      return "dispatch_ineligible:approval_policy_missing_evidence";
+    const { checkedAt, ...currentEvidence } = result.evidence ?? {};
+    if (expectedEvidenceHash !== hashJson(currentEvidence)) {
+      return "dispatch_ineligible:evidence_changed_since_plan";
+    }
+
+    // The escalated/security-label refusal ran inline here before WM-842; it is
+    // now the built-in `factory:escalation-labels` hook, first in the waterfall,
+    // and every hook deny keeps the `dispatch_ineligible:<reason>` shape.
+    return after(
+      approveBeforeHooks(hookCtx.hooks, hookCtx, { evidence: result.evidence }),
+      (verdict) => {
+        if (verdict.decision === "deny")
+          return `dispatch_ineligible:${verdict.reason}`;
+        if ((result.evidence?.escalatePathIntersections ?? []).length > 0)
+          return "dispatch_ineligible:escalate_paths_intersect";
+        return null;
+      },
+    );
+  };
+
+  let result;
+  try {
+    result = dispatchEligibility(envelope.payload, dispatch);
+  } catch (err) {
+    return failed(err);
   }
-
-  if (!result?.ok)
-    return `dispatch_ineligible:${result?.refusal?.reason ?? "unknown"}`;
-
-  const expectedEvidenceHash =
-    stableChainApprovalPolicyForHash(approvalPolicy)?.dispatchEvidenceHash;
-  if (!expectedEvidenceHash)
-    return "dispatch_ineligible:approval_policy_missing_evidence";
-  const { checkedAt, ...currentEvidence } = result.evidence ?? {};
-  if (expectedEvidenceHash !== hashJson(currentEvidence)) {
-    return "dispatch_ineligible:evidence_changed_since_plan";
-  }
-
-  // The escalated/security-label refusal ran inline here before WM-842; it is
-  // now the built-in `factory:escalation-labels` hook, first in the waterfall,
-  // and every hook deny keeps the `dispatch_ineligible:<reason>` shape.
-  return after(
-    approveBeforeHooks(hookCtx.hooks, hookCtx, { evidence: result.evidence }),
-    (verdict) => {
-      if (verdict.decision === "deny")
-        return `dispatch_ineligible:${verdict.reason}`;
-      if ((result.evidence?.escalatePathIntersections ?? []).length > 0)
-        return "dispatch_ineligible:escalate_paths_intersect";
-      return null;
-    },
-  );
+  return isThenable(result)
+    ? Promise.resolve(result).then(checked, failed)
+    : checked(result);
 }
 
 function mergeBarrierReason(db, registry, candidate, now) {
@@ -904,6 +922,18 @@ function pinnedToOlderRegistry(row, registryVersion) {
   return pinned !== null && pinned !== registryVersion;
 }
 
+function staleRevisitJitter(row, revisitMs) {
+  // Stable, bounded jitter is deterministic across a restart while ensuring a
+  // batch that became stale together does not become due together again.
+  const window = Math.floor(revisitMs / 10);
+  if (window < 1) return 0;
+  const key = `${row.run_id}\0${row.id}`;
+  let hash = 0;
+  for (let index = 0; index < key.length; index += 1)
+    hash = (hash * 31 + key.charCodeAt(index)) >>> 0;
+  return hash % (window + 1);
+}
+
 /**
  * Recheck and approve the currently open, eligible chain proposals once.
  * A second pass finds no approved proposal and therefore cannot double-approve.
@@ -968,6 +998,7 @@ async function runPass(
     hookTimeoutMs,
     maxRows = DEFAULT_MAX_CHAIN_AUTO_APPROVALS_PER_TICK,
     staleRevisitMs = DEFAULT_STALE_CHAIN_REVISIT_MS,
+    deadlineMs = chainAutoApprovalDeadlineMs(),
   } = {},
   marker = { settled: false },
 ) {
@@ -984,6 +1015,11 @@ async function runPass(
       Number.isFinite(staleRevisitMs) && staleRevisitMs >= 0
         ? staleRevisitMs
         : DEFAULT_STALE_CHAIN_REVISIT_MS;
+    const passDeadlineMs =
+      Number.isFinite(deadlineMs) && deadlineMs > 0
+        ? deadlineMs
+        : DEFAULT_CHAIN_AUTO_APPROVAL_DEADLINE_MS;
+    const passStartedAt = Date.now();
     const memo = staleVerdictsFor(db);
     let skipped = 0;
     let memoised = 0;
@@ -1053,13 +1089,20 @@ async function runPass(
         skipped += 1;
         continue;
       }
+      // Check immediately before the potentially remote eligibility read. A
+      // slow row may finish, but it cannot start another backlog row in the
+      // same pass.
+      if (Date.now() - passStartedAt >= passDeadlineMs) {
+        skipped += 1;
+        continue;
+      }
       evaluated += 1;
       const hold = (reason) => {
         if (stale)
           memo.set(memoKey, {
             proposalId: row.id,
             reason,
-            until: now + revisitMs,
+            until: now + revisitMs + staleRevisitJitter(row, revisitMs),
           });
         else memo.delete(memoKey);
       };
