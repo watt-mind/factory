@@ -85,7 +85,8 @@
     "test": "bun test",
     "docs:dev": "cd site && bun run dev",
     "docs:build": "cd site && bun run build",
-    "lint": "eslint .",
+    "lint": "bun run lint:cycles && eslint .",
+    "lint:cycles": "bun tools/check-import-cycles.mjs && bun tools/check-import-cycles.mjs --self-test",
     "lint:fix": "eslint . --fix"
   },
   "engines": {
