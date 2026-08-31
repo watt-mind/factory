@@ -1062,8 +1062,12 @@ export function composeHandoffVerification(handoff) {
           ? "yes"
           : "no"
         : "unknown";
+    const headSha =
+      typeof handoff.pr?.headSha === "string" && handoff.pr.headSha.trim()
+        ? handoff.pr.headSha.trim().slice(0, 12)
+        : "unknown";
     lines.push(
-      `- PR: #${prNumber} (${draftState === "draft state unknown" ? draftState : `draft: ${draftState}`}) · Fixes: ${fixes} · run trailer: ${runTrailer}`,
+      `- PR: #${prNumber} (${draftState === "draft state unknown" ? draftState : `draft: ${draftState}`}) · head SHA: ${headSha} · Fixes: ${fixes} · run trailer: ${runTrailer}`,
     );
   }
   const primary = handoff.verification;

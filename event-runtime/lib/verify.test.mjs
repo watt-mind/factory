@@ -2942,6 +2942,7 @@ describe("handoff verification helpers (WM-718)", () => {
     const body = composeHandoffVerification({
       prNumber: 42,
       prDraft: true,
+      pr: { headSha: "a".repeat(40) },
       verification: {
         source: "ticket",
         command: "bun test",
@@ -2973,7 +2974,7 @@ describe("handoff verification helpers (WM-718)", () => {
     const lines = body.split("\n");
     expect(lines[0]).toBe("## Handoff verification (worker-observed)");
     expect(lines[1]).toBe(
-      "- PR: #42 (draft: yes) · Fixes: unknown · run trailer: unknown",
+      "- PR: #42 (draft: yes) · head SHA: aaaaaaaaaaaa · Fixes: unknown · run trailer: unknown",
     );
     expect(lines[2]).toBe("- Verification: `bun test` — exit 1 (FAIL)");
     expect(body).toContain("(fail) x > y");
@@ -2996,6 +2997,19 @@ describe("handoff verification helpers (WM-718)", () => {
     expect(body).toContain("- agent-reported: `bun test` — pass, all green");
     expect(lines.filter((l) => l.startsWith("- Verification:"))).toHaveLength(
       1,
+    );
+  });
+
+  test("composeHandoffVerification explicitly reports an unavailable PR head SHA", () => {
+    const body = composeHandoffVerification({
+      verification: null,
+      repoVerify: null,
+      webBuild: null,
+      pr: { number: 77, draft: false },
+    });
+
+    expect(body).toContain(
+      "- PR: #77 (draft: no) · head SHA: unknown · Fixes: unknown · run trailer: unknown",
     );
   });
 
@@ -3073,12 +3087,13 @@ describe("handoff verification helpers (WM-718)", () => {
       pr: {
         number: 77,
         draft: false,
+        headSha: "a".repeat(40),
         hasFixesLine: true,
         hasRunTrailer: false,
       },
     });
     expect(body).toContain(
-      "- PR: #77 (draft: no) · Fixes: yes · run trailer: no",
+      "- PR: #77 (draft: no) · head SHA: aaaaaaaaaaaa · Fixes: yes · run trailer: no",
     );
   });
 });
