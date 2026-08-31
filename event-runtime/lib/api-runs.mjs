@@ -34,18 +34,23 @@ import {
   parseListLimit,
   parseNonNegativeSince,
 } from "./api-params.mjs";
+import { createLruCache } from "./lru-cache.mjs";
 
 export const MAX_EXTENSION_SECONDS = 3600;
 export const OBSERVED_MODEL_CACHE_LIMIT = 512;
+export const TICKET_DETAIL_CACHE_LIMIT = 256;
+export const RUN_SUBJECT_CACHE_LIMIT = 512;
 export const RUN_STATE_GROUPS = Object.freeze({
   ACTIVE: Object.freeze(["QUEUED", "LEASED", "RUNNING", "VERIFYING"]),
   FAILED: Object.freeze(["FAILED", "TIMED_OUT", "REFUSED"]),
 });
 
 // Transcript artifacts are content-addressed, so a model observed for a hash
-// cannot change. Keep this module-local FIFO bounded because run detail views
+// cannot change. Keep this module-local cache bounded because run detail views
 // poll frequently and artifactHead performs synchronous I/O.
-const observedModelCache = new Map();
+const observedModelCache = createLruCache({
+  limit: OBSERVED_MODEL_CACHE_LIMIT,
+});
 
 export function clearObservedModelCache() {
   observedModelCache.clear();
@@ -673,7 +678,10 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
 
 /** Short TTL so Ticket Journey can poll without exhausting Linear. */
 export const TICKET_DETAIL_CACHE_TTL_MS = 30_000;
-const ticketDetailCache = new Map();
+const ticketDetailCache = createLruCache({
+  limit: TICKET_DETAIL_CACHE_LIMIT,
+  ttlMs: TICKET_DETAIL_CACHE_TTL_MS,
+});
 let injectedTicketDetailControlPlane = null;
 
 /** Test seam: inject a ControlPlane (typically `memoryControlPlane`) or clear. */
@@ -714,10 +722,8 @@ export async function ticketDetailView(rawTicket, options = {}) {
   const nowMs = options.nowMs ?? Date.now();
   const cacheKey = ticket;
   if (options.noCache !== true) {
-    const cached = ticketDetailCache.get(cacheKey);
-    if (cached && nowMs - cached.timestamp < TICKET_DETAIL_CACHE_TTL_MS) {
-      return { ...cached.data, cached: true };
-    }
+    const cached = ticketDetailCache.get(cacheKey, nowMs);
+    if (cached) return { ...cached, cached: true };
   }
 
   try {
@@ -759,7 +765,7 @@ export async function ticketDetailView(rawTicket, options = {}) {
       fetchedAt: new Date(nowMs).toISOString(),
       cached: false,
     };
-    ticketDetailCache.set(cacheKey, { timestamp: nowMs, data });
+    ticketDetailCache.set(cacheKey, data, nowMs);
     return data;
   } catch (err) {
     const message = err?.message ? String(err.message) : "tracker read failed";
@@ -798,7 +804,10 @@ const RUN_SUBJECT_RESOLVE_CONCURRENCY = 4;
 // GET /runs is polled frequently. Resolve each distinct ticket once per short
 // window (including misses) so duplicate rows and the detail view never turn a
 // browser poll into one tracker request per row.
-const runSubjectCache = new Map();
+const runSubjectCache = createLruCache({
+  limit: RUN_SUBJECT_CACHE_LIMIT,
+  ttlMs: RUN_SUBJECT_CACHE_TTL_MS,
+});
 
 export function clearRunSubjectCache() {
   runSubjectCache.clear();
@@ -864,9 +873,9 @@ async function resolveRunSubjects(
   for (const run of runs) {
     const ticket = normalizeTicketId(run.ticketSubject);
     if (!ticket || run.subjectTitle) continue;
-    const cached = runSubjectCache.get(ticket);
-    if (cached && nowMs - cached.timestamp < RUN_SUBJECT_CACHE_TTL_MS) {
-      Object.assign(run, cached.data);
+    const cached = runSubjectCache.get(ticket, nowMs);
+    if (cached) {
+      Object.assign(run, cached);
     } else {
       unresolved.add(ticket);
     }
@@ -903,7 +912,7 @@ async function resolveRunSubjects(
       // A tracker outage degrades to the bare persisted subject. Cache the
       // miss briefly as well, otherwise every 5s poll retries the outage.
     }
-    runSubjectCache.set(ticket, { timestamp: nowMs, data });
+    runSubjectCache.set(ticket, data, nowMs);
   }
 
   // Chunked loop: at most RUN_SUBJECT_RESOLVE_CONCURRENCY in flight at once,
@@ -916,8 +925,8 @@ async function resolveRunSubjects(
   }
   for (const run of runs) {
     const ticket = normalizeTicketId(run.ticketSubject);
-    const cached = ticket ? runSubjectCache.get(ticket) : null;
-    if (cached && !run.subjectTitle) Object.assign(run, cached.data);
+    const cached = ticket ? runSubjectCache.get(ticket, nowMs) : null;
+    if (cached && !run.subjectTitle) Object.assign(run, cached);
   }
   return runs;
 }
@@ -1999,7 +2008,11 @@ function runsView(db, filters = {}, page = {}) {
               e.type AS event_type
        FROM runs r
        LEFT JOIN attempts a ON a.run_id = r.run_id AND a.attempt = r.attempts
-       LEFT JOIN proposals p ON p.run_id = r.run_id AND p.decision = 'run'
+       LEFT JOIN proposals p ON p.rowid = (
+         SELECT p2.rowid FROM proposals p2
+         WHERE p2.run_id = r.run_id AND p2.decision = 'run'
+         ORDER BY p2.created_at DESC, p2.rowid DESC LIMIT 1
+       )
        LEFT JOIN events e ON e.source = p.event_source AND e.event_id = p.event_id
        ${where}
        ORDER BY r.created_at DESC, r.rowid DESC
@@ -2129,7 +2142,8 @@ function observedModelForRun({
   // Keyed by store root as well as hash: a test or a relocated store must not
   // serve an observation read from a different artifacts directory.
   const cacheKey = `${artifactsDir} ${sha256}`;
-  if (observedModelCache.has(cacheKey)) return observedModelCache.get(cacheKey);
+  const cachedModel = observedModelCache.get(cacheKey);
+  if (cachedModel !== undefined) return cachedModel;
 
   const observedModel = observedModelFromTranscript(
     readArtifactHead(artifactsDir, sha256),
@@ -2137,9 +2151,6 @@ function observedModelForRun({
   // A growing transcript may gain its model line later, but a terminal one
   // cannot. Cache null only for terminal runs while caching all model values.
   if (observedModel !== null || terminal) {
-    if (observedModelCache.size >= OBSERVED_MODEL_CACHE_LIMIT) {
-      observedModelCache.delete(observedModelCache.keys().next().value);
-    }
     observedModelCache.set(cacheKey, observedModel);
   }
   return observedModel;

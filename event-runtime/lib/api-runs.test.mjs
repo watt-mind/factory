@@ -13,6 +13,7 @@ import {
 } from "bun:test";
 import { memoryControlPlane } from "../../lib/control-plane/index.mjs";
 import {
+  TICKET_DETAIL_CACHE_LIMIT,
   TICKET_DETAIL_CACHE_TTL_MS,
   RUN_SUBJECT_CACHE_TTL_MS,
   clearObservedModelCache,
@@ -24,6 +25,7 @@ import {
   ticketJourneyView,
   ticketIndexView,
   ticketSupplyView,
+  ticketDetailView,
 } from "./api-runs.mjs";
 import {
   CONTROL_TOKEN,
@@ -379,6 +381,36 @@ describe("run list deadlines (WM-692)", () => {
             new Date(start).toISOString(),
           );
       }
+      for (const [eventId, type] of [
+        ["evt-page-old", "factory.page.old"],
+        ["evt-page-latest", "factory.page.latest"],
+      ]) {
+        s.db
+          .query(
+            `INSERT INTO events
+             (source, event_id, type, occurred_at, received_at, envelope_json, payload_hash, admitted_at)
+             VALUES ('test', ?, ?, ?, ?, '{}', 'sha256:test', ?)`,
+          )
+          .run(
+            eventId,
+            type,
+            new Date(start).toISOString(),
+            new Date(start).toISOString(),
+            new Date(start).toISOString(),
+          );
+      }
+      for (const [id, eventId] of [
+        ["prop-page-old", "evt-page-old"],
+        ["prop-page-latest", "evt-page-latest"],
+      ]) {
+        s.db
+          .query(
+            `INSERT INTO proposals
+             (id, event_source, event_id, run_id, decision, created_at, ttl_seconds)
+             VALUES (?, 'test', ?, 'run-page-c', 'run', ?, 1800)`,
+          )
+          .run(id, eventId, new Date(start).toISOString());
+      }
       const first = await fetch(s.url("/runs?limit=2"));
       expect(first.status).toBe(200);
       const firstPage = await first.json();
@@ -386,6 +418,10 @@ describe("run list deadlines (WM-692)", () => {
         "run-page-c",
         "run-page-b",
       ]);
+      expect(firstPage.runs[0].originType).toBe("factory.page.latest");
+      expect(firstPage.runs[0].originType).toBe(
+        (await s.client.run("run-page-c")).identity.originType,
+      );
       expect(firstPage.runs[0]).toEqual({
         runId: "run-page-c",
         state: "COMPLETED",
@@ -402,8 +438,8 @@ describe("run list deadlines (WM-692)", () => {
         subjectLabel: null,
         subjectTitle: null,
         subjectUrl: null,
-        originType: null,
-        originLabel: null,
+        originType: "factory.page.latest",
+        originLabel: "page latest",
       });
       expect(typeof firstPage.nextBefore).toBe("string");
 
@@ -2636,6 +2672,28 @@ describe("GET /tickets/:id/detail (WM-914)", () => {
     } finally {
       s.close();
     }
+  });
+
+  test("evicts ticket details beyond the shared cache capacity", async () => {
+    const calls = [];
+    const controlPlane = {
+      async getTicket(ticket) {
+        calls.push(ticket);
+        return { identifier: ticket, title: ticket };
+      },
+      async listComments() {
+        return [];
+      },
+    };
+    const nowMs = Date.parse("2026-08-19T12:00:00.000Z");
+    for (let index = 1; index <= TICKET_DETAIL_CACHE_LIMIT + 1; index++) {
+      await ticketDetailView(`WM-${index}`, { controlPlane, nowMs });
+    }
+
+    expect(calls).toHaveLength(TICKET_DETAIL_CACHE_LIMIT + 1);
+    const firstAgain = await ticketDetailView("WM-1", { controlPlane, nowMs });
+    expect(firstAgain.cached).toBe(false);
+    expect(calls.filter((ticket) => ticket === "WM-1")).toHaveLength(2);
   });
 
   test("rejects malformed ids, missing issues, and tracker failures", async () => {
