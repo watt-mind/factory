@@ -55,7 +55,7 @@ test("assessServeHealth rejects a stale planner while admitted events wait", () 
   const result = assessServeHealth(
     {
       registry: { stamp: "files:current", lastReloadError: null },
-      planner: { lastSuccessAt: "2026-08-30T11:45:00.000Z" },
+      planner: { lastPlannedAt: "2026-08-30T11:45:00.000Z" },
     },
     {
       expectedRegistryStamp: "files:current",
@@ -1273,6 +1273,35 @@ test("live deps page open proposals newest-first and keep every page", async () 
     expect(rows.map((r) => r.id)).toEqual(["new", "old"]);
     expect(seen).toHaveLength(2);
     expect(seen[1]).toContain("before=cursor1");
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("live serveOk tolerates a stale registry but halts on a stale planner", async () => {
+  let plannerLastPlannedAt = new Date().toISOString();
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === "/health")
+        return Response.json({
+          registry: { stamp: "files:definitely-stale", lastReloadError: null },
+          planner: { lastPlannedAt: plannerLastPlannedAt },
+        });
+      if (url.pathname === "/status")
+        return Response.json({ events: { admitted: 3 } });
+      return new Response("{}");
+    },
+  });
+  try {
+    const { serveOk } = liveIdleWatchdogDeps({ port: server.port });
+    // REGISTRY_STALE alone must not stop idle-loop injection: a reachable
+    // serve on last-good code still plans and drains admitted work.
+    expect(await serveOk()).toBe(true);
+    // A planner that has not succeeded within the staleness window does.
+    plannerLastPlannedAt = "2020-01-01T00:00:00.000Z";
+    expect(await serveOk()).toBe(false);
   } finally {
     server.stop(true);
   }

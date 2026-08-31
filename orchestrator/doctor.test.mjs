@@ -31,6 +31,7 @@ import {
 import {
   compareCliVersions,
   chainAutoApprovalPolicyDiagnostic,
+  defaultControlApiProbe,
   MIN_BUN_VERSION,
   MIN_GIT_VERSION,
   ossOnboardingDiagnostics,
@@ -473,7 +474,7 @@ describe("stack daemon diagnostics (#1868)", () => {
               loadedAt: "2026-08-30T12:00:00.000Z",
               lastReloadError: { message: "bad schema" },
             },
-            planner: { lastSuccessAt: "2026-08-30T11:00:00.000Z" },
+            planner: { lastPlannedAt: "2026-08-30T11:00:00.000Z" },
           },
         };
       },
@@ -490,6 +491,29 @@ describe("stack daemon diagnostics (#1868)", () => {
     expect(rows).toContainEqual(
       expect.objectContaining({ label: "planner health", ok: false }),
     );
+  });
+
+  test("control API probe keeps the bearer token out of curl argv", () => {
+    const token = "secret-bearer-token";
+    const spawned = [];
+    const spawn = (cmd, args, opts) => {
+      spawned.push({ cmd, args, opts });
+      return { status: 0, stdout: "{}", stderr: "" };
+    };
+
+    defaultControlApiProbe("/status", { port: 7381, token, spawn });
+    expect(spawned).toHaveLength(1);
+    const { args, opts } = spawned[0];
+    expect(args.join(" ")).not.toContain(token);
+    expect(args).toContain("--config");
+    expect(args).toContain("-");
+    expect(opts.input).toBe(`header = "Authorization: Bearer ${token}"\n`);
+
+    // /health stays bearer-free: no config stanza, no stdin payload.
+    defaultControlApiProbe("/health", { port: 7381, token, spawn });
+    expect(spawned[1].args).not.toContain("--config");
+    expect(spawned[1].opts.input).toBeUndefined();
+    expect(JSON.stringify(spawned[1])).not.toContain(token);
   });
 });
 

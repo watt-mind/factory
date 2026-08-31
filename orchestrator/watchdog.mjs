@@ -151,14 +151,9 @@ export function assessServeHealth(
 
   if (health && Object.hasOwn(health, "planner") && queuedEvents > 0) {
     const planner = health.planner;
-    const lastAt = timestampMs(
-      planner?.lastSuccessAt ??
-        planner?.lastPlannedAt ??
-        planner?.lastPlanAt ??
-        planner?.lastCompletedAt ??
-        planner?.lastRunAt ??
-        planner?.lastAt,
-    );
+    // #1903 landed the canonical `lastPlannedAt` recency field on /health;
+    // the old guess chain over speculative field names is gone with it.
+    const lastAt = timestampMs(planner?.lastPlannedAt);
     if (lastAt === null) {
       issues.push({
         severity: "WARNING",
@@ -1151,7 +1146,11 @@ export function liveIdleWatchdogDeps({
           if (Object.hasOwn(health ?? {}, "planner")) {
             queuedEvents = admittedEventCount(await api("/status"));
           }
-          return assessServeHealth(health, { queuedEvents }).ok;
+          // Gate the idle loop on planner recency only: a reachable serve on
+          // last-good code (REGISTRY_STALE) can still plan and drain work, so
+          // the watchdog report surfaces it without halting injection here.
+          const { issues } = assessServeHealth(health, { queuedEvents });
+          return !issues.some((issue) => issue.code?.startsWith("PLANNER_"));
         } catch {
           if (attempt === 1) return false;
         }

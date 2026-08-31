@@ -24,6 +24,7 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { homedir } from "node:os";
 import { factoryRoot } from "../lib/factory-root.mjs";
+import { PLANNER_STALE_MS } from "./watchdog.mjs";
 import {
   controlPlaneKindFromPolicy,
   loadControlPlane,
@@ -440,20 +441,29 @@ function defaultProcessProbe(pid) {
   }
 }
 
-function defaultControlApiProbe(pathname, { port, token = null }) {
-  const headers = [];
-  if (token && pathname !== "/health")
-    headers.push("-H", `Authorization: Bearer ${token}`);
-  const result = spawnSync(
+export function defaultControlApiProbe(
+  pathname,
+  { port, token = null, spawn = spawnSync },
+) {
+  // The bearer travels on stdin via `--config -`, never in argv: anything in
+  // the argument vector is world-readable through /proc/*/cmdline for the
+  // lifetime of the curl process.
+  const useAuth = Boolean(token) && pathname !== "/health";
+  const result = spawn(
     "curl",
     [
       "-fsS",
       "--max-time",
       "3",
-      ...headers,
+      ...(useAuth ? ["--config", "-"] : []),
       `http://127.0.0.1:${port}${pathname}`,
     ],
-    { encoding: "utf8" },
+    {
+      encoding: "utf8",
+      ...(useAuth
+        ? { input: `header = "Authorization: Bearer ${token}"\n` }
+        : {}),
+    },
   );
   if (result.status !== 0) {
     return {
@@ -466,18 +476,6 @@ function defaultControlApiProbe(pathname, { port, token = null }) {
   } catch {
     return { ok: false, detail: "control API returned invalid JSON" };
   }
-}
-
-function plannerLastSuccessAt(planner) {
-  return (
-    planner?.lastSuccessAt ??
-    planner?.lastPlannedAt ??
-    planner?.lastPlanAt ??
-    planner?.lastCompletedAt ??
-    planner?.lastRunAt ??
-    planner?.lastAt ??
-    null
-  );
 }
 
 function plannerAgeMs(value, now) {
@@ -770,10 +768,10 @@ export function stackDaemonDiagnostics({
         ? admitted.count
         : 0;
     const age = plannerAgeMs(
-      plannerLastSuccessAt(healthProbe.body.planner),
+      healthProbe.body.planner?.lastPlannedAt ?? null,
       now,
     );
-    if (queued > 0 && (age === null || age > 5 * 60 * 1000)) {
+    if (queued > 0 && (age === null || age > PLANNER_STALE_MS)) {
       diagnostics.push({
         ok: false,
         label: "planner health",
