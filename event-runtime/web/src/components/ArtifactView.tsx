@@ -191,12 +191,7 @@ function Value({
           {f.items.map((item, index) => (
             <li key={`${item.text}:${index}`} className="break-all py-px">
               {item.href ? (
-                <a
-                  href={item.href}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-(--accent) hover:underline"
-                >
+                <a href={item.href} className="text-(--accent) hover:underline">
                   {item.text}
                 </a>
               ) : (

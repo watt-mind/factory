@@ -10,7 +10,6 @@
  * simply drops its section (optional fields are optional, §2.2).
  */
 import { dur } from "../heartbeat";
-import { artifactUrl } from "../api";
 import type {
   ArtifactFormat,
   ArtifactTone,
@@ -190,9 +189,10 @@ function storedArtifactDigest(value: unknown): string | null {
 }
 
 function evidenceItem(value: unknown): { text: string; href: string | null } {
-  const text = typeof value === "string" ? value : JSON.stringify(value);
+  const text =
+    typeof value === "string" ? value : String(JSON.stringify(value) ?? value);
   const digest = storedArtifactDigest(value);
-  return { text, href: digest ? artifactUrl(digest) : null };
+  return { text, href: digest ? `#/artifacts/${digest}` : null };
 }
 
 /**

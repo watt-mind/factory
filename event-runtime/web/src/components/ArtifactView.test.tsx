@@ -334,24 +334,25 @@ describe("dispatch UX critique evidence", () => {
       (
         r.getByRole("link", { name: `sha256:${sha256a}` }) as HTMLAnchorElement
       ).getAttribute("href"),
-    ).toBe(`/api/artifacts/${sha256a}`);
+    ).toBe(`#/artifacts/${sha256a}`);
     expect(
       (
         r.getByRole("link", {
           name: `file:///var/lib/factory/artifacts/${sha256b}`,
         }) as HTMLAnchorElement
       ).getAttribute("href"),
-    ).toBe(`/api/artifacts/${sha256b}`);
+    ).toBe(`#/artifacts/${sha256b}`);
     expect(r.getByText("legacy browser note").tagName).toBe("SPAN");
   });
 
-  test("keeps empty evidence as an empty value", () => {
+  test("empty evidence drops the row, like any other absent key", () => {
     const r = render(
       <ArtifactView
-        artifact={{ uxCritique: { evidence: [] } }}
+        artifact={{ uxCritique: { status: "skipped", evidence: [] } }}
         view={readView("dispatch")}
       />,
     );
-    expect(r.getByText("evidence").parentElement?.textContent).toContain("—");
+    expect(r.getByText("status")).toBeTruthy();
+    expect(r.queryByText("evidence")).toBeNull();
   });
 });
