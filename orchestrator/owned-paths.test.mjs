@@ -189,6 +189,12 @@ test("bare filenames with extensions match that basename at any repository depth
   expectTrue(!matcher.test("event-runtime/lib/adapters/acp.mjs"));
 });
 
+test("bare root filenames with extensions do not match nested files", () => {
+  const matcher = globToRegExp("package.json");
+  expectTrue(matcher.test("package.json"));
+  expectTrue(!matcher.test("fixtures/nested/package.json"));
+});
+
 test("the case keyword matching gets wrong", () => {
   // Same vocabulary, unrelated files: must NOT collide.
   expectTrue(

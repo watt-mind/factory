@@ -20,7 +20,7 @@
  * brace expressions are refused rather than being passed through to RegExp.
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 
 /** Inputs whose changes alter the zero-pack merged registry digest. */
@@ -345,10 +345,18 @@ export function globToRegExp(glob) {
   let g = glob.trim().replace(/^\.\//, "");
   // A bare filename with an extension is ambiguous in an Owned Paths list:
   // unlike a repo-relative path, it does not identify which directory holds
-  // the file. Treat it as a basename matcher so handoff verification does not
-  // report a false deviation merely because the ticket omitted that directory.
+  // the file. Treat it as a basename matcher only when no file by that name
+  // exists at the repository root. A root file is the less surprising target
+  // for a legacy bare entry such as `package.json`.
+  const resolvesToRootFile =
+    !g.includes("/") &&
+    existsSync(g) &&
+    statSync(g, { throwIfNoEntry: false })?.isFile();
   const matchBasenameAtAnyDepth =
-    !g.includes("/") && !/[*?{}]/.test(g) && /\.[a-z0-9]+$/i.test(g);
+    !g.includes("/") &&
+    !/[*?{}]/.test(g) &&
+    /\.[a-z0-9]+$/i.test(g) &&
+    !resolvesToRootFile;
   // A path with no glob metacharacters and no extension is treated as a prefix:
   // `app/services` owns everything beneath it. It also names a real, concrete
   // path in its own right (`Dockerfile`, `Makefile` — extensionless files are

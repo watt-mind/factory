@@ -2574,6 +2574,15 @@ describe("handoff verification helpers (WM-718)", () => {
     ).toEqual(["docs/unrelated.md"]);
   });
 
+  test("ownedPathsDeviations does not let a root filename own nested files", () => {
+    expect(
+      ownedPathsDeviations(
+        ["package.json", "fixtures/nested/package.json"],
+        ["package.json"],
+      ),
+    ).toEqual(["fixtures/nested/package.json"]);
+  });
+
   test("changedFilesSince diffs merge-base(origin/<base>)..HEAD and reports an unusable tree instead of guessing", () => {
     const dir = tmpDir("evrt-handoff-diff-");
     const git = (...args) => execFileSync("git", args, { cwd: dir });
