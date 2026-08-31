@@ -670,8 +670,8 @@ export function OverviewNeedsYou({
   const groups = useMemo(() => groupItems(items), [items]);
   const navigable = useMemo(
     () => [
-      ...groups.flatMap(({ items: groupItems }) =>
-        groupItems
+      ...groups.flatMap(({ items: rows }) =>
+        rows
           .slice(0, NEEDS_YOU_CAP)
           .map((item) => ({ id: item.id, open: () => onOpenItem(item.id) })),
       ),
@@ -723,15 +723,15 @@ export function OverviewNeedsYou({
         </div>
       ) : (
         <div className="space-y-2">
-          {groups.map(({ group, items: groupItems }) => (
+          {groups.map(({ group, items: rows }) => (
             <NeedsYouGroup
               key={group.id}
               label={group.label}
               hue={group.hue}
-              count={groupItems.length}
+              count={rows.length}
               onMore={onMore}
             >
-              {groupItems.slice(0, NEEDS_YOU_CAP).map((item) => (
+              {rows.slice(0, NEEDS_YOU_CAP).map((item) => (
                 <NeedsYouRow
                   key={item.id}
                   kind={item.kind}
