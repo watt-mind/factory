@@ -242,10 +242,12 @@ export async function tick({
   reconcile = reconcileInbox,
   inboxDeadlineMs = INBOX_RECONCILE_DEADLINE_MS,
   onStep = () => {},
+  autoApproveChainsFn = autoApproveChains,
 } = {}) {
   const tickStart = Date.now();
   const stepMs = {};
   let expiredScheduledProposals = 0;
+  let deadlineSkipped = 0;
   const runStep = async (name, fn) => {
     const start = Date.now();
     onStep({ name, startedAt: start });
@@ -300,12 +302,13 @@ export async function tick({
     // `wrapLinearReads` (ticket/viewer/in-flight plus the rate-limit latch) and
     // by `withPassInFlightCache` for the pass (#1064), each read bounded well
     // under the tracker's own 15s request timeout.
-    const auto = await autoApproveChains(db, registry, {
+    const auto = await autoApproveChainsFn(db, registry, {
       now,
       policyVersion: pv,
       dispatchEligibility: worktreeDispatchAutoEligibilityAsync,
       dispatch: createAutoApprovalDispatch(),
     });
+    deadlineSkipped = auto.deadlineSkipped ?? 0;
     for (const a of auto.approved)
       logLine(
         `chain proposal approved ${a.proposalId} → run ${a.runId} (actor: chain auto)`,
@@ -448,6 +451,7 @@ export async function tick({
     lastPrune: nextPrune,
     durationMs: Date.now() - tickStart,
     stepMs,
+    deadlineSkipped,
   };
 }
 
@@ -673,6 +677,7 @@ export default async function serve(args) {
   let lastPrune = Date.now();
   let busy = false;
   let tickOverruns = 0;
+  let lastDeadlineSkipped = 0;
   let lastTickMs = 0;
   let lastOverrunAt = null;
   let lastTickAt = null;
@@ -696,6 +701,7 @@ export default async function serve(args) {
       // watchdog and the web dashboard read them) — keep exactly one spelling.
       lastMs: lastTickMs,
       overruns: tickOverruns,
+      deadlineSkipped: lastDeadlineSkipped,
       lastTickAt,
       currentStep: currentTickStep,
       // How long the in-progress tick has been running. Non-zero here with a
@@ -720,6 +726,7 @@ export default async function serve(args) {
     busy = true;
     const start = Date.now();
     tickStartedAt = start;
+    lastDeadlineSkipped = 0;
     try {
       registryRef.poll();
       const result = await tick({
@@ -740,6 +747,7 @@ export default async function serve(args) {
         },
       });
       lastPrune = result.lastPrune;
+      lastDeadlineSkipped = result.deadlineSkipped;
       const duration = Date.now() - start;
       lastTickMs = duration;
       lastTickAt = new Date().toISOString();

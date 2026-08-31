@@ -308,6 +308,7 @@ describe("serve command", () => {
       await new Promise((resolve) => child.once("exit", resolve));
     }
     expect(health.ok).toBe(true);
+    expect(health.tick.deadlineSkipped).toBe(0);
   });
 
   test("a stalled Linear ticket read cannot wedge /health past the tick budget (#1835 AC3)", async () => {
