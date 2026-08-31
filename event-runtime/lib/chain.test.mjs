@@ -20,6 +20,7 @@ import { planAdmittedEvents } from "./planner.mjs";
 import { approveProposal, openProposals } from "./proposals.mjs";
 import { loadRegistry, RegistryError } from "./registry.mjs";
 import { runOnce } from "./worker.mjs";
+import { LOG_FILE } from "./ci-log-capture.mjs";
 import { tick } from "../cli/serve.mjs";
 import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
 // Importing test-helpers pins FACTORY_EVENT_HOME/FACTORY_HOME to an isolated
@@ -214,6 +215,12 @@ function proposalsForAgent(db, agent) {
  */
 async function throughCapture(h, eventId) {
   const capture = await h.runToCompletion(eventId);
+  const captureResult = h.db
+    .query(`SELECT result_json FROM results WHERE run_id = ?`)
+    .get(capture.runId);
+  expect(JSON.parse(captureResult.result_json).artifact.captured).toBe(
+    LOG_FILE,
+  );
   expect(resolveChains(h.db, registry).emitted).toBe(1);
   planAdmittedEvents(h.db, registry, { policyVersion: PV });
   expect(
@@ -498,6 +505,7 @@ describe("multi-emit chain resolution (WM-119)", () => {
       agent,
       input,
       artifact,
+      artifacts = [],
       eventId = `evt-${runId}`,
       correlationId = `corr-${runId}`,
     },
@@ -534,7 +542,7 @@ describe("multi-emit chain resolution (WM-119)", () => {
     db.query(
       `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
        VALUES (?, 1, ?, 'art-hash', '{}', '{}', ?)`,
-    ).run(runId, JSON.stringify({ artifact }), now);
+    ).run(runId, JSON.stringify({ artifact, artifacts }), now);
   }
 
   function seedChainChild(db, runId, eventId) {
@@ -569,6 +577,34 @@ describe("multi-emit chain resolution (WM-119)", () => {
     expect(chainResolution(db, "run-no-capture")).toMatchObject({
       note: "chain_resolved",
       reason: "no_edge_selected",
+    });
+  });
+
+  test("ci-log-capture with failed.log emits the ci-diagnose edge", () => {
+    const db = openDb(":memory:");
+    const runId = "run-captured-log";
+    seedCompletedRun(db, {
+      runId,
+      agent: "ci-log-capture@1",
+      input: { repo: "wm/factory", runId: 12345 },
+      artifact: { captured: LOG_FILE, exitCode: 0 },
+      artifacts: [{ kind: "ci-log", sha256: "a".repeat(64) }],
+    });
+
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 1,
+      skipped: 0,
+      errors: [],
+    });
+    const chainEvent = db
+      .query(`SELECT * FROM events WHERE event_id = ?`)
+      .get(`chain-${runId}`);
+    expect(chainEvent.type).toBe(CI_DIAGNOSE);
+    expect(chainEvent.causation_id).toBe(runId);
+    expect(chainResolution(db, runId)).toMatchObject({
+      note: "chain_resolved",
+      reason: "emitted",
+      events: [`chain-${runId}`],
     });
   });
 
