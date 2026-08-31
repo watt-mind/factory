@@ -2715,6 +2715,43 @@ describe("planEvent worktree gate (WM-108)", () => {
     );
   });
 
+  test("a direct dispatch enforces an in-repo-only escalate_paths overlay", () => {
+    const checkout = tmpDir("evrt-escalate-overlay-");
+    writeFileSync(
+      path.join(checkout, ".factory.yaml"),
+      "schemaVersion: factory.repo/v1\nescalate_paths:\n  - src/auth/**\n",
+    );
+    withReposRoot(
+      `repos:\n  - name: overlaid\n    path: ${checkout}\n    base: develop\n` +
+        `    team: WM\n    project: Factory\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+        `    worktree_root: /tmp/worktrees\n    escalate_paths: []\n`,
+      () => {
+        const result = worktreeDispatchAutoEligibility(
+          { repo: "overlaid", ticket: "WM-1797" },
+          {
+            countLeases: () => 0,
+            budgetRefusal: () => null,
+            fetchTicket: () => ({
+              identifier: "WM-1797",
+              state: { name: "Todo" },
+              assignee: null,
+              labels: { nodes: [{ name: "ai:agent-ready" }] },
+              description: "## Owned Paths\n- src/auth/session.ts\n",
+            }),
+            fetchInFlight: () => [],
+          },
+        );
+        expect(result.refusal).toMatchObject({
+          decision: "noop",
+          reason: "escalate_paths_intersect",
+        });
+        expect(result.evidence.escalatePathIntersections).toEqual([
+          "src/auth/**",
+        ]);
+      },
+    );
+  });
+
   test("dispatch also defers when merge-fix already owns the ticket worktree", () => {
     withReposRoot(
       `repos:\n  - name: fixture\n    path: /tmp/fixture\n    base: develop\n    team: WM\n    project: Factory\n    worktree_up: /tmp/worktree-up\n    worktree_down: /tmp/worktree-down\n    worktree_root: /tmp/worktrees\n    escalate_paths: []\n`,
@@ -3195,8 +3232,9 @@ describe("buildRunSpec", () => {
       policyVersion: "git:test",
       now: 0,
     });
+    // Regenerated (#2013): dispatch documents draft PR readiness; prompt pin only.
     expect(canonicalJson(spec)).toBe(
-      '{"adapter":"cursor","agent":"dispatch@1","capabilities":["tracker:write","repo:write","github:write"],"defHash":"sha256:de6c15bb144b71b99530807f819e0a5246c9c4442c8bf8d4d2162cd3ced63463","idempotencyKey":"dispatch@1:factory.dispatch-result/v1:sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59:dispatch-baseline","input":{"repo":"factory","ticket":"WM-694"},"inputHash":"sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59","maxAttempts":1,"model":"cursor-grok-4.6-high","modelTier":"strong","outputContract":"factory.dispatch-result/v1","policyVersion":"git:test","promptVersion":"git:test","runId":"run_baseline","schemaVersion":"factory.run-spec/v1","timeoutSeconds":5400,"workspace":{"checkoutDir":"repo","retainOnFailure":true,"type":"worktree"}}',
+      '{"adapter":"cursor","agent":"dispatch@1","capabilities":["tracker:write","repo:write","github:write"],"defHash":"sha256:4a12ffc0fa80ad8b97a9757361ee319589c3567de36f8d9aa33ef917ff26a4d2","idempotencyKey":"dispatch@1:factory.dispatch-result/v1:sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59:dispatch-baseline","input":{"repo":"factory","ticket":"WM-694"},"inputHash":"sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59","maxAttempts":1,"model":"cursor-grok-4.6-high","modelTier":"strong","outputContract":"factory.dispatch-result/v1","policyVersion":"git:test","promptVersion":"git:test","runId":"run_baseline","schemaVersion":"factory.run-spec/v1","timeoutSeconds":5400,"workspace":{"checkoutDir":"repo","retainOnFailure":true,"type":"worktree"}}',
     );
   });
 

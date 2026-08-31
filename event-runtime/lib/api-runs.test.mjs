@@ -15,6 +15,7 @@ import { memoryControlPlane } from "../../lib/control-plane/index.mjs";
 import {
   TICKET_DETAIL_CACHE_LIMIT,
   TICKET_DETAIL_CACHE_TTL_MS,
+  RUN_SUBJECT_CACHE_LIMIT,
   RUN_SUBJECT_CACHE_TTL_MS,
   RUN_SUBJECT_RESOLVE_TIMEOUT_MS,
   runSubjectResolutionSettled,
@@ -581,6 +582,82 @@ describe("run list human identity (#2025, #2058)", () => {
       await s.client.runs();
       await runSubjectResolutionSettled();
       expect(calls).toHaveLength(4);
+    } finally {
+      s.close();
+    }
+  });
+
+  test("evicts run subjects beyond the shared cache capacity", async () => {
+    const calls = [];
+    setTicketDetailControlPlane({
+      async getTicket(ticket) {
+        calls.push(ticket);
+        return {
+          identifier: ticket,
+          title: `Title for ${ticket}`,
+          url: `https://github.com/watt-mind/factory/issues/${ticket.split("#")[1]}`,
+        };
+      },
+    });
+    const nowMs = Date.parse("2026-08-31T10:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    const at = new Date(nowMs).toISOString();
+    try {
+      for (let index = 0; index <= RUN_SUBJECT_CACHE_LIMIT; index += 1)
+        insertRunInto(
+          s.db,
+          `run_cache_${index}`,
+          "dispatch@1",
+          `watt-mind/factory#${5000 + index}`,
+          at,
+        );
+
+      // Each GET /runs schedules a capped background batch. Walk the public
+      // cursor pages until every distinct subject has been resolved rather
+      // than reaching into the cache. The last page has the remainder.
+      let before = null;
+      let remaining = RUN_SUBJECT_CACHE_LIMIT + 1;
+      let hotPageBefore = null;
+      while (remaining > 0) {
+        const pageSize = Math.min(200, remaining);
+        const batches = Math.ceil(pageSize / 8);
+        const pageBefore = before;
+        if (remaining <= 200) hotPageBefore = pageBefore;
+        let nextBefore = null;
+        for (let batch = 0; batch < batches; batch += 1) {
+          const page = await s.client.runs({ limit: 200, before: pageBefore });
+          if (batch === 0) nextBefore = page.nextBefore;
+          await runSubjectResolutionSettled();
+        }
+        before = nextBefore;
+        remaining -= pageSize;
+      }
+      expect(new Set(calls).size).toBe(RUN_SUBJECT_CACHE_LIMIT + 1);
+
+      const evicted = calls[0];
+      const hot = calls.at(-1);
+      const coldView = await s.client.runs();
+      const bySubject = Object.fromEntries(
+        coldView.runs.map((run) => [run.ticketSubject, run]),
+      );
+      // The first resolved entry was evicted when the limit overflowed, while
+      // a recently resolved entry still takes the within-TTL cached path.
+      expect(bySubject[evicted].subjectTitle).toBeNull();
+      const hotView = await s.client.runs({
+        limit: 200,
+        before: hotPageBefore,
+      });
+      expect(
+        hotView.runs.find((run) => run.ticketSubject === hot).subjectTitle,
+      ).toBe(`Title for ${hot}`);
+
+      await runSubjectResolutionSettled();
+      expect(calls.filter((ticket) => ticket === evicted)).toHaveLength(2);
+      const refetched = await s.client.runs();
+      expect(
+        refetched.runs.find((run) => run.ticketSubject === evicted)
+          .subjectTitle,
+      ).toBe(`Title for ${evicted}`);
     } finally {
       s.close();
     }

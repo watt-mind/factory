@@ -17,11 +17,11 @@
       "commands/factory-retro.md": "sha256:644d6e3e6f4b6efed28a69dfa296bbf5189c9153c57d202fec11aff77b77a163",
       "commands/factory-ship.md": "sha256:b3c96ecec4b8af7237500b2bf952d3e872a1957ab2519c19e853f65151b936ba",
       "commands/factory-sweep.md": "sha256:f7dc737e45bcce94442cd78aea01868c5d9cce3312da83d3cc51322ab0bef4b4",
-      "commands/factory-ticket.md": "sha256:1547443c3833fa36840ab0b3fcf520d3a564237a36b21fa1bbea56d4c80cc488",
+      "commands/factory-ticket.md": "sha256:22c8a5ea5556f309f6ca7b36e9f5a4496b1d1fe275acda28a355f8337ef31c24",
       "commands/factory-triage.md": "sha256:20d538ca3c7358b22ea2f263fa1ec8b75affbf222e58c77989b43d34750c0ff1",
       "commands/factory-unblock.md": "sha256:496bffc002afea8eca9d6c1b80f38c6732eb2163f3e41f6d04f0357c4e2905cb",
-      "commands/factory-work.md": "sha256:665d7b9c2c9a9f6c852b61d7efd72b20b8363aa3e1869ccd33cfc5c4bf703358",
-      "floor.md": "sha256:01ed10b8cdbe39487dd9a653243d71b7540dc881c42a92e116adbf63b7777112",
+      "commands/factory-work.md": "sha256:c69095b7697fb4f0599ed6f2da40a4f6495e74bc5cfed90f41a4bc786d9cc72a",
+      "floor.md": "sha256:448930a5705b4f919059696e941239a4c50a30d78a5847dbaadea99ea10dfdf3",
       "skills/factory-handoff/SKILL.md": "sha256:c6e452e33a8101cd4fdca70f650c52b626688a5555826039ebfac26847de8fd9",
       "skills/ticket-spec/SKILL.md": "sha256:6cd7e613072a1f4bd360389b62f3482432cbeb167b1e34b27b4a6099d4685b23"
     }

@@ -11,7 +11,7 @@ everything you need to run one factory; team and hosted features live behind
 the reserved [`ee/`](ee/README.md) seam.
 
 The factory orchestrates coding agents (Claude Code, Codex, Gemini CLI,
-Cursor, Pi). It does not compete with them. The tracker is the control plane,
+Cursor, Pi, and Hermes Agent via ACP). It does not compete with them. The tracker is the control plane,
 GitHub is the source of truth, and CI is the reward signal. Nothing merges
 because an agent said it was done.
 
@@ -38,8 +38,8 @@ What is true in the tree today, or landing as the repo prepares to go public.
 The **content is portable; only the packaging isn't.** Skills, commands, and
 agent prompts live in `shared/` and emit into each harness's native layout.
 Claude Code, Codex, Gemini CLI, Cursor, and Pi already consume the same floor
-rules. Adding a harness is a packaging problem, not a second copy of the
-factory.
+rules, while Hermes Agent is available through the event runtime's ACP adapter.
+Adding a harness is a packaging problem, not a second copy of the factory.
 
 ### Packs
 

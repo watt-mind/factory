@@ -219,7 +219,7 @@ write transactions around an unlocked effect, not one transaction:
    the whole effect window: `GET /inbox/:id` shows `response.effect.outcome
 === "pending"`, a second `/decide` gets `already_decided`, and
    `/decide/retry` gets `effect_pending`.
-2. **Effect**, outside the write lock. Effects call the CLI (`tools/linear.mjs`,
+2. **Effect**, outside the write lock. Effects call the CLI (`tools/ticket.mjs`,
    the planner) and can take up to the 20 s transport timeout; holding the
    SQLite lock for that starved every other writer (#1434).
 3. **Settle.** The outcome replaces the pending record (`applied` resolves
@@ -243,7 +243,7 @@ for anything not `applied`.
 | Effect             | What the runtime does                                                                                                                                                                                                                                                                | Legal only when the item has            |
 | :----------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------- |
 | `authorise`        | Records the authorisation (§3.1) and emits a `factory.dispatch.requested` envelope for `refs.issue` on `refs.repo` with `humanDecision` in the payload (§5). The item resolves as `operator:authorised`.                                                                             | `refs.issue`, `refs.repo`, `refs.runId` |
-| `send_to_triage`   | Moves `refs.issue` to `Triage`, removes `ai:agent-ready`, comments the operator's fields (`tools/linear.mjs`). Resolves as `operator:triaged`.                                                                                                                                       | `refs.issue`                            |
+| `send_to_triage`   | Moves `refs.issue` to `Triage`, removes `ai:agent-ready`, comments the operator's fields (`tools/ticket.mjs`). Resolves as `operator:triaged`.                                                                                                                                       | `refs.issue`                            |
 | `answer`           | Comments the operator's `text` field(s) on `refs.issue` (at least one applicable field is required), moves it `Blocked → Todo` (WM-287's "Answer" verb, unchanged). Resolves as `operator:answered`.                                                                                 | `refs.issue`                            |
 | `requeue`          | `POST /events/requeue` for `refs.eventSource`/`refs.eventId` (existing planner path). Resolves as `operator:requeued`.                                                                                                                                                               | `refs.eventSource`, `refs.eventId`      |
 | `approve_proposal` | `approveProposal(refs.proposalId)`; an expired proposal takes the existing SpecDiff re-plan path, and the item is **retargeted** onto the fresh proposal rather than resolved (§3.2) — never auto-approve. Resolves as `operator:approve_proposal` only when a run actually started. | `refs.proposalId`                       |
@@ -504,11 +504,24 @@ API:
 
 ```
 GET  /inbox/:id                → the item, with decision, response, responseHistory
+POST /inbox                    → creates an item; optional decision is validated
 POST /inbox/:id/decide         → body: factory.decision-response/v1 minus decidedAt
                                   200 { item, effect: { kind, outcome } }
 POST /inbox/:id/decide/retry   → re-run a failed effect with the stored response,
                                   or take over a pending claim abandoned by a crash (§3)
 ```
+
+`POST /inbox` has source-specific presentation rules. `serve:notify` and
+`agent:*` sources are machine-oriented inputs: their submitted `title` and
+`body` are passed through `synthesizeInboxItem()` and are not necessarily the
+persisted values. The synthesized body starts with `What happened:` and `Why
+it matters:`, then includes the reason code, links, and decision paragraphs
+when available, with the producer's original body appended last. For
+`decision_needed` and `proposal_expired` items with a proposal, the synthesized
+title is `Approve <agent> run (<subject>)?`. By contrast, `cli` items are
+stored verbatim, including their supplied title and body. Synthesis deliberately
+does not rewrite the serialized decision request: decision responses hash that
+request, so changing it would make an otherwise valid response stale.
 
 Decision endpoints return `{ error, message, errors? }`; `errors` is present
 only when validation supplies individual errors. The routes return
@@ -652,7 +665,7 @@ template with the errors visible, never to a lost escalation.
 | WM-384 | all      | this document                                                                                                                                                                                         |
 | WM-389 | §2, §4.1 | `schemas/factory.decision-request.v1.json`, `schemas/factory.decision-response.v1.json`, `lib/decision.mjs` (+ test), `schemas/factory.agent-result.v1.json`, `lib/verify.mjs` (+ test)               |
 | WM-390 | §4, §6   | `lib/db.mjs` v5, `lib/inbox.mjs`, `lib/decision-templates.mjs`, `lib/api.mjs` (`GET /inbox/:id`, `POST /inbox/:id/decide`), `lib/worker.mjs` refused-run producer, `lib/notify.mjs`, `cli.mjs decide` |
-| WM-391 | §3, §5   | `lib/decision-effects.mjs`, `schemas/dispatch.input.json`, `agents/dispatch.md`+`.json`, `tools/linear.mjs` (triage/answer writes)                                                                    |
+| WM-391 | §3, §5   | `lib/decision-effects.mjs`, `schemas/dispatch.input.json`, `agents/dispatch.md`+`.json`, `tools/ticket.mjs` (triage/answer writes)                                                                    |
 | WM-392 | §7       | `web/src/components/DecisionCard.tsx`, `web/src/lib/decisionForm.ts`, `web/src/lib/decision.ts` (validator port), `web/src/views/Inbox.tsx` integration, `web/src/types.ts`, `web/src/api.ts`         |
 | WM-393 | §4.2, §8 | shared brief section, `agents/{dispatch,triage-scan,merge-scan}.md`+`.json`, `schemas/triage-scan.output.json`, `schemas/merge-scan.output.json`, `agents/triage-apply.json`, `agents/merge-apply.*`  |
 | WM-286 | §7       | the Inbox view this renders into (unchanged)                                                                                                                                                          |

@@ -430,8 +430,10 @@ describe("registry", () => {
     // from a genuinely unassessable flow; dispatch.json is re-pinned.
     // Regenerated (#2035): triage-scan names ticket.mjs as the active ticket
     // CLI and re-pins its definition; the prompt pin is a registry input.
+    // Regenerated (#2013): dispatch documents draft PR readiness and refreshes
+    // its prompt pin; the registry digest follows it.
     const expected =
-      "sha256:d7990996b96367144944af86799c85cb1448aba9c0b7c38cd3cdfee451b433ec";
+      "sha256:3d12b762b3946e9e6e95e033d28f628affa970e27bf4633c695b2d8be0b11013";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -730,8 +732,10 @@ describe("registry", () => {
     // Regenerated (#2057): dispatch names the authenticated worktree Runs
     // fixture and the explicit auth-fixture NOT-ASSESSED classification;
     // prompt pin only, `pack` remains non-enumerable.
+    // Regenerated (#2013): dispatch documents draft PR readiness; prompt pin
+    // only, `pack` remains non-enumerable.
     expect(computeDefHash(def)).toBe(
-      "sha256:de6c15bb144b71b99530807f819e0a5246c9c4442c8bf8d4d2162cd3ced63463",
+      "sha256:4a12ffc0fa80ad8b97a9757361ee319589c3567de36f8d9aa33ef917ff26a4d2",
     );
   });
 

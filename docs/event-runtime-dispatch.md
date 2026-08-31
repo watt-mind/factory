@@ -194,7 +194,7 @@ Linear allows 2500 requests per hour. The factory used to treat a 400/429
 open chain-dispatch proposal re-ran `fetchTicket` + `fetchViewer` +
 `fetchInFlight` on every tick. Rate-limited outcomes are **retry-later**:
 
-- `tools/linear.mjs` records `X-RateLimit-Requests-*` (falling back to the
+- `tools/ticket.mjs` records `X-RateLimit-Requests-*` (falling back to the
   complexity headers), exposes `factory ticket budget`, and exits 3 with
   `{rateLimited:true, resetAt}` instead of a generic failure.
 - One planning pass memoizes in-flight issues by team+project for ≤60s and
@@ -386,6 +386,21 @@ directory that repository verify runs, the worker records
 sandbox step. It otherwise preserves the independent ticket command check;
 unparseable shell commands, missing files, non-test modules and flag values
 (`--preload x`) never qualify for skipping.
+
+### Dispatch pull-request readiness
+
+A dispatch agent may open its pull request as a draft. Draft status is a safe
+handoff state while the worker performs the authoritative checks: the ticket's
+and repository's verification commands, the configured base branch, and the
+required PR form. The worker promotes a draft to **ready for review** only
+after handoff verification and the base/form checks have all passed. The
+worker then records the PR's final draft state in the worker-authored handoff
+observation.
+
+Failure to complete the readiness transition is treated as a handoff
+verification failure. The PR remains a draft so the merge stage cannot land
+an unverified handoff; the recorded failure must be resolved before the PR is
+made ready for review.
 
 ### Run-scoped notification fallback
 

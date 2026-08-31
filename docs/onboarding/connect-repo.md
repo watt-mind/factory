@@ -42,8 +42,10 @@ needs a browser you do not have, report and stop with the exact command the
 human should run.
 
 Confirm the human has at least one coding-agent harness installed and logged in
-(Claude Code, Codex, Gemini, Cursor, Pi, or Agy). Whichever one is running you
-is a fine answer, as long as it is also usable headlessly.
+(Claude Code, Codex, Gemini, Cursor, Pi, Agy, or Hermes Agent via ACP).
+Whichever one is running you is a fine answer, as long as it is also usable
+headlessly. For Hermes Agent, confirm that the ACP-speaking
+`hermes-agent-acp` binary is installed and configured for the event runtime.
 
 ## 2. Get a factory checkout
 

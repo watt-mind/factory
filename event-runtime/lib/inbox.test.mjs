@@ -296,8 +296,29 @@ describe("human inbox ledger (WM-285)", () => {
       title: expected.title,
       body: expected.body,
     });
+    expect(created.title).not.toBe(input.title);
+    expect(created.body).not.toBe(input.body);
+    expect(created.body).toContain("What happened:");
+    expect(created.body).toContain("Why it matters:");
     expect(created.decision).toEqual(input.decision);
     expect(created.dedupeKey).toBe(input.dedupeKey);
+
+    const cli = createInboxItem(
+      db,
+      {
+        ...input,
+        title: "CLI title stays verbatim",
+        body: "CLI body stays verbatim.",
+        refs: { issue: "WM-2048", repo: "factory", runId: "run_cli" },
+        source: "cli",
+        dedupeKey: null,
+      },
+      { id: "cli_presentation", now: 1000 },
+    );
+    expect({ title: cli.title, body: cli.body }).toEqual({
+      title: "CLI title stays verbatim",
+      body: "CLI body stays verbatim.",
+    });
   });
 
   test("same-question open items attach as waiters instead of stacking rows", () => {
