@@ -54,6 +54,17 @@ test("delivered floor documents valid Owned Paths bullets", () => {
   );
 });
 
+test("delivered floor documents explicit browser tab routing and reload re-read rules", () => {
+  const floor = readFileSync(
+    path.join(ROOT, "dist", "AGENTS.floor.md"),
+    "utf8",
+  );
+  expect(floor).toContain("Pass `tabId` explicitly on every browser call");
+  expect(floor).toContain("Own a tab from `tabs_create`");
+  expect(floor).toContain("Assert origin before trusting a read");
+  expect(floor).toContain("Re-read after reload");
+});
+
 test.each([
   ["git@github.com:Owner/Repository.git", "owner/repository"],
   ["https://github.com/Owner/Repository", "owner/repository"],
