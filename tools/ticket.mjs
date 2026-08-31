@@ -65,6 +65,7 @@ import path from "node:path";
 import { loadRepos } from "../event-runtime/lib/repos.mjs";
 import {
   loadControlPlane,
+  ControlPlaneError,
   TYPE_LABELS,
   SOURCE_LABELS,
   validateLabels,
@@ -91,9 +92,59 @@ export {
   appendIssueDetail,
 };
 
+const CONTROL_PLANE_MUTATION_RETRY_BACKOFF_MS = 250;
+
+const controlPlaneMutationBackoff = (ms) =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+function graphqlTimeoutMessage(controlPlane, error) {
+  const message = String(error?.message ?? "");
+  const endpoint =
+    controlPlane?.kind === "github"
+      ? "github projects graphql"
+      : controlPlane?.kind === "linear"
+        ? "linear graphql"
+        : null;
+  const match = endpoint
+    ? new RegExp(
+        `^${
+          controlPlane.kind === "github" ? "github(?: projects)?" : "linear"
+        } graphql timed out after (\\d+)ms$`,
+      ).exec(message)
+    : null;
+  return match ? `${endpoint} timed out after ${match[1]}ms` : null;
+}
+
+/**
+ * State and label writes are idempotent, so one timed-out GraphQL attempt can
+ * be retried without replaying comments or ticket creation. Keep this at the
+ * CLI boundary: it covers both configured control planes while their adapters
+ * retain ownership of their respective transports.
+ */
+export async function retryControlPlaneMutation(
+  controlPlane,
+  mutation,
+  { backoff = controlPlaneMutationBackoff } = {},
+) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await mutation();
+    } catch (cause) {
+      const timeout = graphqlTimeoutMessage(controlPlane, cause);
+      if (!timeout) throw cause;
+      if (attempt === 1)
+        throw new ControlPlaneError(timeout, {
+          status: cause?.status ?? null,
+          cause,
+        });
+      await backoff(CONTROL_PLANE_MUTATION_RETRY_BACKOFF_MS);
+    }
+  }
+}
+
 /** Transition first, so a promotion rationale is never posted for a failed move. */
 export async function transitionThenComment(cp, key, state, options, comment) {
-  await cp.transition(key, state, options);
+  await retryControlPlaneMutation(cp, () => cp.transition(key, state, options));
   if (comment?.trim()) await cp.comment(key, comment);
 }
 
@@ -914,7 +965,9 @@ const VERBS = {
       out(current, current.join(" ") || "(none)");
       return;
     }
-    await cp.setLabels(key, { add, remove });
+    await retryControlPlaneMutation(cp, () =>
+      cp.setLabels(key, { add, remove }),
+    );
     out(
       { ok: true, identifier: key, added: add, removed: remove },
       `${key} labels updated`,
