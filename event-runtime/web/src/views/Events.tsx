@@ -32,6 +32,7 @@ import {
 } from "../displayOptions";
 import { DisplayOptions, exportJson } from "../components/DisplayOptions";
 import { CustomCell } from "../components/CustomCell";
+import { EventEnvelopeView } from "../components/EventEnvelopeView";
 import {
   CausationGlyphs,
   EventHoverCard,
@@ -40,7 +41,14 @@ import {
 import { chainKeyOfEvent, eventNodeId } from "../graph/chainModel";
 import { setContextActions } from "../palette";
 import { ScopeCaption } from "../components/ContextTabs";
-import type { AdmittedEvent, EventFocus, Proposal, RunSummary } from "../types";
+import type {
+  AdmittedEvent,
+  AgentDef,
+  ArtifactView,
+  EventFocus,
+  Proposal,
+  RunSummary,
+} from "../types";
 import type { OperatorContext } from "../context";
 import { matchesRepo } from "../context";
 import {
@@ -62,13 +70,11 @@ import {
   Button,
   CopyActions,
   Dialog,
-  Disclosure,
   EVENT_STATUS_HUES,
   FilterInput,
   ListToolbar,
   ListPane,
   DetailPane,
-  JsonBlock,
   JumpLink,
   KV,
   ListEmpty,
@@ -514,6 +520,32 @@ export function Events({
       }
     }
     return schemas;
+  }, [agentsQ.data]);
+  // Event routes identify the producer whose output view owns the matching
+  // input presentation. Keep this alongside the schema lookup above so both
+  // registry shapes (top-level routes and per-agent routes) remain useful.
+  const inputViewByEventType = useMemo(() => {
+    const registry = agentsQ.data;
+    const byRef = new Map(registry?.agents.map((agent) => [agent.ref, agent]));
+    const views = new Map<string, ArtifactView>();
+    const add = (type: string, agent: AgentDef | undefined) => {
+      const input = agent?.outputView?.input;
+      if (input && agent?.outputView) {
+        views.set(type, {
+          schemaVersion: agent.outputView.schemaVersion,
+          ...input,
+          sections: input.sections ?? [],
+        });
+      }
+    };
+    for (const route of registry?.eventTypes ?? [])
+      add(route.type, route.agent ? byRef.get(route.agent) : undefined);
+    for (const agent of registry?.agents ?? []) {
+      for (const route of agent.eventTypes) {
+        if (!views.has(route.type)) add(route.type, agent);
+      }
+    }
+    return views;
   }, [agentsQ.data]);
   const decisions = useMemo(() => {
     const byId = new Map<string, Proposal>();
@@ -1725,9 +1757,11 @@ export function Events({
           })()}
 
           <Section title="Envelope">
-            <Disclosure label="payload JSON">
-              <JsonBlock value={sel.envelope} />
-            </Disclosure>
+            <EventEnvelopeView
+              envelope={sel.envelope}
+              inputView={inputViewByEventType.get(sel.type)}
+              now={now}
+            />
           </Section>
 
           <VerbError error={requeue.error ?? replay.error} />

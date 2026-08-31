@@ -282,6 +282,35 @@ describe("Events component harness: selection & detail view", () => {
     );
   });
 
+  test("renders the selected envelope with semantic workflow links", async () => {
+    const event = stubEvent("evt_workflow_failure", "admitted", {
+      type: "github.workflow-run.failed",
+      envelope: {
+        schemaVersion: "factory.event/v1",
+        eventId: "evt_workflow_failure",
+        type: "github.workflow-run.failed",
+        source: "github",
+        payload: { repo: "watt-mind/factory", runId: 42 },
+      },
+    });
+    await withApi(
+      {
+        events: async () => ({ events: [event] }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderEvents({
+          focusEvent: { source: "github", eventId: event.eventId },
+        });
+        await waitFor(() =>
+          expect(
+            r.getByRole("link", { name: "run #42" }).getAttribute("href"),
+          ).toBe("https://github.com/watt-mind/factory/actions/runs/42"),
+        );
+      },
+    );
+  });
+
   test("clicking a row selects the event via onSelectEvent", async () => {
     const onSelectEvent = mock(() => {});
     const e1 = stubEvent("evt_click_test", "admitted");
