@@ -5910,6 +5910,28 @@ sh -c 'sleep 5 & wait'
     expect(calls).toHaveLength(1);
   });
 
+  test("a failed ready-for-review transition leaves the handoff draft", () => {
+    const handoff = {
+      github: "watt-mind/factory",
+      prNumber: 77,
+      pr: { number: 77, draft: true },
+      prDraft: true,
+    };
+    const forge = {
+      prSetDraft: () => {
+        throw new Error("GitHub rejected the transition");
+      },
+    };
+
+    expect(() =>
+      defaultMarkHandoffPullRequestReady({ handoff, forge }),
+    ).toThrow(
+      "pr_ready_failed: could not mark PR #77 ready for review: GitHub rejected the transition",
+    );
+    expect(handoff.pr.draft).toBe(true);
+    expect(handoff.prDraft).toBe(true);
+  });
+
   test("handoff PR form rejects literal run trailers when a run ID is set", () => {
     const base = {
       github: "watt-mind/factory",
