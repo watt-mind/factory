@@ -414,6 +414,38 @@ describe("worker", () => {
     }
   });
 
+  test("keeps exactly one local notify drain in the adapter finally to prevent double delivery", () => {
+    // Two drain sites could race the same outbox read/truncate cycle and
+    // deliver a BLOCKED or escalation notification twice. Keep this structural
+    // guard alongside the behavioral drain tests so a future refactor cannot
+    // silently add another call site.
+    const source = readFileSync(
+      new URL("./worker.mjs", import.meta.url),
+      "utf8",
+    );
+    const marker =
+      "    } finally {\n      stopDeadlineMonitor();\n      stopCancellationMonitor();\n";
+    const start = source.indexOf(marker);
+    expect(start).toBeGreaterThan(-1);
+    const open = source.indexOf("{", start);
+    let depth = 0;
+    let end = -1;
+    for (let i = open; i < source.length; i += 1) {
+      if (source[i] === "{") depth += 1;
+      else if (source[i] === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+      }
+    }
+    expect(end).toBeGreaterThan(open);
+    const finallyBody = source.slice(open, end);
+    expect(finallyBody).toContain("await drainLocalNotifyOutbox({");
+    expect(source.split("await drainLocalNotifyOutbox({")).toHaveLength(2);
+  });
+
   test("retains an undelivered local notification for handoff recovery", async () => {
     const home = tmpDir("evrt-local-notify-retained-");
     const runId = "run_1558_retained";
