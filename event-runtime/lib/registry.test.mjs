@@ -1576,6 +1576,10 @@ describe("registry", () => {
       "/verification",
       "/uxCritique",
     ]);
+    expect(
+      dispatch.view.sections.find((s) => s.path === "/uxCritique").formats
+        .evidence,
+    ).toBe("url");
     const reconcile = getArtifactView(registry, "reconcile@1");
     expect(reconcile.source).toBe("contract");
     expect(reconcile.file).toBe(

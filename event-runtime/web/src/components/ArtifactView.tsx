@@ -185,6 +185,27 @@ function Value({
           {f.text}
         </a>
       );
+    case "links":
+      return (
+        <ul className="m-0 list-none p-0">
+          {f.items.map((item, index) => (
+            <li key={`${item.text}:${index}`} className="break-all py-px">
+              {item.href ? (
+                <a
+                  href={item.href}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-(--accent) hover:underline"
+                >
+                  {item.text}
+                </a>
+              ) : (
+                <span>{item.text}</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      );
     case "json":
       if (block) {
         if (
