@@ -2416,6 +2416,29 @@ describe("planEvent worktree gate (WM-108)", () => {
     );
   });
 
+  test("an invalid unrelated registry stanza blocks dispatch from a partial config", () => {
+    const healthyRepo =
+      `repos:\n  - name: healthy\n    path: /tmp/healthy\n    base: develop\n` +
+      `    team: WM\n    project: Factory\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+      `    worktree_root: /tmp/worktrees\n    escalate_paths: []\n` +
+      `  - name: malformed\n    path: /tmp/malformed\n    max_in_flight: many\n`;
+    withReposRoot(healthyRepo, () => {
+      const result = worktreeDispatchAutoEligibility(
+        { repo: "healthy", ticket: "WM-694" },
+        tierDispatch(),
+      );
+      // The registry is host-wide policy. Do not dispatch from a partial
+      // parse, even though the malformed entry is not the target repo.
+      expect(result.refusal).toMatchObject({
+        decision: "human_needed",
+      });
+      expect(result.refusal.reason).toMatch(/^repo_unknown: /);
+      expect(result.refusal.reason).toContain(
+        "repo malformed max_in_flight must be a positive number",
+      );
+    });
+  });
+
   test("whole-repo Owned Paths refuses distinctly before wildcard escalation", () => {
     withReposRoot(
       `repos:\n  - name: gated\n    path: /tmp/nowhere\n    base: develop\n` +

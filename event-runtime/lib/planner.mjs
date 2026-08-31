@@ -920,25 +920,14 @@ export function inFlightDispatchForTicket(db, payload) {
 }
 
 function loadRepoEscalatePaths(repoName, root = reposRoot(), snapshot = null) {
-  if (snapshot) {
-    let repo;
-    try {
-      repo = getRepo(snapshotRepos(snapshot), repoName);
-    } catch (err) {
-      throw new RepoError(
-        `${reposConfigPath(root)}: cannot verify escalate_paths: ${err.message}`,
-      );
-    }
-    if (!Array.isArray(repo.escalatePaths)) {
-      throw new RepoError(
-        `${reposConfigPath(root)}: repo ${repoName} must declare escalate_paths as an array (use [] only when deliberately empty)`,
-      );
-    }
-    return [...new Set(repo.escalatePaths.map((item) => item.trim()))];
-  }
   let repo;
   try {
-    repo = getRepo(loadRepos({ root }), repoName);
+    // `loadRepos` validates the entire host registry deliberately: host-wide
+    // routing, lifecycle, and capacity facts must come from one coherent
+    // configuration revision. An invalid unrelated stanza therefore blocks
+    // dispatch rather than letting this gate evaluate against a partial view.
+    const repos = snapshot ? snapshotRepos(snapshot) : loadRepos({ root });
+    repo = getRepo(repos, repoName);
   } catch (err) {
     throw new RepoError(
       `${reposConfigPath(root)}: cannot verify escalate_paths: ${err.message}`,
