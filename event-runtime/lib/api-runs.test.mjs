@@ -13,6 +13,7 @@ import {
 } from "bun:test";
 import { memoryControlPlane } from "../../lib/control-plane/index.mjs";
 import {
+  TICKET_DETAIL_CACHE_LIMIT,
   TICKET_DETAIL_CACHE_TTL_MS,
   RUN_SUBJECT_CACHE_TTL_MS,
   clearObservedModelCache,
@@ -24,6 +25,7 @@ import {
   ticketJourneyView,
   ticketIndexView,
   ticketSupplyView,
+  ticketDetailView,
 } from "./api-runs.mjs";
 import {
   CONTROL_TOKEN,
@@ -2636,6 +2638,28 @@ describe("GET /tickets/:id/detail (WM-914)", () => {
     } finally {
       s.close();
     }
+  });
+
+  test("evicts ticket details beyond the shared cache capacity", async () => {
+    const calls = [];
+    const controlPlane = {
+      async getTicket(ticket) {
+        calls.push(ticket);
+        return { identifier: ticket, title: ticket };
+      },
+      async listComments() {
+        return [];
+      },
+    };
+    const nowMs = Date.parse("2026-08-19T12:00:00.000Z");
+    for (let index = 1; index <= TICKET_DETAIL_CACHE_LIMIT + 1; index++) {
+      await ticketDetailView(`WM-${index}`, { controlPlane, nowMs });
+    }
+
+    expect(calls).toHaveLength(TICKET_DETAIL_CACHE_LIMIT + 1);
+    const firstAgain = await ticketDetailView("WM-1", { controlPlane, nowMs });
+    expect(firstAgain.cached).toBe(false);
+    expect(calls.filter((ticket) => ticket === "WM-1")).toHaveLength(2);
   });
 
   test("rejects malformed ids, missing issues, and tracker failures", async () => {
