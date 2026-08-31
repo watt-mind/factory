@@ -1564,6 +1564,38 @@ describe("human inbox ledger (WM-285)", () => {
     ]);
   });
 
+  test("bounds PR referent reads and rotates deferred oldest rows to the next poll", async () => {
+    const db = openDb(":memory:");
+    for (let pr = 1; pr <= 10; pr += 1) {
+      createInboxItem(
+        db,
+        {
+          kind: "BLOCKED",
+          title: `PR ${pr}`,
+          refs: { repo: "factory", pr: String(pr) },
+        },
+        { id: `pr-${pr}`, now: pr * 1000 },
+      );
+    }
+    const fetched = [];
+    const fetchPullRequest = async ({ pr }) => {
+      fetched.push(pr);
+      return { state: pr > 8 ? "MERGED" : "OPEN" };
+    };
+
+    await reconcileInbox(db, { now: 60_000, fetchPullRequest });
+    expect(fetched).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+
+    await expect(
+      reconcileInbox(db, { now: 120_000, fetchPullRequest }),
+    ).resolves.toEqual([
+      { id: "pr-9", resolvedBy: "auto:pr_merged" },
+      { id: "pr-10", resolvedBy: "auto:pr_merged" },
+    ]);
+    expect(fetched).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 1, 2, 3, 4, 5, 6]);
+    db.close();
+  });
+
   test("supersedes an older parked item when a newer run owns its ticket", () => {
     const db = openDb(":memory:");
     createInboxItem(

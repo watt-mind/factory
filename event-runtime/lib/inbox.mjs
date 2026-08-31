@@ -10,7 +10,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { loadControlPlane } from "../../lib/control-plane/index.mjs";
-import { loadForge } from "../../lib/forge/index.mjs";
+import { makeGhApi } from "../../lib/control-plane/github.mjs";
 import { hashJson } from "./canonical.mjs";
 import { ApiParameterError } from "./api-params.mjs";
 import {
@@ -1547,9 +1547,10 @@ const RUN_PROGRESS_KINDS = new Set(["CI RED", "SMOKE RED", "CIRCUIT BREAKER"]);
 // automatically when the ticket moves on; an ESCALATED ask or any other kind
 // names something an operator still has to look at.
 const PARKED_KINDS = new Set(["BLOCKED", "human_needed"]);
-// Bounded fan-out for the per-tick PR referent sweep (#1069): a busy inbox
-// must not open one forge request per distinct PR all at once.
-const PR_FETCH_CONCURRENCY = 4;
+// A busy inbox must not read every distinct PR on every poll. The offset is
+// kept per database so deferred, oldest-first referents are reached next poll.
+const PR_FETCH_LIMIT = 8;
+const prFetchOffset = new WeakMap();
 
 /** An ask the operator has been handed and has not answered yet. */
 function hasPendingDecision(row) {
@@ -1581,11 +1582,14 @@ function githubRepoFor(refs) {
   }
 }
 
-function defaultFetchPullRequest({ github, pr }) {
-  return loadForge().prView(github, pr, { fields: ["state"] });
+async function defaultFetchPullRequest({ github, pr }) {
+  // makeGhApi uses ghSpawn, rather than the forge's spawnSync transport, so
+  // the serve loop yields while GitHub answers this read.
+  const pull = await makeGhApi()("GET", `repos/${github}/pulls/${pr}`);
+  return { state: pull.state };
 }
 
-async function fetchReferencedInboxPullRequests(rows, fetchPullRequest) {
+async function fetchReferencedInboxPullRequests(rows, fetchPullRequest, db) {
   const unique = new Map();
   for (const { refs } of rows) {
     const pr = prNumber(refs.pr);
@@ -1601,17 +1605,16 @@ async function fetchReferencedInboxPullRequests(rows, fetchPullRequest) {
       return [key, null];
     }
   };
-  // Chunked loop: at most PR_FETCH_CONCURRENCY forge reads in flight at once,
-  // so a wide inbox cannot burst a request per distinct PR every tick.
   const entries = [...unique.entries()];
-  const fetched = [];
-  for (let i = 0; i < entries.length; i += PR_FETCH_CONCURRENCY) {
-    fetched.push(
-      ...(await Promise.all(
-        entries.slice(i, i + PR_FETCH_CONCURRENCY).map(fetchOne),
-      )),
-    );
-  }
+  if (entries.length === 0) return new Map();
+  const offset = prFetchOffset.get(db) ?? 0;
+  const start = offset % entries.length;
+  const selected = Array.from(
+    { length: Math.min(PR_FETCH_LIMIT, entries.length) },
+    (_, index) => entries[(start + index) % entries.length],
+  );
+  prFetchOffset.set(db, (start + selected.length) % entries.length);
+  const fetched = await Promise.all(selected.map(fetchOne));
   return new Map(fetched.filter(([, pull]) => pull));
 }
 
@@ -1966,7 +1969,7 @@ export function reconcileInbox(
       ? fetchReferencedInboxIssues(linearRows, linearIssues, controlPlane)
       : [],
     prRows.length
-      ? fetchReferencedInboxPullRequests(prRows, fetchPullRequest)
+      ? fetchReferencedInboxPullRequests(prRows, fetchPullRequest, db)
       : new Map(),
   ])
     .then(([issues, pulls]) => {

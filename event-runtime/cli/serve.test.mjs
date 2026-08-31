@@ -814,6 +814,44 @@ export default async function start() {
     db.close();
   });
 
+  test("tick awaits asynchronous inbox reconciliation", async () => {
+    const { tick, TICK_SUBSYSTEMS } = await import("../cli.mjs");
+    const db = openDb(":memory:");
+    let release;
+    let entered;
+    const reconciled = new Promise((resolve) => {
+      release = resolve;
+    });
+    const enteredInbox = new Promise((resolve) => {
+      entered = resolve;
+    });
+    const subsystems = Object.fromEntries(
+      TICK_SUBSYSTEMS.filter((name) => name !== "inbox").map((name) => [
+        name,
+        () => {},
+      ]),
+    );
+    let finished = false;
+    const running = tick({
+      db,
+      now: 9000,
+      skipPlan: true,
+      subsystems,
+      reconcile: () => {
+        entered();
+        return reconciled;
+      },
+    }).then(() => {
+      finished = true;
+    });
+
+    await enteredInbox;
+    expect(finished).toBe(false);
+    release();
+    await running;
+    db.close();
+  });
+
   test("tick bounds orphaned non-run proposal sweeps and logs the remainder", async () => {
     const { tick } = await import("../cli.mjs");
     const { loadRegistry } = await import("../lib/registry.mjs");

@@ -232,6 +232,7 @@ export async function tick({
   subsystems = {},
   skipPlan = false,
   proposalSweepLimit,
+  reconcile = reconcileInbox,
   onStep = () => {},
 } = {}) {
   const tickStart = Date.now();
@@ -317,9 +318,7 @@ export async function tick({
 
   // Referent state is authoritative: acknowledged or untouched items both
   // resolve automatically once the proposal/event no longer needs a human.
-  await runStep("inbox", () => {
-    reconcileInbox(db, { now });
-  });
+  await runStep("inbox", () => reconcile(db, { now }));
 
   await runStep("proposals", () => {
     const { expired, remaining } = sweepOrphanedNonRunProposals(db, {
