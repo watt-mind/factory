@@ -25,6 +25,9 @@ const REASON_PLAIN = Object.freeze({
   "auto_approval_ineligible:capacity_full": "Repo at in-flight cap",
   "auto_approval_ineligible:evidence_changed_since_plan":
     "Ticket changed since planning",
+  owned_paths_not_closed:
+    "The ticket's allowed paths do not cover every required file.",
+  merge_barrier_unverified: "Merge barrier has not been verified.",
 });
 
 const PRIMARY_INPUT_KEYS = Object.freeze([
@@ -151,7 +154,14 @@ export function proposalReasonPlain(reason) {
   const prefixed = code.startsWith("auto_approval_ineligible:")
     ? code
     : `auto_approval_ineligible:${code}`;
-  return REASON_PLAIN[prefixed] ?? code;
+  if (REASON_PLAIN[prefixed]) return REASON_PLAIN[prefixed];
+
+  const barrier =
+    /^(?:auto_approval_ineligible:)?merge_barrier_unverified(?::.+)?$/.test(
+      code,
+    );
+  if (barrier) return REASON_PLAIN.merge_barrier_unverified;
+  return code;
 }
 
 /**

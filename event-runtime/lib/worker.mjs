@@ -92,6 +92,7 @@ import { createInboxItem } from "./inbox.mjs";
 import { persistMergeReviewFromResult } from "./merge-reviews.mjs";
 import { registerMemos } from "./memos.mjs";
 import { templateFor } from "./decision-templates.mjs";
+import { proposalReasonPlain } from "./proposal-subject.mjs";
 import {
   DETACHED_SPAWN_OPTIONS,
   killProcessGroup,
@@ -1400,6 +1401,57 @@ function refusalInboxRefs(spec) {
   return refs;
 }
 
+function refusalText(value) {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  for (const key of ["message", "summary", "reason", "finding", "title"]) {
+    const text = refusalText(value[key]);
+    if (text) return text;
+  }
+  return null;
+}
+
+function refusalFindingLines(...values) {
+  return [
+    ...new Set(
+      values.flatMap((value) => {
+        const entries = Array.isArray(value) ? value : [value];
+        return entries.map(refusalText).filter(Boolean);
+      }),
+    ),
+  ];
+}
+
+function refusalEvidenceBody(result) {
+  const evidence = result?.evidence ?? {};
+  const lines = [];
+  const summary =
+    refusalText(evidence.summary) ??
+    refusalText(evidence.agentSummary) ??
+    refusalText(result?.summary);
+  if (summary) lines.push(`Agent summary: ${summary}`);
+
+  const reason = refusalText(evidence.reason);
+  if (reason)
+    lines.push(`Agent reason: ${proposalReasonPlain(reason) ?? reason}`);
+
+  const message = refusalText(evidence.message);
+  if (message) lines.push(`Agent message: ${message}`);
+
+  const findings = refusalFindingLines(
+    evidence.findings,
+    evidence.finding,
+    result?.findings,
+    result?.finding,
+  );
+  if (findings.length)
+    lines.push(
+      `Agent findings:\n${findings.map((item) => `- ${item}`).join("\n")}`,
+    );
+  return lines.join("\n\n");
+}
+
 function createRefusalInboxItem(db, spec, result, { now }) {
   if (result.reasonCode !== "needs_human") return null;
   const refs = refusalInboxRefs(spec);
@@ -1410,9 +1462,15 @@ function createRefusalInboxItem(db, spec, result, { now }) {
       refs,
     });
   const subject = refs.issue ?? refs.runId;
-  const body = result.decisionErrors?.length
-    ? `The agent's decision request was rejected:\n${result.decisionErrors.join("\n")}`
-    : null;
+  const body =
+    [
+      refusalEvidenceBody(result),
+      result.decisionErrors?.length
+        ? `The agent's decision request was rejected:\n${result.decisionErrors.join("\n")}`
+        : null,
+    ]
+      .filter(Boolean)
+      .join("\n\n") || null;
   return createInboxItem(
     db,
     {
