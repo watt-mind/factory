@@ -786,6 +786,14 @@ const RUN_POPULATIONS = new Set([
 export const RUN_LIST_DEFAULT_LIMIT = 100;
 export const RUN_LIST_MAX_LIMIT = 200;
 export const RUN_SUBJECT_CACHE_TTL_MS = 30_000;
+// A cold cache can face up to RUN_LIST_MAX_LIMIT distinct unresolved tickets
+// in a single list request. Resolving all of them inline would fan out one
+// tracker read per row, every poll, from every open tab -- exactly the shape
+// that has caused two tracker rate-limit incidents. Cap the synchronous
+// resolution per request and let the rest fill in on later polls (misses are
+// not cached, so they stay eligible next time around).
+const RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST = 8;
+const RUN_SUBJECT_RESOLVE_CONCURRENCY = 4;
 
 // GET /runs is polled frequently. Resolve each distinct ticket once per short
 // window (including misses) so duplicate rows and the detail view never turn a
@@ -871,28 +879,41 @@ async function resolveRunSubjects(
   } catch {
     plane = null;
   }
-  await Promise.all(
-    [...unresolved].map(async (ticket) => {
-      let data = { subjectTitle: null, subjectUrl: runSubjectUrl(ticket) };
-      try {
-        const issue = await plane?.getTicket(ticket);
-        data = {
-          subjectTitle:
-            typeof issue?.title === "string" && issue.title.trim()
-              ? issue.title.trim()
-              : null,
-          subjectUrl:
-            typeof issue?.url === "string" && issue.url.trim()
-              ? issue.url.trim()
-              : runSubjectUrl(ticket),
-        };
-      } catch {
-        // A tracker outage degrades to the bare persisted subject. Cache the
-        // miss briefly as well, otherwise every 5s poll retries the outage.
-      }
-      runSubjectCache.set(ticket, { timestamp: nowMs, data });
-    }),
+
+  const toResolve = [...unresolved].slice(
+    0,
+    RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST,
   );
+
+  async function resolveOne(ticket) {
+    let data = { subjectTitle: null, subjectUrl: runSubjectUrl(ticket) };
+    try {
+      const issue = await plane?.getTicket(ticket);
+      data = {
+        subjectTitle:
+          typeof issue?.title === "string" && issue.title.trim()
+            ? issue.title.trim()
+            : null,
+        subjectUrl:
+          typeof issue?.url === "string" && issue.url.trim()
+            ? issue.url.trim()
+            : runSubjectUrl(ticket),
+      };
+    } catch {
+      // A tracker outage degrades to the bare persisted subject. Cache the
+      // miss briefly as well, otherwise every 5s poll retries the outage.
+    }
+    runSubjectCache.set(ticket, { timestamp: nowMs, data });
+  }
+
+  // Chunked loop: at most RUN_SUBJECT_RESOLVE_CONCURRENCY in flight at once,
+  // and never more than RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST tickets total for
+  // this request. Anything left in `unresolved` beyond the cap is simply not
+  // resolved here -- it stays a bare subject until a later poll picks it up.
+  for (let i = 0; i < toResolve.length; i += RUN_SUBJECT_RESOLVE_CONCURRENCY) {
+    const chunk = toResolve.slice(i, i + RUN_SUBJECT_RESOLVE_CONCURRENCY);
+    await Promise.all(chunk.map((ticket) => resolveOne(ticket)));
+  }
   for (const run of runs) {
     const ticket = normalizeTicketId(run.ticketSubject);
     const cached = ticket ? runSubjectCache.get(ticket) : null;

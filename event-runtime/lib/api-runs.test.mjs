@@ -524,6 +524,68 @@ describe("run list human identity (#2025)", () => {
       s.close();
     }
   });
+
+  test("caps unresolved ticket resolution per request instead of fanning out to every row", async () => {
+    const calls = [];
+    setTicketDetailControlPlane({
+      async getTicket(ticket) {
+        calls.push(ticket);
+        return {
+          identifier: ticket,
+          title: `Title for ${ticket}`,
+          url: `https://github.com/watt-mind/factory/issues/${ticket.split("#")[1]}`,
+        };
+      },
+    });
+    const nowMs = Date.parse("2026-08-31T10:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    const at = new Date(nowMs).toISOString();
+    const ticketCount = 20;
+    try {
+      for (let i = 0; i < ticketCount; i += 1) {
+        s.db
+          .query(
+            `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at, subject)
+             VALUES (?, ?, ?, 'sha256:test', 'RUNNING', 1, ?, ?, ?)`,
+          )
+          .run(
+            `run_cap_${i}`,
+            `idem-run_cap_${i}`,
+            JSON.stringify({ agent: "dispatch@1", adapter: "pi", input: {} }),
+            at,
+            at,
+            `watt-mind/factory#${3000 + i}`,
+          );
+      }
+
+      // Cold-cache first request: at most 8 distinct tickets get resolved
+      // inline, no matter how many distinct unresolved subjects are in the
+      // page -- an unbounded fan-out here is exactly the shape that has
+      // caused tracker rate-limit incidents.
+      const first = await s.client.runs();
+      expect(calls.length).toBeLessThanOrEqual(8);
+      const firstResolvedCount = first.runs.filter(
+        (run) => run.subjectTitle,
+      ).length;
+      expect(firstResolvedCount).toBeLessThanOrEqual(8);
+      expect(firstResolvedCount).toBeGreaterThan(0);
+      expect(first.runs.length).toBe(ticketCount);
+
+      // A later poll picks up more of the previously-unresolved tickets
+      // (cache misses are not cached, so they stay eligible), converging on
+      // full resolution across a few polls without ever exceeding the cap
+      // in a single request.
+      const callsAfterFirst = calls.length;
+      const second = await s.client.runs();
+      expect(calls.length - callsAfterFirst).toBeLessThanOrEqual(8);
+      const secondResolvedCount = second.runs.filter(
+        (run) => run.subjectTitle,
+      ).length;
+      expect(secondResolvedCount).toBeGreaterThan(firstResolvedCount);
+    } finally {
+      s.close();
+    }
+  });
 });
 
 describe("repoNamesFromInput (OPS-356)", () => {
