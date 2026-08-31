@@ -387,6 +387,21 @@ sandbox step. It otherwise preserves the independent ticket command check;
 unparseable shell commands, missing files, non-test modules and flag values
 (`--preload x`) never qualify for skipping.
 
+### Dispatch pull-request readiness
+
+A dispatch agent may open its pull request as a draft. Draft status is a safe
+handoff state while the worker performs the authoritative checks: the ticket's
+and repository's verification commands, the configured base branch, and the
+required PR form. The worker promotes a draft to **ready for review** only
+after handoff verification and the base/form checks have all passed. The
+worker then records the PR's final draft state in the worker-authored handoff
+observation.
+
+Failure to complete the readiness transition is treated as a handoff
+verification failure. The PR remains a draft so the merge stage cannot land
+an unverified handoff; the recorded failure must be resolved before the PR is
+made ready for review.
+
 ### Run-scoped notification fallback
 
 Dispatch adapters mark the child with `FACTORY_DISPATCH=1` and pass the
