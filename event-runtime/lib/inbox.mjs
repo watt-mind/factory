@@ -605,12 +605,11 @@ export function createInboxItem(
     throw new Error(`unknown inbox source: ${source}`);
   }
   const refs = normalizeRefs(input?.refs);
-  // Runtime notifications are the high-volume producer that previously wrote
-  // machine-oriented titles and almost always a null body. Keep API/agent
-  // callers backward-compatible while making the durable notification ledger
-  // self-explanatory before it is projected to the operator.
+  // Runtime notifications and agent-produced items begin as machine-oriented
+  // events. Synthesize their durable presentation here so producers do not
+  // need to duplicate this policy before the item reaches the operator.
   const presentation =
-    source === "serve:notify"
+    source === "serve:notify" || source.startsWith("agent:")
       ? synthesizeInboxItem({ ...input, kind, refs, source })
       : input;
   const title = requiredString(presentation?.title, "title");

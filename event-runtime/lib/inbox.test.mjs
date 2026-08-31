@@ -272,6 +272,34 @@ describe("human inbox ledger (WM-285)", () => {
     });
   });
 
+  test("synthesizes agent-source presentation inside createInboxItem", () => {
+    const db = openDb(":memory:");
+    const input = {
+      kind: "ESCALATED",
+      title: "ESCALATED WM-2047: needs_human",
+      body: "The agent needs an operator decision.",
+      reasonCode: "needs_human",
+      ticketTitle: "consolidate presentation synthesis",
+      refs: { issue: "WM-2047", repo: "factory", runId: "run_2047" },
+      source: "agent:run_2047",
+      decision: decision(),
+      dedupeKey: "ESCALATED:WM-2047",
+    };
+    const expected = synthesizeInboxItem(input);
+
+    const created = createInboxItem(db, input, {
+      id: "agent_presentation",
+      now: 1000,
+    });
+
+    expect({ title: created.title, body: created.body }).toEqual({
+      title: expected.title,
+      body: expected.body,
+    });
+    expect(created.decision).toEqual(input.decision);
+    expect(created.dedupeKey).toBe(input.dedupeKey);
+  });
+
   test("same-question open items attach as waiters instead of stacking rows", () => {
     const db = openDb(":memory:");
     const first = createInboxItem(
@@ -302,7 +330,7 @@ describe("human inbox ledger (WM-285)", () => {
     );
     expect(second.id).toBe(first.id);
     expect(second.attached).toBe(true);
-    expect(second.body).toBe("old");
+    expect(second.body).toContain("old");
     expect(second.refs).toEqual({ issue: "WM-1", runId: "run_1" });
     expect(second.decision).toEqual(decision());
     expect(second.waiters).toEqual([
@@ -401,8 +429,8 @@ describe("human inbox ledger (WM-285)", () => {
       { id: "second" },
     );
     expect(second.id).toBe(first.id);
-    expect(second.title).toBe("second");
-    expect(second.body).toBe("new");
+    expect(second.title).toBe("Escalated: WM-1");
+    expect(second.body).toContain("new");
     expect(second.refs).toEqual({ issue: "WM-1", runId: "run_2" });
     expect(second.decision).toEqual(replacement);
     expect(second.delivery.supersededDecisions).toBe(1);

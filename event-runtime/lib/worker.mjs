@@ -88,7 +88,7 @@ import {
   PathViolation,
   safeJoin,
 } from "./workspace.mjs";
-import { createInboxItem, synthesizeInboxItem } from "./inbox.mjs";
+import { createInboxItem } from "./inbox.mjs";
 import { persistMergeReviewFromResult } from "./merge-reviews.mjs";
 import { registerMemos } from "./memos.mjs";
 import { templateFor } from "./decision-templates.mjs";
@@ -1413,25 +1413,19 @@ function createRefusalInboxItem(db, spec, result, { now }) {
   const body = result.decisionErrors?.length
     ? `The agent's decision request was rejected:\n${result.decisionErrors.join("\n")}`
     : null;
-  // Refusals are the one agent-produced inbox path.  Keep its decision request
-  // intact, but persist the same operator-readable presentation that runtime
-  // notifications receive before the item can be projected to the inbox.
-  const presentation = synthesizeInboxItem({
-    kind: "ESCALATED",
-    title:
-      result.decision?.question ?? `ESCALATED ${subject}: ${result.reasonCode}`,
-    body,
-    reasonCode: result.reasonCode,
-    ticketTitle: spec.approvalPolicy?.dispatchEvidence?.ticket?.title,
-    refs,
-    source: `agent:${spec.runId}`,
-    decision,
-  });
   return createInboxItem(
     db,
     {
-      ...presentation,
+      kind: "ESCALATED",
+      title:
+        result.decision?.question ??
+        `ESCALATED ${subject}: ${result.reasonCode}`,
+      body,
+      reasonCode: result.reasonCode,
+      ticketTitle: spec.approvalPolicy?.dispatchEvidence?.ticket?.title,
       refs,
+      source: `agent:${spec.runId}`,
+      decision,
       dedupeKey: `ESCALATED:${refs.issue ?? refs.runId}`,
     },
     { now },
