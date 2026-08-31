@@ -20,6 +20,7 @@ import {
   resolveInboxItem,
   fetchLinearInboxIssues,
   linearGql,
+  synthesizeInboxItem,
 } from "./inbox.mjs";
 import { decisionRequestHash } from "./decision.mjs";
 import { templateFor } from "./decision-templates.mjs";
@@ -118,6 +119,49 @@ test("the documented decision API errors match decide and retry", () => {
 });
 
 describe("human inbox ledger (WM-285)", () => {
+  test("synthesizes an operator-readable inbox message and explains decision effects", () => {
+    const request = {
+      schemaVersion: "factory.decision-request/v1",
+      question: "How should the factory proceed with watt-mind/factory#1158?",
+      context: "The dispatch run stopped before opening a pull request.",
+      options: [
+        {
+          id: "triage",
+          label: "Send back to Triage",
+          effect: "send_to_triage",
+        },
+        { id: "answer", label: "Answer the agent", effect: "answer" },
+      ],
+    };
+    const item = synthesizeInboxItem({
+      kind: "BLOCKED",
+      title:
+        "BLOCKED factory.dispatch.requested run_123-watt-mind/factory#1158: owned_paths_not_closed",
+      refs: {
+        repo: "factory",
+        issue: "watt-mind/factory#1158",
+        runId: "run_123",
+        pr: "42",
+      },
+      decision: request,
+    });
+
+    expect(item.title).toBe(
+      "Blocked: factory#1158 — its allowed paths do not cover every required file",
+    );
+    expect(item.body).toContain(
+      "What happened: A blocked item needs attention",
+    );
+    expect(item.body).toContain("Why it matters: The ticket's allowed paths");
+    expect(item.body).toContain("Ticket: watt-mind/factory#1158");
+    expect(item.body).toContain("Run: run_123");
+    expect(item.body).toContain("PR: 42");
+    expect(item.body).toContain("Send back to Triage — removes ai:agent-ready");
+    expect(item.body).toContain(
+      "Answer the agent — records the operator's reply",
+    );
+  });
+
   test("decision requests are validated and exposed with decision metadata", () => {
     const db = openDb(":memory:");
     expect(() =>
@@ -193,7 +237,7 @@ describe("human inbox ledger (WM-285)", () => {
     expect(db.query("SELECT COUNT(*) AS n FROM inbox_items").get().n).toBe(3);
   });
 
-  test("a dispatch proposal item stores the action-first title and why-line (WM-896)", () => {
+  test("a dispatch proposal item stores a human-readable title and decision details", () => {
     const db = openDb(":memory:");
     const refs = {
       proposalId: "prop_2dda1ca8-2469-4aab-8908-79c31a5df55b",
@@ -224,9 +268,9 @@ describe("human inbox ledger (WM-285)", () => {
       },
       { id: "inbox_dispatch" },
     );
-    expect(created.title).toBe(
-      "Dispatch WM-862 · factory · cursor-grok-4.6-high",
-    );
+    expect(created.title).toBe("Approve dispatch@1 run (WM-862)?");
+    expect(created.body).toContain("Question: Run dispatch@1 for WM-862");
+    expect(created.body).toContain("Approve proposal — approves the proposal");
     expect(created.decision.question).toBe(
       "Run dispatch@1 for WM-862 (factory) on cursor-grok-4.6-high?",
     );
@@ -1212,6 +1256,57 @@ describe("human inbox ledger (WM-285)", () => {
     ]);
   });
 
+  test("terminal run and closed ticket references auto-resolve as stale", async () => {
+    const db = openDb(":memory:");
+    const now = new Date(1000).toISOString();
+    db.query(
+      `INSERT INTO runs
+         (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+       VALUES ('run-terminal', 'terminal-key', '{}', 'sha256:test', 'COMPLETED', 1, ?, ?)`,
+    ).run(now, now);
+    createInboxItem(
+      db,
+      {
+        kind: "human_needed",
+        title: "terminal run",
+        refs: { runId: "run-terminal" },
+        source: "serve:notify",
+      },
+      { id: "terminal-run", now: 1000 },
+    );
+    createInboxItem(
+      db,
+      {
+        kind: "RC READY",
+        title: "closed ticket",
+        refs: { issue: "WM-closed" },
+      },
+      { id: "closed-ticket", now: 1000 },
+    );
+
+    expect(
+      await reconcileInbox(db, {
+        now: 60_000,
+        linearIssues: async () => [
+          {
+            identifier: "WM-closed",
+            state: { name: "Done", type: "completed" },
+            labels: { nodes: [] },
+          },
+        ],
+      }),
+    ).toEqual([
+      { id: "terminal-run", resolvedBy: "auto:stale_ref" },
+      { id: "closed-ticket", resolvedBy: "auto:stale_ref" },
+    ]);
+    expect(getInboxItem(db, "terminal-run")).toMatchObject({
+      resolvedReason: "stale_ref",
+    });
+    expect(getInboxItem(db, "closed-ticket")).toMatchObject({
+      resolvedReason: "stale_ref",
+    });
+  });
+
   test("a pending decision becomes moot when its event leaves human_needed", async () => {
     const db = openDb(":memory:");
     insertEvent(db, { eventId: "evt-2" });
@@ -1726,10 +1821,10 @@ describe("approving an expired proposal retargets its item (WM-714)", () => {
     });
     expect(again.id).toBe(id);
     expect(again.title).toBe(
-      `DECISION NEEDED proposal ${FRESH}: expired undecided`,
+      `Proposal expired: proposal ${FRESH} — The proposal expired before an operator approved or rejected it`,
     );
     expect(listInboxItems(db).map((item) => item.title)).toEqual([
-      `DECISION NEEDED proposal ${FRESH}: expired undecided`,
+      `Proposal expired: proposal ${FRESH} — The proposal expired before an operator approved or rejected it`,
     ]);
     expect(db.query("SELECT COUNT(*) AS n FROM inbox_items").get().n).toBe(1);
     // Supersession does not lose the retarget the operator already paid for.
