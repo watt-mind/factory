@@ -908,7 +908,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
   // WM-115 / #1252: a partial `dispatch` override used to disable the demo
   // stub wholesale, so the seams the caller left out — notably the WM-718
   // handoff comment — fell through to the real tracker CLI. A fake-adapter run
-  // then spawned `bun tools/linear.mjs comment` per run: real Linear writes
+  // then spawned `bun tools/ticket.mjs comment` per run: real Linear writes
   // from the test suite, and a wall-clock dependency that timed the burst test
   // out on CI. Use the shared fake tracker CLI and assert nothing reaches it.
   test("a partial dispatch override still never reaches the tracker CLI under the fake adapter", async () => {
@@ -940,7 +940,7 @@ describe("execute-side dispatch hardening (WM-115)", () => {
         reasonCode: "ok",
       });
       expect(runState(db, spec.runId)).toBe("COMPLETED");
-      expect(fakeCli.calls()).not.toContain("linear.mjs");
+      expect(fakeCli.calls()).toBe("");
     } finally {
       process.env.PATH = previousPath;
     }

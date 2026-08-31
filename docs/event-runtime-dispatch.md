@@ -194,7 +194,7 @@ Linear allows 2500 requests per hour. The factory used to treat a 400/429
 open chain-dispatch proposal re-ran `fetchTicket` + `fetchViewer` +
 `fetchInFlight` on every tick. Rate-limited outcomes are **retry-later**:
 
-- `tools/linear.mjs` records `X-RateLimit-Requests-*` (falling back to the
+- `tools/ticket.mjs` records `X-RateLimit-Requests-*` (falling back to the
   complexity headers), exposes `factory ticket budget`, and exits 3 with
   `{rateLimited:true, resetAt}` instead of a generic failure.
 - One planning pass memoizes in-flight issues by team+project for ≤60s and

@@ -1230,42 +1230,20 @@ function loadRepoEscalatePaths(repoName, root = reposRoot(), snapshot = null) {
     }
     return [...new Set(repo.escalatePaths.map((item) => item.trim()))];
   }
-  const file = reposConfigPath(root);
-  if (!existsSync(file)) {
-    throw new RepoError(
-      `${file}: cannot verify escalate_paths because repos.yaml is missing`,
-    );
-  }
-  let parsed;
+  let repo;
   try {
-    parsed = Bun.YAML.parse(readFileSync(file, "utf8"));
+    repo = getRepo(loadRepos({ root }), repoName);
   } catch (err) {
     throw new RepoError(
-      `${file}: cannot verify escalate_paths: ${err.message}`,
+      `${reposConfigPath(root)}: cannot verify escalate_paths: ${err.message}`,
     );
   }
-  const entry = (parsed?.repos ?? []).find((row) => row?.name === repoName);
-  if (!entry) {
+  if (!Array.isArray(repo.escalatePaths)) {
     throw new RepoError(
-      `${file}: cannot verify escalate_paths for unknown repo ${repoName}`,
+      `${reposConfigPath(root)}: repo ${repoName} must declare escalate_paths as an array (use [] only when deliberately empty)`,
     );
   }
-  const escalate = entry.escalate_paths ?? entry.escalatePaths;
-  if (!Array.isArray(escalate)) {
-    throw new RepoError(
-      `${file}: repo ${repoName} must declare escalate_paths as an array (use [] only when deliberately empty)`,
-    );
-  }
-  if (
-    !escalate.every(
-      (item) => typeof item === "string" && item.trim().length > 0,
-    )
-  ) {
-    throw new RepoError(
-      `${file}: repo ${repoName} has invalid escalate_paths (every glob must be a non-empty string)`,
-    );
-  }
-  return [...new Set(escalate.map((item) => item.trim()))];
+  return [...new Set(repo.escalatePaths.map((item) => item.trim()))];
 }
 
 function loadRuntimePolicy(root = reposRoot(), snapshot = null) {
