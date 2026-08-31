@@ -1,0 +1,31 @@
+{
+  "title": "factory.celld-smoke/v1 output artifact — cell interaction and verification result",
+  "type": "object",
+  "required": ["cellId", "cellVersion", "migrated", "entityVersion", "verified"],
+  "additionalProperties": false,
+  "properties": {
+    "cellId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Identifier of the target cell"
+    },
+    "cellVersion": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Observed monotonic cell version after operations"
+    },
+    "migrated": {
+      "type": "boolean",
+      "description": "True if schema migration succeeded or was already current"
+    },
+    "entityVersion": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Persisted entity version"
+    },
+    "verified": {
+      "type": "boolean",
+      "description": "True if post-write read-back matched input payload"
+    }
+  }
+}

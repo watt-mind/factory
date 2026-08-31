@@ -441,8 +441,9 @@ describe("registry", () => {
     // an auditable script, records expected missing logs as a completed
     // no-artifact outcome, and only chains a diagnosis when a ci-log artifact
     // was captured.
+    // Regenerated (#2144): added celld-smoke agent definition.
     const expected =
-      "sha256:5e787a02b59c4816c24abde6225cb568673d85f9d1fa3a6a1706d4468ca35015";
+      "sha256:225177afffb07f8032c60ff8365866b2b7852ba1ad71e089cd7bae6dee842c96";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
