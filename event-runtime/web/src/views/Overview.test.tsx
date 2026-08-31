@@ -951,7 +951,7 @@ describe("Overview needs you (WM-596)", () => {
     };
   }
 
-  test("leads with capped oldest-first inbox groups and opens the selected row", async () => {
+  test("leads with capped newest-first inbox groups and opens the selected row", async () => {
     const items = Array.from({ length: 6 }, (_, index) =>
       inboxItem(
         `blocked-${index}`,
@@ -974,13 +974,24 @@ describe("Overview needs you (WM-596)", () => {
           .slice(0, 2),
       ).toEqual(["Overview", "Needs you"]);
       expect(view.getAllByTitle(/Attention blocked-/)).toHaveLength(5);
-      expect(view.queryByTitle("Attention blocked-5")).toBeNull();
+      expect(
+        view
+          .getAllByTitle(/Attention blocked-/)
+          .map((row) => row.getAttribute("title")),
+      ).toEqual([
+        "Attention blocked-5",
+        "Attention blocked-4",
+        "Attention blocked-3",
+        "Attention blocked-2",
+        "Attention blocked-1",
+      ]);
+      expect(view.queryByTitle("Attention blocked-0")).toBeNull();
 
       fireEvent.click(view.getByRole("button", { name: "1 more →" }));
       expect(onNavigate).toHaveBeenCalledWith("inbox");
 
       fireEvent.keyDown(document.body, { key: "Enter" });
-      expect(onNavigate).toHaveBeenCalledWith("inbox/blocked-0");
+      expect(onNavigate).toHaveBeenCalledWith("inbox/blocked-5");
     } finally {
       restore();
     }

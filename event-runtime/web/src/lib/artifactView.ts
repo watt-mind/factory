@@ -370,7 +370,7 @@ export function groupRows(
   for (const row of rows) {
     const value = resolveRelative(row.raw, groupBy);
     if (value === undefined || value === null || value === "") {
-      missing ??= { key: " missing", label: "—", rows: [] };
+      missing ??= { key: "\0missing", label: "—", rows: [] };
       missing.rows.push(row);
       continue;
     }
