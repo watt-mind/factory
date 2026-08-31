@@ -3946,6 +3946,196 @@ sh -c 'sleep 5 & wait'
     expect(active.continuations).toHaveLength(1);
   });
 
+  test("a retained open PR skips the continuation and still releases the ticket claim", async () => {
+    const db = openDb(":memory:");
+    const ticket = "watt-mind/factory#2006";
+    let ticketState = "Todo";
+    const comments = [];
+    const unclaims = [];
+    const spec = queueRun(
+      db,
+      makeSpec({
+        runId: "run_tier_retained_pr",
+        agent: "dispatch@1",
+        input: { repo: "factory", ticket },
+        workspace: {
+          type: "worktree",
+          checkoutDir: "repo",
+          retainOnFailure: true,
+        },
+        outputContract: "factory.dispatch-result/v1",
+        modelTier: "light",
+        maxAttempts: 1,
+      }),
+    );
+    linkEvent(db, spec.runId, { type: "factory.dispatch.requested" });
+    const o = opts({
+      dispatch: {
+        locksDir: tmpDir("tier-retained-locks-"),
+        leasesDir: tmpDir("tier-retained-leases-"),
+        fetchTicket: () => ({
+          identifier: ticket,
+          state: { name: ticketState },
+          assignee: ticketState === "Todo" ? null : { name: "hdkiller" },
+          labels: {
+            nodes: [
+              {
+                name:
+                  ticketState === "Todo" ? "ai:agent-ready" : "ai:in-progress",
+              },
+            ],
+          },
+          description:
+            "## Owned Paths\n- event-runtime/lib/worker.mjs\n\n## Verification Command\n`bun test event-runtime/lib/worker.test.mjs`\n",
+        }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        budgetRefusal: () => null,
+        claimTicket: () => ((ticketState = "In Progress"), { ok: true }),
+        commentTicket: (entry) => comments.push(entry),
+        unclaimTicket: (entry) => (unclaims.push(entry), true),
+        projectTierEscalation: () => true,
+        // The agent opened a PR and left it out of draft; the ticket never
+        // reached In Review, so only the forge carries the ownership signal.
+        findWorkspacePullRequest: () => ({ number: 4242, isDraft: false }),
+      },
+      materializeWorktree: () => ({ path: tmpDir("tier-retained-checkout-") }),
+    });
+    const claim = claimNext(db, o);
+    const result = await executeClaimed(
+      db,
+      registry,
+      {
+        fake: {
+          async execute() {
+            return { exitCode: 1, timedOut: false };
+          },
+        },
+      },
+      claim,
+      o,
+    );
+
+    expect(result).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "agent_exit_1",
+      tierEscalationSkip: "retained_pr_open",
+    });
+    expect(db.query(`SELECT * FROM tier_escalations`).all()).toEqual([]);
+    // No continuation inherits the claim, so the run must hand the ticket back
+    // itself rather than strand it In Progress with nothing scheduled.
+    expect(unclaims).toEqual([
+      { repo: "factory", ticket, why: "agent_exit_1", log: null },
+    ]);
+    expect(comments).toContainEqual(
+      expect.objectContaining({
+        body: expect.stringContaining(
+          "the retained worktree already has an open non-draft PR",
+        ),
+      }),
+    );
+    db.close();
+  });
+
+  test("the PR the failed handoff just opened is drafted before the guard reads it, so escalation still happens", async () => {
+    const db = openDb(":memory:");
+    const ticket = "watt-mind/factory#2006";
+    let ticketState = "Todo";
+    // The agent's own PR: open and NOT draft at the moment the handoff
+    // verification fails. WM-718's hold converts it; the guard must observe
+    // the converted state, not the pre-hold one.
+    let prIsDraft = false;
+    const held = [];
+    const spec = queueRun(
+      db,
+      makeSpec({
+        runId: "run_tier_handoff_pr",
+        agent: "dispatch@1",
+        input: { repo: "factory", ticket },
+        workspace: {
+          type: "worktree",
+          checkoutDir: "repo",
+          retainOnFailure: true,
+        },
+        outputContract: "factory.dispatch-result/v1",
+        modelTier: "light",
+        maxAttempts: 1,
+      }),
+    );
+    linkEvent(db, spec.runId, { type: "factory.dispatch.requested" });
+    const o = opts({
+      verifyResult: () => {
+        throw new ContractViolation(["repo_verify_failed"], {
+          reasonCode: "handoff_verification_failed",
+          handoff: {
+            prNumber: 4242,
+            prUrl: "https://github.com/watt-mind/factory/pull/4242",
+            github: "watt-mind/factory",
+            verification: [],
+          },
+        });
+      },
+      dispatch: {
+        locksDir: tmpDir("tier-handoff-locks-"),
+        leasesDir: tmpDir("tier-handoff-leases-"),
+        fetchTicket: () => ({
+          identifier: ticket,
+          state: { name: ticketState },
+          assignee: ticketState === "Todo" ? null : { name: "hdkiller" },
+          labels: {
+            nodes: [
+              {
+                name:
+                  ticketState === "Todo" ? "ai:agent-ready" : "ai:in-progress",
+              },
+            ],
+          },
+          description:
+            "## Owned Paths\n- event-runtime/lib/worker.mjs\n\n## Verification Command\n`bun test event-runtime/lib/worker.test.mjs`\n",
+        }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        budgetRefusal: () => null,
+        claimTicket: () => ((ticketState = "In Progress"), { ok: true }),
+        commentTicket: () => {},
+        holdPullRequest: (entry) => (
+          held.push(entry),
+          (prIsDraft = true),
+          true
+        ),
+        returnHandoffTicket: () => ({ agentReadyRestored: true }),
+        unclaimTicket: () => true,
+        projectTierEscalation: () => true,
+        findWorkspacePullRequest: () => ({ number: 4242, isDraft: prIsDraft }),
+      },
+      materializeWorktree: () => ({ path: tmpDir("tier-handoff-checkout-") }),
+    });
+    const claim = claimNext(db, o);
+    const result = await executeClaimed(
+      db,
+      registry,
+      {
+        fake: {
+          async execute() {
+            return { exitCode: 0, timedOut: false };
+          },
+        },
+      },
+      claim,
+      o,
+    );
+
+    expect(result).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "handoff_verification_failed",
+      escalatedRunId: expect.any(String),
+    });
+    expect(result.tierEscalationSkip).toBeUndefined();
+    expect(held).toHaveLength(1);
+    expect(db.query(`SELECT * FROM tier_escalations`).all()).toHaveLength(1);
+    db.close();
+  });
+
   test("continuation handoff failures are matched per violation, anchored at its start", () => {
     const quoted =
       "repo_verify_failed: (fail) x\nweb_build_failed: quoted inside output";

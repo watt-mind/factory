@@ -3686,6 +3686,27 @@ export async function executeClaimed(
     return failureCount(db, runId, "agent_error") + 1 >= spec.maxAttempts;
   };
 
+  // The guard performs live tracker and forge reads. Memoize per reason code:
+  // a terminal path consults it once for the claim-release decision and again
+  // inside the escalation write, and those two answers must be the same world.
+  let escalationGuardCache = null;
+  const resolveEscalationGuard = (reasonCode) => {
+    if (escalationGuardCache?.reasonCode === reasonCode) {
+      return escalationGuardCache.guard;
+    }
+    const guard = tierEscalationDue(reasonCode)
+      ? tierEscalationContinuationGuard(spec, reasonCode, {
+          fetchTicket: fetchTicketFn,
+          findPullRequest:
+            dispatchOpts?.findWorkspacePullRequest ??
+            defaultFindWorkspacePullRequest,
+          workspacePath: worktreePath ?? checkoutPath,
+        })
+      : null;
+    escalationGuardCache = { reasonCode, guard };
+    return guard;
+  };
+
   const projectScheduledEscalation = (scheduled) =>
     scheduled
       ? reconcileTierEscalations(db, {
@@ -3741,15 +3762,7 @@ export async function executeClaimed(
 
   /** Terminal failure-shaped write: classify, finalize, and budget any retry atomically. */
   const failTerminal = (to, journalReason, reasonCode, beforeTerminal) => {
-    const escalationGuard = tierEscalationDue(reasonCode)
-      ? tierEscalationContinuationGuard(spec, reasonCode, {
-          fetchTicket: fetchTicketFn,
-          findPullRequest:
-            dispatchOpts?.findWorkspacePullRequest ??
-            defaultFindWorkspacePullRequest,
-          workspacePath: worktreePath ?? checkoutPath,
-        })
-      : null;
+    const escalationGuard = resolveEscalationGuard(reasonCode);
     const result = txImmediate(db, () => {
       const currentNow = nowFn();
       if (!assertCurrentToken(db, runId, fencingToken)) {
@@ -5042,7 +5055,15 @@ export async function executeClaimed(
     if (!lateCompletion && exitCode !== 0) {
       const reasonCode = `agent_exit_${exitCode}`;
       const escalating = tierEscalationDue(reasonCode);
-      if (mayMutateClaimedTicket() && !escalating) {
+      // A skipped escalation writes no continuation, so the claim has no
+      // successor to inherit it: release it here or the ticket is stranded
+      // In Progress forever. `defaultUnclaimTicket` no-ops unless the ticket
+      // is still In Progress + ai:in-progress, so the `ticket_in_review` skip
+      // cannot drag a reviewed ticket back to Todo (#2006).
+      const escalationGuard = escalating
+        ? resolveEscalationGuard(reasonCode)
+        : null;
+      if (mayMutateClaimedTicket() && (!escalating || escalationGuard?.skip)) {
         try {
           unclaimTicketFn({
             repo: repoName,
@@ -5243,15 +5264,6 @@ export async function executeClaimed(
         ? `${composeHandoffVerification(handoff)}\n\n**Result:** run ${runId} FAILED \`${reasonCode}\` — ${activeError.violations.join("; ")}`
         : null;
       const escalating = tierEscalationDue(reasonCode);
-      const escalationGuard = escalating
-        ? tierEscalationContinuationGuard(spec, reasonCode, {
-            fetchTicket: fetchTicketFn,
-            findPullRequest:
-              dispatchOpts?.findWorkspacePullRequest ??
-              defaultFindWorkspacePullRequest,
-            workspacePath: worktreePath ?? checkoutPath,
-          })
-        : null;
       // WM-718: the PR is the agent's, already opened; the structural hold is
       // to draft it and quote the observed failure where the reviewer looks.
       if (
@@ -5271,8 +5283,32 @@ export async function executeClaimed(
           /* intentionally ignored */
         }
       }
-      if (mayMutateClaimedTicket() && !escalating) {
-        if (isAgentHandoffFailure(reasonCode)) {
+      // Resolve the guard only AFTER the hold above: an ordinary handoff
+      // verification failure has just converted the agent's own PR to draft,
+      // and probing the forge before that would read the still-open PR as
+      // retained review ownership and suppress every escalation on the most
+      // common failure path (#2006).
+      const escalationGuard = escalating
+        ? resolveEscalationGuard(reasonCode)
+        : null;
+      if (mayMutateClaimedTicket() && (!escalating || escalationGuard?.skip)) {
+        if (escalationGuard?.skip) {
+          // No continuation was scheduled, so nothing inherits the claim.
+          // Release it through the plain unclaim, which no-ops unless the
+          // ticket is still In Progress + ai:in-progress — the
+          // `ticket_in_review` skip must never pull a reviewed ticket back to
+          // Todo the way the handoff return would.
+          try {
+            unclaimTicketFn({
+              repo: repoName,
+              ticket: ticketId,
+              why: failureReason,
+              log: null,
+            });
+          } catch {
+            /* intentionally ignored */
+          }
+        } else if (isAgentHandoffFailure(reasonCode)) {
           try {
             const returned = returnHandoffTicketFn({
               repo: repoName,
@@ -6098,8 +6134,12 @@ export function cancelRun(
   } = {},
 ) {
   const currentNow = resolveNow(now);
-  const active = ACTIVE_EXECUTIONS.get(runId);
   const outcome = txImmediate(db, () => {
+    // Read the executor registry inside the transaction: an execution can
+    // register or finish while the write waits on the lock, and the
+    // post-commit ownership handoff below must act on what was true when the
+    // cancellation actually committed.
+    const active = ACTIVE_EXECUTIONS.get(runId);
     const run = db
       .query(`SELECT state, attempts FROM runs WHERE run_id = ?`)
       .get(runId);
@@ -6146,9 +6186,20 @@ export function cancelRun(
     if (active) {
       active.abort(reason);
     }
-    return { ...result, proposalClose, escalation, escalationRefused };
+    return {
+      ...result,
+      proposalClose,
+      escalation,
+      escalationRefused,
+      hadActiveExecution: Boolean(active),
+    };
   });
-  const { escalation, escalationRefused, ...cancelledRun } = outcome;
+  const {
+    escalation,
+    escalationRefused,
+    hadActiveExecution: active,
+    ...cancelledRun
+  } = outcome;
 
   // An executing continuation owns its ticket/workspace cleanup and responds
   // to the abort above. An APPROVED/QUEUED continuation has no executor to do
