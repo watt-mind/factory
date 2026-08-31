@@ -22,8 +22,8 @@
   "limits": { "timeout_seconds": 120, "attempts": 1 },
   "mutating": false,
   "pins": {
-    "agents/celld-smoke.md": "sha256:0dcdb79d0c99f072a9fb7cc4a45a720ea6520326556b600a803c67fa044da398",
+    "agents/celld-smoke.md": "sha256:627867cbed98dad67bb826a442133944c79df92bd1043d146907f432bfcaa8d0",
     "schemas/celld-smoke.input.json": "sha256:92a26727efcdaae87b169fb8869783f53c30f42929db5619746e6a614b5f700e",
-    "schemas/celld-smoke.output.json": "sha256:c48ce7842249c13b40328c43e3485c58ea1f522047c772494c1ba2c0bceaa862"
+    "schemas/celld-smoke.output.json": "sha256:f4c3930dff0665c11e91a3fae3a72d1762e360316f2aaee27369f8116416a90f"
   }
 }

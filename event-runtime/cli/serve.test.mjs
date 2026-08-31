@@ -814,6 +814,76 @@ export default async function start() {
     db.close();
   });
 
+  test("tick awaits asynchronous inbox reconciliation", async () => {
+    const { tick, TICK_SUBSYSTEMS } = await import("../cli.mjs");
+    const db = openDb(":memory:");
+    let release;
+    let entered;
+    const reconciled = new Promise((resolve) => {
+      release = resolve;
+    });
+    const enteredInbox = new Promise((resolve) => {
+      entered = resolve;
+    });
+    const subsystems = Object.fromEntries(
+      TICK_SUBSYSTEMS.filter((name) => name !== "inbox").map((name) => [
+        name,
+        () => {},
+      ]),
+    );
+    let finished = false;
+    const running = tick({
+      db,
+      now: 9000,
+      skipPlan: true,
+      subsystems,
+      reconcile: () => {
+        entered();
+        return reconciled;
+      },
+    }).then(() => {
+      finished = true;
+    });
+
+    await enteredInbox;
+    expect(finished).toBe(false);
+    release();
+    await running;
+    db.close();
+  });
+
+  test("tick abandons an overrunning inbox reconcile and logs late failures", async () => {
+    const { tick, TICK_SUBSYSTEMS } = await import("../cli.mjs");
+    const db = openDb(":memory:");
+    const subsystems = Object.fromEntries(
+      TICK_SUBSYSTEMS.filter((name) => name !== "inbox").map((name) => [
+        name,
+        () => {},
+      ]),
+    );
+    let rejectSweep;
+    const sweep = new Promise((_, reject) => {
+      rejectSweep = reject;
+    });
+    const lines = [];
+    await tick({
+      db,
+      now: 9000,
+      skipPlan: true,
+      subsystems,
+      inboxDeadlineMs: 5,
+      log: (line) => lines.push(String(line)),
+      reconcile: () => sweep,
+    });
+    expect(lines.some((l) => l.includes("inbox reconcile overran"))).toBe(true);
+    // The abandoned sweep stays attributed: a late failure logs rather than
+    // surfacing as an unhandled rejection.
+    rejectSweep(new Error("late forge failure"));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(lines.some((l) => l.includes("late forge failure"))).toBe(true);
+    db.close();
+  });
+
   test("tick bounds orphaned non-run proposal sweeps and logs the remainder", async () => {
     const { tick } = await import("../cli.mjs");
     const { loadRegistry } = await import("../lib/registry.mjs");

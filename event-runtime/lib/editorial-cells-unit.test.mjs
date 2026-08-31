@@ -12,14 +12,14 @@ describe("Editorial Cells Pure In-Memory Unit Test (No live server, no subproces
     const site = new SiteCellClient({
       endpoint: "http://mock-cell.local",
       siteId: "coachwatts.com",
-      fetch: mockFetch
+      fetch: mockFetch,
     });
 
     await site.setPolicy({
       tone: "Authoritative endurance coaching",
       audience: "Cyclists and runners",
       pillars: ["Physiology", "Nutrition"],
-      safetyRules: ["No unreferenced medical claims"]
+      safetyRules: ["No unreferenced medical claims"],
     });
 
     const snapshot = await site.getSnapshot();
@@ -32,44 +32,47 @@ describe("Editorial Cells Pure In-Memory Unit Test (No live server, no subproces
         title: "Zone 2 Training: Mitochondrial Biogenesis Guide",
         slug: "zone-2-mitochondrial-biogenesis",
         angle: "Why low intensity builds aerobic base",
-        priority: 10
-      }
+        priority: 10,
+      },
     ]);
 
     await site.createArticle({
       topicId: "topic-zone2-training",
-      articleId: "article:coachwatts:zone2-guide"
+      articleId: "article:coachwatts:zone2-guide",
     });
 
     // 3. ArticleCell Brief & Research
     const article = new ArticleCellClient({
       endpoint: "http://mock-cell.local",
       articleId: "coachwatts:zone2-guide",
-      fetch: mockFetch
+      fetch: mockFetch,
     });
 
     await article.setBrief({
       title: "Zone 2 Training: Mitochondrial Biogenesis Guide",
       slug: "zone-2-mitochondrial-biogenesis",
       targetAudience: "Endurance athletes",
-      intent: "Explain cellular adaptations of low intensity exercise"
+      intent: "Explain cellular adaptations of low intensity exercise",
     });
 
     await article.addSources([
       {
         id: "src-san-millan-2020",
-        title: "Assessment of Metabolic Flexibility and Lactate Clearance in Elite Cyclists",
+        title:
+          "Assessment of Metabolic Flexibility and Lactate Clearance in Elite Cyclists",
         url: "https://pubmed.ncbi.nlm.nih.gov/32298782/",
         relevanceScore: 0.99,
-        claims: ["Zone 2 optimizes fat oxidation and clears blood lactate efficiently"]
-      }
+        claims: [
+          "Zone 2 optimizes fat oxidation and clears blood lactate efficiently",
+        ],
+      },
     ]);
 
     // 4. Draft Revision 1
     const draft = await article.commitRevision({
       title: "Zone 2 Training: Mitochondrial Biogenesis Guide",
       body: "# Zone 2 Training\n\nZone 2 training stimulates mitochondrial volume density...",
-      revisionNumber: 1
+      revisionNumber: 1,
     });
     expect(draft.ok).toBe(true);
 
@@ -78,20 +81,26 @@ describe("Editorial Cells Pure In-Memory Unit Test (No live server, no subproces
       revisionHash: draft.revisionHash,
       verdict: "APPROVE",
       score: 0.96,
-      findings: [{ category: "Accuracy", severity: "INFO", description: "Solid science." }]
+      findings: [
+        {
+          category: "Accuracy",
+          severity: "INFO",
+          description: "Solid science.",
+        },
+      ],
     });
     expect(review.verdict).toBe("APPROVE");
 
     await article.approveRevision({
       revisionHash: draft.revisionHash,
-      approvedBy: "laszlo@coachwatts.com"
+      approvedBy: "laszlo@coachwatts.com",
     });
 
     await article.recordPublicationReceipt({
       cmsPostId: "cw-post-1001",
       cmsUrl: "https://coachwatts.com/blog/zone-2-mitochondrial-biogenesis",
       cmsStatus: "draft",
-      revisionHash: draft.revisionHash
+      revisionHash: draft.revisionHash,
     });
 
     const state = await article.getState();
@@ -107,12 +116,12 @@ describe("Editorial Cells Pure In-Memory Unit Test (No live server, no subproces
       endpoint: "http://mock-cell.local",
       articleId: "article:coachwatts:data-only-test",
       access: "data-only",
-      fetch: mockFetch
+      fetch: mockFetch,
     });
 
     await article.setBrief({
       title: "Data Only Article",
-      slug: "data-only-test"
+      slug: "data-only-test",
     });
 
     const brief = await article.getBrief();
@@ -123,14 +132,14 @@ describe("Editorial Cells Pure In-Memory Unit Test (No live server, no subproces
       endpoint: "http://mock-cell.local",
       cellId: "article:coachwatts:data-only-test",
       access: "data-only",
-      fetch: mockFetch
+      fetch: mockFetch,
     });
 
     let forbiddenThrown = false;
     try {
       await genericClient.migrate({
         migrationId: "002_forbidden_migration",
-        sql: "CREATE TABLE secret_table (id TEXT);"
+        sql: "CREATE TABLE secret_table (id TEXT);",
       });
     } catch (err) {
       forbiddenThrown = true;
@@ -146,7 +155,7 @@ describe("Editorial Cells Pure In-Memory Unit Test (No live server, no subproces
       endpoint: "http://mock-cell.local",
       siteId: "coachwatts.com",
       access: "read-only",
-      fetch: mockFetch
+      fetch: mockFetch,
     });
 
     // Reading policy is permitted
@@ -160,7 +169,7 @@ describe("Editorial Cells Pure In-Memory Unit Test (No live server, no subproces
         tone: "Mutated tone",
         audience: "All",
         pillars: [],
-        safetyRules: []
+        safetyRules: [],
       });
     } catch (err) {
       writeForbidden = true;

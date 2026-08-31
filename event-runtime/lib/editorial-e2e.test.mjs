@@ -11,14 +11,14 @@ describe("Editorial End-to-End Workflow with CMS Publishing", () => {
     const site = new SiteCellClient({
       endpoint: "http://mock-cells.local",
       siteId: "editorial:site:coachwatts.com",
-      fetch: mockFetch
+      fetch: mockFetch,
     });
 
     await site.setPolicy({
       tone: "Authoritative, data-driven endurance coaching",
       audience: "Endurance athletes",
       pillars: ["Physiology", "Nutrition & Recovery"],
-      safetyRules: ["No unreferenced medical claims"]
+      safetyRules: ["No unreferenced medical claims"],
     });
 
     // 2. Step 1: Topic Scan -> Propose Topics
@@ -27,9 +27,10 @@ describe("Editorial End-to-End Workflow with CMS Publishing", () => {
         id: "topic-heat-prep",
         title: "Heat Acclimation Protocols for Summer Marathons",
         slug: "heat-acclimation-protocols-marathon",
-        angle: "Plasma volume expansion through passive sauna and active training",
-        priority: 9
-      }
+        angle:
+          "Plasma volume expansion through passive sauna and active training",
+        priority: 9,
+      },
     ]);
     expect(proposed.ok).toBe(true);
 
@@ -37,20 +38,21 @@ describe("Editorial End-to-End Workflow with CMS Publishing", () => {
     const articleId = "editorial:article:coachwatts.com:heat-prep-001";
     await site.createArticle({
       topicId: "topic-heat-prep",
-      articleId
+      articleId,
     });
 
     const article = new ArticleCellClient({
       endpoint: "http://mock-cells.local",
       articleId,
-      fetch: mockFetch
+      fetch: mockFetch,
     });
 
     await article.setBrief({
       title: "Heat Acclimation Protocols for Summer Marathons",
       slug: "heat-acclimation-protocols-marathon",
       targetAudience: "Marathon runners and triathletes",
-      intent: "Provide practical sauna and training guidelines for heat acclimation"
+      intent:
+        "Provide practical sauna and training guidelines for heat acclimation",
     });
 
     // 4. Step 3: Research Agent -> Extract Sources
@@ -62,9 +64,9 @@ describe("Editorial End-to-End Workflow with CMS Publishing", () => {
         relevanceScore: 0.98,
         claims: [
           "5-10 days of heat exposure increases plasma volume by 4.5-10%",
-          "Sweating threshold shifts earlier and sweat sodium concentration decreases"
-        ]
-      }
+          "Sweating threshold shifts earlier and sweat sodium concentration decreases",
+        ],
+      },
     ]);
 
     let state = await article.getState();
@@ -74,7 +76,7 @@ describe("Editorial End-to-End Workflow with CMS Publishing", () => {
     const draftRes = await article.commitRevision({
       title: "Heat Acclimation Protocols for Summer Marathons",
       body: "# Heat Acclimation Protocols for Summer Marathons\n\nAcclimating to heat stress is one of the most effective physiological interventions...",
-      revisionNumber: 1
+      revisionNumber: 1,
     });
     expect(draftRes.ok).toBe(true);
     const revHash = draftRes.revisionHash;
@@ -84,8 +86,14 @@ describe("Editorial End-to-End Workflow with CMS Publishing", () => {
       revisionHash: revHash,
       verdict: "APPROVE",
       score: 0.95,
-      findings: [{ category: "Physiology", severity: "INFO", description: "Plasma volume citations verified." }],
-      instructions: "Approved for publication"
+      findings: [
+        {
+          category: "Physiology",
+          severity: "INFO",
+          description: "Plasma volume citations verified.",
+        },
+      ],
+      instructions: "Approved for publication",
     });
     expect(reviewRes.verdict).toBe("APPROVE");
 
@@ -93,7 +101,7 @@ describe("Editorial End-to-End Workflow with CMS Publishing", () => {
     const approveRes = await article.approveRevision({
       revisionHash: revHash,
       approvedBy: "laszlo@coachwatts.com",
-      reason: "Ready for blog release"
+      reason: "Ready for blog release",
     });
     expect(approveRes.ok).toBe(true);
 
@@ -106,13 +114,13 @@ describe("Editorial End-to-End Workflow with CMS Publishing", () => {
         externalCmsCalls++;
         expect(title).toContain("Heat Acclimation");
         expect(slug).toBe("heat-acclimation-protocols-marathon");
-      }
+      },
     });
 
     const pubRes1 = await cms.publishDraft({
       articleCell: article,
       siteCell: site,
-      revisionHash: revHash
+      revisionHash: revHash,
     });
 
     expect(pubRes1.ok).toBe(true);
@@ -127,7 +135,7 @@ describe("Editorial End-to-End Workflow with CMS Publishing", () => {
     const pubRes2 = await cms.publishDraft({
       articleCell: article,
       siteCell: site,
-      revisionHash: revHash
+      revisionHash: revHash,
     });
 
     expect(pubRes2.ok).toBe(true);

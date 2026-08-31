@@ -8,22 +8,22 @@
     "bindings": [
       {
         "name": "GENERIC_CELL",
-        "class_name": "GenericCell"
+        "class_name": "GenericCell",
       },
       {
         "name": "SITE_CELL",
-        "class_name": "SiteCell"
+        "class_name": "SiteCell",
       },
       {
         "name": "ARTICLE_CELL",
-        "class_name": "ArticleCell"
-      }
-    ]
+        "class_name": "ArticleCell",
+      },
+    ],
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["GenericCell", "SiteCell", "ArticleCell"]
-    }
-  ]
+      "new_sqlite_classes": ["GenericCell", "SiteCell", "ArticleCell"],
+    },
+  ],
 }

@@ -50,6 +50,7 @@ const USAGE = BASE_USAGE.replace(
 
 // Preserve the small programmatic surface used by runtime tests and tooling.
 export {
+  INBOX_RECONCILE_DEADLINE_MS,
   PRUNE_INTERVAL_MS,
   TICK_SUBSYSTEMS,
   acquireServeLock,

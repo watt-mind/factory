@@ -1,15 +1,42 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["articleId", "title", "slug", "revisionHash", "revisionNumber", "wordCount", "cellVersion"],
+  "required": [
+    "articleId",
+    "outcome",
+    "title",
+    "slug",
+    "revisionHash",
+    "revisionNumber",
+    "wordCount",
+    "cellVersion"
+  ],
   "properties": {
-    "articleId": { "type": "string" },
-    "title": { "type": "string" },
-    "slug": { "type": "string" },
-    "revisionHash": { "type": "string" },
-    "revisionNumber": { "type": "integer" },
-    "wordCount": { "type": "integer" },
-    "cellVersion": { "type": "integer" }
+    "articleId": {
+      "type": "string"
+    },
+    "outcome": {
+      "type": "string",
+      "enum": ["DRAFTED"]
+    },
+    "title": {
+      "type": "string"
+    },
+    "slug": {
+      "type": "string"
+    },
+    "revisionHash": {
+      "type": "string"
+    },
+    "revisionNumber": {
+      "type": "integer"
+    },
+    "wordCount": {
+      "type": "integer"
+    },
+    "cellVersion": {
+      "type": "integer"
+    }
   },
   "additionalProperties": false
 }

@@ -2378,6 +2378,53 @@ describe("chain auto approval (WM-357)", () => {
       { proposalId: backlog[0].id, runId: backlog[0].runId },
     ]);
     expect(result.skipped).toBe(2);
+    expect(result.deadlineSkipped).toBe(2);
+  });
+
+  test("a slow open head yields the next pass to the following proposal (#2148)", async () => {
+    const db = openDb(":memory:");
+    const backlog = Array.from({ length: 3 }, (_, index) =>
+      dispatchSeed(db, `round-robin-${index}`, {
+        ticket: `WM-${21480 + index}`,
+      }),
+    );
+    const checked = [];
+    const options = {
+      deadlineMs: 50,
+      dispatchEligibility: async ({ ticket }) => {
+        checked.push(ticket);
+        await new Promise((resolve) => setTimeout(resolve, 70));
+        return {
+          ok: false,
+          refusal: { reason: "recheck_deferred" },
+          evidence: {
+            ticket: { labels: [] },
+            escalatePathIntersections: [],
+          },
+        };
+      },
+      runtimeGuard: () => null,
+    };
+
+    const first = await auto(db, options);
+    expect(first.open).toEqual([
+      {
+        proposalId: backlog[0].id,
+        reason: "dispatch_ineligible:recheck_deferred",
+      },
+    ]);
+    expect(first.skipped).toBe(2);
+    expect(first.deadlineSkipped).toBe(2);
+
+    const second = await auto(db, options);
+    expect(second.open).toEqual([
+      {
+        proposalId: backlog[1].id,
+        reason: "dispatch_ineligible:recheck_deferred",
+      },
+    ]);
+    expect(second.deadlineSkipped).toBe(2);
+    expect(checked).toEqual(["WM-21480", "WM-21481"]);
   });
 
   test("registry-stale rows are evaluated once per (run, registryVersion) and then memoised (#1706)", async () => {

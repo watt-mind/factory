@@ -1,22 +1,65 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["siteId", "candidates", "cellVersion"],
+  "required": ["siteId", "outcome", "candidates", "cellVersion"],
   "properties": {
-    "siteId": { "type": "string" },
-    "cellVersion": { "type": "integer" },
+    "siteId": {
+      "type": "string"
+    },
+    "outcome": {
+      "type": "string",
+      "enum": ["TOPICS_PROPOSED", "NO_GAPS"]
+    },
+    "cellVersion": {
+      "type": "integer"
+    },
     "candidates": {
       "type": "array",
       "items": {
         "type": "object",
         "required": ["id", "title", "slug", "angle", "priority"],
         "properties": {
-          "id": { "type": "string" },
-          "title": { "type": "string" },
-          "slug": { "type": "string" },
-          "angle": { "type": "string" },
-          "priority": { "type": "integer" },
-          "rationale": { "type": "string" }
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "angle": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "rationale": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "claimed": {
+      "type": "array",
+      "description": "Topics claimed into an ArticleCell by this scan; each entry chains a research run.",
+      "items": {
+        "type": "object",
+        "required": ["topicId", "articleId", "title", "slug"],
+        "properties": {
+          "topicId": {
+            "type": "string"
+          },
+          "articleId": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          }
         },
         "additionalProperties": false
       }

@@ -12,7 +12,11 @@ export class CmsAdapterError extends Error {
 }
 
 export class CmsAdapter {
-  constructor({ target = "mock", baseUrl = "https://coachwatts.com", customPublisher = null } = {}) {
+  constructor({
+    target = "mock",
+    baseUrl = "https://coachwatts.com",
+    customPublisher = null,
+  } = {}) {
     this.target = target;
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.customPublisher = customPublisher;
@@ -20,13 +24,17 @@ export class CmsAdapter {
 
   async publishDraft({ articleCell, siteCell, revisionHash }) {
     if (!articleCell) {
-      throw new CmsAdapterError("articleCell client is required", { code: "missing_article_cell" });
+      throw new CmsAdapterError("articleCell client is required", {
+        code: "missing_article_cell",
+      });
     }
 
     // 1. Read state from ArticleCell
     const state = await articleCell.getState();
     if (!state || !state.brief) {
-      throw new CmsAdapterError("Article brief not found on cell", { code: "missing_brief" });
+      throw new CmsAdapterError("Article brief not found on cell", {
+        code: "missing_brief",
+      });
     }
 
     // 2. Check for existing publication receipt (Idempotency)
@@ -37,24 +45,30 @@ export class CmsAdapter {
         receiptId: state.receipt.id,
         cmsPostId: state.receipt.cms_post_id,
         cmsUrl: state.receipt.cms_url,
-        revisionHash
+        revisionHash,
       };
     }
 
     // 3. Verify approval receipt exists for this exact revision hash
     if (!state.approval || state.approval.revision_hash !== revisionHash) {
-      throw new CmsAdapterError(`Revision ${revisionHash} does not have a valid approval receipt`, {
-        code: "unapproved_revision",
-        details: { approval: state.approval, revisionHash }
-      });
+      throw new CmsAdapterError(
+        `Revision ${revisionHash} does not have a valid approval receipt`,
+        {
+          code: "unapproved_revision",
+          details: { approval: state.approval, revisionHash },
+        },
+      );
     }
 
     // 4. Fetch the revision body
     const revision = await articleCell.getLatestRevision();
     if (!revision || revision.hash !== revisionHash) {
-      throw new CmsAdapterError(`Revision hash ${revisionHash} is not the latest revision on cell`, {
-        code: "revision_mismatch"
-      });
+      throw new CmsAdapterError(
+        `Revision hash ${revisionHash} is not the latest revision on cell`,
+        {
+          code: "revision_mismatch",
+        },
+      );
     }
 
     const { title, slug } = state.brief;
@@ -68,7 +82,7 @@ export class CmsAdapter {
         slug,
         markdown: revision.body,
         cmsPostId,
-        cmsUrl
+        cmsUrl,
       });
     }
 
@@ -77,17 +91,21 @@ export class CmsAdapter {
       cmsPostId,
       cmsUrl,
       cmsStatus: "draft",
-      revisionHash
+      revisionHash,
     });
 
     // 7. Update SiteCell coverage index if siteCell is supplied
     if (siteCell && typeof siteCell.indexCoverage === "function") {
-      await siteCell.indexCoverage({
-        slug,
-        title,
-        articleId: articleCell.articleId,
-        url: cmsUrl
-      }).catch(() => { /* non-blocking */ });
+      await siteCell
+        .indexCoverage({
+          slug,
+          title,
+          articleId: articleCell.articleId,
+          url: cmsUrl,
+        })
+        .catch(() => {
+          /* non-blocking */
+        });
     }
 
     return {
@@ -95,7 +113,7 @@ export class CmsAdapter {
       receiptId: receiptRes.receiptId,
       cmsPostId,
       cmsUrl,
-      revisionHash
+      revisionHash,
     };
   }
 }

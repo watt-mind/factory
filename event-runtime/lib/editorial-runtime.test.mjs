@@ -1,6 +1,7 @@
 import { describe, it, beforeAll, afterAll, expect } from "bun:test";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, cpSync } from "node:fs";
+import { createServer } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SiteCellClient, ArticleCellClient } from "./editorial-cells.mjs";
@@ -8,28 +9,65 @@ import { SiteCellClient, ArticleCellClient } from "./editorial-cells.mjs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "../..");
 const CELLS_DIR = path.join(REPO_ROOT, "cells");
-const TMP_TEST_DIR = path.resolve(REPO_ROOT, ".test-editorial-cells-" + Date.now());
+const TMP_TEST_DIR = path.resolve(
+  REPO_ROOT,
+  ".test-editorial-cells-" + Date.now(),
+);
 
-const TEST_PORT = 9985;
-const TEST_ENDPOINT = `http://127.0.0.1:${TEST_PORT}`;
+// `celld` is a local developer daemon; it is not provisioned in CI or in the
+// sandbox, so the whole suite is gated on the binary being present.
+const CELLD_BIN = Bun.which("celld");
 
-let celldProcess = null;
+// wrangler.jsonc is JSONC: strip comments and trailing commas before parsing.
+function parseJsonc(text) {
+  const withoutComments = text
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:"'\\])\/\/.*$/gm, "$1");
+  return JSON.parse(withoutComments.replace(/,(\s*[}\]])/g, "$1"));
+}
 
-function startCelld(customPort = TEST_PORT, storageProjectDir = TMP_TEST_DIR) {
-  return spawn("celld", [
-    "dev",
-    storageProjectDir,
-    "--host",
-    "127.0.0.1",
-    "--port",
-    String(customPort),
-  ], {
-    cwd: storageProjectDir,
-    stdio: "pipe",
+// Pick a free port at run time — a hardcoded port collides on shared runners.
+async function pickFreePort() {
+  return await new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.on("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const { port } = srv.address();
+      srv.close(() => resolve(port));
+    });
   });
 }
 
-async function waitForHealth(endpoint = TEST_ENDPOINT, maxAttempts = 35) {
+const TEST_TOKEN = "editorial-" + Math.random().toString(36).slice(2);
+
+let TEST_PORT = 0;
+let TEST_ENDPOINT = "";
+let celldProcess = null;
+
+function startCelld(customPort, storageProjectDir = TMP_TEST_DIR) {
+  return spawn(
+    "celld",
+    [
+      "dev",
+      storageProjectDir,
+      "--host",
+      "127.0.0.1",
+      "--port",
+      String(customPort),
+    ],
+    {
+      cwd: storageProjectDir,
+      stdio: "pipe",
+      env: {
+        ...process.env,
+        CELL_AUTH_TOKEN: TEST_TOKEN,
+      },
+    },
+  );
+}
+
+async function waitForHealth(endpoint, maxAttempts = 35) {
+  endpoint = endpoint || TEST_ENDPOINT;
   for (let i = 0; i < maxAttempts; i++) {
     try {
       const res = await fetch(`${endpoint}/health`);
@@ -45,14 +83,36 @@ async function waitForHealth(endpoint = TEST_ENDPOINT, maxAttempts = 35) {
   return false;
 }
 
-describe("Editorial Agent Runtime Vertical Slice", () => {
+function siteClient(endpoint, siteId) {
+  return new SiteCellClient({ endpoint, siteId, authToken: TEST_TOKEN });
+}
+
+function articleClient(endpoint, articleId) {
+  return new ArticleCellClient({ endpoint, articleId, authToken: TEST_TOKEN });
+}
+
+describe.skipIf(!CELLD_BIN)("Editorial Agent Runtime Vertical Slice", () => {
   beforeAll(async () => {
-    if (existsSync(TMP_TEST_DIR)) rmSync(TMP_TEST_DIR, { recursive: true, force: true });
+    TEST_PORT = await pickFreePort();
+    TEST_ENDPOINT = `http://127.0.0.1:${TEST_PORT}`;
+
+    if (existsSync(TMP_TEST_DIR))
+      rmSync(TMP_TEST_DIR, { recursive: true, force: true });
     mkdirSync(TMP_TEST_DIR, { recursive: true });
     cpSync(CELLS_DIR, TMP_TEST_DIR, { recursive: true });
 
+    // Inject the shared-secret binding the worker requires (see the deployment
+    // warning in cells/src/index.mjs); the daemon reads it from wrangler vars.
+    const wranglerPath = path.join(TMP_TEST_DIR, "wrangler.jsonc");
+    const wranglerConfig = parseJsonc(await Bun.file(wranglerPath).text());
+    wranglerConfig.vars = {
+      ...(wranglerConfig.vars || {}),
+      CELL_AUTH_TOKEN: TEST_TOKEN,
+    };
+    await Bun.write(wranglerPath, JSON.stringify(wranglerConfig, null, 2));
+
     celldProcess = startCelld(TEST_PORT, TMP_TEST_DIR);
-    const healthy = await waitForHealth();
+    const healthy = await waitForHealth(TEST_ENDPOINT);
     expect(healthy).toBe(true);
   });
 
@@ -64,18 +124,26 @@ describe("Editorial Agent Runtime Vertical Slice", () => {
         // ignore
       }
     }
-    if (existsSync(TMP_TEST_DIR)) rmSync(TMP_TEST_DIR, { recursive: true, force: true });
+    if (existsSync(TMP_TEST_DIR))
+      rmSync(TMP_TEST_DIR, { recursive: true, force: true });
   });
 
   it("1. Initializes SiteCell policy and editorial snapshot", async () => {
-    const site = new SiteCellClient({ endpoint: TEST_ENDPOINT, siteId: "coachwatts.com" });
+    const site = siteClient(TEST_ENDPOINT, "coachwatts.com");
 
     // Set site policy
     const setRes = await site.setPolicy({
       tone: "Authoritative, data-driven, practical endurance coaching",
       audience: "Competitive cyclists, triathletes, and distance runners",
-      pillars: ["Cardiovascular Physiology", "Training Methodology", "Nutrition & Recovery"],
-      safetyRules: ["No unsubstantiated medical claims", "Cite peer-reviewed exercise physiology"]
+      pillars: [
+        "Cardiovascular Physiology",
+        "Training Methodology",
+        "Nutrition & Recovery",
+      ],
+      safetyRules: [
+        "No unsubstantiated medical claims",
+        "Cite peer-reviewed exercise physiology",
+      ],
     });
     expect(setRes.ok).toBe(true);
     expect(setRes.policyVersion).toBe(1);
@@ -88,7 +156,7 @@ describe("Editorial Agent Runtime Vertical Slice", () => {
   });
 
   it("2. Proposes topic candidates via topic-scan and claims one for creation", async () => {
-    const site = new SiteCellClient({ endpoint: TEST_ENDPOINT, siteId: "coachwatts.com" });
+    const site = siteClient(TEST_ENDPOINT, "coachwatts.com");
 
     // Topic scanner proposes candidates
     const proposeRes = await site.proposeTopics([
@@ -96,16 +164,18 @@ describe("Editorial Agent Runtime Vertical Slice", () => {
         id: "topic-vo2max-intervals",
         title: "Optimizing VO2max: 30/15 vs 4x4min Intervals for Cyclists",
         slug: "optimizing-vo2max-intervals-cycling",
-        angle: "Comparative analysis of short micro-intervals vs classic long bouts",
-        priority: 9
+        angle:
+          "Comparative analysis of short micro-intervals vs classic long bouts",
+        priority: 9,
       },
       {
         id: "topic-carb-fueling",
         title: "High-Carb Fueling (120g/hr): Gut Training Protocols",
         slug: "high-carb-fueling-gut-training",
-        angle: "Practical ramp-up strategy for high-carb intake during long races",
-        priority: 8
-      }
+        angle:
+          "Practical ramp-up strategy for high-carb intake during long races",
+        priority: 8,
+      },
     ]);
     expect(proposeRes.ok).toBe(true);
     expect(proposeRes.createdCount).toBe(2);
@@ -118,27 +188,30 @@ describe("Editorial Agent Runtime Vertical Slice", () => {
     // Operator claims and initializes ArticleCell
     const claimRes = await site.createArticle({
       topicId: "topic-vo2max-intervals",
-      articleId: "article:coachwatts:vo2max-intervals-001"
+      articleId: "article:coachwatts:vo2max-intervals-001",
     });
     expect(claimRes.ok).toBe(true);
 
     const updatedTopics = await site.listTopics("in_progress");
     expect(updatedTopics.count).toBe(1);
-    expect(updatedTopics.topics[0].article_id).toBe("article:coachwatts:vo2max-intervals-001");
+    expect(updatedTopics.topics[0].article_id).toBe(
+      "article:coachwatts:vo2max-intervals-001",
+    );
   });
 
   it("3. Executes full ArticleCell lifecycle: Research -> Draft -> Review -> Approval -> Publication", async () => {
-    const article = new ArticleCellClient({
-      endpoint: TEST_ENDPOINT,
-      articleId: "coachwatts:vo2max-intervals-001"
-    });
+    const article = articleClient(
+      TEST_ENDPOINT,
+      "coachwatts:vo2max-intervals-001",
+    );
 
     // Step A: Set Brief
     await article.setBrief({
       title: "Optimizing VO2max: 30/15 vs 4x4min Intervals for Cyclists",
       slug: "optimizing-vo2max-intervals-cycling",
       targetAudience: "Competitive endurance cyclists",
-      intent: "Provide definitive scientific guidance on interval duration selection"
+      intent:
+        "Provide definitive scientific guidance on interval duration selection",
     });
 
     let state = await article.getState();
@@ -149,24 +222,26 @@ describe("Editorial Agent Runtime Vertical Slice", () => {
     await article.addSources([
       {
         id: "src-ronnestad-2015",
-        title: "Short intervals induce superior training adaptations compared with long intervals in cyclists",
+        title:
+          "Short intervals induce superior training adaptations compared with long intervals in cyclists",
         url: "https://pubmed.ncbi.nlm.nih.gov/24714538/",
         relevanceScore: 0.98,
         claims: [
           "30/15 micro-intervals elicit greater fractional utilization of VO2max",
-          "Power output at 4mmol/L lactate increased significantly more with short intervals"
-        ]
+          "Power output at 4mmol/L lactate increased significantly more with short intervals",
+        ],
       },
       {
         id: "src-seiler-2013",
-        title: "Adaptations to aerobic interval training: Interactive effects of interval duration and intensity",
+        title:
+          "Adaptations to aerobic interval training: Interactive effects of interval duration and intensity",
         url: "https://pubmed.ncbi.nlm.nih.gov/21812822/",
         relevanceScore: 0.95,
         claims: [
           "Accumulating 32 minutes of work at 90-95% HRmax induces robust mitochondrial biogenesis",
-          "4x8min bouts balanced physiological stress and recovery better than 4x16min"
-        ]
-      }
+          "4x8min bouts balanced physiological stress and recovery better than 4x16min",
+        ],
+      },
     ]);
 
     state = await article.getState();
@@ -195,7 +270,7 @@ Classic Seiler intervals (4x4 to 4x8 minutes at 90-95% HRmax) provide continuous
     const draftRes = await article.commitRevision({
       title: "Optimizing VO2max: 30/15 vs 4x4min Intervals for Cyclists",
       body: draftMarkdown,
-      revisionNumber: 1
+      revisionNumber: 1,
     });
     expect(draftRes.ok).toBe(true);
     expect(draftRes.revisionNumber).toBe(1);
@@ -211,10 +286,18 @@ Classic Seiler intervals (4x4 to 4x8 minutes at 90-95% HRmax) provide continuous
       verdict: "APPROVE",
       score: 0.94,
       findings: [
-        { category: "Physiology", severity: "INFO", description: "Clear citations to Rønnestad and Seiler." },
-        { category: "Structure", severity: "INFO", description: "Strong actionable takeaways." }
+        {
+          category: "Physiology",
+          severity: "INFO",
+          description: "Clear citations to Rønnestad and Seiler.",
+        },
+        {
+          category: "Structure",
+          severity: "INFO",
+          description: "Strong actionable takeaways.",
+        },
       ],
-      instructions: "Draft is publication ready."
+      instructions: "Draft is publication ready.",
     });
     expect(reviewRes.ok).toBe(true);
     expect(reviewRes.verdict).toBe("APPROVE");
@@ -227,7 +310,7 @@ Classic Seiler intervals (4x4 to 4x8 minutes at 90-95% HRmax) provide continuous
     const approveRes = await article.approveRevision({
       revisionHash: revHash,
       approvedBy: "laszlo@coachwatts.com",
-      reason: "Excellent scientific rigor and clear coach advice."
+      reason: "Excellent scientific rigor and clear coach advice.",
     });
     expect(approveRes.ok).toBe(true);
     expect(approveRes.state).toBe("approved");
@@ -237,7 +320,7 @@ Classic Seiler intervals (4x4 to 4x8 minutes at 90-95% HRmax) provide continuous
       cmsPostId: "cw-post-9842",
       cmsUrl: "https://coachwatts.com/blog/optimizing-vo2max-intervals-cycling",
       cmsStatus: "draft",
-      revisionHash: revHash
+      revisionHash: revHash,
     });
     expect(pubRes.ok).toBe(true);
     expect(pubRes.state).toBe("published");
@@ -255,7 +338,7 @@ Classic Seiler intervals (4x4 to 4x8 minutes at 90-95% HRmax) provide continuous
     }
 
     // Start new celld instance on a new port using the SAME storage directory
-    const NEW_PORT = 9989;
+    const NEW_PORT = await pickFreePort();
     const NEW_ENDPOINT = `http://127.0.0.1:${NEW_PORT}`;
     celldProcess = startCelld(NEW_PORT, TMP_TEST_DIR);
 
@@ -263,12 +346,15 @@ Classic Seiler intervals (4x4 to 4x8 minutes at 90-95% HRmax) provide continuous
     expect(healthy).toBe(true);
 
     // Read back SiteCell
-    const site = new SiteCellClient({ endpoint: NEW_ENDPOINT, siteId: "coachwatts.com" });
+    const site = siteClient(NEW_ENDPOINT, "coachwatts.com");
     const snapshot = await site.getSnapshot();
     expect(snapshot.policy.pillars).toContain("Cardiovascular Physiology");
 
     // Read back ArticleCell
-    const article = new ArticleCellClient({ endpoint: NEW_ENDPOINT, articleId: "coachwatts:vo2max-intervals-001" });
+    const article = articleClient(
+      NEW_ENDPOINT,
+      "coachwatts:vo2max-intervals-001",
+    );
     const finalState = await article.getState();
     expect(finalState.state).toBe("published");
     expect(finalState.sourcesCount).toBe(2);

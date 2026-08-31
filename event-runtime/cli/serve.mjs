@@ -39,6 +39,13 @@ import { CLI_PATH, fail, flagValue, log } from "./shared.mjs";
 
 export const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 /**
+ * Cap on the inbox step (#2147). Reconciliation reads live GitHub and Linear
+ * state, so an unbounded await lets one slow forge stall every other tick
+ * step. Past the deadline the tick continues and the sweep finishes in the
+ * background; its result lands on the next poll.
+ */
+export const INBOX_RECONCILE_DEADLINE_MS = 10_000;
+/**
  * Shutdown budget (#1585). The supervisor (`await_daemon` in
  * bin/worktree-common.sh) SIGKILLs a serve that has not exited 3 s after
  * SIGTERM. Everything below must fit inside that window with margin, or the
@@ -232,6 +239,8 @@ export async function tick({
   subsystems = {},
   skipPlan = false,
   proposalSweepLimit,
+  reconcile = reconcileInbox,
+  inboxDeadlineMs = INBOX_RECONCILE_DEADLINE_MS,
   onStep = () => {},
 } = {}) {
   const tickStart = Date.now();
@@ -317,8 +326,25 @@ export async function tick({
 
   // Referent state is authoritative: acknowledged or untouched items both
   // resolve automatically once the proposal/event no longer needs a human.
-  await runStep("inbox", () => {
-    reconcileInbox(db, { now });
+  // Reconciliation now reads live GitHub/Linear state, so the step is capped:
+  // the tick moves on when the deadline passes and the in-flight sweep is left
+  // attributed, so a late failure logs instead of rejecting unhandled.
+  await runStep("inbox", async () => {
+    const sweep = Promise.resolve(reconcile(db, { now })).catch((err) => {
+      logLine(`tick inbox: ${err?.message ?? err}`);
+    });
+    if (!(inboxDeadlineMs > 0)) return sweep;
+    let timer;
+    const overran = new Promise((resolve) => {
+      timer = setTimeout(() => resolve("overran"), inboxDeadlineMs);
+      timer.unref?.();
+    });
+    const outcome = await Promise.race([sweep.then(() => "done"), overran]);
+    clearTimeout(timer);
+    if (outcome === "overran")
+      logLine(
+        `inbox reconcile overran ${inboxDeadlineMs}ms; continuing tick (sweep still running)`,
+      );
   });
 
   await runStep("proposals", () => {

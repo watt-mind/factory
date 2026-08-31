@@ -36,11 +36,24 @@ export class CellNotFoundError extends CellError {
 }
 
 export class CellClient {
-  constructor({ endpoint = "http://127.0.0.1:9876", cellId = null, access = "malleable", fetch = globalThis.fetch } = {}) {
+  constructor({
+    endpoint = "http://127.0.0.1:9876",
+    cellId = null,
+    access = "malleable",
+    fetch = globalThis.fetch,
+    authToken = null,
+  } = {}) {
     this.endpoint = endpoint.replace(/\/+$/, "");
     this.cellId = cellId;
+    // Coarse access tier advertised to the cell (malleable | read-write |
+    // data-only | read-only); the cell enforces it, this only declares it.
     this.access = access;
     this._fetch = fetch;
+    // Shared-secret bearer token for the loopback cell spike. Defaults to the
+    // daemon's own CELL_AUTH_TOKEN so a client in the same environment works
+    // without extra wiring.
+    this.authToken =
+      authToken ?? globalThis.process?.env?.CELL_AUTH_TOKEN ?? null;
   }
 
   forCell(cellId) {
@@ -51,13 +64,16 @@ export class CellClient {
       endpoint: this.endpoint,
       cellId,
       access: this.access,
-      fetch: this._fetch
+      fetch: this._fetch,
+      authToken: this.authToken,
     });
   }
 
   _url(path) {
     if (!this.cellId) {
-      throw new Error("CellClient must be bound to a cellId or call forCell(cellId)");
+      throw new Error(
+        "CellClient must be bound to a cellId or call forCell(cellId)",
+      );
     }
     const cleanPath = path.replace(/^\/+/, "");
     return `${this.endpoint}/cells/${encodeURIComponent(this.cellId)}/${cleanPath}`;
@@ -69,7 +85,8 @@ export class CellClient {
       Accept: "application/json",
       "X-Cell-Type": "generic",
       "X-Cell-Access": this.access,
-      ...headers
+      ...(this.authToken ? { Authorization: `Bearer ${this.authToken}` } : {}),
+      ...headers,
     };
 
     let reqBody = null;
@@ -83,13 +100,16 @@ export class CellClient {
       response = await this._fetch(url, {
         method,
         headers: reqHeaders,
-        body: reqBody
+        body: reqBody,
       });
     } catch (err) {
-      throw new CellError(`Network error reaching cell daemon at ${url}: ${err.message}`, {
-        code: "network_error",
-        details: err
-      });
+      throw new CellError(
+        `Network error reaching cell daemon at ${url}: ${err.message}`,
+        {
+          code: "network_error",
+          details: err,
+        },
+      );
     }
 
     const contentType = response.headers.get("content-type") || "";
@@ -98,10 +118,13 @@ export class CellClient {
       try {
         data = await response.json();
       } catch (err) {
-        throw new CellError(`Invalid JSON from cell endpoint ${url}: ${err.message}`, {
-          status: response.status,
-          code: "invalid_response"
-        });
+        throw new CellError(
+          `Invalid JSON from cell endpoint ${url}: ${err.message}`,
+          {
+            status: response.status,
+            code: "invalid_response",
+          },
+        );
       }
     } else {
       const text = await response.text();
@@ -113,21 +136,24 @@ export class CellClient {
         throw new VersionConflictError(data.message || "Version conflict", {
           currentVersion: data.currentVersion,
           cellVersion: data.cellVersion,
-          details: data
+          details: data,
         });
       }
       if (response.status === 404) {
         throw new CellNotFoundError(data.message || "Not found", {
           collection: data.collection,
           id: data.id,
-          details: data
+          details: data,
         });
       }
-      throw new CellError(data.message || `Cell request failed with status ${response.status}`, {
-        status: response.status,
-        code: data.error || "request_failed",
-        details: data
-      });
+      throw new CellError(
+        data.message || `Cell request failed with status ${response.status}`,
+        {
+          status: response.status,
+          code: data.error || "request_failed",
+          details: data,
+        },
+      );
     }
 
     return data;
@@ -136,7 +162,7 @@ export class CellClient {
   async checkHealth() {
     try {
       const res = await this._fetch(`${this.endpoint}/health`, {
-        headers: { Accept: "application/json" }
+        headers: { Accept: "application/json" },
       });
       if (!res.ok) return false;
       const data = await res.json();
@@ -156,7 +182,7 @@ export class CellClient {
     }
     return this._request("v1/schema/migrate", {
       method: "POST",
-      body: { migrationId, sql, description }
+      body: { migrationId, sql, description },
     });
   }
 
@@ -165,9 +191,12 @@ export class CellClient {
       throw new Error("collection and id are required");
     }
     try {
-      return await this._request(`v1/entities/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`, {
-        method: "GET"
-      });
+      return await this._request(
+        `v1/entities/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
+        {
+          method: "GET",
+        },
+      );
     } catch (err) {
       if (err instanceof CellNotFoundError) {
         return null;
@@ -180,19 +209,25 @@ export class CellClient {
     if (!collection) {
       throw new Error("collection is required");
     }
-    return this._request(`v1/entities/${encodeURIComponent(collection)}?limit=${encodeURIComponent(limit)}`, {
-      method: "GET"
-    });
+    return this._request(
+      `v1/entities/${encodeURIComponent(collection)}?limit=${encodeURIComponent(limit)}`,
+      {
+        method: "GET",
+      },
+    );
   }
 
   async putEntity(collection, id, data, { expectedVersion } = {}) {
     if (!collection || !id) {
       throw new Error("collection and id are required");
     }
-    return this._request(`v1/entities/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`, {
-      method: "PUT",
-      body: { data, expectedVersion }
-    });
+    return this._request(
+      `v1/entities/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
+      {
+        method: "PUT",
+        body: { data, expectedVersion },
+      },
+    );
   }
 
   async postEntity(collection, data, { id = null, expectedVersion } = {}) {
@@ -201,7 +236,7 @@ export class CellClient {
     }
     return this._request(`v1/entities/${encodeURIComponent(collection)}`, {
       method: "POST",
-      body: { id, data, expectedVersion }
+      body: { id, data, expectedVersion },
     });
   }
 
@@ -209,12 +244,16 @@ export class CellClient {
     if (!collection || !id) {
       throw new Error("collection and id are required");
     }
-    const query = expectedVersion !== undefined && expectedVersion !== null
-      ? `?expectedVersion=${encodeURIComponent(expectedVersion)}`
-      : "";
-    return this._request(`v1/entities/${encodeURIComponent(collection)}/${encodeURIComponent(id)}${query}`, {
-      method: "DELETE"
-    });
+    const query =
+      expectedVersion !== undefined && expectedVersion !== null
+        ? `?expectedVersion=${encodeURIComponent(expectedVersion)}`
+        : "";
+    return this._request(
+      `v1/entities/${encodeURIComponent(collection)}/${encodeURIComponent(id)}${query}`,
+      {
+        method: "DELETE",
+      },
+    );
   }
 
   async query(sql, params = []) {
@@ -223,7 +262,7 @@ export class CellClient {
     }
     return this._request("v1/query", {
       method: "POST",
-      body: { sql, params }
+      body: { sql, params },
     });
   }
 }

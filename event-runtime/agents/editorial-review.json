@@ -7,7 +7,10 @@
   "output_contract": "factory.editorial-review/v1",
   "model_tier": "strong",
   "effort": "high",
-  "workspace": { "type": "ephemeral", "retainOnFailure": true },
+  "workspace": {
+    "type": "ephemeral",
+    "retainOnFailure": true
+  },
   "capabilities": {
     "filesystem": "workspace-only",
     "services": [],
@@ -19,11 +22,14 @@
       }
     ]
   },
-  "limits": { "timeout_seconds": 180, "attempts": 1 },
+  "limits": {
+    "timeout_seconds": 180,
+    "attempts": 1
+  },
   "mutating": false,
   "pins": {
-    "agents/editorial-review.md": "sha256:5847a804b79ee76d9c504b94ab1d4e8f296c6e3f6edeca32cc407c2361d4e2fa",
+    "agents/editorial-review.md": "sha256:bd85cb13b3f9f94a278c27d955a44089da7998d7ffd4f449c7edf9e1a172946e",
     "schemas/editorial-review.input.json": "sha256:3a15c07b0c268470d3e94c67bd7f8b332f58a8a4383248adab9bb584a951044e",
-    "schemas/editorial-review.output.json": "sha256:b9d2b7583c9250c467eb987808460bac4e1fac9ebf08033bf5674b34d57ebac3"
+    "schemas/editorial-review.output.json": "sha256:147f259f03816286d70ddbf2a8b572ef1958f3e438a064cb3ea2c5d2e2dd728d"
   }
 }
