@@ -67,6 +67,42 @@ const defaultWorkflowRunList = (repo, options) =>
   readWorkflowRuns({ repo, ...options });
 
 /**
+ * Report whether every emitted factory command is available in a repository.
+ * Command links are intentionally untracked and can be restored with one
+ * `factory emit`, so missing and dangling links are actionable warnings.
+ */
+export function factoryCommandLinkDiagnostic({
+  commandsDir,
+  expectedCommands = [],
+} = {}) {
+  const missing = [];
+  const broken = [];
+  for (const name of expectedCommands) {
+    const target = path.join(commandsDir, `${name}.md`);
+    let st = null;
+    try {
+      st = lstatSync(target);
+    } catch {
+      /* intentionally ignored */
+    }
+    if (!st) {
+      missing.push(name);
+      continue;
+    }
+    if (st.isSymbolicLink() && !existsSync(target)) broken.push(name);
+  }
+  const problems = [...missing, ...broken];
+  return {
+    ok: problems.length === 0 ? true : "warn",
+    label: "/factory-* commands linked",
+    detail: problems.length
+      ? `${problems.length}/${expectedCommands.length} missing or broken: ${problems.join(", ")}`
+      : `${expectedCommands.length} commands`,
+    fix: problems.length ? "factory emit" : null,
+  };
+}
+
+/**
  * Report whether a repository's base branch has a healthy completed Actions
  * run. The reader is injectable so doctor tests never need GitHub access.
  */
@@ -1154,31 +1190,15 @@ if (import.meta.main) {
       }
     }
 
-    const commandsDir = path.join(p, ".claude", "commands");
-    const missing = [];
-    const broken = [];
-    for (const name of expectedCommands) {
-      const target = path.join(commandsDir, `${name}.md`);
-      let st = null;
-      try {
-        st = lstatSync(target);
-      } catch {
-        /* intentionally ignored */
-      }
-      if (!st) {
-        missing.push(name);
-        continue;
-      }
-      if (st.isSymbolicLink() && !existsSync(target)) broken.push(name); // dangling symlink
-    }
-    const problems = [...missing, ...broken];
+    const commandLinks = factoryCommandLinkDiagnostic({
+      commandsDir: path.join(p, ".claude", "commands"),
+      expectedCommands,
+    });
     check(
-      problems.length === 0,
-      "/factory-* commands linked",
-      problems.length
-        ? `${problems.length}/${expectedCommands.length} missing or broken: ${problems.join(", ")}`
-        : `${expectedCommands.length} commands`,
-      problems.length ? "factory emit" : null,
+      commandLinks.ok,
+      commandLinks.label,
+      commandLinks.detail,
+      commandLinks.fix,
     );
 
     const gitignorePath = path.join(p, ".gitignore");
