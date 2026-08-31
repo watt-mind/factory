@@ -413,8 +413,10 @@ describe("registry", () => {
     // grammar and its prompt pin changes; the registry digest follows it.
     // Regenerated (#2023): dispatch declares UX screenshots as durable
     // result artifacts and cites their content-addressed identifiers.
+    // Regenerated (#2035): triage-scan names ticket.mjs as the active ticket
+    // CLI and re-pins its definition; the prompt pin is a registry input.
     const expected =
-      "sha256:1602d801ca413eb7093918e489bc51901b884fc39a1705ca91128694db306e4f";
+      "sha256:db13f68023714db1485bd79cc1359169f5d7056fcc1e44db307c6748e48fedfe";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 

@@ -786,7 +786,7 @@ export async function main(argv = process.argv.slice(2)) {
           // --strict makes this file the ONLY source of MCP servers: no user
           // scope, no project .mcp.json, no claude.ai connectors. What an
           // unattended agent can reach is declared in git and moves by PR.
-          // Drops the Linear MCP too — tools/linear.mjs replaces it, reached via
+          // Drops the Linear MCP too — tools/ticket.mjs replaces it, reached via
           // the FACTORY_ROOT set below. Mirrors run-agent.sh.
           "--mcp-config",
           path.join(ROOT, "config/mcp/claude.json"),
@@ -863,13 +863,13 @@ export async function main(argv = process.argv.slice(2)) {
         "-u",
         "CLAUDE_CODE_ENTRYPOINT",
         // Agents run in a worktree, not in this checkout, so `bun
-        // tools/linear.mjs` does not resolve for them. The floor tells them to
-        // use "$FACTORY_ROOT/tools/linear.mjs"; this is what makes that true.
+        // tools/ticket.mjs` does not resolve for them. The floor tells them to
+        // use "$FACTORY_ROOT/tools/ticket.mjs"; this is what makes that true.
         // Without it, --strict-mcp-config removes the Linear MCP and leaves no
         // replacement — the control plane goes silent.
         `FACTORY_ROOT=${ROOT}`,
         // Run id == transcript basename, same convention as run-agent.sh: the
-        // rollup keys on it, linear.mjs stamps it into comments, the floor puts
+        // rollup keys on it, ticket.mjs stamps it into comments, the floor puts
         // it in PR bodies. One key joins Linear/GitHub back to this log (OPS-76).
         `FACTORY_RUN_ID=${path.basename(log, ".jsonl")}`,
         harnessBin,
