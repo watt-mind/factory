@@ -446,6 +446,26 @@ describe("worktree workspaces (WM-108)", () => {
     expect(destroyWorkspace(dir)).toBe(true);
   });
 
+  test("uses an injected materializeWorktree seam when provided", () => {
+    const calls = [];
+    const created = make("wtrepo", "WM-seam", "run_wt_seam", {
+      materializeWorktree: (args) => {
+        calls.push(args);
+        return { injected: true };
+      },
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      input: { repo: "wtrepo", ticket: "WM-seam" },
+      checkoutDir: "repo",
+      runId: "run_wt_seam",
+      attempt: 1,
+    });
+    expect(created.worktree).toEqual({ injected: true });
+    expect(destroyWorkspace(created.dir)).toBe(true);
+  });
+
   test("a sandboxed definition is refused when the workspace carries a worktree marker", () => {
     const { dir } = make("wtrepo", "WM-1-SANDBOX", "run_wt1_sandbox");
     expect(() =>

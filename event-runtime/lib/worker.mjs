@@ -3476,6 +3476,7 @@ export async function executeClaimed(
     resolveLinearKey = resolveLinearApiKey,
     policyRoot = FACTORY_ROOT,
     sandboxAvailability,
+    materializeWorktree,
     verifyResult: verifyResultFn = verifyResult,
   } = {},
 ) {
@@ -4540,6 +4541,7 @@ export async function executeClaimed(
         ticketLeaseOwner,
         workerLeasesDir: leasesDir,
         worktreeHandoff,
+        materializeWorktree,
       });
     } catch (err) {
       // Missing declared inputs are permanent: re-queuing cannot repopulate an
