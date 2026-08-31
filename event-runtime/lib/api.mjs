@@ -158,6 +158,8 @@ export function createApi({
   buildArtifactInventory = artifactInventory,
   getTickStats = null,
   getLinearBudget = loadLinearBudget,
+  // Injectable so dispatcher tests can prove a route group receives a path.
+  registryApi = handleRegistryApiRoute,
 } = {}) {
   const actor = "operator";
   const staticRegistryLoadedAt = new Date(now()).toISOString();
@@ -482,12 +484,11 @@ export function createApi({
         url.pathname === "/agents" ||
         url.pathname === "/overrides" ||
         url.pathname.startsWith("/overrides/") ||
-        url.pathname === "/promotion/preview" ||
-        url.pathname === "/promotion/apply" ||
+        url.pathname.startsWith("/promotion/") ||
         url.pathname === "/repos" ||
         url.pathname.startsWith("/repos/")
       ) {
-        const result = await handleRegistryApiRoute({ ...common, janitor });
+        const result = await registryApi({ ...common, janitor });
         if (result !== false) return result;
       }
       if (

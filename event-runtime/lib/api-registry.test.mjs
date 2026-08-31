@@ -804,6 +804,24 @@ describe("overlay promotion routes (gh-860)", () => {
     }
   });
 
+  test("API dispatcher sends nested promotion paths to the registry handler", async () => {
+    const seen = [];
+    const { server, request, close } = await makeServer({
+      registryApi: ({ url, send }) => {
+        seen.push(url.pathname);
+        return send(204);
+      },
+    });
+    try {
+      const response = await request("/promotion/preview/extra");
+      expect(response.status).toBe(204);
+      expect(seen).toEqual(["/promotion/preview/extra"]);
+    } finally {
+      close();
+      server.close();
+    }
+  });
+
   test("POST /promotion/apply drives injected seams and returns the PR", async () => {
     const db = openDb(":memory:");
     seed(db);
