@@ -378,13 +378,9 @@ export function prHref(item: InboxItem): string | null {
   return number && repo ? `https://github.com/${repo}/pull/${number}` : null;
 }
 
-/** Per-kind action chips may trust a digits-only refs.pr once refs.repo resolves. */
+/** Per-kind action chips resolve the same PR href as the reference list. */
 export function inboxActionPrHref(item: InboxItem): string | null {
-  const existing = prHref(item);
-  if (existing) return existing;
-  const number = /^\d+$/.exec(item.refs.pr?.trim() ?? "")?.[0];
-  const repo = githubRepo(item);
-  return number && repo ? `https://github.com/${repo}/pull/${number}` : null;
+  return prHref(item);
 }
 
 function refPrefixIsVisible(prefix: string, item: InboxItem): boolean {

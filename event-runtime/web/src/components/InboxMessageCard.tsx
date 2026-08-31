@@ -70,9 +70,7 @@ export function parseInboxMessage(body: string): MessageSection[] {
     if (quoted) {
       if (paragraph.length || list) flush();
       calloutLines ??= [];
-      calloutTone = /^(?:>\s*)?(warning|caution):/i.test(line)
-        ? "warning"
-        : "note";
+      if (/^(?:>\s*)?(warning|caution):/i.test(line)) calloutTone = "warning";
       calloutLines.push(quoted[1].replace(/^(warning|caution):\s*/i, ""));
       continue;
     }
@@ -203,7 +201,7 @@ export function InboxMessageCard({
                 role="note"
                 className={`mt-1.5 rounded border-l-2 px-2 py-1.5 text-(--text-dim) ${block.tone === "warning" ? "border-(--hue-warn) bg-(--hue-warn)/10" : "border-(--accent) bg-(--accent)/10"}`}
               >
-                <span className="mr-1 rounded bg-(--surface-2) px-1 py-0.5 text-[10px] font-medium uppercase">
+                <span className="mr-1 rounded bg-(--surface-2) px-1 py-0.5 text-[11px] font-medium uppercase">
                   {block.tone}
                 </span>
                 {inlineMarkdown(block.lines.join("\n"))}

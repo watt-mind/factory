@@ -283,15 +283,10 @@ describe("inbox pure helpers", () => {
     ).toBe("https://github.com/watt-mind/factory/pull/607");
   });
 
+  // `run`/`runId` stay unmapped by the WM-483 contract (identity labels reserve
+  // an empty slot); the run reference renders as text until #2119 decides otherwise.
   test("reference attributes have distinct icons", () => {
-    for (const reference of [
-      "run",
-      "proposal",
-      "event",
-      "issue",
-      "pr",
-      "repo",
-    ]) {
+    for (const reference of ["proposal", "event", "issue", "pr", "repo"]) {
       expect(attrIcon(reference)).not.toBeNull();
     }
   });

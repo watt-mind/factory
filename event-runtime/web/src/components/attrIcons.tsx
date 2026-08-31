@@ -115,7 +115,6 @@ const REGISTRY: Record<string, () => ReactNode> = {
   // ── projects / repos ──────────────────────────────────────────────────
   repository: () => <ArchiveIcon />,
   repo: () => <ArchiveIcon />,
-  run: () => <PlayIcon />,
   proposal: () => <TargetIcon />,
   event: () => <PaperPlaneIcon />,
   issue: () => <CheckCircledIcon />,

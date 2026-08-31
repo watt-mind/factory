@@ -24,6 +24,19 @@ describe("InboxMessageCard", () => {
     );
   });
 
+  test("a multi-line callout keeps the warning tone raised by its first line", () => {
+    const sections = parseInboxMessage(
+      "> Warning: confirm the target.\n> Retrying is destructive.",
+    );
+    expect(sections[0].blocks).toEqual([
+      {
+        type: "callout",
+        tone: "warning",
+        lines: ["confirm the target.", "Retrying is destructive."],
+      },
+    ]);
+  });
+
   test("keeps plain text as a paragraph and parses numbered lists", () => {
     const sections = parseInboxMessage("Plain update\n\n1. First\n2. Second");
     expect(sections).toEqual([
