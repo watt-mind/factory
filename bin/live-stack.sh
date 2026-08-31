@@ -308,7 +308,7 @@ gh_app_release_root() {
 
 gh_app_daemon_command_matches() { # <ps command>
   local command="$1" script release_root relative release_id
-  [[ "$command" =~ ^([^[:space:]]*/)?bun[[:space:]]+([^[:space:]]+)[[:space:]]+--daemon$ ]] \
+  [[ "$command" =~ ^([^[:space:]]*/)?bun[[:space:]]+([^[:space:]]+)[[:space:]]+--daemon(-held)?$ ]] \
     || return 1
   script="${BASH_REMATCH[2]}"
   [[ "$script" == "$REPO/lib/control-plane/gh-app-auth.mjs" ]] && return 0
