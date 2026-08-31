@@ -38,6 +38,7 @@ import {
 } from "./api-test-helpers.mjs";
 import { createHookRegistry } from "./hooks.mjs";
 import { GITHUB_INTAKE_STALE_AFTER_MS } from "./intake.mjs";
+import { statusView } from "./status-view.mjs";
 
 const makeServer = async (...args) => {
   const result = await makeApiServer(...args);
@@ -673,6 +674,27 @@ describe("GET /status hook decisions (WM-842)", () => {
     } finally {
       s.close();
     }
+  });
+
+  test("stalled Linear read-budget anomalies are capped at 20 rows plus a count line (#1937)", () => {
+    const dir = tmpDir("evrt-status-budget-cap-");
+    const db = openDb(path.join(dir, "runtime.db"));
+    const nowMs = 100000000;
+    const staleAt = new Date(nowMs - 5 * 60_000 - 1).toISOString();
+    for (let i = 1; i <= 25; i++) {
+      db.query(
+        `INSERT INTO events (source, event_id, type, subject, status, payload_hash, occurred_at, received_at, plan_failures, last_plan_error, admitted_at, envelope_json)
+         VALUES ("test", ?, "test.type", "test", "admitted", "dummy-hash", ?, ?, 0, "linear_read_budget_exhausted", ?, "{}")`,
+      ).run(`evt-budget-cap-${i}`, staleAt, staleAt, staleAt);
+    }
+    const anomalies = statusView(db, registry, nowMs, {
+      policyVersion: "git:test",
+    }).anomalies.configuration.filter((a) => a.includes("Linear read-budget"));
+    expect(anomalies).toHaveLength(21);
+    expect(anomalies[20]).toBe(
+      "More admitted events beyond the first 20 are deferred for Linear read-budget exhaustion",
+    );
+    db.close();
   });
 
   test("hooks.decisions24h is empty before any hook ever ran (no table yet)", async () => {

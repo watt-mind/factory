@@ -541,12 +541,14 @@ function resolveNow(now) {
   return typeof now === "function" ? now() : now;
 }
 
-// Planning runs in the planner worker, not the serve loop. Bound each event's
-// Linear CLI reads so one stalled ticket cannot delay the next event forever;
-// the default leaves room for normal control-plane reads without holding an
-// operator's planner pass hostage. Operators may set the positive millisecond
-// FACTORY_LINEAR_READ_TIMEOUT_MS environment variable to tune this deadline.
-const LINEAR_READ_TIMEOUT_MS = (() => {
+// Planning normally runs in the planner worker, but `serve --no-planner` still
+// plans inline on the serve loop, so a stalled read can block the tick itself.
+// Bound each event's Linear CLI reads so one stalled ticket cannot delay the
+// next event forever; the default leaves room for normal control-plane reads
+// without holding an operator's planner pass hostage. Operators may set the
+// positive millisecond FACTORY_LINEAR_READ_TIMEOUT_MS environment variable to
+// tune this deadline.
+export const LINEAR_READ_TIMEOUT_MS = (() => {
   const n = Number(process.env.FACTORY_LINEAR_READ_TIMEOUT_MS);
   return Number.isFinite(n) && n > 0 ? n : 25_000;
 })();

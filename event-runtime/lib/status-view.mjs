@@ -19,6 +19,10 @@ import {
 } from "./workers.mjs";
 
 const LINEAR_READ_BUDGET_STALLED_AFTER_MS = 5 * 60_000;
+// A whole-backlog stall would otherwise push one anomaly line per admitted
+// event and drown every other anomaly in the status view; the count line tells
+// the operator how many more are behind the cap.
+const LINEAR_READ_BUDGET_STALLED_LIMIT = 20;
 
 function eventCounts(db) {
   const counts = {
@@ -224,15 +228,22 @@ export function statusView(
       eventId: row.event_id,
       lastError: row.last_plan_error,
     }));
+  // `events` carries no last-plan-attempt timestamp, so staleness is aged from
+  // admitted_at: the row is only reported once the event has been admitted (and
+  // therefore replanned every tick) for longer than the threshold.
+  const stalledLinearReadBudgetCutoff = new Date(
+    nowMs - LINEAR_READ_BUDGET_STALLED_AFTER_MS,
+  ).toISOString();
   const stalledLinearReadBudgets = db
     .query(
       `SELECT source, event_id FROM events
        WHERE status = 'admitted'
          AND last_plan_error = 'linear_read_budget_exhausted'
          AND admitted_at < ?
-       ORDER BY admitted_at, rowid`,
+       ORDER BY admitted_at, rowid
+       LIMIT ?`,
     )
-    .all(new Date(nowMs - LINEAR_READ_BUDGET_STALLED_AFTER_MS).toISOString());
+    .all(stalledLinearReadBudgetCutoff, LINEAR_READ_BUDGET_STALLED_LIMIT + 1);
 
   const fleet = workerCapacityView(db, nowMs, {
     workerPolicy,
@@ -307,11 +318,18 @@ export function statusView(
   if (policyVersion === "unknown")
     configAnomalies.push("policyVersion is unknown");
   if (fleet.policyError) configAnomalies.push(fleet.policyError);
-  for (const row of stalledLinearReadBudgets) {
+  for (const row of stalledLinearReadBudgets.slice(
+    0,
+    LINEAR_READ_BUDGET_STALLED_LIMIT,
+  )) {
     configAnomalies.push(
       `Admitted event ${row.source}:${row.event_id} has been deferred for Linear read-budget exhaustion for over ${LINEAR_READ_BUDGET_STALLED_AFTER_MS / 60_000} minutes`,
     );
   }
+  if (stalledLinearReadBudgets.length > LINEAR_READ_BUDGET_STALLED_LIMIT)
+    configAnomalies.push(
+      `More admitted events beyond the first ${LINEAR_READ_BUDGET_STALLED_LIMIT} are deferred for Linear read-budget exhaustion`,
+    );
   // Registry-load anomalies that are deliberately not load errors — today
   // only artifact-view sidecars that do not fit their schema (WM-454).
   configAnomalies.push(...(registry?.anomalies ?? []));

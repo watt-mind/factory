@@ -26,6 +26,7 @@ import {
   modelAdapterMismatch,
   DEFAULT_MAX_IN_FLIGHT as PLANNER_DEFAULT_MAX_IN_FLIGHT,
   idempotencyKeyFor,
+  LINEAR_READ_TIMEOUT_MS,
   pinMemos,
   planAdmittedEvents,
   planEvent,
@@ -4644,6 +4645,16 @@ describe("Linear rate limit (WM-878)", () => {
       ).toEqual({ status: "planned", last_plan_error: null });
     });
   });
+
+  // The default is what production runs on: no deployment sets
+  // FACTORY_LINEAR_READ_TIMEOUT_MS, so a silent change to this number changes
+  // how long a stalled Linear read can hold a planner pass.
+  test.skipIf(process.env.FACTORY_LINEAR_READ_TIMEOUT_MS != null)(
+    "the Linear read budget defaults to 25s when FACTORY_LINEAR_READ_TIMEOUT_MS is unset",
+    () => {
+      expect(LINEAR_READ_TIMEOUT_MS).toBe(25_000);
+    },
+  );
 
   test("one planning pass over 10 candidates makes at most 3 in-flight queries", () => {
     withReposRoot(gatedYaml, () => {
