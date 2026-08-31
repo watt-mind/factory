@@ -60,6 +60,37 @@ function pickPortBase() {
   throw new Error("could not find a free port band for worktree-common tests");
 }
 
+// The delayed worktree-up fixtures start real daemons. Give every fixture its
+// own API/web pair rather than letting WM-1763 resolve to the production
+// default band. Keep both sockets open while probing so the pair is known to
+// be available together before the fixture hands it to worktree-up.
+function pickDelayedHealthPort() {
+  for (let i = 0; i < 50; i++) {
+    const candidate = 20000 + 2 * Math.floor(Math.random() * 20000);
+    let api;
+    let web;
+    try {
+      api = Bun.listen({
+        hostname: "127.0.0.1",
+        port: candidate,
+        socket: { data() {} },
+      });
+      web = Bun.listen({
+        hostname: "127.0.0.1",
+        port: candidate + 1,
+        socket: { data() {} },
+      });
+      return candidate;
+    } catch {
+      // Try another pair when either API or web is in use.
+    } finally {
+      web?.stop(true);
+      api?.stop(true);
+    }
+  }
+  throw new Error("could not find a free API/web pair for delayed health");
+}
+
 const PORT_BASE = pickPortBase();
 const PORT_RESERVATION_ROOT = mkdtempSync(
   path.join(tmpdir(), "factory-port-reservations-"),
@@ -210,6 +241,7 @@ function delayedHealthFixture({
   workerExitsImmediately = false,
 } = {}) {
   const fixture = worktreeUpFixture();
+  const portBase = pickDelayedHealthPort();
   const fakeBun = path.join(fixture.mockBin, "bun");
   mkdirSync(path.join(fixture.root, "event-runtime", "web"), {
     recursive: true,
@@ -288,7 +320,7 @@ esac
   git(fixture.root, "add", "event-runtime", "bin");
   git(fixture.root, "commit", "-qm", "delayed health fixture");
   git(fixture.root, "push", "-q", "origin", "develop");
-  return fixture;
+  return { ...fixture, portBase };
 }
 
 function runDelayedHealthWorktreeUp(fixture, timeout, resume = false) {
@@ -304,6 +336,8 @@ function runDelayedHealthWorktreeUp(fixture, timeout, resume = false) {
     {
       FACTORY_WT_ROOT: fixture.worktrees,
       FACTORY_LOCK_DIR: path.join(fixture.root, ".locks", "bun-install"),
+      FACTORY_PORT_BASE: String(fixture.portBase),
+      FACTORY_PORT_SPAN: "1",
       FACTORY_PORT_RESERVATION_ROOT: path.join(fixture.root, ".locks", "ports"),
       FACTORY_WORKTREE_HEALTH_TIMEOUT_S: String(timeout),
       FAKE_HEALTH_DELAY_MS: "2000",
@@ -1324,6 +1358,8 @@ test("worktree-up times out a live web daemon that never binds and tears down al
       {
         FACTORY_WT_ROOT: fixture.worktrees,
         FACTORY_LOCK_DIR: path.join(fixture.root, ".locks", "bun-install"),
+        FACTORY_PORT_BASE: String(fixture.portBase),
+        FACTORY_PORT_SPAN: "1",
         FACTORY_PORT_RESERVATION_ROOT: path.join(
           fixture.root,
           ".locks",
