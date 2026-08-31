@@ -71,7 +71,7 @@ release_worktree_lifecycle_lock() {
 # unreachable control plane leaves the worktree in place.
 ticket_is_terminal() { # <ticket> <branch>
   local ticket="$1" branch="$2" json="" state="" merged=""
-  if json=$(bun "$REPO/tools/linear.mjs" get "$ticket" --json 2>/dev/null); then
+  if json=$(bun "$REPO/tools/ticket.mjs" get "$ticket" --json 2>/dev/null); then
     state=$(printf '%s\n' "$json" | awk '
       {
         line=$0

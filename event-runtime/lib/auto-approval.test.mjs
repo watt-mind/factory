@@ -22,7 +22,7 @@ import { planAdmittedEvents } from "./planner.mjs";
 import { lifecycleOf, runState } from "./lifecycle.mjs";
 import { openProposals } from "./proposals.mjs";
 import { loadRegistry } from "./registry.mjs";
-import { LinearRateLimitError } from "../../tools/linear.mjs";
+import { LinearRateLimitError } from "../../tools/ticket.mjs";
 
 const registry = loadRegistry();
 const now = Date.parse("2026-08-19T12:00:00.000Z");

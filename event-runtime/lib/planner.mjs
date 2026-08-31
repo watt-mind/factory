@@ -89,7 +89,7 @@ import {
   isLinearRateLimited,
   linearRateLimitState,
   loadLinearBudget,
-} from "../../tools/linear.mjs";
+} from "../../tools/ticket.mjs";
 
 /** In-flight issues list is stable across one scan; 60s is the ticket cap. */
 export const IN_FLIGHT_CACHE_TTL_MS = 60_000;
@@ -618,16 +618,13 @@ function linearCli() {
   );
 }
 
-const DEPRECATED_LINEAR_SHIM_NOTICE =
-  "tools/linear.mjs is deprecated — use tools/ticket.mjs (or `factory ticket`)";
-
 function linearReadFailureReason(err) {
   const stderr = String(err?.stderr ?? "");
   const underlyingStderr = stderr
     .trim()
     .split("\n")
     .map((line) => line.trim())
-    .filter((line) => line && line !== DEPRECATED_LINEAR_SHIM_NOTICE)
+    .filter(Boolean)
     .pop();
   return (
     underlyingStderr ||

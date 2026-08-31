@@ -65,10 +65,10 @@ test("imports exported helpers without materialized instance config", () => {
   const root = scratch();
   mkdirSync(path.join(root, "tools"), { recursive: true });
   // `doctor.mjs` calls `factoryRoot()`, which recognizes FACTORY_ROOT only
-  // when its `tools/linear.mjs` marker resolves. This empty marker lets the
+  // when its `tools/ticket.mjs` marker resolves. This empty marker lets the
   // import use this deliberately config-less root; no Linear exports execute
   // while importing doctor, so fixture content is unnecessary.
-  writeFileSync(path.join(root, "tools", "linear.mjs"), "");
+  writeFileSync(path.join(root, "tools", "ticket.mjs"), "");
 
   const result = Bun.spawnSync({
     cmd: [
@@ -1229,7 +1229,7 @@ describe("Linear budget line (WM-878)", () => {
       linearBudgetStatus,
       parseRateLimitHeaders,
       LINEAR_BUDGET_WARN_REMAINING,
-    } = await import("../tools/linear.mjs");
+    } = await import("../tools/ticket.mjs");
     expect(formatLinearBudgetLine(null)).toBe(
       "Linear budget: unknown (no recent API call)",
     );

@@ -22,7 +22,7 @@ import { validate } from "./schema.mjs";
 import {
   isLinearRateLimited,
   isLinearRateLimitMessage,
-} from "../../tools/linear.mjs";
+} from "../../tools/ticket.mjs";
 
 export const CHAIN_APPROVAL_SOURCE = "chain";
 export const HANDOFF_APPROVAL_SOURCE = "handoff";

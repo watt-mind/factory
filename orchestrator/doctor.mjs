@@ -52,7 +52,7 @@ import {
   installLinearBudgetCapture,
   linearBudgetStatus,
   loadLinearBudget,
-} from "../tools/linear.mjs";
+} from "../tools/ticket.mjs";
 import { readWorkflowRuns } from "./ci.mjs";
 
 export const MIN_BUN_VERSION = "1.1.0";
