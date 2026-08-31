@@ -61,6 +61,27 @@ const fakeChrome = (dir, body) => {
   return p;
 };
 
+test("imports exported helpers without materialized instance config", () => {
+  const root = scratch();
+  mkdirSync(path.join(root, "tools"), { recursive: true });
+  writeFileSync(path.join(root, "tools", "linear.mjs"), "");
+
+  const result = Bun.spawnSync({
+    cmd: [
+      process.execPath,
+      "--eval",
+      `import(${JSON.stringify(new URL("./doctor.mjs", import.meta.url).href)})`,
+    ],
+    cwd: root,
+    env: { ...process.env, FACTORY_ROOT: root },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  expect(result.exitCode).toBe(0);
+  expect(new TextDecoder().decode(result.stderr)).toBe("");
+});
+
 describe("base branch CI diagnostics (#1928)", () => {
   const repo = {
     name: "factory",
