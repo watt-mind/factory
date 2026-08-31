@@ -12,6 +12,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -33,12 +34,10 @@ const KNOWN_BASELINE_CYCLES = new Set([
   "auto-approval.mjs -> registry.mjs -> schedules.mjs -> proposals.mjs -> planner.mjs -> auto-approval.mjs",
   "adapters/agy.mjs -> adapters/claude.mjs -> registry.mjs -> schedules.mjs -> proposals.mjs -> planner.mjs -> runtime-overrides.mjs -> adapters/index.mjs -> adapters/agy.mjs",
   "adapters/cursor.mjs -> registry.mjs -> schedules.mjs -> proposals.mjs -> planner.mjs -> runtime-overrides.mjs -> adapters/index.mjs -> adapters/cursor.mjs",
-  "adapters/index.mjs -> adapters/agy.mjs -> adapters/claude.mjs -> registry.mjs -> schedules.mjs -> proposals.mjs -> planner.mjs -> runtime-overrides.mjs -> adapters/index.mjs",
   "planner.mjs -> registry.mjs -> schedules.mjs -> proposals.mjs -> planner.mjs",
   "planner.mjs -> schedules.mjs -> proposals.mjs -> planner.mjs",
   "planner.mjs -> runtime-overrides.mjs -> registry.mjs -> schedules.mjs -> proposals.mjs -> planner.mjs",
   "proposals.mjs -> registry.mjs -> schedules.mjs -> proposals.mjs",
-  "registry.mjs -> schedules.mjs -> proposals.mjs -> registry.mjs",
   "registry.mjs -> schedules.mjs -> registry.mjs",
 ]);
 
@@ -148,15 +147,15 @@ function sourceFiles(root) {
     .map((entry) => path.join(root, entry));
 }
 
-function resolveRelativeImport(from, specifier) {
+export function resolveRelativeImport(from, specifier) {
   if (!specifier.startsWith(".")) return null;
   const raw = specifier.replace(/[?#].*$/, "");
   const base = path.resolve(path.dirname(from), raw);
   for (const candidate of [base, `${base}.mjs`, path.join(base, "index.mjs")]) {
     try {
-      if (readFileSync(candidate, "utf8")) return candidate;
+      if (statSync(candidate).isFile()) return candidate;
     } catch (error) {
-      if (error.code !== "ENOENT" && error.code !== "EISDIR") throw error;
+      if (error.code !== "ENOENT") throw error;
     }
   }
   return null;
@@ -175,6 +174,10 @@ export function findImportCycles(root) {
   }
 
   const cycles = [];
+  // This traversal visits each module once, so it detects back edges but does
+  // not enumerate every distinct simple cycle within a multi-cycle SCC.
+  // Keep the baseline aligned with this detector's output, not an all-cycles
+  // enumeration, until the detector is replaced with one that provides that.
   const visited = new Set();
   const active = [];
   const activeSet = new Set();
@@ -206,15 +209,34 @@ function canonicalCycle(cycle, root) {
     .sort()[0];
 }
 
-export function assertNoImportCycles(root) {
+export function assertNoImportCycles(
+  root,
+  knownBaselineCycles = KNOWN_BASELINE_CYCLES,
+) {
   const cycles = findImportCycles(root);
-  const unallowlisted = cycles.filter(
-    (cycle) => !KNOWN_BASELINE_CYCLES.has(canonicalCycle(cycle, root)),
+  const foundCycles = new Set(
+    cycles.map((cycle) => canonicalCycle(cycle, root)),
   );
-  if (unallowlisted.length === 0) return cycles.length;
-  throw new Error(
-    `Import cycles detected:\n${unallowlisted.map((cycle) => `  ${canonicalCycle(cycle, root)}`).join("\n")}`,
+  const unallowlisted = [...foundCycles].filter(
+    (cycle) => !knownBaselineCycles.has(cycle),
   );
+  const stale = [...knownBaselineCycles].filter(
+    (cycle) => !foundCycles.has(cycle),
+  );
+  if (unallowlisted.length === 0 && stale.length === 0) return cycles.length;
+
+  const errors = [];
+  if (unallowlisted.length > 0) {
+    errors.push(
+      `Import cycles detected:\n${unallowlisted.map((cycle) => `  ${cycle}`).join("\n")}`,
+    );
+  }
+  if (stale.length > 0) {
+    errors.push(
+      `Import cycle allowlist is stale:\n${stale.map((cycle) => `  ${cycle}`).join("\n")}`,
+    );
+  }
+  throw new Error(errors.join("\n"));
 }
 
 function runSelfTest() {
