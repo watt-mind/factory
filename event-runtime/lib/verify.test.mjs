@@ -2694,6 +2694,24 @@ describe("handoff verification helpers (WM-718)", () => {
     ).toBe(false);
   });
 
+  test("a bare bun test repo verify covers an explicit ticket test path", () => {
+    expect(
+      ticketVerifyCoveredByRepoVerify("bun test event-runtime/lib", "bun test"),
+    ).toBe(true);
+    expect(
+      ticketVerifyCoveredByRepoVerify(
+        "bun test event-runtime/lib",
+        "bun test --timeout 20000",
+      ),
+    ).toBe(true);
+    expect(
+      ticketVerifyCoveredByRepoVerify(
+        "bun test event-runtime/lib",
+        "bun test -t handoff",
+      ),
+    ).toBe(false);
+  });
+
   test("directory coverage requires an existing bun test file; flag values never widen it", () => {
     const root = tmpDir("evrt-handoff-coverage-");
     mkdirSync(path.join(root, "event-runtime", "lib"), { recursive: true });
@@ -2837,6 +2855,21 @@ describe("handoff verification helpers (WM-718)", () => {
     expect(body).toContain("- agent-reported: `bun test` — pass, all green");
     expect(lines.filter((l) => l.startsWith("- Verification:"))).toHaveLength(
       1,
+    );
+  });
+
+  test("composeHandoffVerification reports optional steps as unknown when the diff is unavailable", () => {
+    const body = composeHandoffVerification({
+      verification: null,
+      repoVerify: null,
+      webBuild: null,
+      eventRuntimeLibVerify: null,
+      diff: { ok: false, error: "base unresolved" },
+    });
+
+    expect(body).toContain("- Web build: unknown (diff unavailable)");
+    expect(body).toContain(
+      "- Event-runtime lib suite: unknown (diff unavailable)",
     );
   });
 

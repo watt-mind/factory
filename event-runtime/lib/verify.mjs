@@ -740,6 +740,14 @@ const BUN_TEST_VALUE_FLAGS = new Set([
   "-c",
 ]);
 
+/** Value-taking flags that limit default test discovery rather than configure it. */
+const BUN_TEST_LIMITING_VALUE_FLAGS = new Set([
+  "-t",
+  "--test-name-pattern",
+  "--path-ignore-patterns",
+  "--filter",
+]);
+
 /** Filename shapes bun's default discovery treats as tests. */
 const BUN_TEST_FILE_RE =
   /(?:^|[._-])(?:test|spec)\.(?:[cm]?[jt]sx?)$|(?:^|\/)(?:test|spec)\.[cm]?[jt]sx?$/;
@@ -751,12 +759,17 @@ export function isBunTestFile(filePath) {
 function bunTestPaths(command) {
   if (typeof command !== "string") return null;
   const paths = [];
+  let hasBunTestSegment = false;
+  let wholeSuite = false;
   const segments = command.split(/(?:&&|;)/);
   for (const segment of segments) {
     // Shell expansion or a pipeline makes the set of executed tests unclear.
     if (/[$`'"\\(){}[\]|<>*?]/.test(segment)) return null;
     const words = segment.trim().split(/\s+/);
     if (words[0] !== "bun" || words[1] !== "test") continue;
+    hasBunTestSegment = true;
+    let hasTestPath = false;
+    let limitsTestDiscovery = false;
     let skipValue = false;
     for (const word of words.slice(2)) {
       if (skipValue) {
@@ -765,6 +778,8 @@ function bunTestPaths(command) {
         continue;
       }
       if (word.startsWith("-")) {
+        const flag = word.split("=", 1)[0];
+        if (BUN_TEST_LIMITING_VALUE_FLAGS.has(flag)) limitsTestDiscovery = true;
         skipValue = !word.includes("=") && BUN_TEST_VALUE_FLAGS.has(word);
         continue;
       }
@@ -782,15 +797,19 @@ function bunTestPaths(command) {
       )
         return null;
       paths.push(normalized.replace(/\/$/, ""));
+      hasTestPath = true;
     }
+    // Bun's default test discovery runs the whole suite when there is no
+    // explicit path, including when the segment has only value-taking flags.
+    if (!hasTestPath && !limitsTestDiscovery) wholeSuite = true;
   }
-  return paths.length > 0 ? paths : null;
+  return hasBunTestSegment ? { paths, wholeSuite } : null;
 }
 
 /**
- * True only when every explicit ticket test path is contained by an explicit
- * `bun test` path in repo verify. Unparseable commands and default test
- * discovery return false, preserving the independent ticket check.
+ * True only when every explicit ticket test path is contained by the repo
+ * verify command. A bare `bun test` runs Bun's default whole-suite discovery.
+ * Unparseable commands return false, preserving the independent ticket check.
  *
  * Exact-path matches stand on their own. A ticket path covered only by a
  * repo-verify DIRECTORY additionally has to be a real file under `root` whose
@@ -807,9 +826,11 @@ export function ticketVerifyCoveredByRepoVerify(
   const ticketPaths = bunTestPaths(ticketCommand);
   const repoPaths = bunTestPaths(repoVerify);
   if (!ticketPaths || !repoPaths) return false;
-  return ticketPaths.every((ticketPath) => {
-    if (repoPaths.includes(ticketPath)) return true;
-    const underDirectory = repoPaths.some((repoPath) =>
+  if (repoPaths.wholeSuite) return true;
+  if (ticketPaths.wholeSuite) return false;
+  return ticketPaths.paths.every((ticketPath) => {
+    if (repoPaths.paths.includes(ticketPath)) return true;
+    const underDirectory = repoPaths.paths.some((repoPath) =>
       ticketPath.startsWith(`${repoPath}/`),
     );
     if (!underDirectory) return false;
@@ -828,11 +849,13 @@ export function ticketVerifyCoveredByRepoVerify(
 function ticketVerifyCoversEventRuntimeLibSuite(ticketCommand) {
   const ticketPaths = bunTestPaths(ticketCommand);
   return (
-    ticketPaths?.some(
-      (ticketPath) =>
-        ticketPath === HANDOFF_EVENT_RUNTIME_LIB_PREFIX.slice(0, -1) ||
-        HANDOFF_EVENT_RUNTIME_LIB_PREFIX.startsWith(`${ticketPath}/`),
-    ) ?? false
+    (ticketPaths?.wholeSuite ||
+      ticketPaths?.paths.some(
+        (ticketPath) =>
+          ticketPath === HANDOFF_EVENT_RUNTIME_LIB_PREFIX.slice(0, -1) ||
+          HANDOFF_EVENT_RUNTIME_LIB_PREFIX.startsWith(`${ticketPath}/`),
+      )) ??
+    false
   );
 }
 
@@ -931,6 +954,22 @@ function commandLine(label, obs) {
   return `- ${label}: \`${obs.command}\` — ${verdict}`;
 }
 
+function optionalStepLines({
+  label,
+  activeLabel,
+  observation,
+  diff,
+  skippedReason,
+}) {
+  if (observation) {
+    const lines = [commandLine(activeLabel ?? label, observation)];
+    if (!observation.passed) lines.push(fenceBlock(observation.tail));
+    return lines;
+  }
+  if (diff?.ok) return [`- ${label}: skipped (${skippedReason})`];
+  return [`- ${label}: unknown (diff unavailable)`];
+}
+
 /**
  * The worker-authored Handoff verification (WM-718). Composed only from what
  * the worker observed; the agent's own claim, when present, is kept below it
@@ -991,32 +1030,27 @@ export function composeHandoffVerification(handoff) {
   }
   if (handoff.repoVerify && handoff.repoVerify !== primary)
     lines.push(commandLine("Repo verify", handoff.repoVerify));
-  if (handoff.webBuild) {
-    lines.push(
-      commandLine(
-        `Web build (${HANDOFF_WEB_SRC_PREFIX}** changed)`,
-        handoff.webBuild,
-      ),
-    );
-    if (!handoff.webBuild.passed) lines.push(fenceBlock(handoff.webBuild.tail));
-  } else if (handoff.diff?.ok) {
-    lines.push(`- Web build: skipped (no ${HANDOFF_WEB_SRC_PREFIX}** changes)`);
-  }
-  if (handoff.eventRuntimeLibVerify) {
-    lines.push(
-      commandLine(
-        `Event-runtime lib suite (${HANDOFF_EVENT_RUNTIME_LIB_PREFIX}** changed)`,
-        handoff.eventRuntimeLibVerify,
-      ),
-    );
-    if (!handoff.eventRuntimeLibVerify.passed)
-      lines.push(fenceBlock(handoff.eventRuntimeLibVerify.tail));
-  } else if (handoff.diff?.ok) {
-    const why = handoff.ticketVerifyCoversEventRuntimeLibSuite
-      ? "ticket or repo verify command already covers it"
-      : `no ${HANDOFF_EVENT_RUNTIME_LIB_PREFIX}** changes`;
-    lines.push(`- Event-runtime lib suite: skipped (${why})`);
-  }
+  lines.push(
+    ...optionalStepLines({
+      label: "Web build",
+      activeLabel: `Web build (${HANDOFF_WEB_SRC_PREFIX}** changed)`,
+      observation: handoff.webBuild,
+      diff: handoff.diff,
+      skippedReason: `no ${HANDOFF_WEB_SRC_PREFIX}** changes`,
+    }),
+  );
+  const libSuiteSkippedReason = handoff.ticketVerifyCoversEventRuntimeLibSuite
+    ? "ticket or repo verify command already covers it"
+    : `no ${HANDOFF_EVENT_RUNTIME_LIB_PREFIX}** changes`;
+  lines.push(
+    ...optionalStepLines({
+      label: "Event-runtime lib suite",
+      activeLabel: `Event-runtime lib suite (${HANDOFF_EVENT_RUNTIME_LIB_PREFIX}** changed)`,
+      observation: handoff.eventRuntimeLibVerify,
+      diff: handoff.diff,
+      skippedReason: libSuiteSkippedReason,
+    }),
+  );
   if (handoff.diff?.ok) {
     const n = handoff.diff.files.length;
     lines.push(
