@@ -14,6 +14,13 @@ import { canonicalJson } from "./canonical.mjs";
 import { admitEvent } from "./intake.mjs";
 import { rejectProposal } from "./proposals.mjs";
 import { getAgent, getEventType } from "./registry.mjs";
+import { parseCadence } from "./schedule-config.mjs";
+export {
+  APPROVAL_MODES,
+  CATCH_UP_MODES,
+  parseCadence,
+} from "./schedule-config.mjs";
+export { inFlightRunsForAgent } from "./in-flight-runs.mjs";
 
 export const SCHEDULE_SOURCE = "schedule";
 /** Fields emitDueTicks always stamps itself, overriding a static payload. */
@@ -23,19 +30,6 @@ const TICK_PAYLOAD_FIELDS = new Set([
   "cadenceSeconds",
   "skippedSlots",
 ]);
-export const CATCH_UP_MODES = ["none", "last", "all"];
-export const APPROVAL_MODES = ["watched", "auto"];
-
-/** "60m" / "30s" / "2h" / "1d" → seconds. Intervals only: no cron, no timezone. */
-export function parseCadence(every) {
-  const match = /^(\d+)([smhd])$/.exec(String(every ?? "").trim());
-  if (!match)
-    throw new Error(`unparseable cadence "${every}" — use 30s, 15m, 2h or 1d`);
-  const value = Number(match[1]);
-  if (value <= 0) throw new Error(`cadence "${every}" must be positive`);
-  return value * { s: 1, m: 60, h: 3600, d: 86400 }[match[2]];
-}
-
 /**
  * The slot a moment belongs to: the interval floor from the epoch. Identity
  * comes from the slot, never from the instant a tick was emitted — that is
@@ -207,23 +201,6 @@ export function emitDueTicks(db, registry, { now = Date.now() } = {}) {
     }
   }
   return { emitted, errors };
-}
-
-/**
- * Runs for an agent that are still in flight, oldest first. PROPOSED remains
- * excluded (OPS-436): an unapproved watched proposal must not silence later
- * schedule slots. Returning the rows lets singleton NOOPs identify the run
- * they deferred to instead of dropping that audit evidence.
- */
-export function inFlightRunsForAgent(db, agentRef) {
-  return db
-    .query(
-      `SELECT run_id, state, created_at FROM runs
-       WHERE state NOT IN ('PROPOSED','COMPLETED','REFUSED','FAILED','TIMED_OUT','CANCELLED')
-         AND json_extract(spec_json, '$.agent') = ?
-       ORDER BY created_at ASC, rowid ASC`,
-    )
-    .all(agentRef);
 }
 
 /** The newest slot that successfully completed for a loop, or null if never completed (OPS-436). */

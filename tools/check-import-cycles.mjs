@@ -24,25 +24,6 @@ export const SOURCE_ROOT = path.resolve(
 );
 const WORD = /[A-Za-z0-9_$]/;
 
-// These pre-existing cycles are a deliberately narrow baseline while #1952
-// removes them outside this ticket's Owned Paths. They are currently benign
-// because the participating modules exchange functions or lazy runtime values,
-// rather than reading an imported binding during module initialization. Keeping
-// the complete file chains here makes a new edge fail CI instead of silently
-// expanding the accepted graph.
-const KNOWN_BASELINE_CYCLES = new Set([
-  "artifacts.mjs -> workspace.mjs -> artifacts.mjs",
-  "artifacts.mjs -> workspace.mjs -> transcripts.mjs -> artifacts.mjs",
-  "auto-approval.mjs -> proposals.mjs -> planner.mjs -> auto-approval.mjs",
-  "auto-approval.mjs -> registry.mjs -> schedules.mjs -> proposals.mjs -> planner.mjs -> auto-approval.mjs",
-  "adapters/agy.mjs -> adapters/claude.mjs -> registry.mjs -> schedules.mjs -> proposals.mjs -> planner.mjs -> runtime-overrides.mjs -> adapters/index.mjs -> adapters/agy.mjs",
-  "planner.mjs -> registry.mjs -> schedules.mjs -> proposals.mjs -> planner.mjs",
-  "planner.mjs -> schedules.mjs -> proposals.mjs -> planner.mjs",
-  "planner.mjs -> runtime-overrides.mjs -> registry.mjs -> schedules.mjs -> proposals.mjs -> planner.mjs",
-  "proposals.mjs -> registry.mjs -> schedules.mjs -> proposals.mjs",
-  "registry.mjs -> schedules.mjs -> registry.mjs",
-]);
-
 function skipQuoted(source, index) {
   const quote = source[index++];
   while (index < source.length) {
@@ -216,10 +197,7 @@ function canonicalCycle(cycle, root) {
     .sort()[0];
 }
 
-export function assertNoImportCycles(
-  root,
-  knownBaselineCycles = KNOWN_BASELINE_CYCLES,
-) {
+export function assertNoImportCycles(root, knownBaselineCycles = new Set()) {
   const cycles = findImportCycles(root);
   const foundCycles = new Set(
     cycles.map((cycle) => canonicalCycle(cycle, root)),
@@ -273,8 +251,6 @@ function runSelfTest() {
 
 if (process.argv.includes("--self-test")) runSelfTest();
 else {
-  const baselineCount = assertNoImportCycles(SOURCE_ROOT);
-  console.log(
-    `import-cycle check: event-runtime/lib has no unallowlisted cycles (${baselineCount} documented baseline cycle${baselineCount === 1 ? "" : "s"})`,
-  );
+  assertNoImportCycles(SOURCE_ROOT);
+  console.log("import-cycle check: event-runtime/lib has no import cycles");
 }

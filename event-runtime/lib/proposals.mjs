@@ -17,7 +17,7 @@ import { DEFAULT_PROPOSAL_TTL_SECONDS } from "./config.mjs";
 import { txImmediate } from "./db.mjs";
 import { newProposalId } from "./ids.mjs";
 import { runState, transition } from "./lifecycle.mjs";
-import { buildRunSpec, modelAdapterMismatch } from "./planner.mjs";
+import { buildRunSpec, modelAdapterMismatch } from "./run-spec.mjs";
 import { plannedDef } from "./runtime-overrides.mjs";
 import { getAgent, getEventType } from "./registry.mjs";
 import { computeDefHash } from "./receipts.mjs";

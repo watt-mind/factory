@@ -73,6 +73,7 @@ test("cycle discovery does not depend on directory entry order", () => {
   expect(discover(names)).toEqual(discover([...names].reverse()));
 });
 
-test("the repository baseline matches the cycles found under sorted order", () => {
+test("the repository import graph has no cycles", () => {
+  expect(findImportCycles(SOURCE_ROOT)).toEqual([]);
   expect(() => assertNoImportCycles(SOURCE_ROOT)).not.toThrow();
 });

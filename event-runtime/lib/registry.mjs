@@ -18,7 +18,11 @@ import {
 import path from "node:path";
 import { format as prettierFormat, resolveConfig } from "prettier";
 import { hashBytes } from "./canonical.mjs";
-import { APPROVAL_MODES, CATCH_UP_MODES, parseCadence } from "./schedules.mjs";
+import {
+  APPROVAL_MODES,
+  CATCH_UP_MODES,
+  parseCadence,
+} from "./schedule-config.mjs";
 import { RUNTIME_ROOT, resolveConfigPath } from "./config.mjs";
 import { MEMO_KINDS, SUBJECT_TYPES } from "./memos.mjs";
 import { reposRoot } from "./repos.mjs";

@@ -31,7 +31,6 @@ import { liveWorkerLeases } from "../../lib/worker-leases.mjs";
 import { findArtifact, pinRunArtifact } from "./artifacts.mjs";
 import { canonicalJson, hashBytes, hashJson } from "./canonical.mjs";
 import { resolveConfigPath } from "./config.mjs";
-import { hashHarnessRoots } from "./pins.mjs";
 import { isTrustedAssociation } from "./triage.mjs";
 import { listMemos } from "./memos.mjs";
 import {
@@ -52,7 +51,6 @@ import {
 import {
   getAgent,
   getEventType,
-  MODEL_ADAPTERS,
   MODEL_TIERS,
   resolveModel,
 } from "./registry.mjs";
@@ -74,14 +72,26 @@ import {
   toolchainHash,
 } from "./repos.mjs";
 import { validate } from "./schema.mjs";
-import { inFlightRunsForAgent } from "./schedules.mjs";
-import { resolveInputRef } from "./workspace.mjs";
-import { computeDefHash } from "./receipts.mjs";
-import { HANDOFF_REASON_CODES } from "./verify.mjs";
+import { inFlightRunsForAgent } from "./in-flight-runs.mjs";
 import {
-  autoApproveChains,
-  buildChainApprovalPolicy,
-} from "./auto-approval.mjs";
+  buildRunSpec,
+  idempotencyKeyFor,
+  modelAdapterMismatch,
+} from "./run-spec.mjs";
+export {
+  buildRunSpec,
+  HARNESS_KINDS,
+  HARNESS_NAME_PATTERN,
+  harnessFromDef,
+  harnessPinsForSpec,
+  idempotencyKeyFor,
+  modelAdapterMismatch,
+  normalizeHarness,
+} from "./run-spec.mjs";
+import { resolveInputRef } from "./workspace.mjs";
+import { HANDOFF_REASON_CODES } from "./verify.mjs";
+import { buildChainApprovalPolicy } from "./chain-approval-policy.mjs";
+import { autoApproveChains } from "./auto-approval.mjs";
 import {
   LINEAR_RATE_LIMIT_EXIT,
   LinearRateLimitError,
@@ -99,68 +109,6 @@ export { DEFAULT_MAX_IN_FLIGHT };
 // not to an individual event. Cache failures too: dispatch bursts must run one
 // bounded probe set per repo/toolchain declaration.
 const dispatchToolchainPreflightCache = new Map();
-
-/**
- * §5.4 idempotency key: agent ref, output contract, then the event type's
- * declared scope fields in declared order. Unknown scope fields fail closed —
- * a typo in a mapping must not silently widen or narrow dedup.
- */
-export function idempotencyKeyFor(mapping, def, envelope, inputHash) {
-  const parts = mapping.idempotencyScope.map((field) => {
-    switch (field) {
-      case "correlationId":
-        return envelope.correlationId ?? envelope.eventId;
-      case "subject":
-        return envelope.subject ?? "";
-      case "inputHash":
-        return inputHash;
-      default:
-        throw new Error(
-          `unknown idempotency scope field "${field}" (docs/event-runtime.md §5.4 — fail closed)`,
-        );
-    }
-  });
-  return `${def.ref}:${def.output_contract}:${parts.join(":")}`;
-}
-
-/**
- * A tier-resolved model must be one of the configured values for its adapter.
- * Model tiers are portable intent; model names are not. Keep this at the
- * planning boundary so a bad runtime overlay or carried-forward pin parks the
- * event rather than producing a QUEUED run the adapter will reject.
- *
- * Explicit pins — a definition's `model:` or an agent overlay `model` — are
- * operator intent: `resolveModel` returns them verbatim and no adapter
- * publishes a known-model list to check them against, so they are accepted
- * as-is. `explicitPin` states that provenance when the caller knows it. When
- * it does not (a stored spec being approved as recorded), a model outside the
- * adapter's map is refused only when it is a tier value of some *other*
- * adapter — the signature of a pin carried across an adapter change — and is
- * otherwise treated as a pin.
- *
- * An adapter that takes no model (`fake`, actions) cannot mismatch one: a
- * model on such a spec is the registered route's pin carried across a
- * process-wide `--adapter-override`, and that adapter ignores it.
- */
-export function modelAdapterMismatch(
-  spec,
-  modelTiers,
-  adapter,
-  { explicitPin } = {},
-) {
-  if (spec?.model == null || explicitPin === true) return null;
-  if (!MODEL_ADAPTERS.has(adapter)) return null;
-  const allowed = Object.values(modelTiers?.[adapter] ?? {});
-  if (allowed.includes(spec.model)) return null;
-  if (explicitPin === undefined) {
-    const foreignTierValue = Object.entries(modelTiers ?? {}).some(
-      ([name, tiers]) =>
-        name !== adapter && Object.values(tiers ?? {}).includes(spec.model),
-    );
-    if (!foreignTierValue) return null;
-  }
-  return `model_adapter_mismatch: model ${JSON.stringify(spec.model)} is not configured for adapter ${JSON.stringify(adapter)}`;
-}
 
 /**
  * Per-agent repo scoping (WM-64), the repo analogue of the actions adapter's
@@ -250,241 +198,6 @@ export function pinMemos(
       foldedAt: new Date(now).toISOString(),
       entries,
     },
-  };
-}
-
-/**
- * Closed identifiers for `def.harness.{skills,commands,subagents}` (WM-851).
- * No slashes: namespaced third-party pack names wait on WM-849's catalog.
- */
-export const HARNESS_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
-export const HARNESS_KINDS = Object.freeze(["skills", "commands", "subagents"]);
-
-/**
- * Shape-check an agent definition's `harness` block. Pure: no catalog I/O —
- * unknown names are a worker refusal, not a plan-time fetch.
- * Absent field → undefined so undeclared specs stay byte-identical.
- */
-export function harnessFromDef(def) {
-  if (def?.harness === undefined) return undefined;
-  return normalizeHarness(def.harness, def.ref ?? def.id ?? "harness");
-}
-
-/**
- * The catalog defaults to the built-in shared pack when no extension roots
- * were supplied, matching worker.mjs's materialization lookup. Keep the
- * source pins in the approved RunSpec even for a core-only runtime.
- */
-function harnessRootsForSpec(registry) {
-  if (Array.isArray(registry?.harnessRoots) && registry.harnessRoots.length) {
-    return registry.harnessRoots;
-  }
-  const dir = path.join(FACTORY_ROOT, "shared");
-  return [
-    {
-      dir,
-      plugin: "core",
-      origin: "builtin",
-      name: "factory/core",
-      version: "0.1.0",
-      floor: path.join(dir, "floor.md"),
-      commands: path.join(dir, "commands"),
-      skills: path.join(dir, "skills"),
-      subagents: path.join(dir, "agents"),
-    },
-  ];
-}
-
-/**
- * Pin only the declared source components, not every component currently in a
- * harness catalog. The worker separately attests the emitted bytes it copied
- * into the workspace because emit output may legitimately transform them.
- */
-export function harnessPinsForSpec(registry, harness) {
-  if (!harness || typeof harness !== "object") return undefined;
-  const roots = harnessRootsForSpec(registry);
-  const catalogPins = hashHarnessRoots(roots);
-  const selected = {};
-
-  for (const root of roots) {
-    const files = catalogPins[root.plugin]?.files ?? {};
-    const picked = {};
-    for (const kind of HARNESS_KINDS) {
-      const dir = root[kind];
-      const names = Array.isArray(harness[kind]) ? harness[kind] : [];
-      if (typeof dir !== "string") continue;
-      for (const name of names) {
-        const source = path.relative(
-          root.dir,
-          path.join(dir, kind === "skills" ? name : `${name}.md`),
-        );
-        for (const [file, hash] of Object.entries(files)) {
-          if (file === source || file.startsWith(`${source}/`)) {
-            picked[file] = hash;
-          }
-        }
-      }
-    }
-    if (Object.keys(picked).length > 0) {
-      selected[root.plugin] = { ...catalogPins[root.plugin], files: picked };
-    }
-  }
-  return Object.keys(selected).length > 0 ? selected : undefined;
-}
-
-export function normalizeHarness(raw, source = "harness") {
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new Error(
-      `${source}: "harness" must be an object { skills?, commands?, subagents? }`,
-    );
-  }
-  const allowed = new Set(HARNESS_KINDS);
-  for (const key of Object.keys(raw)) {
-    if (!allowed.has(key)) {
-      throw new Error(
-        `${source}: "harness" unknown key "${key}" (allowed: ${HARNESS_KINDS.join(", ")})`,
-      );
-    }
-  }
-  const out = {};
-  for (const kind of HARNESS_KINDS) {
-    if (raw[kind] === undefined) continue;
-    const names = raw[kind];
-    const wellFormed =
-      Array.isArray(names) &&
-      names.every((n) => typeof n === "string" && HARNESS_NAME_PATTERN.test(n));
-    if (!wellFormed) {
-      throw new Error(
-        `${source}: "harness.${kind}" must be an array of names matching ${HARNESS_NAME_PATTERN}`,
-      );
-    }
-    out[kind] = [...names];
-  }
-  return out;
-}
-
-/**
- * Pure assembly of the §5.2 RunSpec from a registered mapping. No I/O, no
- * clock reads beyond the injected `now` — same inputs, same spec, always.
- */
-export function buildRunSpec(
-  registry,
-  envelope,
-  mapping,
-  {
-    runId,
-    policyVersion,
-    adapterOverride,
-    now = Date.now(),
-    approvalPolicy = null,
-    modelTierOverride,
-    modelOverride,
-    configSnapshot = null,
-  } = {},
-) {
-  const def = getAgent(registry, mapping.agent);
-  const planned = plannedDef(def, { modelTierOverride, modelOverride });
-  let payload = envelope.payload;
-  if (def.workspace?.type === "repository" && payload?.repo) {
-    try {
-      payload = {
-        ...payload,
-        repoPin: pinRepo(payload.repo, payload.ref ?? undefined),
-      };
-    } catch (err) {
-      if (!payload?.repoPin) throw err;
-    }
-  }
-  // Hand the work scan the same security-dispatch verdict the dispatch gate
-  // will apply (WM-1060), so it stops pre-filtering security tickets the gate
-  // would now admit. Scoped to work-scan to keep every other agent's input —
-  // and thus its idempotency key — untouched.
-  if (mapping.agent?.startsWith("work-scan") && payload?.repo) {
-    payload = {
-      ...payload,
-      dispatchSecurity: policyDispatchSecurity(
-        configSnapshot?.root ?? reposRoot(),
-        configSnapshot,
-      ),
-    };
-  }
-  const inputHash = hashJson(payload);
-  const placement = def.placement ?? mapping.placement ?? undefined;
-  const specEnvelope =
-    payload === envelope.payload ? envelope : { ...envelope, payload };
-  let idempotencyKey = idempotencyKeyFor(mapping, def, specEnvelope, inputHash);
-  const correlation = envelope.correlationId ?? envelope.eventId ?? null;
-  if (
-    correlation &&
-    !mapping.idempotencyScope.includes("correlationId") &&
-    !mapping.idempotencyScope.includes("eventId")
-  ) {
-    idempotencyKey = `${idempotencyKey}:${correlation}`;
-  }
-  return {
-    schemaVersion: "factory.run-spec/v1",
-    runId,
-    agent: mapping.agent,
-    input: payload,
-    inputHash,
-    workspace: def.workspace,
-    adapter: adapterOverride ?? mapping.adapter,
-    promptVersion: policyVersion,
-    policyVersion,
-    outputContract: def.output_contract,
-    // Attested definition pin (WM-1056): the content sha256 of the registered
-    // agent definition, computed with the same helper the worker's claim-time
-    // verifyDefHash and the receipt seam use. Pinned at plan time so a proposal
-    // that crosses a registry reload is compared against the exact def it was
-    // planned against. Computed from `def`, NOT `planned`, so per-ticket
-    // model/model-tier overrides never redefine the attested definition or make
-    // otherwise identical planner inputs nondeterministic.
-    defHash: computeDefHash(def),
-    capabilities: def.capabilities.services,
-    // Pin workspace-only intent into new RunSpecs so the worker's execution
-    // backstop does not depend solely on a mutable live definition. Legacy
-    // model specs without defHash are refused by the worker instead.
-    ...(def.mutating === false &&
-    def.capabilities.filesystem === "workspace-only"
-      ? { filesystem: "workspace-only" }
-      : {}),
-    // Declared repo scope (WM-64) rides in the spec so the proposal the
-    // operator approves names it, same as capabilities.
-    ...(def.repos ? { repos: def.repos } : {}),
-    // Declared harness content (WM-851): skills/commands/subagents the
-    // worker materializes into the run workspace. Omitted when the
-    // definition does not declare the field, so undeclared specs stay
-    // byte-identical to before.
-    ...(def.harness !== undefined
-      ? (() => {
-          const harness = harnessFromDef(def);
-          const harnessPins = harnessPinsForSpec(registry, harness);
-          return { harness, ...(harnessPins ? { harnessPins } : {}) };
-        })()
-      : {}),
-    // Model-tier routing (WM-135), the house repoPin pattern: the tier is
-    // resolved HERE, at plan time, and the concrete value is pinned so the
-    // proposal, receipt, and inspect output all name the exact model. Fields
-    // appear only when the definition declares intent — an undeclared
-    // definition's spec is byte-identical to before (regression contract).
-    // Resolution keys off mapping.adapter. Process-wide `--adapter-override`
-    // substitutes execution only (fake still pins the registered route's
-    // model). A runtime overlay (WM-887) changes mapping.adapter itself so
-    // the model follows the effective harness. A null model means the routed
-    // adapter takes none (not applicable).
-    ...(modelTierOverride !== undefined ||
-    planned.model_tier !== undefined ||
-    planned.model !== undefined
-      ? {
-          modelTier: modelTierOverride ?? planned.model_tier ?? null,
-          model: resolveModel(planned, mapping.adapter, registry.modelTiers),
-        }
-      : {}),
-    timeoutSeconds: def.limits.timeout_seconds,
-    maxAttempts: def.limits.attempts,
-    ...(approvalPolicy ? { approvalPolicy } : {}),
-    idempotencyKey,
-    ...(placement ? { placement } : {}),
   };
 }
 

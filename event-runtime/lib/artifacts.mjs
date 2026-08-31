@@ -27,7 +27,7 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalJson, hashJson } from "./canonical.mjs";
-import { confinedRegularFile } from "./workspace.mjs";
+import { confinedRegularFile } from "./workspace-paths.mjs";
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const ARTIFACT_TEMP = /^[0-9a-f]{64}\.tmp\./;
