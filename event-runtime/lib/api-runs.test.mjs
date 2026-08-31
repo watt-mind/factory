@@ -379,6 +379,36 @@ describe("run list deadlines (WM-692)", () => {
             new Date(start).toISOString(),
           );
       }
+      for (const [eventId, type] of [
+        ["evt-page-old", "factory.page.old"],
+        ["evt-page-latest", "factory.page.latest"],
+      ]) {
+        s.db
+          .query(
+            `INSERT INTO events
+             (source, event_id, type, occurred_at, received_at, envelope_json, payload_hash, admitted_at)
+             VALUES ('test', ?, ?, ?, ?, '{}', 'sha256:test', ?)`,
+          )
+          .run(
+            eventId,
+            type,
+            new Date(start).toISOString(),
+            new Date(start).toISOString(),
+            new Date(start).toISOString(),
+          );
+      }
+      for (const [id, eventId] of [
+        ["prop-page-old", "evt-page-old"],
+        ["prop-page-latest", "evt-page-latest"],
+      ]) {
+        s.db
+          .query(
+            `INSERT INTO proposals
+             (id, event_source, event_id, run_id, decision, created_at, ttl_seconds)
+             VALUES (?, 'test', ?, 'run-page-c', 'run', ?, 1800)`,
+          )
+          .run(id, eventId, new Date(start).toISOString());
+      }
       const first = await fetch(s.url("/runs?limit=2"));
       expect(first.status).toBe(200);
       const firstPage = await first.json();
@@ -386,6 +416,10 @@ describe("run list deadlines (WM-692)", () => {
         "run-page-c",
         "run-page-b",
       ]);
+      expect(firstPage.runs[0].originType).toBe("factory.page.latest");
+      expect(firstPage.runs[0].originType).toBe(
+        (await s.client.run("run-page-c")).identity.originType,
+      );
       expect(firstPage.runs[0]).toEqual({
         runId: "run-page-c",
         state: "COMPLETED",
@@ -402,8 +436,8 @@ describe("run list deadlines (WM-692)", () => {
         subjectLabel: null,
         subjectTitle: null,
         subjectUrl: null,
-        originType: null,
-        originLabel: null,
+        originType: "factory.page.latest",
+        originLabel: "page latest",
       });
       expect(typeof firstPage.nextBefore).toBe("string");
 

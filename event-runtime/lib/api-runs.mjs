@@ -1999,7 +1999,11 @@ function runsView(db, filters = {}, page = {}) {
               e.type AS event_type
        FROM runs r
        LEFT JOIN attempts a ON a.run_id = r.run_id AND a.attempt = r.attempts
-       LEFT JOIN proposals p ON p.run_id = r.run_id AND p.decision = 'run'
+       LEFT JOIN proposals p ON p.rowid = (
+         SELECT p2.rowid FROM proposals p2
+         WHERE p2.run_id = r.run_id AND p2.decision = 'run'
+         ORDER BY p2.created_at DESC, p2.rowid DESC LIMIT 1
+       )
        LEFT JOIN events e ON e.source = p.event_source AND e.event_id = p.event_id
        ${where}
        ORDER BY r.created_at DESC, r.rowid DESC
