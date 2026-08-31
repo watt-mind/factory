@@ -3477,6 +3477,7 @@ export async function executeClaimed(
     policyRoot = FACTORY_ROOT,
     sandboxAvailability,
     materializeWorktree,
+    localNotifyFetch,
     verifyResult: verifyResultFn = verifyResult,
   } = {},
 ) {
@@ -4795,6 +4796,7 @@ export async function executeClaimed(
               home: workerEventHome,
               port: workerEventPort,
               token: workerControlToken,
+              fetchFn: localNotifyFetch,
             })
           : { delivered: [], undelivered: [] };
         if (notificationDrain.undelivered.length && mayMutateClaimedTicket()) {

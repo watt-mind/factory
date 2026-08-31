@@ -324,12 +324,10 @@ describe("worker", () => {
     const materializeCalls = [];
     const posted = [];
     const comments = [];
-    const fetchFn = spyOn(globalThis, "fetch").mockImplementation(
-      async (url, init) => {
-        posted.push({ url, init });
-        return new Response("{}", { status: posted.length === 1 ? 201 : 503 });
-      },
-    );
+    const localNotifyFetch = async (url, init) => {
+      posted.push({ url, init });
+      return new Response("{}", { status: posted.length === 1 ? 201 : 503 });
+    };
     const description = "## Owned Paths\n- event-runtime/lib/worker.mjs\n";
     const dispatch = {
       locksDir: tmpDir("evrt-local-notify-throw-locks-"),
@@ -387,6 +385,7 @@ describe("worker", () => {
             materializeCalls.push(args);
             return { injected: true };
           },
+          localNotifyFetch,
         }),
       );
 
@@ -411,7 +410,6 @@ describe("worker", () => {
         readFileSync(path.join(home, "outbox", `${runId}.jsonl`), "utf8"),
       ).toContain("BLOCKED watt-mind/factory#1973: retained notification");
     } finally {
-      fetchFn.mockRestore();
       rmSync(home, { recursive: true, force: true });
     }
   });
