@@ -149,11 +149,14 @@ const DECISION_EFFECTS = Object.freeze({
   dismiss: "keeps the item resolved without changing the referenced work",
 });
 
-function readableSubject(refs) {
+function readableSubject(refs, ticketTitle) {
   if (refs.issue) {
     const match = /(?:^|\/)([^/\s#]+)#(\d+)$/.exec(refs.issue);
-    if (match) return `${match[1]}#${match[2]}`;
-    return refs.issue;
+    if (match) {
+      const ticket = `${match[1]}#${match[2]}`;
+      return ticketTitle ? `${ticket} "${ticketTitle}"` : ticket;
+    }
+    return ticketTitle ? `${refs.issue} "${ticketTitle}"` : refs.issue;
   }
   if (refs.pr) return `PR ${refs.pr.replace(/^PR\s*/i, "")}`;
   if (refs.proposalId) return `proposal ${refs.proposalId}`;
@@ -200,13 +203,24 @@ function linksFor(refs) {
   return links;
 }
 
-function proposalAgent(decision) {
+function proposalSubject(decision) {
   const question = decision?.question;
   const match =
     typeof question === "string"
-      ? /^Run\s+([^\s]+)\s+for\s+/i.exec(question)
+      ? /^Run\s+([^\s]+)(?:\s+for\s+(.+?))?\?$/i.exec(question.trim())
       : null;
-  return match?.[1] ?? null;
+  if (!match) return null;
+  return {
+    agent: match[1].replace(/@\d+$/, ""),
+    subject: match[2]?.trim() ?? null,
+  };
+}
+
+function optionEffect(option) {
+  return (
+    DECISION_EFFECTS[option.effect] ??
+    `asks the runtime to ${String(option.effect ?? "continue").replaceAll("_", " ")}`
+  );
 }
 
 /**
@@ -220,21 +234,22 @@ export function synthesizeInboxItem(input) {
   const kind = input?.kind ?? "human_needed";
   const reason = reasonCodeFor(input);
   const label = INBOX_KIND_LABELS[kind] ?? String(kind).replaceAll("_", " ");
-  const subject = readableSubject(refs);
+  const ticketTitle =
+    typeof input?.ticketTitle === "string" && input.ticketTitle.trim()
+      ? input.ticketTitle.trim()
+      : null;
+  const subject = readableSubject(refs, ticketTitle);
   const why = humanReason(reason);
   const originalBody =
     typeof input?.body === "string" && input.body.trim()
       ? input.body.trim()
       : null;
   const decision = input?.decision;
-  const agent = proposalAgent(decision);
+  const proposal = proposalSubject(decision);
   const effects = Array.isArray(decision?.options)
-    ? decision.options
-        .map((option) => {
-          const effect = DECISION_EFFECTS[option.effect];
-          return effect ? `${option.label} — ${effect}.` : null;
-        })
-        .filter(Boolean)
+    ? decision.options.map(
+        (option) => `${option.label} — ${optionEffect(option)}.`,
+      )
     : [];
   // Keep the serialized request untouched. It is hashed by decision responses,
   // so rewriting its context after a producer has handed it off would make a
@@ -263,8 +278,8 @@ export function synthesizeInboxItem(input) {
   return {
     ...input,
     title:
-      agent && (kind === "decision_needed" || kind === "proposal_expired")
-        ? `Approve ${agent} run (${subject})?`
+      proposal && (kind === "decision_needed" || kind === "proposal_expired")
+        ? `Approve ${proposal.agent} run (${ticketTitle ? subject : (proposal.subject ?? subject)})?`
         : `${label}: ${subject} — ${titleReason(reason)}`,
     body,
   };

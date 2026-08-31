@@ -162,6 +162,51 @@ describe("human inbox ledger (WM-285)", () => {
     );
   });
 
+  test("synthesizes titles and bodies for every inbox kind, including unknown reasons", () => {
+    for (const kind of INBOX_KINDS) {
+      const reason =
+        kind === "proposal_expired" ? "proposal_expired" : "novel_reason";
+      const item = synthesizeInboxItem({
+        kind,
+        title: `machine ${kind}: ${reason}`,
+        refs: { issue: "watt-mind/factory#1158", runId: "run_1", pr: "42" },
+      });
+      expect(item.title).toMatch(/^[A-Z]|^Blocked:|^Escalated:|^CI failed:/);
+      expect(item.body).toContain("What happened:");
+      expect(item.body).toContain("Why it matters:");
+      expect(item.body).toContain(`Reason code: ${reason}.`);
+      expect(item.body).toContain("Ticket: watt-mind/factory#1158");
+      expect(item.body).toContain("Run: run_1");
+      expect(item.body).toContain("PR: 42");
+    }
+  });
+
+  test("uses cached ticket titles and proposal subjects in human titles", () => {
+    const ticket = synthesizeInboxItem({
+      kind: "BLOCKED",
+      title: "BLOCKED factory#1158: owned_paths_not_closed",
+      ticketTitle: "select Opus only for Claude parent runs",
+      refs: { issue: "watt-mind/factory#1158" },
+    });
+    expect(ticket.title).toBe(
+      'Blocked: factory#1158 "select Opus only for Claude parent runs" — its allowed paths do not cover every required file',
+    );
+
+    const proposal = synthesizeInboxItem({
+      kind: "decision_needed",
+      title: "Reaper",
+      refs: { proposalId: "proposal-1" },
+      decision: {
+        question: "Run reaper@1 for hourly sweep?",
+        options: [{ label: "Approve", effect: "approve_proposal" }],
+      },
+    });
+    expect(proposal.title).toBe("Approve reaper run (hourly sweep)?");
+    expect(proposal.body).toContain(
+      "Approve — approves the proposal and allows its run to proceed.",
+    );
+  });
+
   test("decision requests are validated and exposed with decision metadata", () => {
     const db = openDb(":memory:");
     expect(() =>
@@ -256,6 +301,7 @@ describe("human inbox ledger (WM-285)", () => {
       {
         kind: "decision_needed",
         title: "Dispatch WM-862 · factory · cursor-grok-4.6-high",
+        ticketTitle: "select Opus only for Claude parent runs",
         refs,
         source: "serve:notify",
         decision: templateFor("decision_needed", {
@@ -268,7 +314,9 @@ describe("human inbox ledger (WM-285)", () => {
       },
       { id: "inbox_dispatch" },
     );
-    expect(created.title).toBe("Approve dispatch@1 run (WM-862)?");
+    expect(created.title).toBe(
+      'Approve dispatch run (WM-862 "select Opus only for Claude parent runs")?',
+    );
     expect(created.body).toContain("Question: Run dispatch@1 for WM-862");
     expect(created.body).toContain("Approve proposal — approves the proposal");
     expect(created.decision.question).toBe(

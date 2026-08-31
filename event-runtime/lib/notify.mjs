@@ -208,6 +208,10 @@ export function pendingNotifications(db, { now = Date.now() } = {}) {
     const spec = p.spec_json ? JSON.parse(p.spec_json) : null;
     const agent = spec?.agent ?? "?";
     const title = proposalSubject(spec);
+    const ticketTitle =
+      typeof spec?.approvalPolicy?.dispatchEvidence?.ticket?.title === "string"
+        ? spec.approvalPolicy.dispatchEvidence.ticket.title
+        : null;
     const issue =
       typeof spec?.input?.ticket === "string" ? spec.input.ticket : null;
     const repo = typeof spec?.input?.repo === "string" ? spec.input.repo : null;
@@ -233,6 +237,7 @@ export function pendingNotifications(db, { now = Date.now() } = {}) {
           kind: KIND_PROPOSAL_EXPIRED,
           target: p.id,
           title,
+          ...(ticketTitle ? { ticketTitle } : {}),
           message: `DECISION NEEDED proposal ${p.id} (${agent}): expired undecided`,
           refs,
           source: "serve:notify",
@@ -247,6 +252,7 @@ export function pendingNotifications(db, { now = Date.now() } = {}) {
         dedupKind: DEDUP_PROPOSAL_TTL,
         target: p.id,
         title,
+        ...(ticketTitle ? { ticketTitle } : {}),
         message: `DECISION NEEDED proposal ${p.id} (${agent}): expires in ${minutesLeft}m`,
         refs,
         source: "serve:notify",
