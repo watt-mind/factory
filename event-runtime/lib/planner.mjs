@@ -3242,7 +3242,7 @@ export function planAdmittedEvents(db, registry, opts = {}) {
     }
   }
   for (const { source, event_id: eventId, type } of rows) {
-    cache.linearReadBudget = createEventReadBudget();
+    cache.linearReadBudget = opts.linearReadBudget ?? createEventReadBudget();
     try {
       const outcome = planEvent(db, registry, { source, eventId }, planOpts);
       if (
