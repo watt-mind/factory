@@ -22,6 +22,16 @@
  * `captured: "failed.log"` edge to factory.ci-diagnose.requested (edges.json)
  * simply does not fire. Genuine faults — auth, network, quota, a missing
  * `gh` — still exit non-zero and are still `agent_exit_<code>`.
+ *
+ * Precedence, when `gh` exits non-zero with nothing captured: FAULT wins over
+ * MISSING. GitHub masks some authorization failures as 404, so stderr that
+ * matches `EXPECTED_FAULT` is a fault even when it also reads as a missing
+ * log; only stderr that matches `EXPECTED_MISSING` and no fault signal exits
+ * 0. Anything unrecognized is a fault — the safe default is to surface it.
+ * That precedence makes `EXPECTED_FAULT` the narrower of the two: it lists
+ * explicit auth/network/quota signals only, never bare words like `auth` or
+ * `timeout` that appear in `gh`'s routine "Try authenticating with: gh auth
+ * login" hint printed alongside an ordinary deleted-run 404.
  */
 import { spawnSync } from "node:child_process";
 import {
@@ -46,17 +56,25 @@ const DETAIL_LIMIT = 400;
  * `gh` output that means "this attempt's logs are gone", not "the capture
  * broke": the run was deleted, the attempt 404/410s, the log retention window
  * closed, or the run was cancelled before any job produced a log.
+ *
+ * Matched anywhere in the line: `gh` prefixes its diagnostics ("gh: ",
+ * "error: "), and a prefixed genuine missing-log message must not fall
+ * through to the fault branch and re-create the #2076 `agent_exit_1` flood.
  */
 const EXPECTED_MISSING =
-  /(?:^|\n)(?:.*\bHTTP (?:404|410)\b.*|no logs(?: found)?(?: for (?:this )?run)?|logs? (?:have )?expired|run (?:was )?cancell?ed)\b/im;
+  /(?:\bHTTP (?:404|410)\b|no logs|logs? (?:have )?expired|run (?:was )?cancell?ed)/im;
 
 /**
  * A missing-log response must never conceal a failure to make the request.
  * GitHub deliberately masks some authorization failures as 404, so this
- * check deliberately wins over `EXPECTED_MISSING` below.
+ * check deliberately wins over `EXPECTED_MISSING` above.
+ *
+ * Explicit signals only. Bare `auth`/`timeout`/`permission`/`forbidden` were
+ * removed: `gh` appends "Try authenticating with: gh auth login" to plain
+ * 404s, which would classify an ordinary deleted run as a fault.
  */
 const EXPECTED_FAULT =
-  /HTTP (?:401|403)\b|bad credentials|rate limit|context cancell?ed|context deadline exceeded|connection refused|timeout|gh auth login|EAI_AGAIN|ENOTFOUND|auth(?:entication|orization)?|permission|forbidden|access denied|resource not accessible/i;
+  /HTTP (?:401|403)\b|bad credentials|rate limit|context cancell?ed|context deadline exceeded|connection refused|EAI_AGAIN|ENOTFOUND|resource not accessible/i;
 
 /**
  * The pinned-attempt argv, and the legacy fallback when the event carries no
