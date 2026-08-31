@@ -4477,6 +4477,37 @@ describe("Linear rate limit (WM-878)", () => {
     });
   });
 
+  test("a timeout-killed child cannot classify the deprecated shim notice as its error", () => {
+    // The shim used to emit this before invoking ticket.mjs. A timeout can
+    // terminate the child before it emits a transport diagnostic, so retain
+    // the timeout signal instead of turning the warning into the failure.
+    withLinearCli(
+      [
+        'console.error("tools/linear.mjs is deprecated — use tools/ticket.mjs (or `factory ticket`)");',
+        'process.kill(process.pid, "SIGTERM");',
+      ].join("\n"),
+      () => {
+        const cache = createLinearReadCache();
+        const reads = wrapLinearReads({}, cache, NOW, {
+          repos: new Map([
+            ["gated", { name: "gated", controlPlane: "linear" }],
+          ]),
+        });
+
+        let error;
+        try {
+          reads.fetchTicket("WM-timeout", "gated");
+        } catch (caught) {
+          error = caught;
+        }
+        expect(error?.message).toBe(
+          "linear_read_failed: linear read timed out",
+        );
+        expect(error?.message).not.toContain("tools/linear.mjs is deprecated");
+      },
+    );
+  });
+
   test("a simulated Linear 400 rate-limit refuses linear_rate_limited, leaves the event admitted, and does not dead-letter", () => {
     withReposRoot(gatedYaml, () => {
       const db = openDb(":memory:");
