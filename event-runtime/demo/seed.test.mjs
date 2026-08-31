@@ -307,6 +307,7 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
       );
       await expectSuccess("initial seed", seedRes, port);
       expect(seedRes.stdout).toContain("merge-apply@2 watched");
+      expect(seedRes.stdout).toContain("structured dispatch handoff");
       expect(seedRes.stdout).not.toContain(
         "merge-verify@1 exact landed lifecycle",
       );
@@ -331,6 +332,39 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
       );
       expect(verifyRes.stdout).toContain(
         "TTL-expired Inbox item offers approve/reject decision",
+      );
+
+      const inboxResponse = await fetch(
+        `http://127.0.0.1:${port}/inbox?status=open`,
+        { headers: controlAuthHeaders() },
+      );
+      expect(inboxResponse.ok).toBe(true);
+      const { items } = await inboxResponse.json();
+      const fixture = items.find(
+        (item) => item.id === "inbox_t1_dispatch_detail",
+      );
+      expect(
+        fixture,
+        `seeded inbox refs: ${JSON.stringify(items.map((item) => item.refs))}`,
+      ).toBeTruthy();
+      expect(fixture).toMatchObject({
+        title: "Review seeded dispatch handoff",
+        refs: {
+          runId: "run_t1_dispatch_wm100",
+          eventSource: "demo-seed",
+          eventId: "t1-human-needed",
+          issue: "DEMO-100",
+        },
+      });
+      expect(fixture.refs.proposalId).toStartWith("prop_");
+      expect(fixture.refs.pr).toMatch(
+        /^https:\/\/github\.com\/watt-mind\/.+\/pull\/999999$/,
+      );
+      expect(fixture.refs.repo).toBeTruthy();
+      expect(fixture.body).toContain("## Handoff");
+      expect(fixture.body).toContain("## References");
+      expect(fixture.body).toContain(
+        "```\nbun test event-runtime/demo/seed.test.mjs\n```",
       );
     },
     loadAdjustedTimeout(30_000),

@@ -46,6 +46,7 @@
 import { apiClient } from "../lib/client.mjs";
 import { openDb } from "../lib/db.mjs";
 import { dbPath, runtimeHome } from "../lib/config.mjs";
+import { createInboxItem } from "../lib/inbox.mjs";
 import { createRun, transition } from "../lib/lifecycle.mjs";
 import { hashJson } from "../lib/canonical.mjs";
 
@@ -844,6 +845,53 @@ try {
   );
   log(
     `${dispatchRunId} → COMPLETED (dispatch@1, simulated working PR workflow with PR_OPEN)`,
+  );
+
+  // A hand-authored open item gives web UX review a stable, information-rich
+  // detail pane. Runtime-generated items cover decisions and expiry, while
+  // this fixture deliberately exercises structured message rendering and every
+  // jump target without requiring an operator action.
+  // Use a non-live PR reference so inbox reconciliation cannot auto-resolve the
+  // review fixture when the historical dispatch's real pull request is merged.
+  const inboxPrUrl = `https://github.com/watt-mind/${primaryProject}/pull/999999`;
+  createInboxItem(
+    db,
+    {
+      kind: "ESCALATED",
+      severity: "normal",
+      title: "Review seeded dispatch handoff",
+      body: [
+        "## Handoff",
+        "",
+        "**Dispatch completed** and opened a review-ready pull request.",
+        "",
+        "## References",
+        "",
+        `- [Pull request](${inboxPrUrl})`,
+        `- Ticket \`DEMO-100\` in repository \`${primaryProject}\``,
+        "",
+        "Warning: this is fixture data for UX review; do not merge it.",
+        "",
+        "```",
+        "bun test event-runtime/demo/seed.test.mjs",
+        "```",
+      ].join("\n"),
+      refs: {
+        runId: dispatchRunId,
+        proposalId: human.id,
+        eventSource: "demo-seed",
+        eventId: `${prefix}-human-needed`,
+        // Keep an explicit ticket reference without coupling fixture lifetime
+        // to a live tracker issue that reconciliation may close.
+        issue: "DEMO-100",
+        pr: inboxPrUrl,
+        repo: primaryProject,
+      },
+    },
+    { id: `inbox_${prefix}_dispatch_detail`, now: Date.parse(nowStr) },
+  );
+  log(
+    `inbox_${prefix}_dispatch_detail left open (structured dispatch handoff)`,
   );
 
   db.close();
