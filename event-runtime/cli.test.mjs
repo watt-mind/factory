@@ -10,7 +10,13 @@ import {
   runs,
   runsCommand,
 } from "./cli/runs.mjs";
-import { CLI, freePort, runCli, throwawayRunDir } from "./cli/test-helpers.mjs";
+import {
+  CLI,
+  DEAD_PORT,
+  freePort,
+  runCli,
+  throwawayRunDir,
+} from "./cli/test-helpers.mjs";
 import { apiClient } from "./lib/client.mjs";
 import { tmpDir } from "./test-support/tmp.mjs?file=event-runtime-cli-test-mjs";
 
@@ -755,5 +761,167 @@ describe("cli routing", () => {
     const result = runCli(["inspect"]);
     expect(result.status).not.toBe(0);
     expect(result.all).toContain("usage: inspect <run-id>");
+  });
+
+  test("decide renders a failed effect's error and says the item remains open", async () => {
+    const item = {
+      id: "item-9",
+      decision: { fields: [] },
+    };
+    const server = Bun.serve({
+      port: Number(freePort()),
+      async fetch(req) {
+        const url = new URL(req.url);
+        if (req.method === "GET" && url.pathname === "/inbox/item-9") {
+          return Response.json({ item });
+        }
+        if (req.method === "POST" && url.pathname === "/inbox/item-9/decide") {
+          return Response.json({
+            item: { ...item, response: { effect: { outcome: "failed" } } },
+            effect: {
+              kind: "approve_proposal",
+              outcome: "failed",
+              error: "linear_triage_failed: connection refused",
+            },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    try {
+      const child = Bun.spawn(["bun", CLI, "decide", "item-9", "approve"], {
+        env: {
+          ...process.env,
+          FACTORY_EVENT_HOME: tmpDir("evrt-cli-"),
+          FACTORY_EVENT_PORT: String(server.port),
+          FACTORY_RUN_DIR: throwawayRunDir(),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [status, stdout] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+      ]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("item-9: approve_proposal failed");
+      expect(stdout).toContain(
+        "error: linear_triage_failed: connection refused",
+      );
+      expect(stdout).toContain("item-9 remains open");
+      expect(stdout).toContain("decision was not applied");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("inbox resolve posts the reason and prints the resolved item", async () => {
+    let request;
+    const server = Bun.serve({
+      port: Number(freePort()),
+      async fetch(req) {
+        request = {
+          method: req.method,
+          pathname: new URL(req.url).pathname,
+          body: await req.json(),
+        };
+        return Response.json({
+          item: { id: "item-1", resolvedReason: request.body.reason },
+        });
+      },
+    });
+    try {
+      const child = Bun.spawn(
+        [
+          "bun",
+          CLI,
+          "inbox",
+          "resolve",
+          "item-1",
+          "--reason",
+          "handled by hand",
+        ],
+        {
+          env: {
+            ...process.env,
+            FACTORY_EVENT_HOME: tmpDir("evrt-cli-"),
+            FACTORY_EVENT_PORT: String(server.port),
+            FACTORY_RUN_DIR: throwawayRunDir(),
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      const [status, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      expect(status, stderr).toBe(0);
+      expect(stdout).toContain("item-1: resolved (handled by hand)");
+    } finally {
+      server.stop(true);
+    }
+    expect(request).toEqual({
+      method: "POST",
+      pathname: "/inbox/item-1/resolve",
+      body: { reason: "handled by hand" },
+    });
+  });
+
+  test("inbox resolve without --reason reports usage", () => {
+    const result = runCli(["inbox", "resolve", "item-1"], {
+      FACTORY_EVENT_PORT: DEAD_PORT,
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.all).toContain(
+      'usage: inbox resolve <item-id> --reason "<text>"',
+    );
+  });
+
+  test("inbox resolve without an item ID reports usage", () => {
+    const result = runCli(["inbox", "resolve"], {
+      FACTORY_EVENT_PORT: DEAD_PORT,
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.all).toContain(
+      'usage: inbox resolve <item-id> --reason "<text>"',
+    );
+  });
+
+  test("inbox resolve on an unknown item renders the control API's 404", async () => {
+    const server = Bun.serve({
+      port: Number(freePort()),
+      fetch() {
+        return Response.json(
+          { error: "unknown inbox item ghost" },
+          { status: 404 },
+        );
+      },
+    });
+    try {
+      const child = Bun.spawn(
+        ["bun", CLI, "inbox", "resolve", "ghost", "--reason", "cleanup"],
+        {
+          env: {
+            ...process.env,
+            FACTORY_EVENT_HOME: tmpDir("evrt-cli-"),
+            FACTORY_EVENT_PORT: String(server.port),
+            FACTORY_RUN_DIR: throwawayRunDir(),
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      );
+      const [status, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      expect(status).not.toBe(0);
+      expect(`${stdout}${stderr}`).toContain("unknown inbox item ghost");
+    } finally {
+      server.stop(true);
+    }
   });
 });

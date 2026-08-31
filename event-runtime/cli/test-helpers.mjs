@@ -253,7 +253,7 @@ export async function runNotifierDeliveryCase({
     // of the ask is stripped so the operator does not read it twice).
     const expectedMessage = [
       "BLOCKED linear.ticket.agent_ready evt-tick: no_worktree_scripts",
-      "What happened: A blocked item needs attention for linear.ticket.agent_ready evt-tick.",
+      "What happened: An item needs attention for linear.ticket.agent_ready evt-tick (blocked).",
       "",
       "Why it matters: The runtime reported “no worktree scripts” and needs an operator to decide what happens next.",
       "",

@@ -34,7 +34,7 @@ const USAGE = BASE_USAGE.replace(
 )
   .replace(
     "  inbox                          open items waiting on the human",
-    "  inbox                          open items waiting on the human (? = decision pending)\n  decide <item-id> <option-id> [--field key=value]...\n                                 answer an inbox decision through the control API\n  memos <subjectType> <id> [--kind k] [--all]\n                                 live memos for a subject, with provenance and expiry",
+    '  inbox                          open items waiting on the human (? = decision pending)\n  inbox resolve <item-id> --reason "<text>"\n                                 resolve an inbox item through the control API\n  decide <item-id> <option-id> [--field key=value]...\n                                 answer an inbox decision through the control API\n  memos <subjectType> <id> [--kind k] [--all]\n                                 live memos for a subject, with provenance and expiry',
   )
   .replace(
     "  adapters [--json]               registered harness adapters: name, source, sandbox support (local, no serve needed)",
@@ -161,8 +161,38 @@ export async function memosCommand(args = []) {
   return memos;
 }
 
+const INBOX_RESOLVE_USAGE = 'usage: inbox resolve <item-id> --reason "<text>"';
+
+/** `inbox resolve <item-id> --reason "<text>"` — POST /inbox/:id/resolve (AC3). */
+export async function inboxResolveCommand(args = []) {
+  const [itemId, ...rest] = args;
+  if (!itemId) throw new Error(INBOX_RESOLVE_USAGE);
+  let reason;
+  for (let index = 0; index < rest.length; index++) {
+    if (rest[index] !== "--reason" || rest[index + 1] === undefined) {
+      throw new Error(`unexpected inbox resolve argument: ${rest[index]}`);
+    }
+    reason = rest[++index];
+  }
+  if (!reason || !reason.trim()) throw new Error(INBOX_RESOLVE_USAGE);
+  const result = await callControl(
+    "POST",
+    `/inbox/${encodeURIComponent(itemId)}/resolve`,
+    { reason: reason.trim() },
+  );
+  console.log(
+    `${result.item.id}: resolved (${result.item.resolvedReason ?? reason.trim()})`,
+  );
+  return result;
+}
+
 /** Owned-path override of the split inbox command, adding decision markers. */
-export async function inboxCommand() {
+export async function inboxCommand(args = []) {
+  const [sub, ...rest] = args;
+  if (sub === "resolve") return inboxResolveCommand(rest);
+  if (sub !== undefined) {
+    throw new Error(`unknown inbox subcommand: ${sub}`);
+  }
   const body = await callControl("GET", "/inbox?status=open");
   if (body.items.length === 0) {
     console.log("no open inbox items");
@@ -232,6 +262,12 @@ export async function decideCommand(args) {
   console.log(
     `${result.item.id}: ${result.effect.kind} ${result.effect.outcome}`,
   );
+  if (result.effect.outcome === "failed") {
+    console.log(`  error: ${result.effect.error ?? "unknown error"}`);
+    console.log(
+      `  ${itemId} remains open — the decision was not applied; retry with: bun event-runtime/cli.mjs decide ${itemId} ${optionId}`,
+    );
+  }
   return result;
 }
 

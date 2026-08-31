@@ -150,9 +150,7 @@ describe("human inbox ledger (WM-285)", () => {
     expect(item.title).toBe(
       "Blocked: factory#1158 — its allowed paths do not cover every required file",
     );
-    expect(item.body).toContain(
-      "What happened: A blocked item needs attention",
-    );
+    expect(item.body).toContain("What happened: An item needs attention");
     expect(item.body).toContain("Why it matters: The ticket's allowed paths");
     expect(item.body).toContain("Ticket: watt-mind/factory#1158");
     expect(item.body).toContain("Run: run_123");
@@ -204,7 +202,7 @@ describe("human inbox ledger (WM-285)", () => {
       refs: { eventSource: "linear", eventId: "evt-park" },
     });
     expect(item.body).toContain(
-      "What happened: A blocked item needs attention for linear.ticket.agent_ready evt-park.",
+      "What happened: An item needs attention for linear.ticket.agent_ready evt-park (blocked).",
     );
     expect(item.body).toContain("Reason code: repo_report_only.");
     expect(
@@ -213,7 +211,7 @@ describe("human inbox ledger (WM-285)", () => {
         title: "BLOCKED evt-park",
         refs: { eventSource: "linear", eventId: "evt-park", repo: "factory" },
       }).body,
-    ).toContain("for event evt-park (factory).");
+    ).toContain("for event evt-park (factory) (blocked).");
   });
 
   test("uses cached ticket titles and proposal subjects in human titles", () => {
@@ -760,6 +758,55 @@ describe("human inbox ledger (WM-285)", () => {
       other.close();
       db.close();
     }
+  });
+
+  test("a failed decision effect leaves the item open and decidable (AC3b)", async () => {
+    const db = openDb(":memory:");
+    const request = decision([
+      { id: "triage", label: "Triage", effect: "send_to_triage" },
+    ]);
+    createInboxItem(
+      db,
+      {
+        kind: "ESCALATED",
+        title: "linear is down",
+        refs: { issue: "WM-1500" },
+        decision: request,
+      },
+      { id: "failed_effect_item" },
+    );
+    const response = {
+      schemaVersion: "factory.decision-response/v1",
+      requestHash: decisionRequestHash(request),
+      optionId: "triage",
+      fields: {},
+    };
+    const decided = await decideInboxItem(db, "failed_effect_item", response, {
+      now: 1_000,
+      applyEffect: () => ({ outcome: "failed", error: "linear unreachable" }),
+    });
+    expect(decided.effect).toEqual({
+      kind: "send_to_triage",
+      outcome: "failed",
+      error: "linear unreachable",
+    });
+    // The control-API path must not resolve the item on a failed effect —
+    // it stays open (unresolved) so the operator can retry the decision.
+    expect(decided.item.resolvedAt).toBeNull();
+    expect(decided.item.resolvedBy).toBeNull();
+    const stored = getInboxItem(db, "failed_effect_item");
+    expect(stored.resolvedAt).toBeNull();
+    expect(stored.response.effect).toMatchObject({
+      outcome: "failed",
+      error: "linear unreachable",
+    });
+
+    // Still decidable: a retry with a successful effect resolves it.
+    const retried = await retryInboxDecision(db, "failed_effect_item", {
+      now: 2_000,
+      applyEffect: () => ({ outcome: "applied" }),
+    });
+    expect(retried.item.resolvedAt).toBe(new Date(2_000).toISOString());
   });
 
   test("a retry takes over a pending claim once it is older than the transport timeout", async () => {

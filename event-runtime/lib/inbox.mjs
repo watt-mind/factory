@@ -284,7 +284,7 @@ export function synthesizeInboxItem(input) {
   // so rewriting its context after a producer has handed it off would make a
   // valid response look stale. The durable body carries the same information.
   const body = [
-    `What happened: A ${label.toLowerCase()} item needs attention for ${subject}.`,
+    `What happened: An item needs attention for ${subject} (${label.toLowerCase()}).`,
     `Why it matters: ${why}`,
     reason ? `Reason code: ${reason}.` : null,
     linksFor(refs).length ? `Links:\n${linksFor(refs).join("\n")}` : null,

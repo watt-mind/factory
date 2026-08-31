@@ -1765,7 +1765,7 @@ sh -c 'sleep 5 & wait'
       `Escalated: run ${spec.runId} — stopped because an operator decision is required before it can proceed`,
     );
     expect(inbox.body).toContain(
-      `What happened: A escalated item needs attention for run ${spec.runId}.`,
+      `What happened: An item needs attention for run ${spec.runId} (escalated).`,
     );
     expect(inbox.body).toContain("Reason code: needs_human.");
     expect(inbox.body).toContain("Option effects:");
@@ -1987,7 +1987,7 @@ sh -c 'sleep 5 & wait'
           'Escalated: WM-390 "Choose a supported answer" — stopped because an operator decision is required before it can proceed',
         );
         expect(item.body).toContain(
-          'What happened: A escalated item needs attention for WM-390 "Choose a supported answer".',
+          'What happened: An item needs attention for WM-390 "Choose a supported answer" (escalated).',
         );
         expect(item.body).toContain("Reason code: needs_human.");
         expect(item.body).toContain(

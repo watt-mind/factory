@@ -218,7 +218,7 @@ describe("notify (WM-65)", () => {
     await first.deliveries;
     expect(stub.pushes()).toEqual([
       "BLOCKED linear.ticket.agent_ready evt-park: repo_report_only",
-      "What happened: A blocked item needs attention for linear.ticket.agent_ready evt-park.",
+      "What happened: An item needs attention for linear.ticket.agent_ready evt-park (blocked).",
       "",
       "Why it matters: The runtime reported “repo report only” and needs an operator to decide what happens next.",
       "",
@@ -391,7 +391,7 @@ describe("notify (WM-65)", () => {
       "DECISION NEEDED proposal prop_2dda1ca8-2469-4aab-8908-79c31a5df55b (dispatch@1): expires in 14m",
     );
     expect(stub.pushes()).toContain(
-      'What happened: A decision needed item needs attention for WM-862 "select Opus only for Claude parent runs".',
+      'What happened: An item needs attention for WM-862 "select Opus only for Claude parent runs" (decision needed).',
     );
     expect(stub.pushes()).toContain(
       "Run dispatch@1 for WM-862 (factory) on cursor-grok-4.6-high?",
