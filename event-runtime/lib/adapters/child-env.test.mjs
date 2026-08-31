@@ -1,12 +1,28 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   DISPATCH_IDENTITY_ENV,
+  HARNESS_LAYOUT,
+  KILL_GRACE_MS,
+  PROMPT_SUFFIX,
   PROVIDER_CREDENTIAL_ENV,
   PUSH_CREDENTIAL_ENV,
   RUNTIME_IDENTITY_ENV,
   safeChildEnvironment,
+  verifiedPrompt,
 } from "./child-env.mjs";
+import {
+  HARNESS_LAYOUT as acpHarnessLayout,
+  KILL_GRACE_MS as acpKillGraceMs,
+  PROMPT_SUFFIX as acpPromptSuffix,
+  verifiedPrompt as acpVerifiedPrompt,
+} from "./acp.mjs";
 import { safeChildEnvironment as claudeEnvironment } from "./claude.mjs";
+import {
+  HARNESS_LAYOUT as claudeHarnessLayout,
+  KILL_GRACE_MS as claudeKillGraceMs,
+  PROMPT_SUFFIX as claudePromptSuffix,
+  verifiedPrompt as claudeVerifiedPrompt,
+} from "./claude.mjs";
 import { safeChildEnvironment as commandEnvironment } from "./command.mjs";
 import { safeChildEnvironment as agyEnvironment } from "./agy.mjs";
 import { safeChildEnvironment as cursorEnvironment } from "./cursor.mjs";
@@ -19,6 +35,17 @@ describe("shared child environment", () => {
 
   afterEach(() => {
     process.env = { ...originalEnv };
+  });
+
+  test("shares harness packaging and prompt contracts with ACP and Claude", () => {
+    expect(acpHarnessLayout).toBe(HARNESS_LAYOUT);
+    expect(claudeHarnessLayout).toBe(HARNESS_LAYOUT);
+    expect(acpKillGraceMs).toBe(KILL_GRACE_MS);
+    expect(claudeKillGraceMs).toBe(KILL_GRACE_MS);
+    expect(acpPromptSuffix).toBe(PROMPT_SUFFIX);
+    expect(claudePromptSuffix).toBe(PROMPT_SUFFIX);
+    expect(acpVerifiedPrompt).toBe(verifiedPrompt);
+    expect(claudeVerifiedPrompt).toBe(verifiedPrompt);
   });
 
   test("keeps adapter differences explicit while stripping all credentials", () => {

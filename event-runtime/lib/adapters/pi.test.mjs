@@ -662,8 +662,10 @@ process.stdin.on("end", () => {
     for (let attempt = 0; attempt < 500; attempt += 1) {
       if (existsSync(pidFile)) {
         const pid = Number(readFileSync(pidFile, "utf8"));
-        trackProcessGroupForPid(pid);
-        return pid;
+        if (Number.isInteger(pid) && pid > 0) {
+          trackProcessGroupForPid(pid);
+          return pid;
+        }
       }
       await new Promise((resolve) => setTimeout(resolve, 10));
     }

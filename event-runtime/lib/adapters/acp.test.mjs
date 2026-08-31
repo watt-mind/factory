@@ -950,6 +950,12 @@ describe("execute against a fake ACP agent", () => {
     },
   );
 
+  test("rejects an incomplete grandchild PID before process-group lookup", () => {
+    expect(() => trackProcessGroupForPid(0)).toThrow(
+      "invalid or incomplete test pid 0",
+    );
+  });
+
   const testProcessGroup = process.platform === "win32" ? test.skip : test;
   testProcessGroup("timeout kills a long-lived grandchild", async () => {
     const workspaceDir = ws();
@@ -967,9 +973,12 @@ describe("execute against a fake ACP agent", () => {
     let pid = null;
     for (let i = 0; i < 200; i += 1) {
       if (existsSync(pidFile)) {
-        pid = Number(readFileSync(pidFile, "utf8"));
-        trackProcessGroupForPid(pid);
-        break;
+        const candidate = Number(readFileSync(pidFile, "utf8"));
+        if (Number.isInteger(candidate) && candidate > 0) {
+          pid = candidate;
+          trackProcessGroupForPid(pid);
+          break;
+        }
       }
       await new Promise((r) => setTimeout(r, 10));
     }

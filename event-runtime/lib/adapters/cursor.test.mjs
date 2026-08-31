@@ -472,11 +472,18 @@ if (behavior === "emit_error_tool_result") {
   const testProcessGroup = process.platform === "win32" ? test.skip : test;
 
   async function waitForGrandchildPid(pidFile) {
-    await until("stub grandchild PID file", () => existsSync(pidFile), {
-      timeoutMs: 15_000,
-      everyMs: 10,
-    });
-    const pid = Number(readFileSync(pidFile, "utf8"));
+    const pid = await until(
+      "stub grandchild PID file",
+      () => {
+        if (!existsSync(pidFile)) return null;
+        const candidate = Number(readFileSync(pidFile, "utf8"));
+        return Number.isInteger(candidate) && candidate > 0 ? candidate : null;
+      },
+      {
+        timeoutMs: 15_000,
+        everyMs: 10,
+      },
+    );
     trackProcessGroupForPid(pid);
     return pid;
   }

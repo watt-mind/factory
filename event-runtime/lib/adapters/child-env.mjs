@@ -59,6 +59,47 @@ export const PROVIDER_CREDENTIAL_ENV = [
 ];
 
 /**
+ * Workspace-relative packaging of RunSpec.harness. This module deliberately
+ * remains independent of adapter initialization, so adapters can share the
+ * contract without introducing a registry cycle.
+ */
+export const HARNESS_LAYOUT = Object.freeze({
+  skills: Object.freeze({
+    source: (name) => ["plugins", "core", "skills", name],
+    dest: (name) => [".claude", "skills", name],
+    type: "dir",
+  }),
+  commands: Object.freeze({
+    source: (name) => ["plugins", "core", "commands", `${name}.md`],
+    dest: (name) => [".claude", "commands", `${name}.md`],
+    type: "file",
+  }),
+  subagents: Object.freeze({
+    source: (name) => ["plugins", "core", "agents", `${name}.md`],
+    dest: (name) => [".claude", "agents", `${name}.md`],
+    type: "file",
+  }),
+});
+
+export const KILL_GRACE_MS = 30_000;
+
+export const PROMPT_SUFFIX =
+  "\n\n---\nInput is at ./input.json. Write ./result.json per the factory.agent-result/v1 contract. Work only inside this directory.";
+
+/**
+ * Prompt bytes are verified by the registry before they reach an adapter.
+ * `promptPath` remains provenance only: re-reading it would bypass that pin.
+ */
+export function verifiedPrompt(def, adapter) {
+  if (typeof def?.promptText !== "string") {
+    throw new Error(
+      `${adapter}: definition ${def?.ref ?? "<unknown>"} has no verified promptText (registry-loaded definitions only)`,
+    );
+  }
+  return def.promptText + PROMPT_SUFFIX;
+}
+
+/**
  * Build an adapter child environment from the worker allowlist.
  *
  * Only an explicit boolean mutating value grants push credentials. Adapters
