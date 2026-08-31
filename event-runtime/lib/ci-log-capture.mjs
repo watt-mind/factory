@@ -23,15 +23,12 @@
  * simply does not fire. Genuine faults — auth, network, quota, a missing
  * `gh` — still exit non-zero and are still `agent_exit_<code>`.
  *
- * Precedence, when `gh` exits non-zero with nothing captured: FAULT wins over
- * MISSING. GitHub masks some authorization failures as 404, so stderr that
- * matches `EXPECTED_FAULT` is a fault even when it also reads as a missing
- * log; only stderr that matches `EXPECTED_MISSING` and no fault signal exits
- * 0. Anything unrecognized is a fault — the safe default is to surface it.
- * That precedence makes `EXPECTED_FAULT` the narrower of the two: it lists
- * explicit auth/network/quota signals only, never bare words like `auth` or
- * `timeout` that appear in `gh`'s routine "Try authenticating with: gh auth
- * login" hint printed alongside an ordinary deleted-run 404.
+ * Precedence, when `gh` exits non-zero with nothing captured: an explicit
+ * `HTTP NNN` token is authoritative. Only 404 and 410 are expected-missing;
+ * every other status is a fault regardless of accompanying prose. Statusless
+ * diagnostics use the narrow `EXPECTED_MISSING` fallback below. A failed
+ * spawn is always a fault. Anything unrecognized is also a fault — the safe
+ * default is to surface it.
  */
 import { spawnSync } from "node:child_process";
 import {
@@ -62,19 +59,23 @@ const DETAIL_LIMIT = 400;
  * through to the fault branch and re-create the #2076 `agent_exit_1` flood.
  */
 const EXPECTED_MISSING =
-  /(?:\bHTTP (?:404|410)\b|no logs|logs? (?:have )?expired|run (?:was )?cancell?ed)/im;
+  /(?:no logs|logs? (?:have )?expired|run (?:was )?cancell?ed)/im;
 
 /**
- * A missing-log response must never conceal a failure to make the request.
- * GitHub deliberately masks some authorization failures as 404, so this
- * check deliberately wins over `EXPECTED_MISSING` above.
- *
- * Explicit signals only. Bare `auth`/`timeout`/`permission`/`forbidden` were
- * removed: `gh` appends "Try authenticating with: gh auth login" to plain
- * 404s, which would classify an ordinary deleted run as a fault.
+ * Extract the authoritative HTTP status token that `gh` prints in an API
+ * diagnostic. Message text must not influence a classification once present.
  */
-const EXPECTED_FAULT =
-  /HTTP (?:401|403)\b|bad credentials|rate limit|context cancell?ed|context deadline exceeded|connection refused|EAI_AGAIN|ENOTFOUND|resource not accessible/i;
+export function parseHttpStatus(stderr) {
+  const match = /\bHTTP\s+(\d{3})\b/i.exec(String(stderr ?? ""));
+  return match ? Number.parseInt(match[1], 10) : null;
+}
+
+function isExpectedMissing(stderr) {
+  const status = parseHttpStatus(stderr);
+  return status === null
+    ? EXPECTED_MISSING.test(stderr)
+    : status === 404 || status === 410;
+}
 
 /**
  * The pinned-attempt argv, and the legacy fallback when the event carries no
@@ -115,9 +116,14 @@ function spawnToFile(argv, logPath) {
       return {
         exitCode: child.status ?? 1,
         stderr: String(child.error.message),
+        spawnError: child.error,
       };
     }
-    return { exitCode: child.status ?? 1, stderr: child.stderr ?? "" };
+    return {
+      exitCode: child.status ?? 1,
+      stderr: child.stderr ?? "",
+      spawnError: null,
+    };
   } finally {
     closeSync(fd);
   }
@@ -136,7 +142,7 @@ export function captureCiLog({
 } = {}) {
   const logPath = path.join(cwd, LOG_FILE);
   const { argv, attempt } = buildArgv(input);
-  const { exitCode, stderr } = spawn(argv, logPath);
+  const { exitCode, stderr, spawnError = null } = spawn(argv, logPath);
 
   const bytes = existsSync(logPath) ? statSync(logPath).size : 0;
   const captured = exitCode === 0 && bytes > 0;
@@ -148,7 +154,7 @@ export function captureCiLog({
   if (
     !captured &&
     exitCode !== 0 &&
-    (EXPECTED_FAULT.test(detail) || !EXPECTED_MISSING.test(detail))
+    (spawnError || !isExpectedMissing(detail))
   ) {
     return {
       ok: false,

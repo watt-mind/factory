@@ -14,12 +14,12 @@ const registry = loadRegistry();
 const INPUT = { repo: "watt-mind/factory", runId: 33300511167 };
 
 /** A `gh` stand-in: writes `stdout` to the log file and returns its exit. */
-function fakeGh({ stdout = "", stderr = "", exitCode = 0 }) {
+function fakeGh({ stdout = "", stderr = "", exitCode = 0, spawnError = null }) {
   const calls = [];
   const spawn = (argv, logPath) => {
     calls.push(argv);
     writeFileSync(logPath, stdout, "utf8");
-    return { exitCode, stderr };
+    return { exitCode, stderr, spawnError };
   };
   spawn.calls = calls;
   return spawn;
@@ -129,7 +129,6 @@ describe("ci-log-capture command (#2076)", () => {
       "HTTP 401: Bad credentials",
       "HTTP 403: rate limit exceeded",
       'Post "https://api.github.com/repos/watt-mind/factory": context canceled',
-      "HTTP 404: Not Found: Resource not accessible by integration (permission denied)",
     ]) {
       const cwd = tmpDir("evrt-ci-log-capture-fault-taxonomy-");
       const outcome = captureCiLog({
@@ -142,6 +141,66 @@ describe("ci-log-capture command (#2076)", () => {
       expect(outcome.exitCode).toBe(1);
       expect(existsSync(path.join(cwd, "result.json"))).toBe(false);
     }
+  });
+
+  test("classifies an HTTP status before its accompanying message", () => {
+    for (const stderr of [
+      "HTTP 500: log not found in cache",
+      "HTTP 403: the cancelled run cannot be read",
+    ]) {
+      const cwd = tmpDir("evrt-ci-log-capture-status-fault-");
+      const outcome = captureCiLog({
+        cwd,
+        input: INPUT,
+        spawn: fakeGh({ stderr, exitCode: 1 }),
+      });
+
+      expect(outcome.ok).toBe(false);
+      expect(existsSync(path.join(cwd, "result.json"))).toBe(false);
+    }
+
+    for (const stderr of [
+      "HTTP 404: resource not accessible by integration",
+      "HTTP 410: cancelled run logs expired",
+    ]) {
+      const cwd = tmpDir("evrt-ci-log-capture-status-missing-");
+      const outcome = captureCiLog({
+        cwd,
+        input: INPUT,
+        spawn: fakeGh({ stderr, exitCode: 1 }),
+      });
+
+      expect(outcome.ok).toBe(true);
+      expect(readResult(cwd).artifact.captured).toBe(NO_CAPTURE);
+    }
+  });
+
+  test("uses narrow missing-log text only when stderr has no HTTP status", () => {
+    const cwd = tmpDir("evrt-ci-log-capture-statusless-missing-");
+    const outcome = captureCiLog({
+      cwd,
+      input: INPUT,
+      spawn: fakeGh({ stderr: "failed job logs have expired", exitCode: 1 }),
+    });
+
+    expect(outcome.ok).toBe(true);
+    expect(readResult(cwd).artifact.captured).toBe(NO_CAPTURE);
+  });
+
+  test("a spawn failure remains a fault even when its message resembles missing logs", () => {
+    const cwd = tmpDir("evrt-ci-log-capture-spawn-failure-");
+    const outcome = captureCiLog({
+      cwd,
+      input: INPUT,
+      spawn: fakeGh({
+        stderr: "logs expired",
+        exitCode: 1,
+        spawnError: new Error("gh executable not found"),
+      }),
+    });
+
+    expect(outcome.ok).toBe(false);
+    expect(existsSync(path.join(cwd, "result.json"))).toBe(false);
   });
 
   test("gh's routine auth hint on a plain 404 stays a missing log", () => {
