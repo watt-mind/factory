@@ -2007,6 +2007,45 @@ sh -c 'sleep 5 & wait'
     }
   });
 
+  test("needs_human surfaces agent evidence, summaries, and findings in the inbox", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(
+      db,
+      makeSpec({
+        adapter: "refuse-with-evidence",
+        input: { repos: ["evidence"], ticket: "WM-2118", repo: "factory" },
+      }),
+    );
+    const adapter = {
+      async execute({ workspaceDir }) {
+        writeFileSync(
+          path.join(workspaceDir, "result.json"),
+          JSON.stringify({
+            schemaVersion: "factory.agent-result/v1",
+            terminalState: "refused",
+            reasonCode: "needs_human",
+            evidence: {
+              summary: "The PR is already closed.",
+              reason: "auto_approval_ineligible:merge_barrier_unverified:pr-42",
+              message: "Confirm the merge barrier before retrying.",
+              findings: ["PR #42 was closed before review."],
+            },
+          }),
+        );
+        return { exitCode: 0, timedOut: false };
+      },
+    };
+
+    await runOnce(db, registry, { "refuse-with-evidence": adapter }, opts());
+    const body = db.query("SELECT body FROM inbox_items").get().body;
+    expect(body).toContain("Agent summary: The PR is already closed.");
+    expect(body).toContain("Agent reason: Merge barrier has not been verified");
+    expect(body).toContain(
+      "Agent message: Confirm the merge barrier before retrying.",
+    );
+    expect(body).toContain("PR #42 was closed before review.");
+  });
+
   test("a failing refusal inbox write never rolls back the terminal REFUSED state", async () => {
     const db = openDb(":memory:");
     // Force createInboxItem to throw inside the REFUSED transaction; the
