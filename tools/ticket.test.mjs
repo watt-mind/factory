@@ -32,6 +32,9 @@ import {
   retryControlPlaneMutation,
   transitionThenComment,
   getTicketWithRetry,
+  triageTicket,
+  answerTicket,
+  replaceTicketDetail,
   unclaimTicket,
   fileTicket,
   closureCheckMessages,
@@ -442,6 +445,117 @@ test("state does not post a comment when the transition fails", async () => {
     transitionThenComment(cp, "WM-910", "Todo", {}, "do not post"),
   ).rejects.toThrow("transition rejected");
   expect(calls).toEqual(["transition"]);
+});
+
+test("state comment retry does not repeat a timed-out comment that landed", async () => {
+  const calls = { transition: 0, comment: 0, listComments: 0 };
+  const comments = [];
+  const cp = {
+    kind: "github",
+    async transition() {
+      calls.transition += 1;
+    },
+    async comment(_key, body) {
+      calls.comment += 1;
+      comments.push({ body });
+      throw new Error("gh timed out after 15000ms");
+    },
+    async listComments() {
+      calls.listComments += 1;
+      return comments;
+    },
+  };
+
+  await expect(
+    transitionThenComment(cp, "WM-910", "Todo", {}, "explain the move"),
+  ).resolves.toBeUndefined();
+  expect(calls).toEqual({ transition: 1, comment: 1, listComments: 1 });
+  expect(comments).toEqual([{ body: "explain the move" }]);
+});
+
+test("answer retries a timed-out comment without repeating its transition", async () => {
+  const calls = { getTicket: 0, transition: 0, comment: 0, listComments: 0 };
+  const comments = [];
+  const cp = {
+    kind: "linear",
+    async getTicket() {
+      calls.getTicket += 1;
+      return { state: { name: "Blocked" } };
+    },
+    async transition() {
+      calls.transition += 1;
+    },
+    async comment(_key, body) {
+      calls.comment += 1;
+      if (calls.comment === 1)
+        throw new Error("linear graphql timed out after 15000ms");
+      comments.push({ body });
+    },
+    async listComments() {
+      calls.listComments += 1;
+      return comments;
+    },
+  };
+
+  await expect(
+    answerTicket(cp, "WM-910", "the answer"),
+  ).resolves.toBeUndefined();
+  expect(calls).toEqual({
+    getTicket: 1,
+    transition: 1,
+    comment: 2,
+    listComments: 1,
+  });
+  expect(comments).toEqual([{ body: "the answer" }]);
+});
+
+test("triage retries its trailing comment without repeating its transition", async () => {
+  const calls = { transition: 0, comment: 0, listComments: 0 };
+  const comments = [];
+  const cp = {
+    kind: "linear",
+    async transition() {
+      calls.transition += 1;
+    },
+    async comment(_key, body) {
+      calls.comment += 1;
+      if (calls.comment === 1)
+        throw new Error("linear graphql timed out after 15000ms");
+      comments.push({ body });
+    },
+    async listComments() {
+      calls.listComments += 1;
+      return comments;
+    },
+  };
+
+  await expect(
+    triageTicket(cp, "WM-910", "scope needs revision"),
+  ).resolves.toBeUndefined();
+  expect(calls).toEqual({ transition: 1, comment: 2, listComments: 1 });
+  expect(comments).toEqual([{ body: "scope needs revision" }]);
+});
+
+test("detail replacement retries a timed-out absolute write", async () => {
+  const calls = { getTicket: 0, raw: 0 };
+  const cp = {
+    kind: "github",
+    async getTicket() {
+      calls.getTicket += 1;
+      return { id: "issue-910", description: "old detail" };
+    },
+    async raw() {
+      calls.raw += 1;
+      if (calls.raw === 1)
+        throw new Error("github graphql timed out after 15000ms");
+      return { updateIssue: { issue: { id: "issue-910" } } };
+    },
+  };
+
+  await expect(
+    replaceTicketDetail(cp, "WM-910", "new detail"),
+  ).resolves.toEqual({ replaced: true });
+  expect(calls).toEqual({ getTicket: 1, raw: 2 });
 });
 
 test("ticket state and label reads retry one GraphQL timeout", async () => {

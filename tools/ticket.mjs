@@ -97,22 +97,21 @@ const CONTROL_PLANE_MUTATION_RETRY_BACKOFF_MS = 250;
 const controlPlaneMutationBackoff = (ms) =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
-function graphqlTimeoutMessage(controlPlane, error) {
+function controlPlaneTimeoutMessage(controlPlane, error) {
   const message = String(error?.message ?? "");
-  const endpoint =
-    controlPlane?.kind === "github"
-      ? "github projects graphql"
-      : controlPlane?.kind === "linear"
-        ? "linear graphql"
-        : null;
-  const match = endpoint
-    ? new RegExp(
-        `^${
-          controlPlane.kind === "github" ? "github(?: projects)?" : "linear"
-        } graphql timed out after (\\d+)ms$`,
-      ).exec(message)
-    : null;
-  return match ? `${endpoint} timed out after ${match[1]}ms` : null;
+  if (controlPlane?.kind === "linear") {
+    const match = /^linear graphql timed out after (\d+)ms$/.exec(message);
+    return match ? `linear graphql timed out after ${match[1]}ms` : null;
+  }
+  if (controlPlane?.kind === "github") {
+    const graphql =
+      /^github(?: projects)? graphql timed out after (\d+)ms$/.exec(message);
+    if (graphql)
+      return `github projects graphql timed out after ${graphql[1]}ms`;
+    const api = /^gh timed out after (\d+)ms$/.exec(message);
+    return api ? `github api timed out after ${api[1]}ms` : null;
+  }
+  return null;
 }
 
 /**
@@ -129,7 +128,7 @@ export async function retryControlPlaneMutation(
     try {
       return await mutation();
     } catch (cause) {
-      const timeout = graphqlTimeoutMessage(controlPlane, cause);
+      const timeout = controlPlaneTimeoutMessage(controlPlane, cause);
       if (!timeout) throw cause;
       if (attempt === 1)
         throw new ControlPlaneError(timeout, {
@@ -142,10 +141,46 @@ export async function retryControlPlaneMutation(
   throw new Error("unreachable: control-plane mutation retry loop exhausted");
 }
 
+function commentBodyMatches(body, expected) {
+  if (body === expected) return true;
+  const runId = process.env.FACTORY_RUN_ID;
+  return (
+    process.env.FACTORY_COMMENT_ATTRIBUTION === "1" &&
+    Boolean(runId) &&
+    !expected.includes(`run:${runId}`) &&
+    body === `${expected}\n\nrun:${runId}`
+  );
+}
+
+/**
+ * Retry a comment only after checking whether the timed-out write landed.
+ *
+ * Comment creation is not idempotent: blindly replaying a request after its
+ * response timed out can create a duplicate timeline entry. The check runs
+ * only on the retry path, so ordinary comments remain one write.
+ */
+export async function commentWithRetry(cp, key, body) {
+  let retrying = false;
+  return retryControlPlaneMutation(cp, async () => {
+    if (retrying) {
+      const comments = await getCommentsWithRetry(cp, key);
+      if (comments.some((comment) => commentBodyMatches(comment.body, body)))
+        return;
+    }
+    retrying = true;
+    return cp.comment(key, body);
+  });
+}
+
+/** Read comments through the same timeout recovery used by other ticket reads. */
+export async function getCommentsWithRetry(cp, key) {
+  return retryControlPlaneMutation(cp, () => cp.listComments(key));
+}
+
 /** Transition first, so a promotion rationale is never posted for a failed move. */
 export async function transitionThenComment(cp, key, state, options, comment) {
   await retryControlPlaneMutation(cp, () => cp.transition(key, state, options));
-  if (comment?.trim()) await cp.comment(key, comment);
+  if (comment?.trim()) await commentWithRetry(cp, key, comment);
 }
 
 /** Apply a complete label delta through the same retry policy as state writes. */
@@ -156,6 +191,39 @@ export async function setLabelsWithRetry(cp, key, options) {
 /** Read a ticket through the same timeout recovery used by state mutations. */
 export async function getTicketWithRetry(cp, key) {
   return retryControlPlaneMutation(cp, () => cp.getTicket(key));
+}
+
+/** Move a ticket to Triage, then safely add the required rationale. */
+export async function triageTicket(cp, key, comment) {
+  await retryControlPlaneMutation(cp, () =>
+    cp.transition(key, "Triage", { remove: ["ai:agent-ready"] }),
+  );
+  if (comment.trim()) await commentWithRetry(cp, key, comment);
+}
+
+/** Answer a blocked ticket without replaying its state transition on retry. */
+export async function answerTicket(cp, key, text) {
+  const issue = await getTicketWithRetry(cp, key);
+  if (issue.state?.name?.toLowerCase() === "blocked")
+    await retryControlPlaneMutation(cp, () => cp.transition(key, "Todo"));
+  await commentWithRetry(cp, key, text);
+}
+
+/** Replace a ticket body with a retried absolute write. */
+export async function replaceTicketDetail(cp, key, rawDetail) {
+  const issue = await getTicketWithRetry(cp, key);
+  const description = String(rawDetail).trim();
+  const current = String(issue.description ?? "").trim();
+  if (description === current) return { replaced: false };
+  const request = descriptionReplacementRequest(key, issue.id, description, {
+    kind: cp.kind,
+  });
+  const result = await retryControlPlaneMutation(cp, () =>
+    cp.raw(request.query, request.variables),
+  );
+  if (!replacementSucceeded(result, request.resultAt))
+    throw new Error(`detail replacement failed for ${key}`);
+  return { replaced: true };
 }
 
 /** Release a ticket only after its labels have been read through retry policy. */
@@ -903,10 +971,7 @@ const VERBS = {
       throw new Error(`usage: triage <ISSUE-ID> --comment "<text>"`);
     const key = normalizeTicketRef(positional[0]);
     const cp = controlPlane(key);
-    await retryControlPlaneMutation(cp, () =>
-      cp.transition(key, "Triage", { remove: ["ai:agent-ready"] }),
-    );
-    if (comment.trim()) await cp.comment(key, comment);
+    await triageTicket(cp, key, comment);
     out({ ok: true, identifier: key }, `${key} -> Triage`);
   },
 
@@ -916,10 +981,7 @@ const VERBS = {
       throw new Error(`usage: answer <ISSUE-ID> [--] "<text>"`);
     const key = normalizeTicketRef(positional[0]);
     const cp = controlPlane(key);
-    const issue = await getTicketWithRetry(cp, key);
-    if (issue.state?.name?.toLowerCase() === "blocked")
-      await retryControlPlaneMutation(cp, () => cp.transition(key, "Todo"));
-    await cp.comment(key, text);
+    await answerTicket(cp, key, text);
     out({ ok: true, identifier: key }, `answered ${key}`);
   },
 
@@ -930,25 +992,14 @@ const VERBS = {
     const key = normalizeTicketRef(positional[0]);
     const cp = controlPlane(key);
     if (has("replace")) {
-      const issue = await getTicketWithRetry(cp, key);
-      const description = String(rawDetail).trim();
-      const current = String(issue.description ?? "").trim();
-      if (description === current) {
+      const { replaced } = await replaceTicketDetail(cp, key, rawDetail);
+      if (!replaced) {
         out(
           { ok: true, identifier: key, replaced: false },
           `${key} detail already matches`,
         );
         return;
       }
-      const request = descriptionReplacementRequest(
-        key,
-        issue.id,
-        description,
-        { kind: cp.kind },
-      );
-      const result = await cp.raw(request.query, request.variables);
-      if (!replacementSucceeded(result, request.resultAt))
-        throw new Error(`detail replacement failed for ${key}`);
       out(
         { ok: true, identifier: key, replaced: true },
         `${key} detail replaced`,
