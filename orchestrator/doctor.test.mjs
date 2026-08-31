@@ -14,11 +14,14 @@ import { test, expect, describe } from "bun:test";
 import {
   mkdtempSync,
   mkdirSync,
+  readdirSync,
   writeFileSync,
   chmodSync,
   existsSync,
   readFileSync,
   rmSync,
+  symlinkSync,
+  unlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -42,6 +45,7 @@ import {
   parseCliVersion,
   repoToolchainDiagnostics,
   stackDaemonDiagnostics,
+  factoryCommandLinkDiagnostic,
 } from "./doctor.mjs";
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -173,6 +177,82 @@ describe("base branch CI diagnostics (#1928)", () => {
         detail: "develop — skipped, no completed Actions history",
       }),
     ]);
+  });
+});
+
+describe("factory command link diagnostic (#1950)", () => {
+  const expectedCommands = () =>
+    readdirSync(path.join(HERE, "..", "shared", "commands"))
+      .filter((file) => file.endsWith(".md"))
+      .map((file) => path.basename(file, ".md"));
+
+  const setupLinkedCommands = (dir, names) => {
+    const commandsDir = path.join(dir, ".claude", "commands");
+    mkdirSync(commandsDir, { recursive: true });
+    for (const name of names) {
+      symlinkSync(
+        path.join(HERE, "..", "shared", "commands", `${name}.md`),
+        path.join(commandsDir, `${name}.md`),
+      );
+    }
+    return commandsDir;
+  };
+
+  test("passes when every expected command is linked", () => {
+    const dir = scratch();
+    const names = expectedCommands();
+    const commandsDir = setupLinkedCommands(dir, names);
+
+    expect(
+      factoryCommandLinkDiagnostic({ commandsDir, expectedCommands: names }),
+    ).toEqual({
+      ok: true,
+      label: "/factory-* commands linked",
+      detail: `${names.length} commands`,
+      fix: null,
+    });
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("warns with the existing emit hint when a command link is missing", () => {
+    const dir = scratch();
+    const names = expectedCommands();
+    const commandsDir = setupLinkedCommands(dir, names);
+    const missing = names[0];
+    unlinkSync(path.join(commandsDir, `${missing}.md`));
+
+    expect(
+      factoryCommandLinkDiagnostic({ commandsDir, expectedCommands: names }),
+    ).toEqual({
+      ok: "warn",
+      label: "/factory-* commands linked",
+      detail: `1/${names.length} missing or broken: ${missing}`,
+      fix: "factory emit",
+    });
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("warns with the existing emit hint when a command link is dangling", () => {
+    const dir = scratch();
+    const names = expectedCommands();
+    const commandsDir = setupLinkedCommands(dir, names);
+    const broken = names[0];
+    const target = path.join(commandsDir, `${broken}.md`);
+    unlinkSync(target);
+    symlinkSync(path.join(dir, "missing-target.md"), target);
+
+    expect(
+      factoryCommandLinkDiagnostic({ commandsDir, expectedCommands: names }),
+    ).toEqual({
+      ok: "warn",
+      label: "/factory-* commands linked",
+      detail: `1/${names.length} missing or broken: ${broken}`,
+      fix: "factory emit",
+    });
+
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 
