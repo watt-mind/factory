@@ -2715,6 +2715,43 @@ describe("planEvent worktree gate (WM-108)", () => {
     );
   });
 
+  test("a direct dispatch enforces an in-repo-only escalate_paths overlay", () => {
+    const checkout = tmpDir("evrt-escalate-overlay-");
+    writeFileSync(
+      path.join(checkout, ".factory.yaml"),
+      "schemaVersion: factory.repo/v1\nescalate_paths:\n  - src/auth/**\n",
+    );
+    withReposRoot(
+      `repos:\n  - name: overlaid\n    path: ${checkout}\n    base: develop\n` +
+        `    team: WM\n    project: Factory\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+        `    worktree_root: /tmp/worktrees\n    escalate_paths: []\n`,
+      () => {
+        const result = worktreeDispatchAutoEligibility(
+          { repo: "overlaid", ticket: "WM-1797" },
+          {
+            countLeases: () => 0,
+            budgetRefusal: () => null,
+            fetchTicket: () => ({
+              identifier: "WM-1797",
+              state: { name: "Todo" },
+              assignee: null,
+              labels: { nodes: [{ name: "ai:agent-ready" }] },
+              description: "## Owned Paths\n- src/auth/session.ts\n",
+            }),
+            fetchInFlight: () => [],
+          },
+        );
+        expect(result.refusal).toMatchObject({
+          decision: "noop",
+          reason: "escalate_paths_intersect",
+        });
+        expect(result.evidence.escalatePathIntersections).toEqual([
+          "src/auth/**",
+        ]);
+      },
+    );
+  });
+
   test("dispatch also defers when merge-fix already owns the ticket worktree", () => {
     withReposRoot(
       `repos:\n  - name: fixture\n    path: /tmp/fixture\n    base: develop\n    team: WM\n    project: Factory\n    worktree_up: /tmp/worktree-up\n    worktree_down: /tmp/worktree-down\n    worktree_root: /tmp/worktrees\n    escalate_paths: []\n`,
