@@ -1445,6 +1445,136 @@ describe("worktree baseline verification (WM-334)", () => {
     ]);
   });
 
+  test("a repo verify command covering the lib suite does not duplicate the backstop", () => {
+    const { dir, record } = worktreeWorkspace(
+      "bun test event-runtime/lib --timeout 20000",
+      null,
+    );
+    record.handoff = { verificationCommand: "ticket-narrow" };
+    commitHandoffDiff(record, "event-runtime/lib/changed.mjs");
+    const calls = [];
+    const out = verifyResult({
+      spec: dispatchSpec,
+      def: dispatchDef,
+      registry,
+      workspaceDir: dir,
+      attempt: 1,
+      worktreeRecord: record,
+      runHandoffCommandFn: ({ command }) => {
+        calls.push(command);
+        return {
+          passed: true,
+          exitCode: 0,
+          output: "ok",
+          sandbox: { tmpfsMb: 1024 },
+        };
+      },
+    });
+
+    expect(out.kind).toBe("completed");
+    // The repo `verify:` command already ran the full lib suite in step 1;
+    // step 3 must not spawn it a second time.
+    expect(calls).toEqual([
+      "bun test event-runtime/lib --timeout 20000",
+      "ticket-narrow",
+    ]);
+    expect(out.handoff.ticketVerifyCoversEventRuntimeLibSuite).toBe(true);
+    expect(out.handoff.eventRuntimeLibVerify).toBeNull();
+    const body = composeHandoffVerification(out.handoff);
+    expect(body).toContain(
+      "- Event-runtime lib suite: skipped (ticket or repo verify command already covers it)",
+    );
+  });
+
+  test("a lib suite failure matching the pre-existing red baseline is refused as baseline_red, not event_runtime_lib_verify_failed", () => {
+    const { dir, record } = worktreeWorkspace("repo-verify", {
+      status: "red",
+      check: "event_runtime_lib",
+      output: "regression outside the focused ticket test",
+    });
+    record.handoff = { verificationCommand: "ticket-narrow" };
+    commitHandoffDiff(record, "event-runtime/lib/changed.mjs");
+
+    try {
+      verifyResult({
+        spec: dispatchSpec,
+        def: dispatchDef,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+        worktreeRecord: record,
+        runHandoffCommandFn: ({ command }) => ({
+          passed: command !== "bun test event-runtime/lib --timeout 20000",
+          exitCode:
+            command === "bun test event-runtime/lib --timeout 20000" ? 1 : 0,
+          output:
+            command === "bun test event-runtime/lib --timeout 20000"
+              ? "regression outside the focused ticket test"
+              : "ok",
+          sandbox: { tmpfsMb: 1024 },
+        }),
+      });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.reasonCode).toBe("baseline_red");
+      expect(err.violations[0]).toContain("event_runtime_lib_verify_failed");
+    }
+  });
+
+  test("a missing event-runtime/lib directory never triggers the backstop", () => {
+    const { dir, record } = worktreeWorkspace("repo-verify", null);
+    record.handoff = { verificationCommand: "ticket-narrow" };
+    // Commit a diff that names a path under the lib prefix as a deleted file
+    // reference only — the directory itself does not exist in the final tree.
+    record.base = "develop";
+    const git = (...args) => execFileSync("git", args, { cwd: record.path });
+    git("init", "-q", "-b", "develop");
+    git("config", "user.email", "t@t");
+    git("config", "user.name", "t");
+    writeFileSync(path.join(record.path, "README.md"), "base\n");
+    git("add", "-A");
+    git("commit", "-qm", "base");
+    git("update-ref", "refs/remotes/origin/develop", "HEAD");
+    git("checkout", "-qb", "feat/x");
+    mkdirSync(path.join(record.path, "event-runtime", "lib"), {
+      recursive: true,
+    });
+    writeFileSync(
+      path.join(record.path, "event-runtime", "lib", "gone.mjs"),
+      "x\n",
+    );
+    git("add", "-A");
+    git("commit", "-qm", "add then remove");
+    execFileSync("git", ["rm", "-q", "-r", "event-runtime/lib"], {
+      cwd: record.path,
+    });
+    git("commit", "-qm", "remove lib dir");
+
+    const calls = [];
+    const out = verifyResult({
+      spec: dispatchSpec,
+      def: dispatchDef,
+      registry,
+      workspaceDir: dir,
+      attempt: 1,
+      worktreeRecord: record,
+      runHandoffCommandFn: ({ command }) => {
+        calls.push(command);
+        return {
+          passed: true,
+          exitCode: 0,
+          output: "ok",
+          sandbox: { tmpfsMb: 1024 },
+        };
+      },
+    });
+
+    expect(out.kind).toBe("completed");
+    expect(calls).toEqual(["repo-verify", "ticket-narrow"]);
+    expect(out.handoff.eventRuntimeLibVerify).toBeNull();
+  });
+
   test("missing dependencies install before the injected step-1 sandbox runner", () => {
     const { dir, record } = worktreeWorkspace("step-1", null);
     writeFileSync(

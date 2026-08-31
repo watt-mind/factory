@@ -1013,7 +1013,7 @@ export function composeHandoffVerification(handoff) {
       lines.push(fenceBlock(handoff.eventRuntimeLibVerify.tail));
   } else if (handoff.diff?.ok) {
     const why = handoff.ticketVerifyCoversEventRuntimeLibSuite
-      ? "ticket command already covers it"
+      ? "ticket or repo verify command already covers it"
       : `no ${HANDOFF_EVENT_RUNTIME_LIB_PREFIX}** changes`;
     lines.push(`- Event-runtime lib suite: skipped (${why})`);
   }
@@ -1935,7 +1935,8 @@ function verifyCompleted({
         { root: worktreePath },
       ),
       ticketVerifyCoversEventRuntimeLibSuite:
-        ticketVerifyCoversEventRuntimeLibSuite(ticketCommand),
+        ticketVerifyCoversEventRuntimeLibSuite(ticketCommand) ||
+        ticketVerifyCoversEventRuntimeLibSuite(worktreeRecord.verify),
       reasonCode: null,
     };
     const refuse = (reasonCode, violation) => {
@@ -1978,9 +1979,9 @@ function verifyCompleted({
       base: worktreeRecord.base ?? null,
     });
     const files = handoff.diff.files ?? [];
-    const needsEventRuntimeLibVerify = files.some((file) =>
-      file.startsWith(HANDOFF_EVENT_RUNTIME_LIB_PREFIX),
-    );
+    const needsEventRuntimeLibVerify =
+      files.some((file) => file.startsWith(HANDOFF_EVENT_RUNTIME_LIB_PREFIX)) &&
+      existsSync(path.join(worktreePath, HANDOFF_EVENT_RUNTIME_LIB_PREFIX));
     const needsWebBuild =
       files.some((file) => file.startsWith(HANDOFF_WEB_SRC_PREFIX)) &&
       existsSync(
@@ -2071,8 +2072,11 @@ function verifyCompleted({
       obs.source = "event_runtime_lib";
       handoff.eventRuntimeLibVerify = obs;
       if (!obs.passed) {
+        const baselineStillRed =
+          !obs.timedOut &&
+          matchesRedBaseline(worktreeRecord.baseline, obs.output);
         refuse(
-          "event_runtime_lib_verify_failed",
+          baselineStillRed ? "baseline_red" : "event_runtime_lib_verify_failed",
           `event_runtime_lib_verify_failed: ${handoffWhy(obs)}`,
         );
       }
@@ -2100,7 +2104,7 @@ function verifyCompleted({
       handoffChecks.push("web_build_passed");
     }
 
-    // 4. Owned Paths conformance: listed always; refused under strict.
+    // 5. Owned Paths conformance: listed always; refused under strict.
     if (handoff.diff.ok && ownedPathsKnown) {
       handoff.ownedPathsDeviations = ownedPathsDeviations(files, ownedPaths);
       if (handoff.ownedPathsDeviations.length === 0) {
