@@ -28,7 +28,7 @@ import {
   releaseStalledWorkerLease,
   retryRun,
 } from "./worker.mjs";
-import { proposalSubject } from "./proposal-subject.mjs";
+import { agentFamily, proposalSubject } from "./proposal-subject.mjs";
 import {
   ApiParameterError,
   parseListLimit,
@@ -785,6 +785,142 @@ const RUN_POPULATIONS = new Set([
 
 export const RUN_LIST_DEFAULT_LIMIT = 100;
 export const RUN_LIST_MAX_LIMIT = 200;
+export const RUN_SUBJECT_CACHE_TTL_MS = 30_000;
+// A cold cache can face up to RUN_LIST_MAX_LIMIT distinct unresolved tickets
+// in a single list request. Resolving all of them inline would fan out one
+// tracker read per row, every poll, from every open tab -- exactly the shape
+// that has caused two tracker rate-limit incidents. Cap the synchronous
+// resolution per request and let the rest fill in on later polls (misses are
+// not cached, so they stay eligible next time around).
+const RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST = 8;
+const RUN_SUBJECT_RESOLVE_CONCURRENCY = 4;
+
+// GET /runs is polled frequently. Resolve each distinct ticket once per short
+// window (including misses) so duplicate rows and the detail view never turn a
+// browser poll into one tracker request per row.
+const runSubjectCache = new Map();
+
+export function clearRunSubjectCache() {
+  runSubjectCache.clear();
+}
+
+function runSubjectLabel(subject) {
+  const ticket = normalizeTicketId(subject);
+  if (!ticket)
+    return typeof subject === "string" && subject.trim()
+      ? subject.trim()
+      : null;
+  const github = ticket.match(/^([^/]+)\/([^#]+)#(\d+)$/);
+  return github ? `${github[2]}#${github[3]}` : ticket;
+}
+
+function runSubjectUrl(subject) {
+  const ticket = normalizeTicketId(subject);
+  if (!ticket) return null;
+  const github = ticket.match(/^([^/]+)\/([^#]+)#(\d+)$/);
+  if (github)
+    return `https://github.com/${github[1]}/${github[2]}/issues/${github[3]}`;
+  return `https://linear.app/watt-mind/issue/${encodeURIComponent(ticket)}`;
+}
+
+function runOriginLabel(type) {
+  if (typeof type !== "string" || !type.trim()) return null;
+  const parts = type.trim().split(".").filter(Boolean);
+  if (parts[0] === "factory") parts.shift();
+  if (["requested", "request", "tick"].includes(parts.at(-1))) parts.pop();
+  return parts.join(" ") || type.trim();
+}
+
+function embeddedRunSubjectTitle(spec) {
+  const candidates = [
+    spec?.approvalPolicy?.dispatchEvidence?.ticket?.title,
+    spec?.input?.ticketTitle,
+    spec?.input?.issueTitle,
+  ];
+  return (
+    candidates
+      .find((value) => typeof value === "string" && value.trim())
+      ?.trim() ?? null
+  );
+}
+
+function runIdentity(row, spec) {
+  return {
+    agentKind: agentFamily(spec.agent),
+    ticketSubject: row.subject ?? null,
+    subjectLabel: runSubjectLabel(row.subject),
+    subjectTitle: embeddedRunSubjectTitle(spec),
+    subjectUrl: runSubjectUrl(row.subject),
+    originType: row.event_type ?? null,
+    originLabel: runOriginLabel(row.event_type),
+  };
+}
+
+async function resolveRunSubjects(
+  runs,
+  { nowMs = Date.now(), controlPlane } = {},
+) {
+  const unresolved = new Set();
+  for (const run of runs) {
+    const ticket = normalizeTicketId(run.ticketSubject);
+    if (!ticket || run.subjectTitle) continue;
+    const cached = runSubjectCache.get(ticket);
+    if (cached && nowMs - cached.timestamp < RUN_SUBJECT_CACHE_TTL_MS) {
+      Object.assign(run, cached.data);
+    } else {
+      unresolved.add(ticket);
+    }
+  }
+  if (unresolved.size === 0) return runs;
+
+  let plane;
+  try {
+    plane = await ticketDetailControlPlane(controlPlane);
+  } catch {
+    plane = null;
+  }
+
+  const toResolve = [...unresolved].slice(
+    0,
+    RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST,
+  );
+
+  async function resolveOne(ticket) {
+    let data = { subjectTitle: null, subjectUrl: runSubjectUrl(ticket) };
+    try {
+      const issue = await plane?.getTicket(ticket);
+      data = {
+        subjectTitle:
+          typeof issue?.title === "string" && issue.title.trim()
+            ? issue.title.trim()
+            : null,
+        subjectUrl:
+          typeof issue?.url === "string" && issue.url.trim()
+            ? issue.url.trim()
+            : runSubjectUrl(ticket),
+      };
+    } catch {
+      // A tracker outage degrades to the bare persisted subject. Cache the
+      // miss briefly as well, otherwise every 5s poll retries the outage.
+    }
+    runSubjectCache.set(ticket, { timestamp: nowMs, data });
+  }
+
+  // Chunked loop: at most RUN_SUBJECT_RESOLVE_CONCURRENCY in flight at once,
+  // and never more than RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST tickets total for
+  // this request. Anything left in `unresolved` beyond the cap is simply not
+  // resolved here -- it stays a bare subject until a later poll picks it up.
+  for (let i = 0; i < toResolve.length; i += RUN_SUBJECT_RESOLVE_CONCURRENCY) {
+    const chunk = toResolve.slice(i, i + RUN_SUBJECT_RESOLVE_CONCURRENCY);
+    await Promise.all(chunk.map((ticket) => resolveOne(ticket)));
+  }
+  for (const run of runs) {
+    const ticket = normalizeTicketId(run.ticketSubject);
+    const cached = ticket ? runSubjectCache.get(ticket) : null;
+    if (cached && !run.subjectTitle) Object.assign(run, cached.data);
+  }
+  return runs;
+}
 
 class ListQueryError extends Error {
   constructor(error, details = {}) {
@@ -1859,10 +1995,12 @@ function runsView(db, filters = {}, page = {}) {
   const rows = db
     .query(
       `SELECT r.*, r.rowid AS list_rowid, a.reason_code, a.terminal_state AS attempt_terminal,
-              a.started_at, a.lease_expires_at, p.event_id, p.event_source
+              a.started_at, a.lease_expires_at, p.event_id, p.event_source,
+              e.type AS event_type
        FROM runs r
        LEFT JOIN attempts a ON a.run_id = r.run_id AND a.attempt = r.attempts
        LEFT JOIN proposals p ON p.run_id = r.run_id AND p.decision = 'run'
+       LEFT JOIN events e ON e.source = p.event_source AND e.event_id = p.event_id
        ${where}
        ORDER BY r.created_at DESC, r.rowid DESC
        LIMIT ?`,
@@ -1884,6 +2022,7 @@ function runsView(db, filters = {}, page = {}) {
         modelTier: spec.modelTier ?? null,
         model: spec.model ?? null,
         idempotencyKey: row.idempotency_key,
+        ...runIdentity(row, spec),
       };
     }),
     nextBefore: hasNextPage ? encodeRunCursor(pageRows.at(-1)) : null,
@@ -2011,7 +2150,17 @@ function runView(
   runId,
   { artifactsDir, registry, readArtifactHead = artifactHead } = {},
 ) {
-  const row = db.query(`SELECT * FROM runs WHERE run_id = ?`).get(runId);
+  const row = db
+    .query(
+      `SELECT r.*,
+              (SELECT e.type
+               FROM proposals p
+               JOIN events e ON e.source = p.event_source AND e.event_id = p.event_id
+               WHERE p.run_id = r.run_id AND p.decision = 'run'
+               ORDER BY p.created_at DESC, p.rowid DESC LIMIT 1) AS event_type
+       FROM runs r WHERE r.run_id = ?`,
+    )
+    .get(runId);
   if (!row) return null;
   const attempts = db
     .query(`SELECT * FROM attempts WHERE run_id = ? ORDER BY attempt`)
@@ -2042,6 +2191,7 @@ function runView(
       spec,
     },
     subject: registry ? proposalSubject(registry, spec) : null,
+    identity: runIdentity(row, spec),
     lifecycle: lifecycleOf(db, runId),
     attempts,
     result,
@@ -2331,7 +2481,9 @@ export async function handleRunApiRoute({
         state: url.searchParams.get("state") ?? undefined,
         agent: url.searchParams.get("agent") ?? undefined,
       };
-      return send(200, runsView(db, filters, runPage(url)));
+      const view = runsView(db, filters, runPage(url));
+      await resolveRunSubjects(view.runs, { nowMs });
+      return send(200, view);
     } catch (err) {
       if (err instanceof ListQueryError) return send(422, err.body);
       throw err;
@@ -2465,6 +2617,7 @@ export async function handleRunApiRoute({
       readArtifactHead,
     });
     if (!view) return send(404, { error: `unknown run ${runGet[1]}` });
+    await resolveRunSubjects([view.identity], { nowMs });
     return send(200, view);
   }
 
