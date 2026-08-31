@@ -65,6 +65,7 @@ export class CellClient {
     const url = this._url(path);
     const reqHeaders = {
       Accept: "application/json",
+      "X-Cell-Type": "generic",
       ...headers
     };
 

@@ -9,13 +9,21 @@
       {
         "name": "GENERIC_CELL",
         "class_name": "GenericCell"
+      },
+      {
+        "name": "SITE_CELL",
+        "class_name": "SiteCell"
+      },
+      {
+        "name": "ARTICLE_CELL",
+        "class_name": "ArticleCell"
       }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["GenericCell"]
+      "new_sqlite_classes": ["GenericCell", "SiteCell", "ArticleCell"]
     }
   ]
 }

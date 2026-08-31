@@ -11,7 +11,7 @@ const CELLS_DIR = path.resolve(REPO_ROOT, "cells");
 const TMP_TEST_DIR = path.resolve(REPO_ROOT, ".factory/test-celld-smoke-" + Date.now());
 
 // Select an ephemeral port
-const TEST_PORT = 9988;
+const TEST_PORT = 9975;
 const TEST_ENDPOINT = `http://127.0.0.1:${TEST_PORT}`;
 
 let celldProcess = null;

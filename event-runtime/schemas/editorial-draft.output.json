@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["articleId", "title", "slug", "revisionHash", "revisionNumber", "wordCount", "cellVersion"],
+  "properties": {
+    "articleId": { "type": "string" },
+    "title": { "type": "string" },
+    "slug": { "type": "string" },
+    "revisionHash": { "type": "string" },
+    "revisionNumber": { "type": "integer" },
+    "wordCount": { "type": "integer" },
+    "cellVersion": { "type": "integer" }
+  },
+  "additionalProperties": false
+}

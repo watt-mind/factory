@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["siteId", "articleId", "cellEndpoint"],
+  "properties": {
+    "siteId": { "type": "string" },
+    "articleId": { "type": "string" },
+    "cellEndpoint": { "type": "string" },
+    "revisionNumber": { "type": "integer", "default": 1 },
+    "instructions": { "type": "string" }
+  },
+  "additionalProperties": false
+}

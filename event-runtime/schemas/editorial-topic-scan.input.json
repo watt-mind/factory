@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["siteId", "cellEndpoint"],
+  "properties": {
+    "siteId": { "type": "string" },
+    "cellEndpoint": { "type": "string" },
+    "maxCandidates": { "type": "integer", "default": 3 },
+    "focusPillars": { "type": "array", "items": { "type": "string" } }
+  },
+  "additionalProperties": false
+}

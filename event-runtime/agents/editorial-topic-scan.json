@@ -1,0 +1,29 @@
+{
+  "id": "editorial-topic-scan",
+  "version": 1,
+  "prompt": "agents/editorial-topic-scan.md",
+  "input_schema": "schemas/editorial-topic-scan.input.json",
+  "output_schema": "schemas/editorial-topic-scan.output.json",
+  "output_contract": "factory.editorial-topic-scan/v1",
+  "model_tier": "strong",
+  "effort": "high",
+  "workspace": { "type": "ephemeral", "retainOnFailure": true },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": [],
+    "cells": [
+      {
+        "binding": "SITE_CELL",
+        "access": "read-write",
+        "description": "Site-wide editorial policy and topic backlog"
+      }
+    ]
+  },
+  "limits": { "timeout_seconds": 180, "attempts": 1 },
+  "mutating": false,
+  "pins": {
+    "agents/editorial-topic-scan.md": "sha256:f31d25abcd14151c5adb22870cdde567c8b462ecd3ff27cb4f38df2c16179222",
+    "schemas/editorial-topic-scan.input.json": "sha256:b67c35526589722e4b58a102ebe8b870fa9cb5eed2f663a242a926c61ba76ae9",
+    "schemas/editorial-topic-scan.output.json": "sha256:9e58e880bf857271c2b425b4d48ef510be414a2198e77fe3858f93af93e0f395"
+  }
+}
