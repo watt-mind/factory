@@ -148,6 +148,11 @@ export async function transitionThenComment(cp, key, state, options, comment) {
   if (comment?.trim()) await cp.comment(key, comment);
 }
 
+/** Apply a complete label delta through the same retry policy as state writes. */
+export async function setLabelsWithRetry(cp, key, options) {
+  await retryControlPlaneMutation(cp, () => cp.setLabels(key, options));
+}
+
 /**
  * File one ticket through the control plane and report the outcome.
  *
@@ -965,9 +970,7 @@ const VERBS = {
       out(current, current.join(" ") || "(none)");
       return;
     }
-    await retryControlPlaneMutation(cp, () =>
-      cp.setLabels(key, { add, remove }),
-    );
+    await setLabelsWithRetry(cp, key, { add, remove });
     out(
       { ok: true, identifier: key, added: add, removed: remove },
       `${key} labels updated`,
