@@ -504,11 +504,24 @@ API:
 
 ```
 GET  /inbox/:id                → the item, with decision, response, responseHistory
+POST /inbox                    → creates an item; optional decision is validated
 POST /inbox/:id/decide         → body: factory.decision-response/v1 minus decidedAt
                                   200 { item, effect: { kind, outcome } }
 POST /inbox/:id/decide/retry   → re-run a failed effect with the stored response,
                                   or take over a pending claim abandoned by a crash (§3)
 ```
+
+`POST /inbox` has source-specific presentation rules. `serve:notify` and
+`agent:*` sources are machine-oriented inputs: their submitted `title` and
+`body` are passed through `synthesizeInboxItem()` and are not necessarily the
+persisted values. The synthesized body starts with `What happened:` and `Why
+it matters:`, then includes the reason code, links, and decision paragraphs
+when available, with the producer's original body appended last. For
+`decision_needed` and `proposal_expired` items with a proposal, the synthesized
+title is `Approve <agent> run (<subject>)?`. By contrast, `cli` items are
+stored verbatim, including their supplied title and body. Synthesis deliberately
+does not rewrite the serialized decision request: decision responses hash that
+request, so changing it would make an otherwise valid response stale.
 
 Decision endpoints return `{ error, message, errors? }`; `errors` is present
 only when validation supplies individual errors. The routes return
