@@ -60,6 +60,24 @@ export class GenericCell {
   }
 
   async _handleGenericRoutes(request, pathname, method) {
+    const access = request.headers.get("X-Cell-Access") || "malleable";
+
+    if (access === "read-only" && method !== "GET") {
+      return new Response(JSON.stringify({
+        error: "forbidden",
+        code: "read_only_access",
+        message: "Write operations are forbidden (access level: read-only)"
+      }), { status: 403, headers: { "Content-Type": "application/json" } });
+    }
+
+    if ((access === "data-only" || access === "read-write") && pathname === "/v1/schema/migrate") {
+      return new Response(JSON.stringify({
+        error: "forbidden",
+        code: "schema_modifications_forbidden",
+        message: "Schema modifications are forbidden (access level: data-only). Data operations are permitted, but table alterations require 'malleable' access."
+      }), { status: 403, headers: { "Content-Type": "application/json" } });
+    }
+
     if (pathname === "/v1/schema" && method === "GET") {
       const meta = Object.fromEntries([...this.sql.exec("SELECT key, value FROM _cell_meta")].map(r => [r.key, r.value]));
       const migrations = [...this.sql.exec("SELECT id, applied_at, description FROM _cell_migrations ORDER BY applied_at ASC")];

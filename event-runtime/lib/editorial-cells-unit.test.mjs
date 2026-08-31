@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { SiteCellClient, ArticleCellClient } from "./editorial-cells.mjs";
+import { CellClient } from "./cell-client.mjs";
 import { createMockCellFetch } from "./mock-cells.mjs";
 
 describe("Editorial Cells Pure In-Memory Unit Test (No live server, no subprocess)", () => {
@@ -96,5 +97,75 @@ describe("Editorial Cells Pure In-Memory Unit Test (No live server, no subproces
     const state = await article.getState();
     expect(state.state).toBe("published");
     expect(state.receipt.cms_post_id).toBe("cw-post-1001");
+  });
+
+  it("enforces access: data-only allowing entity/article writes while blocking DDL schema migrations", async () => {
+    const mockFetch = createMockCellFetch();
+
+    // 1. Data-Only Client can write data normally
+    const article = new ArticleCellClient({
+      endpoint: "http://mock-cell.local",
+      articleId: "article:coachwatts:data-only-test",
+      access: "data-only",
+      fetch: mockFetch
+    });
+
+    await article.setBrief({
+      title: "Data Only Article",
+      slug: "data-only-test"
+    });
+
+    const brief = await article.getBrief();
+    expect(brief.title).toBe("Data Only Article");
+
+    // 2. But generic DDL migration is refused with 403 Forbidden
+    const genericClient = new CellClient({
+      endpoint: "http://mock-cell.local",
+      cellId: "article:coachwatts:data-only-test",
+      access: "data-only",
+      fetch: mockFetch
+    });
+
+    let forbiddenThrown = false;
+    try {
+      await genericClient.migrate({
+        migrationId: "002_forbidden_migration",
+        sql: "CREATE TABLE secret_table (id TEXT);"
+      });
+    } catch (err) {
+      forbiddenThrown = true;
+      expect(err.status).toBe(403);
+    }
+    expect(forbiddenThrown).toBe(true);
+  });
+
+  it("enforces access: read-only rejecting any mutating PUT or POST request", async () => {
+    const mockFetch = createMockCellFetch();
+
+    const readOnlySite = new SiteCellClient({
+      endpoint: "http://mock-cell.local",
+      siteId: "coachwatts.com",
+      access: "read-only",
+      fetch: mockFetch
+    });
+
+    // Reading policy is permitted
+    const policy = await readOnlySite.getPolicy();
+    expect(policy).not.toBeNull();
+
+    // Writing policy is blocked with 403
+    let writeForbidden = false;
+    try {
+      await readOnlySite.setPolicy({
+        tone: "Mutated tone",
+        audience: "All",
+        pillars: [],
+        safetyRules: []
+      });
+    } catch (err) {
+      writeForbidden = true;
+      expect(err.status).toBe(403);
+    }
+    expect(writeForbidden).toBe(true);
   });
 });

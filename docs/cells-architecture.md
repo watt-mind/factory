@@ -118,7 +118,23 @@ To add new Durable Object classes, endpoints, or business logic:
 
 ---
 
-## 6. Testing Strategy & Isolation Seams
+## 6. Access Control & Cell Immutability Policy
+
+To protect cells from unauthorized modifications by untrusted, specialized, or restricted agents, the runtime supports **three granular access tiers** configured via the `X-Cell-Access` header or agent capabilities:
+
+| Access Tier | Permitted Operations | Blocked Operations | Intended Use Case |
+| :--- | :--- | :--- | :--- |
+| `read-only` | `GET` requests (`/v1/state`, `/v1/schema`, `/v1/entities/...`, `/v1/query`) | All `POST`, `PUT`, `DELETE` operations (returns `403 Forbidden`) | Auditors, topic scanners, reviewers who only inspect |
+| `data-only` | Full data CRUD (`PUT /v1/entities/...`, `POST /v1/sources`, `POST /v1/revisions`) | Schema alterations & DDL migrations (`POST /v1/schema/migrate`) returns `403 Forbidden` | Standard drafters, researchers, and content writers who must not alter table schemas |
+| `malleable` | Full data CRUD + dynamic DDL schema migrations (`POST /v1/schema/migrate`) | None at the cell level | Cell engineer and autonomous architecture agents |
+
+### Code Deployment Immutability:
+* Standard agents operate in isolated sandbox workspaces without Cloudflare R2 deployment credentials.
+* Only explicitly authorized CI / release workflows or designated engineering agents can execute `celld deploy`.
+
+---
+
+## 7. Testing Strategy & Isolation Seams
 
 Under no circumstances should automated tests touch live production `celld` or remote Cloudflare R2 buckets.
 
@@ -130,7 +146,7 @@ Under no circumstances should automated tests touch live production `celld` or r
 
 ---
 
-## 7. Production Network & Security Topology
+## 8. Production Network & Security Topology
 
 * **Private Tailnet Binding:** The `celld` daemon on `runner` binds exclusively to `100.74.142.98:8080` (with internal peer listen on `:8081`).
 * **Unproxied DNS Pointer:** `cells.servers.hdkiller.com` $\rightarrow$ `100.74.142.98` (Cloudflare DNS-only / Grey Cloud).

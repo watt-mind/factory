@@ -78,6 +78,23 @@ export function createMockCellFetch() {
     }
 
     const db = getSql(cellId);
+    const access = options.headers?.["X-Cell-Access"] || options.headers?.["x-cell-access"] || "malleable";
+
+    if (access === "read-only" && method !== "GET") {
+      return new Response(JSON.stringify({
+        error: "forbidden",
+        code: "read_only_access",
+        message: "Write operations are forbidden (access level: read-only)"
+      }), { status: 403, headers: { "Content-Type": "application/json" } });
+    }
+
+    if ((access === "data-only" || access === "read-write") && subPath === "/v1/schema/migrate") {
+      return new Response(JSON.stringify({
+        error: "forbidden",
+        code: "schema_modifications_forbidden",
+        message: "Schema modifications are forbidden (access level: data-only). Data operations are permitted, but table alterations require 'malleable' access."
+      }), { status: 403, headers: { "Content-Type": "application/json" } });
+    }
 
     // 1. GET /v1/schema
     if (subPath === "/v1/schema" && method === "GET") {

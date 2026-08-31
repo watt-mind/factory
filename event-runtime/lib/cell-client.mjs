@@ -36,9 +36,10 @@ export class CellNotFoundError extends CellError {
 }
 
 export class CellClient {
-  constructor({ endpoint = "http://127.0.0.1:9876", cellId = null, fetch = globalThis.fetch } = {}) {
+  constructor({ endpoint = "http://127.0.0.1:9876", cellId = null, access = "malleable", fetch = globalThis.fetch } = {}) {
     this.endpoint = endpoint.replace(/\/+$/, "");
     this.cellId = cellId;
+    this.access = access;
     this._fetch = fetch;
   }
 
@@ -49,6 +50,7 @@ export class CellClient {
     return new CellClient({
       endpoint: this.endpoint,
       cellId,
+      access: this.access,
       fetch: this._fetch
     });
   }
@@ -66,6 +68,7 @@ export class CellClient {
     const reqHeaders = {
       Accept: "application/json",
       "X-Cell-Type": "generic",
+      "X-Cell-Access": this.access,
       ...headers
     };
 
