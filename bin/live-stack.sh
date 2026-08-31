@@ -99,8 +99,13 @@ untrack_up_pidfile() { # <pidfile>
     kept_pidfiles+=("${UP_STARTED_PIDFILES[$i]}")
     kept_labels+=("${UP_STARTED_LABELS[$i]}")
   done
-  UP_STARTED_PIDFILES=("${kept_pidfiles[@]}")
-  UP_STARTED_LABELS=("${kept_labels[@]}")
+  if [[ ${#kept_pidfiles[@]} -gt 0 ]]; then
+    UP_STARTED_PIDFILES=("${kept_pidfiles[@]}")
+    UP_STARTED_LABELS=("${kept_labels[@]}")
+  else
+    UP_STARTED_PIDFILES=()
+    UP_STARTED_LABELS=()
+  fi
 }
 
 track_up_pool_pidfiles() {

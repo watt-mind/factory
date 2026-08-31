@@ -386,6 +386,28 @@ test("`up` adopts a lock-owning GitHub App daemon when its pidfile is missing", 
   }
 });
 
+test("untracking the only pidfile remains safe under nounset", () => {
+  const result = Bun.spawnSync({
+    cmd: [
+      "bash",
+      "-uc",
+      `source <(sed -n '48,109p' "$1")
+UP_STARTED_PIDFILES=("$2")
+UP_STARTED_LABELS=("GitHub App token daemon")
+untrack_up_pidfile "$2"
+[[ \${#UP_STARTED_PIDFILES[@]} -eq 0 ]]
+[[ \${#UP_STARTED_LABELS[@]} -eq 0 ]]`,
+      "bash",
+      LIVE_STACK,
+      "/tmp/only.pid",
+    ],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(result.exitCode).toBe(0);
+  expect(result.stderr.toString()).toBe("");
+});
+
 test("`up` keeps the existing live GitHub App daemon pidfile behavior", () => {
   const f = makeFixture();
   try {
