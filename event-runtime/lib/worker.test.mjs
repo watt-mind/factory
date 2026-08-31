@@ -119,6 +119,7 @@ import {
   resolveLinearApiKey,
   reconcileTierEscalations,
   scheduleTierEscalation,
+  sweepOrphanedLocalNotifyOutbox,
   tierEscalationEligibility,
   retryRun,
   runLinearCli,
@@ -156,6 +157,28 @@ registerTestProcessCleanup(import.meta.url);
 let seq = 0;
 
 describe("worker", () => {
+  test("sweeps orphaned local notify outboxes while preserving active runs", () => {
+    const home = tmpDir("evrt-local-notify-sweep-");
+    const outboxDir = path.join(home, "outbox");
+    const db = openDb(":memory:");
+    const active = queueRun(db, makeSpec({ runId: "run_active_outbox" }));
+    claimNext(db, opts());
+    mkdirSync(outboxDir, { recursive: true });
+    writeFileSync(path.join(outboxDir, `${active.runId}.jsonl`), "active\n");
+    writeFileSync(path.join(outboxDir, "run_orphan_outbox.jsonl"), "orphan\n");
+
+    expect(sweepOrphanedLocalNotifyOutbox({ db, home })).toEqual([
+      "run_orphan_outbox",
+    ]);
+    expect(existsSync(path.join(outboxDir, `${active.runId}.jsonl`))).toBe(
+      true,
+    );
+    expect(existsSync(path.join(outboxDir, "run_orphan_outbox.jsonl"))).toBe(
+      false,
+    );
+    rmSync(home, { recursive: true, force: true });
+  });
+
   test("drains an agent local notification outbox with the worker bearer", async () => {
     const home = tmpDir("evrt-local-notify-outbox-");
     const runId = "run_1558";
@@ -198,6 +221,40 @@ describe("worker", () => {
     );
     expect(existsSync(outbox)).toBe(false);
     rmSync(home, { recursive: true, force: true });
+  });
+
+  test("retains an outbox entry with an attributable error for an invalid port", async () => {
+    const home = tmpDir("evrt-local-notify-invalid-port-");
+    const runId = "run_invalid_port";
+    const outbox = path.join(home, "outbox", `${runId}.jsonl`);
+    mkdirSync(path.dirname(outbox), { recursive: true });
+    writeFileSync(
+      outbox,
+      `${JSON.stringify({
+        schemaVersion: "factory.local-notify-outbox/v1",
+        runId,
+        kind: "BLOCKED",
+        title: "BLOCKED watt-mind/factory#1964: invalid port",
+        refs: {},
+        source: `agent:${runId}`,
+      })}\n`,
+    );
+    const fetchFn = spyOn(globalThis, "fetch");
+    try {
+      expect(
+        await drainLocalNotifyOutbox({ home, runId, port: "not-a-port" }),
+      ).toEqual({
+        delivered: [],
+        undelivered: [],
+        error:
+          "FACTORY_EVENT_PORT must be a positive integer between 1 and 65535",
+      });
+      expect(fetchFn).not.toHaveBeenCalled();
+      expect(existsSync(outbox)).toBe(true);
+    } finally {
+      fetchFn.mockRestore();
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test("drains the local notify outbox from the adapter finally so a throw cannot strand an escalation", () => {

@@ -1070,6 +1070,64 @@ export function dispatchIdentityEnv({
 }
 
 const LOCAL_NOTIFY_OUTBOX_SCHEMA = "factory.local-notify-outbox/v1";
+const LOCAL_NOTIFY_ACTIVE_RUN_STATES = Object.freeze([
+  "QUEUED",
+  "LEASED",
+  "RUNNING",
+  "VERIFYING",
+]);
+
+function localNotifyPort(port) {
+  const value = typeof port === "string" ? port.trim() : String(port);
+  if (!/^[1-9]\d*$/.test(value)) return null;
+  const numeric = Number(value);
+  return Number.isSafeInteger(numeric) && numeric <= 65_535 ? numeric : null;
+}
+
+/**
+ * Remove retained local notification files for runs that can no longer be
+ * executed. This is deliberately separate from the per-run drain in
+ * executeClaimed's finally block: a crashed or unclaimed run never reaches
+ * that block. Queued runs remain protected because a retry can still drain
+ * their prior attempt's retained escalation.
+ */
+export function sweepOrphanedLocalNotifyOutbox({
+  db,
+  home = process.env.FACTORY_EVENT_HOME,
+} = {}) {
+  if (!db || typeof home !== "string" || home.trim() === "") return [];
+  const outboxDir = path.join(home, "outbox");
+  if (!existsSync(outboxDir)) return [];
+
+  let entries;
+  try {
+    entries = readdirSync(outboxDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const activeRunIds = new Set(
+    db
+      .query(
+        `SELECT run_id FROM runs WHERE state IN (${LOCAL_NOTIFY_ACTIVE_RUN_STATES.map(() => "?").join(", ")})`,
+      )
+      .all(...LOCAL_NOTIFY_ACTIVE_RUN_STATES)
+      .map(({ run_id: runId }) => runId),
+  );
+  const swept = [];
+  for (const entry of entries) {
+    const match = /^([A-Za-z0-9._-]+)\.jsonl$/.exec(entry.name);
+    if (!match || activeRunIds.has(match[1])) continue;
+    try {
+      unlinkSync(path.join(outboxDir, entry.name));
+      swept.push(match[1]);
+    } catch {
+      // A concurrent writer or permissions change must not stop a worker from
+      // claiming the next run; the next startup will retry this hygiene pass.
+    }
+  }
+  return swept;
+}
 
 function localOutboxEntry(value, runId) {
   if (
@@ -1112,6 +1170,16 @@ export async function drainLocalNotifyOutbox({
   }
   if (!existsSync(outboxPath)) return { delivered: [], undelivered: [] };
 
+  const validatedPort = localNotifyPort(port);
+  if (validatedPort === null) {
+    return {
+      delivered: [],
+      undelivered: [],
+      error:
+        "FACTORY_EVENT_PORT must be a positive integer between 1 and 65535",
+    };
+  }
+
   const lines = readFileSync(outboxPath, "utf8").split("\n").filter(Boolean);
   const retained = [];
   const delivered = [];
@@ -1132,19 +1200,22 @@ export async function drainLocalNotifyOutbox({
       continue;
     }
     try {
-      const response = await fetchFn(`http://127.0.0.1:${port}/inbox`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...(token ? { authorization: `Bearer ${token}` } : {}),
+      const response = await fetchFn(
+        `http://127.0.0.1:${validatedPort}/inbox`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...(token ? { authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({
+            kind: entry.kind,
+            title: entry.title,
+            refs: entry.refs,
+            source: entry.source,
+          }),
         },
-        body: JSON.stringify({
-          kind: entry.kind,
-          title: entry.title,
-          refs: entry.refs,
-          source: entry.source,
-        }),
-      });
+      );
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       delivered.push(entry);
     } catch (error) {
@@ -5837,6 +5908,10 @@ export function reapExpiredLeases(
 
 /** Claim and execute one run, or return a typed refusal/null without execution. */
 export async function runOnce(db, registry, adapters, opts = {}) {
+  sweepOrphanedLocalNotifyOutbox({
+    db,
+    home: opts.env?.FACTORY_EVENT_HOME ?? opts.eventHome,
+  });
   // claimNext already reconciles pending escalation projections and logs a
   // failed one without abandoning the claim: a tracker outage on one
   // escalation must never stall claiming of every other queued run. Forward
