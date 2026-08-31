@@ -219,9 +219,13 @@ export async function runNotifierDeliveryCase({
   const saved = {
     N: process.env.FACTORY_EVENT_NOTIFY,
     C: process.env.FACTORY_EVENT_NOTIFY_CMD,
+    W: process.env.FACTORY_WEB_URL,
   };
   process.env.FACTORY_EVENT_NOTIFY = "1";
   process.env.FACTORY_EVENT_NOTIFY_CMD = stub;
+  // The push appends a deep link to the item's random id when a web URL is
+  // configured. This box exports one; the fixture asserts an exact message.
+  delete process.env.FACTORY_WEB_URL;
   const logs = [];
   let deliveryStarted = false;
   let deliverySettled = false;
@@ -244,10 +248,16 @@ export async function runNotifierDeliveryCase({
     writeFileSync(releaseFile, "release\n");
     const delivery = await awaitNotifierDelivery(db, "test/evt-tick");
     deliverySettled = true;
-    // The parked-event projection carries its decision question and options
-    // (WM-390), so one delivery is a four-line message.
+    // The push is the synthesized item: its human title and body, then the
+    // decision question and its options once (WM-390, the body's restatement
+    // of the ask is stripped so the operator does not read it twice).
     const expectedMessage = [
       "BLOCKED linear.ticket.agent_ready evt-tick: no_worktree_scripts",
+      "What happened: A blocked item needs attention for linear.ticket.agent_ready evt-tick.",
+      "",
+      "Why it matters: The runtime reported “no worktree scripts” and needs an operator to decide what happens next.",
+      "",
+      "Reason code: no_worktree_scripts.",
       "Should this parked event be requeued?",
       "1. Requeue the event",
       "2. Not now",
@@ -276,6 +286,8 @@ export async function runNotifierDeliveryCase({
     else process.env.FACTORY_EVENT_NOTIFY = saved.N;
     if (saved.C === undefined) delete process.env.FACTORY_EVENT_NOTIFY_CMD;
     else process.env.FACTORY_EVENT_NOTIFY_CMD = saved.C;
+    if (saved.W === undefined) delete process.env.FACTORY_WEB_URL;
+    else process.env.FACTORY_WEB_URL = saved.W;
     db.close();
   }
 }

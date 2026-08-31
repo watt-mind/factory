@@ -149,7 +149,7 @@ const DECISION_EFFECTS = Object.freeze({
   dismiss: "keeps the item resolved without changing the referenced work",
 });
 
-function readableSubject(refs, ticketTitle) {
+function readableSubject(refs, ticketTitle, eventType) {
   if (refs.issue) {
     const match = /(?:^|\/)([^/\s#]+)#(\d+)$/.exec(refs.issue);
     if (match) {
@@ -161,21 +161,29 @@ function readableSubject(refs, ticketTitle) {
   if (refs.pr) return `PR ${refs.pr.replace(/^PR\s*/i, "")}`;
   if (refs.proposalId) return `proposal ${refs.proposalId}`;
   if (refs.runId) return `run ${refs.runId}`;
+  // Parked-event notices carry only their event coordinates. Name the event
+  // rather than degrading to "this item"; the repo qualifies it when known.
+  if (refs.eventId) {
+    const named = eventType
+      ? `${eventType} ${refs.eventId}`
+      : `event ${refs.eventId}`;
+    return refs.repo ? `${named} (${refs.repo})` : named;
+  }
   if (refs.repo) return refs.repo;
   return "this item";
 }
 
+/**
+ * Reason codes are structured input, never scraped out of a producer's title:
+ * a machine title is prose, and guessing a code from it invents facts (an
+ * English word or a ticket slug rendered as if it were a runtime reason).
+ * Producers that know their reason pass `reasonCode`; the rest render none.
+ */
 function reasonCodeFor(input) {
   if (typeof input?.reasonCode === "string" && input.reasonCode.trim())
     return input.reasonCode.trim();
   if (input?.kind === "proposal_expired") return "proposal_expired";
-  const title = typeof input?.title === "string" ? input.title : "";
-  const known = Object.keys(INBOX_REASON_GLOSSARY).find((code) =>
-    new RegExp(`(?:^|[^a-z0-9_])${code}(?:$|[^a-z0-9_])`, "i").test(title),
-  );
-  if (known) return known;
-  const candidate = title.match(/:\s*([a-z][a-z0-9_]+)(?:\s|$)/i)?.[1];
-  return candidate?.toLowerCase() ?? null;
+  return null;
 }
 
 function humanReason(reason) {
@@ -224,6 +232,28 @@ function optionEffect(option) {
 }
 
 /**
+ * The durable body restates the ask and what each option does. The Telegram
+ * push renders that request itself (question plus numbered options), so it
+ * strips exactly these paragraphs back out and the operator reads it once.
+ */
+function decisionParagraphs(decision) {
+  const effects = Array.isArray(decision?.options)
+    ? decision.options.map(
+        (option) => `${option.label} — ${optionEffect(option)}.`,
+      )
+    : [];
+  return [
+    typeof decision?.question === "string" && decision.question.trim()
+      ? `Question: ${decision.question.trim()}`
+      : null,
+    typeof decision?.context === "string" && decision.context.trim()
+      ? `Context: ${decision.context.trim()}`
+      : null,
+    effects.length ? `Option effects:\n${effects.join("\n")}` : null,
+  ].filter(Boolean);
+}
+
+/**
  * Convert producer-oriented inbox data into an operator-readable message.
  * Producers retain their concise machine title as an input signal, while the
  * persisted title/body explain what happened, why it matters, and where the
@@ -238,7 +268,11 @@ export function synthesizeInboxItem(input) {
     typeof input?.ticketTitle === "string" && input.ticketTitle.trim()
       ? input.ticketTitle.trim()
       : null;
-  const subject = readableSubject(refs, ticketTitle);
+  const eventType =
+    typeof input?.eventType === "string" && input.eventType.trim()
+      ? input.eventType.trim()
+      : null;
+  const subject = readableSubject(refs, ticketTitle, eventType);
   const why = humanReason(reason);
   const originalBody =
     typeof input?.body === "string" && input.body.trim()
@@ -246,31 +280,15 @@ export function synthesizeInboxItem(input) {
       : null;
   const decision = input?.decision;
   const proposal = proposalSubject(decision);
-  const effects = Array.isArray(decision?.options)
-    ? decision.options.map(
-        (option) => `${option.label} — ${optionEffect(option)}.`,
-      )
-    : [];
   // Keep the serialized request untouched. It is hashed by decision responses,
   // so rewriting its context after a producer has handed it off would make a
   // valid response look stale. The durable body carries the same information.
-  const decisionDetails = [
-    typeof decision?.question === "string" && decision.question.trim()
-      ? `Question: ${decision.question.trim()}`
-      : null,
-    typeof decision?.context === "string" && decision.context.trim()
-      ? `Context: ${decision.context.trim()}`
-      : null,
-    effects.length ? `Option effects:\n${effects.join("\n")}` : null,
-  ]
-    .filter(Boolean)
-    .join("\n\n");
   const body = [
     `What happened: A ${label.toLowerCase()} item needs attention for ${subject}.`,
     `Why it matters: ${why}`,
     reason ? `Reason code: ${reason}.` : null,
     linksFor(refs).length ? `Links:\n${linksFor(refs).join("\n")}` : null,
-    decisionDetails,
+    ...decisionParagraphs(decision),
     originalBody,
   ]
     .filter(Boolean)
@@ -280,7 +298,9 @@ export function synthesizeInboxItem(input) {
     title:
       proposal && (kind === "decision_needed" || kind === "proposal_expired")
         ? `Approve ${proposal.agent} run (${ticketTitle ? subject : (proposal.subject ?? subject)})?`
-        : `${label}: ${subject} — ${titleReason(reason)}`,
+        : reason
+          ? `${label}: ${subject} — ${titleReason(reason)}`
+          : `${label}: ${subject}`,
     body,
   };
 }
@@ -1425,7 +1445,15 @@ function correlatedProposal(db, inboxItemId) {
 
 function telegramMessage(item, webUrl) {
   const lines = [item.title];
-  if (item.body) lines.push(item.body);
+  if (item.body) {
+    // The push renders the ask below; drop the body's restatement of it.
+    const duplicated = new Set(decisionParagraphs(item.decision));
+    const kept = item.body
+      .split("\n\n")
+      .filter((paragraph) => !duplicated.has(paragraph))
+      .join("\n\n");
+    if (kept) lines.push(kept);
+  }
   if (item.decision) {
     lines.push(item.decision.question);
     item.decision.options.forEach((option, index) => {
@@ -1507,6 +1535,16 @@ const TERMINAL_RUN_STATES = new Set([
   "TIMED_OUT",
   "CANCELLED",
 ]);
+// Notices that only report how a run went. Their referent is the run itself,
+// so a terminal run makes them stale. Asks are deliberately excluded: an
+// ESCALATED item is *born* on a REFUSED run, and a decision the operator has
+// not answered stays open no matter what the run it names went on to do.
+const RUN_PROGRESS_KINDS = new Set(["CI RED", "SMOKE RED", "CIRCUIT BREAKER"]);
+
+/** An ask the operator has been handed and has not answered yet. */
+function hasPendingDecision(row) {
+  return row.decision_json != null && row.response_json == null;
+}
 
 function prNumber(ref) {
   if (typeof ref !== "string") return null;
@@ -1592,9 +1630,12 @@ export async function fetchLinearInboxIssues(
  * those rows through their repository-selected adapter, while preserving one
  * bounded batch for the Linear rows and the injectable test seam.
  */
-async function fetchReferencedInboxIssues(rows, fallback) {
+async function fetchReferencedInboxIssues(rows, fallback, controlPlane) {
   const linearIds = [];
-  const githubRows = [];
+  // One lookup per distinct ticket, not per open item: several inbox rows
+  // routinely name the same ticket, and each GitHub lookup is its own
+  // un-batched API call against a shared token budget.
+  const githubRows = new Map();
   for (const entry of rows) {
     const repoName = entry.refs.repo;
     if (!repoName) {
@@ -1602,9 +1643,10 @@ async function fetchReferencedInboxIssues(rows, fallback) {
       continue;
     }
     try {
-      const plane = loadControlPlane({ repoName });
+      const plane = controlPlane({ repoName });
       if (plane.kind === "github") {
-        githubRows.push({ entry, plane });
+        if (!githubRows.has(entry.refs.issue))
+          githubRows.set(entry.refs.issue, plane);
         continue;
       }
     } catch {
@@ -1614,19 +1656,25 @@ async function fetchReferencedInboxIssues(rows, fallback) {
     linearIds.push(entry.refs.issue);
   }
   const githubIssues = await Promise.all(
-    githubRows.map(async ({ entry, plane }) => {
-      const ticket = await plane.getTicket(entry.refs.issue);
-      return {
-        identifier: entry.refs.issue,
-        state: ticket.state,
-        labels: ticket.labels,
-        title: ticket.title,
-      };
+    [...githubRows].map(async ([issue, plane]) => {
+      // Per-row fail-open: one deleted ticket or one rate-limited read must
+      // not reject the whole batch and stall every other row's reconcile.
+      try {
+        const ticket = await plane.getTicket(issue);
+        return {
+          identifier: issue,
+          state: ticket.state,
+          labels: ticket.labels,
+          title: ticket.title,
+        };
+      } catch {
+        return null;
+      }
     }),
   );
   const linearIssues =
     linearIds.length > 0 ? await fallback([...new Set(linearIds)]) : [];
-  return [...githubIssues, ...linearIssues];
+  return [...githubIssues.filter(Boolean), ...linearIssues];
 }
 
 function linearIssueResolved(row, issue, db) {
@@ -1664,7 +1712,11 @@ function issueIsClosed(issue) {
 /** Resolve asks when their runtime-owned or externally polled referent moves on. */
 export function reconcileInbox(
   db,
-  { now = Date.now(), linearIssues = fetchLinearInboxIssues } = {},
+  {
+    now = Date.now(),
+    linearIssues = fetchLinearInboxIssues,
+    controlPlane = loadControlPlane,
+  } = {},
 ) {
   const resolved = [];
   const rows = db
@@ -1712,20 +1764,7 @@ export function reconcileInbox(
     // ask is moot and resolveInboxItem records it as superseded (auto:*).
     const refs = parseObject(row.refs_json);
     let resolvedBy = null;
-    if (refs.runId) {
-      const run = db
-        .query("SELECT state FROM runs WHERE run_id = ?")
-        .get(refs.runId);
-      if (run && TERMINAL_RUN_STATES.has(run.state)) {
-        resolveInboxItem(db, row.id, {
-          now,
-          resolvedBy: "auto:stale_ref",
-          reason: "stale_ref",
-        });
-        resolved.push({ id: row.id, resolvedBy: "auto:stale_ref" });
-        continue;
-      }
-    }
+    let resolvedReason = null;
     if (row.kind === "decision_needed" || row.kind === "proposal_expired") {
       if (!refs.proposalId) continue;
       const proposal = db
@@ -1753,8 +1792,28 @@ export function reconcileInbox(
       if (event && event.status !== "human_needed")
         resolvedBy = "auto:event_requeued";
     }
+    // A run-progress notice about a run that has already finished is stale.
+    // This never applies to an open ask: the operator still owes an answer.
+    if (
+      !resolvedBy &&
+      refs.runId &&
+      RUN_PROGRESS_KINDS.has(row.kind) &&
+      !hasPendingDecision(row)
+    ) {
+      const run = db
+        .query("SELECT state FROM runs WHERE run_id = ?")
+        .get(refs.runId);
+      if (run && TERMINAL_RUN_STATES.has(run.state)) {
+        resolvedBy = "auto:stale_ref";
+        resolvedReason = "stale_ref";
+      }
+    }
     if (!resolvedBy) continue;
-    resolveInboxItem(db, row.id, { now, resolvedBy });
+    resolveInboxItem(db, row.id, {
+      now,
+      resolvedBy,
+      ...(resolvedReason ? { reason: resolvedReason } : {}),
+    });
     resolved.push({ id: row.id, resolvedBy });
   }
 
@@ -1776,7 +1835,9 @@ export function reconcileInbox(
   const lastPoll = linearPollAt.get(db) ?? -Infinity;
   if (now - lastPoll < LINEAR_POLL_INTERVAL_MS) return resolved;
   linearPollAt.set(db, now);
-  return Promise.resolve(fetchReferencedInboxIssues(linearRows, linearIssues))
+  return Promise.resolve(
+    fetchReferencedInboxIssues(linearRows, linearIssues, controlPlane),
+  )
     .then((issues) => {
       const byId = new Map(issues.map((issue) => [issue.identifier, issue]));
       for (const { row, refs } of linearRows) {

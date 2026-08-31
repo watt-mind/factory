@@ -137,6 +137,7 @@ describe("human inbox ledger (WM-285)", () => {
       kind: "BLOCKED",
       title:
         "BLOCKED factory.dispatch.requested run_123-watt-mind/factory#1158: owned_paths_not_closed",
+      reasonCode: "owned_paths_not_closed",
       refs: {
         repo: "factory",
         issue: "watt-mind/factory#1158",
@@ -169,6 +170,7 @@ describe("human inbox ledger (WM-285)", () => {
       const item = synthesizeInboxItem({
         kind,
         title: `machine ${kind}: ${reason}`,
+        reasonCode: reason,
         refs: { issue: "watt-mind/factory#1158", runId: "run_1", pr: "42" },
       });
       expect(item.title).toMatch(/^[A-Z]|^Blocked:|^Escalated:|^CI failed:/);
@@ -181,10 +183,44 @@ describe("human inbox ledger (WM-285)", () => {
     }
   });
 
+  test("never invents a reason code out of a producer's free-text title", () => {
+    const item = synthesizeInboxItem({
+      kind: "BLOCKED",
+      // Reads like a reason code, but nothing structured says it is one.
+      title: "BLOCKED factory#1158: owned_paths_not_closed",
+      refs: { issue: "watt-mind/factory#1158" },
+    });
+    expect(item.title).toBe("Blocked: factory#1158");
+    expect(item.body).not.toContain("Reason code:");
+    expect(item.body).not.toContain("allowed paths");
+  });
+
+  test('names the event a parked notice refers to instead of "this item"', () => {
+    const item = synthesizeInboxItem({
+      kind: "BLOCKED",
+      title: "BLOCKED linear.ticket.agent_ready evt-park: repo_report_only",
+      reasonCode: "repo_report_only",
+      eventType: "linear.ticket.agent_ready",
+      refs: { eventSource: "linear", eventId: "evt-park" },
+    });
+    expect(item.body).toContain(
+      "What happened: A blocked item needs attention for linear.ticket.agent_ready evt-park.",
+    );
+    expect(item.body).toContain("Reason code: repo_report_only.");
+    expect(
+      synthesizeInboxItem({
+        kind: "BLOCKED",
+        title: "BLOCKED evt-park",
+        refs: { eventSource: "linear", eventId: "evt-park", repo: "factory" },
+      }).body,
+    ).toContain("for event evt-park (factory).");
+  });
+
   test("uses cached ticket titles and proposal subjects in human titles", () => {
     const ticket = synthesizeInboxItem({
       kind: "BLOCKED",
       title: "BLOCKED factory#1158: owned_paths_not_closed",
+      reasonCode: "owned_paths_not_closed",
       ticketTitle: "select Opus only for Claude parent runs",
       refs: { issue: "watt-mind/factory#1158" },
     });
@@ -1304,7 +1340,7 @@ describe("human inbox ledger (WM-285)", () => {
     ]);
   });
 
-  test("terminal run and closed ticket references auto-resolve as stale", async () => {
+  test("a run-progress notice for a finished run and a closed ticket auto-resolve as stale", async () => {
     const db = openDb(":memory:");
     const now = new Date(1000).toISOString();
     db.query(
@@ -1315,7 +1351,7 @@ describe("human inbox ledger (WM-285)", () => {
     createInboxItem(
       db,
       {
-        kind: "human_needed",
+        kind: "CI RED",
         title: "terminal run",
         refs: { runId: "run-terminal" },
         source: "serve:notify",
@@ -1353,6 +1389,100 @@ describe("human inbox ledger (WM-285)", () => {
     expect(getInboxItem(db, "closed-ticket")).toMatchObject({
       resolvedReason: "stale_ref",
     });
+  });
+
+  test("GitHub ticket lookups are deduped per ticket and fail open per row", async () => {
+    const db = openDb(":memory:");
+    // Two distinct items naming the same ticket — the shape that used to cost
+    // one un-batched GitHub read per open item, every poll.
+    for (const [id, kind, issue] of [
+      ["gh-a", "BLOCKED", "watt-mind/factory#1"],
+      ["gh-b", "RC READY", "watt-mind/factory#1"],
+      ["gh-c", "BLOCKED", "watt-mind/factory#2"],
+    ]) {
+      createInboxItem(
+        db,
+        { kind, title: id, refs: { issue, repo: "factory" } },
+        { id, now: 1000 },
+      );
+    }
+    const looked = [];
+    const resolved = await reconcileInbox(db, {
+      now: 60_000,
+      linearIssues: async () => {
+        throw new Error("GitHub rows must not reach the Linear batch");
+      },
+      controlPlane: () => ({
+        kind: "github",
+        getTicket: async (issue) => {
+          looked.push(issue);
+          // One unreadable ticket must not sink the whole poll.
+          if (issue === "watt-mind/factory#2") throw new Error("rate limited");
+          return { state: { name: "Closed", type: "completed" }, labels: [] };
+        },
+      }),
+    });
+
+    // Two rows share one ticket: one lookup, not one per open item.
+    expect(looked).toEqual(["watt-mind/factory#1", "watt-mind/factory#2"]);
+    expect(resolved).toEqual([
+      { id: "gh-a", resolvedBy: "auto:stale_ref" },
+      { id: "gh-b", resolvedBy: "auto:stale_ref" },
+    ]);
+    expect(getInboxItem(db, "gh-c").resolvedAt).toBeNull();
+  });
+
+  test("an escalation on a REFUSED run survives reconcile — it is born terminal", async () => {
+    const db = openDb(":memory:");
+    const at = new Date(1000).toISOString();
+    db.query(
+      `INSERT INTO runs
+         (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+       VALUES ('run-refused', 'refused-key', '{}', 'sha256:test', 'REFUSED', 1, ?, ?)`,
+    ).run(at, at);
+    const refs = { runId: "run-refused", issue: "WM-901", repo: "factory" };
+    createInboxItem(
+      db,
+      {
+        kind: "ESCALATED",
+        title: "How should the factory proceed with WM-901?",
+        refs,
+        source: "agent:run-refused",
+        decision: templateFor("ESCALATED", { producer: "escalation", refs }),
+      },
+      { id: "live-escalation", now: 1000 },
+    );
+    // A parked ask whose event is still parked must survive the same sweep.
+    db.query(
+      `INSERT INTO runs
+         (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+       VALUES ('run-done', 'done-key', '{}', 'sha256:test', 'COMPLETED', 1, ?, ?)`,
+    ).run(at, at);
+    createInboxItem(
+      db,
+      {
+        kind: "human_needed",
+        title: "an unanswered ask about a finished run",
+        refs: { runId: "run-done" },
+        source: "serve:notify",
+      },
+      { id: "live-ask", now: 1000 },
+    );
+
+    expect(
+      await reconcileInbox(db, {
+        now: 60_000,
+        linearIssues: async () => [
+          {
+            identifier: "WM-901",
+            state: { name: "In Progress", type: "started" },
+            labels: { nodes: [{ name: "ai:agent-ready" }] },
+          },
+        ],
+      }),
+    ).toEqual([]);
+    expect(getInboxItem(db, "live-escalation").resolvedAt).toBeNull();
+    expect(getInboxItem(db, "live-ask").resolvedAt).toBeNull();
   });
 
   test("a pending decision becomes moot when its event leaves human_needed", async () => {

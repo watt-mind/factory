@@ -218,17 +218,13 @@ describe("notify (WM-65)", () => {
     await first.deliveries;
     expect(stub.pushes()).toEqual([
       "BLOCKED linear.ticket.agent_ready evt-park: repo_report_only",
-      "What happened: A blocked item needs attention for this item.",
+      "What happened: A blocked item needs attention for linear.ticket.agent_ready evt-park.",
       "",
       "Why it matters: The runtime reported “repo report only” and needs an operator to decide what happens next.",
       "",
       "Reason code: repo_report_only.",
-      "",
-      "Question: Should this parked event be requeued?",
-      "",
-      "Option effects:",
-      "Requeue the event — puts the parked event back into planning.",
-      "Not now — keeps the item resolved without changing the referenced work.",
+      // The push renders the ask once: the body's restatement is stripped and
+      // only the question plus its numbered options follow.
       "Should this parked event be requeued?",
       "1. Requeue the event",
       "2. Not now",
@@ -261,7 +257,7 @@ describe("notify (WM-65)", () => {
     });
     expect(afterRestart.sent).toEqual([]);
     await afterRestart.deliveries;
-    expect(stub.pushes()).toHaveLength(16);
+    expect(stub.pushes()).toHaveLength(10);
     db.close();
   });
 
