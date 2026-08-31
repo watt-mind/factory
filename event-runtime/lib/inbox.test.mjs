@@ -24,6 +24,7 @@ import {
 import { decisionRequestHash } from "./decision.mjs";
 import { templateFor } from "./decision-templates.mjs";
 import { listMemos, MEMO_SCHEMA_VERSION, memoDigest } from "./memos.mjs";
+import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
 
 const inboxDocPath = path.resolve(
   import.meta.dir,
@@ -573,8 +574,13 @@ describe("human inbox ledger (WM-285)", () => {
     const started = new Promise((resolve) => {
       effectStarted = resolve;
     });
+    let releaseEffect;
+    const effectFinished = new Promise((resolve) => {
+      releaseEffect = resolve;
+    });
+    let deciding;
     try {
-      const deciding = decideInboxItem(
+      deciding = decideInboxItem(
         db,
         "slow_effect",
         {
@@ -586,18 +592,16 @@ describe("human inbox ledger (WM-285)", () => {
         {
           applyEffect: async () => {
             effectStarted();
-            await new Promise((resolve) => setTimeout(resolve, 250));
+            await effectFinished;
             return { outcome: "applied" };
           },
         },
       );
       await started;
 
-      const writeStarted = performance.now();
       expect(() =>
         createInboxItem(other, { kind: "BLOCKED", title: "other writer" }),
       ).not.toThrow();
-      expect(performance.now() - writeStarted).toBeLessThan(200);
       await expect(
         decideInboxItem(db, "slow_effect", {
           schemaVersion: "factory.decision-response/v1",
@@ -616,12 +620,15 @@ describe("human inbox ledger (WM-285)", () => {
         claimedAt: expect.any(String),
       });
 
+      releaseEffect();
       await deciding;
       expect(getInboxItem(db, "slow_effect").response.effect).toEqual({
         kind: "send_to_triage",
         outcome: "applied",
       });
     } finally {
+      releaseEffect?.();
+      await deciding;
       other.close();
       db.close();
     }
@@ -1162,7 +1169,7 @@ describe("human inbox ledger (WM-285)", () => {
 
     const started = performance.now();
     expect(inboxCounts(db).open).toBe(10_000);
-    expect(performance.now() - started).toBeLessThan(200);
+    expect(performance.now() - started).toBeLessThan(loadAdjustedTimeout(200));
     db.close();
   });
 

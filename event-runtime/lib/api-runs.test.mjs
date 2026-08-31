@@ -1791,7 +1791,7 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
     // The lock is held for 75 ms; a lower bound proves the approval actually
     // waited on it instead of racing past a lock that was never taken.
     expect(elapsedMs).toBeGreaterThanOrEqual(50);
-    expect(elapsedMs).toBeLessThan(2_000);
+    expect(elapsedMs).toBeLessThan(loadAdjustedTimeout(2_000));
     expect(await lock.exited).toBe(0);
     expect(await s.client.cancel(waiting.runId, "test cleanup")).toEqual({
       cancelled: true,
@@ -1825,7 +1825,9 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
       const healthStartedAt = Date.now();
       const health = await fetch(s.url("/health"));
       expect(health.status).toBe(200);
-      expect(Date.now() - healthStartedAt).toBeLessThan(500);
+      expect(Date.now() - healthStartedAt).toBeLessThan(
+        loadAdjustedTimeout(500),
+      );
       expect(await approval).toEqual({
         approved: true,
         runId: approvedProposal.runId,

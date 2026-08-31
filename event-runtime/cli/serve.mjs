@@ -642,12 +642,18 @@ export default async function serve(args) {
   let tickOverruns = 0;
   let lastTickMs = 0;
   let lastOverrunAt = null;
+  let plannerWorker = null;
 
   function getTickStats() {
+    const queued =
+      db
+        .query(`SELECT 1 FROM events WHERE status = 'admitted' LIMIT 1`)
+        .get() != null;
     return {
       lastMs: lastTickMs,
       overruns: tickOverruns,
       ...(lastOverrunAt ? { lastOverrunAt } : {}),
+      planner: plannerWorker?.state({ queued }) ?? null,
     };
   }
 
@@ -695,7 +701,6 @@ export default async function serve(args) {
     }
   }
 
-  let plannerWorker = null;
   if (!noPlanner) {
     plannerWorker = startPlannerWorker({
       eventHome: home,

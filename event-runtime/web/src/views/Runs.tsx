@@ -897,7 +897,7 @@ export function Runs({
   // A side pane turns the list into a compact comparison rail. Keep the five
   // decision-bearing columns instead of forcing a horizontal scrollbar; the
   // pane and the unselected list retain every configured column.
-  const listCols = sel
+  const listCols = selectedId
     ? cols.filter((c) =>
         [
           "run",
@@ -1016,6 +1016,14 @@ export function Runs({
   // detail without its root run as unpopulated so every guarded d.run access
   // below stays on the loading/fallback path.
   const d = detail.data?.run ? detail.data : undefined;
+  // A direct link can select a run outside the bounded summary page. Once its
+  // canonical detail resolves, use it for every selection verb just as a row
+  // in the current page would be used.
+  const selectedRun = sel ?? d?.run ?? null;
+  // GET /runs/:id deliberately does not include the proposal-origin join used
+  // by the summary list. Give detail rendering an explicit unknown origin
+  // rather than treating an off-page selection as an absent selection.
+  const origin = sel ?? { eventId: null, eventSource: null };
   const attemptsExhausted = d
     ? d.run.attempts >= d.run.spec.maxAttempts
     : false;
@@ -1056,12 +1064,15 @@ export function Runs({
 
   useListKeys({
     count: flat.length,
-    selected: selectedIndex,
+    // useListKeys only invokes custom verbs for a non-negative list index.
+    // An off-page direct link has no index, but its resolved detail is still
+    // a real selection and must retain those verbs.
+    selected: selectedRun ? Math.max(selectedIndex, 0) : selectedIndex,
     onSelect: (i) => onSelectRun(flat[i]?.runId ?? null),
     // §5 "Enter/o — open detail": selection already opens the panel, so the
     // open verb graduates to the full-page run view (`g o` is safe — list
     // verbs stand down while the chord prefix is armed, hooks.ts).
-    onOpen: () => sel && onOpenFull(sel.runId),
+    onOpen: () => selectedRun && onOpenFull(selectedRun.runId),
     onClose: () => {
       if (selectedId) onSelectRun(null);
       else if (filter) setFilter("");
@@ -1074,24 +1085,27 @@ export function Runs({
         setConfirmApprove(true),
       // §5 convention: `x` is the destructive verb on the selection — here, cancel.
       x: () =>
-        sel && connected && isCancellable(sel.state) && setConfirm("cancel"),
+        selectedRun &&
+        connected &&
+        isCancellable(selectedRun.state) &&
+        setConfirm("cancel"),
       c: () => {
-        if (!sel) return;
+        if (!selectedRun) return;
         const now = Date.now();
         if (pendingC.current > 0 && now - pendingC.current < 800) {
           copyText(
-            `bun event-runtime/cli.mjs inspect ${sel.runId}`,
+            `bun event-runtime/cli.mjs inspect ${selectedRun.runId}`,
             "CLI inspect command",
           );
           pendingC.current = 0;
         } else {
-          copyText(sel.runId, "run id");
+          copyText(selectedRun.runId, "run id");
           pendingC.current = now;
         }
       },
       l: () => {
         if (
-          sel &&
+          selectedRun &&
           pendingC.current > 0 &&
           Date.now() - pendingC.current < 800
         ) {
@@ -1099,7 +1113,7 @@ export function Runs({
           pendingC.current = 0;
         }
       },
-      p: () => sel && toggleRunPin(sel.runId),
+      p: () => selectedRun && toggleRunPin(selectedRun.runId),
     },
   });
 
@@ -1107,14 +1121,14 @@ export function Runs({
     function onKey(e: KeyboardEvent) {
       if (keyGuard(e) || e.metaKey || e.ctrlKey || e.altKey) return;
       if (goPrefixActive()) return;
-      if (!sel) return;
+      if (!selectedRun) return;
       const now = Date.now();
       if (pendingC.current > 0 && now - pendingC.current < 800) {
         if (e.key === "i" || e.key === "I") {
           e.preventDefault();
           e.stopImmediatePropagation();
           copyText(
-            `bun event-runtime/cli.mjs inspect ${sel.runId}`,
+            `bun event-runtime/cli.mjs inspect ${selectedRun.runId}`,
             "CLI inspect command",
           );
           pendingC.current = 0;
@@ -1124,31 +1138,35 @@ export function Runs({
     window.addEventListener("keydown", onKey, { capture: true });
     return () =>
       window.removeEventListener("keydown", onKey, { capture: true });
-  }, [sel]);
+  }, [selectedRun]);
 
   // Offer the selection's verbs in the ⌘K palette (§5).
   useEffect(() => {
-    if (!sel) {
+    if (!selectedRun) {
       setContextActions([]);
     } else {
       const copy = [
-        { label: "Open in tab", hint: "p", run: () => toggleRunPin(sel.runId) },
+        {
+          label: "Open in tab",
+          hint: "p",
+          run: () => toggleRunPin(selectedRun.runId),
+        },
         {
           label: "Open full view",
           hint: "o",
-          run: () => onOpenFull(sel.runId),
+          run: () => onOpenFull(selectedRun.runId),
         },
         {
           label: "Copy run id",
           hint: "c",
-          run: () => copyText(sel.runId, "run id"),
+          run: () => copyText(selectedRun.runId, "run id"),
         },
         {
           label: "Copy CLI inspect command",
           hint: "c i",
           run: () =>
             copyText(
-              `bun event-runtime/cli.mjs inspect ${sel.runId}`,
+              `bun event-runtime/cli.mjs inspect ${selectedRun.runId}`,
               "CLI inspect command",
             ),
         },
@@ -1205,7 +1223,7 @@ export function Runs({
     return () => setContextActions([]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    sel?.runId,
+    selectedRun?.runId,
     d?.run?.runId,
     d?.run?.state,
     attemptsExhausted,
@@ -1781,7 +1799,7 @@ export function Runs({
                   d={d}
                   now={now}
                   connected={connected}
-                  origin={sel}
+                  origin={origin}
                   onJumpAgent={onJumpAgent}
                   onJumpEvent={onJumpEvent}
                   onCancel={() => setConfirm("cancel")}

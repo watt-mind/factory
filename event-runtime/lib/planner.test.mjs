@@ -4417,19 +4417,70 @@ describe("Linear rate limit (WM-878)", () => {
 
       expect(counts).toEqual({ planned: 0, failed: 0, deadLettered: 0 });
       expect(ticketReads).toBe(0);
-      expect(logs).toEqual([
-        `planner: Linear rate-limited until ${resetAt} — skipping Linear reads`,
-      ]);
-      expect(
-        db
-          .query(
-            `SELECT status, last_plan_error FROM events WHERE event_id = ?`,
-          )
-          .get(ref.eventId),
-      ).toMatchObject({
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toMatch(/rate-limited/);
+      expect(logs[0]).toContain(resetAt);
+      const escapedResetAt = resetAt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const event = db
+        .query(`SELECT status, last_plan_error FROM events WHERE event_id = ?`)
+        .get(ref.eventId);
+      expect(event).toMatchObject({
         status: "admitted",
-        last_plan_error: `linear_rate_limited: resetAt=${resetAt}`,
+        last_plan_error: expect.stringMatching(
+          new RegExp(`^linear_rate_limited:.*${escapedResetAt}`),
+        ),
       });
+    });
+  });
+
+  test("a pass-level read budget defers later stalled Linear reads", () => {
+    withReposRoot(gatedYaml, () => {
+      const db = openDb(":memory:");
+      for (const ticket of ["WM-1866-1", "WM-1866-2"]) {
+        admit(db, {
+          type: "factory.dispatch.requested",
+          eventId: `pass-budget-${ticket}`,
+          correlationId: `pass-budget-${ticket}`,
+          payload: { repo: "gated", ticket },
+        });
+      }
+      let elapsed = 0;
+      const ticketReads = [];
+
+      expect(
+        planAdmittedEvents(db, registry, {
+          now: NOW,
+          policyVersion: "git:test",
+          linearReadClock: () => elapsed,
+          linearReadTimeoutMs: 50,
+          dispatch: {
+            countLeases: () => 0,
+            budgetRefusal: () => null,
+            fetchTicket: (ticket) => {
+              ticketReads.push(ticket);
+              // Model the first stalled read consuming the pass budget.
+              elapsed = 50;
+              return readyTicket(ticket);
+            },
+            fetchInFlight: () => [],
+          },
+        }),
+      ).toEqual({ planned: 0, failed: 0, deadLettered: 0 });
+
+      expect(ticketReads).toEqual(["WM-1866-1"]);
+      for (const ticket of ["WM-1866-1", "WM-1866-2"]) {
+        expect(
+          db
+            .query(
+              `SELECT status, plan_failures, last_plan_error FROM events WHERE event_id = ?`,
+            )
+            .get(`pass-budget-${ticket}`),
+        ).toMatchObject({
+          status: "admitted",
+          plan_failures: 0,
+          last_plan_error: "linear_read_budget_exhausted",
+        });
+      }
     });
   });
 

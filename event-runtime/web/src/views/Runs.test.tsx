@@ -10,6 +10,7 @@ import {
 import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { ApiError } from "../api";
+import { useContextActions } from "../palette";
 import {
   Runs,
   countRunsByTab,
@@ -48,6 +49,15 @@ afterEach(() => {
 const noop = () => {};
 const FAILURE_REASON = 'contract_violation: $: unknown property "captured"';
 const NOW = new Date().toISOString();
+
+function PaletteProbe() {
+  const actions = useContextActions();
+  return (
+    <div data-testid="palette-probe">
+      {actions.map((action) => action.label).join(" | ")}
+    </div>
+  );
+}
 
 test("reads a complete metrics drill-down contract from the hash", () => {
   expect(
@@ -153,20 +163,26 @@ function transition(
   return createLifecycleEventFixture(seq, runId, from, to, reason, NOW);
 }
 
-function renderRuns(props: Partial<Parameters<typeof Runs>[0]> = {}) {
+function renderRuns(
+  props: Partial<Parameters<typeof Runs>[0]> = {},
+  withPaletteProbe = false,
+) {
   return renderWithClient(
-    <Runs
-      connected={true}
-      context={{ kind: "all" }}
-      focusRunId={null}
-      onSelectRun={noop}
-      onOpenFull={noop}
-      focusState={null}
-      onFocusStateConsumed={noop}
-      onJumpAgent={noop}
-      onJumpEvent={noop}
-      {...props}
-    />,
+    <>
+      <Runs
+        connected={true}
+        context={{ kind: "all" }}
+        focusRunId={null}
+        onSelectRun={noop}
+        onOpenFull={noop}
+        focusState={null}
+        onFocusStateConsumed={noop}
+        onJumpAgent={noop}
+        onJumpEvent={noop}
+        {...props}
+      />
+      {withPaletteProbe && <PaletteProbe />}
+    </>,
   );
 }
 
@@ -775,6 +791,47 @@ describe("Runs component harness: selection & filter retention", () => {
         const r = renderRuns({ focusRunId: runId });
         await r.findByText("idempotencyKey");
         expect(run).toHaveBeenCalledTimes(1);
+      },
+    );
+  });
+
+  test("enables direct-link keyboard verbs, palette actions, and compact columns", async () => {
+    const runId = "run_off_page_actions";
+    const onOpenFull = mock(() => {});
+    await withApi(
+      {
+        runs: async () => ({ runs: [stubListItem("run_newest", "COMPLETED")] }),
+        run: async () => stubDetail(runId, "RUNNING", []),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderRuns({ focusRunId: runId, onOpenFull }, true);
+        await r.findByText("idempotencyKey");
+
+        // The detail pane, not presence in the bounded list page, controls
+        // the comparison rail.
+        expect(r.queryByRole("columnheader", { name: /^Agent/ })).toBeNull();
+        expect(r.getByRole("columnheader", { name: /^Run/ })).toBeTruthy();
+        expect(r.getByRole("columnheader", { name: /^State/ })).toBeTruthy();
+
+        const actions = r.getByTestId("palette-probe").textContent ?? "";
+        for (const label of [
+          "Open in tab",
+          "Open full view",
+          "Copy run id",
+          "Copy CLI inspect command",
+          "Copy link",
+          "Cancel run…",
+        ]) {
+          expect(actions).toContain(label);
+        }
+
+        fireEvent.keyDown(document.body, { key: "o" });
+        expect(onOpenFull).toHaveBeenCalledWith(runId);
+        fireEvent.keyDown(document.body, { key: "x" });
+        expect(
+          await r.findByRole("dialog", { name: `Cancel ${runId}?` }),
+        ).toBeTruthy();
       },
     );
   });

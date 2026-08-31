@@ -32,10 +32,10 @@ async function tickPlanner() {
       policyVersion,
       adapterOverride,
     });
-    if (outcome && outcome.length > 0) {
+    if (outcome?.planned > 0) {
       parentPort?.postMessage({
         type: "planned",
-        count: outcome.length,
+        count: outcome.planned,
         outcome,
       });
     }

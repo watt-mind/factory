@@ -29,6 +29,7 @@ import {
   spawnTracked,
   spawnSupervisor,
   spawnWorker,
+  until,
   waitFor,
   registerCliTmpCleanup,
   registerTestProcessCleanup,
@@ -161,14 +162,19 @@ describe("work command", () => {
           "--poll-ms",
           "25",
           "--skip-report-ms",
-          "1000",
+          "100",
         ],
         { FACTORY_EVENT_HOME: home },
       );
       try {
         await waitFor(box, '"runId":"run_placement_skip"');
-        await Bun.sleep(100); // at least three more 25ms polls
-        expect(box.out.match(/"runId":"run_placement_skip"/g)).toHaveLength(1);
+        await until(
+          "the next placement skip-report interval",
+          () =>
+            (box.out.match(/"runId":"run_placement_skip"/g) ?? []).length >= 2,
+          { timeoutMs: 5_000, everyMs: 10 },
+        );
+        expect(box.out.match(/"runId":"run_placement_skip"/g)).toHaveLength(2);
         expect(box.out).toContain('"definition":"factory-status-report@1"');
         expect(box.out).toContain("placement_unsatisfied:node=gpu");
       } finally {
@@ -195,14 +201,19 @@ describe("work command", () => {
           "--poll-ms",
           "25",
           "--skip-report-ms",
-          "1000",
+          "100",
         ],
         { FACTORY_EVENT_HOME: home },
       );
       try {
         await waitFor(box, '"runId":"run_registry_skip"');
-        await Bun.sleep(100); // at least three more 25ms polls
-        expect(box.out.match(/"runId":"run_registry_skip"/g)).toHaveLength(1);
+        await until(
+          "the next registry skip-report interval",
+          () =>
+            (box.out.match(/"runId":"run_registry_skip"/g) ?? []).length >= 2,
+          { timeoutMs: 5_000, everyMs: 10 },
+        );
+        expect(box.out.match(/"runId":"run_registry_skip"/g)).toHaveLength(2);
         expect(box.out).toMatch(
           /registry_stale:spec=git:older-registry\/git:older-registry:worker=git:[^:"]+:checkout=git:[^"}]+/,
         );
