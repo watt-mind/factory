@@ -58,6 +58,9 @@ import { readWorkflowRuns } from "./ci.mjs";
 export const MIN_BUN_VERSION = "1.1.0";
 export const MIN_GIT_VERSION = "2.40.0";
 export const BASE_BRANCH_CI_TIMEOUT_MS = 10_000;
+// All base-branch Actions reads share this 10s ceiling, regardless of repo
+// count, so an unavailable GitHub Actions API cannot delay node-local checks.
+export const BASE_BRANCH_CI_AGGREGATE_TIMEOUT_MS = 10_000;
 export const BASE_BRANCH_CI_RUN_LIMIT = 20;
 
 const defaultWorkflowRunList = (repo, options) =>
@@ -70,6 +73,8 @@ const defaultWorkflowRunList = (repo, options) =>
 export function baseBranchCiDiagnostics({
   repos = [],
   runList = defaultWorkflowRunList,
+  deadlineMs = Infinity,
+  now = Date.now,
 } = {}) {
   return repos.map((repo) => {
     const label = "base branch CI";
@@ -83,12 +88,21 @@ export function baseBranchCiDiagnostics({
     }
 
     const branch = repo.base || "main";
+    const remainingMs = deadlineMs - now();
+    if (remainingMs <= 0) {
+      return {
+        ok: "info",
+        label,
+        detail: `${branch} — skipped, aggregate GitHub Actions deadline exhausted`,
+        fix: null,
+      };
+    }
     const runs = (() => {
       try {
         return runList(repo.github, {
           branch,
           limit: BASE_BRANCH_CI_RUN_LIMIT,
-          timeout: BASE_BRANCH_CI_TIMEOUT_MS,
+          timeout: Math.min(BASE_BRANCH_CI_TIMEOUT_MS, remainingMs),
         });
       } catch {
         // An injected reader may throw while the production helper returns null.
@@ -124,6 +138,14 @@ export function baseBranchCiDiagnostics({
         ok: true,
         label,
         detail: `${branch} — ${workflow} succeeded (${runRef})`,
+        fix: null,
+      };
+    }
+    if (["skipped", "neutral"].includes(latest.conclusion)) {
+      return {
+        ok: "info",
+        label,
+        detail: `${branch} — ${workflow} ${latest.conclusion} (${runRef})`,
         fix: null,
       };
     }
@@ -1031,6 +1053,7 @@ if (import.meta.main) {
     .map((f) => path.basename(f, ".md"));
 
   // -------------------------------------------------------------------- repos ---
+  const baseBranchCiDeadline = Date.now() + BASE_BRANCH_CI_AGGREGATE_TIMEOUT_MS;
   for (const repo of repos) {
     console.log(
       c.bold(`\n${repo.name}`) + c.dim(`  ${repo.team} / ${repo.project}`),
@@ -1042,7 +1065,10 @@ if (import.meta.main) {
       check(row.ok, row.label, row.detail, row.fix);
     }
 
-    for (const row of baseBranchCiDiagnostics({ repos: [repo] })) {
+    for (const row of baseBranchCiDiagnostics({
+      repos: [repo],
+      deadlineMs: baseBranchCiDeadline,
+    })) {
       check(row.ok, row.label, row.detail, row.fix);
     }
 
