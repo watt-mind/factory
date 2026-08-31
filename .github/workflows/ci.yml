@@ -408,6 +408,86 @@ jobs:
         run: |
           find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} + || true
 
+  sandboxed-verify-smoke:
+    name: Sandboxed verify smoke
+    # This is the production handoff boundary exercised against the PR head,
+    # not an approximation of it. Unlike the non-blocking Timing-bound tests,
+    # a red sandbox smoke is merge-blocking through required-verify below:
+    # host/CI green plus this lane red is a hermeticity regression. A future
+    # flaky quarantine must be explicit in this workflow and leave a visible,
+    # non-green signal; it must never silently make the smoke advisory.
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.route.result == 'success' &&
+        (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
+        (needs.route.outputs.self_hosted != 'true' || needs.shadow-runner-health.result == 'success')
+      }}
+    needs: [route, shadow-runner-health]
+    runs-on: ${{ fromJSON(needs.route.outputs.verify_labels) }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout (no action download)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          rm -rf "${GITHUB_WORKSPACE:?}"/* "${GITHUB_WORKSPACE:?}"/.[!.]* 2>/dev/null || true
+          git init -q "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          git fetch -q --depth 1 origin "$SHA"
+          git checkout -q FETCH_HEAD
+          git log -1 --oneline
+
+      - name: Setup bun (no action download)
+        shell: bash
+        run: |
+          set -euo pipefail
+          .github/scripts/install-pinned-tools.sh bun
+          if [ -x "$HOME/.bun/bin/bun" ]; then
+            echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+            "$HOME/.bun/bin/bun" --version
+          else
+            bun --version
+          fi
+
+      - name: Install root dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run configured factory verify in the production handoff sandbox
+        # Keep this command synchronized with factory's host-owned verify:
+        # config/repos.yaml. `runHandoffVerifySmoke` delegates to
+        # `runHandoffCommand`, so unshare, env scrubbing, the worktree-only
+        # mount, chroot, and HOME=/tmp/home all stay owned by production code.
+        env:
+          FACTORY_HANDOFF_SMOKE_COMMAND: bun test event-runtime/lib --timeout 20000 && bun build/emit.mjs --check && bun run format:check && bun run lint
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun -e '
+            import { mkdtempSync } from "node:fs";
+            import { tmpdir } from "node:os";
+            import path from "node:path";
+            import { runHandoffVerifySmoke } from "./event-runtime/lib/verify.mjs";
+
+            const root = process.cwd();
+            const logDir = mkdtempSync(path.join(tmpdir(), "factory-handoff-smoke-"));
+            const observation = runHandoffVerifySmoke({
+              command: process.env.FACTORY_HANDOFF_SMOKE_COMMAND,
+              cwd: root,
+              worktreePath: root,
+              logPath: path.join(logDir, "verify.log"),
+              timeoutMs: 600_000,
+            });
+            console.log(observation.sandboxFacts);
+            process.stdout.write(observation.output);
+            if (!observation.passed) process.exitCode = 1;
+          '
+
   verify:
     name: Full verification
     # `!cancelled()` overrides GitHub's implicit `success()` gate on `needs`, so
@@ -705,7 +785,14 @@ jobs:
   required-verify:
     name: Verify
     if: always()
-    needs: [route, shadow-runner-health, fast-unit-tests, verify]
+    needs:
+      [
+        route,
+        shadow-runner-health,
+        fast-unit-tests,
+        verify,
+        sandboxed-verify-smoke,
+      ]
     # Runs on cloud runner so required verification is decoupled from host fleet
     # health when executing cloud PR runs (WM-950).
     runs-on: ubuntu-latest
@@ -718,6 +805,7 @@ jobs:
       HEALTH_RESULT: ${{ needs.shadow-runner-health.result }}
       FAST_RESULT: ${{ needs.fast-unit-tests.result }}
       FULL_RESULT: ${{ needs.verify.result }}
+      SANDBOX_SMOKE_RESULT: ${{ needs.sandboxed-verify-smoke.result }}
     steps:
       - name: Report required verification result
         shell: bash
@@ -756,6 +844,7 @@ jobs:
           fi
           require_success "Fast unit tests" "$FAST_RESULT"
           require_success "Full verification" "$FULL_RESULT"
+          require_success "Sandboxed verify smoke" "$SANDBOX_SMOKE_RESULT"
 
           if [ "$failed" -ne 0 ]; then
             echo "::error::One or more required verification jobs did not succeed; Verify cannot be green."
