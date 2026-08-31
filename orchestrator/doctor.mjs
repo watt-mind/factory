@@ -58,9 +58,9 @@ import { readWorkflowRuns } from "./ci.mjs";
 export const MIN_BUN_VERSION = "1.1.0";
 export const MIN_GIT_VERSION = "2.40.0";
 export const BASE_BRANCH_CI_TIMEOUT_MS = 10_000;
-// All base-branch Actions reads share this 10s ceiling, regardless of repo
-// count, so an unavailable GitHub Actions API cannot delay node-local checks.
-export const BASE_BRANCH_CI_AGGREGATE_TIMEOUT_MS = 10_000;
+// Each repository gets at most 10s, while the wider aggregate ceiling lets a
+// slow read fail in isolation instead of starving every repository after it.
+export const BASE_BRANCH_CI_AGGREGATE_TIMEOUT_MS = 60_000;
 export const BASE_BRANCH_CI_RUN_LIMIT = 20;
 
 const defaultWorkflowRunList = (repo, options) =>

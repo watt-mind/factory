@@ -165,7 +165,58 @@ describe("base branch CI diagnostics (#1928)", () => {
         detail: expect.stringContaining("aggregate GitHub Actions deadline"),
       }),
     ]);
-    expect(BASE_BRANCH_CI_AGGREGATE_TIMEOUT_MS).toBe(BASE_BRANCH_CI_TIMEOUT_MS);
+  });
+
+  test("gives a later repository a CI signal after a slow earlier read", () => {
+    const laterRepo = {
+      name: "later",
+      github: "watt-mind/later",
+      base: "main",
+    };
+    let elapsedMs = 0;
+    const calls = [];
+    const rows = baseBranchCiDiagnostics({
+      repos: [repo, laterRepo],
+      deadlineMs: BASE_BRANCH_CI_AGGREGATE_TIMEOUT_MS,
+      now: () => elapsedMs,
+      runList: (name, options) => {
+        calls.push({ name, options });
+        if (name === repo.github) {
+          elapsedMs += BASE_BRANCH_CI_TIMEOUT_MS;
+          return [];
+        }
+        return [
+          {
+            status: "completed",
+            conclusion: "success",
+            workflowName: "CI",
+            databaseId: 42,
+          },
+        ];
+      },
+    });
+
+    expect(calls).toEqual([
+      expect.objectContaining({ name: repo.github }),
+      expect.objectContaining({
+        name: laterRepo.github,
+        options: expect.objectContaining({
+          timeout: BASE_BRANCH_CI_TIMEOUT_MS,
+        }),
+      }),
+    ]);
+    expect(rows[1]).toEqual(
+      expect.objectContaining({
+        ok: true,
+        detail: expect.stringContaining("CI succeeded"),
+      }),
+    );
+  });
+
+  test("keeps the aggregate budget above the per-repository cap", () => {
+    expect(BASE_BRANCH_CI_AGGREGATE_TIMEOUT_MS).toBeGreaterThan(
+      BASE_BRANCH_CI_TIMEOUT_MS,
+    );
   });
 
   test("skips without failing when Actions has no completed history", () => {
