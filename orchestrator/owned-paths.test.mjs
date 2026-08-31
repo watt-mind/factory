@@ -182,6 +182,13 @@ test("extensionless concrete files (Dockerfile, Makefile) match themselves", () 
   expectTrue(!globsOverlap("app/src/auth", "app/src/auth.ts"));
 });
 
+test("bare filenames with extensions match that basename at any repository depth", () => {
+  const matcher = globToRegExp("acp.test.mjs");
+  expectTrue(matcher.test("acp.test.mjs"));
+  expectTrue(matcher.test("event-runtime/lib/adapters/acp.test.mjs"));
+  expectTrue(!matcher.test("event-runtime/lib/adapters/acp.mjs"));
+});
+
 test("the case keyword matching gets wrong", () => {
   // Same vocabulary, unrelated files: must NOT collide.
   expectTrue(

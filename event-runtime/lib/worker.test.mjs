@@ -307,40 +307,111 @@ describe("worker", () => {
     }
   });
 
-  test("drains the local notify outbox from the adapter finally so a throw cannot strand an escalation", () => {
-    // The drain used to sit after the adapter try/finally: an adapter that
-    // threw skipped it, and the retained escalation was never delivered and
-    // never reported on the ticket. Ordering is still load-bearing — the
-    // drain has to run after the adapter has fully stopped writing — so the
-    // call must live inside that `finally`, not before it and not after the
-    // block.
-    const source = readFileSync(
-      new URL("./worker.mjs", import.meta.url),
-      "utf8",
+  test("drains a worktree adapter's local notifications and reports an undelivered one after the adapter throws", async () => {
+    const db = openDb(":memory:");
+    const home = tmpDir("evrt-local-notify-throw-");
+    const runId = "run_local_notify_adapter_throw";
+    const ticket = "watt-mind/factory#1973";
+    queueRun(
+      db,
+      makeSpec({
+        runId,
+        input: { repo: "factory", ticket },
+        workspace: { type: "worktree" },
+      }),
     );
-    const marker =
-      "    } finally {\n      stopDeadlineMonitor();\n      stopCancellationMonitor();\n";
-    const start = source.indexOf(marker);
-    expect(start).toBeGreaterThan(-1);
-    const open = source.indexOf("{", start);
-    let depth = 0;
-    let end = -1;
-    for (let i = open; i < source.length; i += 1) {
-      if (source[i] === "{") depth += 1;
-      else if (source[i] === "}") {
-        depth -= 1;
-        if (depth === 0) {
-          end = i;
-          break;
-        }
-      }
+    const claim = claimNext(db, opts());
+    const materializeCalls = [];
+    const posted = [];
+    const comments = [];
+    const localNotifyFetch = async (url, init) => {
+      posted.push({ url, init });
+      return new Response("{}", { status: posted.length === 1 ? 201 : 503 });
+    };
+    const description = "## Owned Paths\n- event-runtime/lib/worker.mjs\n";
+    const dispatch = {
+      locksDir: tmpDir("evrt-local-notify-throw-locks-"),
+      leasesDir: tmpDir("evrt-local-notify-throw-leases-"),
+      fetchTicket: () => ({
+        identifier: ticket,
+        state: { name: "Todo" },
+        assignee: null,
+        labels: { nodes: [{ name: "ai:agent-ready" }] },
+        description,
+      }),
+      fetchInFlight: () => [],
+      countLeases: () => 0,
+      budgetRefusal: () => null,
+      claimTicket: () => ({ ok: true }),
+      commentTicket: (args) => comments.push(args),
+    };
+    const throwingAdapter = {
+      async execute() {
+        const outbox = path.join(home, "outbox", `${runId}.jsonl`);
+        mkdirSync(path.dirname(outbox), { recursive: true });
+        writeFileSync(
+          outbox,
+          ["delivered notification", "retained notification"]
+            .map((title) =>
+              JSON.stringify({
+                schemaVersion: "factory.local-notify-outbox/v1",
+                runId,
+                kind: "BLOCKED",
+                title: `BLOCKED watt-mind/factory#1973: ${title}`,
+                refs: { issue: ticket, repo: "factory" },
+                source: `agent:${runId}`,
+              }),
+            )
+            .join("\n") + "\n",
+        );
+        throw new Error("adapter threw");
+      },
+    };
+
+    try {
+      const summary = await executeClaimed(
+        db,
+        registry,
+        { fake: throwingAdapter },
+        claim,
+        opts({
+          dispatch,
+          env: {
+            FACTORY_EVENT_HOME: home,
+            FACTORY_EVENT_PORT: "7499",
+            FACTORY_CONTROL_API_TOKEN: "worker-token",
+          },
+          materializeWorktree: (args) => {
+            materializeCalls.push(args);
+            return { injected: true };
+          },
+          localNotifyFetch,
+        }),
+      );
+
+      expect(summary).toMatchObject({ terminalState: "FAILED" });
+      expect(materializeCalls).toHaveLength(1);
+      expect(posted).toHaveLength(2);
+      expect(posted[0].url).toBe("http://127.0.0.1:7499/inbox");
+      expect(JSON.parse(posted[0].init.body)).toMatchObject({
+        title: "BLOCKED watt-mind/factory#1973: delivered notification",
+        refs: { issue: ticket, repo: "factory" },
+      });
+      expect(comments).toEqual([
+        expect.objectContaining({
+          repo: "factory",
+          ticket,
+          body: expect.stringContaining(
+            "BLOCKED watt-mind/factory#1973: retained notification",
+          ),
+        }),
+      ]);
+      expect(
+        readFileSync(path.join(home, "outbox", `${runId}.jsonl`), "utf8"),
+      ).toContain("BLOCKED watt-mind/factory#1973: retained notification");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
     }
-    expect(end).toBeGreaterThan(open);
-    const finallyBody = source.slice(open, end);
-    expect(finallyBody).toContain("await drainLocalNotifyOutbox({");
-    expect(finallyBody).toContain("commentTicketFn({");
-    // Exactly one drain call site, and it is the one inside the finally.
-    expect(source.split("await drainLocalNotifyOutbox({")).toHaveLength(2);
   });
 
   test("retains an undelivered local notification for handoff recovery", async () => {

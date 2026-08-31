@@ -40,6 +40,11 @@ const DELAYED_HEALTH_OFFSETS = Array.from(
   { length: DELAYED_HEALTH_PORT_SPAN * 2 },
   (_, offset) => offset,
 );
+// Offsets are contiguous from 0, so the count doubles as the band width
+// (last offset + 1). If DELAYED_HEALTH_OFFSETS ever grows sparse, use
+// Math.max(...DELAYED_HEALTH_OFFSETS) + 1 instead.
+const DELAYED_HEALTH_BAND_WIDTH = DELAYED_HEALTH_OFFSETS.length;
+const delayedHealthFixtureRanges = [];
 
 function offsetsBindable(base, offsets) {
   for (const offset of offsets) {
@@ -80,6 +85,13 @@ function pickFreeBase(offsets, excludedRanges = []) {
   throw new Error("could not find a free port band for worktree-common tests");
 }
 
+function delayedHealthPortBand(portBase) {
+  return {
+    start: portBase,
+    end: portBase + DELAYED_HEALTH_BAND_WIDTH - 1,
+  };
+}
+
 const PORT_BASE = pickFreeBase(FIXTURE_OFFSETS);
 const PORT_RESERVATION_ROOT = mkdtempSync(
   path.join(tmpdir(), "factory-port-reservations-"),
@@ -100,6 +112,48 @@ const BAND_ENV = {
   FACTORY_PORT_SPAN: String(PORT_SPAN),
   FACTORY_PORT_RESERVATION_ROOT: PORT_RESERVATION_ROOT,
 };
+
+function delayedHealthExcludedRanges(
+  issuedRanges = delayedHealthFixtureRanges,
+) {
+  return [
+    { start: PORT_BASE, end: PORT_BASE + 2 * PORT_SPAN - 1 },
+    ...issuedRanges,
+  ];
+}
+
+test("delayed-health exclusions retain every issued fixture port band", () => {
+  const issuedRanges = [
+    delayedHealthPortBand(12000),
+    delayedHealthPortBand(14000),
+  ];
+
+  expect(delayedHealthExcludedRanges(issuedRanges)).toEqual([
+    { start: PORT_BASE, end: PORT_BASE + 2 * PORT_SPAN - 1 },
+    { start: 12000, end: 12005 },
+    { start: 14000, end: 14005 },
+  ]);
+});
+
+test("delayed-health exclusions default arg accumulates fixture bands pushed at runtime", () => {
+  const saved = delayedHealthFixtureRanges.slice();
+  try {
+    delayedHealthFixtureRanges.length = 0;
+    const bandA = delayedHealthPortBand(16000);
+    const bandB = delayedHealthPortBand(18000);
+    delayedHealthFixtureRanges.push(bandA);
+    delayedHealthFixtureRanges.push(bandB);
+
+    expect(delayedHealthExcludedRanges()).toEqual([
+      { start: PORT_BASE, end: PORT_BASE + 2 * PORT_SPAN - 1 },
+      bandA,
+      bandB,
+    ]);
+  } finally {
+    delayedHealthFixtureRanges.length = 0;
+    delayedHealthFixtureRanges.push(...saved);
+  }
+});
 
 afterAll(() => {
   rmSync(PORT_RESERVATION_ROOT, { recursive: true, force: true });
@@ -231,10 +285,13 @@ function delayedHealthFixture({
 } = {}) {
   const fixture = worktreeUpFixture();
   // Reserve enough adjacent pairs for allocate_api_port to recover if the
-  // preferred pair is claimed after this probe, and never overlap BAND_ENV.
-  const portBase = pickFreeBase(DELAYED_HEALTH_OFFSETS, [
-    { start: PORT_BASE, end: PORT_BASE + 2 * PORT_SPAN - 1 },
-  ]);
+  // preferred pair is claimed after this probe. Exclude BAND_ENV and every
+  // delayed-health band already issued in this test-file run.
+  const portBase = pickFreeBase(
+    DELAYED_HEALTH_OFFSETS,
+    delayedHealthExcludedRanges(),
+  );
+  delayedHealthFixtureRanges.push(delayedHealthPortBand(portBase));
   const fakeBun = path.join(fixture.mockBin, "bun");
   mkdirSync(path.join(fixture.root, "event-runtime", "web"), {
     recursive: true,

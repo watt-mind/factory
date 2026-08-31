@@ -776,6 +776,7 @@ export function createWorkspace({
   adapter = null,
   ticketLeaseOwner = null,
   workerLeasesDir,
+  materializeWorktree: materializeWorktreeFn = materializeWorktree,
   worktreeOwnershipConflict = detectWorktreeOwnershipConflict,
   worktreePreservationComment = commentOnPreservedWorktree,
   worktreeHandoff = null,
@@ -838,7 +839,7 @@ export function createWorkspace({
   let worktree = null;
   if (workspace.type === "worktree") {
     try {
-      worktree = materializeWorktree({
+      worktree = materializeWorktreeFn({
         workspaceDir: dir,
         input,
         checkoutDir: workspace.checkoutDir ?? "repo",

@@ -58,6 +58,7 @@ import { normalizePolicy } from "../sandbox/gondolin.mjs";
 import { PROMPT_SUFFIX, verifiedPrompt } from "./claude.mjs";
 import {
   BASE_INHERITED_ENV,
+  KILL_GRACE_MS,
   PROVIDER_CREDENTIAL_ENV,
   PUSH_CREDENTIAL_ENV,
   RUNTIME_IDENTITY_ENV,
@@ -79,6 +80,7 @@ import {
 // list shared by both LLM adapters (WM-223), so it cannot drift between them.
 export {
   BASE_INHERITED_ENV,
+  KILL_GRACE_MS,
   PROVIDER_CREDENTIAL_ENV,
   PROMPT_SUFFIX,
   PUSH_CREDENTIAL_ENV,
@@ -117,8 +119,6 @@ export const HARNESS_LAYOUT = Object.freeze({
  * host path pipes, and it lives beside input.json under the workspace mount.
  */
 export const SANDBOX_PROMPT_FILE = ".prompt.md";
-
-export const KILL_GRACE_MS = 30_000;
 
 /** Terminate a detached CLI and every subprocess it started (WM-263). */
 export { killProcessGroup };
