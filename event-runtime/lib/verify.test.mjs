@@ -2565,6 +2565,15 @@ describe("handoff verification helpers (WM-718)", () => {
     expect(ownedPathsDeviations(null, ["src/**"])).toEqual([]);
   });
 
+  test("ownedPathsDeviations accepts a bare filename alongside full paths", () => {
+    expect(
+      ownedPathsDeviations(
+        ["event-runtime/lib/adapters/acp.test.mjs", "docs/unrelated.md"],
+        ["acp.test.mjs", "event-runtime/lib/verify.mjs"],
+      ),
+    ).toEqual(["docs/unrelated.md"]);
+  });
+
   test("changedFilesSince diffs merge-base(origin/<base>)..HEAD and reports an unusable tree instead of guessing", () => {
     const dir = tmpDir("evrt-handoff-diff-");
     const git = (...args) => execFileSync("git", args, { cwd: dir });
