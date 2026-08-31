@@ -28,6 +28,7 @@ import {
   waitingLabel,
 } from "./Inbox";
 import { api } from "../api";
+import { attrIcon } from "../components/attrIcons";
 import { clearToasts, ToastContainer } from "../components/ui";
 import type { InboxItem, Proposal } from "../types";
 import { changeInput } from "../test-render";
@@ -263,8 +264,14 @@ describe("inbox pure helpers", () => {
       ),
     ).toBe("https://github.com/watt-mind/factory/pull/124");
     expect(
-      prHref(item({ id: "bare", kind: "CI RED", refs: { pr: "PR#125" } })),
-    ).toBeNull();
+      prHref(
+        item({
+          id: "bare",
+          kind: "CI RED",
+          refs: { pr: "125", repo: "factory" },
+        }),
+      ),
+    ).toBe("https://github.com/watt-mind/factory/pull/125");
     expect(
       inboxActionPrHref(
         item({
@@ -274,6 +281,19 @@ describe("inbox pure helpers", () => {
         }),
       ),
     ).toBe("https://github.com/watt-mind/factory/pull/607");
+  });
+
+  test("reference attributes have distinct icons", () => {
+    for (const reference of [
+      "run",
+      "proposal",
+      "event",
+      "issue",
+      "pr",
+      "repo",
+    ]) {
+      expect(attrIcon(reference)).not.toBeNull();
+    }
   });
 
   test("Inbox age preserves hour precision after 24 hours", () => {
@@ -759,6 +779,12 @@ describe("Inbox view", () => {
     const pr = view.getByTitle("Open pull request") as HTMLAnchorElement;
     expect(pr.getAttribute("href")).toBe(
       "https://github.com/watt-mind/factory/pull/9",
+    );
+    const { view: detail } = renderInbox({ focusItemId: "inbox_open_1" });
+    await waitFor(() => detail.getByTitle("Open repository"));
+    const repo = detail.getByTitle("Open repository") as HTMLAnchorElement;
+    expect(repo.getAttribute("href")).toBe(
+      "https://github.com/watt-mind/factory",
     );
   });
 
