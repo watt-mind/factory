@@ -329,6 +329,32 @@ test("Prisma/SaaS app config leaves ordinary dashboard, analytics, and docs chan
   ).toEqual([]);
 });
 
+test("bare escalation globs use the target repo root, not the process CWD", () => {
+  const rootWithFile = mkdtempSync(path.join(tmpdir(), "escalate-root-with-"));
+  const rootWithoutFile = mkdtempSync(
+    path.join(tmpdir(), "escalate-root-without-"),
+  );
+  try {
+    writeFileSync(path.join(rootWithFile, "package.json"), "{}\n");
+    const files = ["package.json", "fixtures/nested/package.json"];
+
+    expect(
+      matchEscalations(files, ["package.json"], { repoRoot: rootWithFile }),
+    ).toEqual([{ file: "package.json", globs: ["package.json"] }]);
+    // An absent root file must retain any-depth matching rather than narrowing
+    // based on whichever directory runs the escalation process.
+    expect(
+      matchEscalations(files, ["package.json"], { repoRoot: rootWithoutFile }),
+    ).toEqual([
+      { file: "package.json", globs: ["package.json"] },
+      { file: "fixtures/nested/package.json", globs: ["package.json"] },
+    ]);
+  } finally {
+    rmSync(rootWithFile, { recursive: true, force: true });
+    rmSync(rootWithoutFile, { recursive: true, force: true });
+  }
+});
+
 test("flags a file under an escalate glob", () => {
   const hits = matchEscalations(["app/src/payment/stripe.ts"], globs);
   expect(hits.length).toBe(1);

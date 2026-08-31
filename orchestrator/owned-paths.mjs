@@ -405,11 +405,11 @@ export function globToRegExp(glob, { repoRoot } = {}) {
  * pair of tickets; false negatives cost two agents editing one file. Bias to
  * the former, always.
  */
-export function globsOverlap(a, b) {
+export function globsOverlap(a, b, { repoRoot } = {}) {
   if (a === b) return true;
   try {
-    const ra = globToRegExp(a);
-    const rb = globToRegExp(b);
+    const ra = globToRegExp(a, { repoRoot });
+    const rb = globToRegExp(b, { repoRoot });
     const isConcrete = (g) => !/[*?{]/.test(g);
 
     // At least one side names an actual path: decide by matching, which is exact.

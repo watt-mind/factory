@@ -905,7 +905,13 @@ function pinManifestFreshness(repo) {
   const patterns = Array.isArray(policy.pinManifests)
     ? policy.pinManifests
     : [];
-  const matchers = patterns.map(globToRegExp);
+  // This planner path does have the configured checkout on disk, so preserve
+  // root-file semantics for legacy bare manifest names. Other plan-time
+  // ownership routing works only from ticket/config text and intentionally
+  // remains any-depth rather than consulting an ambient CWD.
+  const matchers = patterns.map((pattern) =>
+    globToRegExp(pattern, { repoRoot: repoPath }),
+  );
   const manifests = [];
 
   // Match the owned-paths reader's file-only traversal. Directory mtime alone
@@ -1911,6 +1917,9 @@ function ownedPathContains(ownerValue, candidateValue) {
   if (isMatchEverythingGlob(owner) || owner === candidate) return true;
 
   const candidateHasGlob = /[*?{]/.test(candidate);
+  // Merge-fix eligibility is evaluated from the ticket payload before a
+  // checkout is guaranteed to exist, so bare Owned Paths intentionally retain
+  // their conservative any-depth semantics here.
   if (!candidateHasGlob) return globToRegExp(owner).test(candidate);
 
   // A directory (bare or /**) owns narrower globs rooted below it. Other

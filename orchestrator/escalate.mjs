@@ -45,10 +45,10 @@ import { loadForge } from "../lib/forge/index.mjs";
 export const EXIT = { CLEAN: 0, ESCALATE: 2, CANNOT_EVALUATE: 3 };
 
 /** Which changed files hit which escalate globs? Pure, for tests. */
-export function matchEscalations(files, globs) {
+export function matchEscalations(files, globs, { repoRoot } = {}) {
   const hits = [];
   for (const f of files) {
-    const matched = globs.filter((g) => globsOverlap(f, g));
+    const matched = globs.filter((g) => globsOverlap(f, g, { repoRoot }));
     if (matched.length) hits.push({ file: f, globs: matched });
   }
   return hits;
@@ -220,12 +220,15 @@ if (import.meta.main) {
 
   // Non-empty is the whole test for an injection: an exported-but-empty seam is
   // an absent answer, not a diff with no files in it.
+  // The config names the target repository's checkout. Use it for both the
+  // forge read and bare-filename matching; never let the orchestrator CWD
+  // decide whether an escalation pattern anchors at a repository root.
+  const repoPath = String(repo.path).replace(/^~/, homedir());
   const injected = process.env.FACTORY_ESCALATE_DIFF_FILES;
   let raw;
   if (injected?.trim()) {
     raw = injected;
   } else {
-    const repoPath = String(repo.path).replace(/^~/, homedir());
     try {
       raw = loadForge().prDiffFiles(null, pr, { cwd: repoPath }).join("\n");
     } catch (err) {
@@ -250,7 +253,7 @@ if (import.meta.main) {
   }
   const files = changed.files;
 
-  const hits = matchEscalations(files, globs);
+  const hits = matchEscalations(files, globs, { repoRoot: repoPath });
   if (hits.length) {
     console.log(
       `ESCALATE — PR #${pr} touches ${hits.length} protected file(s) in ${repo.name}:`,
