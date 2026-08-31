@@ -37,13 +37,17 @@ function processGroupForPid(pid) {
   const result = spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], {
     encoding: "utf8",
   });
-  const pgid = Number(result.stdout.trim());
+  const pgid = Number(result.stdout?.trim());
   return result.status === 0 && Number.isInteger(pgid) && pgid > 0
     ? pgid
     : null;
 }
 
-const testRunnerPgid = processGroupForPid(process.pid);
+function testRunnerProcessGroup() {
+  const pgid = process.getpgid?.(0);
+  if (Number.isInteger(pgid) && pgid > 0) return pgid;
+  return processGroupForPid(process.pid);
+}
 
 function keyFor({ pid, group }) {
   return `${group ? "group" : "pid"}:${pid}`;
@@ -90,10 +94,20 @@ export function trackProcess(
     throw new Error(`cannot track invalid test process pid ${pid}`);
   }
   const entry = { pid: Number(pid), group, scope, owner };
-  if (entry.group && testRunnerPgid !== null && entry.pid === testRunnerPgid) {
-    throw new Error(
-      `refusing to track the test runner process group ${testRunnerPgid}`,
-    );
+  if (entry.pid === process.pid) {
+    throw new Error("refusing to track the test runner process group");
+  }
+  if (entry.group && process.platform !== "win32") {
+    // Resolution is best effort: inside a PID namespace neither getpgid nor ps
+    // may answer. The `entry.pid === process.pid` identity guard above already
+    // refuses the obvious self-tracking case, so an unresolvable runner group
+    // must not fail every tracked spawn.
+    const runnerPgid = testRunnerProcessGroup();
+    if (runnerPgid !== null && entry.pid === runnerPgid) {
+      throw new Error(
+        `refusing to track the test runner process group ${runnerPgid}`,
+      );
+    }
   }
   tracked.set(keyFor(entry), entry);
   return entry;
@@ -129,11 +143,14 @@ export function trackProcessGroupsMatching(fragment, options = {}) {
   });
   if (result.status !== 0)
     throw new Error("could not inspect test process groups");
+  const runnerPgid = testRunnerProcessGroup();
   for (const line of result.stdout.split("\n")) {
     const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
     if (!match || !match[3].includes(fragment)) continue;
     const pgid = Number(match[2]);
-    if (pgid > 0 && pgid !== testRunnerPgid) {
+    // Non-detached children share the runner's group; skip those rows rather
+    // than letting trackProcess throw out of a test's cleanup path.
+    if (pgid > 0 && pgid !== runnerPgid) {
       trackProcess(pgid, { ...options, group: process.platform !== "win32" });
     }
   }
@@ -147,6 +164,7 @@ export function trackMarkedFakeRuntimeGroups(marker, options = {}) {
   });
   if (result.status !== 0)
     throw new Error("could not inspect marked test process groups");
+  const runnerPgid = testRunnerProcessGroup();
   for (const line of result.stdout.split("\n")) {
     const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
     if (!match) continue;
@@ -160,7 +178,9 @@ export function trackMarkedFakeRuntimeGroups(marker, options = {}) {
       if (!withEnv.includes(`FACTORY_TEST_TRACKED_PROCESS=${marker}`)) continue;
     }
     const group = Number(pgid);
-    if (group > 0 && group !== testRunnerPgid) trackProcess(group, options);
+    // Same runner-group skip as trackProcessGroupsMatching: a marked fixture
+    // that never detached must not drag the runner's own group into cleanup.
+    if (group > 0 && group !== runnerPgid) trackProcess(group, options);
   }
 }
 

@@ -2574,6 +2574,22 @@ describe("handoff verification helpers (WM-718)", () => {
     ).toEqual(["docs/unrelated.md"]);
   });
 
+  test("ownedPathsDeviations lets a bare filename own that basename at any depth", () => {
+    // `ownedPathsDeviations` compiles globs without a repository root, so a
+    // bare `package.json` stays an any-depth basename matcher — the ticket did
+    // not say which directory it meant, and over-claiming here only costs a
+    // missing deviation report, while under-claiming would block real work.
+    // Anchoring a bare entry to the root file is opt-in via
+    // `globToRegExp(g, { repoRoot })`; threading a repo root through this
+    // helper is follow-up work (see watt-mind/factory#1996).
+    expect(
+      ownedPathsDeviations(
+        ["package.json", "fixtures/nested/package.json", "docs/unrelated.md"],
+        ["package.json"],
+      ),
+    ).toEqual(["docs/unrelated.md"]);
+  });
+
   test("changedFilesSince diffs merge-base(origin/<base>)..HEAD and reports an unusable tree instead of guessing", () => {
     const dir = tmpDir("evrt-handoff-diff-");
     const git = (...args) => execFileSync("git", args, { cwd: dir });

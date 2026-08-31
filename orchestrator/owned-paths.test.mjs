@@ -189,6 +189,71 @@ test("bare filenames with extensions match that basename at any repository depth
   expectTrue(!matcher.test("event-runtime/lib/adapters/acp.mjs"));
 });
 
+test("compiling a glob never reads the filesystem or the process CWD", () => {
+  // `globToRegExp` is shared with the escalate gate, which compiles globs with
+  // no repository in hand. If compilation consulted an ambient directory, a
+  // stray root file would silently narrow an escalate_paths matcher and drop
+  // escalations. Whatever sits next to the test process must not matter: with
+  // no `repoRoot`, a bare filename stays an any-depth basename matcher.
+  const root = mkdtempSync(path.join(tmpdir(), "owned-paths-root-"));
+  try {
+    writeFileSync(path.join(root, "package.json"), "{}\n");
+    const ambient = globToRegExp("package.json");
+    expectTrue(ambient.test("package.json"));
+    expectTrue(ambient.test("fixtures/nested/package.json"));
+    // Explicitly passing no root, and passing an empty options bag, agree.
+    expectTrue(globToRegExp("package.json", {}).test("nested/package.json"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an explicit repoRoot anchors a bare filename that resolves to a root file", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "owned-paths-root-"));
+  try {
+    writeFileSync(path.join(root, "package.json"), "{}\n");
+    const matcher = globToRegExp("package.json", { repoRoot: root });
+    expectTrue(matcher.test("package.json"));
+    expectTrue(!matcher.test("fixtures/nested/package.json"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a repoRoot leaves an unresolvable bare filename matching at any depth", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "owned-paths-root-"));
+  try {
+    // Nothing named acp.test.mjs at the root, and a same-named directory must
+    // not count as a resolution either — only a real file anchors.
+    mkdirSync(path.join(root, "acp.test.mjs"));
+    const matcher = globToRegExp("acp.test.mjs", { repoRoot: root });
+    expectTrue(matcher.test("acp.test.mjs"));
+    expectTrue(matcher.test("event-runtime/lib/adapters/acp.test.mjs"));
+    expectTrue(!matcher.test("event-runtime/lib/adapters/acp.mjs"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("extensionless bare names stay prefix matchers in both modes", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "owned-paths-root-"));
+  try {
+    writeFileSync(path.join(root, "Dockerfile"), "FROM scratch\n");
+    for (const matcher of [
+      globToRegExp("Dockerfile"),
+      globToRegExp("Dockerfile", { repoRoot: root }),
+    ]) {
+      expectTrue(matcher.test("Dockerfile"));
+      expectTrue(matcher.test("Dockerfile/nested"));
+      // Prefix matching is anchored at the root: a nested Dockerfile is a
+      // different file and neither mode claims it.
+      expectTrue(!matcher.test("services/api/Dockerfile"));
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the case keyword matching gets wrong", () => {
   // Same vocabulary, unrelated files: must NOT collide.
   expectTrue(
