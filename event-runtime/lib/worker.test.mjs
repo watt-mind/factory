@@ -167,15 +167,47 @@ describe("worker", () => {
     writeFileSync(path.join(outboxDir, `${active.runId}.jsonl`), "active\n");
     writeFileSync(path.join(outboxDir, "run_orphan_outbox.jsonl"), "orphan\n");
 
-    expect(sweepOrphanedLocalNotifyOutbox({ db, home })).toEqual([
-      "run_orphan_outbox",
-    ]);
+    // Past the grace window: the inactive run's file is eligible, the active
+    // run's file is still protected by its state.
+    expect(
+      sweepOrphanedLocalNotifyOutbox({
+        db,
+        home,
+        now: Date.now() + 2 * 60 * 60 * 1000,
+      }),
+    ).toEqual(["run_orphan_outbox"]);
     expect(existsSync(path.join(outboxDir, `${active.runId}.jsonl`))).toBe(
       true,
     );
     expect(existsSync(path.join(outboxDir, "run_orphan_outbox.jsonl"))).toBe(
       false,
     );
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("leaves an outbox file inside the mtime grace window alone", () => {
+    // Without an age grace the sweep deletes the very file a live drain
+    // retains as its recovery source: the agent writes the outbox before the
+    // worker's run is visible in any active state to this sweep's snapshot.
+    const home = tmpDir("evrt-local-notify-grace-");
+    const outboxDir = path.join(home, "outbox");
+    const db = openDb(":memory:");
+    mkdirSync(outboxDir, { recursive: true });
+    const fresh = path.join(outboxDir, "run_fresh_outbox.jsonl");
+    writeFileSync(fresh, "fresh\n");
+
+    expect(sweepOrphanedLocalNotifyOutbox({ db, home })).toEqual([]);
+    expect(existsSync(fresh)).toBe(true);
+
+    // Only once the file has aged past the window does it become eligible.
+    expect(
+      sweepOrphanedLocalNotifyOutbox({
+        db,
+        home,
+        now: Date.now() + 61 * 60 * 1000,
+      }),
+    ).toEqual(["run_fresh_outbox"]);
+    expect(existsSync(fresh)).toBe(false);
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -223,33 +255,51 @@ describe("worker", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  test("retains an outbox entry with an attributable error for an invalid port", async () => {
+  test("reports one undelivered entry per line for an invalid port", async () => {
+    // The caller only reads `undelivered`; an `error` field alone made a
+    // misconfigured port invisible and the retained lines were then swept.
     const home = tmpDir("evrt-local-notify-invalid-port-");
     const runId = "run_invalid_port";
     const outbox = path.join(home, "outbox", `${runId}.jsonl`);
     mkdirSync(path.dirname(outbox), { recursive: true });
-    writeFileSync(
-      outbox,
-      `${JSON.stringify({
+    const line = (title) =>
+      JSON.stringify({
         schemaVersion: "factory.local-notify-outbox/v1",
         runId,
         kind: "BLOCKED",
-        title: "BLOCKED watt-mind/factory#1964: invalid port",
+        title,
         refs: {},
         source: `agent:${runId}`,
-      })}\n`,
+      });
+    writeFileSync(
+      outbox,
+      `${line("BLOCKED watt-mind/factory#1964: invalid port")}\n${line(
+        "BLOCKED watt-mind/factory#1964: second escalation",
+      )}\nnot-json\n`,
     );
+    const expectedError =
+      "FACTORY_EVENT_PORT must be a positive integer between 1 and 65535";
     const fetchFn = spyOn(globalThis, "fetch");
     try {
-      expect(
-        await drainLocalNotifyOutbox({ home, runId, port: "not-a-port" }),
-      ).toEqual({
-        delivered: [],
-        undelivered: [],
-        error:
-          "FACTORY_EVENT_PORT must be a positive integer between 1 and 65535",
+      const result = await drainLocalNotifyOutbox({
+        home,
+        runId,
+        port: "not-a-port",
       });
+      expect(result.delivered).toEqual([]);
+      expect(result.undelivered).toEqual([
+        {
+          title: "BLOCKED watt-mind/factory#1964: invalid port",
+          error: expectedError,
+        },
+        {
+          title: "BLOCKED watt-mind/factory#1964: second escalation",
+          error: expectedError,
+        },
+        { title: "invalid local notification record", error: expectedError },
+      ]);
       expect(fetchFn).not.toHaveBeenCalled();
+      // The outbox stays put as the recovery source.
       expect(existsSync(outbox)).toBe(true);
     } finally {
       fetchFn.mockRestore();

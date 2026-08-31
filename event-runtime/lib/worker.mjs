@@ -1076,6 +1076,12 @@ const LOCAL_NOTIFY_ACTIVE_RUN_STATES = Object.freeze([
   "RUNNING",
   "VERIFYING",
 ]);
+/**
+ * How long a retained outbox file must sit untouched before the sweep may
+ * delete it. Long enough that no live drain can lose its recovery source,
+ * short enough that a crashed worker's leftovers do not accumulate.
+ */
+const LOCAL_NOTIFY_OUTBOX_GRACE_MS = 60 * 60 * 1000;
 
 function localNotifyPort(port) {
   const value = typeof port === "string" ? port.trim() : String(port);
@@ -1090,10 +1096,19 @@ function localNotifyPort(port) {
  * executeClaimed's finally block: a crashed or unclaimed run never reaches
  * that block. Queued runs remain protected because a retry can still drain
  * their prior attempt's retained escalation.
+ *
+ * Active-state protection alone is not enough. A file is written by the agent
+ * before the run reaches any of those states in this worker's view (and a
+ * concurrent worker's run is invisible to a different event home's snapshot),
+ * so a run-state check on its own would delete the very file the drain treats
+ * as its recovery source. A file must therefore also be older than
+ * LOCAL_NOTIFY_OUTBOX_GRACE_MS before it is eligible.
  */
 export function sweepOrphanedLocalNotifyOutbox({
   db,
   home = process.env.FACTORY_EVENT_HOME,
+  now = Date.now(),
+  graceMs = LOCAL_NOTIFY_OUTBOX_GRACE_MS,
 } = {}) {
   if (!db || typeof home !== "string" || home.trim() === "") return [];
   const outboxDir = path.join(home, "outbox");
@@ -1118,8 +1133,16 @@ export function sweepOrphanedLocalNotifyOutbox({
   for (const entry of entries) {
     const match = /^([A-Za-z0-9._-]+)\.jsonl$/.exec(entry.name);
     if (!match || activeRunIds.has(match[1])) continue;
+    const filePath = path.join(outboxDir, entry.name);
+    let mtimeMs;
     try {
-      unlinkSync(path.join(outboxDir, entry.name));
+      mtimeMs = statSync(filePath).mtimeMs;
+    } catch {
+      continue;
+    }
+    if (!(now - mtimeMs >= graceMs)) continue;
+    try {
+      unlinkSync(filePath);
       swept.push(match[1]);
     } catch {
       // A concurrent writer or permissions change must not stop a worker from
@@ -1170,17 +1193,35 @@ export async function drainLocalNotifyOutbox({
   }
   if (!existsSync(outboxPath)) return { delivered: [], undelivered: [] };
 
+  const lines = readFileSync(outboxPath, "utf8").split("\n").filter(Boolean);
+
   const validatedPort = localNotifyPort(port);
   if (validatedPort === null) {
+    // Report one undelivered entry per retained line rather than a bare
+    // `error` field: the caller only reads `undelivered`, and a misconfigured
+    // port must surface as the same ticket comment as any other delivery
+    // failure instead of failing silently. The file stays put as the
+    // recovery source.
+    const error =
+      "FACTORY_EVENT_PORT must be a positive integer between 1 and 65535";
     return {
       delivered: [],
-      undelivered: [],
-      error:
-        "FACTORY_EVENT_PORT must be a positive integer between 1 and 65535",
+      undelivered: lines.map((line) => {
+        let entry;
+        try {
+          entry = localOutboxEntry(JSON.parse(line), runId);
+        } catch {
+          entry = null;
+        }
+        return {
+          title: entry ? entry.title : "invalid local notification record",
+          error,
+        };
+      }),
+      error,
     };
   }
 
-  const lines = readFileSync(outboxPath, "utf8").split("\n").filter(Boolean);
   const retained = [];
   const delivered = [];
   const undelivered = [];
