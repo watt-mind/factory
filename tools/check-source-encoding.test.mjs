@@ -5,18 +5,21 @@ import { expect, test } from "bun:test";
 const ROOT = path.resolve(import.meta.dir, "..");
 
 const TEXT_GLOBS = [
+  "*.css",
+  "*.html",
+  "*.js",
+  "*.json",
+  "*.md",
   "*.mjs",
   "*.ts",
   "*.tsx",
-  "*.js",
-  "*.md",
   "*.sh",
   "*.yaml",
   "*.yml",
 ];
 
 /** Locate NUL bytes in a buffer, reporting 1-based line numbers. */
-export function findNulHits(relPath, bytes) {
+function findNulHits(relPath, bytes) {
   const hits = [];
   let line = 1;
   for (let i = 0; i < bytes.length; i++) {
