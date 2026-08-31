@@ -37,13 +37,17 @@ function processGroupForPid(pid) {
   const result = spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], {
     encoding: "utf8",
   });
-  const pgid = Number(result.stdout.trim());
+  const pgid = Number(result.stdout?.trim());
   return result.status === 0 && Number.isInteger(pgid) && pgid > 0
     ? pgid
     : null;
 }
 
-const testRunnerPgid = processGroupForPid(process.pid);
+function testRunnerProcessGroup() {
+  const pgid = process.getpgid?.(0);
+  if (Number.isInteger(pgid) && pgid > 0) return pgid;
+  return processGroupForPid(process.pid);
+}
 
 function keyFor({ pid, group }) {
   return `${group ? "group" : "pid"}:${pid}`;
@@ -90,10 +94,19 @@ export function trackProcess(
     throw new Error(`cannot track invalid test process pid ${pid}`);
   }
   const entry = { pid: Number(pid), group, scope, owner };
-  if (entry.group && testRunnerPgid !== null && entry.pid === testRunnerPgid) {
-    throw new Error(
-      `refusing to track the test runner process group ${testRunnerPgid}`,
-    );
+  if (entry.pid === process.pid) {
+    throw new Error("refusing to track the test runner process group");
+  }
+  if (entry.group && process.platform !== "win32") {
+    const testRunnerPgid = testRunnerProcessGroup();
+    if (testRunnerPgid === null) {
+      throw new Error("could not resolve test runner process group");
+    }
+    if (entry.pid === testRunnerPgid) {
+      throw new Error(
+        `refusing to track the test runner process group ${testRunnerPgid}`,
+      );
+    }
   }
   tracked.set(keyFor(entry), entry);
   return entry;
@@ -133,7 +146,7 @@ export function trackProcessGroupsMatching(fragment, options = {}) {
     const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
     if (!match || !match[3].includes(fragment)) continue;
     const pgid = Number(match[2]);
-    if (pgid > 0 && pgid !== testRunnerPgid) {
+    if (pgid > 0) {
       trackProcess(pgid, { ...options, group: process.platform !== "win32" });
     }
   }
@@ -160,7 +173,7 @@ export function trackMarkedFakeRuntimeGroups(marker, options = {}) {
       if (!withEnv.includes(`FACTORY_TEST_TRACKED_PROCESS=${marker}`)) continue;
     }
     const group = Number(pgid);
-    if (group > 0 && group !== testRunnerPgid) trackProcess(group, options);
+    if (group > 0) trackProcess(group, options);
   }
 }
 
