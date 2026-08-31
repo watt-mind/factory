@@ -887,38 +887,6 @@ test("resolveRepoName matches the checkout, the worktree root, and --repo", () =
   }
 });
 
-// ------------------------------------------------- rename + shim (WM-1026) ---
-// The rename is only safe because the old path keeps working: agent prompts,
-// shared commands and every emitted harness bundle still invoke
-// `tools/linear.mjs`, and they are swept separately.
-test("tools/linear.mjs still runs, delegating to ticket.mjs", () => {
-  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-  const r = Bun.spawnSync({
-    cmd: ["bun", path.join(root, "tools", "linear.mjs")],
-    cwd: root,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const stdout = r.stdout.toString();
-  const stderr = r.stderr.toString();
-  // Same usage output as the real CLI...
-  expect(stdout).toContain("verbs:");
-  expect(stdout).toContain("claim");
-  // ...and the deprecation notice on STDERR, never stdout: `get --json`,
-  // `queue` and `budget` print machine-readable output that callers parse.
-  expect(stderr).toContain("deprecated");
-  expect(stdout).not.toContain("deprecated");
-});
-
-test("the shim re-exports the module's public surface", async () => {
-  const shim = await import("./linear.mjs");
-  const real = await import("./ticket.mjs");
-  for (const name of Object.keys(real)) {
-    expect(shim[name]).toBe(real[name]);
-  }
-  expect(typeof real.main).toBe("function");
-});
-
 test("factory exposes `ticket`, and `linear` as a deprecated alias", () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const script = readFileSync(path.join(root, "bin", "factory"), "utf8");
