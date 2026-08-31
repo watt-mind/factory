@@ -387,6 +387,19 @@ sandbox step. It otherwise preserves the independent ticket command check;
 unparseable shell commands, missing files, non-test modules and flag values
 (`--preload x`) never qualify for skipping.
 
+### Run-scoped notification fallback
+
+Dispatch adapters mark the child with `FACTORY_DISPATCH=1` and pass the
+isolated `FACTORY_EVENT_HOME` and port to the agent, but never
+`FACTORY_CONTROL_API_TOKEN`. If `factory notify` cannot create a durable
+control-API record during a run, it appends the structured notification to
+`$FACTORY_EVENT_HOME/outbox/<run-id>.jsonl` and reports `queued_local` instead
+of losing the message. After the agent exits, the worker submits each entry to
+`POST /inbox` with its own bearer. Delivered entries are removed; a failed or
+malformed entry remains in the outbox and its intended text is recorded on the
+ticket during handoff. This keeps the bearer out of the agent environment while
+making a missing or rejected agent-side token observable and recoverable.
+
 ---
 
 ## 6. Execution form: the `claude` adapter, `mutating: true`

@@ -25,6 +25,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import { localNotifyOutboxPath } from "../../lib/notify.mjs";
 import {
   LEASE_HEARTBEAT_MS,
   leaseDir,
@@ -1048,13 +1049,116 @@ export function dispatchIdentityEnv({
   repoName = null,
 }) {
   if (!String(spec?.agent ?? "").startsWith("dispatch@")) return env;
-  const identity = {};
+  // A dispatched agent must never inherit the worker's control bearer. It can
+  // retain a notification locally and the worker will submit it after exit.
+  const agentEnv = { ...env };
+  delete agentEnv.FACTORY_CONTROL_API_TOKEN;
+  const identity = { FACTORY_DISPATCH: "1" };
   if (runId != null && runId !== "") identity.FACTORY_RUN_ID = String(runId);
   if (ticketId != null && ticketId !== "")
     identity.FACTORY_TICKET = String(ticketId);
   if (repoName != null && repoName !== "")
     identity.FACTORY_REPO = String(repoName);
-  return { ...env, ...identity };
+  // A dispatched agent needs the location of its isolated runtime to retain
+  // notifications, but never the worker's control bearer. The caller supplies
+  // these two non-secret values explicitly rather than copying process.env.
+  for (const key of ["FACTORY_EVENT_HOME", "FACTORY_EVENT_PORT"]) {
+    const value = env[key];
+    if (value != null && value !== "") identity[key] = String(value);
+  }
+  return { ...agentEnv, ...identity };
+}
+
+const LOCAL_NOTIFY_OUTBOX_SCHEMA = "factory.local-notify-outbox/v1";
+
+function localOutboxEntry(value, runId) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    value.schemaVersion !== LOCAL_NOTIFY_OUTBOX_SCHEMA ||
+    value.runId !== runId ||
+    value.source !== `agent:${runId}` ||
+    typeof value.kind !== "string" ||
+    value.kind.trim() === "" ||
+    typeof value.title !== "string" ||
+    value.title.trim() === "" ||
+    !value.refs ||
+    typeof value.refs !== "object" ||
+    Array.isArray(value.refs)
+  ) {
+    return null;
+  }
+  return value;
+}
+
+/**
+ * Submit agent-retained notifications with the worker's bearer. Failed lines
+ * stay in the append-only run outbox so the worker can report their exact text
+ * in the ticket handoff instead of silently losing an escalation.
+ */
+export async function drainLocalNotifyOutbox({
+  home = process.env.FACTORY_EVENT_HOME,
+  runId,
+  port = process.env.FACTORY_EVENT_PORT || "7381",
+  token = process.env.FACTORY_CONTROL_API_TOKEN,
+  fetchFn = fetch,
+}) {
+  let outboxPath;
+  try {
+    outboxPath = localNotifyOutboxPath({ home, runId });
+  } catch (error) {
+    return { delivered: [], undelivered: [], error: error.message };
+  }
+  if (!existsSync(outboxPath)) return { delivered: [], undelivered: [] };
+
+  const lines = readFileSync(outboxPath, "utf8").split("\n").filter(Boolean);
+  const retained = [];
+  const delivered = [];
+  const undelivered = [];
+  for (const line of lines) {
+    let entry;
+    try {
+      entry = localOutboxEntry(JSON.parse(line), runId);
+    } catch {
+      entry = null;
+    }
+    if (!entry) {
+      retained.push(line);
+      undelivered.push({
+        title: "invalid local notification record",
+        error: "invalid outbox entry",
+      });
+      continue;
+    }
+    try {
+      const response = await fetchFn(`http://127.0.0.1:${port}/inbox`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          kind: entry.kind,
+          title: entry.title,
+          refs: entry.refs,
+          source: entry.source,
+        }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      delivered.push(entry);
+    } catch (error) {
+      retained.push(line);
+      undelivered.push({
+        title: entry.title,
+        error: String(error?.message ?? error),
+      });
+    }
+  }
+  if (retained.length)
+    writeFileSync(outboxPath, `${retained.join("\n")}\n`, "utf8");
+  else unlinkSync(outboxPath);
+  return { delivered, undelivered };
 }
 
 function maxEnvironmentRetries(spec) {
@@ -4519,14 +4623,25 @@ export async function executeClaimed(
       deadlinePoll = null;
     };
 
+    const workerEventHome =
+      env.FACTORY_EVENT_HOME ?? process.env.FACTORY_EVENT_HOME;
+    const workerEventPort =
+      env.FACTORY_EVENT_PORT ?? process.env.FACTORY_EVENT_PORT;
+    const workerControlToken =
+      env.FACTORY_CONTROL_API_TOKEN ?? process.env.FACTORY_CONTROL_API_TOKEN;
     let outcome;
     try {
       // Dispatch identity comes from the immutable RunSpec, never the ambient
       // worker environment. The adapter's child-environment builder preserves
       // these values while continuing to strip credentials it does not need.
+      const dispatchEnv = { ...env };
+      for (const key of ["FACTORY_EVENT_HOME", "FACTORY_EVENT_PORT"]) {
+        if (dispatchEnv[key] === undefined && process.env[key] !== undefined)
+          dispatchEnv[key] = process.env[key];
+      }
       const adapterEnv = dispatchIdentityEnv({
         spec,
-        env,
+        env: dispatchEnv,
         runId,
         ticketId,
         repoName,
@@ -4553,6 +4668,36 @@ export async function executeClaimed(
     } finally {
       stopDeadlineMonitor();
       stopCancellationMonitor();
+    }
+
+    // The agent may have retained a notification because it deliberately lacks
+    // the control bearer. Drain only after its process has exited, so no writer
+    // can race the read/truncate cycle. A delivery failure is recorded on the
+    // ticket but never replaces the agent's primary terminal outcome.
+    const notificationDrain = isWorktree
+      ? await drainLocalNotifyOutbox({
+          runId,
+          home: workerEventHome,
+          port: workerEventPort,
+          token: workerControlToken,
+        })
+      : { delivered: [], undelivered: [] };
+    if (notificationDrain.undelivered.length && mayMutateClaimedTicket()) {
+      try {
+        const messages = notificationDrain.undelivered
+          .slice(0, 10)
+          .map(({ title, error }) => `- ${JSON.stringify(title)} — ${error}`)
+          .join("\n");
+        commentTicketFn({
+          repo: repoName,
+          ticket: ticketId,
+          body:
+            `## Notification outbox\n` +
+            `Worker could not deliver ${notificationDrain.undelivered.length} retained notification(s); intended text:\n${messages}`,
+        });
+      } catch {
+        // The retained outbox remains the recovery source if the tracker is down.
+      }
     }
 
     if (outcome?.usage)

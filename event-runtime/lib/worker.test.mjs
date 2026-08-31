@@ -93,6 +93,7 @@ import {
   defaultProjectTierEscalation,
   defaultReturnHandoffTicket,
   defaultUnclaimTicket,
+  drainLocalNotifyOutbox,
   dispatchLockPath,
   DYNAMIC_DEADLINE_ADAPTERS,
   executeClaimed,
@@ -155,6 +156,85 @@ registerTestProcessCleanup(import.meta.url);
 let seq = 0;
 
 describe("worker", () => {
+  test("drains an agent local notification outbox with the worker bearer", async () => {
+    const home = tmpDir("evrt-local-notify-outbox-");
+    const runId = "run_1558";
+    const outbox = path.join(home, "outbox", `${runId}.jsonl`);
+    mkdirSync(path.dirname(outbox), { recursive: true });
+    writeFileSync(
+      outbox,
+      `${JSON.stringify({
+        schemaVersion: "factory.local-notify-outbox/v1",
+        runId,
+        kind: "BLOCKED",
+        title: "BLOCKED watt-mind/factory#1558: token unavailable",
+        refs: { issue: "watt-mind/factory#1558", repo: "factory" },
+        source: `agent:${runId}`,
+      })}\n`,
+    );
+    const calls = [];
+    const result = await drainLocalNotifyOutbox({
+      home,
+      runId,
+      port: "7499",
+      token: "worker-only-token",
+      fetchFn: async (url, init) => {
+        calls.push({ url, init });
+        return new Response("{}", { status: 201 });
+      },
+    });
+
+    expect(result).toEqual({
+      delivered: [
+        expect.objectContaining({
+          title: "BLOCKED watt-mind/factory#1558: token unavailable",
+        }),
+      ],
+      undelivered: [],
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].init.headers.authorization).toBe(
+      "Bearer worker-only-token",
+    );
+    expect(existsSync(outbox)).toBe(false);
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("retains an undelivered local notification for handoff recovery", async () => {
+    const home = tmpDir("evrt-local-notify-retained-");
+    const runId = "run_1558_retained";
+    const outbox = path.join(home, "outbox", `${runId}.jsonl`);
+    mkdirSync(path.dirname(outbox), { recursive: true });
+    writeFileSync(
+      outbox,
+      `${JSON.stringify({
+        schemaVersion: "factory.local-notify-outbox/v1",
+        runId,
+        kind: "ESCALATED",
+        title: "ESCALATED watt-mind/factory#1558: worker delivery failed",
+        refs: { issue: "watt-mind/factory#1558", repo: "factory" },
+        source: `agent:${runId}`,
+      })}\n`,
+    );
+    const result = await drainLocalNotifyOutbox({
+      home,
+      runId,
+      fetchFn: async () => {
+        throw new Error("runtime unavailable");
+      },
+    });
+
+    expect(result.delivered).toEqual([]);
+    expect(result.undelivered).toEqual([
+      {
+        title: "ESCALATED watt-mind/factory#1558: worker delivery failed",
+        error: "runtime unavailable",
+      },
+    ]);
+    expect(readFileSync(outbox, "utf8")).toContain("worker delivery failed");
+    rmSync(home, { recursive: true, force: true });
+  });
+
   test("canonical authorisation hash is verified before dispatch execution", () => {
     const description =
       "## Owned Paths\n- event-runtime/lib/worker.mjs\n- docs/event-runtime-inbox.md\n";
@@ -5400,7 +5480,12 @@ sh -c 'sleep 5 & wait'
   });
 
   test("dispatchIdentityEnv omits unset identity keys and gates on the dispatch@ prefix (#1497)", () => {
-    const env = { PATH: "/bin" };
+    const env = {
+      PATH: "/bin",
+      FACTORY_CONTROL_API_TOKEN: "worker-only-token",
+      FACTORY_EVENT_HOME: "/tmp/factory-events",
+      FACTORY_EVENT_PORT: "7381",
+    };
     const full = dispatchIdentityEnv({
       spec: { agent: "dispatch@2" },
       env,
@@ -5410,10 +5495,14 @@ sh -c 'sleep 5 & wait'
     });
     expect(full).toEqual({
       PATH: "/bin",
+      FACTORY_EVENT_HOME: "/tmp/factory-events",
+      FACTORY_EVENT_PORT: "7381",
+      FACTORY_DISPATCH: "1",
       FACTORY_RUN_ID: "run-1",
       FACTORY_TICKET: "1497",
       FACTORY_REPO: "factory",
     });
+    expect(full.FACTORY_CONTROL_API_TOKEN).toBeUndefined();
 
     const partial = dispatchIdentityEnv({
       spec: { agent: "dispatch@1" },
@@ -5422,7 +5511,14 @@ sh -c 'sleep 5 & wait'
       ticketId: null,
       repoName: undefined,
     });
-    expect(partial).toEqual({ PATH: "/bin", FACTORY_RUN_ID: "run-2" });
+    expect(partial).toEqual({
+      PATH: "/bin",
+      FACTORY_EVENT_HOME: "/tmp/factory-events",
+      FACTORY_EVENT_PORT: "7381",
+      FACTORY_DISPATCH: "1",
+      FACTORY_RUN_ID: "run-2",
+    });
+    expect(partial.FACTORY_CONTROL_API_TOKEN).toBeUndefined();
     expect("FACTORY_TICKET" in partial).toBe(false);
     expect("FACTORY_REPO" in partial).toBe(false);
 
