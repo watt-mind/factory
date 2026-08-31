@@ -343,6 +343,12 @@ export function globToRegExp(glob) {
     throw new OwnedPathsPatternError(glob, "pattern must be a string");
   }
   let g = glob.trim().replace(/^\.\//, "");
+  // A bare filename with an extension is ambiguous in an Owned Paths list:
+  // unlike a repo-relative path, it does not identify which directory holds
+  // the file. Treat it as a basename matcher so handoff verification does not
+  // report a false deviation merely because the ticket omitted that directory.
+  const matchBasenameAtAnyDepth =
+    !g.includes("/") && !/[*?{}]/.test(g) && /\.[a-z0-9]+$/i.test(g);
   // A path with no glob metacharacters and no extension is treated as a prefix:
   // `app/services` owns everything beneath it. It also names a real, concrete
   // path in its own right (`Dockerfile`, `Makefile` — extensionless files are
@@ -358,6 +364,7 @@ export function globToRegExp(glob) {
   // The "/**" appended above compiles to a trailing literal "/.*"; make the
   // "/" + anything optional so the bare path matches itself as well.
   if (matchSelf) re = re.replace(/\/\.\*$/, "(?:/.*)?");
+  if (matchBasenameAtAnyDepth) re = `(?:.*/)?${re}`;
   return new RegExp(`^${re}$`);
 }
 

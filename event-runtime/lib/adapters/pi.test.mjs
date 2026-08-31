@@ -38,6 +38,7 @@ import {
   registerTestProcessCleanup,
   trackProcessGroupForPid,
 } from "../test-helpers-process.mjs";
+import { until } from "../test-helpers-timing.mjs";
 
 registerTestProcessCleanup(import.meta.url);
 
@@ -659,17 +660,17 @@ process.stdin.on("end", () => {
   const testProcessGroup = process.platform === "win32" ? test.skip : test;
 
   async function waitForGrandchildPid(pidFile) {
-    for (let attempt = 0; attempt < 500; attempt += 1) {
-      if (existsSync(pidFile)) {
-        const pid = Number(readFileSync(pidFile, "utf8"));
-        if (Number.isInteger(pid) && pid > 0) {
-          trackProcessGroupForPid(pid);
-          return pid;
-        }
-      }
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    throw new Error("stub did not report its grandchild PID");
+    const pid = await until(
+      "stub did not report its grandchild PID",
+      () => {
+        if (!existsSync(pidFile)) return null;
+        const candidate = Number(readFileSync(pidFile, "utf8"));
+        return Number.isInteger(candidate) && candidate > 0 ? candidate : null;
+      },
+      { timeoutMs: 5_000, everyMs: 10 },
+    );
+    trackProcessGroupForPid(pid);
+    return pid;
   }
 
   function processExists(pid) {
@@ -682,11 +683,10 @@ process.stdin.on("end", () => {
   }
 
   async function expectProcessExit(pid) {
-    for (let attempt = 0; attempt < 500; attempt += 1) {
-      if (!processExists(pid)) return;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    expect(processExists(pid)).toBe(false);
+    await until(`pid ${pid} to exit`, () => !processExists(pid), {
+      timeoutMs: 5_000,
+      everyMs: 10,
+    });
   }
 
   function killIfRunning(pid) {
