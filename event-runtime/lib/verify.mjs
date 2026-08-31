@@ -697,6 +697,45 @@ export function runHandoffCommand({
 }
 
 /**
+ * The stable, at-a-glance facts CI prints beside a sandboxed verification.
+ * Keep this derived from the observation returned by `runHandoffCommand` so
+ * the CI smoke lane does not grow a second sandbox implementation or drift
+ * from the worker's production handoff boundary.
+ */
+export function handoffSandboxFacts(observation) {
+  const namespaces = Array.isArray(observation?.sandbox?.namespaces)
+    ? observation.sandbox.namespaces.join(",")
+    : HANDOFF_SANDBOX_NAMESPACES.join(",");
+  const tmpfs = Number.isSafeInteger(observation?.sandbox?.tmpfsMb)
+    ? `${observation.sandbox.tmpfsMb}MiB`
+    : "unknown";
+  return `Handoff sandbox facts: env scrubbed; HOME=/tmp/home; workspace=/workspace; namespaces=${namespaces}; tmpfs=${tmpfs}.`;
+}
+
+/**
+ * Execute a configured repository verify command through the worker's actual
+ * handoff seam. CI calls this for its smoke lane; the injected runner exists
+ * solely to keep the seam testable without creating a real namespace.
+ */
+export function runHandoffVerifySmoke({
+  command,
+  cwd,
+  worktreePath = cwd,
+  logPath,
+  timeoutMs,
+  runHandoffCommandFn = runHandoffCommand,
+}) {
+  const observation = runHandoffCommandFn({
+    command,
+    cwd,
+    worktreePath,
+    logPath,
+    timeoutMs,
+  });
+  return { ...observation, sandboxFacts: handoffSandboxFacts(observation) };
+}
+
+/**
  * `bun test` flags that consume the following word. Their values must never
  * widen the covering set (`--preload ./setup.mjs`, `-t verify`, ...).
  */

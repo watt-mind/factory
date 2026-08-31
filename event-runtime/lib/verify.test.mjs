@@ -19,6 +19,7 @@ import {
   HANDOFF_DEPENDENCIES_MISSING,
   HANDOFF_FAILURE_OUTPUT_MAX_CHARS,
   HANDOFF_REASON_CODES,
+  HANDOFF_SANDBOX_NAMESPACES,
   handoffFailureReasonCode,
   handoffFailureOutput,
   missingModuleSpecifiers,
@@ -41,10 +42,12 @@ import {
   clampHandoffSandboxTmpfsMb,
   isBunTestFile,
   insideHandoffSandbox,
+  handoffSandboxFacts,
   policyHandoffSandboxTmpfsMb,
   policyOwnedPathsConformance,
   repoVerifyFailingTests,
   runHandoffCommand,
+  runHandoffVerifySmoke,
   ticketVerifyCoveredByRepoVerify,
   verifyResult,
 } from "./verify.mjs";
@@ -2219,6 +2222,46 @@ describe("handoff failure diagnostics (#1529)", () => {
 });
 
 describe("handoff verification helpers (WM-718)", () => {
+  test("sandboxed verify smoke delegates to the production handoff seam and names its facts", () => {
+    const worktree = tmpDir("evrt-handoff-smoke-");
+    const calls = [];
+    const observation = runHandoffVerifySmoke({
+      command: "bun test event-runtime/lib --timeout 20000",
+      cwd: worktree,
+      worktreePath: worktree,
+      logPath: path.join(worktree, "handoff.log"),
+      timeoutMs: 600_000,
+      runHandoffCommandFn: (options) => {
+        calls.push(options);
+        return {
+          passed: true,
+          exitCode: 0,
+          output: "2333 pass\n0 fail\n",
+          sandbox: {
+            tmpfsMb: 1024,
+            namespaces: HANDOFF_SANDBOX_NAMESPACES,
+          },
+        };
+      },
+    });
+
+    expect(calls).toEqual([
+      {
+        command: "bun test event-runtime/lib --timeout 20000",
+        cwd: worktree,
+        worktreePath: worktree,
+        logPath: path.join(worktree, "handoff.log"),
+        timeoutMs: 600_000,
+      },
+    ]);
+    expect(observation.sandboxFacts).toBe(
+      "Handoff sandbox facts: env scrubbed; HOME=/tmp/home; workspace=/workspace; namespaces=user,mount,pid,network; tmpfs=1024MiB.",
+    );
+    expect(handoffSandboxFacts({ sandbox: {} })).toContain(
+      "env scrubbed; HOME=/tmp/home; workspace=/workspace",
+    );
+  });
+
   test("ticket commands get a credential-free environment and namespace/chroot confinement", () => {
     const worktree = tmpDir("evrt-handoff-confined-");
     const logPath = path.join(worktree, "handoff.log");
