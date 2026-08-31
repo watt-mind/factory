@@ -337,21 +337,40 @@ function compileGlob(glob, start = 0, delimiters = new Set()) {
  * Supports the subset that actually appears in Owned Paths: `**` (any depth,
  * including none), `*` (one segment), `?`, and `{a,b}` alternation. A trailing
  * `/` or a bare directory means "everything under it".
+ *
+ * The compilation is pure by default: no filesystem is consulted and the
+ * process CWD is never read, so the same glob always compiles to the same
+ * matcher. Pass an explicit `repoRoot` to opt into root-anchoring a bare
+ * filename that names a real file at that root (see below). Callers that
+ * cannot name a repository root — the escalate gate among them — must keep
+ * the pure behaviour: silently narrowing a matcher against whatever happens
+ * to sit in an ambient directory would drop escalations.
+ *
+ * @param {string} glob
+ * @param {{ repoRoot?: string }} [options] `repoRoot` is the absolute path of
+ *   the repository the glob is written against.
  */
-export function globToRegExp(glob) {
+export function globToRegExp(glob, { repoRoot } = {}) {
   if (typeof glob !== "string") {
     throw new OwnedPathsPatternError(glob, "pattern must be a string");
   }
   let g = glob.trim().replace(/^\.\//, "");
   // A bare filename with an extension is ambiguous in an Owned Paths list:
   // unlike a repo-relative path, it does not identify which directory holds
-  // the file. Treat it as a basename matcher only when no file by that name
-  // exists at the repository root. A root file is the less surprising target
-  // for a legacy bare entry such as `package.json`.
+  // the file. Treat it as a basename matcher so handoff verification does not
+  // report a false deviation merely because the ticket omitted that directory.
+  //
+  // When the caller names the repository root, that ambiguity can be resolved:
+  // if a file by that name really sits at the root, a legacy bare entry such
+  // as `package.json` means the root file and nothing nested. This resolution
+  // only ever narrows the matcher, so it is opt-in — never inferred from the
+  // process CWD, which the compiler does not read.
   const resolvesToRootFile =
+    typeof repoRoot === "string" &&
+    repoRoot !== "" &&
     !g.includes("/") &&
-    existsSync(g) &&
-    statSync(g, { throwIfNoEntry: false })?.isFile();
+    statSync(path.join(repoRoot, g), { throwIfNoEntry: false })?.isFile() ===
+      true;
   const matchBasenameAtAnyDepth =
     !g.includes("/") &&
     !/[*?{}]/.test(g) &&
