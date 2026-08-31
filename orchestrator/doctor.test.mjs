@@ -14,11 +14,14 @@ import { test, expect, describe } from "bun:test";
 import {
   mkdtempSync,
   mkdirSync,
+  readdirSync,
   writeFileSync,
   chmodSync,
   existsSync,
   readFileSync,
   rmSync,
+  symlinkSync,
+  unlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -29,6 +32,7 @@ import {
   CHROME_HEADLESS_WRAPPER,
 } from "./doctor-browser.mjs";
 import {
+  BASE_BRANCH_CI_AGGREGATE_TIMEOUT_MS,
   BASE_BRANCH_CI_RUN_LIMIT,
   BASE_BRANCH_CI_TIMEOUT_MS,
   baseBranchCiDiagnostics,
@@ -41,6 +45,7 @@ import {
   parseCliVersion,
   repoToolchainDiagnostics,
   stackDaemonDiagnostics,
+  factoryCommandLinkDiagnostic,
 } from "./doctor.mjs";
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -119,6 +124,50 @@ describe("base branch CI diagnostics (#1928)", () => {
     expect(rows[0].detail).toContain("actions/runs/99");
   });
 
+  test.each(["skipped", "neutral"])(
+    "reports a %s latest completed run as informational",
+    (conclusion) => {
+      const rows = baseBranchCiDiagnostics({
+        repos: [repo],
+        runList: () => [
+          {
+            status: "completed",
+            conclusion,
+            workflowName: "CI",
+            databaseId: 99,
+          },
+        ],
+      });
+
+      expect(rows).toEqual([
+        expect.objectContaining({
+          ok: "info",
+          detail: expect.stringContaining(`CI ${conclusion}`),
+          fix: null,
+        }),
+      ]);
+    },
+  );
+
+  test("does not start a read after the shared aggregate deadline", () => {
+    const calls = [];
+    const rows = baseBranchCiDiagnostics({
+      repos: [repo],
+      deadlineMs: 1_000,
+      now: () => 1_000,
+      runList: (...args) => calls.push(args),
+    });
+
+    expect(calls).toEqual([]);
+    expect(rows).toEqual([
+      expect.objectContaining({
+        ok: "info",
+        detail: expect.stringContaining("aggregate GitHub Actions deadline"),
+      }),
+    ]);
+    expect(BASE_BRANCH_CI_AGGREGATE_TIMEOUT_MS).toBe(BASE_BRANCH_CI_TIMEOUT_MS);
+  });
+
   test("skips without failing when Actions has no completed history", () => {
     const rows = baseBranchCiDiagnostics({ repos: [repo], runList: () => [] });
 
@@ -128,6 +177,82 @@ describe("base branch CI diagnostics (#1928)", () => {
         detail: "develop — skipped, no completed Actions history",
       }),
     ]);
+  });
+});
+
+describe("factory command link diagnostic (#1950)", () => {
+  const expectedCommands = () =>
+    readdirSync(path.join(HERE, "..", "shared", "commands"))
+      .filter((file) => file.endsWith(".md"))
+      .map((file) => path.basename(file, ".md"));
+
+  const setupLinkedCommands = (dir, names) => {
+    const commandsDir = path.join(dir, ".claude", "commands");
+    mkdirSync(commandsDir, { recursive: true });
+    for (const name of names) {
+      symlinkSync(
+        path.join(HERE, "..", "shared", "commands", `${name}.md`),
+        path.join(commandsDir, `${name}.md`),
+      );
+    }
+    return commandsDir;
+  };
+
+  test("passes when every expected command is linked", () => {
+    const dir = scratch();
+    const names = expectedCommands();
+    const commandsDir = setupLinkedCommands(dir, names);
+
+    expect(
+      factoryCommandLinkDiagnostic({ commandsDir, expectedCommands: names }),
+    ).toEqual({
+      ok: true,
+      label: "/factory-* commands linked",
+      detail: `${names.length} commands`,
+      fix: null,
+    });
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("warns with the existing emit hint when a command link is missing", () => {
+    const dir = scratch();
+    const names = expectedCommands();
+    const commandsDir = setupLinkedCommands(dir, names);
+    const missing = names[0];
+    unlinkSync(path.join(commandsDir, `${missing}.md`));
+
+    expect(
+      factoryCommandLinkDiagnostic({ commandsDir, expectedCommands: names }),
+    ).toEqual({
+      ok: "warn",
+      label: "/factory-* commands linked",
+      detail: `1/${names.length} missing or broken: ${missing}`,
+      fix: "factory emit",
+    });
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("warns with the existing emit hint when a command link is dangling", () => {
+    const dir = scratch();
+    const names = expectedCommands();
+    const commandsDir = setupLinkedCommands(dir, names);
+    const broken = names[0];
+    const target = path.join(commandsDir, `${broken}.md`);
+    unlinkSync(target);
+    symlinkSync(path.join(dir, "missing-target.md"), target);
+
+    expect(
+      factoryCommandLinkDiagnostic({ commandsDir, expectedCommands: names }),
+    ).toEqual({
+      ok: "warn",
+      label: "/factory-* commands linked",
+      detail: `1/${names.length} missing or broken: ${broken}`,
+      fix: "factory emit",
+    });
+
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 

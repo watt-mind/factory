@@ -482,6 +482,8 @@ export function createApi({
         url.pathname === "/agents" ||
         url.pathname === "/overrides" ||
         url.pathname.startsWith("/overrides/") ||
+        url.pathname === "/promotion/preview" ||
+        url.pathname === "/promotion/apply" ||
         url.pathname === "/repos" ||
         url.pathname.startsWith("/repos/")
       ) {

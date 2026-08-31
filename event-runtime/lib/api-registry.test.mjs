@@ -782,6 +782,28 @@ describe("overlay promotion routes (gh-860)", () => {
     db.close();
   });
 
+  test("API dispatcher routes promotion preview and apply to the registry handler", async () => {
+    const db = openDb(":memory:");
+    seed(db);
+    const { server, request, close } = await makeServer({ db, repos: reposFn });
+    try {
+      const preview = await request("/promotion/preview");
+      expect(preview.status).toBe(200);
+      const { digest } = await preview.json();
+
+      const apply = await request("/promotion/apply", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ repo: "factory", digest, keys: [] }),
+      });
+      expect(apply.status).toBe(200);
+      expect(await apply.json()).toMatchObject({ status: "noop" });
+    } finally {
+      close();
+      server.close();
+    }
+  });
+
   test("POST /promotion/apply drives injected seams and returns the PR", async () => {
     const db = openDb(":memory:");
     seed(db);
