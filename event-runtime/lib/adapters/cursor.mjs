@@ -33,6 +33,7 @@ import { FACTORY_ROOT, transcriptMaxBytes } from "../config.mjs";
 import { DEFAULT_MODEL } from "../registry.mjs";
 import { PROMPT_SUFFIX, verifiedPrompt } from "./claude.mjs";
 import {
+  KILL_GRACE_MS,
   PROVIDER_CREDENTIAL_ENV,
   PUSH_CREDENTIAL_ENV,
   RUNTIME_IDENTITY_ENV,
@@ -46,6 +47,7 @@ import {
 import { refuseSandbox } from "./sandboxed.mjs";
 
 export {
+  KILL_GRACE_MS,
   PROVIDER_CREDENTIAL_ENV,
   PROMPT_SUFFIX,
   PUSH_CREDENTIAL_ENV,
@@ -77,8 +79,6 @@ export const HARNESS_LAYOUT = Object.freeze({
     type: "file",
   }),
 });
-
-export const KILL_GRACE_MS = 30_000;
 
 /** Terminate a detached CLI and every subprocess it started (WM-263). */
 export { killProcessGroup };

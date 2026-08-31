@@ -24,9 +24,25 @@ import {
   verifiedPrompt as claudeVerifiedPrompt,
 } from "./claude.mjs";
 import { safeChildEnvironment as commandEnvironment } from "./command.mjs";
-import { safeChildEnvironment as agyEnvironment } from "./agy.mjs";
-import { safeChildEnvironment as cursorEnvironment } from "./cursor.mjs";
-import { safeChildEnvironment as piEnvironment } from "./pi.mjs";
+import {
+  HARNESS_LAYOUT as agyHarnessLayout,
+  KILL_GRACE_MS as agyKillGraceMs,
+  safeChildEnvironment as agyEnvironment,
+} from "./agy.mjs";
+import {
+  HARNESS_LAYOUT as cursorHarnessLayout,
+  KILL_GRACE_MS as cursorKillGraceMs,
+  safeChildEnvironment as cursorEnvironment,
+} from "./cursor.mjs";
+import {
+  HARNESS_LAYOUT as hermesHarnessLayout,
+  KILL_GRACE_MS as hermesKillGraceMs,
+} from "./hermes.mjs";
+import {
+  HARNESS_LAYOUT as piHarnessLayout,
+  KILL_GRACE_MS as piKillGraceMs,
+  safeChildEnvironment as piEnvironment,
+} from "./pi.mjs";
 
 const keySet = (env) => Object.keys(env).sort();
 
@@ -46,6 +62,35 @@ describe("shared child environment", () => {
     expect(claudePromptSuffix).toBe(PROMPT_SUFFIX);
     expect(acpVerifiedPrompt).toBe(verifiedPrompt);
     expect(claudeVerifiedPrompt).toBe(verifiedPrompt);
+  });
+
+  test("exports the shared kill grace period from every standard adapter", () => {
+    for (const adapterKillGraceMs of [
+      acpKillGraceMs,
+      agyKillGraceMs,
+      claudeKillGraceMs,
+      cursorKillGraceMs,
+      hermesKillGraceMs,
+      piKillGraceMs,
+    ]) {
+      expect(adapterKillGraceMs).toBe(KILL_GRACE_MS);
+    }
+  });
+
+  test("keeps every private harness layout leaf on the shared contract shape", () => {
+    for (const layout of [
+      agyHarnessLayout,
+      cursorHarnessLayout,
+      hermesHarnessLayout,
+      piHarnessLayout,
+    ]) {
+      for (const entry of Object.values(layout)) {
+        expect(Object.keys(entry).sort()).toEqual(["dest", "source", "type"]);
+        expect(typeof entry.source).toBe("function");
+        expect(typeof entry.dest).toBe("function");
+        expect(typeof entry.type).toBe("string");
+      }
+    }
   });
 
   test("keeps adapter differences explicit while stripping all credentials", () => {

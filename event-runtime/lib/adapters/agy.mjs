@@ -21,6 +21,7 @@ import { PROMPT_SUFFIX, verifiedPrompt } from "./claude.mjs";
 import { FACTORY_ROOT } from "../config.mjs";
 import {
   BASE_INHERITED_ENV,
+  KILL_GRACE_MS,
   PROVIDER_CREDENTIAL_ENV,
   PUSH_CREDENTIAL_ENV,
   RUNTIME_IDENTITY_ENV,
@@ -30,6 +31,7 @@ import { refuseSandbox } from "./sandboxed.mjs";
 
 export {
   BASE_INHERITED_ENV,
+  KILL_GRACE_MS,
   PROVIDER_CREDENTIAL_ENV,
   PROMPT_SUFFIX,
   PUSH_CREDENTIAL_ENV,
@@ -69,7 +71,6 @@ export const HARNESS_LAYOUT = Object.freeze({
 
 export { killProcessGroup };
 
-export const KILL_GRACE_MS = 30_000;
 const TEXT_PREVIEW_CHARS = 4000;
 const STDERR_FILE_CHARS = 16_384;
 
