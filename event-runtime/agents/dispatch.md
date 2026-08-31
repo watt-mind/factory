@@ -100,7 +100,7 @@ new ticket.
    critic concluded, and a critic that never ran concluded nothing.
 
    Spawn the `factory-ux-critic` subagent after verification and before opening
-   the PR. Before spawning it, create `./ux-artifacts/` at the run workspace
+   the PR. Before spawning it, create `ux-artifacts/` at the run workspace
    root (beside `repo`, never inside it) and pass its absolute path as
    `artifactDir: <absolute workspace path>/ux-artifacts` in the prompt. Its
    prompt must also spell out `worktree: <absolute path>` plus the exact
@@ -111,8 +111,13 @@ new ticket.
 
    Screenshot evidence must survive workspace cleanup. For every screenshot the
    critic creates, calculate its SHA-256 and declare it in the outer
-   `result.json` as `{ "kind": "ux-screenshot", "path": "ux-artifacts/<file>" }`.
-   In `artifact.uxCritique.evidence`, cite the matching durable identifier as
+   `result.json` as `{ "kind": "ux-screenshot", "path": "ux-artifacts/<file>" }`
+   only after confirming the file exists under `artifactDir`; if the critic
+   produced no file there, omit the declaration entirely and record the
+   ephemeral URL instead — a declared artifact whose file is missing hard-fails
+   the run with `artifact_missing` (`ContractViolation`, `verify.mjs`
+   collection step), it does not degrade to `NOT-ASSESSED`. In
+   `artifact.uxCritique.evidence`, cite the matching durable identifier as
    `sha256:<64-hex-digest>`, never the workspace screenshot path. The worker
    copies declared artifacts to its content-addressed store before teardown, so
    that identifier resolves after the workspace is gone. Keep observed

@@ -414,7 +414,7 @@ describe("registry", () => {
     // Regenerated (#2023): dispatch declares UX screenshots as durable
     // result artifacts and cites their content-addressed identifiers.
     const expected =
-      "sha256:90c2596362835cdc75a13a0c8bb52f64423078b2ed61ce448c321256c67f4b01";
+      "sha256:1602d801ca413eb7093918e489bc51901b884fc39a1705ca91128694db306e4f";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -711,7 +711,7 @@ describe("registry", () => {
     // its prompt pin legitimately changes while `pack` remains non-enumerable.
     // #2023 adds durable UX screenshot artifact declarations to that prompt.
     expect(computeDefHash(def)).toBe(
-      "sha256:5feb08bd0bf15a3a355a8e211f47a7ba58b07546a6c43a4cbab00e151b5fb1c6",
+      "sha256:d71406671c4b9addd6b5184f18eb2919b0d2b40d57640bffc56927c3e3e9231d",
     );
   });
 
