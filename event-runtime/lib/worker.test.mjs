@@ -88,6 +88,7 @@ import {
   DEFAULT_MAX_ENVIRONMENT_RETRIES,
   defaultFindWorkspacePullRequest,
   defaultLocksDir,
+  defaultMarkHandoffPullRequestReady,
   defaultReconcileVerifiedHandoffTicket,
   defaultHoldPullRequest,
   defaultProjectTierEscalation,
@@ -6287,6 +6288,239 @@ sh -c 'sleep 5 & wait'
       hasRunTrailer: true,
       hasUnexpandedRunTrailer: false,
     });
+  });
+
+  test("verified draft handoffs are marked ready and record draft: no", () => {
+    const handoff = {
+      github: "watt-mind/factory",
+      prNumber: 77,
+      pr: { number: 77, draft: true },
+      prDraft: true,
+    };
+    const calls = [];
+    const forge = {
+      prSetDraft: (...args) => calls.push(args),
+    };
+
+    expect(defaultMarkHandoffPullRequestReady({ handoff, forge })).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual([
+      "watt-mind/factory",
+      77,
+      false,
+      expect.objectContaining({ timeout: expect.any(Number) }),
+    ]);
+    expect(handoff.pr.draft).toBe(false);
+    expect(handoff.prDraft).toBe(false);
+    expect(
+      composeHandoffVerification({
+        ...handoff,
+        verification: null,
+        repoVerify: null,
+        webBuild: null,
+      }),
+    ).toContain("- PR: #77 (draft: no)");
+
+    expect(defaultMarkHandoffPullRequestReady({ handoff, forge })).toBe(false);
+    expect(calls).toHaveLength(1);
+  });
+
+  test("a failed ready-for-review transition is best effort: the run keeps its verified handoff, recorded draft: yes", () => {
+    const handoff = {
+      github: "watt-mind/factory",
+      prNumber: 77,
+      pr: { number: 77, draft: true },
+      prDraft: true,
+    };
+    const forge = {
+      prSetDraft: () => {
+        throw new Error("GitHub rejected the transition");
+      },
+    };
+
+    const err = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // Promotion happens after the run is already verified; a transient forge
+      // error must never throw here, or a green run is failed and its PR is
+      // re-drafted by the failure path it lands in.
+      expect(defaultMarkHandoffPullRequestReady({ handoff, forge })).toBe(
+        false,
+      );
+      expect(
+        err.mock.calls.some((c) =>
+          String(c[0]).includes(
+            "could not mark PR #77 ready for review: GitHub rejected the transition",
+          ),
+        ),
+      ).toBe(true);
+    } finally {
+      err.mockRestore();
+    }
+    expect(handoff.pr.draft).toBe(true);
+    expect(handoff.prDraft).toBe(true);
+    // The comment stays truthful about the state the PR is actually left in.
+    expect(
+      composeHandoffVerification({
+        ...handoff,
+        verification: null,
+        repoVerify: null,
+        webBuild: null,
+      }),
+    ).toContain("- PR: #77 (draft: yes)");
+  });
+
+  test("a handoff with no usable PR coordinates is left alone rather than promoted", () => {
+    const forge = {
+      prSetDraft: () => {
+        throw new Error("prSetDraft must not be called");
+      },
+    };
+    for (const handoff of [
+      { github: "watt-mind/factory", prNumber: null, pr: { draft: true } },
+      { github: null, prNumber: 77, pr: { number: 77, draft: true } },
+      { github: "watt-mind/factory", prNumber: 77, pr: { draft: false } },
+      { github: "watt-mind/factory", prNumber: 77 },
+    ]) {
+      expect(defaultMarkHandoffPullRequestReady({ handoff, forge })).toBe(
+        false,
+      );
+    }
+  });
+
+  test("executeClaimed promotes a verified handoff PR, and never a refused one (#2005)", async () => {
+    const TICKET = "watt-mind/factory#2005";
+    // The gate reads the live PR; this is the form it must accept, and it is
+    // what makes the handoff record say `draft: true` before promotion.
+    const livePullRequest = {
+      baseRefName: "develop",
+      isDraft: true,
+      body: `Fixes ${TICKET}`,
+    };
+    const handoffFixture = () => ({
+      github: "watt-mind/factory",
+      ticket: TICKET,
+      prNumber: 77,
+      verification: null,
+      repoVerify: null,
+      webBuild: null,
+    });
+    const runResult = (spec, overrides = {}) => {
+      const artifact = { repos: [], recommendedAction: "wait" };
+      return {
+        schemaVersion: "factory.run-result/v1",
+        runId: spec.runId,
+        attempt: 1,
+        terminalState: "completed",
+        reasonCode: "ok",
+        outputContract: spec.outputContract,
+        artifact,
+        artifactHash: hashJson(artifact),
+        evidenceSetHash: null,
+        verification: { status: "passed", checks: [] },
+        artifacts: [],
+        ...overrides,
+      };
+    };
+    const dispatchSeams = (calls) => ({
+      locksDir: tmpDir("evrt-pr-ready-locks-"),
+      leasesDir: tmpDir("evrt-pr-ready-leases-"),
+      fetchTicket: () => ({
+        identifier: TICKET,
+        state: { name: "Todo" },
+        assignee: null,
+        labels: { nodes: [{ name: "ai:agent-ready" }] },
+        description: "## Owned Paths\n- event-runtime/lib/worker.mjs\n",
+      }),
+      fetchInFlight: () => [],
+      countLeases: () => 0,
+      budgetRefusal: () => null,
+      claimTicket: () => ({ ok: true }),
+      unclaimTicket: () => true,
+      commentTicket: (args) => (calls.comments.push(args), true),
+      fetchHandoffPullRequest: () => livePullRequest,
+      markHandoffPullRequestReady: ({ handoff }) => {
+        calls.promoted.push(handoff);
+        handoff.pr.draft = false;
+        handoff.prDraft = false;
+        return true;
+      },
+    });
+    const workerOpts = (calls, verified) =>
+      opts({
+        artifactStore: freshRoot(),
+        dispatch: dispatchSeams(calls),
+        materializeWorktree: () => ({
+          github: "watt-mind/factory",
+          base: "develop",
+        }),
+        verifyResult: verified,
+      });
+
+    const acceptedDb = openDb(":memory:");
+    const acceptedSpec = makeSpec({
+      input: { repo: "factory", ticket: TICKET },
+      workspace: { type: "worktree" },
+    });
+    queueRun(acceptedDb, acceptedSpec);
+    const acceptedCalls = { comments: [], promoted: [] };
+    const acceptedHandoff = handoffFixture();
+    const accepted = await executeClaimed(
+      acceptedDb,
+      registry,
+      adapters,
+      claimNext(acceptedDb, opts()),
+      workerOpts(acceptedCalls, () => ({
+        kind: "completed",
+        result: runResult(acceptedSpec),
+        receipt: {},
+        handoff: acceptedHandoff,
+      })),
+    );
+
+    expect(accepted).toMatchObject({ terminalState: "COMPLETED" });
+    expect(acceptedCalls.promoted).toEqual([acceptedHandoff]);
+    // Promotion runs before the handoff comment is composed, so the comment
+    // reports the state the PR is actually left in.
+    expect(acceptedCalls.comments).toEqual([
+      expect.objectContaining({
+        body: expect.stringContaining("- PR: #77 (draft: no)"),
+      }),
+    ]);
+    acceptedDb.close();
+
+    // A refused run must leave its PR in draft: the merge stage skips drafts,
+    // which is exactly what keeps an unaccepted handoff from landing.
+    const refusedDb = openDb(":memory:");
+    const refusedSpec = makeSpec({
+      input: { repo: "factory", ticket: TICKET },
+      workspace: { type: "worktree" },
+    });
+    queueRun(refusedDb, refusedSpec);
+    const refusedCalls = { comments: [], promoted: [] };
+    const refusedHandoff = handoffFixture();
+    const refused = await executeClaimed(
+      refusedDb,
+      registry,
+      adapters,
+      claimNext(refusedDb, opts()),
+      workerOpts(refusedCalls, () => ({
+        kind: "refused",
+        reasonCode: "ticket_not_ready",
+        result: runResult(refusedSpec, {
+          terminalState: "refused",
+          reasonCode: "ticket_not_ready",
+        }),
+        handoff: refusedHandoff,
+      })),
+    );
+
+    expect(refused).toMatchObject({
+      terminalState: "REFUSED",
+      reasonCode: "ticket_not_ready",
+    });
+    expect(refusedCalls.promoted).toEqual([]);
+    expect(refusedHandoff.pr.draft).toBe(true);
+    refusedDb.close();
   });
 
   test("handoff PR form rejects literal run trailers when a run ID is set", () => {

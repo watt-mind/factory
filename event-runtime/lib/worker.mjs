@@ -3418,6 +3418,37 @@ export function assertHandoffPullRequestBase({
   }
 }
 
+/**
+ * Promote a successfully verified dispatch PR out of draft so GitHub routes
+ * its full CI lane. The handoff's state is updated only after `gh pr ready`
+ * succeeds, making the worker-authored handoff comment an observation of the
+ * final PR state rather than the draft state it had during local verification.
+ *
+ * Best effort, like the handoff comment itself: the run is already verified by
+ * the time this is called, so a transient forge error must not fail it, redraft
+ * anything, or bounce the ticket. On failure the handoff keeps `draft: true`,
+ * the comment truthfully records `draft: yes`, and this returns false.
+ */
+export function defaultMarkHandoffPullRequestReady({ handoff, forge = null }) {
+  if (handoff?.pr?.draft !== true) return false;
+  const prNumber = handoffPrNumber(handoff);
+  if (!handoff.github || !prNumber) return false;
+  try {
+    forge ??= loadForge();
+    forge.prSetDraft(handoff.github, prNumber, false, {
+      timeout: workerSubprocessTimeoutMs(),
+    });
+  } catch (err) {
+    console.error(
+      `[worker] could not mark PR #${prNumber} ready for review: ${String(err?.message ?? err)}`,
+    );
+    return false;
+  }
+  handoff.pr.draft = false;
+  handoff.prDraft = false;
+  return true;
+}
+
 const BASELINE_COMMENT_MARKER = "wm:baseline:red:";
 
 function baselineFailureSignature({ why, log = null, baseline = null }) {
@@ -3609,6 +3640,7 @@ export async function executeClaimed(
       returnHandoffTicket: () => true,
       reconcileVerifiedHandoffTicket: () => false,
       holdPullRequest: () => false,
+      markHandoffPullRequestReady: () => false,
       findWorkspacePullRequest: () => null,
     };
   } else if (dispatchStubSelected) {
@@ -3623,6 +3655,7 @@ export async function executeClaimed(
       returnHandoffTicket: () => true,
       reconcileVerifiedHandoffTicket: () => false,
       holdPullRequest: () => false,
+      markHandoffPullRequestReady: () => false,
       findWorkspacePullRequest: () => null,
       ...dispatchOpts,
     };
@@ -3673,6 +3706,9 @@ export async function executeClaimed(
     dispatchOpts?.holdPullRequest ?? defaultHoldPullRequest;
   const fetchHandoffPullRequestFn =
     dispatchOpts?.fetchHandoffPullRequest ?? defaultFetchHandoffPullRequest;
+  const markHandoffPullRequestReadyFn =
+    dispatchOpts?.markHandoffPullRequestReady ??
+    defaultMarkHandoffPullRequestReady;
   const projectTierEscalationFn =
     dispatchOpts?.projectTierEscalation ?? defaultProjectTierEscalation;
   let handoffContext = null;
@@ -5582,6 +5618,14 @@ export async function executeClaimed(
         reasonCode: verified.reasonCode,
         receipt: res.receipt,
       };
+    }
+
+    // The run is accepted: neither failed nor refused. Only now may the PR
+    // leave draft — a refused handoff must not be promoted — and promoting it
+    // before the handoff comment is composed keeps that comment an observation
+    // of the PR's final state.
+    if (verified.handoff && handoffPrNumber(verified.handoff)) {
+      markHandoffPullRequestReadyFn({ handoff: verified.handoff });
     }
 
     // WM-718: the Handoff's Verification line is worker-authored. Post what

@@ -2859,10 +2859,10 @@ describe("handoff verification helpers (WM-718)", () => {
     const base = { verification: null, repoVerify: null, webBuild: null };
     expect(
       composeHandoffVerification({ ...base, prNumber: 7, prDraft: true }),
-    ).toContain("- PR: #7 (draft)");
+    ).toContain("- PR: #7 (draft: yes)");
     expect(
       composeHandoffVerification({ ...base, prNumber: 7, prDraft: false }),
-    ).toContain("- PR: #7 (ready)");
+    ).toContain("- PR: #7 (draft: no)");
     // pr_base_unreadable never sets prDraft; the worker drafts the PR after
     // this comment is composed, so "ready" would be a lie.
     expect(composeHandoffVerification({ ...base, prNumber: 7 })).toContain(
@@ -2908,7 +2908,7 @@ describe("handoff verification helpers (WM-718)", () => {
     const lines = body.split("\n");
     expect(lines[0]).toBe("## Handoff verification (worker-observed)");
     expect(lines[1]).toBe(
-      "- PR: #42 (draft) · Fixes: unknown · run trailer: unknown",
+      "- PR: #42 (draft: yes) · Fixes: unknown · run trailer: unknown",
     );
     expect(lines[2]).toBe("- Verification: `bun test` — exit 1 (FAIL)");
     expect(body).toContain("(fail) x > y");
@@ -3012,6 +3012,8 @@ describe("handoff verification helpers (WM-718)", () => {
         hasRunTrailer: false,
       },
     });
-    expect(body).toContain("- PR: #77 (ready) · Fixes: yes · run trailer: no");
+    expect(body).toContain(
+      "- PR: #77 (draft: no) · Fixes: yes · run trailer: no",
+    );
   });
 });
