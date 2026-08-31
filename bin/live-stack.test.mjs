@@ -63,6 +63,10 @@ pid_alive() {
     [[ -f "$1.terminated" || -f "$1.exited" ]] && return 1
     return 0
   fi
+  if [[ "$(basename "$1")" == "gh-app-auth.pid" && -f "$1.fake" ]]; then
+    [[ -f "$1.terminated" || -f "$1.exited" ]] && return 1
+    return 0
+  fi
   [[ "\${FAKE_ALIVE:-0}" == "1" ]] || return 1
   [[ -f "$1" ]] || return 1
   [[ -f "$1.terminated" ]] && return 1
@@ -74,6 +78,10 @@ spawn_daemon() { # <pidfile> <logfile> <workdir> <cmd...>
   printf 'SPAWN pid=%s workdir=%s cmd=%s\\n' "$(basename "$pidfile")" "$workdir" "$*" >>"$SPAWN_LOG"
   if [[ "$(basename "$pidfile")" == "\${FAKE_SPAWN_FAIL_PIDFILE:-}" ]]; then return 1; fi
   printf '1\\n' >"$pidfile"
+  if [[ "$(basename "$pidfile")" == "gh-app-auth.pid" ]]; then
+    touch "$pidfile.fake"
+    printf '1\\n' >"\${FACTORY_GH_APP_TOKEN_FILE}.lock"
+  fi
   if [[ -n "\${FAKE_DAEMON_DIES_FOR:-}" && "$*" == *"\${FAKE_DAEMON_DIES_FOR}"* ]]; then
     printf 'fake daemon exited 1\\n' >"$logfile"
     touch "$pidfile.exited"
@@ -282,6 +290,7 @@ function runStack(fixture, args, extraEnv = {}) {
       BUILD_LOG: fixture.buildLog,
       FACTORY_RUN_DIR: path.join(fixture.root, "run"),
       FACTORY_EVENT_HOME: path.join(fixture.root, "home"),
+      FACTORY_GH_APP_TOKEN_FILE: path.join(fixture.root, "gh-app-token.json"),
       // Startup survival is covered by focused cases below. Keep unrelated
       // command-wiring tests immediate instead of paying the production 5s.
       FACTORY_WORKER_READY_TIMEOUT: "0",
@@ -303,6 +312,102 @@ function runStack(fixture, args, extraEnv = {}) {
 
 const spawnFor = (spawns, pidfile) =>
   spawns.find((line) => line.includes(`pid=${pidfile}`)) ?? "";
+
+async function startLockOwningGhAppProcess(fixture) {
+  const script = path.join(
+    fixture.root,
+    "lib",
+    "control-plane",
+    "gh-app-auth.mjs",
+  );
+  mkdirSync(path.dirname(script), { recursive: true });
+  writeFileSync(script, "setInterval(() => {}, 60_000);\n", "utf8");
+  const child = Bun.spawn({
+    cmd: [process.execPath, script, "--daemon"],
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const command = Bun.spawnSync({
+      cmd: ["ps", "-p", String(child.pid), "-o", "command="],
+      stdout: "pipe",
+      stderr: "ignore",
+    }).stdout.toString();
+    if (command.trim().endsWith(`${script} --daemon`)) {
+      writeFileSync(
+        path.join(fixture.root, "gh-app-token.json.lock"),
+        `${child.pid}\n`,
+      );
+      return child;
+    }
+    await Bun.sleep(5);
+  }
+  child.kill();
+  await child.exited;
+  throw new Error(`fake gh-app-auth process ${child.pid} did not start`);
+}
+
+async function stopProcess(child) {
+  try {
+    child.kill();
+  } catch {
+    // Already exited.
+  }
+  await child.exited;
+}
+
+test("`up` adopts a lock-owning GitHub App daemon when its pidfile is missing", async () => {
+  const f = makeFixture();
+  const daemon = await startLockOwningGhAppProcess(f);
+  try {
+    const r = runStack(f, ["up"], {
+      FACTORY_GH_APP_ID: "test-app",
+      FACTORY_GH_APP_PRIVATE_KEY_PATH: "/tmp/test-key",
+      FACTORY_HOME: f.root,
+      FACTORY_ROOT: f.root,
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(
+      `GitHub App token daemon already running (adopted pid ${daemon.pid})`,
+    );
+    expect(readFileSync(path.join(f.runDir, "gh-app-auth.pid"), "utf8")).toBe(
+      `${daemon.pid}\n`,
+    );
+    expect(spawnFor(r.spawns, "gh-app-auth.pid")).toBe("");
+
+    const down = runStack(f, ["down"], { FAKE_ALIVE: "1" });
+    expect(down.status).toBe(0);
+    expect(down.spawns).toContain("TERM GitHub App token daemon");
+    expect(down.spawns).toContain("AWAIT GitHub App token daemon");
+  } finally {
+    await stopProcess(daemon);
+    f.cleanup();
+  }
+});
+
+test("`up` keeps the existing live GitHub App daemon pidfile behavior", () => {
+  const f = makeFixture();
+  try {
+    mkdirSync(f.runDir, { recursive: true });
+    writeFileSync(path.join(f.runDir, "gh-app-auth.pid"), "31337\n");
+    const r = runStack(f, ["up"], {
+      FACTORY_GH_APP_ID: "test-app",
+      FACTORY_GH_APP_PRIVATE_KEY_PATH: "/tmp/test-key",
+      FAKE_ALIVE: "1",
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(
+      "GitHub App token daemon already running (pid 31337)",
+    );
+    expect(readFileSync(path.join(f.runDir, "gh-app-auth.pid"), "utf8")).toBe(
+      "31337\n",
+    );
+    expect(spawnFor(r.spawns, "gh-app-auth.pid")).toBe("");
+  } finally {
+    f.cleanup();
+  }
+});
 
 test("plain `up` spawns serve, worker, and the static web server — unchanged by --dev existing", () => {
   const f = makeFixture();

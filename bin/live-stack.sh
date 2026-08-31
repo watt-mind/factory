@@ -90,6 +90,19 @@ track_up_pidfile() { # <label> <pidfile>
   UP_STARTED_LABELS+=("$label")
 }
 
+untrack_up_pidfile() { # <pidfile>
+  local target="$1" i
+  local kept_pidfiles=() kept_labels=()
+  [[ ${#UP_STARTED_PIDFILES[@]} -gt 0 ]] || return 0
+  for i in "${!UP_STARTED_PIDFILES[@]}"; do
+    [[ "${UP_STARTED_PIDFILES[$i]}" == "$target" ]] && continue
+    kept_pidfiles+=("${UP_STARTED_PIDFILES[$i]}")
+    kept_labels+=("${UP_STARTED_LABELS[$i]}")
+  done
+  UP_STARTED_PIDFILES=("${kept_pidfiles[@]}")
+  UP_STARTED_LABELS=("${kept_labels[@]}")
+}
+
 track_up_pool_pidfiles() {
   local pidfile label
   for pidfile in "$RUN_DIR/supervisor.pid" "$RUN_DIR"/worker-[0-9]*.pid; do
@@ -282,6 +295,83 @@ if [[ "$ACTION" != "up" ]]; then
   mkdir -p "$RUN_DIR" "$HOME_DIR"
 fi
 REPO="$(repo_root)"
+
+gh_app_release_root() {
+  if [[ -n "${FACTORY_HOME:-}" ]]; then
+    printf '%s\n' "${FACTORY_HOME%/}/releases"
+  elif [[ "${FACTORY_ROOT:-}" == */releases/* ]]; then
+    printf '%s\n' "${FACTORY_ROOT%%/releases/*}/releases"
+  elif [[ "$REPO" == */releases/* ]]; then
+    printf '%s\n' "${REPO%%/releases/*}/releases"
+  fi
+}
+
+gh_app_daemon_command_matches() { # <ps command>
+  local command="$1" script release_root relative release_id
+  [[ "$command" =~ ^([^[:space:]]*/)?bun[[:space:]]+([^[:space:]]+)[[:space:]]+--daemon$ ]] \
+    || return 1
+  script="${BASH_REMATCH[2]}"
+  [[ "$script" == "$REPO/lib/control-plane/gh-app-auth.mjs" ]] && return 0
+
+  release_root="$(gh_app_release_root)"
+  [[ -n "$release_root" && "$script" == "$release_root/"* ]] || return 1
+  relative="${script#"$release_root/"}"
+  release_id="${relative%%/*}"
+  [[ -n "$release_id" && "$release_id" != "$relative" \
+    && "$relative" == "$release_id/lib/control-plane/gh-app-auth.mjs" ]]
+}
+
+gh_app_lock_file() {
+  printf '%s.lock\n' "${FACTORY_GH_APP_TOKEN_FILE:-$HOME/.factory/gh-app-token.json}"
+}
+
+gh_app_daemon_pid_is_valid() { # <pid>
+  local pid="$1" command owner
+  [[ "$pid" =~ ^[0-9]+$ && "$pid" -ne $$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  gh_app_daemon_command_matches "$command" || return 1
+  owner="$(cat "$(gh_app_lock_file)" 2>/dev/null || true)"
+  [[ "$owner" == "$pid" ]]
+}
+
+gh_app_daemon_pid() {
+  local pid command processes
+  processes="$(ps -axo pid=,command= 2>/dev/null || true)"
+  while read -r pid command; do
+    if gh_app_daemon_command_matches "$command" \
+      && gh_app_daemon_pid_is_valid "$pid"; then
+      printf '%s\n' "$pid"
+      return 0
+    fi
+  done <<<"$processes"
+  return 1
+}
+
+adopt_gh_app_daemon() { # <pid>
+  local pid="$1"
+  gh_app_daemon_pid_is_valid "$pid" || return 1
+  printf '%s\n' "$pid" >"$RUN_DIR/gh-app-auth.pid"
+  info "GitHub App token daemon already running (adopted pid $pid)"
+}
+
+wait_for_started_gh_app_daemon() { # <spawned pid>
+  local started_pid="$1" owner winner _
+  for _ in {1..50}; do
+    owner="$(cat "$(gh_app_lock_file)" 2>/dev/null || true)"
+    if [[ "$owner" == "$started_pid" ]] \
+      && pid_alive "$RUN_DIR/gh-app-auth.pid"; then
+      return 0
+    fi
+    if winner="$(gh_app_daemon_pid)"; then
+      untrack_up_pidfile "$RUN_DIR/gh-app-auth.pid"
+      rm -f "$RUN_DIR/gh-app-auth.pid"
+      adopt_gh_app_daemon "$winner" && return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
 
 elapsed_seconds() {
   local elapsed="${1//[[:space:]]/}" days=0 rest hours=0 minutes=0 seconds=0
@@ -632,6 +722,8 @@ case "$ACTION" in
     if [[ -n "${FACTORY_GH_APP_ID:-}" && -n "${FACTORY_GH_APP_PRIVATE_KEY_PATH:-}" ]]; then
       if pid_alive "$RUN_DIR/gh-app-auth.pid"; then
         info "GitHub App token daemon already running (pid $(cat "$RUN_DIR/gh-app-auth.pid"))"
+      elif GH_APP_DAEMON_PID="$(gh_app_daemon_pid)"; then
+        adopt_gh_app_daemon "$GH_APP_DAEMON_PID"
       else
         info "minting initial GitHub App installation token"
         if ! (cd "$REPO" && bun "$REPO/lib/control-plane/gh-app-auth.mjs" >>"$RUN_DIR/gh-app-auth.log" 2>&1); then
@@ -640,6 +732,9 @@ case "$ACTION" in
         info "starting GitHub App token-refresh daemon"
         spawn_daemon_tracked "GitHub App token daemon" "$RUN_DIR/gh-app-auth.pid" "$RUN_DIR/gh-app-auth.log" "$REPO" \
           bun "$REPO/lib/control-plane/gh-app-auth.mjs" --daemon
+        GH_APP_STARTED_PID="$(cat "$RUN_DIR/gh-app-auth.pid")"
+        wait_for_started_gh_app_daemon "$GH_APP_STARTED_PID" \
+          || die "GitHub App token daemon exited during startup without an adoptable lock owner"
       fi
     fi
 
