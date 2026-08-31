@@ -798,7 +798,7 @@ export const RUN_SUBJECT_CACHE_TTL_MS = 30_000;
 // that has caused two tracker rate-limit incidents. Cap the synchronous
 // resolution per request and let the rest fill in on later polls (misses are
 // not cached, so they stay eligible next time around).
-const RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST = 8;
+export const RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST = 8;
 const RUN_SUBJECT_RESOLVE_CONCURRENCY = 4;
 // One control-plane read that hangs (a GitHub Projects GraphQL stall was
 // measured at 15s on the live host) must not pin the background batch open
