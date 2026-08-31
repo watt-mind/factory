@@ -764,23 +764,25 @@ describe("multi-emit chain resolution (WM-119)", () => {
     });
   });
 
-  test("a malformed whenPath records the failing edge instead of silently skipping", () => {
-    const db = openDb(":memory:");
-    const whenPathRegistry = {
-      ...registry,
-      edges: {
-        "when-path-edge@1": {
-          recommendationField: "recommendation",
-          edges: {
-            NEXT: {
-              eventType: "factory.work.requested",
-              input: {},
-              whenPath: "$.artifact.missing",
-            },
+  const whenPathRegistryFor = (whenPath) => ({
+    ...registry,
+    edges: {
+      "when-path-edge@1": {
+        recommendationField: "recommendation",
+        edges: {
+          NEXT: {
+            eventType: "factory.work.requested",
+            input: {},
+            whenPath,
           },
         },
       },
-    };
+    },
+  });
+
+  test("a malformed whenPath records the failing edge instead of silently skipping", () => {
+    const db = openDb(":memory:");
+    const whenPathRegistry = whenPathRegistryFor("$.nope.x");
     seedCompletedRun(db, {
       runId: "run-malformed-when-path",
       agent: "when-path-edge@1",
@@ -793,7 +795,7 @@ describe("multi-emit chain resolution (WM-119)", () => {
     expect(outcome.skipped).toBe(0);
     expect(outcome.errors).toEqual([
       expect.stringMatching(
-        /chain edge "NEXT" whenPath "\$\.artifact\.missing" failed: .*resolves to nothing/,
+        /chain edge "NEXT" whenPath "\$\.nope\.x" failed: .*unknown root "nope"/,
       ),
     ]);
     expect(resolvedAtOf(db, "run-malformed-when-path")).not.toBeNull();
@@ -801,13 +803,35 @@ describe("multi-emit chain resolution (WM-119)", () => {
       note: "chain_resolved",
       reason: "invalid_chain_data",
       error: expect.stringMatching(
-        /chain edge "NEXT" whenPath "\$\.artifact\.missing" failed: .*resolves to nothing/,
+        /chain edge "NEXT" whenPath "\$\.nope\.x" failed: .*unknown root "nope"/,
       ),
     });
     expect(resolveChains(db, whenPathRegistry)).toEqual({
       emitted: 0,
       skipped: 0,
       errors: [],
+    });
+  });
+
+  test("a well-formed whenPath with no value skips the edge without erroring", () => {
+    const db = openDb(":memory:");
+    const whenPathRegistry = whenPathRegistryFor("$.artifact.missing");
+    seedCompletedRun(db, {
+      runId: "run-absent-when-path",
+      agent: "when-path-edge@1",
+      input: { repo: "wm/when-path" },
+      artifact: { recommendation: "NEXT" },
+    });
+
+    // "condition not met" is how a rule declines an edge — not a defect.
+    expect(resolveChains(db, whenPathRegistry)).toEqual({
+      emitted: 0,
+      skipped: 1,
+      errors: [],
+    });
+    expect(chainResolution(db, "run-absent-when-path")).toMatchObject({
+      note: "chain_resolved",
+      reason: "no_edge_selected",
     });
   });
 
