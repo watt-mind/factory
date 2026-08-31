@@ -1,3 +1,18 @@
+/**
+ * factory-cells — GenericCell Durable Object (spike, ticket #2144).
+ *
+ * SECURITY / DEPLOYMENT WARNING:
+ *   This is a loopback-only development spike. It is intended to be reached
+ *   exclusively over 127.0.0.1 via `celld dev`. The only access control here is
+ *   a shared-secret bearer token read from `env.CELL_AUTH_TOKEN`, which is a
+ *   stop-gap, not an authentication system: there is no per-caller identity, no
+ *   rotation, no rate limiting, and no authorization on which cell a caller may
+ *   touch. Requests are refused outright when the secret is unset (fail closed).
+ *
+ *   This worker MUST NOT be deployed to a public or shared environment until
+ *   real authentication and per-cell authorization are in place.
+ */
+
 export class GenericCell {
   constructor(ctx, env) {
     this.ctx = ctx;
@@ -108,10 +123,11 @@ export class GenericCell {
         headers: { "Content-Type": "application/json" }
       });
     } catch (err) {
+      // Log the stack locally; never leak it to the caller.
+      console.error("[cell] unhandled error", err);
       return new Response(JSON.stringify({
         error: "internal_error",
-        message: err.message,
-        stack: err.stack
+        message: err.message
       }), {
         status: 500,
         headers: { "Content-Type": "application/json" }
@@ -192,6 +208,20 @@ export class GenericCell {
     if (!sql || typeof sql !== "string") {
       return new Response(JSON.stringify({ error: "bad_request", message: "sql string is required" }), {
         status: 400,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
+    // Only a single statement may be submitted: a trailing `;` is tolerated but
+    // anything after it is rejected, so `SELECT 1; DROP TABLE _cell_entities;`
+    // cannot ride in behind a read-only leading keyword.
+    const semicolonIndex = sql.indexOf(";");
+    if (semicolonIndex !== -1 && sql.slice(semicolonIndex + 1).trim() !== "") {
+      return new Response(JSON.stringify({
+        error: "forbidden",
+        message: "query endpoint accepts a single statement; additional statements after ';' are not permitted"
+      }), {
+        status: 403,
         headers: { "Content-Type": "application/json" }
       });
     }
@@ -394,7 +424,19 @@ export class GenericCell {
 
   _handleDeleteEntity(collection, id, searchParams) {
     const expectedVersionParam = searchParams.get("expectedVersion");
-    const expectedVersion = expectedVersionParam !== null ? parseInt(expectedVersionParam, 10) : null;
+    let expectedVersion = null;
+    if (expectedVersionParam !== null && expectedVersionParam !== "") {
+      if (!/^-?\d+$/.test(expectedVersionParam.trim())) {
+        return new Response(JSON.stringify({
+          error: "bad_request",
+          message: `expectedVersion must be an integer, received ${JSON.stringify(expectedVersionParam)}`
+        }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      expectedVersion = parseInt(expectedVersionParam.trim(), 10);
+    }
 
     const existingRows = [...this.sql.exec(
       "SELECT version FROM _cell_entities WHERE collection = ? AND id = ?",
@@ -415,7 +457,7 @@ export class GenericCell {
     }
 
     const currentVersion = existingRows[0].version;
-    if (expectedVersion !== null && !isNaN(expectedVersion) && expectedVersion !== currentVersion) {
+    if (expectedVersion !== null && expectedVersion !== currentVersion) {
       return new Response(JSON.stringify({
         error: "conflict",
         message: `Version conflict: currentVersion is ${currentVersion}, expectedVersion was ${expectedVersion}`,
@@ -443,17 +485,61 @@ export class GenericCell {
   }
 }
 
+function jsonResponse(payload, status) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "Content-Type": "application/json" }
+  });
+}
+
+/**
+ * Shared-secret bearer check. Stop-gap for the loopback spike only — see the
+ * deployment warning at the top of this file. Fails closed when the secret is
+ * not configured so an unconfigured worker is never an open one.
+ */
+function checkAuth(request, env) {
+  const secret = env && env.CELL_AUTH_TOKEN;
+  if (!secret) {
+    return jsonResponse({
+      error: "unauthorized",
+      message: "CELL_AUTH_TOKEN is not configured; the cell refuses all requests"
+    }, 401);
+  }
+
+  const header = request.headers.get("Authorization") || "";
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  const presented = match ? match[1].trim() : null;
+  if (!presented || presented.length !== secret.length) {
+    return jsonResponse({ error: "unauthorized", message: "missing or invalid bearer token" }, 401);
+  }
+
+  // Length-independent constant-time-ish compare.
+  let diff = 0;
+  for (let i = 0; i < secret.length; i++) {
+    diff |= presented.charCodeAt(i) ^ secret.charCodeAt(i);
+  }
+  if (diff !== 0) {
+    return jsonResponse({ error: "unauthorized", message: "missing or invalid bearer token" }, 401);
+  }
+
+  return null;
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // Health check endpoint
+    // Health check endpoint — unauthenticated liveness probe only; it exposes
+    // no cell state.
     if (url.pathname === "/health" || url.pathname === "/") {
       return new Response(JSON.stringify({ status: "healthy", service: "factory-cells" }), {
         status: 200,
         headers: { "Content-Type": "application/json" }
       });
     }
+
+    const authFailure = checkAuth(request, env);
+    if (authFailure) return authFailure;
 
     // Route by Cell ID from header or path:
     // 1. Header `X-Cell-Id`

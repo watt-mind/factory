@@ -36,10 +36,19 @@ export class CellNotFoundError extends CellError {
 }
 
 export class CellClient {
-  constructor({ endpoint = "http://127.0.0.1:9876", cellId = null, fetch = globalThis.fetch } = {}) {
+  constructor({
+    endpoint = "http://127.0.0.1:9876",
+    cellId = null,
+    fetch = globalThis.fetch,
+    authToken = null
+  } = {}) {
     this.endpoint = endpoint.replace(/\/+$/, "");
     this.cellId = cellId;
     this._fetch = fetch;
+    // Shared-secret bearer token for the loopback cell spike. Defaults to the
+    // daemon's own CELL_AUTH_TOKEN so a client in the same environment works
+    // without extra wiring.
+    this.authToken = authToken ?? (globalThis.process?.env?.CELL_AUTH_TOKEN ?? null);
   }
 
   forCell(cellId) {
@@ -49,7 +58,8 @@ export class CellClient {
     return new CellClient({
       endpoint: this.endpoint,
       cellId,
-      fetch: this._fetch
+      fetch: this._fetch,
+      authToken: this.authToken
     });
   }
 
@@ -65,6 +75,7 @@ export class CellClient {
     const url = this._url(path);
     const reqHeaders = {
       Accept: "application/json",
+      ...(this.authToken ? { Authorization: `Bearer ${this.authToken}` } : {}),
       ...headers
     };
 
