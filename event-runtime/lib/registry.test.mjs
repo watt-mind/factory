@@ -433,7 +433,7 @@ describe("registry", () => {
     // Regenerated (#2013): dispatch documents draft PR readiness and refreshes
     // its prompt pin; the registry digest follows it.
     const expected =
-      "sha256:1fa34c0135c2beb2cf4353193cc43714f2b01bff6e981e0e875706e5bae726bb";
+      "sha256:3d12b762b3946e9e6e95e033d28f628affa970e27bf4633c695b2d8be0b11013";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -735,7 +735,7 @@ describe("registry", () => {
     // Regenerated (#2013): dispatch documents draft PR readiness; prompt pin
     // only, `pack` remains non-enumerable.
     expect(computeDefHash(def)).toBe(
-      "sha256:30aaad04e16d8ea6bd89fe3848780a3608f5e2f2fea477542d4f365e5a66f12e",
+      "sha256:4a12ffc0fa80ad8b97a9757361ee319589c3567de36f8d9aa33ef917ff26a4d2",
     );
   });
 

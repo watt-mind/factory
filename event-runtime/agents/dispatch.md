@@ -172,13 +172,11 @@ shell` means the spawn prompt was defective: correct its path/launch details
    required UX critique, create it as a draft first. The worker, not the
    agent, owns the readiness transition: after the agent returns, it performs
    handoff verification plus the configured-base and PR-form checks, and only
-   then promotes a draft to ready for review. Run `gh pr ready <PR>` yourself
-   only when the applicable UX gate has an evidence-backed `SHIP` verdict
-   (including a `FIX-FIRST` resolved to `SHIP`) and the PR is otherwise ready
-   for the worker's handoff checks. Leave `FIX-FIRST`, `NOT-ASSESSED`, and
-   `BLOCKED` PRs in draft for review; skipped critiques may open ready
-   normally. If the readiness transition fails, treat it as a handoff
-   verification failure and leave the PR in draft.
+   then promotes a draft to ready for review. Do not run `gh pr ready <PR>`
+   yourself for a draft; leave that transition to the worker. Leave
+   `FIX-FIRST`, `NOT-ASSESSED`, and `BLOCKED` PRs in draft for review; skipped
+   critiques may open ready normally. If the readiness transition fails, treat
+   it as a handoff verification failure and leave the PR in draft.
 
    The checks you already ran are the reviewer's starting point — carry them
    into the artifact instead of leaving them in the transcript. The PR body is
