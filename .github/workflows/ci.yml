@@ -466,12 +466,13 @@ jobs:
         # WM-918: required lanes exclude the timing-bound group because its
         # wall-clock ceilings are not reliable under shared-host contention.
         env:
-          FACTORY_HANDOFF_SMOKE_COMMAND: >-
-            bun test event-runtime/lib --timeout 20000 --test-name-pattern "$(bun event-runtime/lib/test-helpers-timing.mjs exclude-pattern)" && bun build/emit.mjs --check && bun run format:check && bun run lint
           FACTORY_HANDOFF_SMOKE_LANE: ${{ runner.environment }}
         shell: bash
         run: |
           set -euo pipefail
+          pat="$(bun event-runtime/lib/test-helpers-timing.mjs exclude-pattern)"
+          [ -n "$pat" ] || exit 1
+          export FACTORY_HANDOFF_SMOKE_COMMAND="bun test event-runtime/lib --timeout 20000 --test-name-pattern \"$pat\" && bun build/emit.mjs --check && bun run format:check && bun run lint"
           bun -e '
             import { mkdtempSync } from "node:fs";
             import { tmpdir } from "node:os";
