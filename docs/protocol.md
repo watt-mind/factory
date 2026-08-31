@@ -244,6 +244,24 @@ well (the root `bun run check` runs it too, once `event-runtime/web` has had
 ticket commands. Never advance state, open a PR, or report success on
 failing output. Never weaken a test to get green.
 
+### Sandboxed verify smoke
+
+CI's **Sandboxed verify smoke** job runs the factory `verify:` command through
+`runHandoffVerifySmoke` → `runHandoffCommand`, the same production seam the
+worker uses before accepting a dispatch handoff. It is merge-blocking via
+`Verify`, unlike the explicitly non-blocking **Timing-bound tests** quarantine
+lane. The job prints the sandbox facts — scrubbed environment, `HOME=/tmp/home`,
+worktree mounted at `/workspace`, and namespaces — before the command output.
+
+Therefore **host/CI green + sandbox red is a hermeticity bug, not a branch
+bug**. First inspect tests that read ambient homes or an operator checkout.
+Use `event-runtime/lib/worker-test-helpers.mjs` helpers such as
+`dispatchConfigSnapshot()` to point registry-dependent tests at the checkout
+under test, and use the repository's test-home helpers instead of inheriting
+`FACTORY_EVENT_HOME`. Do not add an unsandboxed fallback or weaken the smoke;
+if a timing-only flake needs quarantine, document its visible non-blocking
+policy in `.github/workflows/ci.yml`.
+
 **Mandatory `## Handoff` comment** before moving to `In Review`:
 
 ```

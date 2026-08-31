@@ -13,6 +13,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { Database } from "bun:sqlite";
 import { canonicalJson, sha256Hex } from "./canonical.mjs";
+import { FACTORY_ROOT } from "./config.mjs";
 import { MEMO_SCHEMA_VERSION, memoDigest, withProvenance } from "./memos.mjs";
 import {
   assertSandboxWorkspaceSupported,
@@ -660,6 +661,25 @@ describe("worktree workspaces (WM-108)", () => {
         delete process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS;
       else process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS = previous;
     }
+  });
+
+  test("a preservation comment spawns tools/ticket.mjs, not the deleted tools/linear.mjs", () => {
+    const calls = [];
+    const result = commentOnPreservedWorktree({
+      ticket: "WM-13-argv",
+      preservation: { ref: "wip/x", commit: "abc", push: "pushed" },
+      spawn: (...args) => {
+        calls.push(args);
+        return { error: null, status: 0, stdout: "", stderr: "" };
+      },
+    });
+    expect(result).toEqual({ status: "posted" });
+    expect(calls).toHaveLength(1);
+    const [command, argv] = calls[0];
+    expect(command).toBe("bun");
+    expect(argv[0]).toBe(path.join(FACTORY_ROOT, "tools", "ticket.mjs"));
+    expect(argv[0]).not.toMatch(/linear\.mjs$/);
+    expect(argv.slice(1, 3)).toEqual(["comment", "WM-13-argv"]);
   });
 
   test("a preservation comment that fails to spawn records the cause, not a blank error", () => {

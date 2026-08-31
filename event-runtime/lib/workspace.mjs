@@ -451,7 +451,7 @@ export function commentOnPreservedWorktree({
   const text = `Recovered an abandoned dirty worktree before re-dispatch: preserved its uncommitted changes at \`${preservation.ref}\` (commit ${preservation.commit}, ${preservation.push === "pushed" ? "pushed to origin" : "kept locally because push failed"}).`;
   const result = spawn(
     "bun",
-    [path.join(FACTORY_ROOT, "tools", "linear.mjs"), "comment", ticket, text],
+    [path.join(FACTORY_ROOT, "tools", "ticket.mjs"), "comment", ticket, text],
     {
       cwd: FACTORY_ROOT,
       encoding: "utf8",
