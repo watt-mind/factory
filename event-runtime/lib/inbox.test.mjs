@@ -1610,6 +1610,53 @@ describe("human inbox ledger (WM-285)", () => {
     ]);
   });
 
+  test("a pending decision and an escalation survive a newer run for their ticket", async () => {
+    const db = openDb(":memory:");
+    insertEvent(db, { eventId: "ask-evt", status: "human_needed" });
+    createInboxItem(
+      db,
+      {
+        kind: "BLOCKED",
+        title: "unanswered ask",
+        refs: {
+          issue: "watt-mind/factory#1158",
+          eventSource: "test",
+          eventId: "ask-evt",
+        },
+        decision: decision(),
+        dedupeKey: "BLOCKED:ask-evt",
+      },
+      { id: "open-ask", now: 1000 },
+    );
+    createInboxItem(
+      db,
+      {
+        kind: "ESCALATED",
+        title: "refused run",
+        refs: { issue: "watt-mind/factory#1158" },
+      },
+      { id: "open-escalation", now: 1000 },
+    );
+    const at = new Date(2000).toISOString();
+    db.query(
+      `INSERT INTO runs
+       (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at, subject)
+       VALUES ('run-new', 'new-subject', '{}', 'sha256:test', 'PROPOSED', 0, ?, ?, 'watt-mind/factory#1158')`,
+    ).run(at, at);
+
+    await expect(
+      reconcileInbox(db, { now: 3000, linearIssues: async () => [] }),
+    ).resolves.toEqual([]);
+    expect(
+      db
+        .query(
+          "SELECT id FROM inbox_items WHERE resolved_at IS NULL ORDER BY id",
+        )
+        .all()
+        .map((row) => row.id),
+    ).toEqual(["open-ask", "open-escalation"]);
+  });
+
   test("expires an old parked item with no actionable referent", () => {
     const db = openDb(":memory:");
     createInboxItem(

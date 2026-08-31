@@ -1543,6 +1543,13 @@ const TERMINAL_RUN_STATES = new Set([
 // ESCALATED item is *born* on a REFUSED run, and a decision the operator has
 // not answered stays open no matter what the run it names went on to do.
 const RUN_PROGRESS_KINDS = new Set(["CI RED", "SMOKE RED", "CIRCUIT BREAKER"]);
+// Notices parked on work the factory itself owns. Only these may be retired
+// automatically when the ticket moves on; an ESCALATED ask or any other kind
+// names something an operator still has to look at.
+const PARKED_KINDS = new Set(["BLOCKED", "human_needed"]);
+// Bounded fan-out for the per-tick PR referent sweep (#1069): a busy inbox
+// must not open one forge request per distinct PR all at once.
+const PR_FETCH_CONCURRENCY = 4;
 
 /** An ask the operator has been handed and has not answered yet. */
 function hasPendingDecision(row) {
@@ -1585,17 +1592,26 @@ async function fetchReferencedInboxPullRequests(rows, fetchPullRequest) {
     const github = githubRepoFor(refs);
     if (pr && github) unique.set(`${github}#${pr}`, { github, pr });
   }
-  const fetched = await Promise.all(
-    [...unique.entries()].map(async ([key, request]) => {
-      try {
-        return [key, await fetchPullRequest(request)];
-      } catch {
-        // A deleted PR or rate-limited repository must not stall unrelated
-        // inbox reconciliation. The next poll can retry this one referent.
-        return [key, null];
-      }
-    }),
-  );
+  const fetchOne = async ([key, request]) => {
+    try {
+      return [key, await fetchPullRequest(request)];
+    } catch {
+      // A deleted PR or rate-limited repository must not stall unrelated
+      // inbox reconciliation. The next poll can retry this one referent.
+      return [key, null];
+    }
+  };
+  // Chunked loop: at most PR_FETCH_CONCURRENCY forge reads in flight at once,
+  // so a wide inbox cannot burst a request per distinct PR every tick.
+  const entries = [...unique.entries()];
+  const fetched = [];
+  for (let i = 0; i < entries.length; i += PR_FETCH_CONCURRENCY) {
+    fetched.push(
+      ...(await Promise.all(
+        entries.slice(i, i + PR_FETCH_CONCURRENCY).map(fetchOne),
+      )),
+    );
+  }
   return new Map(fetched.filter(([, pull]) => pull));
 }
 
@@ -1622,7 +1638,7 @@ function hasNewerSubjectRun(db, subject, createdAt) {
 }
 
 function staleParkedItem(db, row, refs, now) {
-  if (!new Set(["BLOCKED", "human_needed"]).has(row.kind)) return false;
+  if (!PARKED_KINDS.has(row.kind)) return false;
   const createdAt = Date.parse(row.created_at);
   if (!Number.isFinite(createdAt) || now - createdAt < MAX_PARKED_INBOX_AGE_MS)
     return false;
@@ -1878,7 +1894,16 @@ export function reconcileInbox(
       if (event && event.status !== "human_needed")
         resolvedBy = "auto:event_requeued";
     }
-    if (!resolvedBy && hasNewerSubjectRun(db, refs.issue, row.created_at)) {
+    // A parked notice about a ticket the factory has already picked back up is
+    // stale. This never applies to an open ask or an escalation: a newer run
+    // does not answer a decision the operator still owes, and silently
+    // resolving one would discard it.
+    if (
+      !resolvedBy &&
+      PARKED_KINDS.has(row.kind) &&
+      !hasPendingDecision(row) &&
+      hasNewerSubjectRun(db, refs.issue, row.created_at)
+    ) {
       resolvedBy = "auto:superseded";
     }
     // A run-progress notice about a run that has already finished is stale.
@@ -1946,20 +1971,22 @@ export function reconcileInbox(
   ])
     .then(([issues, pulls]) => {
       const byId = new Map(issues.map((issue) => [issue.identifier, issue]));
-      for (const row of rows) {
+      // Only the rows collected for the PR sweep are eligible here: a CI RED
+      // row that happens to share a PR reference with another item must not be
+      // retired by that item's fetch.
+      for (const { row, refs } of prRows) {
         if (resolved.some((entry) => entry.id === row.id)) continue;
-        const refs = parseObject(row.refs_json);
         const pr = prNumber(refs.pr);
         const github = githubRepoFor(refs);
         const pull = pr && github ? pulls.get(`${github}#${pr}`) : null;
-        if (["MERGED", "CLOSED"].includes(pull?.state)) {
-          const resolvedBy =
-            pull.state === "MERGED" ? "auto:pr_merged" : "auto:pr_closed";
-          resolveInboxItem(db, row.id, { now, resolvedBy });
-          resolved.push({ id: row.id, resolvedBy });
-          continue;
-        }
-        if (!refs.issue) continue;
+        if (!["MERGED", "CLOSED"].includes(pull?.state)) continue;
+        const resolvedBy =
+          pull.state === "MERGED" ? "auto:pr_merged" : "auto:pr_closed";
+        resolveInboxItem(db, row.id, { now, resolvedBy });
+        resolved.push({ id: row.id, resolvedBy });
+      }
+      for (const { row, refs } of linearRows) {
+        if (resolved.some((entry) => entry.id === row.id)) continue;
         const issue = byId.get(refs.issue);
         if (!issue) continue;
         const stale = issueIsClosed(issue);
