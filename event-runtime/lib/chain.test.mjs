@@ -545,6 +545,33 @@ describe("multi-emit chain resolution (WM-119)", () => {
     ).run(eventId, now, now, `corr-${runId}`, runId, now);
   }
 
+  test("ci-log-capture with no captured artifact does not emit a ci-diagnose event", () => {
+    const db = openDb(":memory:");
+    seedCompletedRun(db, {
+      runId: "run-no-capture",
+      agent: "ci-log-capture@1",
+      input: { repo: "wm/factory", runId: 12345 },
+      artifact: { captured: "none", exitCode: 0 },
+    });
+
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 0,
+      skipped: 1,
+      errors: [],
+    });
+    expect(
+      db
+        .query(
+          `SELECT * FROM events WHERE source = 'chain' AND causation_id = 'run-no-capture'`,
+        )
+        .get(),
+    ).toBeNull();
+    expect(chainResolution(db, "run-no-capture")).toMatchObject({
+      note: "chain_resolved",
+      reason: "no_edge_selected",
+    });
+  });
+
   test("fans out N planned items into N admitted chain events with chain-<runId>-<itemKey> IDs", () => {
     const dir = tmpDir("evrt-chain-multi-");
     const db = openDb(path.join(dir, "runtime.db"));
