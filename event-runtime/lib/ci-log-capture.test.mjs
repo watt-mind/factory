@@ -95,10 +95,10 @@ describe("ci-log-capture command (#2076)", () => {
     for (const stderr of [
       "gh: Not Found (HTTP 404)",
       "no logs found for this run",
-      "run was cancelled",
+      "run was cancelled; logs were not produced",
       // `gh` prefixes its diagnostics; a prefixed missing-log message must
       // still be MISSING, not the #2076 agent_exit_1 fault.
-      "gh: run was cancelled",
+      "gh: run was cancelled; logs were unavailable",
       "gh: no logs found for this run",
       "error: logs expired",
       "error: no logs found for this run",
@@ -159,10 +159,7 @@ describe("ci-log-capture command (#2076)", () => {
       expect(existsSync(path.join(cwd, "result.json"))).toBe(false);
     }
 
-    for (const stderr of [
-      "HTTP 404: resource not accessible by integration",
-      "HTTP 410: cancelled run logs expired",
-    ]) {
+    for (const stderr of ["HTTP 410: cancelled run logs expired"]) {
       const cwd = tmpDir("evrt-ci-log-capture-status-missing-");
       const outcome = captureCiLog({
         cwd,
@@ -175,6 +172,37 @@ describe("ci-log-capture command (#2076)", () => {
     }
   });
 
+  test("treats authorization-worded HTTP 404 responses as faults", () => {
+    for (const stderr of [
+      "HTTP 404: Resource not accessible by integration",
+      "HTTP 404: permission denied",
+      "HTTP 404: must have admin rights to Repository.",
+      "HTTP 404: requires actions:read scope",
+    ]) {
+      const cwd = tmpDir("evrt-ci-log-capture-authz-404-");
+      const outcome = captureCiLog({
+        cwd,
+        input: INPUT,
+        spawn: fakeGh({ stderr, exitCode: 1 }),
+      });
+
+      expect(outcome.ok).toBe(false);
+      expect(existsSync(path.join(cwd, "result.json"))).toBe(false);
+    }
+  });
+
+  test("keeps a deleted HTTP 404 as expected-missing", () => {
+    const cwd = tmpDir("evrt-ci-log-capture-deleted-404-");
+    const outcome = captureCiLog({
+      cwd,
+      input: INPUT,
+      spawn: fakeGh({ stderr: "HTTP 404: run was deleted", exitCode: 1 }),
+    });
+
+    expect(outcome.ok).toBe(true);
+    expect(readResult(cwd).artifact.captured).toBe(NO_CAPTURE);
+  });
+
   test("uses narrow missing-log text only when stderr has no HTTP status", () => {
     const cwd = tmpDir("evrt-ci-log-capture-statusless-missing-");
     const outcome = captureCiLog({
@@ -185,6 +213,18 @@ describe("ci-log-capture command (#2076)", () => {
 
     expect(outcome.ok).toBe(true);
     expect(readResult(cwd).artifact.captured).toBe(NO_CAPTURE);
+  });
+
+  test("does not treat a statusless cancelled run without log wording as missing", () => {
+    const cwd = tmpDir("evrt-ci-log-capture-cancelled-fault-");
+    const outcome = captureCiLog({
+      cwd,
+      input: INPUT,
+      spawn: fakeGh({ stderr: "run was cancelled by the user", exitCode: 1 }),
+    });
+
+    expect(outcome.ok).toBe(false);
+    expect(existsSync(path.join(cwd, "result.json"))).toBe(false);
   });
 
   test("a spawn failure remains a fault even when its message resembles missing logs", () => {

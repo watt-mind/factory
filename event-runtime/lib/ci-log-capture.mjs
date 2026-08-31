@@ -26,9 +26,11 @@
  * Precedence, when `gh` exits non-zero with nothing captured: an explicit
  * `HTTP NNN` token is authoritative. Only 404 and 410 are expected-missing;
  * every other status is a fault regardless of accompanying prose. Statusless
- * diagnostics use the narrow `EXPECTED_MISSING` fallback below. A failed
- * spawn is always a fault. Anything unrecognized is also a fault — the safe
- * default is to surface it.
+ * diagnostics use the narrow `EXPECTED_MISSING` fallback below. A 404 with
+ * authorization wording is the exception: treating that status alone as
+ * missing would mask a lost `actions:read` permission, so it remains a fault.
+ * A failed spawn is always a fault. Anything unrecognized is also a fault —
+ * the safe default is to surface it.
  */
 import { spawnSync } from "node:child_process";
 import {
@@ -59,7 +61,11 @@ const DETAIL_LIMIT = 400;
  * through to the fault branch and re-create the #2076 `agent_exit_1` flood.
  */
 const EXPECTED_MISSING =
-  /(?:no logs|logs? (?:have )?expired|run (?:was )?cancell?ed)/im;
+  /(?:no logs|logs? (?:have )?expired|run (?:was )?cancell?ed(?=[^\n]*(?:no logs|logs?\s+(?:(?:are|were|have been)\s+)?(?:unavailable|not produced))))/im;
+
+/** Authorization diagnostics GitHub can mask behind an HTTP 404 response. */
+const AUTHORIZATION_404 =
+  /(?:resource not accessible by integration|permission denied|must have admin rights|requires\b[^\n]*\bscope)/i;
 
 /**
  * Extract the authoritative HTTP status token that `gh` prints in an API
@@ -74,7 +80,7 @@ function isExpectedMissing(stderr) {
   const status = parseHttpStatus(stderr);
   return status === null
     ? EXPECTED_MISSING.test(stderr)
-    : status === 404 || status === 410;
+    : status === 410 || (status === 404 && !AUTHORIZATION_404.test(stderr));
 }
 
 /**
