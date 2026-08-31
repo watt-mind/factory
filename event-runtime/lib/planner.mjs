@@ -437,6 +437,18 @@ export function wrapLinearReads(
       ? resetMs
       : resolveNow() + 60_000;
   };
+  // The serve-loop chain pass injects awaited readers, so a rate limit arrives
+  // as a rejected promise the synchronous `catch` below never sees. Latch it
+  // from the promise too, and drop the memo entry so one transient failure is
+  // not replayed to every later row in the pass as a cached value.
+  const trackAsync = (value, forget) => {
+    if (!value || typeof value.then !== "function") return value;
+    value.then(undefined, (err) => {
+      remember(err);
+      forget();
+    });
+    return value;
+  };
 
   // Bind policy dependencies into production fetchers rather than appending
   // them to every call. In particular, fetchViewer's second positional value
@@ -471,7 +483,7 @@ export function wrapLinearReads(
       try {
         const value = fetchTicket(id, repo);
         cache.tickets.set(key, value);
-        return value;
+        return trackAsync(value, () => cache.tickets.delete(key));
       } catch (err) {
         remember(err);
         throw err;
@@ -485,7 +497,7 @@ export function wrapLinearReads(
       try {
         const value = fetchViewer(repo, ...args);
         cache.viewers.set(key, value);
-        return value;
+        return trackAsync(value, () => cache.viewers.delete(key));
       } catch (err) {
         remember(err);
         throw err;
@@ -502,7 +514,7 @@ export function wrapLinearReads(
         cache.inFlightCalls += 1;
         const value = fetchInFlight(repo);
         cache.inFlight.set(key, { value, at });
-        return value;
+        return trackAsync(value, () => cache.inFlight.delete(key));
       } catch (err) {
         remember(err);
         throw err;
@@ -757,21 +769,59 @@ async function spawnRead(args, timeoutMs) {
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
-    timeout: timeoutMs,
+    // Backstop only: the explicit timer below owns the classification, and a
+    // child that ignores SIGTERM still has to die.
+    timeout: Math.max(1, timeoutMs) + 500,
+    killSignal: "SIGKILL",
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  if (exitCode !== 0) {
-    const err = new Error(stderr.trim() || `command exited ${exitCode}`);
+  let timedOut = false;
+  const timer = setTimeout(
+    () => {
+      timedOut = true;
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        // Already exited: the awaited result below is authoritative.
+      }
+    },
+    Math.max(1, timeoutMs),
+  );
+  let stdout;
+  let stderr;
+  let exitCode;
+  try {
+    [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+  if (exitCode === 0) return stdout;
+  // `linearReadTimedOut` is the only thing standing between a stalled control
+  // plane and a hard `dispatch_recheck_failed: linear_read_failed` that the
+  // chain memo then holds for a full stale window. It recognises a timeout by
+  // `code === "ETIMEDOUT"` or by `signal === "SIGTERM" && status == null` —
+  // the shape `child_process` gives a killed sync read — so reproduce exactly
+  // that shape here instead of a bare non-zero exit.
+  if (timedOut) {
+    const err = new Error(
+      `command timed out after ${timeoutMs}ms: ${args.join(" ")}`,
+    );
+    err.code = "ETIMEDOUT";
+    err.signal = proc.signalCode ?? "SIGTERM";
+    err.status = null;
     err.stderr = stderr;
     err.stdout = stdout;
-    err.status = exitCode;
     throw err;
   }
-  return stdout;
+  const err = new Error(stderr.trim() || `command exited ${exitCode}`);
+  err.stderr = stderr;
+  err.stdout = stdout;
+  err.status = exitCode;
+  err.signal = proc.signalCode ?? null;
+  throw err;
 }
 
 function autoApprovalReadTimeout(readBudget) {
@@ -857,54 +907,67 @@ async function fetchInFlightAsync(repoConfig, { readBudget = null } = {}) {
   }
 }
 
+// Escalation-only forge reads. These run at most twice per escalated
+// continuation (never on the ordinary dispatch path), so they reuse the forge
+// client the synchronous gate already uses rather than re-deriving the REST
+// shapes: `prView`'s field projection, `prList`'s `cwd: workspacePath` repo
+// resolution, and the explicit `headRefName === branch` match that a bare
+// `pulls[0]` would silently get wrong when the forge returns more than one row.
 async function fetchPullRequestAsync(payload) {
-  try {
-    const pull = JSON.parse(
-      await spawnRead(
-        ["gh", "api", `repos/${payload?.github}/pulls/${payload?.pr}`],
-        AUTO_APPROVAL_CONTROL_PLANE_READ_TIMEOUT_MS,
-      ),
-    );
-    return { state: pull.state?.toUpperCase(), headRefOid: pull.head?.sha };
-  } catch (err) {
-    const stderr = String(err?.stderr ?? "");
-    if (/not found|no pull request/i.test(stderr)) return null;
-    throw new Error(
-      `github_read_failed: ${stderr.trim().split("\n").pop() || err.message}`,
-      { cause: err },
-    );
-  }
+  return fetchPullRequestDefault(payload);
 }
 
 async function findWorkspacePullRequestAsync(payload) {
-  const workspacePath = payload?.workspacePath;
-  if (!workspacePath || !existsSync(workspacePath)) return null;
-  const branch = (
-    await spawnRead(
-      ["git", "-C", workspacePath, "branch", "--show-current"],
-      AUTO_APPROVAL_CONTROL_PLANE_READ_TIMEOUT_MS,
-    )
-  ).trim();
-  if (!branch) return null;
-  const pulls = JSON.parse(
-    await spawnRead(
-      [
-        "gh",
-        "pr",
-        "list",
-        "--repo",
-        String(payload?.github),
-        "--head",
-        branch,
-        "--state",
-        "open",
-        "--json",
-        "number,url,headRefName,isDraft,state",
-      ],
-      AUTO_APPROVAL_CONTROL_PLANE_READ_TIMEOUT_MS,
-    ),
+  return findWorkspacePullRequestDefault(payload);
+}
+
+/**
+ * The dispatch bag for serve's chain-approval pass.
+ *
+ * Before this existed the serve tick handed `autoApproveChains` the raw SQLite
+ * handle, which is not a dispatch bag at all: `withPassInFlightCache` saw no
+ * `fetchInFlight` and returned it unchanged (so #1064's per-pass in-flight
+ * cache was inert under serve), the eligibility gate found no injected readers
+ * and fell back to the uncached synchronous `*Default` fetchers, and
+ * `wrapLinearReads` — the ticket/viewer/in-flight memo *and* the rate-limit
+ * latch — never applied on this path at all. This wires all three together
+ * with awaited readers and a per-row read deadline.
+ *
+ * `resetReadBudget` is called by the async gate at the start of every row, so a
+ * stalled row cannot spend the next row's read time (the same rule
+ * `planAdmittedEvents` applies per event).
+ */
+export function createAutoApprovalDispatch({
+  now = Date.now,
+  configSnapshot = null,
+  cache = null,
+  readTimeoutMs = AUTO_APPROVAL_CONTROL_PLANE_READ_TIMEOUT_MS,
+} = {}) {
+  const snapshot = configSnapshot ?? policySnapshot();
+  const readCache = cache ?? createLinearReadCache();
+  const newBudget = () =>
+    createLinearReadBudget({ now, timeoutMs: readTimeoutMs });
+  readCache.linearReadBudget = newBudget();
+  const readBudget = () => readCache.linearReadBudget;
+  return wrapLinearReads(
+    {
+      configSnapshot: snapshot,
+      resetReadBudget: () => {
+        readCache.linearReadBudget = newBudget();
+      },
+      fetchTicket: (ticketId, repo) =>
+        fetchTicketAsync(ticketId, repo, { readBudget: readBudget() }),
+      fetchViewer: (repoName, snap = snapshot) =>
+        fetchViewerAsync(repoName, snap, { readBudget: readBudget() }),
+      fetchInFlight: (repo) =>
+        fetchInFlightAsync(repo, { readBudget: readBudget() }),
+      fetchPullRequest: fetchPullRequestAsync,
+      findWorkspacePullRequest: findWorkspacePullRequestAsync,
+    },
+    readCache,
+    now,
+    snapshot,
   );
-  return Array.isArray(pulls) ? (pulls[0] ?? null) : null;
 }
 
 /**
@@ -1245,6 +1308,34 @@ function refusal(reason, evidence, decision = "noop", detail = null) {
  * The shared dispatch proof used at plan time and immediately before a chain
  * auto-approval. Its evidence captures every fact the latter needs to compare.
  */
+/**
+ * The tier-escalation continuation bindings, as a check map. Shared so the
+ * async wrapper can decide whether an escalation prefetch is worth a forge read
+ * using exactly the condition the gate itself will apply — an unauthorised
+ * continuation refuses before it ever looks at a pull request.
+ *
+ * @returns {Record<string, boolean>|null} null when there is no continuation.
+ */
+function escalationContinuationChecks(payload, escalatedContinuation) {
+  if (!escalatedContinuation) return null;
+  return {
+    ticket_escalation_failed_run_bound: Boolean(
+      escalatedContinuation.failedRunId,
+    ),
+    ticket_escalation_continuation_run_bound: Boolean(
+      escalatedContinuation.continuationRunId,
+    ),
+    ticket_escalation_root_run_bound: Boolean(escalatedContinuation.rootRunId),
+    ticket_escalation_projection_applied:
+      escalatedContinuation.projectionState === "applied",
+    ticket_escalation_repo_matches:
+      escalatedContinuation.repo === payload?.repo,
+    ticket_escalation_ticket_matches:
+      String(escalatedContinuation.ticket) === String(payload?.ticket),
+    ticket_escalation_model_tier_strong: payload?.modelTier === "strong",
+  };
+}
+
 export function worktreeDispatchAutoEligibility(
   payload,
   {
@@ -1336,26 +1427,10 @@ export function worktreeDispatchAutoEligibility(
   }
   evidence.checks.ticket_identifier_parseable = true;
 
-  const escalationChecks = escalatedContinuation
-    ? {
-        ticket_escalation_failed_run_bound: Boolean(
-          escalatedContinuation.failedRunId,
-        ),
-        ticket_escalation_continuation_run_bound: Boolean(
-          escalatedContinuation.continuationRunId,
-        ),
-        ticket_escalation_root_run_bound: Boolean(
-          escalatedContinuation.rootRunId,
-        ),
-        ticket_escalation_projection_applied:
-          escalatedContinuation.projectionState === "applied",
-        ticket_escalation_repo_matches:
-          escalatedContinuation.repo === payload?.repo,
-        ticket_escalation_ticket_matches:
-          String(escalatedContinuation.ticket) === String(payload?.ticket),
-        ticket_escalation_model_tier_strong: payload?.modelTier === "strong",
-      }
-    : null;
+  const escalationChecks = escalationContinuationChecks(
+    payload,
+    escalatedContinuation,
+  );
   if (escalationChecks) Object.assign(evidence.checks, escalationChecks);
   const canResumeEscalation = Boolean(
     escalationChecks && Object.values(escalationChecks).every(Boolean),
@@ -1739,16 +1814,43 @@ export function worktreeDispatchAutoEligibility(
   return { ok: true, evidence };
 }
 
+/** Thrown by the local-refusal prepass the first time the gate wants a read. */
+const CONTROL_PLANE_READ_REQUIRED = Symbol("control_plane_read_required");
+
 /**
  * Async counterpart for the serve-loop chain approval path. The historical
  * synchronous gate remains in place for planner and execute-time consumers
  * outside that loop; changing it would turn their established result contract
- * into Promises. All control-plane readers used here yield through Bun.spawn.
+ * into Promises. All control-plane readers used here yield.
+ *
+ * Shape of the pass, and why:
+ *
+ *  1. A *local-refusal prepass* runs the gate with readers that refuse to read.
+ *     Every zero-read refusal (`repo_registry_invalid`, `repo_unknown`,
+ *     `repo_report_only`, `no_worktree_scripts`, a malformed ticket id, the
+ *     budget refusal, `capacity_full`) is decided there, so a row that cannot
+ *     dispatch never spends a control-plane read. The prepass stops at the
+ *     gate's first read, well before `ownedPathsClosureDetails` walks the repo
+ *     for pin manifests, so it is cheap; the lease count it needs is memoised
+ *     and handed to the real pass.
+ *  2. The reads the gate will actually want are then resolved once, under the
+ *     gate's own conditions (viewer only for an assigned ticket, forge reads
+ *     only for an authorised escalation continuation).
+ *  3. The gate runs *once* more, with every reader resolved. The expensive tail
+ *     — owned-paths closure, pin-manifest freshness, escalate-path globs — is
+ *     therefore evaluated exactly one time per row, which is the whole point of
+ *     moving this pass off the synchronous path.
+ *
+ * A read that throws is not swallowed: it is replayed from the throwing reader
+ * inside the real pass, so the gate emits its own typed refusal with full
+ * evidence rather than the wrapper inventing one (or rejecting outright).
  */
 export async function worktreeDispatchAutoEligibilityAsync(
   payload,
   options = {},
 ) {
+  // Per-row deadline: a stalled row must not consume the next row's read time.
+  options.resetReadBudget?.();
   const readBudget = options.readBudget ?? null;
   const fetchTicket =
     options.fetchTicket ??
@@ -1763,6 +1865,60 @@ export async function worktreeDispatchAutoEligibilityAsync(
   const findWorkspacePullRequest =
     options.findWorkspacePullRequest ?? findWorkspacePullRequestAsync;
 
+  // Worker leases are a filesystem scan. Memoise them across the two gate
+  // passes so the prepass costs nothing the real pass then repeats.
+  const baseCountLeases =
+    options.countLeases ?? ((repoName) => liveWorkerLeases(repoName).length);
+  const baseHasTicketLease =
+    options.hasTicketLease ??
+    ((repoName, ticket) =>
+      liveWorkerLeases(repoName).some(
+        (lease) => String(lease.ticket) === String(ticket),
+      ));
+  const leaseCounts = new Map();
+  const ticketLeases = new Map();
+  const countLeases = (repoName) => {
+    const key = String(repoName ?? "");
+    if (!leaseCounts.has(key)) leaseCounts.set(key, baseCountLeases(repoName));
+    return leaseCounts.get(key);
+  };
+  const hasTicketLease = (repoName, ticket) => {
+    const key = `${repoName ?? ""}\u0000${ticket ?? ""}`;
+    if (!ticketLeases.has(key))
+      ticketLeases.set(key, baseHasTicketLease(repoName, ticket));
+    return ticketLeases.get(key);
+  };
+  // Same reason: the budget refusal reads policy and the ledger. The prepass
+  // and the real pass are one row's evaluation, so they see one answer.
+  const baseBudgetRefusal = options.budgetRefusal ?? defaultBudgetRefusal;
+  let budgetRefusalMemo;
+  const budgetRefusal = (...args) => {
+    if (budgetRefusalMemo === undefined)
+      budgetRefusalMemo = baseBudgetRefusal(...args);
+    return budgetRefusalMemo;
+  };
+  const base = { ...options, countLeases, hasTicketLease, budgetRefusal };
+
+  const readRefused = () => {
+    throw CONTROL_PLANE_READ_REQUIRED;
+  };
+  let localRefusal = null;
+  try {
+    localRefusal = worktreeDispatchAutoEligibility(payload, {
+      ...base,
+      fetchTicket: readRefused,
+      fetchViewer: readRefused,
+      fetchInFlight: readRefused,
+      fetchPullRequest: readRefused,
+      findWorkspacePullRequest: readRefused,
+    });
+  } catch (err) {
+    if (err !== CONTROL_PLANE_READ_REQUIRED) throw err;
+  }
+  // A verdict without a read is final either way: the gate reads nothing after
+  // it has decided.
+  if (localRefusal) return localRefusal;
+
   const ticket = await fetchTicket(payload?.ticket, payload?.repo);
   const viewer = ticket?.assignee
     ? await fetchViewer(payload?.repo, options.configSnapshot)
@@ -1771,42 +1927,65 @@ export async function worktreeDispatchAutoEligibilityAsync(
   try {
     repo = getRepo(snapshotRepos(options.configSnapshot), payload?.repo);
   } catch {
-    // The synchronous gate below owns the typed invalid-repo refusal.
+    // Unreachable after the prepass, which owns the typed unknown-repo
+    // refusal; stay defensive rather than turning it into a rejection.
   }
-  const escalation = options.escalatedContinuation;
-  const failedPullRequest = Number.isInteger(
-    escalation?.failedRunArtifact?.prNumber,
-  )
-    ? await fetchPullRequest({
+  const escalation = options.escalatedContinuation ?? null;
+  const escalationChecks = escalationContinuationChecks(payload, escalation);
+  // Only an escalation the gate will actually honour is worth a forge read;
+  // an unauthorised continuation refuses `ticket_assigned` before it looks.
+  const canResumeEscalation = Boolean(
+    escalationChecks && Object.values(escalationChecks).every(Boolean),
+  );
+  let failedPullRequest = null;
+  let failedPullRequestError = null;
+  if (
+    canResumeEscalation &&
+    Number.isInteger(escalation?.failedRunArtifact?.prNumber)
+  ) {
+    try {
+      failedPullRequest = await fetchPullRequest({
         github: repo?.github,
         pr: escalation.failedRunArtifact.prNumber,
-      })
-    : null;
-  const workspacePullRequest = escalation?.workspacePath
-    ? await findWorkspacePullRequest({
+      });
+    } catch (err) {
+      failedPullRequestError = err;
+    }
+  }
+  let workspacePullRequest = null;
+  let workspacePullRequestError = null;
+  if (canResumeEscalation && escalation?.workspacePath) {
+    try {
+      workspacePullRequest = await findWorkspacePullRequest({
         github: repo?.github,
         workspacePath: escalation.workspacePath,
-      })
-    : null;
-  const resolved = {
-    ...options,
+      });
+    } catch (err) {
+      workspacePullRequestError = err;
+    }
+  }
+  // The in-flight list is the gate's last read and sits behind every ticket,
+  // claim and owned-paths refusal — but the gate is synchronous, so resolving
+  // it lazily would cost a second full pass (and a second pin-manifest walk)
+  // for every healthy row. Resolve it here instead: the caller's dispatch bag
+  // memoises the query per repo for the pass (#1064) and per team+project for
+  // the cache TTL, so at most one query is issued for the whole pass however
+  // many rows reach this point.
+  const inFlight = await fetchInFlight(repo);
+
+  return worktreeDispatchAutoEligibility(payload, {
+    ...base,
     fetchTicket: () => ticket,
     fetchViewer: () => viewer,
-    fetchPullRequest: () => failedPullRequest,
-    findWorkspacePullRequest: () => workspacePullRequest,
-  };
-  // Keep the expensive in-flight query behind every local/ticket/claim/path
-  // refusal. A malformed or no-longer-ready ticket must not consume another
-  // scarce control-plane read merely because chain approval is asynchronous.
-  const beforeInFlight = worktreeDispatchAutoEligibility(payload, {
-    ...resolved,
-    fetchInFlight: () => [],
-  });
-  if (!beforeInFlight.ok || !repo || !ticket) return beforeInFlight;
-  const inFlight = await fetchInFlight(repo);
-  return worktreeDispatchAutoEligibility(payload, {
-    ...resolved,
     fetchInFlight: () => inFlight,
+    fetchPullRequest: () => {
+      if (failedPullRequestError) throw failedPullRequestError;
+      return failedPullRequest;
+    },
+    findWorkspacePullRequest: () => {
+      if (workspacePullRequestError) throw workspacePullRequestError;
+      return workspacePullRequest;
+    },
   });
 }
 
@@ -3247,11 +3426,21 @@ export function planAdmittedEvents(db, registry, opts = {}) {
   // candidate set, while every failed proof remains open with a typed reason.
   // This stays after planning so no approval happens inside a planner write
   // transaction or before the proposal has a persisted immutable RunSpec.
-  autoApproveChains(db, registry, {
-    now: opts.now ?? Date.now(),
-    policyVersion: opts.policyVersion ?? "unknown",
-    dispatchEligibility: worktreeDispatchAutoEligibility,
-    dispatch,
-  });
+  // Exactly one owner per process. `serve` runs this pass itself, on its own
+  // loop, with awaited readers and a per-row read deadline; letting the
+  // planner (inline here, or in its worker thread) run the same pass as well
+  // meant two concurrent passes over the same rows — the pass-serialising
+  // WeakMap in auto-approval is per-realm and does not cross the worker
+  // thread. Serve clears the flag for its process before starting the worker.
+  const chainApproval =
+    opts.autoApproveChains ??
+    process.env.FACTORY_PLANNER_AUTO_APPROVE_CHAINS !== "0";
+  if (chainApproval)
+    autoApproveChains(db, registry, {
+      now: opts.now ?? Date.now(),
+      policyVersion: opts.policyVersion ?? "unknown",
+      dispatchEligibility: worktreeDispatchAutoEligibility,
+      dispatch,
+    });
   return { planned, failed, deadLettered };
 }

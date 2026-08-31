@@ -33,6 +33,7 @@ import {
   policyDispatchPaused,
   policyMaxConcurrentMerges,
   policyMergeBatchSize,
+  createAutoApprovalDispatch,
   wrapLinearReads,
   worktreeDispatchAutoEligibility,
   worktreeDispatchAutoEligibilityAsync,
@@ -1168,7 +1169,33 @@ describe("planEvent worktree gate (WM-108)", () => {
     fetchInFlight: () => [],
   });
 
-  test("async dispatch eligibility awaits control-plane readers without changing the synchronous gate contract (#2123)", async () => {
+  async function withReposRootAsync(yaml, fn, policy = null) {
+    const root = tmpDir("evrt-plan-wt-");
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    writeFileSync(path.join(root, "config", "repos.yaml"), yaml);
+    if (policy) writeFileSync(path.join(root, "config", "policy.yaml"), policy);
+    const previous = process.env.FACTORY_REPOS_ROOT;
+    process.env.FACTORY_REPOS_ROOT = root;
+    try {
+      return await fn(root);
+    } finally {
+      if (previous === undefined) delete process.env.FACTORY_REPOS_ROOT;
+      else process.env.FACTORY_REPOS_ROOT = previous;
+    }
+  }
+
+  const resumableEscalation = (overrides = {}) => ({
+    failedRunId: "run_failed",
+    continuationRunId: "run_continuation",
+    rootRunId: "run_root",
+    projectionState: "applied",
+    repo: "tiered",
+    ticket: "WM-694",
+    failedRunArtifact: { prNumber: 7 },
+    ...overrides,
+  });
+
+  test("a zero-read refusal costs no control-plane read at all (#2123)", async () => {
     let ticketReads = 0;
     const result = await worktreeDispatchAutoEligibilityAsync(
       { repo: "not-configured", ticket: "WM-2123" },
@@ -1179,8 +1206,100 @@ describe("planEvent worktree gate (WM-108)", () => {
         },
       },
     );
-    expect(ticketReads).toBe(1);
+    // The refusal is decidable from local config alone, so the ticket read is
+    // never issued — the read is gated behind the prepass, not before it.
+    expect(ticketReads).toBe(0);
     expect(result.refusal?.reason).toMatch(/^repo_unknown: /);
+  });
+
+  test("async dispatch eligibility awaits its readers and evaluates the gate once per row (#2123)", async () => {
+    await withReposRootAsync(tierRepo, async () => {
+      let ticketReads = 0;
+      let inFlightReads = 0;
+      let budgetChecks = 0;
+      const result = await worktreeDispatchAutoEligibilityAsync(
+        { repo: "tiered", ticket: "WM-694" },
+        {
+          countLeases: () => 0,
+          budgetRefusal: () => {
+            budgetChecks += 1;
+            return null;
+          },
+          fetchTicket: async () => {
+            ticketReads += 1;
+            return tierTicket();
+          },
+          fetchInFlight: async () => {
+            inFlightReads += 1;
+            return [];
+          },
+        },
+      );
+
+      expect(result.ok).toBe(true);
+      expect(ticketReads).toBe(1);
+      expect(inFlightReads).toBe(1);
+      // One evaluation of the row's local facts. The earlier shape ran the
+      // whole synchronous gate twice per row (once with an empty in-flight
+      // list), repeating the repo snapshot, the lease scan, the budget read
+      // and — worse — the owned-paths closure and its unbounded pin-manifest
+      // walk, which is the very per-row cost this pass exists to remove.
+      expect(budgetChecks).toBe(1);
+    });
+  });
+
+  test("an escalation forge read failure is the gate's typed refusal, not a rejected call (#2123)", async () => {
+    await withReposRootAsync(tierRepo, async () => {
+      const result = await worktreeDispatchAutoEligibilityAsync(
+        { repo: "tiered", ticket: "WM-694", modelTier: "strong" },
+        {
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          fetchTicket: async () => tierTicket(),
+          fetchInFlight: async () => [],
+          escalatedContinuation: resumableEscalation(),
+          fetchPullRequest: async () => {
+            throw new Error("github_read_failed: gh api timed out");
+          },
+        },
+      );
+
+      expect(result.ok).toBeFalsy();
+      expect(result.refusal?.reason).toBe("ticket_escalation_pr_read_failed");
+      expect(result.refusal?.decision).toBe("noop");
+    });
+  });
+
+  test("an unauthorised escalation continuation spends no forge read (#2123)", async () => {
+    await withReposRootAsync(tierRepo, async () => {
+      let pullRequestReads = 0;
+      const result = await worktreeDispatchAutoEligibilityAsync(
+        { repo: "tiered", ticket: "WM-694", modelTier: "strong" },
+        {
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          fetchTicket: async () => tierTicket(),
+          fetchInFlight: async () => [],
+          // Projection not applied: the gate refuses before it would ever look
+          // at the failed run's pull request.
+          escalatedContinuation: resumableEscalation({
+            projectionState: "pending",
+            workspacePath: "/tmp/nowhere",
+          }),
+          fetchPullRequest: async () => {
+            pullRequestReads += 1;
+            return { state: "OPEN" };
+          },
+          findWorkspacePullRequest: async () => {
+            pullRequestReads += 1;
+            return null;
+          },
+        },
+      );
+
+      expect(pullRequestReads).toBe(0);
+      expect(result.refusal?.reason).toBe("ticket_assigned");
+    });
   });
 
   test("ticket-scoped human-needed refusals deduplicate unchanged bodies and supersede changed ones", () => {
@@ -4581,6 +4700,42 @@ describe("Linear rate limit (WM-878)", () => {
       expect(error?.name).toBe("LinearReadBudgetExceededError");
       expect(error?.message).toBe("linear_read_budget_exhausted");
     });
+  });
+
+  test("an awaited read killed by its own deadline defers instead of failing hard (#2123)", async () => {
+    // Regression: the async reader must reproduce the killed-child error shape
+    // `linearReadTimedOut` recognises (code ETIMEDOUT / SIGTERM with a null
+    // status). Without it the timeout surfaced as `linear_read_failed`, which
+    // chain approval memoises as a hard refusal instead of retrying next tick.
+    const root = tmpDir("evrt-plan-async-cli-");
+    const cli = path.join(root, "linear.mjs");
+    writeFileSync(cli, "Bun.sleepSync(5000);");
+    const previousCli = process.env.FACTORY_LINEAR_CLI;
+    process.env.FACTORY_LINEAR_CLI = cli;
+    try {
+      const dispatch = createAutoApprovalDispatch({
+        readTimeoutMs: 50,
+        configSnapshot: {
+          root,
+          repos: new Map([
+            ["gated", { name: "gated", controlPlane: "linear" }],
+          ]),
+        },
+      });
+
+      let error;
+      try {
+        await dispatch.fetchTicket("WM-slow", "gated");
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error?.name).toBe("LinearReadBudgetExceededError");
+      expect(error?.message).toBe("linear_read_budget_exhausted");
+    } finally {
+      if (previousCli === undefined) delete process.env.FACTORY_LINEAR_CLI;
+      else process.env.FACTORY_LINEAR_CLI = previousCli;
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("a simulated Linear 400 rate-limit refuses linear_rate_limited, leaves the event admitted, and does not dead-letter", () => {

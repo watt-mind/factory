@@ -765,6 +765,55 @@ export default async function start() {
     db.close();
   });
 
+  test("tick names the step it is inside to onStep, and clears it on the way out (#2123)", async () => {
+    // The tick telemetry serve reports as `currentStep`/`stallMs`: while a step
+    // runs its name is live, and the step's own body must be able to observe
+    // it — that is what turns a wedged loop into "wedged inside <step>" instead
+    // of an after-the-fact overrun log that a blocked loop cannot even write.
+    const { tick, TICK_SUBSYSTEMS } = await import("../cli.mjs");
+    const { loadRegistry } = await import("../lib/registry.mjs");
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-31T19:01:40.738Z");
+    let current = "sentinel";
+    let observedInsideStep = null;
+    const steps = [];
+    const subsystems = Object.fromEntries(
+      TICK_SUBSYSTEMS.filter((name) => name !== "plan").map((name) => [
+        name,
+        () => {},
+      ]),
+    );
+    subsystems["auto-approve-chains"] = () => {
+      observedInsideStep = current;
+    };
+
+    const result = await tick({
+      db,
+      registry: loadRegistry(),
+      now,
+      policyVersion: "git:test",
+      skipPlan: true,
+      subsystems,
+      log: () => {},
+      onStep: ({ name }) => {
+        current = name;
+        steps.push(name);
+      },
+    });
+
+    expect(observedInsideStep).toBe("auto-approve-chains");
+    expect(steps[0]).toBe("tick emit");
+    expect(steps.at(-1)).toBeNull();
+    // Every step opens with its name and closes with null: an odd count would
+    // leave `currentStep` naming a step that already finished.
+    expect(steps.filter((name) => name === null)).toHaveLength(
+      steps.length / 2,
+    );
+    expect(current).toBeNull();
+    expect(Object.keys(result.stepMs)).toContain("auto-approve-chains");
+    db.close();
+  });
+
   test("tick bounds orphaned non-run proposal sweeps and logs the remainder", async () => {
     const { tick } = await import("../cli.mjs");
     const { loadRegistry } = await import("../lib/registry.mjs");

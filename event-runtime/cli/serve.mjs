@@ -285,13 +285,17 @@ export async function tick({
   });
 
   await runStep("auto-approve-chains", async () => {
-    const { worktreeDispatchAutoEligibilityAsync } =
+    const { worktreeDispatchAutoEligibilityAsync, createAutoApprovalDispatch } =
       await import("../lib/planner.mjs");
+    // A real dispatch bag, not the raw DB handle: awaited readers memoised by
+    // `wrapLinearReads` (ticket/viewer/in-flight plus the rate-limit latch) and
+    // by `withPassInFlightCache` for the pass (#1064), each read bounded well
+    // under the tracker's own 15s request timeout.
     const auto = await autoApproveChains(db, registry, {
       now,
       policyVersion: pv,
       dispatchEligibility: worktreeDispatchAutoEligibilityAsync,
-      dispatch: db ? db : null,
+      dispatch: createAutoApprovalDispatch(),
     });
     for (const a of auto.approved)
       logLine(
@@ -649,6 +653,12 @@ export default async function serve(args) {
   let currentTickStep = null;
   let tickStartedAt = null;
   let plannerWorker = null;
+  // Chain approval has exactly one owner in this process: the tick step below,
+  // which runs it with awaited, memoised, per-row-bounded control-plane reads.
+  // Without this the planner would run the same pass again — inline under
+  // `--no-planner`, and in the worker thread otherwise (the worker inherits
+  // this env at creation) — concurrently against the same rows.
+  process.env.FACTORY_PLANNER_AUTO_APPROVE_CHAINS = "0";
 
   function getTickStats() {
     const queued =
@@ -656,12 +666,15 @@ export default async function serve(args) {
         .query(`SELECT 1 FROM events WHERE status = 'admitted' LIMIT 1`)
         .get() != null;
     return {
+      // `lastMs`/`overruns` are the published /health names (orchestrator
+      // watchdog and the web dashboard read them) — keep exactly one spelling.
       lastMs: lastTickMs,
-      lastTickMs,
       overruns: tickOverruns,
-      tickOverruns,
       lastTickAt,
       currentStep: currentTickStep,
+      // How long the in-progress tick has been running. Non-zero here with a
+      // stale `lastTickAt` distinguishes "wedged inside <currentStep>" from
+      // "idle" without waiting for the after-the-fact overrun log.
       stallMs:
         busy && tickStartedAt ? Math.max(0, Date.now() - tickStartedAt) : 0,
       ...(lastOverrunAt ? { lastOverrunAt } : {}),
