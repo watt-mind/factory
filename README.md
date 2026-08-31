@@ -103,11 +103,7 @@ including the choices that were wrong first.
 
 ## The loop
 
-```
-Triage ──①triage──▶ ai:agent-ready ──②dispatch──▶ PR ──③merge──▶ Done
-                                                             │
-                             reaper ◀── crashed claims ◀──────┘
-```
+[![The autonomous software loop](docs/media/autonomous-loop.png)](https://watt-mind.github.io/factory/concepts/the-loop/)
 
 Dispatch is rolling: the moment a ticket finishes, its slot refills. Commands
 are repo-agnostic verbs and `--repo` supplies the targets, so adding a
