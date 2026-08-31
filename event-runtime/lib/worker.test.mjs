@@ -5495,7 +5495,9 @@ sh -c 'sleep 5 & wait'
           body: "run:run-1504",
         }),
       }),
-    ).toThrow("handoff_pr_form_invalid");
+    ).toThrow(
+      "handoff_pr_form_invalid: PR #77 has no Fixes line for watt-mind/factory#1504",
+    );
     expect(missingFixes.pr).toMatchObject({
       hasFixesLine: false,
       hasRunTrailer: true,
@@ -5593,6 +5595,69 @@ sh -c 'sleep 5 & wait'
       }),
     });
     expect(linear.pr.hasFixesLine).toBe(true);
+  });
+
+  const assertHandoffFormThrows = (body, message) => {
+    const handoff = {
+      github: "watt-mind/factory",
+      prNumber: 77,
+      ticket: "watt-mind/factory#1504",
+      runId: "run-1504",
+    };
+    expect(() =>
+      assertHandoffPullRequestBase({
+        handoff,
+        base: "develop",
+        fetchPullRequest: () => ({
+          baseRefName: "develop",
+          isDraft: false,
+          body,
+        }),
+      }),
+    ).toThrow(message);
+  };
+
+  test("handoff PR form identifies malformed Fixes-like lines", () => {
+    for (const [body, offendingLine] of [
+      ["Fixes: #1504\n\nrun:run-1504", "Fixes: #1504"],
+      [
+        "Fixes watt-mind/factory#1504 (follow-up)\n\nrun:run-1504",
+        "Fixes watt-mind/factory#1504 (follow-up)",
+      ],
+    ]) {
+      assertHandoffFormThrows(
+        body,
+        `handoff_pr_form_invalid: PR #77 has malformed Fixes line ${JSON.stringify(offendingLine)}`,
+      );
+    }
+  });
+
+  test("handoff PR form reports a well-formed Fixes line that is not first", () => {
+    // The line itself is exactly right — quoting it as "malformed" against an
+    // identical expectation would leave the author nothing to act on.
+    assertHandoffFormThrows(
+      "Implementation details\n\nFixes watt-mind/factory#1504\n\nrun:run-1504",
+      'handoff_pr_form_invalid: PR #77 has "Fixes watt-mind/factory#1504" but it must be the first line of the PR body',
+    );
+  });
+
+  test("handoff PR form accepts a Fixes line after leading blank lines", () => {
+    const handoff = {
+      github: "watt-mind/factory",
+      prNumber: 77,
+      ticket: "watt-mind/factory#1504",
+      runId: "run-1504",
+    };
+    assertHandoffPullRequestBase({
+      handoff,
+      base: "develop",
+      fetchPullRequest: () => ({
+        baseRefName: "develop",
+        isDraft: false,
+        body: "\n  \nFixes watt-mind/factory#1504\n\nrun:run-1504",
+      }),
+    });
+    expect(handoff.pr.hasFixesLine).toBe(true);
   });
 
   test("handoff PR form refuses a null body and reports unknown for a missing ticket or run id", () => {

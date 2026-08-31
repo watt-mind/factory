@@ -618,6 +618,16 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    version: 23,
+    name: "merge_eligibility_event_type_index",
+    up(db) {
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_events_type_source
+          ON events (type, source);
+      `);
+    },
+  },
 ];
 
 export const CURRENT_SCHEMA_VERSION =

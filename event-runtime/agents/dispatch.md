@@ -157,6 +157,13 @@ shell` means the spawn prompt was defective: correct its path/launch details
    run:<concrete run id, e.g. run_0e2d13da-…>
    ```
 
+   The first line is strict: it must be exactly `Fixes <ticket-ref>` by
+   itself — no colon after `Fixes`, no surrounding sentence, and nothing after
+   the ref except at most one trailing `.`, `,`, `;`, or `:`. Use the exact
+   ticket reference: `owner/repo#N` is always accepted; bare `#N` is accepted
+   only when the PR targets that same repository. A malformed Fixes-like line
+   fails handoff validation, so correct it rather than adding another line.
+
    `Fixes <TICKET>` and the trailing concrete `run:<run-id>` line are unchanged
    required lines — the `## Validation` section is added between them, never
    in place of either. Append the trailer with
