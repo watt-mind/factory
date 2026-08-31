@@ -419,7 +419,7 @@ factory ticket raw '<query>' --var key=value
 `claim` exits non-zero when another agent won the race — that is not a
 retry. For anything the verbs do not cover, `raw '<query>' --var k=v`
 beats inventing a new flag. Fallback when the CLI is missing:
-`bun "$FACTORY_ROOT/tools/linear.mjs"`.
+`bun "$FACTORY_ROOT/tools/ticket.mjs"`.
 
 ### GitHub CLI timeout
 

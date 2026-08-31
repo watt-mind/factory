@@ -2860,7 +2860,7 @@ export function createReloadWatcher({
   };
 }
 
-const linearCli = () => path.join(FACTORY_ROOT, "tools", "linear.mjs");
+const linearCli = () => path.join(FACTORY_ROOT, "tools", "ticket.mjs");
 
 /**
  * Resolve Linear credentials from the environment, optionally reading an

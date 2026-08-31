@@ -4,8 +4,8 @@
  *
  * Named `ticket`, not `linear`, because it has routed through
  * `loadControlPlane()` since WM-894 and picks its control plane per repo
- * since WM-1007 — only the filename still said Linear (WM-1026).
- * `tools/linear.mjs` remains as a deprecated shim.
+ * since WM-1007 — only the filename still said Linear (WM-1026). The
+ * deprecated `tools/linear.mjs` shim was removed in WM-2017.
  *
  *   bun tools/ticket.mjs get CLNT-616
  *   bun tools/ticket.mjs get owner/repo#123  # or configured-repo-name#123
@@ -1083,8 +1083,8 @@ const VERBS = {
 };
 
 /**
- * The CLI entry point, exported so `tools/linear.mjs` (the deprecated shim,
- * WM-1026) can delegate to exactly this and stay behaviourally identical.
+ * The CLI entry point, exported so embedders can drive exactly the argv the
+ * shell entry does (the WM-1026 shim that relied on this is gone, WM-2017).
  */
 export async function main() {
   installLinearBudgetCapture();

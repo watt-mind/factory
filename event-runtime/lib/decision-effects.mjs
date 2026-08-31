@@ -18,7 +18,7 @@ function resolvePolicyVersion(value) {
     : factoryPolicyVersion();
 }
 
-const linearCli = () => path.join(FACTORY_ROOT, "tools", "linear.mjs");
+const linearCli = () => path.join(FACTORY_ROOT, "tools", "ticket.mjs");
 const execFileAsync = promisify(execFile);
 
 async function runLinear(args) {
