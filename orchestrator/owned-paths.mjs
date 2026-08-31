@@ -365,9 +365,13 @@ export function globToRegExp(glob, { repoRoot } = {}) {
   // as `package.json` means the root file and nothing nested. This resolution
   // only ever narrows the matcher, so it is opt-in — never inferred from the
   // process CWD, which the compiler does not read.
+  // Only an absolute root may narrow the matcher. A relative `repoRoot` would
+  // be joined against `process.cwd()`, letting whichever directory the caller
+  // happens to run from decide the semantics; that is exactly what this
+  // resolution must never do, so such a root is ignored rather than resolved.
   const resolvesToRootFile =
     typeof repoRoot === "string" &&
-    repoRoot !== "" &&
+    path.isAbsolute(repoRoot) &&
     !g.includes("/") &&
     statSync(path.join(repoRoot, g), { throwIfNoEntry: false })?.isFile() ===
       true;

@@ -189,20 +189,95 @@ test("bare filenames with extensions match that basename at any repository depth
   expectTrue(!matcher.test("event-runtime/lib/adapters/acp.mjs"));
 });
 
-test("compiling a glob never reads the filesystem or the process CWD", () => {
+test("compiling a glob never consults the process CWD", () => {
   // `globToRegExp` is shared with the escalate gate, which compiles globs with
   // no repository in hand. If compilation consulted an ambient directory, a
   // stray root file would silently narrow an escalate_paths matcher and drop
-  // escalations. Whatever sits next to the test process must not matter: with
-  // no `repoRoot`, a bare filename stays an any-depth basename matcher.
-  const root = mkdtempSync(path.join(tmpdir(), "owned-paths-root-"));
+  // escalations. Prove it by compiling the same glob from two working
+  // directories — one that does hold a root `package.json`, one that does not
+  // — in a child process, and requiring identical results.
+  const withFile = mkdtempSync(path.join(tmpdir(), "owned-paths-cwd-with-"));
+  const withoutFile = mkdtempSync(path.join(tmpdir(), "owned-paths-cwd-out-"));
   try {
-    writeFileSync(path.join(root, "package.json"), "{}\n");
-    const ambient = globToRegExp("package.json");
-    expectTrue(ambient.test("package.json"));
-    expectTrue(ambient.test("fixtures/nested/package.json"));
+    writeFileSync(path.join(withFile, "package.json"), "{}\n");
+    const script = [
+      `const { globToRegExp } = await import(${JSON.stringify(
+        path.resolve(import.meta.dir, "owned-paths.mjs"),
+      )});`,
+      `const m = globToRegExp("package.json");`,
+      `console.log(JSON.stringify([m.source, m.test("package.json"), m.test("fixtures/nested/package.json")]));`,
+    ].join("\n");
+    const run = (cwd) =>
+      Bun.spawnSync({
+        cmd: [process.execPath, "-e", script],
+        cwd,
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+        .stdout.toString()
+        .trim();
+    const inWith = run(withFile);
+    expectTrue(inWith.length > 0, "child process produced no output");
+    expectEqual(JSON.parse(inWith).slice(1), [true, true]);
+    expectEqual(run(withoutFile), inWith);
     // Explicitly passing no root, and passing an empty options bag, agree.
     expectTrue(globToRegExp("package.json", {}).test("nested/package.json"));
+  } finally {
+    rmSync(withFile, { recursive: true, force: true });
+    rmSync(withoutFile, { recursive: true, force: true });
+  }
+});
+
+test("a relative repoRoot is ignored rather than resolved against the CWD", () => {
+  // A relative root would be joined onto `process.cwd()`, reintroducing exactly
+  // the ambient dependency the option exists to avoid. Such a root must leave
+  // the matcher at its broad any-depth default.
+  for (const repoRoot of ["", ".", "orchestrator", "./orchestrator"]) {
+    const matcher = globToRegExp("package.json", { repoRoot });
+    expectTrue(matcher.test("package.json"), repoRoot);
+    expectTrue(matcher.test("fixtures/nested/package.json"), repoRoot);
+  }
+});
+
+test("globsOverlap threads repoRoot through to both sides", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "owned-paths-overlap-"));
+  try {
+    writeFileSync(path.join(root, "package.json"), "{}\n");
+    // Root-free (the default everywhere but the handoff deviation gate): the
+    // bare name is an any-depth basename and overlaps the nested file.
+    expectTrue(globsOverlap("package.json", "fixtures/nested/package.json"));
+    expectTrue(globsOverlap("fixtures/nested/package.json", "package.json"));
+    // With the root named and a real file there, the bare entry means that one
+    // file, so the nested path no longer overlaps -- in either argument order.
+    expectTrue(
+      !globsOverlap("package.json", "fixtures/nested/package.json", {
+        repoRoot: root,
+      }),
+    );
+    expectTrue(
+      !globsOverlap("fixtures/nested/package.json", "package.json", {
+        repoRoot: root,
+      }),
+    );
+    // The root file itself still overlaps, and a wildcarded counterpart is
+    // still compiled with the same root.
+    expectTrue(
+      globsOverlap("package.json", "package.json", { repoRoot: root }),
+    );
+    expectTrue(globsOverlap("*.json", "package.json", { repoRoot: root }));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("globsOverlap with an unresolvable repoRoot keeps any-depth overlap", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "owned-paths-overlap-none-"));
+  try {
+    expectTrue(
+      globsOverlap("package.json", "fixtures/nested/package.json", {
+        repoRoot: root,
+      }),
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
