@@ -106,6 +106,12 @@ export function trackProcessGroupForPid(pid, options = {}) {
       `cannot track process group for invalid or incomplete test pid ${pid}`,
     );
   }
+  // In a PID namespace `ps` can fail to resolve the runner during module
+  // initialization. Refuse the runner by PID as well as by its resolved PGID
+  // so cleanup can never register (and later signal) its own process group.
+  if (Number(pid) === process.pid) {
+    throw new Error("refusing to track the test runner process group");
+  }
   if (process.platform === "win32")
     return trackProcess(pid, { ...options, group: false });
   const pgid = processGroupForPid(pid);
