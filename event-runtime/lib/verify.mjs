@@ -1035,7 +1035,13 @@ export function composeHandoffVerification(handoff) {
     const failingTests = handoff.repoVerify.failingTests ?? [];
     lines.push(
       failingTests.length > 0
-        ? `- Repo verify failing tests: ${failingTests.map((name) => `\`${name}\``).join(", ")}`
+        ? `- Repo verify failing tests: ${failingTests
+            .map((name) =>
+              name.startsWith("…and ")
+                ? name
+                : `\`${name.replaceAll("`", "'")}\``,
+            )
+            .join(", ")}`
         : "- Repo verify failing tests: none parseable",
     );
   }
@@ -1152,6 +1158,13 @@ export const HANDOFF_FAILURE_OUTPUT_MAX_CHARS = 2 * 1024;
 // as the failure (WM-918's own registry test says "reads bun (fail) and ✗").
 const REPO_VERIFY_TEST_FAILURE_LINE = /^\s*(?:\(fail\)|✗)/i;
 const REPO_VERIFY_ERROR_LINE = /\berror\b/i;
+// bun appends a per-test wall-clock suffix (e.g. "[12.34ms]", "[1.2s]") after
+// the marker is stripped; it varies run to run and defeats the Set dedup.
+const REPO_VERIFY_TIMING_SUFFIX = /\s*\[[\d.]+m?s\]$/;
+// Bound the handoff record itself, independent of how the comment renders
+// it: an unbounded name list can blow GitHub's 64KB comment limit on broad
+// failures (a single suite regression can list hundreds of test names).
+const REPO_VERIFY_FAILING_TESTS_MAX = 20;
 
 /**
  * Extract runner-reported failing test names for the handoff record. Keeping
@@ -1159,16 +1172,25 @@ const REPO_VERIFY_ERROR_LINE = /\berror\b/i;
  * useful to triage without asking it to parse a truncated failure message.
  */
 export function repoVerifyFailingTests(output) {
-  return [
+  const names = [
     ...new Set(
       stripAnsi(output)
         .split("\n")
         .map((line) => line.trim())
         .filter((line) => REPO_VERIFY_TEST_FAILURE_LINE.test(line))
-        .map((line) => line.replace(REPO_VERIFY_TEST_FAILURE_LINE, "").trim())
+        .map((line) =>
+          line
+            .replace(REPO_VERIFY_TEST_FAILURE_LINE, "")
+            .replace(REPO_VERIFY_TIMING_SUFFIX, "")
+            .trim(),
+        )
         .filter(Boolean),
     ),
   ];
+  if (names.length <= REPO_VERIFY_FAILING_TESTS_MAX) return names;
+  const shown = names.slice(0, REPO_VERIFY_FAILING_TESTS_MAX);
+  shown.push(`…and ${names.length - REPO_VERIFY_FAILING_TESTS_MAX} more`);
+  return shown;
 }
 
 function boundedDiagnostic(lines) {
