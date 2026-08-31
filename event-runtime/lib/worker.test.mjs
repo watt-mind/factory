@@ -279,12 +279,17 @@ describe("worker", () => {
     );
     const expectedError =
       "FACTORY_EVENT_PORT must be a positive integer between 1 and 65535";
-    const fetchFn = spyOn(globalThis, "fetch");
+    let fetchCalls = 0;
+    const fetchFn = async () => {
+      fetchCalls += 1;
+      throw new Error("invalid ports must not attempt notification delivery");
+    };
     try {
       const result = await drainLocalNotifyOutbox({
         home,
         runId,
         port: "not-a-port",
+        fetchFn,
       });
       expect(result.delivered).toEqual([]);
       expect(result.undelivered).toEqual([
@@ -298,13 +303,35 @@ describe("worker", () => {
         },
         { title: "invalid local notification record", error: expectedError },
       ]);
-      expect(fetchFn).not.toHaveBeenCalled();
+      expect(fetchCalls).toBe(0);
       // The outbox stays put as the recovery source.
       expect(existsSync(outbox)).toBe(true);
     } finally {
-      fetchFn.mockRestore();
       rmSync(home, { recursive: true, force: true });
     }
+  });
+
+  test("forbids global fetch spies in lib tests", () => {
+    // Worker code accepts injected fetchFn dependencies. Keeping spies local to
+    // that seam prevents a global patch from leaking into interleaved tests.
+    const libDir = import.meta.dir;
+    const testFiles = [];
+    const visit = (dir) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const file = path.join(dir, entry.name);
+        if (entry.isDirectory()) visit(file);
+        else if (entry.isFile() && entry.name.endsWith(".test.mjs")) {
+          testFiles.push(file);
+        }
+      }
+    };
+    visit(libDir);
+
+    const globalFetchSpy = /spyOn\s*\(\s*globalThis\s*,\s*["']fetch["']/;
+    const violations = testFiles.filter((file) =>
+      globalFetchSpy.test(readFileSync(file, "utf8")),
+    );
+    expect(violations).toEqual([]);
   });
 
   test("drains a worktree adapter's local notifications and reports an undelivered one after the adapter throws", async () => {
