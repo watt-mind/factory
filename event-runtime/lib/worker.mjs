@@ -3370,6 +3370,41 @@ export function assertHandoffPullRequestBase({
   }
 }
 
+/**
+ * Promote a successfully verified dispatch PR out of draft so GitHub routes
+ * its full CI lane. The handoff's state is updated only after `gh pr ready`
+ * succeeds, making the worker-authored handoff comment an observation of the
+ * final PR state rather than the draft state it had during local verification.
+ */
+export function defaultMarkHandoffPullRequestReady({ handoff, forge = null }) {
+  if (handoff?.pr?.draft !== true) return false;
+  const prNumber = handoffPrNumber(handoff);
+  if (!handoff.github || !prNumber) {
+    throw new ContractViolation(
+      [
+        "pr_ready_unverifiable: handoff requires GitHub repository and numeric PR number",
+      ],
+      { reasonCode: "handoff_verification_failed", handoff },
+    );
+  }
+  forge ??= loadForge();
+  try {
+    forge.prSetDraft(handoff.github, prNumber, false, {
+      timeout: workerSubprocessTimeoutMs(),
+    });
+  } catch (err) {
+    throw new ContractViolation(
+      [
+        `pr_ready_failed: could not mark PR #${prNumber} ready for review: ${String(err?.message ?? err)}`,
+      ],
+      { reasonCode: "handoff_verification_failed", handoff },
+    );
+  }
+  handoff.pr.draft = false;
+  handoff.prDraft = false;
+  return true;
+}
+
 const BASELINE_COMMENT_MARKER = "wm:baseline:red:";
 
 function baselineFailureSignature({ why, log = null, baseline = null }) {
@@ -3561,6 +3596,7 @@ export async function executeClaimed(
       returnHandoffTicket: () => true,
       reconcileVerifiedHandoffTicket: () => false,
       holdPullRequest: () => false,
+      markHandoffPullRequestReady: () => false,
       findWorkspacePullRequest: () => null,
     };
   } else if (dispatchStubSelected) {
@@ -3575,6 +3611,7 @@ export async function executeClaimed(
       returnHandoffTicket: () => true,
       reconcileVerifiedHandoffTicket: () => false,
       holdPullRequest: () => false,
+      markHandoffPullRequestReady: () => false,
       findWorkspacePullRequest: () => null,
       ...dispatchOpts,
     };
@@ -3625,6 +3662,9 @@ export async function executeClaimed(
     dispatchOpts?.holdPullRequest ?? defaultHoldPullRequest;
   const fetchHandoffPullRequestFn =
     dispatchOpts?.fetchHandoffPullRequest ?? defaultFetchHandoffPullRequest;
+  const markHandoffPullRequestReadyFn =
+    dispatchOpts?.markHandoffPullRequestReady ??
+    defaultMarkHandoffPullRequestReady;
   const projectTierEscalationFn =
     dispatchOpts?.projectTierEscalation ?? defaultProjectTierEscalation;
   let handoffContext = null;
@@ -5057,6 +5097,7 @@ export async function executeClaimed(
           base: worktreeRecord?.base,
           fetchPullRequest: fetchHandoffPullRequestFn,
         });
+        markHandoffPullRequestReadyFn({ handoff: verified.handoff });
       }
     } catch (err) {
       if (!(err instanceof ContractViolation)) {
@@ -5100,6 +5141,7 @@ export async function executeClaimed(
               base: worktreeRecord?.base,
               fetchPullRequest: fetchHandoffPullRequestFn,
             });
+            markHandoffPullRequestReadyFn({ handoff: verified.handoff });
           }
           verified.result.reasonCode = RECOVERED_RESULT_REASON;
           break verificationAttempt;

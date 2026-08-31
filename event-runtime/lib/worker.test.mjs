@@ -88,6 +88,7 @@ import {
   DEFAULT_MAX_ENVIRONMENT_RETRIES,
   defaultFindWorkspacePullRequest,
   defaultLocksDir,
+  defaultMarkHandoffPullRequestReady,
   defaultReconcileVerifiedHandoffTicket,
   defaultHoldPullRequest,
   defaultProjectTierEscalation,
@@ -5872,6 +5873,41 @@ sh -c 'sleep 5 & wait'
       hasRunTrailer: true,
       hasUnexpandedRunTrailer: false,
     });
+  });
+
+  test("verified draft handoffs are marked ready and record draft: no", () => {
+    const handoff = {
+      github: "watt-mind/factory",
+      prNumber: 77,
+      pr: { number: 77, draft: true },
+      prDraft: true,
+    };
+    const calls = [];
+    const forge = {
+      prSetDraft: (...args) => calls.push(args),
+    };
+
+    expect(defaultMarkHandoffPullRequestReady({ handoff, forge })).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual([
+      "watt-mind/factory",
+      77,
+      false,
+      expect.objectContaining({ timeout: expect.any(Number) }),
+    ]);
+    expect(handoff.pr.draft).toBe(false);
+    expect(handoff.prDraft).toBe(false);
+    expect(
+      composeHandoffVerification({
+        ...handoff,
+        verification: null,
+        repoVerify: null,
+        webBuild: null,
+      }),
+    ).toContain("- PR: #77 (draft: no)");
+
+    expect(defaultMarkHandoffPullRequestReady({ handoff, forge })).toBe(false);
+    expect(calls).toHaveLength(1);
   });
 
   test("handoff PR form rejects literal run trailers when a run ID is set", () => {

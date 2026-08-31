@@ -989,12 +989,12 @@ export function composeHandoffVerification(handoff) {
     const draftState =
       typeof handoff.pr?.draft === "boolean"
         ? handoff.pr.draft
-          ? "draft"
-          : "ready"
+          ? "yes"
+          : "no"
         : typeof handoff.prDraft === "boolean"
           ? handoff.prDraft
-            ? "draft"
-            : "ready"
+            ? "yes"
+            : "no"
           : "draft state unknown";
     const fixes =
       typeof handoff.pr?.hasFixesLine === "boolean"
@@ -1009,7 +1009,7 @@ export function composeHandoffVerification(handoff) {
           : "no"
         : "unknown";
     lines.push(
-      `- PR: #${prNumber} (${draftState}) · Fixes: ${fixes} · run trailer: ${runTrailer}`,
+      `- PR: #${prNumber} (${draftState === "draft state unknown" ? draftState : `draft: ${draftState}`}) · Fixes: ${fixes} · run trailer: ${runTrailer}`,
     );
   }
   const primary = handoff.verification;
