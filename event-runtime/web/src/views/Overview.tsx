@@ -11,7 +11,13 @@ import {
 } from "react";
 import { api } from "../api";
 import { goPrefixActive } from "../goSequence";
-import { keyGuard, refetchIntervals, useNow, useRequeuePoll } from "../hooks";
+import {
+  keyGuard,
+  refetchIntervals,
+  useListKeys,
+  useNow,
+  useRequeuePoll,
+} from "../hooks";
 import type {
   JournalEntry,
   EventFocus,
@@ -23,7 +29,9 @@ import type { OperatorContext } from "../context";
 import { scopedCount, scopedTally } from "../context";
 import { EMPTY, formatBytes, formatRelative } from "../format";
 import type { WorkerHealthFilter } from "./Workers";
+import type { OverviewNeedsYouProps } from "./Inbox";
 import {
+  Ago,
   Button,
   Disclosure,
   Dialog,
@@ -42,11 +50,147 @@ import { Button as PrimitiveButton } from "../components/ui";
 
 const FEED_CAP = 50;
 
-const OverviewNeedsYou = lazy(() =>
-  import("./Inbox").then(({ OverviewNeedsYou }) => ({
-    default: OverviewNeedsYou,
-  })),
-);
+const OverviewNeedsYou = lazy(async () => {
+  const {
+    NEEDS_YOU_CAP,
+    NeedsYouGroup,
+    NeedsYouRow,
+    displayTitle,
+    groupItems,
+  } = await import("./Inbox");
+
+  function OverviewNewestNeedsYou({
+    items,
+    runtimeItems,
+    now,
+    lastDecision,
+    runtimeLabel = "Runtime",
+    connected,
+    ackPending = false,
+    isPending = false,
+    onOpenItem,
+    onAck,
+    onMore,
+  }: OverviewNeedsYouProps) {
+    // The ledger defaults to oldest-first, but Overview is a live attention
+    // surface: preserve its shared triage groups while leading with fresh work.
+    const groups = useMemo(
+      () =>
+        groupItems(items).map(({ group, items: groupItems }) => ({
+          group,
+          items: [...groupItems].reverse(),
+        })),
+      [items],
+    );
+    const navigable = useMemo(
+      () => [
+        ...groups.flatMap(({ items: groupItems }) =>
+          groupItems
+            .slice(0, NEEDS_YOU_CAP)
+            .map((item) => ({ id: item.id, open: () => onOpenItem(item.id) })),
+        ),
+        ...runtimeItems
+          .slice(0, NEEDS_YOU_CAP)
+          .flatMap((item) =>
+            item.primaryAction
+              ? [{ id: item.id, open: item.primaryAction.onClick }]
+              : [],
+          ),
+      ],
+      [groups, onOpenItem, runtimeItems],
+    );
+    const [selected, setSelected] = useState(0);
+    const selectedIndex = Math.min(selected, Math.max(0, navigable.length - 1));
+    useListKeys({
+      count: navigable.length,
+      selected: selectedIndex,
+      onSelect: setSelected,
+      onOpen: () => navigable[selectedIndex]?.open(),
+    });
+
+    const empty = items.length === 0 && runtimeItems.length === 0;
+
+    return (
+      <section className="mb-6" aria-label="Needs you">
+        <div className="mb-2 flex items-baseline justify-between gap-3">
+          <h2>
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-(--text-faint)">
+              Needs you
+            </span>
+          </h2>
+          {items.length > 0 && (
+            <span className="text-[11px] text-(--text-faint)">
+              {items.length} open
+            </span>
+          )}
+        </div>
+        {empty && isPending ? (
+          <div className="flex items-center gap-2 px-1 py-2 text-[12px] text-(--text-faint)">
+            <span className="size-1.5 rounded-full bg-(--hue-idle)" />
+            Checking what needs you
+          </div>
+        ) : empty ? (
+          <div className="flex items-center gap-2 px-1 py-2 text-[12px] text-(--text-faint)">
+            <span className="size-1.5 rounded-full bg-(--hue-ok)" />
+            Nothing needs you · last decision{" "}
+            {lastDecision ? <Ago iso={lastDecision} now={now} /> : "—"}
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {groups.map(({ group, items: groupItems }) => (
+              <NeedsYouGroup
+                key={group.id}
+                label={group.label}
+                hue={group.hue}
+                count={groupItems.length}
+                onMore={onMore}
+              >
+                {groupItems.slice(0, NEEDS_YOU_CAP).map((item) => (
+                  <NeedsYouRow
+                    key={item.id}
+                    kind={item.kind}
+                    title={displayTitle(item)}
+                    tooltip={item.title}
+                    age={<Ago iso={item.createdAt} now={now} />}
+                    selected={navigable[selectedIndex]?.id === item.id}
+                    onOpen={() => onOpenItem(item.id)}
+                    primaryAction={{
+                      label: "Open",
+                      onClick: () => onOpenItem(item.id),
+                    }}
+                    onAck={() => onAck(item.id)}
+                    ackDisabled={!connected || ackPending}
+                  />
+                ))}
+              </NeedsYouGroup>
+            ))}
+            {runtimeItems.length > 0 && (
+              <NeedsYouGroup
+                label={runtimeLabel}
+                hue="var(--hue-warn)"
+                count={runtimeItems.length}
+              >
+                {runtimeItems.slice(0, NEEDS_YOU_CAP).map((item) => (
+                  <NeedsYouRow
+                    key={item.id}
+                    kind="Runtime"
+                    hue="var(--hue-warn)"
+                    title={item.title}
+                    selected={navigable[selectedIndex]?.id === item.id}
+                    onOpen={item.primaryAction?.onClick}
+                    primaryAction={item.primaryAction}
+                  />
+                ))}
+              </NeedsYouGroup>
+            )}
+          </div>
+        )}
+      </section>
+    );
+  }
+
+  return { default: OverviewNewestNeedsYou };
+});
 // Lazy like Needs-you: the artifact-view renderer behind the panels is not
 // entry-chunk material, and a stock install without panels never draws it.
 const PanelGrid = lazy(() =>
