@@ -10,6 +10,7 @@ import {
   defaultProveCi,
   enumerateMergePlan,
   enumerateMergeScan,
+  latestMergeFixTerminalAttempt,
   lookupMergeReview,
   persistMergeReviewFromResult,
   runScanCli,
@@ -1161,6 +1162,39 @@ describe("merge-scan enumerator (WM-936)", () => {
   }
 
   const REFUSED_AT = Date.parse("2026-08-19T16:45:00.000Z");
+
+  test("the terminal-attempt lookup excludes a matching refusal outside the durable horizon", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    insertRefusedMergeFix(db, {
+      runId: "run_fix_expired",
+      pr: 9,
+      reasonCode: "merge_fix_ticket_escalated",
+    });
+
+    expect(
+      latestMergeFixTerminalAttempt(
+        db,
+        { pr: 9, headSha: HEAD, findingHash: REBASE_HASH },
+        {
+          github: GITHUB,
+          now: REFUSED_AT + 6 * 60 * 60_000 + 1,
+        },
+      ),
+    ).toBeNull();
+    expect(
+      conflictingScan(db, {
+        now: REFUSED_AT + 6 * 60 * 60_000 + 1,
+      }).artifact.fix,
+    ).toHaveLength(1);
+  });
 
   test("a refused escalated merge-fix does not re-emit the identical finding", () => {
     const db = openDb(":memory:");

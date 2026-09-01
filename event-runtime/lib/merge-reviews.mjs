@@ -469,6 +469,31 @@ const DURABLE_MERGE_FIX_REFUSALS = new Set([
   "merge_fix_ticket_security",
 ]);
 
+export function latestMergeFixTerminalAttempt(db, item, { github, now }) {
+  const refusalCutoff = new Date(
+    Number(now) - MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MS,
+  ).toISOString();
+  return db
+    .query(
+      `SELECT a.terminal_state AS terminalState,
+              a.reason_code AS reasonCode,
+              a.finished_at AS finishedAt
+         FROM runs r
+         JOIN attempts a ON a.run_id = r.run_id AND a.attempt = r.attempts
+        WHERE r.state IN ('REFUSED', 'FAILED', 'COMPLETED', 'TIMED_OUT', 'CANCELLED')
+          AND a.terminal_state IN ('REFUSED', 'FAILED', 'COMPLETED', 'TIMED_OUT', 'CANCELLED')
+          AND a.finished_at > ?
+          AND json_extract(r.spec_json, '$.agent') = 'merge-fix@1'
+          AND json_extract(r.spec_json, '$.input.pr') = ?
+          AND json_extract(r.spec_json, '$.input.headSha') = ?
+          AND json_extract(r.spec_json, '$.input.github') = ?
+          AND json_extract(r.spec_json, '$.input.findingHash') = ?
+        ORDER BY a.finished_at DESC, r.rowid DESC
+        LIMIT 1`,
+    )
+    .get(refusalCutoff, item.pr, item.headSha, github, item.findingHash);
+}
+
 /**
  * A terminal merge-fix is normally safe to retry, but retrying the exact same
  * refusal every scan turns a tracker outage or an escalated ticket into a
@@ -485,24 +510,10 @@ const DURABLE_MERGE_FIX_REFUSALS = new Set([
  */
 function refusedMergeFixSuppressed(db, item, { github, now }) {
   if (!db) return null;
-  const latestTerminalAttempt = db
-    .query(
-      `SELECT a.terminal_state AS terminalState,
-              a.reason_code AS reasonCode,
-              a.finished_at AS finishedAt
-         FROM runs r
-         JOIN attempts a ON a.run_id = r.run_id AND a.attempt = r.attempts
-        WHERE r.state IN ('REFUSED', 'FAILED', 'COMPLETED', 'TIMED_OUT', 'CANCELLED')
-          AND a.terminal_state IN ('REFUSED', 'FAILED', 'COMPLETED', 'TIMED_OUT', 'CANCELLED')
-          AND json_extract(r.spec_json, '$.agent') = 'merge-fix@1'
-          AND json_extract(r.spec_json, '$.input.pr') = ?
-          AND json_extract(r.spec_json, '$.input.headSha') = ?
-          AND json_extract(r.spec_json, '$.input.github') = ?
-          AND json_extract(r.spec_json, '$.input.findingHash') = ?
-        ORDER BY a.finished_at DESC, r.rowid DESC
-        LIMIT 1`,
-    )
-    .get(item.pr, item.headSha, github, item.findingHash);
+  const latestTerminalAttempt = latestMergeFixTerminalAttempt(db, item, {
+    github,
+    now,
+  });
   if (
     latestTerminalAttempt?.terminalState !== "REFUSED" ||
     !latestTerminalAttempt.reasonCode
