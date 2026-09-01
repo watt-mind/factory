@@ -4547,7 +4547,6 @@ export async function executeClaimed(
         claimLockHeld = false;
       };
       const deferTransientGate = (reasonCode) => {
-        releaseGateLock();
         const deferred = deferTransientDispatchGate(db, {
           runId,
           attempt,
@@ -4680,7 +4679,6 @@ export async function executeClaimed(
         ) {
           return deferTransientGate("linear_read_failed");
         }
-        releaseGateLock();
         throw err;
       }
 
@@ -4709,13 +4707,13 @@ export async function executeClaimed(
           }
           return deferred;
         }
-        releaseGateLock();
         // The retained PR was rejected by the failed run's handoff gate and is
         // still open as a ready (non-draft) PR. Route it to review rather than
         // silently stranding it behind a refused continuation that cannot
         // open a second PR — and hold the PR itself (draft + quoted reason)
-        // so the merge stage cannot land it without a fix round. Runs after
-        // the claim lock is released: both are CLI subprocesses.
+        // so the merge stage cannot land it without a fix round. This happens
+        // before dispatch claim-lock acquisition, so both are independent CLI
+        // subprocesses rather than work inside the claim-lock window.
         if (
           gate === "dispatch" &&
           gateRefusal.reason === "ticket_pr_handoff_verification_failed" &&
