@@ -5121,7 +5121,11 @@ export async function executeClaimed(
           attempt,
           attemptStartedAt: started.startedAt,
           extraArtifacts: RUNTIME_ARTIFACTS,
+          // The empty record keeps worktree command verification suppressed;
+          // the checkout path is handed over separately so the stray-result
+          // probe still looks beside the worktree on this branch.
           worktreeRecord: {},
+          checkoutPath: worktreeRecord?.path ?? null,
           onTrace,
         });
         lateCompletion = true;

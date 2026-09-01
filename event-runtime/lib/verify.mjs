@@ -1721,6 +1721,7 @@ export function verifyResult({
   journalHead = null,
   extraArtifacts = [],
   worktreeRecord = null,
+  checkoutPath = null,
   onTrace = null,
   verifyTimeoutMs = repoVerifyTimeoutMs(),
   runHandoffCommandFn = runHandoffCommand,
@@ -1728,7 +1729,9 @@ export function verifyResult({
 }) {
   const raw = readResultFile({
     workspaceDir,
-    worktreeRecord,
+    // The stray probe only needs the physical checkout. Callers that suppress
+    // worktree command verification still pass it explicitly.
+    checkout: checkoutPath ?? worktreeRecord?.path ?? null,
     attemptStartedAt,
     onTrace,
   });
@@ -1769,12 +1772,7 @@ export function verifyResult({
  * their mtime proves they belong to this attempt; an old sibling ticket's
  * envelope is never a valid substitute for this run's result.
  */
-function readResultFile({
-  workspaceDir,
-  worktreeRecord,
-  attemptStartedAt,
-  onTrace,
-}) {
+function readResultFile({ workspaceDir, checkout, attemptStartedAt, onTrace }) {
   const resultPath = path.join(workspaceDir, "result.json");
   try {
     return readFileSync(resultPath, "utf8");
@@ -1782,7 +1780,6 @@ function readResultFile({
     // The workspace result is deliberately the only unconditional location.
   }
 
-  const checkout = worktreeRecord?.path;
   const candidates = [];
   if (checkout) {
     candidates.push(path.join(checkout, "result.json"));
@@ -1808,17 +1805,27 @@ function readResultFile({
       stalePaths.push({ path: candidatePath, mtime: stat.mtime.toISOString() });
       continue;
     }
+    let raw;
     try {
-      const raw = readFileSync(candidatePath, "utf8");
-      rmSync(candidatePath, { force: true });
-      onTrace?.("lifecycle", {
-        note: "result_recovered_from_stray_path",
-        path: candidatePath,
-      });
-      return raw;
+      raw = readFileSync(candidatePath, "utf8");
     } catch {
       // A concurrent cleanup can remove a candidate between stat and read.
+      continue;
     }
+    try {
+      JSON.parse(raw);
+    } catch {
+      // Adoption destroys the candidate, so only well-formed JSON is adopted:
+      // a truncated or foreign file is left in place for the next candidate
+      // (and for the operator) rather than deleted unread.
+      continue;
+    }
+    rmSync(candidatePath, { force: true });
+    onTrace?.("lifecycle", {
+      note: "result_recovered_from_stray_path",
+      path: candidatePath,
+    });
+    return raw;
   }
 
   const err = new ContractViolation(["missing_result"]);

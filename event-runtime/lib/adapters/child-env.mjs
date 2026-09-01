@@ -85,7 +85,7 @@ export const HARNESS_LAYOUT = Object.freeze({
 export const KILL_GRACE_MS = 30_000;
 
 export const PROMPT_SUFFIX =
-  "\n\n---\nInput is at ./input.json. Write the factory.agent-result/v1 envelope to $FACTORY_RESULT_PATH. Work only inside this directory.";
+  "\n\n---\nInput is at ./input.json. Write the factory.agent-result/v1 envelope to ./result.json (or $FACTORY_RESULT_PATH when set). Work only inside this directory.";
 
 /**
  * Prompt bytes are verified by the registry before they reach an adapter.

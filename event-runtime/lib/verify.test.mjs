@@ -491,6 +491,75 @@ describe("verifyResult", () => {
     ]);
   });
 
+  test("leaves an unparseable stray in place and tries the next candidate", () => {
+    const workspaceDir = tmpDir("evrt-verify-workspace-");
+    const physicalParent = tmpDir("evrt-verify-checkout-parent-");
+    const checkout = path.join(physicalParent, "checkout");
+    mkdirSync(checkout);
+    symlinkSync(checkout, path.join(workspaceDir, "repo"), "dir");
+    // The first candidate probed is <checkout>/result.json; a truncated file
+    // there must not be destroyed, and must not stop the sibling lookup.
+    const truncatedPath = path.join(checkout, "result.json");
+    writeFileSync(truncatedPath, '{"schemaVersion": "factory.age', "utf8");
+    const strayPath = path.join(physicalParent, "result.json");
+    writeFileSync(
+      strayPath,
+      JSON.stringify({
+        schemaVersion: "factory.agent-result/v1",
+        terminalState: "completed",
+        artifact: VALID_ARTIFACT,
+      }),
+      "utf8",
+    );
+
+    const out = verifyResult({
+      spec: makeSpec(),
+      def,
+      registry,
+      workspaceDir,
+      worktreeRecord: { path: checkout },
+      attempt: 1,
+      attemptStartedAt: new Date(Date.now() - 5_000).toISOString(),
+    });
+
+    expect(out.kind).toBe("completed");
+    expect(existsSync(strayPath)).toBe(false);
+    expect(readFileSync(truncatedPath, "utf8")).toBe(
+      '{"schemaVersion": "factory.age',
+    );
+  });
+
+  test("probes the checkout handed over separately from the worktree record", () => {
+    const workspaceDir = tmpDir("evrt-verify-workspace-");
+    const checkout = tmpDir("evrt-verify-checkout-");
+    const strayPath = path.join(checkout, "result.json");
+    writeFileSync(
+      strayPath,
+      JSON.stringify({
+        schemaVersion: "factory.agent-result/v1",
+        terminalState: "completed",
+        artifact: VALID_ARTIFACT,
+      }),
+      "utf8",
+    );
+
+    // The timed-out preflight suppresses worktree command verification with an
+    // empty record while still naming the checkout for the stray probe.
+    const out = verifyResult({
+      spec: makeSpec(),
+      def,
+      registry,
+      workspaceDir,
+      worktreeRecord: {},
+      checkoutPath: checkout,
+      attempt: 1,
+      attemptStartedAt: new Date(Date.now() - 5_000).toISOString(),
+    });
+
+    expect(out.kind).toBe("completed");
+    expect(existsSync(strayPath)).toBe(false);
+  });
+
   test("rejects a stale stray result from before this attempt", () => {
     const workspaceDir = tmpDir("evrt-verify-workspace-");
     const checkout = tmpDir("evrt-verify-checkout-");

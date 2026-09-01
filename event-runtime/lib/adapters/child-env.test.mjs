@@ -16,6 +16,7 @@ import {
   PROMPT_SUFFIX as acpPromptSuffix,
   verifiedPrompt as acpVerifiedPrompt,
 } from "./acp.mjs";
+import { dispatchIdentityEnv } from "../worker.mjs";
 import { safeChildEnvironment as claudeEnvironment } from "./claude.mjs";
 import {
   HARNESS_LAYOUT as claudeHarnessLayout,
@@ -134,6 +135,58 @@ describe("shared child environment", () => {
       keySet(outputs.claude).filter((key) => key !== "CURSOR_API_ENDPOINT"),
     );
     expect(keySet(outputs.pi)).toEqual(keySet(outputs.claude));
+  });
+
+  test("states a result location every agent can honour, dispatched or not", () => {
+    // The suffix is appended to EVERY agent's prompt, but FACTORY_RESULT_PATH
+    // is only exported for dispatch@ agents. It must therefore name the
+    // workspace-relative path unconditionally and the variable only as an
+    // override, or a non-dispatch agent is told to write to an empty string.
+    expect(PROMPT_SUFFIX).toContain("./result.json");
+    expect(PROMPT_SUFFIX).toContain("$FACTORY_RESULT_PATH when set");
+
+    const def = { ref: "review@1", promptText: "You are a test agent." };
+    const prompt = verifiedPrompt(def, "claude");
+    const resultPath = "/workspace/result.json";
+
+    for (const agent of ["review@1", "dispatch@1"]) {
+      const env = dispatchIdentityEnv({
+        spec: { agent },
+        env: { FACTORY_ROOT: "/factory-root" },
+        resultPath,
+      });
+      const dispatched = agent.startsWith("dispatch@");
+      expect(env.FACTORY_RESULT_PATH).toBe(dispatched ? resultPath : undefined);
+      // Whichever half of the instruction applies, the agent can resolve it.
+      const referenced = env.FACTORY_RESULT_PATH ?? "./result.json";
+      expect(referenced.length).toBeGreaterThan(0);
+      expect(prompt).toContain(
+        dispatched ? "$FACTORY_RESULT_PATH" : "./result.json",
+      );
+    }
+  });
+
+  test("carries FACTORY_RESULT_PATH through the child environment", () => {
+    expect(DISPATCH_IDENTITY_ENV).toContain("FACTORY_RESULT_PATH");
+    const supplied = { FACTORY_RESULT_PATH: "/workspace/result.json" };
+    for (const environment of [
+      claudeEnvironment,
+      commandEnvironment,
+      agyEnvironment,
+      cursorEnvironment,
+      piEnvironment,
+    ]) {
+      expect(
+        environment(supplied, { mutating: false }).FACTORY_RESULT_PATH,
+      ).toBe("/workspace/result.json");
+    }
+    // Even under the aggressive FACTORY_ prefix strip the adapters apply.
+    expect(
+      safeChildEnvironment(supplied, false, {
+        extraStrip: ["FACTORY_RESULT_PATH"],
+        stripPrefixes: ["FACTORY_"],
+      }).FACTORY_RESULT_PATH,
+    ).toBe("/workspace/result.json");
   });
 
   test("dispatch identity survives extraStrip and FACTORY_ prefix stripping", () => {
