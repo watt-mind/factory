@@ -1140,9 +1140,27 @@ function collectTicketIds(value, targetSet = new Set()) {
 
 const TICKET_INDEX_CACHE_TTL_MS = 5000;
 const ticketIndexCache = new Map();
+let ticketIndexCacheDatabaseIds = new WeakMap();
+let nextTicketIndexCacheDatabaseId = 0;
 
 export function clearTicketIndexCache() {
   ticketIndexCache.clear();
+  ticketIndexCacheDatabaseIds = new WeakMap();
+  nextTicketIndexCacheDatabaseId = 0;
+}
+
+function ticketIndexCacheDatabaseId(db) {
+  let id = ticketIndexCacheDatabaseIds.get(db);
+  if (id == null) {
+    id = ++nextTicketIndexCacheDatabaseId;
+    ticketIndexCacheDatabaseIds.set(db, id);
+  }
+  return id;
+}
+
+function ticketIndexCacheSinceKey(since) {
+  if (since == null || since === "") return "";
+  return typeof since === "string" ? since.trim() : String(since);
 }
 
 /**
@@ -1161,7 +1179,12 @@ export function ticketIndexView(db, options = {}) {
       ? options.repo.trim().toLowerCase()
       : null;
 
-  const cacheKey = `${db.filename ?? "mem"}:${sinceMs}:${limit}:${repoFilter ?? ""}`;
+  const cacheKey = JSON.stringify([
+    ticketIndexCacheDatabaseId(db),
+    ticketIndexCacheSinceKey(options.since),
+    limit,
+    repoFilter,
+  ]);
   if (options.noCache !== true) {
     const cached = ticketIndexCache.get(cacheKey);
     if (cached && nowMs - cached.timestamp < TICKET_INDEX_CACHE_TTL_MS) {

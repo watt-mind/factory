@@ -25,6 +25,7 @@ import {
   clearObservedModelCache,
   clearRunSubjectCache,
   clearTicketDetailCache,
+  clearTicketIndexCache,
   mergeTicketSupply,
   scanTicketSupply,
   setTicketDetailControlPlane,
@@ -1818,6 +1819,41 @@ describe("recent-ticket index (WM-821)", () => {
       const direct = ticketIndexView(s.db, { since: "14d", nowMs });
       expect(direct.length).toBe(5);
     } finally {
+      s.close();
+    }
+  });
+
+  test("caches ticket index requests across advancing clocks until its TTL expires", async () => {
+    const nowMs = Date.parse("2026-08-18T12:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      clearTicketIndexCache();
+      const initial = ticketIndexView(s.db, { nowMs, since: "14d" });
+      expect(initial).toEqual([]);
+
+      const observedAt = new Date(nowMs - 1000).toISOString();
+      s.db
+        .query(
+          `INSERT INTO events
+           (source, event_id, type, subject, occurred_at, received_at, envelope_json, payload_hash, admitted_at)
+           VALUES ('test', 'ticket-index-cache', 'ticket.updated', 'WM-2158', ?, ?, '{}', 'sha256:test', ?)`,
+        )
+        .run(observedAt, observedAt, observedAt);
+
+      const cached = ticketIndexView(s.db, {
+        nowMs: nowMs + 10,
+        since: "14d",
+      });
+      expect(cached).toBe(initial);
+      expect(cached).toEqual([]);
+
+      const refreshed = ticketIndexView(s.db, {
+        nowMs: nowMs + 5001,
+        since: "14d",
+      });
+      expect(refreshed.map((ticket) => ticket.id)).toEqual(["WM-2158"]);
+    } finally {
+      clearTicketIndexCache();
       s.close();
     }
   });
