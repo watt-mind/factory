@@ -1488,6 +1488,104 @@ describe("merge-scan enumerator (WM-936)", () => {
     expect(beforeCooldown.artifact.fix).toEqual([]);
     expect(afterCooldown.artifact.fix).toHaveLength(1);
   });
+
+  function withEnv(key, value, fn) {
+    const previous = process.env[key];
+    process.env[key] = value;
+    try {
+      return fn();
+    } finally {
+      if (previous === undefined) delete process.env[key];
+      else process.env[key] = previous;
+    }
+  }
+
+  test("a durable cooldown configured below the transient one still suppresses a transient refusal", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    insertRefusedMergeFix(db, {
+      runId: "run_fix_narrow_durable",
+      pr: 9,
+      reasonCode: "merge_fix_ticket_read_failed",
+    });
+
+    // The durable window is narrower than the transient one, so a query bound
+    // derived from the durable cooldown alone would drop this refusal five
+    // minutes in and re-dispatch it every scan for the next ten.
+    withEnv("FACTORY_MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MINUTES", "1", () => {
+      const now = REFUSED_AT + 5 * 60_000;
+      expect(
+        latestMergeFixTerminalAttempt(
+          db,
+          { pr: 9, headSha: HEAD, findingHash: REBASE_HASH },
+          { github: GITHUB, now },
+        )?.reasonCode,
+      ).toBe("merge_fix_ticket_read_failed");
+      expect(conflictingScan(db, { now }).artifact.fix).toEqual([]);
+    });
+  });
+
+  test("the transient cooldown boundary follows its environment override", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    insertRefusedMergeFix(db, {
+      runId: "run_fix_transient_override",
+      pr: 9,
+      reasonCode: "merge_fix_ticket_read_failed",
+    });
+
+    // 29 minutes in is past the 15-minute default but inside the override.
+    withEnv("FACTORY_MERGE_FIX_REFUSAL_COOLDOWN_MINUTES", "30", () => {
+      expect(
+        conflictingScan(db, { now: REFUSED_AT + 29 * 60_000 }).artifact.fix,
+      ).toEqual([]);
+      expect(
+        conflictingScan(db, { now: REFUSED_AT + 31 * 60_000 }).artifact.fix,
+      ).toHaveLength(1);
+    });
+  });
+
+  test("the durable cooldown boundary follows its environment override", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    insertRefusedMergeFix(db, {
+      runId: "run_fix_durable_override",
+      pr: 9,
+      reasonCode: "merge_fix_ticket_escalated",
+    });
+
+    // 7h in is past the 6h default but inside the 10h override.
+    withEnv("FACTORY_MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MINUTES", "600", () => {
+      expect(
+        conflictingScan(db, { now: REFUSED_AT + 7 * 60 * 60_000 }).artifact.fix,
+      ).toEqual([]);
+      expect(
+        conflictingScan(db, { now: REFUSED_AT + 11 * 60 * 60_000 }).artifact
+          .fix,
+      ).toHaveLength(1);
+    });
+  });
 });
 
 describe("merge-plan batch selection (WM-908)", () => {

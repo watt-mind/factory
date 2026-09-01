@@ -495,13 +495,21 @@ export function mergeFixDurableRefusalCooldownMs(env = process.env) {
 const MERGE_FIX_MAX_RUN_LIFETIME_MS = 24 * 60 * 60_000;
 
 export function latestMergeFixTerminalAttempt(db, item, { github, now }) {
+  // The query bound must cover the widest cooldown any reason code can earn,
+  // not just the durable one: an operator can configure the durable window
+  // below the transient one, and a bound derived from the durable window alone
+  // would then drop transient refusals that are still inside their cooldown.
   const durableCooldownMs = mergeFixDurableRefusalCooldownMs();
-  const refusalCutoff = new Date(Number(now) - durableCooldownMs).toISOString();
+  const maxCooldownMs = Math.max(
+    durableCooldownMs,
+    mergeFixRefusalCooldownMs(),
+  );
+  const refusalCutoff = new Date(Number(now) - maxCooldownMs).toISOString();
   // Pure prefilter on the join's outer loop: it keeps whole runs (and their
   // json_extract work) out of the scan without ever being the deciding term —
   // `a.finished_at > refusalCutoff` remains the correctness bound.
   const runCreatedCutoff = new Date(
-    Number(now) - durableCooldownMs - MERGE_FIX_MAX_RUN_LIFETIME_MS,
+    Number(now) - maxCooldownMs - MERGE_FIX_MAX_RUN_LIFETIME_MS,
   ).toISOString();
   return db
     .query(
