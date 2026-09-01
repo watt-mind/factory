@@ -44,11 +44,16 @@ test("pack command supports explicit init destinations and validation", () => {
   });
 });
 
-test("the first-party reference packs both pass authoring validation", () => {
-  for (const name of ["example-hello", "ops-disk"]) {
+test("the first-party reference packs all pass authoring validation", () => {
+  const expectedAgents = {
+    "example-hello": 1,
+    "ops-disk": 1,
+    editorial: 4,
+  };
+  for (const [name, agents] of Object.entries(expectedAgents)) {
     expect(validatePack(path.resolve("packs", name))).toMatchObject({
       name,
-      agents: 1,
+      agents,
     });
   }
 });
