@@ -469,9 +469,22 @@ const DURABLE_MERGE_FIX_REFUSALS = new Set([
   "merge_fix_ticket_security",
 ]);
 
+// Slack between a run's creation and its final attempt finishing. Runs are
+// bounded well below this by dispatch timeouts, so a run created before
+// `cooldown + slack` ago cannot have finished inside the cooldown horizon.
+const MERGE_FIX_MAX_RUN_LIFETIME_MS = 24 * 60 * 60_000;
+
 export function latestMergeFixTerminalAttempt(db, item, { github, now }) {
   const refusalCutoff = new Date(
     Number(now) - MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MS,
+  ).toISOString();
+  // Pure prefilter on the join's outer loop: it keeps whole runs (and their
+  // json_extract work) out of the scan without ever being the deciding term —
+  // `a.finished_at > refusalCutoff` remains the correctness bound.
+  const runCreatedCutoff = new Date(
+    Number(now) -
+      MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MS -
+      MERGE_FIX_MAX_RUN_LIFETIME_MS,
   ).toISOString();
   return db
     .query(
@@ -483,6 +496,7 @@ export function latestMergeFixTerminalAttempt(db, item, { github, now }) {
         WHERE r.state IN ('REFUSED', 'FAILED', 'COMPLETED', 'TIMED_OUT', 'CANCELLED')
           AND a.terminal_state IN ('REFUSED', 'FAILED', 'COMPLETED', 'TIMED_OUT', 'CANCELLED')
           AND a.finished_at > ?
+          AND r.created_at > ?
           AND json_extract(r.spec_json, '$.agent') = 'merge-fix@1'
           AND json_extract(r.spec_json, '$.input.pr') = ?
           AND json_extract(r.spec_json, '$.input.headSha') = ?
@@ -491,7 +505,14 @@ export function latestMergeFixTerminalAttempt(db, item, { github, now }) {
         ORDER BY a.finished_at DESC, r.rowid DESC
         LIMIT 1`,
     )
-    .get(refusalCutoff, item.pr, item.headSha, github, item.findingHash);
+    .get(
+      refusalCutoff,
+      runCreatedCutoff,
+      item.pr,
+      item.headSha,
+      github,
+      item.findingHash,
+    );
 }
 
 /**

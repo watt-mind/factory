@@ -111,6 +111,7 @@ function insertRefusedMergeFix(
     findingHash = REBASE_HASH,
     reasonCode,
     finishedAt = "2026-08-19T16:45:00.000Z",
+    createdAt = finishedAt,
     terminalState = "REFUSED",
   },
 ) {
@@ -121,7 +122,7 @@ function insertRefusedMergeFix(
   db.query(
     `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
      VALUES (?, ?, ?, 'sha256:test', ?, 1, ?, ?)`,
-  ).run(runId, `idem-${runId}`, spec, terminalState, finishedAt, finishedAt);
+  ).run(runId, `idem-${runId}`, spec, terminalState, createdAt, finishedAt);
   db.query(
     `INSERT INTO attempts (run_id, attempt, fencing_token, finished_at, terminal_state, reason_code)
      VALUES (?, 1, 1, ?, ?, ?)`,
@@ -1194,6 +1195,71 @@ describe("merge-scan enumerator (WM-936)", () => {
         now: REFUSED_AT + 6 * 60 * 60_000 + 1,
       }).artifact.fix,
     ).toHaveLength(1);
+  });
+
+  test("the run-created prefilter keeps a long-lived run whose attempt finished inside the horizon", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    // Created 20h before it finished: well outside the 6h cooldown horizon, but
+    // inside the 24h lifetime slack the prefilter allows, so the attempt-side
+    // bound stays the deciding term.
+    insertRefusedMergeFix(db, {
+      runId: "run_fix_long_lived",
+      pr: 9,
+      reasonCode: "merge_fix_ticket_escalated",
+      createdAt: new Date(REFUSED_AT - 20 * 60 * 60_000).toISOString(),
+    });
+
+    expect(
+      latestMergeFixTerminalAttempt(
+        db,
+        { pr: 9, headSha: HEAD, findingHash: REBASE_HASH },
+        { github: GITHUB, now: REFUSED_AT + 60_000 },
+      )?.reasonCode,
+    ).toBe("merge_fix_ticket_escalated");
+    // Smoke check that the scan honours the same suppression; the falsifiable
+    // regression pin is the direct latestMergeFixTerminalAttempt assertion above.
+    expect(
+      conflictingScan(db, { now: REFUSED_AT + 60_000 }).artifact.fix,
+    ).toEqual([]);
+  });
+
+  test("the run-created prefilter drops a run created and finished outside the horizon", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    insertRefusedMergeFix(db, {
+      runId: "run_fix_ancient",
+      pr: 9,
+      reasonCode: "merge_fix_ticket_escalated",
+    });
+
+    // now is 31h after the run was created and finished: past both the 6h
+    // cooldown and the 30h prefilter cutoff.
+    const now = REFUSED_AT + 31 * 60 * 60_000;
+    expect(
+      latestMergeFixTerminalAttempt(
+        db,
+        { pr: 9, headSha: HEAD, findingHash: REBASE_HASH },
+        { github: GITHUB, now },
+      ),
+    ).toBeNull();
+    // Smoke check that the scan is unsuppressed; the falsifiable regression pin
+    // is the direct latestMergeFixTerminalAttempt assertion above.
+    expect(conflictingScan(db, { now }).artifact.fix).toHaveLength(1);
   });
 
   test("a refused escalated merge-fix does not re-emit the identical finding", () => {
