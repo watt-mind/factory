@@ -2432,11 +2432,12 @@ export function claimNext(
         !adapters.includes(candidateSpec.adapter)
       )
         continue;
-      // The worker snapshots the registry and policy at startup. A run planned
-      // against another checkout must stay QUEUED; leasing it would execute and
-      // validate with incompatible definitions. Compare the live checkout too
-      // so only an actually stale worker reloads — an older queued spec must not
-      // put a fresh supervisor into an endless exit-75 loop.
+      // The worker snapshots the registry and policy at startup. Leasing a run
+      // planned against another checkout would execute and validate with
+      // incompatible definitions. Compare the live checkout too: a run matching
+      // the current checkout asks this stale worker to reload, while a run that
+      // differs from the current checkout can never become claimable and must
+      // not keep singleton schedules in flight forever.
       if (
         registryVersion &&
         (candidateSpec.promptVersion !== registryVersion ||
@@ -2458,7 +2459,18 @@ export function claimNext(
           checkoutRegistryVersion: current,
         };
         if (reloadRequired) return refusal;
+        transition(db, {
+          runId: candidate.run_id,
+          to: "CANCELLED",
+          expectFrom: "QUEUED",
+          actor: owner,
+          reason: "registry_stale",
+          policyVersion,
+          now: claimNow,
+        });
         staleRefusal ??= refusal;
+        // Continue looking so one orphaned run cannot keep compatible queued
+        // work behind it from being leased in this claim transaction.
         continue;
       }
       row = candidate;

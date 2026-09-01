@@ -6457,7 +6457,7 @@ sh -c 'sleep 5 & wait'
     ).toHaveLength(0);
   });
 
-  test("claimNext does not restart-loop a fresh worker on an older queued spec (WM-613)", () => {
+  test("claimNext dead-letters an old queued spec so a singleton can schedule again (GH-2226)", async () => {
     const db = openDb(":memory:");
     const staleSpec = queueRun(
       db,
@@ -6481,7 +6481,29 @@ sh -c 'sleep 5 & wait'
       reloadRequired: false,
       reasonCode: "registry_stale",
     });
-    expect(runState(db, staleSpec.runId)).toBe("QUEUED");
+    expect(runState(db, staleSpec.runId)).toBe("CANCELLED");
+    expect(lifecycleOf(db, staleSpec.runId).at(-1)).toMatchObject({
+      from_state: "QUEUED",
+      to_state: "CANCELLED",
+      reason: "registry_stale",
+    });
+
+    const { inFlightRunsForAgent } = await import("./in-flight-runs.mjs");
+    expect(inFlightRunsForAgent(db, staleSpec.agent)).toEqual([]);
+
+    // The next singleton schedule slot can now enqueue a replacement rather
+    // than being deduped against an impossible pre-redeploy run.
+    const freshSpec = queueRun(
+      db,
+      makeSpec({
+        promptVersion: "git:current",
+        policyVersion: "git:current",
+      }),
+      T0 + 1000,
+    );
+    expect(inFlightRunsForAgent(db, staleSpec.agent)).toEqual([
+      expect.objectContaining({ run_id: freshSpec.runId, state: "QUEUED" }),
+    ]);
   });
 
   test("claimNext skips an incompatible old spec and claims compatible queued work (WM-613)", () => {
@@ -6511,7 +6533,7 @@ sh -c 'sleep 5 & wait'
     });
 
     expect(claim.runId).toBe(compatibleSpec.runId);
-    expect(runState(db, staleSpec.runId)).toBe("QUEUED");
+    expect(runState(db, staleSpec.runId)).toBe("CANCELLED");
     expect(runState(db, compatibleSpec.runId)).toBe("LEASED");
   });
 

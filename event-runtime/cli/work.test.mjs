@@ -187,7 +187,7 @@ describe("work command", () => {
   );
 
   test(
-    "folds stale registry refusals into the rate-limited skip report",
+    "dead-letters a queued run stale to the current registry",
     async () => {
       const home = tmpDir("evrt-work-registry-skip-");
       await seedSkippedRun(home, {
@@ -206,26 +206,19 @@ describe("work command", () => {
         { FACTORY_EVENT_HOME: home },
       );
       try {
-        await waitFor(box, '"runId":"run_registry_skip"');
         await until(
-          "the next registry skip-report interval",
-          () =>
-            (box.out.match(/"runId":"run_registry_skip"/g) ?? []).length >= 2,
+          "the stale queued run to be terminalized",
+          () => {
+            const db = openDb(path.join(home, "runtime.db"));
+            const state = db
+              .query(`SELECT state FROM runs WHERE run_id = ?`)
+              .get("run_registry_skip")?.state;
+            db.close();
+            return state === "CANCELLED";
+          },
           { timeoutMs: 5_000, everyMs: 10 },
         );
-        expect(box.out.match(/"runId":"run_registry_skip"/g)).toHaveLength(2);
-        expect(box.out).toMatch(
-          /registry_stale:spec=git:older-registry\/git:older-registry:worker=git:[^:"]+:checkout=git:[^"}]+/,
-        );
         expect(box.out).not.toContain("refused run_registry_skip");
-        const worker = await registeredWorker(home);
-        expect(worker.skipped).toEqual([
-          {
-            runId: "run_registry_skip",
-            definition: "factory-status-report@1",
-            reason: expect.stringMatching(/^registry_stale:/),
-          },
-        ]);
       } finally {
         box.child.kill("SIGTERM");
         await exitOf(box.child);
