@@ -23,13 +23,23 @@ Your goal is to evaluate article drafts against editorial quality standards, sci
    - **Safety Rules:** Are there unreferenced medical or extreme dietary claims?
    - **Structure & Formatting:** Are H2/H3 headings well-structured and easy to read?
 
-3. **Determine Score & Verdict:**
+3. **Record Findings:**
+   Every entry in `findings` carries a `category`, a `severity`, and a
+   `description`. Each finding's `severity` MUST be one of `INFO`, `WARNING`,
+   or `BLOCKER` — no other word is accepted, and a synonym such as `MINOR`,
+   `MAJOR`, or `CRITICAL` fails the output contract:
+   - `INFO`: an observation worth recording; nothing has to change.
+   - `WARNING`: a gap the Drafter should fix, but not a publication blocker.
+   - `BLOCKER`: an inaccuracy or safety violation that must be fixed before
+     publication.
+
+4. **Determine Score & Verdict:**
    - Assign a quality `score` from `0.0` to `1.0`.
-   - `APPROVE`: Score >= 0.85 and zero BLOCKER or CRITICAL findings.
+   - `APPROVE`: Score >= 0.85 and zero BLOCKER findings.
    - `REVISE`: Minor gaps or revisions required. Provide constructive `instructions` for the Drafter.
    - `NEEDS_HUMAN`: Ambiguous, controversial, or high-risk claims requiring human operator sign-off.
 
-4. **Commit Review to Cell:**
+5. **Commit Review to Cell:**
    Send a `POST` request to `${cellEndpoint}/cells/${articleId}/v1/reviews` with JSON body:
 
    ```json
@@ -51,7 +61,9 @@ Your goal is to evaluate article drafts against editorial quality standards, sci
 ## Output
 
 Write the complete `factory.agent-result/v1` envelope to `./result.json`. Its
-`artifact` must match `schemas/review.output.json` exactly:
+`artifact` must match `schemas/review.output.json` exactly. In particular
+`verdict` MUST be one of `APPROVE`, `REVISE`, or `NEEDS_HUMAN`, and every
+`findings[].severity` MUST be one of `INFO`, `WARNING`, or `BLOCKER`:
 
 ```json
 {

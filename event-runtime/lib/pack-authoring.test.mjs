@@ -69,6 +69,7 @@ test("editorial documented result envelopes validate their output schemas", () =
     ),
   );
   const examples = ["topic-scan", "research", "draft", "review"];
+  const documented = new Map();
 
   for (const name of examples) {
     const prompt = readFileSync(
@@ -95,7 +96,32 @@ test("editorial documented result envelopes validate their output schemas", () =
       valid: true,
       errors: [],
     });
+    documented.set(name, {
+      schema: outputSchema,
+      artifact: completed[0].artifact,
+    });
   }
+
+  // An empty `findings` array satisfies the item schema vacuously, so the
+  // enum check above would pass a prompt whose example never exercises it.
+  // The review example must carry a finding for the guard to be real, and a
+  // stray severity must actually fail the contract the way a live run does.
+  const review = documented.get("review");
+  expect(review.artifact.findings.length).toBeGreaterThan(0);
+  expect(
+    validate(review.schema, {
+      ...review.artifact,
+      findings: review.artifact.findings.map((finding) => ({
+        ...finding,
+        severity: "MINOR",
+      })),
+    }),
+  ).toEqual({
+    valid: false,
+    errors: [
+      '$.findings[0].severity: value not in enum ["INFO","WARNING","BLOCKER"]',
+    ],
+  });
 });
 
 /**
