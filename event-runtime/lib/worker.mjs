@@ -4536,59 +4536,11 @@ export async function executeClaimed(
         };
       }
 
-      // Merge-fix never claims a ticket: it only revalidates the already-owned
-      // review ticket. Its tracker read can take the full read timeout, so do
-      // not serialize unrelated dispatch claims behind it.
+      // Tracker reads must finish before a dispatch contender acquires this
+      // repo's claim lock. A tracker brown-out is much longer than the small
+      // mutation window that the lock protects, and serialising it starves
+      // every other claimant for this repository.
       let claimLockHeld = false;
-      if (gate === "dispatch") {
-        claimLockHeld = acquireClaimLock(lockFile, {
-          pid: process.pid,
-          now: nowFn(),
-          isAlive: isAliveFn,
-        });
-        if (!claimLockHeld) {
-          const deferred = deferClaimLockContention(db, {
-            runId,
-            attempt,
-            fencingToken,
-            owner,
-            policyVersion,
-            now: nowFn,
-            maxRequeues: Number.isInteger(
-              dispatchOpts?.maxClaimLockContentionRequeues,
-            )
-              ? Math.max(0, dispatchOpts.maxClaimLockContentionRequeues)
-              : DEFAULT_MAX_CLAIM_LOCK_REQUEUES,
-            random: dispatchOpts?.random ?? Math.random,
-          });
-          if (deferred?.fenced) {
-            stopCancellationMonitor();
-            return { fenced: true };
-          }
-          if (deferred?.requeued) {
-            stopCancellationMonitor();
-            return {
-              runId,
-              attempt,
-              terminalState: "QUEUED",
-              reasonCode: "claim_lock_contention",
-              requeueAfterMs: deferred.backoffMs,
-            };
-          }
-          const res = refuseTerminal("claim_lock_starvation", [
-            "dispatch_claim_lock",
-          ]);
-          stopCancellationMonitor();
-          if (res?.fenced) return { fenced: true };
-          return {
-            runId,
-            attempt,
-            terminalState: "REFUSED",
-            reasonCode: "claim_lock_starvation",
-            receipt: res?.receipt,
-          };
-        }
-      }
       const releaseGateLock = () => {
         if (!claimLockHeld) return;
         releaseClaimLock(lockFile);
@@ -4633,6 +4585,10 @@ export async function executeClaimed(
         };
       };
 
+      // Evaluate every read-dependent eligibility check before the claim-lock
+      // acquisition below. The eventual claim remains the concurrency
+      // authority: if the ticket moved after this snapshot, its read-back is a
+      // normal failed claim rather than a second owner.
       let gateResult;
       try {
         if (gate === "merge-fix") {
@@ -4821,11 +4777,60 @@ export async function executeClaimed(
         };
       }
 
+      if (gate === "dispatch") {
+        claimLockHeld = acquireClaimLock(lockFile, {
+          pid: process.pid,
+          now: nowFn(),
+          isAlive: isAliveFn,
+        });
+        if (!claimLockHeld) {
+          const deferred = deferClaimLockContention(db, {
+            runId,
+            attempt,
+            fencingToken,
+            owner,
+            policyVersion,
+            now: nowFn,
+            maxRequeues: Number.isInteger(
+              dispatchOpts?.maxClaimLockContentionRequeues,
+            )
+              ? Math.max(0, dispatchOpts.maxClaimLockContentionRequeues)
+              : DEFAULT_MAX_CLAIM_LOCK_REQUEUES,
+            random: dispatchOpts?.random ?? Math.random,
+          });
+          if (deferred?.fenced) {
+            stopCancellationMonitor();
+            return { fenced: true };
+          }
+          if (deferred?.requeued) {
+            stopCancellationMonitor();
+            return {
+              runId,
+              attempt,
+              terminalState: "QUEUED",
+              reasonCode: "claim_lock_contention",
+              requeueAfterMs: deferred.backoffMs,
+            };
+          }
+          const res = refuseTerminal("claim_lock_starvation", [
+            "dispatch_claim_lock",
+          ]);
+          stopCancellationMonitor();
+          if (res?.fenced) return { fenced: true };
+          return {
+            runId,
+            attempt,
+            terminalState: "REFUSED",
+            reasonCode: "claim_lock_starvation",
+            receipt: res?.receipt,
+          };
+        }
+      }
+
       if (gate === "merge-fix") {
         // The ticket is already assigned and under review by definition. The
         // merge-fix gate proved those live facts; trying the dispatch claim
         // verb here would reject the valid run as ticket_assigned.
-        releaseGateLock();
       } else {
         // The retry gate has already re-read and authenticated the surviving
         // claim. Do not run the mutating claim command again: besides being

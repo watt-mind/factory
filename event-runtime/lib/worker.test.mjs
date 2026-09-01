@@ -6359,6 +6359,7 @@ sh -c 'sleep 5 & wait'
     );
     const lockFile = dispatchLockPath("factory", locksDir);
     let concurrentClaimantAcquired = false;
+    let lockHeldDuringFetch = null;
     const summary = await executeClaimed(
       db,
       registry,
@@ -6368,6 +6369,7 @@ sh -c 'sleep 5 & wait'
         dispatch: {
           locksDir,
           fetchTicket: () => {
+            lockHeldDuringFetch = existsSync(lockFile);
             concurrentClaimantAcquired = acquireClaimLock(lockFile, {
               pid: 2222,
               isAlive: () => true,
@@ -6384,7 +6386,90 @@ sh -c 'sleep 5 & wait'
       terminalState: "REFUSED",
       reasonCode: "merge_fix_ticket_read_failed",
     });
+    expect(lockHeldDuringFetch).toBe(false);
     expect(concurrentClaimantAcquired).toBe(true);
+    expect(existsSync(lockFile)).toBe(false);
+    db.close();
+  });
+
+  test("a stalled dispatch tracker read occurs before the claim lock", async () => {
+    const db = openDb(":memory:");
+    const locksDir = tmpDir("dispatch-ticket-read-locks-");
+    const ticket = "watt-mind/factory#2228";
+    const description =
+      "## Owned Paths\n- event-runtime/lib/worker.mjs\n\n## Verification Command\n`bun test event-runtime/lib/worker.test.mjs`\n";
+    const lockFile = dispatchLockPath("factory", locksDir);
+    const spec = queueRun(
+      db,
+      makeSpec({
+        agent: "dispatch@1",
+        input: {
+          repo: "factory",
+          ticket,
+          humanDecision: {
+            authorisation: {
+              repo: "factory",
+              ticket,
+              descriptionHash: hashBytes(description),
+              paths: ["event-runtime/lib/worker.mjs"],
+            },
+          },
+        },
+        workspace: { type: "worktree", retainOnFailure: true },
+        outputContract: "factory.dispatch-result/v1",
+      }),
+    );
+    const lockStatesDuringTrackerReads = [];
+    let concurrentClaimantAcquired = false;
+    let claimHeldLock = false;
+    const summary = await runOnce(
+      db,
+      registry,
+      adapters,
+      opts({
+        dispatch: {
+          configSnapshot: dispatchConfigSnapshot(),
+          locksDir,
+          fetchTicket: () => {
+            // Model a stalled tracker request by attempting a concurrent claim
+            // before this reader returns. The contender must not wait on this
+            // read, regardless of how long the real tracker takes to answer.
+            lockStatesDuringTrackerReads.push(existsSync(lockFile));
+            concurrentClaimantAcquired = acquireClaimLock(lockFile, {
+              pid: 2223,
+              isAlive: () => true,
+            });
+            if (concurrentClaimantAcquired) releaseClaimLock(lockFile);
+            return {
+              identifier: ticket,
+              state: { name: "Todo" },
+              assignee: null,
+              labels: { nodes: [{ name: "ai:agent-ready" }] },
+              description,
+            };
+          },
+          fetchInFlight: () => {
+            lockStatesDuringTrackerReads.push(existsSync(lockFile));
+            return [];
+          },
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          claimTicket: () => {
+            claimHeldLock = existsSync(lockFile);
+            return { ok: false, reasonCode: "ticket_claim_lost" };
+          },
+        },
+      }),
+    );
+
+    expect(summary).toMatchObject({
+      runId: spec.runId,
+      terminalState: "REFUSED",
+      reasonCode: "ticket_claim_lost",
+    });
+    expect(lockStatesDuringTrackerReads).toEqual([false, false]);
+    expect(concurrentClaimantAcquired).toBe(true);
+    expect(claimHeldLock).toBe(true);
     expect(existsSync(lockFile)).toBe(false);
     db.close();
   });
