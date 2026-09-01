@@ -7,10 +7,13 @@
  */
 import { createHmac, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
 
-import { loadRepos } from "../event-runtime/lib/repos.mjs";
+import { resolveConfigPath } from "../event-runtime/lib/config.mjs";
+import { loadRepos, reposRoot } from "../event-runtime/lib/repos.mjs";
 
 export const HANDOFF_SCHEMA_VERSION = "factory.handoff/v1";
 export const HANDOFF_RECEIPT_VERSION = "factory.handoff-receipt/v1";
@@ -125,6 +128,125 @@ export function resolveHandoffRepo({ repos, cwd = process.cwd(), repo } = {}) {
       "cwd is not inside a configured repository; pass --repo <short-name>",
     );
   return best.name;
+}
+
+function nonemptyString(value) {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function handoffHostFromConfig(config, { directHost = false } = {}) {
+  if (!config || typeof config !== "object" || Array.isArray(config)) {
+    return null;
+  }
+  return (
+    nonemptyString(config.handoff?.host) ??
+    nonemptyString(config.handoff_host) ??
+    (directHost ? nonemptyString(config.host) : null)
+  );
+}
+
+function parseJsonFile(file, readFile) {
+  try {
+    return JSON.parse(readFile(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function parseDotenvFile(file, readFile) {
+  let text;
+  try {
+    text = readFile(file, "utf8");
+  } catch {
+    return {};
+  }
+  const values = {};
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const entry = line.replace(/^export\s+/, "");
+    const equals = entry.indexOf("=");
+    if (equals <= 0) continue;
+    const key = entry.slice(0, equals).trim();
+    let value = entry.slice(equals + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    values[key] = value;
+  }
+  return values;
+}
+
+function loadHandoffConfig({ root, readFile }) {
+  let repos = null;
+  let policy = null;
+  try {
+    repos = Bun.YAML.parse(
+      readFile(resolveConfigPath("repos", { root }), "utf8"),
+    );
+  } catch {
+    // An unavailable optional source must not prevent lower-precedence defaults.
+  }
+  try {
+    policy = Bun.YAML.parse(
+      readFile(resolveConfigPath("policy", { root }), "utf8"),
+    );
+  } catch {
+    // An unavailable optional source must not prevent lower-precedence defaults.
+  }
+  return { repos, policy };
+}
+
+/**
+ * Resolve the SSH destination without exposing configuration contents in errors.
+ * The result is validated by sendHandoff immediately before spawning ssh.
+ */
+export function resolveHandoffHost({
+  host,
+  env = process.env,
+  repo,
+  home = homedir(),
+  root = reposRoot(),
+  readFile = readFileSync,
+  repoConfig,
+  policy,
+} = {}) {
+  const configured =
+    repoConfig === undefined || policy === undefined
+      ? loadHandoffConfig({ root, readFile })
+      : null;
+  const configuredRepo =
+    repoConfig ??
+    configured?.repos?.repos?.find((entry) => entry?.name === repo);
+  const configuredPolicy = policy ?? configured?.policy;
+  const localConfig = parseJsonFile(
+    path.join(home, ".factory", "config.json"),
+    readFile,
+  );
+  const localHandoff = parseJsonFile(
+    path.join(home, ".factory", "handoff.json"),
+    readFile,
+  );
+  const localSecrets = parseDotenvFile(
+    path.join(home, ".factory", "secrets.env"),
+    readFile,
+  );
+
+  return (
+    nonemptyString(host) ??
+    nonemptyString(env.FACTORY_HANDOFF_SSH_HOST) ??
+    nonemptyString(env.FACTORY_HANDOFF_HOST) ??
+    handoffHostFromConfig(localConfig) ??
+    handoffHostFromConfig(localHandoff, { directHost: true }) ??
+    nonemptyString(localSecrets.FACTORY_HANDOFF_SSH_HOST) ??
+    nonemptyString(localSecrets.FACTORY_HANDOFF_HOST) ??
+    nonemptyString(configuredRepo?.handoff_host) ??
+    handoffHostFromConfig(configuredPolicy) ??
+    "factory-runner"
+  );
 }
 
 function validateTicketForRepo(ticket, repo) {
@@ -425,7 +547,6 @@ export function sshProcess(host, input) {
 
 /** Send one strict request. No remote command is supplied: sshd forces accept. */
 export async function sendHandoff(request, { host, ssh = sshProcess } = {}) {
-  if (!host) fail("ssh_host_missing", "set --host or FACTORY_HANDOFF_SSH_HOST");
   validateSshHost(host);
   const validation = validateHandoffRequest(JSON.stringify(request));
   if (!validation.ok) fail(validation.error, validation.error);
@@ -470,6 +591,11 @@ Usage:
 The client sends only factory.handoff/v1 JSON through SSH. The accept form is
 for a dedicated authorized_keys forced command and reads one bounded document
 from stdin.
+
+SSH host resolution (highest precedence first): --host, FACTORY_HANDOFF_SSH_HOST,
+FACTORY_HANDOFF_HOST, ~/.factory/config.json or handoff.json, ~/.factory/secrets.env,
+config/repos.yaml handoff_host, config/policy.yaml handoff.host or handoff_host,
+then the factory-runner alias.
 `;
 
 export function assertForcedCommandEnvironment(env = process.env) {
@@ -533,7 +659,7 @@ async function main(argv = process.argv.slice(2)) {
     ticket: positionals[0],
   });
   const receipt = await sendHandoff(request, {
-    host: values.host ?? process.env.FACTORY_HANDOFF_SSH_HOST,
+    host: resolveHandoffHost({ host: values.host, repo }),
   });
   if (values.json) {
     console.log(JSON.stringify(receipt));

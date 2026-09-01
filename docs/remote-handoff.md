@@ -56,6 +56,27 @@ factory handoff --repo factory watt-mind/factory#1153
 # equivalent: factory handoff --host factory-runner --repo factory watt-mind/factory#1153
 ```
 
+When `--host` is omitted, the client resolves the SSH alias in this order:
+
+1. `--host <alias>`
+2. `FACTORY_HANDOFF_SSH_HOST`, then `FACTORY_HANDOFF_HOST`
+3. `handoff.host` (or `handoff_host`) in `~/.factory/config.json` or
+   `~/.factory/handoff.json`, then the matching environment variable in
+   `~/.factory/secrets.env`
+4. `handoff_host` for the selected repository in `config/repos.yaml`
+5. `handoff.host` or `handoff_host` in `config/policy.yaml`
+6. the canonical `factory-runner` SSH alias
+
+For example, an operator can set a repository-wide default without changing
+client shells:
+
+```yaml
+# config/repos.yaml
+repos:
+  - name: factory
+    handoff_host: factory-runner
+```
+
 When cwd is under a configured repo `path` or `worktree_root`, `--repo` may be omitted. The client supplies no remote command, so the server's forced command is the only executable path.
 
 ## Server forced command
