@@ -390,36 +390,39 @@ describe("worker", () => {
     LOCAL_NOTIFY_PROBE_TIMEOUT_MS,
   );
 
-  test("keeps exactly one local notify drain in the adapter finally to prevent double delivery", () => {
+  test("keeps exactly one local notify drain, reached only from a finally", () => {
     // Two drain sites could race the same outbox read/truncate cycle and
     // deliver a BLOCKED or escalation notification twice. Keep this structural
     // guard alongside the behavioral drain tests so a future refactor cannot
-    // silently add another call site.
+    // silently add another call site — and so every supervised adapter turn
+    // (the primary execution and the bounded Pi result repair) still drains
+    // from a `finally`, where an adapter throw cannot strand a retained
+    // escalation.
     const source = readFileSync(
       new URL("./worker.mjs", import.meta.url),
       "utf8",
     );
-    const marker =
-      "    } finally {\n      stopDeadlineMonitor();\n      stopCancellationMonitor();\n";
-    const start = source.indexOf(marker);
-    expect(start).toBeGreaterThan(-1);
-    const open = source.indexOf("{", start);
-    let depth = 0;
-    let end = -1;
-    for (let i = open; i < source.length; i += 1) {
-      if (source[i] === "{") depth += 1;
-      else if (source[i] === "}") {
-        depth -= 1;
-        if (depth === 0) {
-          end = i;
-          break;
-        }
-      }
-    }
-    expect(end).toBeGreaterThan(open);
-    const finallyBody = source.slice(open, end);
-    expect(finallyBody).toContain("await drainLocalNotifyOutbox({");
+    // Exactly one place actually touches the outbox...
     expect(source.split("await drainLocalNotifyOutbox({")).toHaveLength(2);
+    const helper = source.indexOf(
+      "const drainNotifyOutboxSafely = async () => {",
+    );
+    expect(helper).toBeGreaterThan(-1);
+    expect(source.indexOf("await drainLocalNotifyOutbox({")).toBeGreaterThan(
+      helper,
+    );
+    // ...and every caller of it sits directly in a `finally`.
+    const callSites = [
+      ...source.matchAll(/await drainNotifyOutboxSafely\(\);/g),
+    ];
+    expect(callSites.length).toBeGreaterThanOrEqual(2);
+    for (const site of callSites) {
+      const preamble = source.slice(Math.max(0, site.index - 200), site.index);
+      expect(preamble).toContain("} finally {");
+      expect(preamble.slice(preamble.lastIndexOf("} finally {"))).not.toContain(
+        "try {",
+      );
+    }
   });
 
   test("retains an undelivered local notification for handoff recovery", async () => {
@@ -2147,41 +2150,68 @@ sh -c 'sleep 5 & wait'
   });
 
   test("Pi retries each observed malformed result shape once with validator detail", async () => {
+    const goodResult = {
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      reasonCode: "ok",
+      artifact: {
+        repos: [
+          {
+            name: "factory",
+            triage: 0,
+            agentReady: 0,
+            inProgress: 0,
+            blocked: 0,
+          },
+        ],
+        recommendedAction: "wait",
+      },
+    };
     const malformed = [
-      { status: "completed", summary: "done", verification: {} },
       {
-        ticket: "watt-mind/factory#1952",
-        repo: "factory",
-        outcome: "PR_OPEN",
-        summary: "real work completed",
-        prUrl: "https://github.com/watt-mind/factory/pull/1952",
-        branch: "feat/1952",
-        verification: {},
+        candidate: { status: "completed", summary: "done", verification: {} },
+        expected: [
+          '$: missing required property "schemaVersion"',
+          '$: missing required property "terminalState"',
+          '$: unknown property "status"',
+          '$: unknown property "verification"',
+        ],
       },
       {
-        schemaVersion: "factory.agent-result/v1",
-        terminalState: "completed",
-        reasonCode: "ok",
-        artifact: {
-          repos: [
-            {
-              name: "factory",
-              triage: 0,
-              agentReady: 0,
-              inProgress: 0,
-              blocked: 0,
-            },
-          ],
-          recommendedAction: "wait",
+        candidate: {
+          ticket: "watt-mind/factory#1952",
+          repo: "factory",
+          outcome: "PR_OPEN",
+          summary: "real work completed",
+          prUrl: "https://github.com/watt-mind/factory/pull/1952",
+          branch: "feat/1952",
+          verification: {},
         },
-        verification: { ticketGate: "pass", repoGate: "pass" },
-        followUpIssue: "WM-2076",
+        expected: [
+          '$: missing required property "schemaVersion"',
+          '$: missing required property "terminalState"',
+          '$: unknown property "outcome"',
+          '$: unknown property "prUrl"',
+        ],
+      },
+      {
+        candidate: {
+          ...goodResult,
+          terminalState: "completed",
+          verification: { ticketGate: "pass", repoGate: "pass" },
+          followUpIssue: "WM-2076",
+        },
+        expected: [
+          '$: unknown property "verification"',
+          '$: unknown property "followUpIssue"',
+        ],
       },
     ];
 
-    for (const candidate of malformed) {
+    for (const { candidate, expected } of malformed) {
       const db = openDb(":memory:");
       const spec = queueRun(db, makeSpec({ adapter: "pi" }));
+      const o = opts();
       const repairs = [];
       const pi = {
         async execute({ workspaceDir, resultRepair }) {
@@ -2191,41 +2221,156 @@ sh -c 'sleep 5 & wait'
               JSON.stringify(candidate),
             );
           } else {
-            repairs.push(resultRepair);
+            repairs.push({
+              ...resultRepair,
+              // The snapshot only survives while the workspace does; a
+              // COMPLETED run destroys it, so read it here.
+              retained: readFileSync(
+                path.join(workspaceDir, "result.invalid.json"),
+                "utf8",
+              ),
+            });
             writeFileSync(
               path.join(workspaceDir, "result.json"),
-              JSON.stringify({
-                schemaVersion: "factory.agent-result/v1",
-                terminalState: "completed",
-                reasonCode: "ok",
-                artifact: {
-                  repos: [
-                    {
-                      name: "factory",
-                      triage: 0,
-                      agentReady: 0,
-                      inProgress: 0,
-                      blocked: 0,
-                    },
-                  ],
-                  recommendedAction: "wait",
-                },
-              }),
+              JSON.stringify(goodResult),
             );
           }
           return { exitCode: 0, timedOut: false };
         },
       };
 
-      const summary = await runOnce(db, registry, { pi }, opts());
+      const summary = await runOnce(db, registry, { pi }, o);
       expect(summary).toMatchObject({ terminalState: "COMPLETED" });
       expect(repairs).toHaveLength(1);
-      expect(repairs[0].violations.join("\n")).toMatch(
-        /\$|required|additional/,
+      // Shape-specific: the repair turn must be handed the validator's own
+      // complaints, not merely some non-empty string.
+      for (const violation of expected) {
+        expect(repairs[0].violations).toContain(violation);
+      }
+      // The rejected bytes travel with the repair request, and are kept on
+      // disk as the evidence of what the agent originally wrote.
+      expect(repairs[0].priorResult).toBe(JSON.stringify(candidate));
+      expect(repairs[0].retained).toBe(JSON.stringify(candidate));
+      expect(repairs[0].priorResultPath).toBe(
+        path.join(o.workspacesRoot, `${spec.runId}-a1`, "result.json"),
       );
       expect(runState(db, spec.runId)).toBe("COMPLETED");
       db.close();
     }
+  });
+
+  test("Pi repair that is still invalid FAILS with the ORIGINAL violations and retains the invalid envelope", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({ adapter: "pi" }));
+    const o = opts();
+    const invalid = { status: "completed", summary: "done" };
+    let calls = 0;
+    const pi = {
+      async execute({ workspaceDir }) {
+        calls += 1;
+        writeFileSync(
+          path.join(workspaceDir, "result.json"),
+          JSON.stringify(
+            calls === 1 ? invalid : { schemaVersion: "wrong/v0", oops: true },
+          ),
+        );
+        return { exitCode: 0, timedOut: false };
+      },
+    };
+
+    const summary = await runOnce(db, registry, { pi }, o);
+    expect(calls).toBe(2);
+    expect(summary).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "contract_violation",
+    });
+    const reason = lifecycleOf(db, spec.runId)
+      .map((event) => event.reason ?? "")
+      .join("\n");
+    // The original complaint is what a human has to read; the repair's own
+    // violations are appended detail, never a replacement.
+    expect(reason).toContain('$: missing required property "schemaVersion"');
+    expect(reason).toContain('$: unknown property "status"');
+    expect(reason).toContain("after repair:");
+    const workspaceDir = path.join(o.workspacesRoot, `${spec.runId}-a1`);
+    expect(
+      readFileSync(path.join(workspaceDir, "result.invalid.json"), "utf8"),
+    ).toBe(JSON.stringify(invalid));
+  });
+
+  test("Pi repair that exits nonzero leaves the original violations standing and is not retried", async () => {
+    for (const repairOutcome of [
+      { exitCode: 3, timedOut: false },
+      { exitCode: 0, timedOut: true },
+      "throw",
+    ]) {
+      const db = openDb(":memory:");
+      const spec = queueRun(db, makeSpec({ adapter: "pi" }));
+      let calls = 0;
+      const pi = {
+        async execute({ workspaceDir, resultRepair }) {
+          calls += 1;
+          if (!resultRepair) {
+            writeFileSync(
+              path.join(workspaceDir, "result.json"),
+              JSON.stringify({ status: "completed", summary: "done" }),
+            );
+            return { exitCode: 0, timedOut: false };
+          }
+          if (repairOutcome === "throw") throw new Error("pi crashed");
+          // A failed repair must not be able to smuggle a result through.
+          return repairOutcome;
+        },
+      };
+
+      const summary = await runOnce(db, registry, { pi }, opts());
+      expect(calls).toBe(2);
+      expect(summary).toMatchObject({
+        terminalState: "FAILED",
+        reasonCode: "contract_violation",
+      });
+      const reason = lifecycleOf(db, spec.runId)
+        .map((event) => event.reason ?? "")
+        .join("\n");
+      expect(reason).toContain('$: unknown property "status"');
+      expect(reason).not.toContain("after repair:");
+      expect(runState(db, spec.runId)).toBe("FAILED");
+      db.close();
+    }
+  });
+
+  test("a handoff-gate contract violation is never repaired as an envelope", async () => {
+    const db = openDb(":memory:");
+    queueRun(db, makeSpec({ adapter: "pi" }));
+    let calls = 0;
+    const pi = {
+      async execute({ workspaceDir }) {
+        calls += 1;
+        writeFileSync(
+          path.join(workspaceDir, "result.json"),
+          JSON.stringify({ status: "completed" }),
+        );
+        return { exitCode: 0, timedOut: false };
+      },
+    };
+    const verifyResultStub = () => {
+      throw new ContractViolation(["handoff verification did not pass"], {
+        reasonCode: "handoff_verification_failed",
+        handoff: { command: "bun test", passed: false, output: "red" },
+      });
+    };
+
+    const summary = await runOnce(
+      db,
+      registry,
+      { pi },
+      { ...opts(), verifyResult: verifyResultStub },
+    );
+    // The gate refused the WORK, not the envelope: re-prompting the agent to
+    // restate its result would launder a real verification failure.
+    expect(calls).toBe(1);
+    expect(summary).toMatchObject({ terminalState: "FAILED" });
+    expect(summary.reasonCode).toBe("handoff_verification_failed");
   });
 
   test("escape: artifact outside the workspace is a contract violation", async () => {

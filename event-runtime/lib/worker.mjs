@@ -928,6 +928,79 @@ export const HANDOFF_FORGE_UNAVAILABLE = "handoff_forge_unavailable";
 /** Non-`ContractViolation` throw from `verifyResult` / `assertHandoffPullRequestBase`. */
 const VERIFICATION_INTERNAL_ERROR = "verification_internal_error";
 
+/**
+ * The repair turn only restates an envelope the agent already produced, so it
+ * gets its own small budget rather than a second full run's worth of wall
+ * clock. A wedged repair must not be able to consume the attempt deadline.
+ */
+const PI_RESULT_REPAIR_TIMEOUT_MS = 5 * 60 * 1000;
+
+/** Evidence copy of the rejected envelope, kept beside the workspace result. */
+const INVALID_RESULT_FILE = "result.invalid.json";
+
+/** Bound on the rejected bytes echoed into the repair prompt and the trace. */
+const INVALID_RESULT_PREVIEW_BYTES = 8000;
+
+const USAGE_SUM_FIELDS = [
+  "inputTokens",
+  "outputTokens",
+  "cacheCreationInputTokens",
+  "cacheReadInputTokens",
+  "costUSD",
+];
+
+/**
+ * The repair is a second billable adapter turn on the same attempt. Attempt
+ * usage is a total, not a last-writer-wins snapshot, so add its tokens and
+ * cost to what the primary execution already reported.
+ */
+function mergeAttemptUsage(base, extra, adapterKey) {
+  const merged = { adapter: adapterKey, ...(base ?? {}), ...(extra ?? {}) };
+  for (const field of USAGE_SUM_FIELDS) {
+    const snake = field.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+    const read = (usage) => {
+      const value = usage?.[field] ?? usage?.[snake];
+      return Number.isFinite(value) && value >= 0 ? value : 0;
+    };
+    const total = read(base) + read(extra);
+    if (total > 0) merged[field] = total;
+    delete merged[snake];
+  }
+  return merged;
+}
+
+/**
+ * Snapshot the rejected envelope before the repair turn overwrites
+ * `result.json`. The invalid payload is the primary evidence for why the run
+ * failed; a repair that fails again must not be the reason it disappeared.
+ */
+function snapshotInvalidResult({ workspaceDir, onTrace }) {
+  let raw;
+  const source = path.join(workspaceDir, "result.json");
+  const target = path.join(workspaceDir, INVALID_RESULT_FILE);
+  try {
+    raw = readFileSync(source);
+    writeFileSync(target, raw);
+  } catch (err) {
+    onTrace?.("lifecycle", {
+      event: "pi_result_repair_snapshot_failed",
+      source,
+      error: String(err?.message ?? err),
+    });
+    return null;
+  }
+  const text = raw.toString("utf8");
+  const snapshot = {
+    source,
+    path: target,
+    bytes: raw.length,
+    sha256: sha256Hex(raw),
+    preview: text.slice(0, INVALID_RESULT_PREVIEW_BYTES),
+  };
+  onTrace?.("lifecycle", { event: "pi_result_repair_snapshot", ...snapshot });
+  return snapshot;
+}
+
 /** A zero-exit Pi run gets one chance to correct its own invalid envelope. */
 function mayRepairPiResult({ adapterKey, outcome, error }) {
   return (
@@ -3869,25 +3942,32 @@ export async function executeClaimed(
   };
 
   const abortController = new AbortController();
-  ACTIVE_EXECUTIONS.set(runId, {
-    abort: (reason) => abortController.abort(reason),
-    controller: abortController,
-    runId,
-    attempt,
-  });
-  let cancelPoll = setInterval(() => {
-    try {
-      const state = db
-        .query(`SELECT state FROM runs WHERE run_id = ?`)
-        .get(runId)?.state;
-      if (state === "CANCELLED" && !abortController.signal.aborted) {
-        abortController.abort("db_cancelled");
+  let cancelPoll = null;
+  // Idempotent so a supervised follow-up adapter turn (the bounded Pi result
+  // repair) can re-arm cancellation after the primary execution stopped it.
+  const startCancellationMonitor = () => {
+    ACTIVE_EXECUTIONS.set(runId, {
+      abort: (reason) => abortController.abort(reason),
+      controller: abortController,
+      runId,
+      attempt,
+    });
+    if (cancelPoll) return;
+    cancelPoll = setInterval(() => {
+      try {
+        const state = db
+          .query(`SELECT state FROM runs WHERE run_id = ?`)
+          .get(runId)?.state;
+        if (state === "CANCELLED" && !abortController.signal.aborted) {
+          abortController.abort("db_cancelled");
+        }
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
-    }
-  }, 250);
-  cancelPoll?.unref?.();
+    }, 250);
+    cancelPoll?.unref?.();
+  };
+  startCancellationMonitor();
   const stopCancellationMonitor = () => {
     if (cancelPoll) clearInterval(cancelPoll);
     cancelPoll = null;
@@ -4957,9 +5037,15 @@ export async function executeClaimed(
       deadlineTimer = setTimeout(refreshDeadline, leftMs);
       deadlineTimer.unref?.();
     };
-    refreshDeadline();
-    deadlinePoll = setInterval(refreshDeadline, DEADLINE_POLL_MS);
-    deadlinePoll.unref?.();
+    // Idempotent for the same reason as `startCancellationMonitor`: the
+    // bounded Pi result repair re-arms the durable deadline for its own turn.
+    const startDeadlineMonitor = () => {
+      if (deadlinePoll) return;
+      refreshDeadline();
+      deadlinePoll = setInterval(refreshDeadline, DEADLINE_POLL_MS);
+      deadlinePoll.unref?.();
+    };
+    startDeadlineMonitor();
     const stopDeadlineMonitor = () => {
       if (deadlineTimer) clearTimeout(deadlineTimer);
       if (deadlinePoll) clearInterval(deadlinePoll);
@@ -4973,6 +5059,48 @@ export async function executeClaimed(
       env.FACTORY_EVENT_PORT ?? process.env.FACTORY_EVENT_PORT;
     const workerControlToken =
       env.FACTORY_CONTROL_API_TOKEN ?? process.env.FACTORY_CONTROL_API_TOKEN;
+    // The agent may have retained a notification because it deliberately
+    // lacks the control bearer. Callers drain in `finally` so an adapter throw
+    // can never strand a retained escalation, and only after the adapter has
+    // fully stopped, so no writer races the read/truncate cycle. Neither the
+    // drain nor its ticket comment may throw: the agent's primary terminal
+    // outcome (or error) always wins.
+    const drainNotifyOutboxSafely = async () => {
+      try {
+        const notificationDrain = isWorktree
+          ? await drainLocalNotifyOutbox({
+              runId,
+              home: workerEventHome,
+              port: workerEventPort,
+              token: workerControlToken,
+              fetchFn: localNotifyFetch,
+            })
+          : { delivered: [], undelivered: [] };
+        if (notificationDrain.undelivered.length && mayMutateClaimedTicket()) {
+          try {
+            const messages = notificationDrain.undelivered
+              .slice(0, 10)
+              .map(
+                ({ title, error }) => `- ${JSON.stringify(title)} — ${error}`,
+              )
+              .join("\n");
+            commentTicketFn({
+              repo: repoName,
+              ticket: ticketId,
+              body:
+                `## Notification outbox\n` +
+                `Worker could not deliver ${notificationDrain.undelivered.length} retained notification(s); intended text:\n${messages}`,
+            });
+          } catch {
+            // The retained outbox remains the recovery source if the tracker
+            // is down.
+          }
+        }
+      } catch (err) {
+        recordTerminalError("drainLocalNotifyOutbox", err);
+      }
+    };
+
     let outcome;
     let adapterEnv;
     try {
@@ -5014,45 +5142,7 @@ export async function executeClaimed(
     } finally {
       stopDeadlineMonitor();
       stopCancellationMonitor();
-      // The agent may have retained a notification because it deliberately
-      // lacks the control bearer. Drain in `finally` so an adapter throw can
-      // never strand a retained escalation, and only after the adapter has
-      // fully stopped, so no writer races the read/truncate cycle. Neither the
-      // drain nor its ticket comment may throw: the agent's primary terminal
-      // outcome (or error) always wins.
-      try {
-        const notificationDrain = isWorktree
-          ? await drainLocalNotifyOutbox({
-              runId,
-              home: workerEventHome,
-              port: workerEventPort,
-              token: workerControlToken,
-              fetchFn: localNotifyFetch,
-            })
-          : { delivered: [], undelivered: [] };
-        if (notificationDrain.undelivered.length && mayMutateClaimedTicket()) {
-          try {
-            const messages = notificationDrain.undelivered
-              .slice(0, 10)
-              .map(
-                ({ title, error }) => `- ${JSON.stringify(title)} — ${error}`,
-              )
-              .join("\n");
-            commentTicketFn({
-              repo: repoName,
-              ticket: ticketId,
-              body:
-                `## Notification outbox\n` +
-                `Worker could not deliver ${notificationDrain.undelivered.length} retained notification(s); intended text:\n${messages}`,
-            });
-          } catch {
-            // The retained outbox remains the recovery source if the tracker
-            // is down.
-          }
-        }
-      } catch (err) {
-        recordTerminalError("drainLocalNotifyOutbox", err);
-      }
+      await drainNotifyOutboxSafely();
     }
 
     if (outcome?.usage)
@@ -5376,28 +5466,69 @@ export async function executeClaimed(
       // contract failure one bounded turn with the validator diagnostics; a
       // handoff-gate failure must never be retried as an envelope repair.
       if (mayRepairPiResult({ adapterKey, outcome, error: activeError })) {
+        const originalViolations = activeError.violations;
+        const invalidSnapshot = snapshotInvalidResult({
+          workspaceDir,
+          onTrace,
+        });
+        let repairOutcome = null;
+        let repairUsage = null;
+        // The repair is a live adapter turn like any other: it runs under the
+        // same durable deadline and cancellation supervision, and drains the
+        // notify outbox in `finally` so a throw can never strand a retained
+        // escalation.
+        startCancellationMonitor();
+        startDeadlineMonitor();
         try {
-          const repairOutcome = await adapter.execute({
+          repairOutcome = await adapter.execute({
             spec:
               executionInput === spec.input
                 ? spec
                 : { ...spec, input: executionInput },
             def,
             workspaceDir,
-            timeoutMs: adapterExecuteTimeoutMs({
-              adapterKey,
-              spec,
-              maxRunMinutes: policyMaxRunMinutes(policyRoot),
-            }),
+            timeoutMs: PI_RESULT_REPAIR_TIMEOUT_MS,
             env: adapterEnv,
             onTrace,
-            onUsage,
+            onUsage: (usage) => {
+              repairUsage = usage ?? null;
+            },
             resume: created.resume ?? null,
             abortSignal: abortController.signal,
             signal: abortController.signal,
-            resultRepair: { violations: activeError.violations },
+            resultRepair: {
+              violations: originalViolations,
+              priorResultPath: invalidSnapshot?.source ?? null,
+              priorResult: invalidSnapshot?.preview ?? null,
+            },
           });
-          if (repairOutcome?.exitCode === 0 && !repairOutcome?.timedOut) {
+        } catch (repairError) {
+          // The repair is best-effort commentary on an already-failed
+          // envelope. An adapter throw leaves the original violations
+          // standing rather than reclassifying the run.
+          onTrace("lifecycle", {
+            event: "pi_result_repair_failed",
+            error: String(repairError?.message ?? repairError),
+          });
+          repairOutcome = null;
+        } finally {
+          stopDeadlineMonitor();
+          stopCancellationMonitor();
+          await drainNotifyOutboxSafely();
+        }
+        if (repairOutcome?.usage) repairUsage = repairOutcome.usage;
+        if (repairUsage)
+          attemptUsage = mergeAttemptUsage(
+            attemptUsage,
+            repairUsage,
+            adapterKey,
+          );
+        if (
+          repairOutcome?.exitCode === 0 &&
+          !repairOutcome?.timedOut &&
+          !abortController.signal.aborted
+        ) {
+          try {
             verified = verifyResultFn({
               spec,
               def,
@@ -5417,12 +5548,28 @@ export async function executeClaimed(
               });
             }
             break verificationAttempt;
+          } catch (repairError) {
+            if (!(repairError instanceof ContractViolation)) {
+              return failVerificationInternal(repairError);
+            }
+            // The rejected original is what a human has to read; the repair's
+            // own violations are appended detail, never a replacement.
+            activeError = new ContractViolation(
+              [
+                ...originalViolations,
+                ...(repairError.violations ?? []).map(
+                  (violation) => `after repair: ${violation}`,
+                ),
+                ...(invalidSnapshot
+                  ? [`rejected envelope retained at ${invalidSnapshot.path}`]
+                  : []),
+              ],
+              {
+                reasonCode: activeError.reasonCode,
+                handoff: repairError.handoff ?? activeError.handoff ?? null,
+              },
+            );
           }
-        } catch (repairError) {
-          if (!(repairError instanceof ContractViolation)) {
-            return failVerificationInternal(repairError);
-          }
-          activeError = repairError;
         }
       }
       if (activeError.reasonCode === HANDOFF_FORGE_UNAVAILABLE) {

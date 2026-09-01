@@ -824,15 +824,30 @@ process.stdin.on("end", () => {
       },
       resultRepair: {
         violations: ["$.schemaVersion: expected const factory.agent-result/v1"],
+        priorResultPath: path.join(workspaceDir, "result.json"),
+        priorResult: '{"status":"completed","summary":"invented shape"}',
       },
     });
 
     const record = JSON.parse(readFileSync(recordFile, "utf8"));
-    expect(record.stdin).toContain("## Bounded result repair");
+    expect(record.stdin).toContain("# Result envelope repair");
     expect(record.stdin).toContain(
       "$.schemaVersion: expected const factory.agent-result/v1",
     );
-    expect(record.stdin).toContain("Do not repeat completed work");
+    // The envelope contract still rides along, so the agent knows the shape.
+    expect(record.stdin).toContain("factory.agent-result/v1");
+    // The rejected bytes are the only description of the completed work.
+    expect(record.stdin).toContain(
+      '{"status":"completed","summary":"invented shape"}',
+    );
+    expect(record.stdin).toContain(path.join(workspaceDir, "result.json"));
+    // A cold repair session must not be re-handed the dispatch task, or it
+    // redoes the work and opens a second PR.
+    expect(record.stdin).not.toContain("You are a test agent.");
+    expect(record.stdin).not.toContain(PROMPT_SUFFIX);
+    expect(record.stdin).toContain("Do not run any tools");
+    expect(record.stdin).toContain("do not open a pull request");
+    expect(record.stdin).toContain("Do not invent field values");
   });
 
   test("nonzero exit code propagates and timedOut is false", async () => {

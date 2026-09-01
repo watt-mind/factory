@@ -142,15 +142,57 @@ not invent top-level fields. In particular,
 \`{ command, passed, output }\`; never write \`ticketGate\` or \`repoGate\`.
 `;
 
-function piPrompt(def, resultRepair = null) {
-  const base = verifiedPrompt(def, "pi") + PI_RESULT_ENVELOPE_CONTRACT;
-  if (!resultRepair?.violations?.length) return base;
+/** Bytes of the rejected envelope echoed back into the repair prompt. */
+const REPAIR_PRIOR_RESULT_CHARS = 8000;
 
+/**
+ * The repair turn is not a re-run. Re-issuing the dispatch prompt to what is
+ * normally a cold session (the run's resume token is usually null, and the
+ * sandbox drops it outright) invites the agent to redo the work and open a
+ * second PR. Send the envelope contract, the validator's complaints, and the
+ * bytes the agent already wrote — nothing that describes the task.
+ */
+function repairPrompt(resultRepair) {
   const violations = resultRepair.violations
     .slice(0, 16)
     .map((violation) => `- ${String(violation).slice(0, 500)}`)
     .join("\n");
-  return `${base}\n\n## Bounded result repair\nThe prior result.json was rejected by the validator. Do not repeat completed work or open another PR. Rewrite only the result envelope at the required path, using these validator errors verbatim:\n${violations}`;
+  const priorPath = resultRepair.priorResultPath ?? "the result path";
+  const prior =
+    typeof resultRepair.priorResult === "string" &&
+    resultRepair.priorResult !== ""
+      ? resultRepair.priorResult.slice(0, REPAIR_PRIOR_RESULT_CHARS)
+      : "(the prior result could not be read)";
+  return [
+    "# Result envelope repair",
+    "",
+    "A previous session finished this task and wrote a result file that the",
+    "factory validator rejected. Your only job now is to rewrite that result",
+    "file so it satisfies the contract below.",
+    PI_RESULT_ENVELOPE_CONTRACT.trim(),
+    "",
+    "## Validator errors",
+    violations,
+    "",
+    `## Prior result written to ${priorPath}`,
+    "```json",
+    prior,
+    "```",
+    "",
+    "## Rules",
+    "- Do not run any tools, commands, or tests.",
+    "- Do not modify the repository, do not commit, and do not open a pull request.",
+    "- Do not repeat or re-verify the completed work.",
+    "- Do not invent field values. Restate only what the prior result already",
+    "  says, mapped onto the required envelope fields; if the prior result does",
+    "  not say something, omit the optional field rather than guessing.",
+    "- Write the corrected envelope to the result path and then stop.",
+  ].join("\n");
+}
+
+function piPrompt(def, resultRepair = null) {
+  if (resultRepair?.violations?.length) return repairPrompt(resultRepair);
+  return verifiedPrompt(def, "pi") + PI_RESULT_ENVELOPE_CONTRACT;
 }
 
 /** Trace events preview text; the recorder's byte bound is the real limit. */
