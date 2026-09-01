@@ -50,6 +50,10 @@ import {
   workspaceOnlyHostFallback,
 } from "./adapters/sandboxed.mjs";
 import { isSandboxGuarded } from "./adapters/index.mjs";
+import {
+  CELL_CAPABILITY_ENV,
+  hasCellCapabilities,
+} from "./adapters/child-env.mjs";
 import { preflight as sandboxPreflight } from "./sandbox/gondolin.mjs";
 import { createRun, IllegalTransition, transition } from "./lifecycle.mjs";
 import {
@@ -1204,6 +1208,34 @@ export function dispatchIdentityEnv({
     if (value != null && value !== "") identity[key] = String(value);
   }
   return { ...agentEnv, ...identity };
+}
+
+export const DEFAULT_CELL_ENDPOINT = "http://127.0.0.1:9876";
+
+/**
+ * Layer celld credentials onto the adapter environment for definitions that
+ * declare `capabilities.cells`.
+ *
+ * `CELL_AUTH_TOKEN` is in no inherit list on purpose — the hardened celld
+ * ingress rejects an unauthenticated agent, and a definition without cell
+ * bindings must never see the bearer. The worker therefore passes it
+ * explicitly, alongside the endpoint the agent should talk to; the adapter
+ * child-environment builder re-asserts both after its strip loops.
+ * Definitions without cells get `env` unchanged.
+ */
+export function cellCapabilityEnv({ def, env = {}, processEnv = process.env }) {
+  if (!hasCellCapabilities(def)) return env;
+  const values = {
+    CELL_AUTH_TOKEN: processEnv.CELL_AUTH_TOKEN,
+    FACTORY_CELL_ENDPOINT:
+      processEnv.FACTORY_CELL_ENDPOINT || DEFAULT_CELL_ENDPOINT,
+  };
+  const agentEnv = { ...env };
+  for (const key of CELL_CAPABILITY_ENV) {
+    const value = values[key];
+    if (value != null && value !== "") agentEnv[key] = String(value);
+  }
+  return agentEnv;
 }
 
 const LOCAL_NOTIFY_OUTBOX_SCHEMA = "factory.local-notify-outbox/v1";
@@ -5116,13 +5148,16 @@ export async function executeClaimed(
         if (dispatchEnv[key] === undefined && process.env[key] !== undefined)
           dispatchEnv[key] = process.env[key];
       }
-      adapterEnv = dispatchIdentityEnv({
-        spec,
-        env: dispatchEnv,
-        runId,
-        ticketId,
-        repoName,
-        resultPath: path.join(workspaceDir, "result.json"),
+      adapterEnv = cellCapabilityEnv({
+        def,
+        env: dispatchIdentityEnv({
+          spec,
+          env: dispatchEnv,
+          runId,
+          ticketId,
+          repoName,
+          resultPath: path.join(workspaceDir, "result.json"),
+        }),
       });
       outcome = await adapter.execute({
         spec:

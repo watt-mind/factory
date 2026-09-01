@@ -78,6 +78,8 @@ import { listMemos, registerMemos } from "./memos.mjs";
 import { getAgent, loadRegistry } from "./registry.mjs";
 import { transcriptSessionId } from "./transcripts.mjs";
 import {
+  cellCapabilityEnv,
+  DEFAULT_CELL_ENDPOINT,
   dispatchIdentityEnv,
   acquireClaimLock,
   adapterExecuteTimeoutMs,
@@ -6807,6 +6809,50 @@ sh -c 'sleep 5 & wait'
         runId: "run-3",
         ticketId: "T-1",
         repoName: "r",
+      });
+      expect(untouched).toBe(env);
+    }
+  });
+
+  test("cellCapabilityEnv passes celld credentials only to cell-capable defs (#2149)", () => {
+    const env = { FACTORY_RUN_ID: "run-1" };
+    const cellDef = {
+      capabilities: {
+        filesystem: "workspace-only",
+        cells: [{ binding: "GENERIC_CELL", access: "read-write" }],
+      },
+    };
+
+    const granted = cellCapabilityEnv({
+      def: cellDef,
+      env,
+      processEnv: { CELL_AUTH_TOKEN: "tok", FACTORY_CELL_ENDPOINT: "" },
+    });
+    expect(granted.CELL_AUTH_TOKEN).toBe("tok");
+    expect(granted.FACTORY_CELL_ENDPOINT).toBe(DEFAULT_CELL_ENDPOINT);
+    expect(granted.FACTORY_RUN_ID).toBe("run-1");
+    expect(env.CELL_AUTH_TOKEN).toBeUndefined();
+
+    const overridden = cellCapabilityEnv({
+      def: cellDef,
+      env,
+      processEnv: {
+        CELL_AUTH_TOKEN: "tok",
+        FACTORY_CELL_ENDPOINT: "http://cells.internal:8080",
+      },
+    });
+    expect(overridden.FACTORY_CELL_ENDPOINT).toBe("http://cells.internal:8080");
+
+    for (const def of [
+      null,
+      {},
+      { capabilities: { filesystem: "workspace-only" } },
+      { capabilities: { cells: [] } },
+    ]) {
+      const untouched = cellCapabilityEnv({
+        def,
+        env,
+        processEnv: { CELL_AUTH_TOKEN: "tok" },
       });
       expect(untouched).toBe(env);
     }

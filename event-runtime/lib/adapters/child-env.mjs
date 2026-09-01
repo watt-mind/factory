@@ -38,6 +38,20 @@ export const DISPATCH_IDENTITY_ENV = [
   "FACTORY_RESULT_PATH",
 ];
 
+// Cell credentials for definitions that declare `capabilities.cells`. Like
+// DISPATCH_IDENTITY_ENV these are supplied explicitly by the worker rather than
+// blanket-inherited from the worker process: an agent with no cell capability
+// must never see the celld bearer. FACTORY_CELL_ENDPOINT would also be removed
+// by a `stripPrefixes: ["FACTORY_"]` adapter, so both are re-asserted after the
+// strip loops.
+export const CELL_CAPABILITY_ENV = ["CELL_AUTH_TOKEN", "FACTORY_CELL_ENDPOINT"];
+
+/** True when a registry definition declares at least one cell binding. */
+export function hasCellCapabilities(def) {
+  const cells = def?.capabilities?.cells;
+  return Array.isArray(cells) && cells.length > 0;
+}
+
 export const PUSH_CREDENTIAL_ENV = [
   "SSH_AUTH_SOCK",
   "SSH_AGENT_PID",
@@ -151,6 +165,16 @@ export function safeChildEnvironment(
   // `stripPrefixes: ["FACTORY_"]` adapter cannot silently remove it.
   for (const key of DISPATCH_IDENTITY_ENV) {
     if (env[key] !== undefined) childEnv[key] = env[key];
+  }
+  // Cell credentials follow the same explicit-from-the-worker rule, and are
+  // gated on the definition actually declaring `capabilities.cells`: a
+  // definition without cells never carries them, even if a caller put them in
+  // `env`.
+  const cellDef = typeof defOrOpts === "boolean" ? null : defOrOpts;
+  const cellCapable = hasCellCapabilities(cellDef);
+  for (const key of CELL_CAPABILITY_ENV) {
+    if (cellCapable && env[key] !== undefined) childEnv[key] = env[key];
+    else if (!cellCapable) delete childEnv[key];
   }
 
   return childEnv;

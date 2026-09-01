@@ -471,8 +471,10 @@ describe("work-scan registration (WM-110)", () => {
     // is fast and on a separate subscription; triage-scan followed on 2026-08-18
     // evening to spare codex quota). agy-smoke rides agy by
     // definition. Any other route leaving pi must be an explicit, reviewed
-    // decision. No route rides claude any more.
-    expect(byAdapter.claude).toBeUndefined();
+    // decision. The only claude route is celld-smoke@1 (#2149): the celld
+    // durable-cell smoke agent is a standard claude-style workspace agent, and
+    // routing it to claude keeps that harness covered by a live smoke.
+    expect([...byAdapter.claude].sort()).toEqual(["celld-smoke@1"]);
     expect([...byAdapter.agy].sort()).toEqual([
       "agy-smoke@1",
       "merge-fix@1",

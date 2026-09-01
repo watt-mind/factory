@@ -445,8 +445,10 @@ describe("registry", () => {
     // prettier formatting of the agent prose/schema).
     // Regenerated (#2170): dispatch writes to FACTORY_RESULT_PATH and the
     // pinned prompt/definition digest changes with that recovery contract.
+    // Regenerated (#2149): factory.celld-smoke.requested routes to
+    // celld-smoke@1 on the claude adapter, so the merged view gains a mapping.
     const expected =
-      "sha256:71f0f5d2006fa5fe5183ad777236aa000044377779726272f4562f61a7dac548";
+      "sha256:e23895b901edd0d011c1e60af256621dca969e869d94505a619b9562712693d9";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 

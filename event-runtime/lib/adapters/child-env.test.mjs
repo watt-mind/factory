@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  CELL_CAPABILITY_ENV,
   DISPATCH_IDENTITY_ENV,
   HARNESS_LAYOUT,
   KILL_GRACE_MS,
@@ -216,6 +217,44 @@ describe("shared child environment", () => {
     });
     for (const key of DISPATCH_IDENTITY_ENV) {
       expect(absent[key]).toBeUndefined();
+    }
+  });
+
+  test("cell credentials reach a definition that declares capabilities.cells", () => {
+    const supplied = Object.fromEntries(
+      CELL_CAPABILITY_ENV.map((key) => [key, `supplied-${key}`]),
+    );
+    const def = {
+      mutating: false,
+      capabilities: {
+        filesystem: "workspace-only",
+        cells: [{ binding: "GENERIC_CELL", access: "read-write" }],
+      },
+    };
+    const output = safeChildEnvironment(supplied, def, {
+      extraStrip: [...CELL_CAPABILITY_ENV],
+      stripPrefixes: ["FACTORY_", "CELL_"],
+    });
+    for (const key of CELL_CAPABILITY_ENV) {
+      expect(output[key]).toBe(`supplied-${key}`);
+    }
+  });
+
+  test("cell credentials are withheld from definitions without cells", () => {
+    const supplied = Object.fromEntries(
+      CELL_CAPABILITY_ENV.map((key) => [key, `supplied-${key}`]),
+    );
+    for (const def of [
+      { mutating: false },
+      { mutating: true, capabilities: { filesystem: "workspace-only" } },
+      { mutating: false, capabilities: { cells: [] } },
+      true,
+      false,
+    ]) {
+      const output = safeChildEnvironment(supplied, def);
+      for (const key of CELL_CAPABILITY_ENV) {
+        expect(output[key]).toBeUndefined();
+      }
     }
   });
 
