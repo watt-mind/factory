@@ -60,6 +60,44 @@ test("the first-party reference packs all pass authoring validation", () => {
   }
 });
 
+test("editorial documented result envelopes validate their output schemas", () => {
+  const root = path.resolve("packs", "editorial");
+  const agentResultSchema = JSON.parse(
+    readFileSync(
+      path.resolve("event-runtime/schemas/factory.agent-result.v1.json"),
+      "utf8",
+    ),
+  );
+  const examples = ["topic-scan", "research", "draft", "review"];
+
+  for (const name of examples) {
+    const prompt = readFileSync(
+      path.join(root, "agents", `${name}.md`),
+      "utf8",
+    );
+    const output = prompt.slice(prompt.indexOf("## Output"));
+    const completed = [...output.matchAll(/```json\n([\s\S]*?)\n```/g)]
+      .map(([, source]) => JSON.parse(source))
+      .filter((example) => example.terminalState === "completed");
+    const outputSchema = JSON.parse(
+      readFileSync(path.join(root, "schemas", `${name}.output.json`), "utf8"),
+    );
+
+    expect(
+      completed,
+      `${name} must document one completed result envelope`,
+    ).toHaveLength(1);
+    expect(validate(agentResultSchema, completed[0])).toEqual({
+      valid: true,
+      errors: [],
+    });
+    expect(validate(outputSchema, completed[0].artifact)).toEqual({
+      valid: true,
+      errors: [],
+    });
+  }
+});
+
 /**
  * Walks every subschema node (the object itself, each `properties` value, and
  * `items`) so a keyword buried under a nested property is checked too —

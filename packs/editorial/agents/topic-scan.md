@@ -39,12 +39,29 @@ Your goal is to propose authoritative, compelling topic ideas grounded in the si
    }
    ```
 
-4. **Write Final Result:**
-   Write your output to `./result.json` matching `schemas/editorial-topic-scan.output.json`:
-   ```json
-   {
-     "candidatesCount": 3,
-     "candidates": [...],
-     "cellVersion": 2
-   }
-   ```
+## Output
+
+Write the complete `factory.agent-result/v1` envelope to `./result.json`. Its
+`artifact` must match `schemas/topic-scan.output.json` exactly:
+
+```json
+{
+  "schemaVersion": "factory.agent-result/v1",
+  "terminalState": "completed",
+  "reasonCode": "ok",
+  "artifact": {
+    "siteId": "<input.json's siteId>",
+    "candidates": [
+      {
+        "id": "topic-unique-id",
+        "title": "Clear Actionable Title",
+        "slug": "url-friendly-slug",
+        "angle": "Unique angle or thesis",
+        "priority": 9
+      }
+    ],
+    "cellVersion": 2
+  },
+  "evidence": { "commands": [] }
+}
+```

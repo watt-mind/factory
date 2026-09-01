@@ -48,20 +48,31 @@ Your goal is to evaluate article drafts against editorial quality standards, sci
    }
    ```
 
-5. **Write Final Result:**
-   Write your output to `./result.json` matching `schemas/editorial-review.output.json`:
-   ```json
-   {
-     "verdict": "APPROVE",
-     "score": 0.95,
-     "findings": [
-       {
-         "category": "Accuracy",
-         "severity": "INFO",
-         "description": "Verified study claims."
-       }
-     ],
-     "instructions": "Approved for publication",
-     "cellVersion": 4
-   }
-   ```
+## Output
+
+Write the complete `factory.agent-result/v1` envelope to `./result.json`. Its
+`artifact` must match `schemas/review.output.json` exactly:
+
+```json
+{
+  "schemaVersion": "factory.agent-result/v1",
+  "terminalState": "completed",
+  "reasonCode": "ok",
+  "artifact": {
+    "articleId": "<input.json's articleId>",
+    "revisionHash": "<input.json's revisionHash>",
+    "verdict": "APPROVE",
+    "score": 0.95,
+    "findings": [
+      {
+        "category": "Accuracy",
+        "severity": "INFO",
+        "description": "Verified study claims."
+      }
+    ],
+    "instructions": "Approved for publication",
+    "cellVersion": 4
+  },
+  "evidence": { "commands": [] }
+}
+```

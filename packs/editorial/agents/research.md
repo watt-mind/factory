@@ -37,12 +37,30 @@ Your goal is to gather authoritative scientific studies, physiological data, and
    }
    ```
 
-4. **Write Final Result:**
-   Write your output to `./result.json` matching `schemas/editorial-research.output.json`:
-   ```json
-   {
-     "sourcesCount": 3,
-     "sources": [...],
-     "cellVersion": 2
-   }
-   ```
+## Output
+
+Write the complete `factory.agent-result/v1` envelope to `./result.json`. Its
+`artifact` must match `schemas/research.output.json` exactly:
+
+```json
+{
+  "schemaVersion": "factory.agent-result/v1",
+  "terminalState": "completed",
+  "reasonCode": "ok",
+  "artifact": {
+    "articleId": "<input.json's articleId>",
+    "sources": [
+      {
+        "id": "src-study-01",
+        "title": "Study Title",
+        "url": "https://pubmed.ncbi.nlm.nih.gov/...",
+        "relevanceScore": 0.98,
+        "claims": ["Key physiological finding 1", "Key finding 2"]
+      }
+    ],
+    "summary": "Evidence-based research summary.",
+    "cellVersion": 2
+  },
+  "evidence": { "commands": [] }
+}
+```
