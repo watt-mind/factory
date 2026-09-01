@@ -18,9 +18,11 @@ import {
   CLOSE_CONNECTIONS_AFTER_MS,
   CONNECTOR_STOP_TIMEOUT_MS,
   HARD_EXIT_MS,
+  mainLoopHardStallAfterMs,
   serveLockPath,
   stopBounded,
 } from "./serve.mjs";
+import { MAIN_LOOP_HARD_STALL_FLOOR_MS } from "../lib/planner-worker.mjs";
 import { openDb } from "../lib/db.mjs";
 import { startPlannerWorker } from "../lib/planner-worker.mjs";
 import { freePort, until } from "../lib/test-helpers-timing.mjs";
@@ -66,6 +68,28 @@ test("planner worker exit is logged and exposed as dead", async () => {
   } finally {
     await planner.stop();
   }
+});
+
+test("main-loop hard stall recovery is inert until explicitly enabled", () => {
+  expect(mainLoopHardStallAfterMs({})).toBeNull();
+  expect(
+    mainLoopHardStallAfterMs({ FACTORY_MAIN_LOOP_STALL_EXIT_AFTER_MS: "0" }),
+  ).toBeNull();
+  expect(
+    mainLoopHardStallAfterMs({ FACTORY_MAIN_LOOP_STALL_EXIT_AFTER_MS: "bad" }),
+  ).toBeNull();
+  // An enabled-but-tiny threshold is raised to the floor: ordinary tick
+  // slowness must never be enough to restart serve.
+  expect(
+    mainLoopHardStallAfterMs({ FACTORY_MAIN_LOOP_STALL_EXIT_AFTER_MS: "1234" }),
+  ).toBe(MAIN_LOOP_HARD_STALL_FLOOR_MS);
+  expect(
+    mainLoopHardStallAfterMs({
+      FACTORY_MAIN_LOOP_STALL_EXIT_AFTER_MS: String(
+        MAIN_LOOP_HARD_STALL_FLOOR_MS * 4,
+      ),
+    }),
+  ).toBe(MAIN_LOOP_HARD_STALL_FLOOR_MS * 4);
 });
 
 /**
@@ -300,15 +324,27 @@ describe("serve command", () => {
     let health;
     try {
       expect(out).toContain("control API on");
-      const res = await fetch(`http://127.0.0.1:${port}/health`);
-      expect(res.ok).toBe(true);
-      health = await res.json();
+      // The worker echoes its main-loop observation at ~1Hz, so poll until
+      // the first one has landed rather than racing the very first tick.
+      for (let attempt = 0; attempt < 30; attempt++) {
+        const res = await fetch(`http://127.0.0.1:${port}/health`);
+        expect(res.ok).toBe(true);
+        health = await res.json();
+        if (health.planner?.mainLoopHeartbeat) break;
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
     } finally {
       child.kill("SIGTERM");
       await new Promise((resolve) => child.once("exit", resolve));
     }
     expect(health.ok).toBe(true);
     expect(health.tick.deadlineSkipped).toBe(0);
+    // The planner worker is serve's only observer of a wedged main loop, so
+    // /health must carry its report (#2129).
+    expect(health.planner.mainLoopHeartbeat).toMatchObject({
+      stalled: false,
+    });
+    expect(typeof health.planner.mainLoopHeartbeat.lastAt).toBe("string");
   });
 
   test("a stalled Linear ticket read cannot wedge /health past the tick budget (#1835 AC3)", async () => {

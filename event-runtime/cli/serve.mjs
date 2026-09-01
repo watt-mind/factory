@@ -34,7 +34,11 @@ import {
 import { startApi } from "../lib/api.mjs";
 import { codeStamp, REGISTRY_STAMP_PATHS } from "../lib/worker.mjs";
 import { reapExpiredLeases } from "../lib/reaper.mjs";
-import { startPlannerWorker } from "../lib/planner-worker.mjs";
+import {
+  MAIN_LOOP_HARD_STALL_FLOOR_MS,
+  MAIN_LOOP_HEARTBEAT_INTERVAL_MS,
+  startPlannerWorker,
+} from "../lib/planner-worker.mjs";
 import { CLI_PATH, fail, flagValue, log } from "./shared.mjs";
 
 export const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
@@ -57,6 +61,19 @@ export const INBOX_RECONCILE_DEADLINE_MS = 10_000;
 export const CONNECTOR_STOP_TIMEOUT_MS = 1_500;
 export const CLOSE_CONNECTIONS_AFTER_MS = 500;
 export const HARD_EXIT_MS = 2_500;
+
+/**
+ * The hard main-loop watchdog is intentionally disabled unless an operator
+ * opts in. An invalid value is equivalent to disabled rather than turning a
+ * typo into an unexpected serve restart, and an enabled one is clamped up to
+ * a floor of several soft stall windows so ordinary tick slowness can never
+ * be enough to restart serve.
+ */
+export function mainLoopHardStallAfterMs(env = process.env) {
+  const value = Number(env.FACTORY_MAIN_LOOP_STALL_EXIT_AFTER_MS);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return Math.max(value, MAIN_LOOP_HARD_STALL_FLOOR_MS);
+}
 
 /**
  * Mutable ownership seam for the validated registry.  Loading and validation
@@ -684,6 +701,7 @@ export default async function serve(args) {
   let currentTickStep = null;
   let tickStartedAt = null;
   let plannerWorker = null;
+  let plannerHeartbeatTimer = null;
   // Chain approval has exactly one owner in this process: the tick step below,
   // which runs it with awaited, memoised, per-row-bounded control-plane reads.
   // Without this the planner would run the same pass again — inline under
@@ -768,12 +786,30 @@ export default async function serve(args) {
   }
 
   if (!noPlanner) {
+    const hardStallAfterMs = mainLoopHardStallAfterMs();
     plannerWorker = startPlannerWorker({
       eventHome: home,
       policyVersion: pv,
       adapterOverride,
+      mainLoopHardStallAfterMs: hardStallAfterMs,
       log,
     });
+    if (hardStallAfterMs != null) {
+      const raw = Number(process.env.FACTORY_MAIN_LOOP_STALL_EXIT_AFTER_MS);
+      log(
+        `planner: main-loop hard stall exit armed at ${hardStallAfterMs}ms` +
+          (raw !== hardStallAfterMs
+            ? ` (raised from ${raw}ms to the ${MAIN_LOOP_HARD_STALL_FLOOR_MS}ms floor)`
+            : ""),
+      );
+    }
+    // The worker owns the clock and can therefore observe a main event-loop
+    // wedge. Include the live step so its report says where the loop stopped.
+    plannerWorker.heartbeat(currentTickStep);
+    plannerHeartbeatTimer = setInterval(
+      () => plannerWorker?.heartbeat(currentTickStep),
+      MAIN_LOOP_HEARTBEAT_INTERVAL_MS,
+    );
   }
 
   const env = {
@@ -867,6 +903,12 @@ export default async function serve(args) {
     stopping = true;
     log(`shutting down (${signal})`);
     if (timer) clearInterval(timer);
+    if (plannerHeartbeatTimer) clearInterval(plannerHeartbeatTimer);
+    // We stop heartbeating on purpose from here on, and the bounded stops
+    // below can legitimately take CONNECTOR_STOP_TIMEOUT_MS. Disarm before
+    // any of that so an orderly shutdown cannot be turned into a SIGKILL
+    // that skips releaseServeLock.
+    plannerWorker?.disarmHardStall();
     // Arm this before any cleanup: a connector or the planner thread may
     // never settle. It sits inside the supervisor's SIGKILL grace so the lock
     // is released by us, not by a kernel kill; it is longer than the bounded
