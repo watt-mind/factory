@@ -98,11 +98,6 @@ if [[ -n "$control_target_supported" ]]; then
     esac
   done
   set -- ${forwarded_args[@]+"${forwarded_args[@]}"}
-
-  if [[ -n "$control_target" && "$control_target_supported" -eq 0 ]]; then
-    echo "factory: remote targeting not yet supported for $cmd (see #2190)" >&2
-    exit 2
-  fi
 fi
 
 if [[ -n "$control_target" ]]; then
