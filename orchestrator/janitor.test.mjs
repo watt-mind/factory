@@ -325,21 +325,24 @@ describe("survey (WM-55: hold wiring and cannot-tell exclusion)", () => {
     const calls = [];
     let active = 0;
     let maxActive = 0;
-    const queryIssues = async (_team, nums) => {
-      calls.push(nums);
+    const queryIssues = async (identifiers) => {
+      calls.push(identifiers);
       active += 1;
       maxActive = Math.max(maxActive, active);
       await Promise.resolve();
       active -= 1;
       // Match Linear's `issues(first: 250)` response limit. Passing all numbers
       // in one request silently omits every worktree after the first 250.
-      return nums.slice(0, 250).map((number) => ({
-        identifier: `CLNT-${number}`,
-        state:
-          number % 2 === 0
-            ? { name: "Done", type: "completed" }
-            : { name: "In Progress", type: "started" },
-      }));
+      return identifiers.slice(0, 250).map((identifier) => {
+        const number = Number(identifier.split("-")[1]);
+        return {
+          identifier,
+          state:
+            number % 2 === 0
+              ? { name: "Done", type: "completed" }
+              : { name: "In Progress", type: "started" },
+        };
+      });
     };
 
     const res = await survey(
@@ -354,12 +357,59 @@ describe("survey (WM-55: hold wiring and cannot-tell exclusion)", () => {
       },
     );
 
-    expect(calls.map((nums) => nums.length)).toEqual([250, 250, 1]);
+    expect(calls.map((identifiers) => identifiers.length)).toEqual([
+      250, 250, 1,
+    ]);
     expect(maxActive).toBe(3);
     expect(res.unknown).toEqual([]);
     expect(res.reclaimable).toHaveLength(250);
     expect(res.kept).toHaveLength(251);
     expect(res.kept.at(-1)).toEqual({ id: "CLNT-501", state: "In Progress" });
+  });
+
+  test("uses the repository's GitHub control plane for gh worktrees", async () => {
+    const githubRepo = {
+      ...repo,
+      name: "factory",
+      control_plane: "github",
+      github: "watt-mind/factory",
+    };
+    const controlPlaneCalls = [];
+    const ticketCalls = [];
+    const res = await survey(
+      githubRepo,
+      { apply: true },
+      {
+        readdir: () => ["gh-2160", "release-scratch"],
+        exists: () => true,
+        resolveControlPlane: (opts) => {
+          controlPlaneCalls.push(opts);
+          return {
+            kind: "github",
+            getTicket: async (identifier) => {
+              ticketCalls.push(identifier);
+              return {
+                identifier,
+                state: { name: "Done", type: "completed" },
+              };
+            },
+          };
+        },
+        getBranches: () => ({ "gh-2160": "fix/gh-2160" }),
+        getOpenPrs: () => [],
+        doReclaim: (finished) => ({
+          removed: finished,
+          refused: [],
+          held: [],
+        }),
+      },
+    );
+
+    expect(controlPlaneCalls).toEqual([{ repoName: "factory" }]);
+    expect(ticketCalls).toEqual(["watt-mind/factory#2160"]);
+    expect(res.named).toEqual(["release-scratch"]);
+    expect(res.reclaimable).toEqual([{ id: "gh-2160", state: "Done" }]);
+    expect(res.removed).toEqual(["gh-2160"]);
   });
 
   test("an open-PR hold populates the held array and is excluded from reclaimable (dry run)", () => {

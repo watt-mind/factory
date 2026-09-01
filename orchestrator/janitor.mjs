@@ -48,6 +48,7 @@ import { loadConfigYaml, ROOT } from "../lib/schedule.mjs";
 import { loadControlPlane } from "../lib/control-plane/index.mjs";
 import { emitFactoryEvent } from "../lib/emit-event.mjs";
 import { githubForge, loadForge } from "../lib/forge/index.mjs";
+import { isSluggableTicket, ticketSlug } from "../lib/ticket-slug.mjs";
 
 export function parseArgs(argv) {
   const val = (f) => {
@@ -218,6 +219,7 @@ export async function survey(
     readdir = readdirSync,
     exists = existsSync,
     queryIssues,
+    resolveControlPlane = loadControlPlane,
     getBranches = ticketBranches,
     getOpenPrs = listOpenPrs,
     doReclaim = reclaim,
@@ -231,36 +233,43 @@ export async function survey(
     return result;
   }
 
-  // Only ever consider <TEAM>-<number> directories. Named worktrees (a release
-  // branch, a scratch checkout) are somebody's deliberate workspace and are not
-  // this tool's business.
-  const pattern = new RegExp(`^${repo.team}-\\d+$`);
+  // Ticket worktrees are named by ticketSlug(), not by their tracker team.
+  // GitHub tickets are gh-<number>, while Linear tickets retain ABC-<number>.
+  // Named worktrees (a release branch, a scratch checkout) are somebody's
+  // deliberate workspace and are not this tool's business.
   const all = readdir(root);
-  const tickets = all.filter((d) => pattern.test(d));
-  result.named = all.filter((d) => !pattern.test(d) && !d.startsWith("."));
+  const tickets = all.filter(isSluggableTicket);
+  result.named = all.filter((d) => !isSluggableTicket(d) && !d.startsWith("."));
 
   let states = {};
   if (tickets.length) {
-    const nums = tickets.map((t) => Number(t.split("-")[1]));
+    const controlPlane = queryIssues
+      ? null
+      : resolveControlPlane({ repoName: repo.name });
+    const planeKind = controlPlane?.kind ?? repo.control_plane;
+    const identifiers = tickets.map((slug) =>
+      planeKind === "github"
+        ? `${repo.github}#${slug.slice("gh-".length)}`
+        : slug,
+    );
     const queryBatch =
       queryIssues ??
-      (async (team, batch) => {
-        const q = `query($n:[Float!]){ issues(first:250, filter:{ number:{in:$n}, team:{key:{eq:"${team}"}} }){ nodes{ identifier state{name type} } } }`;
-        return (
-          (await loadControlPlane().raw(q, { n: batch }))?.issues?.nodes ?? []
-        );
-      });
+      (async (batch) =>
+        Promise.all(
+          batch.map((identifier) => controlPlane.getTicket(identifier)),
+        ));
 
-    // Linear caps this connection at 250 nodes. Keep each filter at or below
-    // that cap and run the independent requests together so every worktree is
-    // resolved without turning a large checkout into a serial API crawl.
+    // Keep bounded batches and run independent reads together so a large
+    // checkout is resolved without a serial API crawl.
     const batches = [];
-    for (let i = 0; i < nums.length; i += 250)
-      batches.push(nums.slice(i, i + 250));
+    for (let i = 0; i < identifiers.length; i += 250)
+      batches.push(identifiers.slice(i, i + 250));
     const nodes = (
-      await Promise.all(batches.map((batch) => queryBatch(repo.team, batch)))
+      await Promise.all(batches.map((batch) => queryBatch(batch)))
     ).flat();
-    states = Object.fromEntries(nodes.map((n) => [n.identifier, n.state]));
+    states = Object.fromEntries(
+      nodes.map((n) => [ticketSlug(n.identifier), n.state]),
+    );
   }
 
   const allFinished = tickets.filter((t) =>
