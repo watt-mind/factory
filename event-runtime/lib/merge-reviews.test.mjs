@@ -1138,6 +1138,29 @@ describe("merge-scan enumerator (WM-936)", () => {
     expect(result.artifact.reviews).toEqual([]);
   });
 
+  function conflictingScan(db, { now } = {}) {
+    return enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith(
+        [
+          pr({
+            number: 9,
+            headRefName: "feat/WM-9",
+            mergeable: "CONFLICTING",
+          }),
+        ],
+        {
+          baseSha: BASE2,
+        },
+      ),
+      repos,
+      ...(now === undefined ? {} : { now }),
+    });
+  }
+
+  const REFUSED_AT = Date.parse("2026-08-19T16:45:00.000Z");
+
   test("a refused escalated merge-fix does not re-emit the identical finding", () => {
     const db = openDb(":memory:");
     upsertMergeReview(db, {
@@ -1154,25 +1177,85 @@ describe("merge-scan enumerator (WM-936)", () => {
       reasonCode: "merge_fix_ticket_escalated",
     });
 
-    const result = enumerateMergeScan({
-      input: { repo: "factory" },
-      db,
-      forge: forgeWith(
-        [
-          pr({
-            number: 9,
-            headRefName: "feat/WM-9",
-            mergeable: "CONFLICTING",
-          }),
-        ],
-        {
-          baseSha: BASE2,
-        },
-      ),
-      repos,
-    });
+    const result = conflictingScan(db, { now: REFUSED_AT + 60_000 });
 
     expect(result.artifact.fix).toEqual([]);
+  });
+
+  test("a durable refusal is retried once its long cooldown expires", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    insertRefusedMergeFix(db, {
+      runId: "run_fix_security",
+      pr: 9,
+      reasonCode: "merge_fix_ticket_security",
+    });
+
+    const withinWindow = conflictingScan(db, {
+      now: REFUSED_AT + 5 * 60 * 60_000,
+    });
+    const afterWindow = conflictingScan(db, {
+      now: REFUSED_AT + 6 * 60 * 60_000 + 60_000,
+    });
+
+    expect(withinWindow.artifact.fix).toEqual([]);
+    expect(afterWindow.artifact.fix).toHaveLength(1);
+  });
+
+  test("an unrecognised refusal code still earns the transient cooldown", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    insertRefusedMergeFix(db, {
+      runId: "run_fix_unknown",
+      pr: 9,
+      reasonCode: "merge_fix_run_check_failed",
+    });
+
+    const beforeCooldown = conflictingScan(db, { now: REFUSED_AT + 60_000 });
+    const afterCooldown = conflictingScan(db, {
+      now: REFUSED_AT + 16 * 60_000,
+    });
+
+    expect(beforeCooldown.artifact.fix).toEqual([]);
+    expect(afterCooldown.artifact.fix).toHaveLength(1);
+  });
+
+  test("a suppressed rebase fix is reported in the scan summary", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    insertRefusedMergeFix(db, {
+      runId: "run_fix_reported",
+      pr: 9,
+      reasonCode: "merge_fix_ticket_escalated",
+    });
+
+    const result = conflictingScan(db, { now: REFUSED_AT + 60_000 });
+
+    expect(result.artifact.fix).toEqual([]);
+    expect(result.artifact.summary).toContain(
+      "rebase_skipped:refused_merge_fix_ticket_escalated #9",
+    );
   });
 
   test("a refused ticket-read merge-fix retries only after its cooldown", () => {

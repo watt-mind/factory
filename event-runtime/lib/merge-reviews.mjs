@@ -463,6 +463,7 @@ function hasInFlightAgent(db, agent, { github, pr, headSha }) {
 }
 
 const MERGE_FIX_REFUSAL_COOLDOWN_MS = 15 * 60_000;
+const MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MS = 6 * 60 * 60_000;
 const DURABLE_MERGE_FIX_REFUSALS = new Set([
   "merge_fix_ticket_escalated",
   "merge_fix_ticket_security",
@@ -473,9 +474,17 @@ const DURABLE_MERGE_FIX_REFUSALS = new Set([
  * refusal every scan turns a tracker outage or an escalated ticket into a
  * dispatch storm. Keep the suppression scoped to the finding and pinned head:
  * a new commit is fresh evidence and remains eligible for a new correction.
+ *
+ * Any refusal earns at least the transient cooldown — a per-code allowlist
+ * silently misses every reason code added later. Refusals that need a human to
+ * clear a blocker get a much longer cooldown, but never permanent suppression:
+ * the blocker can be lifted without a new push, and the scan must eventually
+ * re-notice that.
+ *
+ * Returns the suppressing reason code, or null when the item is dispatchable.
  */
 function refusedMergeFixSuppressed(db, item, { github, now }) {
-  if (!db) return false;
+  if (!db) return null;
   const refused = db
     .query(
       `SELECT a.reason_code AS reasonCode, a.finished_at AS finishedAt
@@ -492,14 +501,14 @@ function refusedMergeFixSuppressed(db, item, { github, now }) {
         LIMIT 1`,
     )
     .get(item.pr, item.headSha, github, item.findingHash);
-  if (!refused?.reasonCode) return false;
-  if (DURABLE_MERGE_FIX_REFUSALS.has(refused.reasonCode)) return true;
-  if (refused.reasonCode !== "merge_fix_ticket_read_failed") return false;
+  if (!refused?.reasonCode) return null;
+  const cooldownMs = DURABLE_MERGE_FIX_REFUSALS.has(refused.reasonCode)
+    ? MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MS
+    : MERGE_FIX_REFUSAL_COOLDOWN_MS;
   const finishedAt = Date.parse(refused.finishedAt ?? "");
-  return (
-    Number.isFinite(finishedAt) &&
-    Number(now) - finishedAt < MERGE_FIX_REFUSAL_COOLDOWN_MS
-  );
+  if (!Number.isFinite(finishedAt)) return null;
+  if (Number(now) - finishedAt >= cooldownMs) return null;
+  return refused.reasonCode;
 }
 
 /**
@@ -703,7 +712,10 @@ function assemble({
         continue;
       }
       const item = rebaseFixItem(pr, hit, { forge, github });
-      if (!item || refusedMergeFixSuppressed(db, item, { github, now })) {
+      if (!item) continue;
+      const suppressed = refusedMergeFixSuppressed(db, item, { github, now });
+      if (suppressed) {
+        rebaseSkipped.push({ pr: pr.number, reason: `refused_${suppressed}` });
         continue;
       }
       fix.push(item);
