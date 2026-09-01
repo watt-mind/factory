@@ -6359,6 +6359,7 @@ sh -c 'sleep 5 & wait'
     );
     const lockFile = dispatchLockPath("factory", locksDir);
     let concurrentClaimantAcquired = false;
+    let acquireClaimLockCalls = 0;
     const lockStates = [];
     const observeLock = () => lockStates.push(existsSync(lockFile));
     const summary = await executeClaimed(
@@ -6374,6 +6375,10 @@ sh -c 'sleep 5 & wait'
       },
       claimNext(db, opts()),
       opts({
+        acquireClaimLock: (...args) => {
+          acquireClaimLockCalls += 1;
+          return acquireClaimLock(...args);
+        },
         dispatch: {
           locksDir,
           fetchTicket: () => {
@@ -6408,7 +6413,9 @@ sh -c 'sleep 5 & wait'
       reasonCode: "agent_exit_1",
     });
     observeLock();
-    expect(lockStates).toEqual([false, false, false, false, false]);
+    expect(acquireClaimLockCalls).toBe(0);
+    expect(lockStates.length).toBeGreaterThan(0);
+    expect(lockStates.every((state) => state === false)).toBe(true);
     expect(concurrentClaimantAcquired).toBe(true);
     expect(existsSync(lockFile)).toBe(false);
     db.close();

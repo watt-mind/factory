@@ -3810,6 +3810,7 @@ export async function executeClaimed(
     sandboxAvailability,
     materializeWorktree,
     localNotifyFetch,
+    acquireClaimLock: acquireClaimLockFn = acquireClaimLock,
     verifyResult: verifyResultFn = verifyResult,
   } = {},
 ) {
@@ -4776,7 +4777,7 @@ export async function executeClaimed(
       }
 
       if (gate === "dispatch") {
-        claimLockHeld = acquireClaimLock(lockFile, {
+        claimLockHeld = acquireClaimLockFn(lockFile, {
           pid: process.pid,
           now: nowFn(),
           isAlive: isAliveFn,
