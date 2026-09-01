@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { GenericCell } from "../base/generic-cell.mjs";
+import { GenericCell } from "../../../cells/src/base/generic-cell.mjs";
 
 /**
  * SiteCell: Manages site-wide editorial policy, topic backlog, and coverage index.

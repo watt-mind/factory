@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { GenericCell } from "../base/generic-cell.mjs";
+import { GenericCell } from "../../../cells/src/base/generic-cell.mjs";
 
 /**
  * ArticleCell: Single-article lifecycle state machine and durability actor.

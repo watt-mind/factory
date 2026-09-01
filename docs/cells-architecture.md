@@ -133,7 +133,7 @@ curl -X POST http://100.74.142.98:8080/cells/editorial:article:01J.../v1/schema/
 To add new Durable Object classes, endpoints, or business logic:
 
 1. Edit the relevant module: [`cells/src/base/generic-cell.mjs`](../cells/src/base/generic-cell.mjs)
-   for shared behaviour, [`cells/src/editorial/`](../cells/src/editorial/) for a domain
+   for shared behaviour, [`extensions/editorial/cells/`](../extensions/editorial/cells/) for a domain
    cell, or [`cells/src/router.mjs`](../cells/src/router.mjs) for ingress routing;
    [`cells/src/index.mjs`](../cells/src/index.mjs) is the worker entrypoint that wires
    them together.

@@ -1,0 +1,21 @@
+{
+  "format": "factory.panel-view/v1",
+  "name": "wattmind/editorial:queue",
+  "title": "Editorial queue",
+  "description": "Active editorial runs and candidate proposals.",
+  "source": {
+    "endpoint": "/proposals",
+    "path": "/proposals"
+  },
+  "refreshSeconds": 30,
+  "view": {
+    "sections": [
+      {
+        "path": "",
+        "as": "table",
+        "columns": ["id", "eventType", "createdAt"],
+        "formats": { "createdAt": "datetime" }
+      }
+    ]
+  }
+}

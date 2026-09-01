@@ -1,0 +1,9 @@
+{
+  "editorial-weekly-scan": {
+    "every": "168h",
+    "eventType": "editorial.topic-scan.requested",
+    "catchUp": "none",
+    "approval": "watched",
+    "enabled": false
+  }
+}

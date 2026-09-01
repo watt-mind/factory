@@ -14,8 +14,8 @@
  */
 
 export { GenericCell } from "./base/generic-cell.mjs";
-export { SiteCell } from "./editorial/site-cell.mjs";
-export { ArticleCell } from "./editorial/article-cell.mjs";
+export { SiteCell } from "../../extensions/editorial/cells/site-cell.mjs";
+export { ArticleCell } from "../../extensions/editorial/cells/article-cell.mjs";
 export { CellRouter, defaultRouter, checkAuth } from "./router.mjs";
 
 import { defaultRouter } from "./router.mjs";

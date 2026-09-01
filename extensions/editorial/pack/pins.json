@@ -1,0 +1,14 @@
+{
+  "agents/editorial-draft.md": "sha256:42100e1f47fed5df1ad5008db4179e14c9e54db89969b922a4ff00155d47c999",
+  "agents/editorial-research.md": "sha256:7f5b26ae6d2e5590b8ab2f6a28ac69e266fc143bcffdb3dd2e273036079def5c",
+  "agents/editorial-review.md": "sha256:bd85cb13b3f9f94a278c27d955a44089da7998d7ffd4f449c7edf9e1a172946e",
+  "agents/editorial-topic-scan.md": "sha256:82e6b426e4a97d916782d0f70a891afb332232970ca074ddd933aa966598b18e",
+  "schemas/editorial-draft.input.json": "sha256:4fef0d88c3745f6261cc2a4b941671ba3eb605d37cc7fccfc92349fa8b1e47af",
+  "schemas/editorial-draft.output.json": "sha256:a7f50a525c4dd76f72342ef0e6e77a27e431b005f69911bc15b9c8c1a1c7d0c8",
+  "schemas/editorial-research.input.json": "sha256:681c812737f0fb5eb7d197b0f77468ca49b41102c348558ea9a17fa99e4bf8dd",
+  "schemas/editorial-research.output.json": "sha256:83dc27085c5a635ead55a0a451036e51c07720db127498384c3c4110545715c7",
+  "schemas/editorial-review.input.json": "sha256:3a15c07b0c268470d3e94c67bd7f8b332f58a8a4383248adab9bb584a951044e",
+  "schemas/editorial-review.output.json": "sha256:147f259f03816286d70ddbf2a8b572ef1958f3e438a064cb3ea2c5d2e2dd728d",
+  "schemas/editorial-topic-scan.input.json": "sha256:b67c35526589722e4b58a102ebe8b870fa9cb5eed2f663a242a926c61ba76ae9",
+  "schemas/editorial-topic-scan.output.json": "sha256:6eb9563b0b0450d44e1e64de8f268ec54d3afa841bb731f5dfc0e4fd0def9e28"
+}

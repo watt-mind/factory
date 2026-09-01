@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Editorial Extension Operator Config",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "cellEndpoint": {
+      "type": "string",
+      "format": "uri",
+      "title": "Cell Daemon Endpoint",
+      "description": "URL of the running celld worker daemon",
+      "default": "http://127.0.0.1:8080"
+    },
+    "cellAuthToken": {
+      "type": "string",
+      "format": "secret",
+      "title": "Cell Auth Bearer Token",
+      "description": "Resolved from FACTORY_EXT_EDITORIAL_CELL_AUTH_TOKEN"
+    },
+    "defaultSiteId": {
+      "type": "string",
+      "title": "Default Site Identifier",
+      "description": "Default site identifier for editorial topic scans (e.g. coachwatts.com)",
+      "default": "coachwatts.com"
+    }
+  }
+}

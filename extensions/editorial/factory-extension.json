@@ -1,0 +1,16 @@
+{
+  "name": "wattmind/editorial",
+  "version": "1.0.0",
+  "description": "Autonomous multi-site editorial pipeline and durable SQLite cells",
+  "factory": {
+    "min": "0.1.0"
+  },
+  "contributes": {
+    "packs": ["./pack"],
+    "config": {
+      "namespace": "editorial",
+      "schema": "./config.schema.json"
+    },
+    "panels": ["./panels"]
+  }
+}

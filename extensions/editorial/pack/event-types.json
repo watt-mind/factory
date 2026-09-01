@@ -1,0 +1,26 @@
+{
+  "editorial.topic-scan.requested": {
+    "agent": "editorial/editorial-topic-scan@1",
+    "adapter": "pi",
+    "idempotencyScope": ["inputHash"],
+    "proposalTtlSeconds": 3600
+  },
+  "editorial.research.requested": {
+    "agent": "editorial/editorial-research@1",
+    "adapter": "pi",
+    "idempotencyScope": ["inputHash"],
+    "proposalTtlSeconds": 3600
+  },
+  "editorial.draft.requested": {
+    "agent": "editorial/editorial-draft@1",
+    "adapter": "pi",
+    "idempotencyScope": ["inputHash"],
+    "proposalTtlSeconds": 3600
+  },
+  "editorial.review.requested": {
+    "agent": "editorial/editorial-review@1",
+    "adapter": "pi",
+    "idempotencyScope": ["inputHash"],
+    "proposalTtlSeconds": 3600
+  }
+}
