@@ -610,6 +610,7 @@ export interface ArtifactView extends ArtifactViewBody {
 export interface AgentDef {
   ref: string;
   id: string;
+  pack?: string | null;
   version: number;
   outputContract: string;
   workspace: { type: string; retainOnFailure?: boolean };

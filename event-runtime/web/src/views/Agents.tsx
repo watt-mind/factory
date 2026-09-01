@@ -166,13 +166,15 @@ export const modelText = (a: AgentDef): string =>
 const AGENTS_DISPLAY: DisplayConfig<AgentDef> = {
   view: "agents",
   groups: [
+    { key: "pack", label: "Pack", get: (a) => a.pack ?? "core" },
     { key: "adapter", label: "Adapter", get: adapterText },
     { key: "tier", label: "Tier", get: tierText, order: TIER_ORDER },
     { key: "contract", label: "Contract", get: (a) => a.outputContract },
   ],
-  subGroups: ["adapter", "tier", "contract"],
+  subGroups: ["pack", "adapter", "tier", "contract"],
   sorts: [
     { key: "ref", label: "Ref", get: (a) => a.ref, column: "ref" },
+    { key: "pack", label: "Pack", get: (a) => a.pack ?? "core", column: "pack" },
     {
       key: "contract",
       label: "Contract",
@@ -209,6 +211,7 @@ const AGENTS_DISPLAY: DisplayConfig<AgentDef> = {
   ],
   columns: [
     { key: "ref", label: "Ref", always: true },
+    { key: "pack", label: "Pack" },
     { key: "contract", label: "Contract" },
     { key: "adapter", label: "Adapter" },
     { key: "tier", label: "Tier" },
@@ -814,8 +817,37 @@ export function Agents({
                       role="gridcell"
                       className="mono border-b border-(--border) px-3 py-1.5 whitespace-nowrap"
                     >
-                      {a.ref}
+                      <div className="flex items-center gap-2">
+                        <span>{a.ref}</span>
+                        {a.pack && (
+                          <span
+                            className="rounded px-1.5 py-0.5 text-[10px] font-sans font-medium"
+                            style={{
+                              background: "color-mix(in oklch, var(--accent) 12%, transparent)",
+                              color: "var(--accent)",
+                            }}
+                          >
+                            {a.pack}
+                          </span>
+                        )}
+                      </div>
                     </td>
+                    {show.has("pack") && (
+                      <td
+                        role="gridcell"
+                        className="border-b border-(--border) px-3 py-1.5 whitespace-nowrap"
+                      >
+                        <span
+                          className="rounded px-1.5 py-0.5 text-[11px] font-medium"
+                          style={{
+                            background: a.pack ? "color-mix(in oklch, var(--accent) 10%, var(--surface-1))" : "var(--surface-1)",
+                            color: a.pack ? "var(--accent)" : "var(--text-faint)",
+                          }}
+                        >
+                          {a.pack ?? "core"}
+                        </span>
+                      </td>
+                    )}
                     {show.has("contract") && (
                       <td
                         role="gridcell"
@@ -1023,6 +1055,7 @@ export function Agents({
                 at one x across the whole panel. */}
             <KVGroup title="Identity">
               <KV k="id" v={sel.id} />
+              <KV k="pack" v={sel.pack ?? "core (built-in)"} />
               <KV k="version" v={String(sel.version)} />
               <KV k="output contract" v={sel.outputContract} />
             </KVGroup>
