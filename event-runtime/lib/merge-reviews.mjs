@@ -485,13 +485,15 @@ const DURABLE_MERGE_FIX_REFUSALS = new Set([
  */
 function refusedMergeFixSuppressed(db, item, { github, now }) {
   if (!db) return null;
-  const refused = db
+  const latestTerminalAttempt = db
     .query(
-      `SELECT a.reason_code AS reasonCode, a.finished_at AS finishedAt
+      `SELECT a.terminal_state AS terminalState,
+              a.reason_code AS reasonCode,
+              a.finished_at AS finishedAt
          FROM runs r
          JOIN attempts a ON a.run_id = r.run_id AND a.attempt = r.attempts
-        WHERE r.state = 'REFUSED'
-          AND a.terminal_state = 'REFUSED'
+        WHERE r.state IN ('REFUSED', 'FAILED', 'COMPLETED', 'TIMED_OUT', 'CANCELLED')
+          AND a.terminal_state IN ('REFUSED', 'FAILED', 'COMPLETED', 'TIMED_OUT', 'CANCELLED')
           AND json_extract(r.spec_json, '$.agent') = 'merge-fix@1'
           AND json_extract(r.spec_json, '$.input.pr') = ?
           AND json_extract(r.spec_json, '$.input.headSha') = ?
@@ -501,14 +503,20 @@ function refusedMergeFixSuppressed(db, item, { github, now }) {
         LIMIT 1`,
     )
     .get(item.pr, item.headSha, github, item.findingHash);
-  if (!refused?.reasonCode) return null;
-  const cooldownMs = DURABLE_MERGE_FIX_REFUSALS.has(refused.reasonCode)
+  if (
+    latestTerminalAttempt?.terminalState !== "REFUSED" ||
+    !latestTerminalAttempt.reasonCode
+  )
+    return null;
+  const cooldownMs = DURABLE_MERGE_FIX_REFUSALS.has(
+    latestTerminalAttempt.reasonCode,
+  )
     ? MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MS
     : MERGE_FIX_REFUSAL_COOLDOWN_MS;
-  const finishedAt = Date.parse(refused.finishedAt ?? "");
+  const finishedAt = Date.parse(latestTerminalAttempt.finishedAt ?? "");
   if (!Number.isFinite(finishedAt)) return null;
   if (Number(now) - finishedAt >= cooldownMs) return null;
-  return refused.reasonCode;
+  return latestTerminalAttempt.reasonCode;
 }
 
 /**

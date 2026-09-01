@@ -110,6 +110,7 @@ function insertRefusedMergeFix(
     findingHash = REBASE_HASH,
     reasonCode,
     finishedAt = "2026-08-19T16:45:00.000Z",
+    terminalState = "REFUSED",
   },
 ) {
   const spec = JSON.stringify({
@@ -118,12 +119,12 @@ function insertRefusedMergeFix(
   });
   db.query(
     `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
-     VALUES (?, ?, ?, 'sha256:test', 'REFUSED', 1, ?, ?)`,
-  ).run(runId, `idem-${runId}`, spec, finishedAt, finishedAt);
+     VALUES (?, ?, ?, 'sha256:test', ?, 1, ?, ?)`,
+  ).run(runId, `idem-${runId}`, spec, terminalState, finishedAt, finishedAt);
   db.query(
     `INSERT INTO attempts (run_id, attempt, fencing_token, finished_at, terminal_state, reason_code)
-     VALUES (?, 1, 1, ?, 'REFUSED', ?)`,
-  ).run(runId, finishedAt, reasonCode);
+     VALUES (?, 1, 1, ?, ?, ?)`,
+  ).run(runId, finishedAt, terminalState, reasonCode);
 }
 
 function insertOpenProposal(db, { id, agent, pr, headSha, github = GITHUB }) {
@@ -1181,6 +1182,36 @@ describe("merge-scan enumerator (WM-936)", () => {
 
     expect(result.artifact.fix).toEqual([]);
   });
+
+  test.each(["COMPLETED", "FAILED"])(
+    "a newer %s merge-fix clears a prior refusal's suppression",
+    (terminalState) => {
+      const db = openDb(":memory:");
+      upsertMergeReview(db, {
+        github: GITHUB,
+        pr: 9,
+        headSha: HEAD,
+        baseSha: BASE,
+        verdict: "MERGE",
+        plan: planItem(9),
+      });
+      insertRefusedMergeFix(db, {
+        runId: "run_fix_refused_first",
+        pr: 9,
+        reasonCode: "merge_fix_ticket_escalated",
+      });
+      insertRefusedMergeFix(db, {
+        runId: `run_fix_${terminalState.toLowerCase()}_latest`,
+        pr: 9,
+        terminalState,
+        finishedAt: "2026-08-19T16:45:01.000Z",
+      });
+
+      const result = conflictingScan(db, { now: REFUSED_AT + 60_000 });
+
+      expect(result.artifact.fix).toHaveLength(1);
+    },
+  );
 
   test("a durable refusal is retried once its long cooldown expires", () => {
     const db = openDb(":memory:");
