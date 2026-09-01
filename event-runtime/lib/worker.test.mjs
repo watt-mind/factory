@@ -6330,9 +6330,9 @@ sh -c 'sleep 5 & wait'
     expect(await runOnce(db, registry, adapters, opts())).toBeNull();
   });
 
-  test("a slow merge-fix ticket read does not hold the dispatch claim lock", async () => {
+  test("a merge-fix run never acquires the dispatch claim lock", async () => {
     const db = openDb(":memory:");
-    const locksDir = tmpDir("merge-fix-ticket-read-locks-");
+    const locksDir = tmpDir("merge-fix-claim-locks-");
     const ticket = "watt-mind/factory#2221";
     const spec = queueRun(
       db,
@@ -6359,34 +6359,56 @@ sh -c 'sleep 5 & wait'
     );
     const lockFile = dispatchLockPath("factory", locksDir);
     let concurrentClaimantAcquired = false;
-    let lockHeldDuringFetch = null;
+    const lockStates = [];
+    const observeLock = () => lockStates.push(existsSync(lockFile));
     const summary = await executeClaimed(
       db,
       registry,
-      adapters,
+      {
+        fake: {
+          async execute() {
+            observeLock();
+            return { exitCode: 1, timedOut: false };
+          },
+        },
+      },
       claimNext(db, opts()),
       opts({
         dispatch: {
           locksDir,
           fetchTicket: () => {
-            lockHeldDuringFetch = existsSync(lockFile);
-            concurrentClaimantAcquired = acquireClaimLock(lockFile, {
-              pid: 2222,
-              isAlive: () => true,
-            });
-            if (concurrentClaimantAcquired) releaseClaimLock(lockFile);
-            throw new Error("tracker read timed out");
+            observeLock();
+            return {
+              identifier: ticket,
+              state: { name: "In Review" },
+              labels: { nodes: [{ name: "ai:needs-review" }] },
+              description: "## Owned Paths\n- event-runtime/lib/worker.mjs\n",
+            };
           },
+          fetchPullRequest: () => {
+            observeLock();
+            return { state: "OPEN", headRefOid: spec.input.headSha };
+          },
+        },
+        materializeWorktree: () => {
+          observeLock();
+          concurrentClaimantAcquired = acquireClaimLock(lockFile, {
+            pid: 2222,
+            isAlive: () => true,
+          });
+          if (concurrentClaimantAcquired) releaseClaimLock(lockFile);
+          return { path: tmpDir("merge-fix-claim-lock-checkout-") };
         },
       }),
     );
 
     expect(summary).toMatchObject({
       runId: spec.runId,
-      terminalState: "REFUSED",
-      reasonCode: "merge_fix_ticket_read_failed",
+      terminalState: "FAILED",
+      reasonCode: "agent_exit_1",
     });
-    expect(lockHeldDuringFetch).toBe(false);
+    observeLock();
+    expect(lockStates).toEqual([false, false, false, false, false]);
     expect(concurrentClaimantAcquired).toBe(true);
     expect(existsSync(lockFile)).toBe(false);
     db.close();
