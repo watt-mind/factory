@@ -1068,24 +1068,28 @@ function collectionPage(url) {
   }
 }
 
+const RELATIVE_SINCE_PATTERN =
+  /^(\d+)\s*(d|day|days|h|hour|hours|m|min|mins|minute|minutes|s|sec|secs|second|seconds|w|week|weeks)$/i;
+
 export function parseSinceDuration(since, nowMs = Date.now()) {
   if (since == null || since === "") {
-    return nowMs - 14 * 24 * 60 * 60 * 1000;
+    const durationMs = 14 * 24 * 60 * 60 * 1000;
+    return { sinceMs: nowMs - durationMs, kind: "relative", durationMs };
   }
   if (typeof since === "number") {
     if (!Number.isFinite(since) || since <= 0) {
       throw new ListQueryError("invalid_since", { since });
     }
-    if (since > 1e11) return since;
-    return nowMs - since;
+    if (since > 1e11) {
+      return { sinceMs: since, kind: "absolute", durationMs: null };
+    }
+    return { sinceMs: nowMs - since, kind: "relative", durationMs: since };
   }
   if (typeof since !== "string") {
     throw new ListQueryError("invalid_since", { since });
   }
   const trimmed = since.trim();
-  const match = trimmed.match(
-    /^(\d+)\s*(d|day|days|h|hour|hours|m|min|mins|minute|minutes|s|sec|secs|second|seconds|w|week|weeks)$/i,
-  );
+  const match = trimmed.match(RELATIVE_SINCE_PATTERN);
   if (match) {
     const count = Number(match[1]);
     if (!Number.isFinite(count) || count <= 0) {
@@ -1098,11 +1102,11 @@ export function parseSinceDuration(since, nowMs = Date.now()) {
     else if (unit.startsWith("h")) ms = count * 60 * 60 * 1000;
     else if (unit.startsWith("m")) ms = count * 60 * 1000;
     else if (unit.startsWith("s")) ms = count * 1000;
-    return nowMs - ms;
+    return { sinceMs: nowMs - ms, kind: "relative", durationMs: ms };
   }
   const parsedDate = Date.parse(trimmed);
   if (Number.isFinite(parsedDate) && !/^\d+$/.test(trimmed)) {
-    return parsedDate;
+    return { sinceMs: parsedDate, kind: "absolute", durationMs: null };
   }
   throw new ListQueryError("invalid_since", { since });
 }
@@ -1140,9 +1144,26 @@ function collectTicketIds(value, targetSet = new Set()) {
 
 const TICKET_INDEX_CACHE_TTL_MS = 5000;
 const ticketIndexCache = new Map();
+let ticketIndexCacheDatabaseIds = new WeakMap();
+let nextTicketIndexCacheDatabaseId = 0;
 
 export function clearTicketIndexCache() {
   ticketIndexCache.clear();
+  ticketIndexCacheDatabaseIds = new WeakMap();
+  nextTicketIndexCacheDatabaseId = 0;
+}
+
+function ticketIndexCacheDatabaseId(db) {
+  let id = ticketIndexCacheDatabaseIds.get(db);
+  if (id == null) {
+    id = ++nextTicketIndexCacheDatabaseId;
+    ticketIndexCacheDatabaseIds.set(db, id);
+  }
+  return id;
+}
+
+function ticketIndexCacheSinceKey({ sinceMs, kind, durationMs }) {
+  return kind === "relative" ? `relative:${durationMs}` : `absolute:${sinceMs}`;
 }
 
 /**
@@ -1151,7 +1172,8 @@ export function clearTicketIndexCache() {
  */
 export function ticketIndexView(db, options = {}) {
   const nowMs = options.nowMs ?? Date.now();
-  const sinceMs = parseSinceDuration(options.since, nowMs);
+  const parsedSince = parseSinceDuration(options.since, nowMs);
+  const { sinceMs } = parsedSince;
   const sinceIso = new Date(sinceMs).toISOString();
   const limit = options.limit
     ? Math.min(Math.max(1, Number(options.limit) || 50), 200)
@@ -1161,7 +1183,12 @@ export function ticketIndexView(db, options = {}) {
       ? options.repo.trim().toLowerCase()
       : null;
 
-  const cacheKey = `${db.filename ?? "mem"}:${sinceMs}:${limit}:${repoFilter ?? ""}`;
+  const cacheKey = JSON.stringify([
+    ticketIndexCacheDatabaseId(db),
+    ticketIndexCacheSinceKey(parsedSince),
+    limit,
+    repoFilter,
+  ]);
   if (options.noCache !== true) {
     const cached = ticketIndexCache.get(cacheKey);
     if (cached && nowMs - cached.timestamp < TICKET_INDEX_CACHE_TTL_MS) {

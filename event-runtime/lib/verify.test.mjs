@@ -6,6 +6,7 @@ import {
   readFileSync,
   realpathSync,
   symlinkSync,
+  utimesSync,
   writeSync,
   writeFileSync,
 } from "node:fs";
@@ -46,6 +47,7 @@ import {
   handoffSandboxFacts,
   policyHandoffSandboxTmpfsMb,
   policyOwnedPathsConformance,
+  repoVerifyFailingTestFiles,
   repoVerifyFailingTests,
   runHandoffCommand,
   runHandoffVerifySmoke,
@@ -444,6 +446,248 @@ describe("verifyResult", () => {
     } catch (err) {
       expect(err).toBeInstanceOf(ContractViolation);
       expect(err.violations).toEqual(["missing_result"]);
+    }
+  });
+
+  test("recovers a current stray result from the physical checkout and removes it", () => {
+    const workspaceDir = tmpDir("evrt-verify-workspace-");
+    const physicalParent = tmpDir("evrt-verify-checkout-parent-");
+    const checkout = path.join(physicalParent, "checkout");
+    mkdirSync(checkout);
+    symlinkSync(checkout, path.join(workspaceDir, "repo"), "dir");
+    const strayPath = path.join(physicalParent, "result.json");
+    const events = [];
+    writeFileSync(
+      strayPath,
+      JSON.stringify({
+        schemaVersion: "factory.agent-result/v1",
+        terminalState: "completed",
+        artifact: VALID_ARTIFACT,
+      }),
+      "utf8",
+    );
+
+    const out = verifyResult({
+      spec: makeSpec(),
+      def,
+      registry,
+      workspaceDir,
+      worktreeRecord: { path: checkout },
+      attempt: 1,
+      attemptStartedAt: new Date(Date.now() - 5_000).toISOString(),
+      onTrace: (kind, payload) => events.push({ kind, payload }),
+    });
+
+    expect(out.kind).toBe("completed");
+    expect(existsSync(strayPath)).toBe(false);
+    expect(events).toEqual([
+      {
+        kind: "lifecycle",
+        payload: {
+          note: "result_recovered_from_stray_path",
+          path: strayPath,
+        },
+      },
+    ]);
+  });
+
+  test("leaves an unparseable stray in place and tries the next candidate", () => {
+    const workspaceDir = tmpDir("evrt-verify-workspace-");
+    const physicalParent = tmpDir("evrt-verify-checkout-parent-");
+    const checkout = path.join(physicalParent, "checkout");
+    mkdirSync(checkout);
+    symlinkSync(checkout, path.join(workspaceDir, "repo"), "dir");
+    // The first candidate probed is <checkout>/result.json; a truncated file
+    // there must not be destroyed, and must not stop the sibling lookup.
+    execFileSync("git", ["init", "--quiet", checkout]);
+    const truncatedPath = path.join(checkout, "result.json");
+    writeFileSync(truncatedPath, '{"schemaVersion": "factory.age', "utf8");
+    const strayPath = path.join(physicalParent, "result.json");
+    writeFileSync(
+      strayPath,
+      JSON.stringify({
+        schemaVersion: "factory.agent-result/v1",
+        terminalState: "completed",
+        artifact: VALID_ARTIFACT,
+      }),
+      "utf8",
+    );
+
+    const out = verifyResult({
+      spec: makeSpec(),
+      def,
+      registry,
+      workspaceDir,
+      worktreeRecord: { path: checkout },
+      attempt: 1,
+      attemptStartedAt: new Date(Date.now() - 5_000).toISOString(),
+    });
+
+    expect(out.kind).toBe("completed");
+    expect(existsSync(strayPath)).toBe(false);
+    expect(readFileSync(truncatedPath, "utf8")).toBe(
+      '{"schemaVersion": "factory.age',
+    );
+  });
+
+  test("leaves a tracked checkout result in place and tries the next candidate", () => {
+    const workspaceDir = tmpDir("evrt-verify-workspace-");
+    const physicalParent = tmpDir("evrt-verify-checkout-parent-");
+    const checkout = path.join(physicalParent, "checkout");
+    mkdirSync(checkout);
+    symlinkSync(checkout, path.join(workspaceDir, "repo"), "dir");
+    const trackedPath = path.join(checkout, "result.json");
+    const trackedResult = JSON.stringify({
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      artifact: VALID_ARTIFACT,
+    });
+    writeFileSync(trackedPath, trackedResult, "utf8");
+    execFileSync("git", ["init", "--quiet", checkout]);
+    execFileSync("git", ["-C", checkout, "add", "result.json"]);
+    const strayPath = path.join(physicalParent, "result.json");
+    const events = [];
+    writeFileSync(
+      strayPath,
+      JSON.stringify({
+        schemaVersion: "factory.agent-result/v1",
+        terminalState: "completed",
+        artifact: VALID_ARTIFACT,
+      }),
+      "utf8",
+    );
+
+    const out = verifyResult({
+      spec: makeSpec(),
+      def,
+      registry,
+      workspaceDir,
+      worktreeRecord: { path: checkout },
+      attempt: 1,
+      attemptStartedAt: new Date(Date.now() - 5_000).toISOString(),
+      onTrace: (kind, payload) => events.push({ kind, payload }),
+    });
+
+    expect(out.kind).toBe("completed");
+    expect(readFileSync(trackedPath, "utf8")).toBe(trackedResult);
+    expect(existsSync(strayPath)).toBe(false);
+    expect(events).toEqual([
+      {
+        kind: "lifecycle",
+        payload: {
+          note: "result_recovered_from_stray_path",
+          path: strayPath,
+        },
+      },
+    ]);
+  });
+
+  test("fails closed when the tracked check cannot answer (#2172)", () => {
+    // The checkout is not a git repository, so `git ls-files` exits 128
+    // rather than the definitive 1. An ambiguous git failure must never let
+    // the candidate be adopted and deleted: the file stays untouched.
+    const workspaceDir = tmpDir("evrt-verify-workspace-");
+    const physicalParent = tmpDir("evrt-verify-checkout-parent-");
+    const checkout = path.join(physicalParent, "checkout");
+    mkdirSync(checkout);
+    symlinkSync(checkout, path.join(workspaceDir, "repo"), "dir");
+    const candidatePath = path.join(checkout, "result.json");
+    const candidate = JSON.stringify({
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      artifact: VALID_ARTIFACT,
+    });
+    writeFileSync(candidatePath, candidate, "utf8");
+
+    try {
+      verifyResult({
+        spec: makeSpec(),
+        def,
+        registry,
+        workspaceDir,
+        worktreeRecord: { path: checkout },
+        attempt: 1,
+        attemptStartedAt: new Date(Date.now() - 5_000).toISOString(),
+      });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.violations).toEqual(["missing_result"]);
+      expect(err.missingResultPaths).toEqual([
+        { path: candidatePath, skipped: "tracked_in_checkout" },
+      ]);
+    }
+    expect(existsSync(candidatePath)).toBe(true);
+    expect(readFileSync(candidatePath, "utf8")).toBe(candidate);
+  });
+
+  test("probes the checkout handed over separately from the worktree record", () => {
+    const workspaceDir = tmpDir("evrt-verify-workspace-");
+    const checkout = tmpDir("evrt-verify-checkout-");
+    execFileSync("git", ["init", "--quiet", checkout]);
+    const strayPath = path.join(checkout, "result.json");
+    writeFileSync(
+      strayPath,
+      JSON.stringify({
+        schemaVersion: "factory.agent-result/v1",
+        terminalState: "completed",
+        artifact: VALID_ARTIFACT,
+      }),
+      "utf8",
+    );
+
+    // The timed-out preflight suppresses worktree command verification with an
+    // empty record while still naming the checkout for the stray probe.
+    const out = verifyResult({
+      spec: makeSpec(),
+      def,
+      registry,
+      workspaceDir,
+      worktreeRecord: {},
+      checkoutPath: checkout,
+      attempt: 1,
+      attemptStartedAt: new Date(Date.now() - 5_000).toISOString(),
+    });
+
+    expect(out.kind).toBe("completed");
+    expect(existsSync(strayPath)).toBe(false);
+  });
+
+  test("rejects a stale stray result from before this attempt", () => {
+    const workspaceDir = tmpDir("evrt-verify-workspace-");
+    const checkout = tmpDir("evrt-verify-checkout-");
+    execFileSync("git", ["init", "--quiet", checkout]);
+    const strayPath = path.join(checkout, "result.json");
+    writeFileSync(
+      strayPath,
+      JSON.stringify({ artifact: VALID_ARTIFACT }),
+      "utf8",
+    );
+    const attemptStartedAt = new Date(Date.now() - 5_000);
+    utimesSync(
+      strayPath,
+      new Date(attemptStartedAt.getTime() - 1_000),
+      new Date(attemptStartedAt.getTime() - 1_000),
+    );
+
+    try {
+      verifyResult({
+        spec: makeSpec(),
+        def,
+        registry,
+        workspaceDir,
+        worktreeRecord: { path: checkout },
+        attempt: 1,
+        attemptStartedAt: attemptStartedAt.toISOString(),
+      });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.violations).toEqual(["missing_result"]);
+      expect(err.missingResultPaths).toEqual([
+        { path: strayPath, mtime: expect.any(String) },
+      ]);
+      expect(existsSync(strayPath)).toBe(true);
     }
   });
 
@@ -1005,6 +1249,82 @@ describe("worktree baseline verification (WM-334)", () => {
     }
   });
 
+  test("a recorded test baseline does not absorb an additional branch-only failure", () => {
+    const baselineOutput = [
+      "event-runtime/lib/worker.test.mjs:",
+      "(fail) worker > pre-existing flaky probe",
+    ].join("\n");
+    const { dir, record } = worktreeWorkspace(
+      `printf '%s\\n' '${baselineOutput}' 'event-runtime/lib/new.test.mjs:' '(fail) new suite > branch-only failure' >&2; exit 9`,
+      { status: "red", check: "repo_verify", output: baselineOutput },
+    );
+    try {
+      verifyResult({
+        spec: dispatchSpec,
+        def: dispatchDef,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+        worktreeRecord: record,
+      });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.reasonCode).toBe("handoff_verification_failed");
+    }
+  });
+
+  test("a recorded test baseline still absorbs a branch that fixed some of its failures", () => {
+    const baselineOutput = [
+      "event-runtime/lib/worker.test.mjs:",
+      "(fail) worker > pre-existing flaky probe",
+      "(fail) worker > second pre-existing probe",
+    ].join("\n");
+    const { dir, record } = worktreeWorkspace(
+      `printf '%s\\n' 'event-runtime/lib/worker.test.mjs:' '(fail) worker > pre-existing flaky probe' >&2; exit 9`,
+      { status: "red", check: "repo_verify", output: baselineOutput },
+    );
+    try {
+      verifyResult({
+        spec: dispatchSpec,
+        def: dispatchDef,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+        worktreeRecord: record,
+      });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.reasonCode).toBe("baseline_red");
+    }
+  });
+
+  test("a truncated failing-test list is never absorbed by a recorded baseline", () => {
+    const names = Array.from({ length: 25 }, (_, i) => `probe ${i}`);
+    const lines = ["event-runtime/lib/worker.test.mjs:"].concat(
+      names.map((name) => `(fail) worker > ${name}`),
+    );
+    const { dir, record } = worktreeWorkspace(
+      `printf '%s\\n' ${lines.map((line) => `'${line}'`).join(" ")} >&2; exit 9`,
+      { status: "red", check: "repo_verify", output: lines.join("\n") },
+    );
+    try {
+      verifyResult({
+        spec: dispatchSpec,
+        def: dispatchDef,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+        worktreeRecord: record,
+      });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.reasonCode).toBe("handoff_verification_failed");
+    }
+  });
+
   // WM-718: a post-agent repo verify failure at handoff is the handoff gate
   // refusing (`handoff_verification_failed`), no longer a generic
   // `contract_violation` — same FAILED path, but named so the ticket goes back
@@ -1060,6 +1380,118 @@ describe("worktree baseline verification (WM-334)", () => {
       expect(err.reasonCode).toBe("handoff_verification_failed");
       expect(err.violations[0]).toStartWith("repo_verify_failed:");
     }
+  });
+
+  test("rechecks an unchanged failing test file at the merge base before charging the branch", () => {
+    const { dir, record } = worktreeWorkspace("repo-verify", null);
+    record.handoff = { verificationCommand: "ticket-narrow" };
+    commitHandoffDiff(record, "docs/note.md");
+    const output = [
+      "event-runtime/lib/worker.test.mjs:",
+      "(fail) worker > drains a worktree adapter notification",
+    ].join("\n");
+    const calls = [];
+
+    try {
+      verifyResult({
+        spec: dispatchSpec,
+        def: dispatchDef,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+        worktreeRecord: record,
+        runHandoffCommandFn: ({ cwd, command }) => {
+          calls.push({ cwd, command });
+          return {
+            passed: false,
+            exitCode: 1,
+            output,
+            sandbox: { tmpfsMb: 1024 },
+          };
+        },
+      });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.reasonCode).toBe("baseline_red");
+      expect(err.handoff.repoVerify.failingTestFiles).toEqual([
+        "event-runtime/lib/worker.test.mjs",
+      ]);
+      expect(err.handoff.repoVerifyBaseline.executionContext).toBe(
+        "merge_base_scratch",
+      );
+      expect(err.handoff.repoVerifyBaseline.failingTests).toEqual(
+        err.handoff.repoVerify.failingTests,
+      );
+    }
+    expect(calls).toHaveLength(2);
+    expect(calls[0].cwd).toBe(record.path);
+    expect(calls[1].cwd).not.toBe(record.path);
+  });
+
+  test("a truncated merge-base failing-test list is not absorbed as baseline_red", () => {
+    const { dir, record } = worktreeWorkspace("repo-verify", null);
+    record.handoff = { verificationCommand: "ticket-narrow" };
+    commitHandoffDiff(record, "docs/note.md");
+    const output = ["event-runtime/lib/worker.test.mjs:"]
+      .concat(
+        Array.from({ length: 25 }, (_, i) => `(fail) worker > probe ${i}`),
+      )
+      .join("\n");
+
+    try {
+      verifyResult({
+        spec: dispatchSpec,
+        def: dispatchDef,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+        worktreeRecord: record,
+        runHandoffCommandFn: () => ({
+          passed: false,
+          exitCode: 1,
+          output,
+          sandbox: { tmpfsMb: 1024 },
+        }),
+      });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.reasonCode).toBe("handoff_verification_failed");
+    }
+  });
+
+  test("does not retry a repo verify failure from a changed test file", () => {
+    const { dir, record } = worktreeWorkspace("repo-verify", null);
+    record.handoff = { verificationCommand: "ticket-narrow" };
+    commitHandoffDiff(record, "event-runtime/lib/worker.test.mjs");
+    const calls = [];
+
+    try {
+      verifyResult({
+        spec: dispatchSpec,
+        def: dispatchDef,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+        worktreeRecord: record,
+        runHandoffCommandFn: ({ command }) => {
+          calls.push(command);
+          return {
+            passed: false,
+            exitCode: 1,
+            output:
+              "event-runtime/lib/worker.test.mjs:\n(fail) worker > branch regression",
+            sandbox: { tmpfsMb: 1024 },
+          };
+        },
+      });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.reasonCode).toBe("handoff_verification_failed");
+    }
+    expect(calls).toEqual(["repo-verify"]);
   });
 
   test("a multi-line verification failure retains the failing test name and full log", () => {
@@ -1980,6 +2412,28 @@ describe("repoVerifyFailingTests", () => {
     const result = repoVerifyFailingTests(lines.join("\n"));
     expect(result).toHaveLength(20);
     expect(result.at(-1)).toBe("suite > case 19");
+  });
+
+  test("associates failures with Bun's source-file heading", () => {
+    expect(
+      repoVerifyFailingTestFiles(
+        [
+          "event-runtime/lib/worker.test.mjs:",
+          "(fail) worker > drains the queue [1ms]",
+          "event-runtime/lib/verify.test.mjs:",
+          "✗ verify > fails closed [2ms]",
+        ].join("\n"),
+      ),
+    ).toEqual([
+      "event-runtime/lib/worker.test.mjs",
+      "event-runtime/lib/verify.test.mjs",
+    ]);
+  });
+
+  test("fails closed when a runner failure lacks a source-file heading", () => {
+    expect(repoVerifyFailingTestFiles("(fail) worker > unknown source")).toBe(
+      null,
+    );
   });
 });
 

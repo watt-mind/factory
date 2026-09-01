@@ -17,6 +17,8 @@ import {
   markInboxDelivered,
   MAX_PARKED_INBOX_AGE_MS,
   reconcileInbox,
+  normalizePullRequestState,
+  defaultFetchPullRequest,
   retryInboxDecision,
   resolveInboxItem,
   fetchLinearInboxIssues,
@@ -1562,6 +1564,153 @@ describe("human inbox ledger (WM-285)", () => {
       { id: "merged-pr", resolvedBy: "auto:pr_merged" },
       { id: "closed-pr", resolvedBy: "auto:pr_closed" },
     ]);
+  });
+
+  test("normalizes the REST pull request shape into referent states", async () => {
+    expect(
+      normalizePullRequestState({ state: "closed", merged_at: null }),
+    ).toBe("CLOSED");
+    expect(
+      normalizePullRequestState({
+        state: "closed",
+        merged_at: "2026-09-01T00:00:00Z",
+      }),
+    ).toBe("MERGED");
+    expect(normalizePullRequestState({ state: "open", merged_at: null })).toBe(
+      "OPEN",
+    );
+
+    // The default fetcher is what serve actually installs: drive it with the
+    // real REST payload shape rather than a hand-written {state:"MERGED"} stub.
+    const rest = {
+      "repos/watt-mind/factory/pulls/17": {
+        state: "closed",
+        merged_at: "2026-09-01T00:00:00Z",
+      },
+      "repos/watt-mind/factory/pulls/18": { state: "closed", merged_at: null },
+      "repos/watt-mind/factory/pulls/19": { state: "open", merged_at: null },
+    };
+    const api = async (method, route) => {
+      expect(method).toBe("GET");
+      return rest[route];
+    };
+    await expect(
+      defaultFetchPullRequest({ github: "watt-mind/factory", pr: 17, api }),
+    ).resolves.toEqual({ state: "MERGED" });
+    await expect(
+      defaultFetchPullRequest({ github: "watt-mind/factory", pr: 19, api }),
+    ).resolves.toEqual({ state: "OPEN" });
+
+    const db = openDb(":memory:");
+    createInboxItem(
+      db,
+      {
+        kind: "BLOCKED",
+        title: "merged",
+        refs: { repo: "factory", pr: "PR#17" },
+      },
+      { id: "rest-merged", now: 1000 },
+    );
+    createInboxItem(
+      db,
+      {
+        kind: "ESCALATED",
+        title: "closed",
+        refs: { repo: "factory", pr: "PR#18" },
+      },
+      { id: "rest-closed", now: 1000 },
+    );
+    createInboxItem(
+      db,
+      {
+        kind: "BLOCKED",
+        title: "open",
+        refs: { repo: "factory", pr: "PR#19" },
+      },
+      { id: "rest-open", now: 1000 },
+    );
+
+    await expect(
+      reconcileInbox(db, {
+        now: 60_000,
+        fetchPullRequest: (request) =>
+          defaultFetchPullRequest({ ...request, api }),
+      }),
+    ).resolves.toEqual([
+      { id: "rest-merged", resolvedBy: "auto:pr_merged" },
+      { id: "rest-closed", resolvedBy: "auto:pr_closed" },
+    ]);
+    expect(listInboxItems(db, { status: "open" }).map((i) => i.id)).toEqual([
+      "rest-open",
+    ]);
+    db.close();
+  });
+
+  test("bounds PR referent reads and resumes after the last key read", async () => {
+    const db = openDb(":memory:");
+    for (let pr = 101; pr <= 110; pr += 1) {
+      createInboxItem(
+        db,
+        {
+          kind: "BLOCKED",
+          title: `PR ${pr}`,
+          refs: { repo: "factory", pr: String(pr) },
+        },
+        { id: `pr-${pr}`, now: pr * 1000 },
+      );
+    }
+    const fetched = [];
+    const fetchPullRequest = async ({ pr }) => {
+      fetched.push(pr);
+      return { state: pr > 108 ? "MERGED" : "OPEN" };
+    };
+
+    await reconcileInbox(db, { now: 60_000, fetchPullRequest });
+    expect(fetched).toEqual([101, 102, 103, 104, 105, 106, 107, 108]);
+
+    await expect(
+      reconcileInbox(db, { now: 120_000, fetchPullRequest }),
+    ).resolves.toEqual([
+      { id: "pr-109", resolvedBy: "auto:pr_merged" },
+      { id: "pr-110", resolvedBy: "auto:pr_merged" },
+    ]);
+    // Resumed after watt-mind/factory#108 and wrapped, rather than replaying a
+    // numeric offset into a list that has since changed length.
+    expect(fetched.slice(8)).toEqual([109, 110, 101, 102, 103, 104, 105, 106]);
+    db.close();
+  });
+
+  test("keeps the PR rotation cursor stable when the pending set shrinks", async () => {
+    const db = openDb(":memory:");
+    for (let pr = 101; pr <= 112; pr += 1) {
+      createInboxItem(
+        db,
+        {
+          kind: "BLOCKED",
+          title: `PR ${pr}`,
+          refs: { repo: "factory", pr: String(pr) },
+        },
+        { id: `pr-${pr}`, now: pr * 1000 },
+      );
+    }
+    const fetched = [];
+    const fetchPullRequest = async ({ pr }) => {
+      fetched.push(pr);
+      return { state: "OPEN" };
+    };
+
+    await reconcileInbox(db, { now: 60_000, fetchPullRequest });
+    expect(fetched).toEqual([101, 102, 103, 104, 105, 106, 107, 108]);
+
+    // Two already-read referents vanish before the next poll. A numeric offset
+    // would skip past unread rows; the key cursor still resumes at #109.
+    resolveInboxItem(db, "pr-101", { now: 90_000, resolvedBy: "operator" });
+    resolveInboxItem(db, "pr-102", { now: 90_000, resolvedBy: "operator" });
+
+    fetched.length = 0;
+    await reconcileInbox(db, { now: 120_000, fetchPullRequest });
+    expect(fetched).toEqual([109, 110, 111, 112, 103, 104, 105, 106]);
+    db.close();
   });
 
   test("supersedes an older parked item when a newer run owns its ticket", () => {

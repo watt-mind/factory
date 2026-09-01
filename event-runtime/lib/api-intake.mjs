@@ -431,6 +431,7 @@ export async function handleIntakeApiRoute({
       tick: {
         lastMs: tickStats?.lastMs ?? 0,
         overruns: tickStats?.overruns ?? 0,
+        deadlineSkipped: tickStats?.deadlineSkipped ?? 0,
       },
       planner: tickStats?.planner ?? null,
     });

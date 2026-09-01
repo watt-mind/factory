@@ -928,6 +928,93 @@ export const HANDOFF_FORGE_UNAVAILABLE = "handoff_forge_unavailable";
 /** Non-`ContractViolation` throw from `verifyResult` / `assertHandoffPullRequestBase`. */
 const VERIFICATION_INTERNAL_ERROR = "verification_internal_error";
 
+/**
+ * The repair turn only restates an envelope the agent already produced, so it
+ * gets its own small budget rather than a second full run's worth of wall
+ * clock. A wedged repair must not be able to consume the attempt deadline.
+ */
+const PI_RESULT_REPAIR_TIMEOUT_MS = 5 * 60 * 1000;
+
+/** Evidence copy of the rejected envelope, kept beside the workspace result. */
+const INVALID_RESULT_FILE = "result.invalid.json";
+
+/** Bound on the rejected bytes echoed into the repair prompt and the trace. */
+const INVALID_RESULT_PREVIEW_BYTES = 8000;
+
+const USAGE_SUM_FIELDS = [
+  "inputTokens",
+  "outputTokens",
+  "cacheCreationInputTokens",
+  "cacheReadInputTokens",
+  "costUSD",
+];
+
+/**
+ * The repair is a second billable adapter turn on the same attempt. Attempt
+ * usage is a total, not a last-writer-wins snapshot, so add its tokens and
+ * cost to what the primary execution already reported.
+ */
+function mergeAttemptUsage(base, extra, adapterKey) {
+  const merged = { adapter: adapterKey, ...(base ?? {}), ...(extra ?? {}) };
+  for (const field of USAGE_SUM_FIELDS) {
+    const snake = field.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+    const read = (usage) => {
+      const value = usage?.[field] ?? usage?.[snake];
+      return Number.isFinite(value) && value >= 0 ? value : 0;
+    };
+    const total = read(base) + read(extra);
+    if (total > 0) merged[field] = total;
+    delete merged[snake];
+  }
+  return merged;
+}
+
+/**
+ * Snapshot the rejected envelope before the repair turn overwrites
+ * `result.json`. The invalid payload is the primary evidence for why the run
+ * failed; a repair that fails again must not be the reason it disappeared.
+ */
+function snapshotInvalidResult({ workspaceDir, onTrace }) {
+  let raw;
+  const source = path.join(workspaceDir, "result.json");
+  const target = path.join(workspaceDir, INVALID_RESULT_FILE);
+  try {
+    raw = readFileSync(source);
+    writeFileSync(target, raw);
+  } catch (err) {
+    onTrace?.("lifecycle", {
+      event: "pi_result_repair_snapshot_failed",
+      source,
+      error: String(err?.message ?? err),
+    });
+    return null;
+  }
+  const text = raw.toString("utf8");
+  const snapshot = {
+    source,
+    path: target,
+    bytes: raw.length,
+    sha256: sha256Hex(raw),
+    preview: text.slice(0, INVALID_RESULT_PREVIEW_BYTES),
+  };
+  onTrace?.("lifecycle", { event: "pi_result_repair_snapshot", ...snapshot });
+  return snapshot;
+}
+
+/** A zero-exit Pi run gets one chance to correct its own invalid envelope. */
+function mayRepairPiResult({ adapterKey, outcome, error }) {
+  return (
+    adapterKey === "pi" &&
+    outcome?.exitCode === 0 &&
+    outcome?.timedOut !== true &&
+    error instanceof ContractViolation &&
+    error.reasonCode === "contract_violation" &&
+    !error.handoff &&
+    Array.isArray(error.violations) &&
+    error.violations.length > 0
+  );
+}
+
 const ENVIRONMENT_FAILURES = new Set([
   "adapter_error",
   "lease_expired",
@@ -1094,6 +1181,7 @@ export function dispatchIdentityEnv({
   runId = null,
   ticketId = null,
   repoName = null,
+  resultPath = null,
 }) {
   if (!String(spec?.agent ?? "").startsWith("dispatch@")) return env;
   // A dispatched agent must never inherit the worker's control bearer. It can
@@ -1106,6 +1194,8 @@ export function dispatchIdentityEnv({
     identity.FACTORY_TICKET = String(ticketId);
   if (repoName != null && repoName !== "")
     identity.FACTORY_REPO = String(repoName);
+  if (resultPath != null && resultPath !== "")
+    identity.FACTORY_RESULT_PATH = String(resultPath);
   // A dispatched agent needs the location of its isolated runtime to retain
   // notifications, but never the worker's control bearer. The caller supplies
   // these two non-secret values explicitly rather than copying process.env.
@@ -1910,8 +2000,10 @@ export function defaultFindWorkspacePullRequest({ workspacePath, forge }) {
 
 const MISSING_RESULT_OUTPUT_CHARS = 2 * 1024;
 
-function missingResultFailure(workspaceDir) {
+function missingResultFailure(workspaceDir, error = null) {
   const resultPath = path.resolve(workspaceDir, "result.json");
+  const fallbackPaths = error?.missingResultFallbacks ?? [];
+  const stalePaths = error?.missingResultPaths ?? [];
   const output = [
     ["stdout", ".transcript.json"],
     ["stderr", ".stderr.txt"],
@@ -1930,7 +2022,13 @@ function missingResultFailure(workspaceDir) {
     .join("\n");
   const normalized = normalizeFailureOutput(output).join("\n");
   const tail = normalized.slice(-MISSING_RESULT_OUTPUT_CHARS);
-  return `missing_result: expected ${resultPath}; agent stdout/stderr (last 2 KB): ${tail || "(no captured output)"}`;
+  const fallbackDetail = fallbackPaths.length
+    ? `; probed fallbacks ${fallbackPaths.join(", ")}`
+    : "";
+  const staleDetail = stalePaths.length
+    ? `; stale result.json found at ${stalePaths.map(({ path: candidatePath, mtime }) => `${candidatePath} (mtime ${mtime}, before this attempt started)`).join(", ")}`
+    : "";
+  return `missing_result: expected ${resultPath}${fallbackDetail}${staleDetail}; agent stdout/stderr (last 2 KB): ${tail || "(no captured output)"}`;
 }
 
 /**
@@ -3042,14 +3140,17 @@ export function defaultUnclaimTicket({
       Array.isArray(cur.labels) ? cur.labels : (cur.labels?.nodes ?? [])
     ).map((l) => l.name);
     const { add, remove } = releaseLabels(currentNames, { to: "Todo" });
-    runCli([
-      "state",
-      ticket,
-      "Todo",
-      "--unassign",
-      ...add.flatMap((n) => ["--add", n]),
-      ...remove.flatMap((n) => ["--remove", n]),
-    ]);
+    runCli(
+      [
+        "state",
+        ticket,
+        "Todo",
+        "--unassign",
+        ...add.flatMap((n) => ["--add", n]),
+        ...remove.flatMap((n) => ["--remove", n]),
+      ],
+      { repo },
+    );
     const body = `Dispatch run failed, claim released back to Todo + ai:agent-ready.\n\n**Why:** ${why}${log ? `\n**Log:** \`${log.replace(homedir(), "~")}\`` : ""}`;
     runCli(["comment", ticket, body], { repo });
     return true;
@@ -3155,8 +3256,8 @@ export function defaultReturnHandoffTicket({
   try {
     const cur =
       typeof fetchTicket === "function"
-        ? fetchTicket(ticket)
-        : defaultFetchTicket(ticket);
+        ? fetchTicket(ticket, repo)
+        : defaultFetchTicket(ticket, repo);
     const state = cur?.state?.name;
     if (!cur || !["In Progress", "In Review"].includes(state)) return false;
     const args = [
@@ -3174,7 +3275,7 @@ export function defaultReturnHandoffTicket({
     let agentReadyRestored = true;
     let labelWarning = null;
     try {
-      runCli(args);
+      runCli(args, { repo });
     } catch {
       // `--add ai:agent-ready` can fail independently of the state move
       // (e.g. the Owned Paths closure check re-running on `--add`). Retry as
@@ -3184,6 +3285,7 @@ export function defaultReturnHandoffTicket({
       // dispatchable again.
       runCli(
         args.filter((a, i) => !(a === "--add" || args[i - 1] === "--add")),
+        { repo },
       );
       try {
         runCli(["labels", ticket, "--add", "ai:agent-ready"], { repo });
@@ -3547,13 +3649,15 @@ function hasRecordedBaselineFailureComment(ticket, signature, repo) {
   }
 }
 
-function defaultBlockBaselineTicket({
+export function defaultBlockBaselineTicket({
   repo,
   ticket,
   why,
   log = null,
   baseline = null,
   fetchTicket,
+  runCli = runLinearCli,
+  hasRecordedBaselineFailure = hasRecordedBaselineFailureComment,
 }) {
   try {
     let cur = null;
@@ -3571,22 +3675,25 @@ function defaultBlockBaselineTicket({
       return false;
 
     const signature = baselineFailureSignature({ why, log, baseline });
-    runLinearCli([
-      "state",
-      ticket,
-      "Blocked",
-      "--unassign",
-      "--add",
-      "ai:blocked",
-      "--remove",
-      "ai:in-progress",
-    ]);
+    runCli(
+      [
+        "state",
+        ticket,
+        "Blocked",
+        "--unassign",
+        "--add",
+        "ai:blocked",
+        "--remove",
+        "ai:in-progress",
+      ],
+      { repo },
+    );
 
-    if (!hasRecordedBaselineFailureComment(ticket, signature, repo)) {
+    if (!hasRecordedBaselineFailure(ticket, signature, repo)) {
       const marker = `${BASELINE_COMMENT_MARKER}${signature}`;
       const body = `Dispatch run blocked due pre-existing baseline red.\n\n**Why:** ${why}${log ? `\n**Log:** \`${log.replace(homedir(), "~")}\`` : ""}\n\n
 <!-- ${marker} -->`;
-      runLinearCli(["comment", ticket, body], { repo });
+      runCli(["comment", ticket, body], { repo });
     }
     return true;
   } catch {
@@ -3835,25 +3942,32 @@ export async function executeClaimed(
   };
 
   const abortController = new AbortController();
-  ACTIVE_EXECUTIONS.set(runId, {
-    abort: (reason) => abortController.abort(reason),
-    controller: abortController,
-    runId,
-    attempt,
-  });
-  let cancelPoll = setInterval(() => {
-    try {
-      const state = db
-        .query(`SELECT state FROM runs WHERE run_id = ?`)
-        .get(runId)?.state;
-      if (state === "CANCELLED" && !abortController.signal.aborted) {
-        abortController.abort("db_cancelled");
+  let cancelPoll = null;
+  // Idempotent so a supervised follow-up adapter turn (the bounded Pi result
+  // repair) can re-arm cancellation after the primary execution stopped it.
+  const startCancellationMonitor = () => {
+    ACTIVE_EXECUTIONS.set(runId, {
+      abort: (reason) => abortController.abort(reason),
+      controller: abortController,
+      runId,
+      attempt,
+    });
+    if (cancelPoll) return;
+    cancelPoll = setInterval(() => {
+      try {
+        const state = db
+          .query(`SELECT state FROM runs WHERE run_id = ?`)
+          .get(runId)?.state;
+        if (state === "CANCELLED" && !abortController.signal.aborted) {
+          abortController.abort("db_cancelled");
+        }
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
-    }
-  }, 250);
-  cancelPoll?.unref?.();
+    }, 250);
+    cancelPoll?.unref?.();
+  };
+  startCancellationMonitor();
   const stopCancellationMonitor = () => {
     if (cancelPoll) clearInterval(cancelPoll);
     cancelPoll = null;
@@ -4189,7 +4303,7 @@ export async function executeClaimed(
       db.query(
         `UPDATE attempts SET started_at = ? WHERE run_id = ? AND attempt = ?`,
       ).run(iso(currentNow), runId, attempt);
-      return { ok: true };
+      return { ok: true, startedAt: iso(currentNow) };
     });
     if (started?.fenced) {
       return { fenced: true };
@@ -4923,9 +5037,15 @@ export async function executeClaimed(
       deadlineTimer = setTimeout(refreshDeadline, leftMs);
       deadlineTimer.unref?.();
     };
-    refreshDeadline();
-    deadlinePoll = setInterval(refreshDeadline, DEADLINE_POLL_MS);
-    deadlinePoll.unref?.();
+    // Idempotent for the same reason as `startCancellationMonitor`: the
+    // bounded Pi result repair re-arms the durable deadline for its own turn.
+    const startDeadlineMonitor = () => {
+      if (deadlinePoll) return;
+      refreshDeadline();
+      deadlinePoll = setInterval(refreshDeadline, DEADLINE_POLL_MS);
+      deadlinePoll.unref?.();
+    };
+    startDeadlineMonitor();
     const stopDeadlineMonitor = () => {
       if (deadlineTimer) clearTimeout(deadlineTimer);
       if (deadlinePoll) clearInterval(deadlinePoll);
@@ -4939,51 +5059,13 @@ export async function executeClaimed(
       env.FACTORY_EVENT_PORT ?? process.env.FACTORY_EVENT_PORT;
     const workerControlToken =
       env.FACTORY_CONTROL_API_TOKEN ?? process.env.FACTORY_CONTROL_API_TOKEN;
-    let outcome;
-    try {
-      // Dispatch identity comes from the immutable RunSpec, never the ambient
-      // worker environment. The adapter's child-environment builder preserves
-      // these values while continuing to strip credentials it does not need.
-      const dispatchEnv = { ...env };
-      for (const key of ["FACTORY_EVENT_HOME", "FACTORY_EVENT_PORT"]) {
-        if (dispatchEnv[key] === undefined && process.env[key] !== undefined)
-          dispatchEnv[key] = process.env[key];
-      }
-      const adapterEnv = dispatchIdentityEnv({
-        spec,
-        env: dispatchEnv,
-        runId,
-        ticketId,
-        repoName,
-      });
-      outcome = await adapter.execute({
-        spec:
-          executionInput === spec.input
-            ? spec
-            : { ...spec, input: executionInput },
-        def,
-        workspaceDir,
-        timeoutMs: adapterExecuteTimeoutMs({
-          adapterKey,
-          spec,
-          maxRunMinutes: policyMaxRunMinutes(policyRoot),
-        }),
-        env: adapterEnv,
-        onTrace,
-        onUsage,
-        resume: created.resume ?? null,
-        abortSignal: abortController.signal,
-        signal: abortController.signal,
-      });
-    } finally {
-      stopDeadlineMonitor();
-      stopCancellationMonitor();
-      // The agent may have retained a notification because it deliberately
-      // lacks the control bearer. Drain in `finally` so an adapter throw can
-      // never strand a retained escalation, and only after the adapter has
-      // fully stopped, so no writer races the read/truncate cycle. Neither the
-      // drain nor its ticket comment may throw: the agent's primary terminal
-      // outcome (or error) always wins.
+    // The agent may have retained a notification because it deliberately
+    // lacks the control bearer. Callers drain in `finally` so an adapter throw
+    // can never strand a retained escalation, and only after the adapter has
+    // fully stopped, so no writer races the read/truncate cycle. Neither the
+    // drain nor its ticket comment may throw: the agent's primary terminal
+    // outcome (or error) always wins.
+    const drainNotifyOutboxSafely = async () => {
       try {
         const notificationDrain = isWorktree
           ? await drainLocalNotifyOutbox({
@@ -5017,6 +5099,50 @@ export async function executeClaimed(
       } catch (err) {
         recordTerminalError("drainLocalNotifyOutbox", err);
       }
+    };
+
+    let outcome;
+    let adapterEnv;
+    try {
+      // Dispatch identity comes from the immutable RunSpec, never the ambient
+      // worker environment. The adapter's child-environment builder preserves
+      // these values while continuing to strip credentials it does not need.
+      const dispatchEnv = { ...env };
+      for (const key of ["FACTORY_EVENT_HOME", "FACTORY_EVENT_PORT"]) {
+        if (dispatchEnv[key] === undefined && process.env[key] !== undefined)
+          dispatchEnv[key] = process.env[key];
+      }
+      adapterEnv = dispatchIdentityEnv({
+        spec,
+        env: dispatchEnv,
+        runId,
+        ticketId,
+        repoName,
+        resultPath: path.join(workspaceDir, "result.json"),
+      });
+      outcome = await adapter.execute({
+        spec:
+          executionInput === spec.input
+            ? spec
+            : { ...spec, input: executionInput },
+        def,
+        workspaceDir,
+        timeoutMs: adapterExecuteTimeoutMs({
+          adapterKey,
+          spec,
+          maxRunMinutes: policyMaxRunMinutes(policyRoot),
+        }),
+        env: adapterEnv,
+        onTrace,
+        onUsage,
+        resume: created.resume ?? null,
+        abortSignal: abortController.signal,
+        signal: abortController.signal,
+      });
+    } finally {
+      stopDeadlineMonitor();
+      stopCancellationMonitor();
+      await drainNotifyOutboxSafely();
     }
 
     if (outcome?.usage)
@@ -5098,8 +5224,14 @@ export async function executeClaimed(
           registry,
           workspaceDir,
           attempt,
+          attemptStartedAt: started.startedAt,
           extraArtifacts: RUNTIME_ARTIFACTS,
+          // The empty record keeps worktree command verification suppressed;
+          // the checkout path is handed over separately so the stray-result
+          // probe still looks beside the worktree on this branch.
           worktreeRecord: {},
+          checkoutPath: worktreeRecord?.path ?? null,
+          onTrace,
         });
         lateCompletion = true;
       } catch (err) {
@@ -5251,8 +5383,10 @@ export async function executeClaimed(
         registry,
         workspaceDir,
         attempt,
+        attemptStartedAt: started.startedAt,
         extraArtifacts: RUNTIME_ARTIFACTS,
         worktreeRecord,
+        onTrace,
       });
       // `prNumber` was optional on pre-WM-576 dispatch artifacts. Preserve
       // their accepted handoffs; current dispatch prompts require it, and all
@@ -5297,8 +5431,10 @@ export async function executeClaimed(
             registry,
             workspaceDir,
             attempt,
+            attemptStartedAt: started.startedAt,
             extraArtifacts: RUNTIME_ARTIFACTS,
             worktreeRecord,
+            onTrace,
           });
           if (verified.handoff && handoffPrNumber(verified.handoff)) {
             assertHandoffPullRequestBase({
@@ -5307,13 +5443,133 @@ export async function executeClaimed(
               fetchPullRequest: fetchHandoffPullRequestFn,
             });
           }
-          verified.result.reasonCode = RECOVERED_RESULT_REASON;
+          // A recovered candidate can name a more precise terminal outcome
+          // than ordinary missing-result recovery. In particular, a pushed
+          // branch with no PR must remain distinguishable so the ticket claim
+          // is released below instead of being completed as a normal recovery.
+          if (
+            !verified.result.reasonCode ||
+            verified.result.reasonCode === "ok"
+          ) {
+            verified.result.reasonCode = RECOVERED_RESULT_REASON;
+          }
           break verificationAttempt;
         } catch (recoveryError) {
           if (!(recoveryError instanceof ContractViolation)) {
             return failVerificationInternal(recoveryError);
           }
           activeError = recoveryError;
+        }
+      }
+      // Codex-tier Pi sessions have historically completed the ticket while
+      // writing an invented result shape. Give only that zero-exit, pre-handoff
+      // contract failure one bounded turn with the validator diagnostics; a
+      // handoff-gate failure must never be retried as an envelope repair.
+      if (mayRepairPiResult({ adapterKey, outcome, error: activeError })) {
+        const originalViolations = activeError.violations;
+        const invalidSnapshot = snapshotInvalidResult({
+          workspaceDir,
+          onTrace,
+        });
+        let repairOutcome = null;
+        let repairUsage = null;
+        // The repair is a live adapter turn like any other: it runs under the
+        // same durable deadline and cancellation supervision, and drains the
+        // notify outbox in `finally` so a throw can never strand a retained
+        // escalation.
+        startCancellationMonitor();
+        startDeadlineMonitor();
+        try {
+          repairOutcome = await adapter.execute({
+            spec:
+              executionInput === spec.input
+                ? spec
+                : { ...spec, input: executionInput },
+            def,
+            workspaceDir,
+            timeoutMs: PI_RESULT_REPAIR_TIMEOUT_MS,
+            env: adapterEnv,
+            onTrace,
+            onUsage: (usage) => {
+              repairUsage = usage ?? null;
+            },
+            resume: created.resume ?? null,
+            abortSignal: abortController.signal,
+            signal: abortController.signal,
+            resultRepair: {
+              violations: originalViolations,
+              priorResultPath: invalidSnapshot?.source ?? null,
+              priorResult: invalidSnapshot?.preview ?? null,
+            },
+          });
+        } catch (repairError) {
+          // The repair is best-effort commentary on an already-failed
+          // envelope. An adapter throw leaves the original violations
+          // standing rather than reclassifying the run.
+          onTrace("lifecycle", {
+            event: "pi_result_repair_failed",
+            error: String(repairError?.message ?? repairError),
+          });
+          repairOutcome = null;
+        } finally {
+          stopDeadlineMonitor();
+          stopCancellationMonitor();
+          await drainNotifyOutboxSafely();
+        }
+        if (repairOutcome?.usage) repairUsage = repairOutcome.usage;
+        if (repairUsage)
+          attemptUsage = mergeAttemptUsage(
+            attemptUsage,
+            repairUsage,
+            adapterKey,
+          );
+        if (
+          repairOutcome?.exitCode === 0 &&
+          !repairOutcome?.timedOut &&
+          !abortController.signal.aborted
+        ) {
+          try {
+            verified = verifyResultFn({
+              spec,
+              def,
+              registry,
+              workspaceDir,
+              attempt,
+              attemptStartedAt: started.startedAt,
+              extraArtifacts: RUNTIME_ARTIFACTS,
+              worktreeRecord,
+              onTrace,
+            });
+            if (verified.handoff && handoffPrNumber(verified.handoff)) {
+              assertHandoffPullRequestBase({
+                handoff: verified.handoff,
+                base: worktreeRecord?.base,
+                fetchPullRequest: fetchHandoffPullRequestFn,
+              });
+            }
+            break verificationAttempt;
+          } catch (repairError) {
+            if (!(repairError instanceof ContractViolation)) {
+              return failVerificationInternal(repairError);
+            }
+            // The rejected original is what a human has to read; the repair's
+            // own violations are appended detail, never a replacement.
+            activeError = new ContractViolation(
+              [
+                ...originalViolations,
+                ...(repairError.violations ?? []).map(
+                  (violation) => `after repair: ${violation}`,
+                ),
+                ...(invalidSnapshot
+                  ? [`rejected envelope retained at ${invalidSnapshot.path}`]
+                  : []),
+              ],
+              {
+                reasonCode: activeError.reasonCode,
+                handoff: repairError.handoff ?? activeError.handoff ?? null,
+              },
+            );
+          }
         }
       }
       if (activeError.reasonCode === HANDOFF_FORGE_UNAVAILABLE) {
@@ -5353,7 +5609,7 @@ export async function executeClaimed(
       let failureReason =
         activeError.violations.length === 1 &&
         activeError.violations[0] === "missing_result"
-          ? `${reasonCode}: ${missingResultFailure(workspaceDir)}`
+          ? `${reasonCode}: ${missingResultFailure(workspaceDir, activeError)}`
           : `${reasonCode}: ${activeError.violations.join(", ")}`;
       const continuationFailure = escalationHandoffFailure(
         activeError,
@@ -5682,6 +5938,27 @@ export async function executeClaimed(
         reasonCode: verified.reasonCode,
         receipt: res.receipt,
       };
+    }
+
+    // Recovery found a remote branch but no PR. It is a completed, durable
+    // diagnostic rather than an agent handoff failure, so it does not use the
+    // handoff-return path; it must still release the claim for the next
+    // dispatcher instead of stranding the ticket In Progress.
+    if (
+      recovery?.candidate?.reasonCode === "pushed_branch_no_pr" &&
+      verified.result.reasonCode === "pushed_branch_no_pr" &&
+      mayMutateClaimedTicket()
+    ) {
+      try {
+        unclaimTicketFn({
+          repo: repoName,
+          ticket: ticketId,
+          why: "pushed_branch_no_pr",
+          log: null,
+        });
+      } catch {
+        /* intentionally ignored */
+      }
     }
 
     // The run is accepted: neither failed nor refused. Only now may the PR

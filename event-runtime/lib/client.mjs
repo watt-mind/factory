@@ -1,5 +1,5 @@
 /**
- * Client for the loopback control API (docs/event-runtime.md §12).
+ * Client for the control API (docs/event-runtime.md §12) — loopback by default.
  *
  * The CLI — and any future TUI or web app — talks to the runtime exclusively
  * through this module: one small method per endpoint, parsed JSON back, and a
@@ -7,7 +7,9 @@
  * non-2xx response. A connection failure (serve not running) surfaces as an
  * error with no `.status`, which callers use to say exactly that.
  */
-import { API_HOST, DEFAULT_PORT } from "./config.mjs";
+import { API_HOST, DEFAULT_PORT, resolveControlApiTarget } from "./config.mjs";
+
+export { resolveControlApiTarget } from "./config.mjs";
 
 /**
  * Actionable text for a control-API auth failure (#1132). Names the variable and the
@@ -20,16 +22,48 @@ export function unauthorizedMessage(tokenPresent) {
     : "control API requires FACTORY_CONTROL_API_TOKEN; set it in ~/.factory/secrets.env";
 }
 
+/** The historic loopback pin: no environment, no config, no argv. */
+function pinnedLoopbackTarget(port) {
+  return {
+    baseUrl: `http://${API_HOST}:${port}`,
+    host: API_HOST,
+    port,
+    source: "pinned",
+  };
+}
+
 export function apiClient({
-  port = DEFAULT_PORT,
-  host = API_HOST,
+  /** A complete HTTP(S) control API URL, including an optional path prefix. */
+  url,
+  /** Backwards-compatible host override; a bare host uses the selected port. */
+  host,
+  port,
   // WM-1152: bearer the control API requires when FACTORY_CONTROL_API_TOKEN is
   // set. Read from env by default so every CLI/worker caller authenticates
   // without changes; sent on every request (webhook/health ignore it). Never
   // logged. Unset means no header, matching the pre-token behavior.
   token = process.env.FACTORY_CONTROL_API_TOKEN || null,
+  /**
+   * Opt in to ambient target resolution — the environment and
+   * ~/.factory/config.json (#2188). Left unset it is true only for a caller
+   * that names no target at all (the CLI entrypoints), so every existing
+   * `apiClient({ port })` caller keeps its 127.0.0.1 pin unchanged. The library
+   * never reads process.argv; bin/factory turns operator flags into env.
+   */
+  resolveTarget,
 } = {}) {
-  const base = `http://${host}:${port}`;
+  const explicit = url ?? host ?? null;
+  const shouldResolve =
+    resolveTarget ??
+    (url === undefined && host === undefined && port === undefined);
+  const target =
+    explicit || shouldResolve
+      ? resolveControlApiTarget({
+          target: explicit,
+          ...(port === undefined ? {} : { defaultPort: port }),
+        })
+      : pinnedLoopbackTarget(port ?? DEFAULT_PORT);
+  const base = target.baseUrl;
   const authHeader = token ? { authorization: `Bearer ${token}` } : {};
 
   async function call(method, path, { body, headers = {} } = {}) {
@@ -67,8 +101,9 @@ export function apiClient({
   }
 
   return {
-    host,
-    port,
+    host: target.host,
+    port: target.port,
+    baseUrl: target.baseUrl,
     token,
     health: () => call("GET", "/health"),
     /** Webhook intake: raw body string plus the §14 signature headers. */

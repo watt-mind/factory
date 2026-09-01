@@ -22,7 +22,7 @@
       "commands/factory-unblock.md": "sha256:496bffc002afea8eca9d6c1b80f38c6732eb2163f3e41f6d04f0357c4e2905cb",
       "commands/factory-work.md": "sha256:c69095b7697fb4f0599ed6f2da40a4f6495e74bc5cfed90f41a4bc786d9cc72a",
       "floor.md": "sha256:d3658d5c8ce6090c57fc3ff89dccdf3050180adb2e041352de2ea4a327c71fe8",
-      "skills/factory-handoff/SKILL.md": "sha256:c6e452e33a8101cd4fdca70f650c52b626688a5555826039ebfac26847de8fd9",
+      "skills/factory-handoff/SKILL.md": "sha256:139b10c02c9425ce9fbd415d215f5d28042bb76e59850cf70b62242637e1a4c4",
       "skills/ticket-spec/SKILL.md": "sha256:6cd7e613072a1f4bd360389b62f3482432cbeb167b1e34b27b4a6099d4685b23"
     }
   }

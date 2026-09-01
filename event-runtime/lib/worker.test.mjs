@@ -95,6 +95,7 @@ import {
   escalationHandoffFailure,
   createReloadWatcher,
   DEFAULT_MAX_ENVIRONMENT_RETRIES,
+  defaultBlockBaselineTicket,
   defaultFindWorkspacePullRequest,
   defaultLocksDir,
   defaultMarkHandoffPullRequestReady,
@@ -389,36 +390,39 @@ describe("worker", () => {
     LOCAL_NOTIFY_PROBE_TIMEOUT_MS,
   );
 
-  test("keeps exactly one local notify drain in the adapter finally to prevent double delivery", () => {
+  test("keeps exactly one local notify drain, reached only from a finally", () => {
     // Two drain sites could race the same outbox read/truncate cycle and
     // deliver a BLOCKED or escalation notification twice. Keep this structural
     // guard alongside the behavioral drain tests so a future refactor cannot
-    // silently add another call site.
+    // silently add another call site — and so every supervised adapter turn
+    // (the primary execution and the bounded Pi result repair) still drains
+    // from a `finally`, where an adapter throw cannot strand a retained
+    // escalation.
     const source = readFileSync(
       new URL("./worker.mjs", import.meta.url),
       "utf8",
     );
-    const marker =
-      "    } finally {\n      stopDeadlineMonitor();\n      stopCancellationMonitor();\n";
-    const start = source.indexOf(marker);
-    expect(start).toBeGreaterThan(-1);
-    const open = source.indexOf("{", start);
-    let depth = 0;
-    let end = -1;
-    for (let i = open; i < source.length; i += 1) {
-      if (source[i] === "{") depth += 1;
-      else if (source[i] === "}") {
-        depth -= 1;
-        if (depth === 0) {
-          end = i;
-          break;
-        }
-      }
-    }
-    expect(end).toBeGreaterThan(open);
-    const finallyBody = source.slice(open, end);
-    expect(finallyBody).toContain("await drainLocalNotifyOutbox({");
+    // Exactly one place actually touches the outbox...
     expect(source.split("await drainLocalNotifyOutbox({")).toHaveLength(2);
+    const helper = source.indexOf(
+      "const drainNotifyOutboxSafely = async () => {",
+    );
+    expect(helper).toBeGreaterThan(-1);
+    expect(source.indexOf("await drainLocalNotifyOutbox({")).toBeGreaterThan(
+      helper,
+    );
+    // ...and every caller of it sits directly in a `finally`.
+    const callSites = [
+      ...source.matchAll(/await drainNotifyOutboxSafely\(\);/g),
+    ];
+    expect(callSites.length).toBeGreaterThanOrEqual(2);
+    for (const site of callSites) {
+      const preamble = source.slice(Math.max(0, site.index - 200), site.index);
+      expect(preamble).toContain("} finally {");
+      expect(preamble.slice(preamble.lastIndexOf("} finally {"))).not.toContain(
+        "try {",
+      );
+    }
   });
 
   test("retains an undelivered local notification for handoff recovery", async () => {
@@ -2143,6 +2147,230 @@ sh -c 'sleep 5 & wait'
     expect(existsSync(path.join(o.workspacesRoot, `${spec.runId}-a1`))).toBe(
       true,
     );
+  });
+
+  test("Pi retries each observed malformed result shape once with validator detail", async () => {
+    const goodResult = {
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      reasonCode: "ok",
+      artifact: {
+        repos: [
+          {
+            name: "factory",
+            triage: 0,
+            agentReady: 0,
+            inProgress: 0,
+            blocked: 0,
+          },
+        ],
+        recommendedAction: "wait",
+      },
+    };
+    const malformed = [
+      {
+        candidate: { status: "completed", summary: "done", verification: {} },
+        expected: [
+          '$: missing required property "schemaVersion"',
+          '$: missing required property "terminalState"',
+          '$: unknown property "status"',
+          '$: unknown property "verification"',
+        ],
+      },
+      {
+        candidate: {
+          ticket: "watt-mind/factory#1952",
+          repo: "factory",
+          outcome: "PR_OPEN",
+          summary: "real work completed",
+          prUrl: "https://github.com/watt-mind/factory/pull/1952",
+          branch: "feat/1952",
+          verification: {},
+        },
+        expected: [
+          '$: missing required property "schemaVersion"',
+          '$: missing required property "terminalState"',
+          '$: unknown property "outcome"',
+          '$: unknown property "prUrl"',
+        ],
+      },
+      {
+        candidate: {
+          ...goodResult,
+          terminalState: "completed",
+          verification: { ticketGate: "pass", repoGate: "pass" },
+          followUpIssue: "WM-2076",
+        },
+        expected: [
+          '$: unknown property "verification"',
+          '$: unknown property "followUpIssue"',
+        ],
+      },
+    ];
+
+    for (const { candidate, expected } of malformed) {
+      const db = openDb(":memory:");
+      const spec = queueRun(db, makeSpec({ adapter: "pi" }));
+      const o = opts();
+      const repairs = [];
+      const pi = {
+        async execute({ workspaceDir, resultRepair }) {
+          if (!resultRepair) {
+            writeFileSync(
+              path.join(workspaceDir, "result.json"),
+              JSON.stringify(candidate),
+            );
+          } else {
+            repairs.push({
+              ...resultRepair,
+              // The snapshot only survives while the workspace does; a
+              // COMPLETED run destroys it, so read it here.
+              retained: readFileSync(
+                path.join(workspaceDir, "result.invalid.json"),
+                "utf8",
+              ),
+            });
+            writeFileSync(
+              path.join(workspaceDir, "result.json"),
+              JSON.stringify(goodResult),
+            );
+          }
+          return { exitCode: 0, timedOut: false };
+        },
+      };
+
+      const summary = await runOnce(db, registry, { pi }, o);
+      expect(summary).toMatchObject({ terminalState: "COMPLETED" });
+      expect(repairs).toHaveLength(1);
+      // Shape-specific: the repair turn must be handed the validator's own
+      // complaints, not merely some non-empty string.
+      for (const violation of expected) {
+        expect(repairs[0].violations).toContain(violation);
+      }
+      // The rejected bytes travel with the repair request, and are kept on
+      // disk as the evidence of what the agent originally wrote.
+      expect(repairs[0].priorResult).toBe(JSON.stringify(candidate));
+      expect(repairs[0].retained).toBe(JSON.stringify(candidate));
+      expect(repairs[0].priorResultPath).toBe(
+        path.join(o.workspacesRoot, `${spec.runId}-a1`, "result.json"),
+      );
+      expect(runState(db, spec.runId)).toBe("COMPLETED");
+      db.close();
+    }
+  });
+
+  test("Pi repair that is still invalid FAILS with the ORIGINAL violations and retains the invalid envelope", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({ adapter: "pi" }));
+    const o = opts();
+    const invalid = { status: "completed", summary: "done" };
+    let calls = 0;
+    const pi = {
+      async execute({ workspaceDir }) {
+        calls += 1;
+        writeFileSync(
+          path.join(workspaceDir, "result.json"),
+          JSON.stringify(
+            calls === 1 ? invalid : { schemaVersion: "wrong/v0", oops: true },
+          ),
+        );
+        return { exitCode: 0, timedOut: false };
+      },
+    };
+
+    const summary = await runOnce(db, registry, { pi }, o);
+    expect(calls).toBe(2);
+    expect(summary).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "contract_violation",
+    });
+    const reason = lifecycleOf(db, spec.runId)
+      .map((event) => event.reason ?? "")
+      .join("\n");
+    // The original complaint is what a human has to read; the repair's own
+    // violations are appended detail, never a replacement.
+    expect(reason).toContain('$: missing required property "schemaVersion"');
+    expect(reason).toContain('$: unknown property "status"');
+    expect(reason).toContain("after repair:");
+    const workspaceDir = path.join(o.workspacesRoot, `${spec.runId}-a1`);
+    expect(
+      readFileSync(path.join(workspaceDir, "result.invalid.json"), "utf8"),
+    ).toBe(JSON.stringify(invalid));
+  });
+
+  test("Pi repair that exits nonzero leaves the original violations standing and is not retried", async () => {
+    for (const repairOutcome of [
+      { exitCode: 3, timedOut: false },
+      { exitCode: 0, timedOut: true },
+      "throw",
+    ]) {
+      const db = openDb(":memory:");
+      const spec = queueRun(db, makeSpec({ adapter: "pi" }));
+      let calls = 0;
+      const pi = {
+        async execute({ workspaceDir, resultRepair }) {
+          calls += 1;
+          if (!resultRepair) {
+            writeFileSync(
+              path.join(workspaceDir, "result.json"),
+              JSON.stringify({ status: "completed", summary: "done" }),
+            );
+            return { exitCode: 0, timedOut: false };
+          }
+          if (repairOutcome === "throw") throw new Error("pi crashed");
+          // A failed repair must not be able to smuggle a result through.
+          return repairOutcome;
+        },
+      };
+
+      const summary = await runOnce(db, registry, { pi }, opts());
+      expect(calls).toBe(2);
+      expect(summary).toMatchObject({
+        terminalState: "FAILED",
+        reasonCode: "contract_violation",
+      });
+      const reason = lifecycleOf(db, spec.runId)
+        .map((event) => event.reason ?? "")
+        .join("\n");
+      expect(reason).toContain('$: unknown property "status"');
+      expect(reason).not.toContain("after repair:");
+      expect(runState(db, spec.runId)).toBe("FAILED");
+      db.close();
+    }
+  });
+
+  test("a handoff-gate contract violation is never repaired as an envelope", async () => {
+    const db = openDb(":memory:");
+    queueRun(db, makeSpec({ adapter: "pi" }));
+    let calls = 0;
+    const pi = {
+      async execute({ workspaceDir }) {
+        calls += 1;
+        writeFileSync(
+          path.join(workspaceDir, "result.json"),
+          JSON.stringify({ status: "completed" }),
+        );
+        return { exitCode: 0, timedOut: false };
+      },
+    };
+    const verifyResultStub = () => {
+      throw new ContractViolation(["handoff verification did not pass"], {
+        reasonCode: "handoff_verification_failed",
+        handoff: { command: "bun test", passed: false, output: "red" },
+      });
+    };
+
+    const summary = await runOnce(
+      db,
+      registry,
+      { pi },
+      { ...opts(), verifyResult: verifyResultStub },
+    );
+    // The gate refused the WORK, not the envelope: re-prompting the agent to
+    // restate its result would launder a real verification failure.
+    expect(calls).toBe(1);
+    expect(summary).toMatchObject({ terminalState: "FAILED" });
+    expect(summary.reasonCode).toBe("handoff_verification_failed");
   });
 
   test("escape: artifact outside the workspace is a contract violation", async () => {
@@ -4151,6 +4379,218 @@ sh -c 'sleep 5 & wait'
     expect(result.tierEscalationSkip).toBeUndefined();
     expect(held).toHaveLength(1);
     expect(db.query(`SELECT * FROM tier_escalations`).all()).toHaveLength(1);
+    db.close();
+  });
+
+  test("an unexpanded run trailer drafts the PR and returns the ticket to the queue", async () => {
+    const db = openDb(":memory:");
+    const ticket = "watt-mind/factory#2164";
+    let ticketState = "Todo";
+    const held = [];
+    const returned = [];
+    const spec = queueRun(
+      db,
+      makeSpec({
+        runId: "run_unexpanded_trailer",
+        agent: "dispatch@1",
+        input: { repo: "factory", ticket },
+        workspace: {
+          type: "worktree",
+          checkoutDir: "repo",
+          retainOnFailure: true,
+        },
+        outputContract: "factory.dispatch-result/v1",
+      }),
+    );
+    const o = opts({
+      verifyResult: () => {
+        throw new ContractViolation(["run trailer is literal"], {
+          reasonCode: "run_trailer_unexpanded",
+          handoff: {
+            prNumber: 2164,
+            prUrl: "https://github.com/watt-mind/factory/pull/2164",
+            github: "watt-mind/factory",
+            verification: [],
+          },
+        });
+      },
+      dispatch: {
+        configSnapshot: dispatchConfigSnapshot(),
+        locksDir: tmpDir("unexpanded-trailer-locks-"),
+        leasesDir: tmpDir("unexpanded-trailer-leases-"),
+        fetchTicket: () => ({
+          identifier: ticket,
+          state: { name: ticketState },
+          assignee: ticketState === "Todo" ? null : { name: "hdkiller" },
+          labels: {
+            nodes: [
+              {
+                name:
+                  ticketState === "Todo" ? "ai:agent-ready" : "ai:in-progress",
+              },
+            ],
+          },
+          description:
+            "## Owned Paths\n- event-runtime/lib/worker.mjs\n\n## Verification Command\n`bun test event-runtime/lib/worker.test.mjs`\n",
+        }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        budgetRefusal: () => null,
+        claimTicket: () => ((ticketState = "In Progress"), { ok: true }),
+        commentTicket: () => {},
+        holdPullRequest: (entry) => (held.push(entry), true),
+        returnHandoffTicket: (entry) => (
+          returned.push(entry),
+          (ticketState = "Todo"),
+          { agentReadyRestored: true }
+        ),
+        unclaimTicket: () => true,
+        projectTierEscalation: () => true,
+      },
+      materializeWorktree: () => ({
+        path: tmpDir("unexpanded-trailer-checkout-"),
+      }),
+    });
+
+    const result = await executeClaimed(
+      db,
+      registry,
+      {
+        fake: {
+          async execute() {
+            return { exitCode: 0, timedOut: false };
+          },
+        },
+      },
+      claimNext(db, o),
+      o,
+    );
+
+    expect(result).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "run_trailer_unexpanded",
+    });
+    expect(held).toEqual([
+      expect.objectContaining({ prNumber: 2164, github: "watt-mind/factory" }),
+    ]);
+    expect(returned).toEqual([
+      expect.objectContaining({
+        ticket,
+        why: expect.stringContaining("run_trailer_unexpanded"),
+      }),
+    ]);
+    expect(ticketState).toBe("Todo");
+    db.close();
+  });
+
+  test("a recovered pushed branch without a PR keeps its reason and releases the claim", async () => {
+    const db = openDb(":memory:");
+    const ticket = "watt-mind/factory#2164";
+    let ticketState = "Todo";
+    const unclaims = [];
+    const checkoutPath = tmpDir("pushed-branch-no-pr-checkout-");
+    const spec = queueRun(
+      db,
+      makeSpec({
+        runId: "run_pushed_branch_no_pr",
+        agent: "dispatch@1",
+        input: { repo: "factory", ticket },
+        workspace: { type: "worktree", checkoutDir: "repo" },
+        outputContract: "factory.dispatch-result/v1",
+      }),
+    );
+    let verificationCalls = 0;
+    const o = opts({
+      artifactStore: freshRoot(),
+      verifyResult: ({ workspaceDir }) => {
+        verificationCalls += 1;
+        if (verificationCalls === 1) {
+          throw new ContractViolation(["missing_result"]);
+        }
+        const recovered = JSON.parse(
+          readFileSync(path.join(workspaceDir, "result.json"), "utf8"),
+        );
+        return {
+          kind: "completed",
+          result: {
+            ...recovered,
+            runId: spec.runId,
+            attempt: 1,
+            outputContract: spec.outputContract,
+            artifactHash: hashJson(recovered.artifact),
+            evidenceSetHash: null,
+            verification: { status: "passed", checks: [] },
+            artifacts: [],
+          },
+          receipt: {},
+        };
+      },
+      dispatch: {
+        configSnapshot: dispatchConfigSnapshot(),
+        locksDir: tmpDir("pushed-branch-no-pr-locks-"),
+        leasesDir: tmpDir("pushed-branch-no-pr-leases-"),
+        fetchTicket: () => ({
+          identifier: ticket,
+          state: { name: ticketState },
+          assignee: ticketState === "Todo" ? null : { name: "hdkiller" },
+          labels: {
+            nodes: [
+              {
+                name:
+                  ticketState === "Todo" ? "ai:agent-ready" : "ai:in-progress",
+              },
+            ],
+          },
+          description:
+            "## Owned Paths\n- event-runtime/lib/worker.mjs\n\n## Verification Command\n`bun test event-runtime/lib/worker.test.mjs`\n",
+        }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        budgetRefusal: () => null,
+        claimTicket: () => ((ticketState = "In Progress"), { ok: true }),
+        commentTicket: () => {},
+        unclaimTicket: (entry) => (
+          unclaims.push(entry),
+          (ticketState = "Todo"),
+          true
+        ),
+        projectTierEscalation: () => true,
+        findWorkspacePullRequest: () => ({ pushedBranch: "feat/gh-2164" }),
+      },
+      materializeWorktree: () => ({
+        path: checkoutPath,
+        github: "watt-mind/factory",
+        base: "develop",
+      }),
+    });
+
+    const result = await executeClaimed(
+      db,
+      registry,
+      {
+        fake: {
+          async execute() {
+            return { exitCode: 0, timedOut: false };
+          },
+        },
+      },
+      claimNext(db, o),
+      o,
+    );
+
+    expect(result).toMatchObject({ terminalState: "COMPLETED" });
+    expect(verificationCalls).toBe(2);
+    expect(
+      JSON.parse(
+        db
+          .query(`SELECT result_json FROM results WHERE run_id = ?`)
+          .get(spec.runId).result_json,
+      ),
+    ).toMatchObject({ reasonCode: "pushed_branch_no_pr" });
+    expect(unclaims).toEqual([
+      { repo: "factory", ticket, why: "pushed_branch_no_pr", log: null },
+    ]);
+    expect(ticketState).toBe("Todo");
     db.close();
   });
 
@@ -6198,6 +6638,7 @@ sh -c 'sleep 5 & wait'
       runId: "run-1",
       ticketId: 1497,
       repoName: "factory",
+      resultPath: "/workspace/result.json",
     });
     expect(full).toEqual({
       PATH: "/bin",
@@ -6207,6 +6648,7 @@ sh -c 'sleep 5 & wait'
       FACTORY_RUN_ID: "run-1",
       FACTORY_TICKET: "1497",
       FACTORY_REPO: "factory",
+      FACTORY_RESULT_PATH: "/workspace/result.json",
     });
     expect(full.FACTORY_CONTROL_API_TOKEN).toBeUndefined();
 
@@ -6891,6 +7333,108 @@ sh -c 'sleep 5 & wait'
     expect(capturedReadOnlyEnv.SSH_AUTH_SOCK).toBeUndefined();
     expect(capturedReadOnlyEnv.GITHUB_TOKEN).toBeUndefined();
     expect(capturedReadOnlyEnv.ANTHROPIC_API_KEY).toBeUndefined();
+  });
+
+  describe("Linear-plane tracker state mutations (#2165)", () => {
+    const repo = "linear-plane-repo";
+
+    test("unclaim sends its state transition to the injected repo", () => {
+      const calls = [];
+      expect(
+        defaultUnclaimTicket({
+          repo,
+          ticket: "WM-2165",
+          why: "test",
+          fetchTicket: () => ({
+            state: { name: "In Progress" },
+            labels: [{ name: "ai:in-progress" }],
+          }),
+          runCli: (args, options) => calls.push({ args, options }),
+        }),
+      ).toBe(true);
+
+      expect(calls.find(({ args }) => args[0] === "state")?.options).toEqual({
+        repo,
+      });
+    });
+
+    test("handoff return passes repo to its ticket read and state transition", () => {
+      const calls = [];
+      const fetchCalls = [];
+      expect(
+        defaultReturnHandoffTicket({
+          repo,
+          ticket: "WM-2165",
+          body: "returning ticket",
+          fetchTicket: (...args) => {
+            fetchCalls.push(args);
+            return { state: { name: "In Review" } };
+          },
+          runCli: (args, options) => calls.push({ args, options }),
+        }),
+      ).toMatchObject({ ok: true, agentReadyRestored: true });
+
+      expect(fetchCalls).toEqual([["WM-2165", repo]]);
+      expect(calls.find(({ args }) => args[0] === "state")?.options).toEqual({
+        repo,
+      });
+    });
+
+    test("handoff return preserves repo through its split state retry", () => {
+      const calls = [];
+      expect(
+        defaultReturnHandoffTicket({
+          repo,
+          ticket: "WM-2165",
+          body: "returning ticket",
+          fetchTicket: () => ({ state: { name: "In Review" } }),
+          runCli: (args, options) => {
+            calls.push({ args, options });
+            if (calls.length === 1) throw new Error("combined label failure");
+          },
+        }),
+      ).toMatchObject({ ok: true, agentReadyRestored: true });
+
+      expect(calls.filter(({ args }) => args[0] === "state")).toHaveLength(2);
+      expect(
+        calls
+          .filter(({ args }) => args[0] === "state")
+          .map(({ options }) => options),
+      ).toEqual([{ repo }, { repo }]);
+    });
+
+    test("baseline block sends its state transition to the injected repo", () => {
+      const calls = [];
+      expect(
+        defaultBlockBaselineTicket({
+          repo,
+          ticket: "WM-2165",
+          why: "baseline failed",
+          fetchTicket: () => ({
+            state: { name: "In Progress" },
+            labels: [{ name: "ai:in-progress" }],
+          }),
+          hasRecordedBaselineFailure: () => true,
+          runCli: (args, options) => calls.push({ args, options }),
+        }),
+      ).toBe(true);
+
+      expect(calls).toEqual([
+        {
+          args: [
+            "state",
+            "WM-2165",
+            "Blocked",
+            "--unassign",
+            "--add",
+            "ai:blocked",
+            "--remove",
+            "ai:in-progress",
+          ],
+          options: { repo },
+        },
+      ]);
+    });
   });
 
   describe("defaultReconcileVerifiedHandoffTicket (#1498)", () => {

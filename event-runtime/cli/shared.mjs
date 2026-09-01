@@ -35,13 +35,20 @@ export function fail(message) {
   process.exit(1);
 }
 
-/** Run one client verb; connection refusal names the fix, exactly (§12). */
+/**
+ * Run one client verb; connection refusal names the fix, exactly (§12).
+ *
+ * The client is built inside the try so a bad operator target (#2188 — an
+ * unparsable URL, or plaintext http to a non-loopback host) exits through
+ * fail() with the message rather than a stack trace.
+ */
 export async function withClient(fn) {
-  const client = apiClient();
+  let client = null;
   try {
+    client = apiClient({ resolveTarget: true });
     await fn(client);
   } catch (err) {
-    if (err.status === undefined) {
+    if (client && err.status === undefined) {
       fail(
         `control API not reachable on ${client.host}:${client.port} — start it with: bun event-runtime/cli.mjs serve`,
       );

@@ -5,6 +5,10 @@
 packs: []
 extensions: []
 
+# Optional default SSH alias for remote ticket handoff. A repository's
+# `handoff_host` takes precedence over this value.
+# handoff_host: factory-runner
+
 # Workspace-only model runs fail closed when this host cannot provide the
 # Gondolin guest boundary. An operator may temporarily accept host execution
 # by naming, one by one, the agents they accept running unconfined. Nothing is

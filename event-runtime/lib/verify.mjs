@@ -13,6 +13,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   closeSync,
+  cpSync,
   existsSync,
   mkdtempSync,
   openSync,
@@ -20,6 +21,8 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -111,6 +114,7 @@ export const HANDOFF_REASON_CODES = new Set([
   "handoff_verification_unspecified",
   "handoff_owned_paths_violation",
   "handoff_pr_form_invalid",
+  "run_trailer_unexpanded",
   "event_runtime_lib_verify_failed",
   HANDOFF_DEPENDENCIES_MISSING,
 ]);
@@ -1193,8 +1197,6 @@ function normalizeFailureOutput(output) {
 
 /**
  * Deterministic normalized signature of a failure payload.
- * Exact equality is intentionally strict: any new signal (even a single
- * additional line) proves the failure signature changed.
  */
 function failureSignature(output) {
   return normalizeFailureOutput(output).join("\n");
@@ -1202,11 +1204,28 @@ function failureSignature(output) {
 
 /**
  * Conservative evidence that post-agent verification hit the recorded red baseline.
- * Unlike partial line overlap, this compares full normalized signatures and fails
- * closed on ambiguous signal drift.
+ * Test failures are compared by name in the fail-closed direction: every failure
+ * observed on the branch must also have failed at the recorded baseline, so a
+ * branch that *adds* a failure is never absorbed. A branch that fixes some of the
+ * baseline's failures still lands, because absorption only needs its remaining
+ * failures to be a subset. Non-test failures retain exact normalized-signature
+ * matching because there is no narrower stable identity.
  */
 function matchesRedBaseline(baseline, verifyOutput) {
   if (baseline?.status !== "red") return false;
+  const baselineTests = repoVerifyFailingTests(baseline.output);
+  const verifyTests = repoVerifyFailingTests(verifyOutput);
+  if (baselineTests.length > 0 || verifyTests.length > 0) {
+    // A truncated list is not a complete failure set; containment over it could
+    // absorb a branch-introduced failure that fell past the cap.
+    if (isTruncatedTestList(baselineTests) || isTruncatedTestList(verifyTests))
+      return false;
+    return (
+      baselineTests.length > 0 &&
+      verifyTests.length > 0 &&
+      verifyTests.every((testName) => baselineTests.includes(testName))
+    );
+  }
   const baselineSig = failureSignature(baseline.output);
   const verifySig = failureSignature(verifyOutput);
   if (!baselineSig || !verifySig) return false;
@@ -1253,6 +1272,152 @@ export function repoVerifyFailingTests(output) {
   const shown = names.slice(0, REPO_VERIFY_FAILING_TESTS_MAX);
   shown.push(`…and ${names.length - REPO_VERIFY_FAILING_TESTS_MAX} more`);
   return shown;
+}
+
+// The sentinel repoVerifyFailingTests appends once it caps the list. Any set
+// comparison over a truncated list is unsound in both directions, so both
+// absorption paths refuse rather than guess at the names they cannot see.
+const REPO_VERIFY_TRUNCATION_SENTINEL = /^…and \d+ more$/;
+
+/** True when a failing-test list was capped and is therefore incomplete. */
+export function isTruncatedTestList(names) {
+  return (
+    Array.isArray(names) &&
+    names.some(
+      (name) =>
+        typeof name === "string" && REPO_VERIFY_TRUNCATION_SENTINEL.test(name),
+    )
+  );
+}
+
+// Bun prints a source-file heading before the tests it reports from that file.
+// Keep this deliberately narrow: an unrecognised runner format is ambiguous and
+// must not trigger the branch-external baseline retry.
+// The path is one flat character class (no nested quantifier over a group) so
+// the match stays linear on adversarial input — CodeQL flags the grouped form
+// as polynomial-backtracking ReDoS.
+const REPO_VERIFY_TEST_FILE_LINE =
+  /^\s*(?<path>[\w@./-]+\.(?:test|spec)\.[cm]?[jt]sx?)\s*:\s*$/i;
+
+/**
+ * Return the runner-reported source files for failing tests, or null when a
+ * failure cannot be tied to a file. The null result is the fail-closed path.
+ */
+export function repoVerifyFailingTestFiles(output) {
+  const files = new Set();
+  let currentFile = null;
+  let failures = 0;
+  for (const rawLine of stripAnsi(output).split("\n")) {
+    const line = rawLine.trim();
+    const match = REPO_VERIFY_TEST_FILE_LINE.exec(line);
+    if (match) {
+      currentFile = match.groups.path.replace(/^\.\//, "");
+      continue;
+    }
+    if (!REPO_VERIFY_TEST_FAILURE_LINE.test(line)) continue;
+    failures += 1;
+    if (!currentFile) return null;
+    files.add(currentFile);
+  }
+  return failures > 0 ? [...files] : null;
+}
+
+function sameFailingTestSet(left, right) {
+  // A capped list hides names, so equality over it would absorb a branch
+  // failure the cap swallowed. Truncation is ambiguous; ambiguous is fail-closed.
+  if (isTruncatedTestList(left) || isTruncatedTestList(right)) return false;
+  return (
+    left.length > 0 &&
+    left.length === right.length &&
+    left.every((testName) => right.includes(testName))
+  );
+}
+
+function failingTestsAreOutsideChangedFiles(obs, changedFiles) {
+  const failingFiles = repoVerifyFailingTestFiles(obs.output);
+  return (
+    Array.isArray(changedFiles) &&
+    obs.failingTests.length > 0 &&
+    Array.isArray(failingFiles) &&
+    failingFiles.length > 0 &&
+    failingFiles.every((file) => !changedFiles.includes(file))
+  );
+}
+
+/**
+ * Execute a second repo verify at the branch's merge-base without mutating the
+ * dispatched checkout. Dependencies are copied only into the disposable
+ * checkout; a linked worktree otherwise has no ignored node_modules tree.
+ */
+function runRepoVerifyBaseline({
+  command,
+  worktreePath,
+  workspaceDir,
+  baseCommit,
+  timeoutMs,
+  runHandoffStep,
+}) {
+  const scratchPath = mkdtempSync(
+    path.join(workspaceDir, ".repo-verify-baseline-"),
+  );
+  rmSync(scratchPath, { recursive: true, force: true });
+  try {
+    try {
+      execFileSync(
+        "git",
+        ["worktree", "add", "--detach", "--force", scratchPath, baseCommit],
+        {
+          cwd: worktreePath,
+          stdio: ["ignore", "pipe", "pipe"],
+          timeout: 60_000,
+        },
+      );
+      const dependencies = path.join(worktreePath, "node_modules");
+      if (existsSync(dependencies)) {
+        const scratchDependencies = path.join(scratchPath, "node_modules");
+        // node_modules is multi-GB here; a symlink makes the scratch checkout
+        // free. Copy only where a link is not usable (e.g. no symlink support).
+        try {
+          symlinkSync(dependencies, scratchDependencies, "dir");
+        } catch {
+          cpSync(dependencies, scratchDependencies, {
+            recursive: true,
+            verbatimSymlinks: true,
+          });
+        }
+      }
+    } catch (err) {
+      return {
+        passed: false,
+        timedOut: false,
+        setupFailed: true,
+        output: String(err?.stderr ?? err?.message ?? err),
+      };
+    }
+    const obs = runHandoffStep({
+      command,
+      cwd: scratchPath,
+      worktreePath: scratchPath,
+      logPath: path.join(workspaceDir, ".verify.baseline.log"),
+      timeoutMs,
+    });
+    obs.source = "repo_verify_baseline";
+    obs.executionContext = "merge_base_scratch";
+    obs.failingTests = repoVerifyFailingTests(obs.output);
+    obs.failingTestFiles = repoVerifyFailingTestFiles(obs.output);
+    return obs;
+  } finally {
+    try {
+      execFileSync("git", ["worktree", "remove", "--force", scratchPath], {
+        cwd: worktreePath,
+        stdio: "ignore",
+        timeout: 60_000,
+      });
+    } catch {
+      // The directory is disposable even if Git has already pruned its entry.
+    }
+    rmSync(scratchPath, { recursive: true, force: true });
+  }
 }
 
 function boundedDiagnostic(lines) {
@@ -1552,19 +1717,24 @@ export function verifyResult({
   registry,
   workspaceDir,
   attempt,
+  attemptStartedAt = null,
   journalHead = null,
   extraArtifacts = [],
   worktreeRecord = null,
+  checkoutPath = null,
+  onTrace = null,
   verifyTimeoutMs = repoVerifyTimeoutMs(),
   runHandoffCommandFn = runHandoffCommand,
   dependencyInstaller = defaultDependencyInstaller,
 }) {
-  let raw;
-  try {
-    raw = readFileSync(path.join(workspaceDir, "result.json"), "utf8");
-  } catch {
-    throw new ContractViolation(["missing_result"]);
-  }
+  const raw = readResultFile({
+    workspaceDir,
+    // The stray probe only needs the physical checkout. Callers that suppress
+    // worktree command verification still pass it explicitly.
+    checkout: checkoutPath ?? worktreeRecord?.path ?? null,
+    attemptStartedAt,
+    onTrace,
+  });
 
   let candidate;
   try {
@@ -1594,6 +1764,103 @@ export function verifyResult({
     runHandoffCommandFn,
     dependencyInstaller,
   });
+}
+
+/**
+ * Result authors work in `workspaceDir/repo`, which may be a symlink to the
+ * physical checkout. Recover the two historical stray locations only when
+ * their mtime proves they belong to this attempt; an old sibling ticket's
+ * envelope is never a valid substitute for this run's result.
+ */
+function readResultFile({ workspaceDir, checkout, attemptStartedAt, onTrace }) {
+  const resultPath = path.join(workspaceDir, "result.json");
+  try {
+    return readFileSync(resultPath, "utf8");
+  } catch {
+    // The workspace result is deliberately the only unconditional location.
+  }
+
+  const candidates = [];
+  if (checkout) {
+    candidates.push(path.join(checkout, "result.json"));
+    try {
+      candidates.push(path.join(realpathSync(checkout), "..", "result.json"));
+    } catch {
+      // The normal missing-result path will report the primary result path.
+    }
+  }
+
+  const startMs = Date.parse(attemptStartedAt);
+  const nowMs = Date.now();
+  const stalePaths = [];
+  for (const candidatePath of [...new Set(candidates)]) {
+    let stat;
+    try {
+      stat = statSync(candidatePath);
+    } catch {
+      continue;
+    }
+    // A checkout can legitimately own a root result.json. Never adopt or
+    // delete that repository file; only untracked checkout output is a stray.
+    // Checked after the existence probe so git is not spawned for a candidate
+    // that does not exist.
+    if (
+      checkout &&
+      candidatePath === path.join(checkout, "result.json") &&
+      checkoutResultIsTracked(checkout)
+    ) {
+      stalePaths.push({ path: candidatePath, skipped: "tracked_in_checkout" });
+      continue;
+    }
+    const mtimeMs = stat.mtimeMs;
+    if (!Number.isFinite(startMs) || mtimeMs < startMs || mtimeMs > nowMs) {
+      stalePaths.push({ path: candidatePath, mtime: stat.mtime.toISOString() });
+      continue;
+    }
+    let raw;
+    try {
+      raw = readFileSync(candidatePath, "utf8");
+    } catch {
+      // A concurrent cleanup can remove a candidate between stat and read.
+      continue;
+    }
+    try {
+      JSON.parse(raw);
+    } catch {
+      // Adoption destroys the candidate, so only well-formed JSON is adopted:
+      // a truncated or foreign file is left in place for the next candidate
+      // (and for the operator) rather than deleted unread.
+      continue;
+    }
+    rmSync(candidatePath, { force: true });
+    onTrace?.("lifecycle", {
+      note: "result_recovered_from_stray_path",
+      path: candidatePath,
+    });
+    return raw;
+  }
+
+  const err = new ContractViolation(["missing_result"]);
+  if (stalePaths.length > 0) err.missingResultPaths = stalePaths;
+  if (candidates.length > 0) err.missingResultFallbacks = candidates;
+  throw err;
+}
+
+function checkoutResultIsTracked(checkout) {
+  try {
+    execFileSync(
+      "git",
+      ["-C", checkout, "ls-files", "--error-unmatch", "result.json"],
+      { stdio: "ignore", timeout: 60_000 },
+    );
+    return true;
+  } catch (err) {
+    // Exit 1 is the definitive "not tracked" answer. Anything else (not a
+    // repository, dubious ownership, a locked index, no git on PATH, timeout)
+    // is ambiguous — fail closed and treat the file as tracked so a stray
+    // git failure can never make us adopt and delete a repository file.
+    return err?.status !== 1;
+  }
 }
 
 /**
@@ -2164,9 +2431,39 @@ function verifyCompleted({
         // clean-checkout reproduction at the same commit.
         obs.executionContext = "dispatch_worktree";
         obs.failingTests = repoVerifyFailingTests(obs.output);
+        obs.failingTestFiles = repoVerifyFailingTestFiles(obs.output);
         const baselineStillRed =
           !obs.timedOut &&
           matchesRedBaseline(worktreeRecord.baseline, obs.output);
+        const shouldRecheckBase =
+          !obs.timedOut &&
+          !baselineStillRed &&
+          handoff.diff.ok &&
+          failingTestsAreOutsideChangedFiles(obs, handoff.diff.files) &&
+          typeof handoff.diff.mergeBase === "string";
+        if (shouldRecheckBase) {
+          const baselineObs = runRepoVerifyBaseline({
+            command: worktreeRecord.verify,
+            worktreePath,
+            workspaceDir,
+            baseCommit: handoff.diff.mergeBase,
+            timeoutMs: verifyTimeoutMs,
+            runHandoffStep,
+          });
+          handoff.repoVerifyBaseline = baselineObs;
+          if (
+            !baselineObs.setupFailed &&
+            !baselineObs.timedOut &&
+            !baselineObs.passed &&
+            sameFailingTestSet(obs.failingTests, baselineObs.failingTests)
+          ) {
+            handoff.reasonCode = "baseline_red";
+            throw new ContractViolation(
+              [`repo_verify_failed: ${failureWhy(obs)}`],
+              { reasonCode: handoff.reasonCode, handoff },
+            );
+          }
+        }
         handoff.reasonCode = baselineStillRed
           ? "baseline_red"
           : "handoff_verification_failed";

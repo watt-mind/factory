@@ -17,6 +17,7 @@ repos:
     # Linear — without it the choice is global and moving one moves all.
     # control_plane: github
     base: develop # Base branch for promotion PRs; defaults to main.
+    # handoff_host: factory-runner # Optional SSH alias for remote ticket handoff.
     deploy_branch: main # Optional human-reviewed release branch.
     worktree_up: bin/worktree-up.sh # Script that creates an isolated ticket worktree.
     worktree_down: bin/worktree-down.sh # Script that tears down an isolated worktree.

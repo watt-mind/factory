@@ -34,10 +34,21 @@ import {
 import { startApi } from "../lib/api.mjs";
 import { codeStamp, REGISTRY_STAMP_PATHS } from "../lib/worker.mjs";
 import { reapExpiredLeases } from "../lib/reaper.mjs";
-import { startPlannerWorker } from "../lib/planner-worker.mjs";
+import {
+  MAIN_LOOP_HARD_STALL_FLOOR_MS,
+  MAIN_LOOP_HEARTBEAT_INTERVAL_MS,
+  startPlannerWorker,
+} from "../lib/planner-worker.mjs";
 import { CLI_PATH, fail, flagValue, log } from "./shared.mjs";
 
 export const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+/**
+ * Cap on the inbox step (#2147). Reconciliation reads live GitHub and Linear
+ * state, so an unbounded await lets one slow forge stall every other tick
+ * step. Past the deadline the tick continues and the sweep finishes in the
+ * background; its result lands on the next poll.
+ */
+export const INBOX_RECONCILE_DEADLINE_MS = 10_000;
 /**
  * Shutdown budget (#1585). The supervisor (`await_daemon` in
  * bin/worktree-common.sh) SIGKILLs a serve that has not exited 3 s after
@@ -50,6 +61,19 @@ export const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 export const CONNECTOR_STOP_TIMEOUT_MS = 1_500;
 export const CLOSE_CONNECTIONS_AFTER_MS = 500;
 export const HARD_EXIT_MS = 2_500;
+
+/**
+ * The hard main-loop watchdog is intentionally disabled unless an operator
+ * opts in. An invalid value is equivalent to disabled rather than turning a
+ * typo into an unexpected serve restart, and an enabled one is clamped up to
+ * a floor of several soft stall windows so ordinary tick slowness can never
+ * be enough to restart serve.
+ */
+export function mainLoopHardStallAfterMs(env = process.env) {
+  const value = Number(env.FACTORY_MAIN_LOOP_STALL_EXIT_AFTER_MS);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return Math.max(value, MAIN_LOOP_HARD_STALL_FLOOR_MS);
+}
 
 /**
  * Mutable ownership seam for the validated registry.  Loading and validation
@@ -232,11 +256,15 @@ export async function tick({
   subsystems = {},
   skipPlan = false,
   proposalSweepLimit,
+  reconcile = reconcileInbox,
+  inboxDeadlineMs = INBOX_RECONCILE_DEADLINE_MS,
   onStep = () => {},
+  autoApproveChainsFn = autoApproveChains,
 } = {}) {
   const tickStart = Date.now();
   const stepMs = {};
   let expiredScheduledProposals = 0;
+  let deadlineSkipped = 0;
   const runStep = async (name, fn) => {
     const start = Date.now();
     onStep({ name, startedAt: start });
@@ -291,12 +319,13 @@ export async function tick({
     // `wrapLinearReads` (ticket/viewer/in-flight plus the rate-limit latch) and
     // by `withPassInFlightCache` for the pass (#1064), each read bounded well
     // under the tracker's own 15s request timeout.
-    const auto = await autoApproveChains(db, registry, {
+    const auto = await autoApproveChainsFn(db, registry, {
       now,
       policyVersion: pv,
       dispatchEligibility: worktreeDispatchAutoEligibilityAsync,
       dispatch: createAutoApprovalDispatch(),
     });
+    deadlineSkipped = auto.deadlineSkipped ?? 0;
     for (const a of auto.approved)
       logLine(
         `chain proposal approved ${a.proposalId} → run ${a.runId} (actor: chain auto)`,
@@ -305,7 +334,7 @@ export async function tick({
       logLine(`chain approval error: ${e.proposalId}:${e.reason}`);
     if (auto.skipped > 0 || expiredScheduledProposals > 0) {
       logLine(
-        `proposal staleness: skipped ${auto.skipped} pending chain row(s) (${auto.memoised ?? 0} memoised registry-stale); expired ${expiredScheduledProposals} unreplannable scheduler row(s)`,
+        `proposal staleness: skipped ${auto.skipped} pending chain row(s) (${auto.memoised ?? 0} memoised registry-stale; ${auto.deadlineSkipped ?? 0} deadline-truncated); expired ${expiredScheduledProposals} unreplannable scheduler row(s)`,
       );
     }
   });
@@ -317,8 +346,25 @@ export async function tick({
 
   // Referent state is authoritative: acknowledged or untouched items both
   // resolve automatically once the proposal/event no longer needs a human.
-  await runStep("inbox", () => {
-    reconcileInbox(db, { now });
+  // Reconciliation now reads live GitHub/Linear state, so the step is capped:
+  // the tick moves on when the deadline passes and the in-flight sweep is left
+  // attributed, so a late failure logs instead of rejecting unhandled.
+  await runStep("inbox", async () => {
+    const sweep = Promise.resolve(reconcile(db, { now })).catch((err) => {
+      logLine(`tick inbox: ${err?.message ?? err}`);
+    });
+    if (!(inboxDeadlineMs > 0)) return sweep;
+    let timer;
+    const overran = new Promise((resolve) => {
+      timer = setTimeout(() => resolve("overran"), inboxDeadlineMs);
+      timer.unref?.();
+    });
+    const outcome = await Promise.race([sweep.then(() => "done"), overran]);
+    clearTimeout(timer);
+    if (outcome === "overran")
+      logLine(
+        `inbox reconcile overran ${inboxDeadlineMs}ms; continuing tick (sweep still running)`,
+      );
   });
 
   await runStep("proposals", () => {
@@ -422,6 +468,7 @@ export async function tick({
     lastPrune: nextPrune,
     durationMs: Date.now() - tickStart,
     stepMs,
+    deadlineSkipped,
   };
 }
 
@@ -647,12 +694,14 @@ export default async function serve(args) {
   let lastPrune = Date.now();
   let busy = false;
   let tickOverruns = 0;
+  let lastDeadlineSkipped = 0;
   let lastTickMs = 0;
   let lastOverrunAt = null;
   let lastTickAt = null;
   let currentTickStep = null;
   let tickStartedAt = null;
   let plannerWorker = null;
+  let plannerHeartbeatTimer = null;
   // Chain approval has exactly one owner in this process: the tick step below,
   // which runs it with awaited, memoised, per-row-bounded control-plane reads.
   // Without this the planner would run the same pass again — inline under
@@ -670,6 +719,7 @@ export default async function serve(args) {
       // watchdog and the web dashboard read them) — keep exactly one spelling.
       lastMs: lastTickMs,
       overruns: tickOverruns,
+      deadlineSkipped: lastDeadlineSkipped,
       lastTickAt,
       currentStep: currentTickStep,
       // How long the in-progress tick has been running. Non-zero here with a
@@ -694,6 +744,7 @@ export default async function serve(args) {
     busy = true;
     const start = Date.now();
     tickStartedAt = start;
+    lastDeadlineSkipped = 0;
     try {
       registryRef.poll();
       const result = await tick({
@@ -714,6 +765,7 @@ export default async function serve(args) {
         },
       });
       lastPrune = result.lastPrune;
+      lastDeadlineSkipped = result.deadlineSkipped;
       const duration = Date.now() - start;
       lastTickMs = duration;
       lastTickAt = new Date().toISOString();
@@ -734,12 +786,30 @@ export default async function serve(args) {
   }
 
   if (!noPlanner) {
+    const hardStallAfterMs = mainLoopHardStallAfterMs();
     plannerWorker = startPlannerWorker({
       eventHome: home,
       policyVersion: pv,
       adapterOverride,
+      mainLoopHardStallAfterMs: hardStallAfterMs,
       log,
     });
+    if (hardStallAfterMs != null) {
+      const raw = Number(process.env.FACTORY_MAIN_LOOP_STALL_EXIT_AFTER_MS);
+      log(
+        `planner: main-loop hard stall exit armed at ${hardStallAfterMs}ms` +
+          (raw !== hardStallAfterMs
+            ? ` (raised from ${raw}ms to the ${MAIN_LOOP_HARD_STALL_FLOOR_MS}ms floor)`
+            : ""),
+      );
+    }
+    // The worker owns the clock and can therefore observe a main event-loop
+    // wedge. Include the live step so its report says where the loop stopped.
+    plannerWorker.heartbeat(currentTickStep);
+    plannerHeartbeatTimer = setInterval(
+      () => plannerWorker?.heartbeat(currentTickStep),
+      MAIN_LOOP_HEARTBEAT_INTERVAL_MS,
+    );
   }
 
   const env = {
@@ -833,6 +903,12 @@ export default async function serve(args) {
     stopping = true;
     log(`shutting down (${signal})`);
     if (timer) clearInterval(timer);
+    if (plannerHeartbeatTimer) clearInterval(plannerHeartbeatTimer);
+    // We stop heartbeating on purpose from here on, and the bounded stops
+    // below can legitimately take CONNECTOR_STOP_TIMEOUT_MS. Disarm before
+    // any of that so an orderly shutdown cannot be turned into a SIGKILL
+    // that skips releaseServeLock.
+    plannerWorker?.disarmHardStall();
     // Arm this before any cleanup: a connector or the planner thread may
     // never settle. It sits inside the supervisor's SIGKILL grace so the lock
     // is released by us, not by a kernel kill; it is longer than the bounded

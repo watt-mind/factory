@@ -441,9 +441,12 @@ describe("registry", () => {
     // an auditable script, records expected missing logs as a completed
     // no-artifact outcome, and only chains a diagnosis when a ci-log artifact
     // was captured.
-    // Regenerated (#2149): added editorial agent definitions, event-types, and edges.
+    // Regenerated (#2144): added celld-smoke agent definition (re-pinned after
+    // prettier formatting of the agent prose/schema).
+    // Regenerated (#2170): dispatch writes to FACTORY_RESULT_PATH and the
+    // pinned prompt/definition digest changes with that recovery contract.
     const expected =
-      "sha256:225177afffb07f8032c60ff8365866b2b7852ba1ad71e089cd7bae6dee842c96";
+      "sha256:f39e83489b66ae02295fbedf030a830733693b7d1956cbbe401aef8dc7fdd49c";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -744,10 +747,10 @@ describe("registry", () => {
     // prompt pin only, `pack` remains non-enumerable.
     // Regenerated (#2013): dispatch documents draft PR readiness; prompt pin
     // only, `pack` remains non-enumerable.
-    // Regenerated (#2071): dispatch blocks an unavailable web UI before UX
-    // critique, then re-pins the prompt definition.
+    // Regenerated (#2170): dispatch writes result envelopes through the
+    // worker-supplied absolute result path.
     expect(computeDefHash(def)).toBe(
-      "sha256:1843e0a20438d74a3ec58d766c020a13c4677da3da00b72e907fd02e4f3dfe00",
+      "sha256:8e8b4b99c6cd953977ed193d22b682b93bf7efd921ea514ae866d729d7442ab9",
     );
   });
 

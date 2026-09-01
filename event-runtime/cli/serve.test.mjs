@@ -18,9 +18,11 @@ import {
   CLOSE_CONNECTIONS_AFTER_MS,
   CONNECTOR_STOP_TIMEOUT_MS,
   HARD_EXIT_MS,
+  mainLoopHardStallAfterMs,
   serveLockPath,
   stopBounded,
 } from "./serve.mjs";
+import { MAIN_LOOP_HARD_STALL_FLOOR_MS } from "../lib/planner-worker.mjs";
 import { openDb } from "../lib/db.mjs";
 import { startPlannerWorker } from "../lib/planner-worker.mjs";
 import { freePort, until } from "../lib/test-helpers-timing.mjs";
@@ -66,6 +68,28 @@ test("planner worker exit is logged and exposed as dead", async () => {
   } finally {
     await planner.stop();
   }
+});
+
+test("main-loop hard stall recovery is inert until explicitly enabled", () => {
+  expect(mainLoopHardStallAfterMs({})).toBeNull();
+  expect(
+    mainLoopHardStallAfterMs({ FACTORY_MAIN_LOOP_STALL_EXIT_AFTER_MS: "0" }),
+  ).toBeNull();
+  expect(
+    mainLoopHardStallAfterMs({ FACTORY_MAIN_LOOP_STALL_EXIT_AFTER_MS: "bad" }),
+  ).toBeNull();
+  // An enabled-but-tiny threshold is raised to the floor: ordinary tick
+  // slowness must never be enough to restart serve.
+  expect(
+    mainLoopHardStallAfterMs({ FACTORY_MAIN_LOOP_STALL_EXIT_AFTER_MS: "1234" }),
+  ).toBe(MAIN_LOOP_HARD_STALL_FLOOR_MS);
+  expect(
+    mainLoopHardStallAfterMs({
+      FACTORY_MAIN_LOOP_STALL_EXIT_AFTER_MS: String(
+        MAIN_LOOP_HARD_STALL_FLOOR_MS * 4,
+      ),
+    }),
+  ).toBe(MAIN_LOOP_HARD_STALL_FLOOR_MS * 4);
 });
 
 /**
@@ -300,14 +324,27 @@ describe("serve command", () => {
     let health;
     try {
       expect(out).toContain("control API on");
-      const res = await fetch(`http://127.0.0.1:${port}/health`);
-      expect(res.ok).toBe(true);
-      health = await res.json();
+      // The worker echoes its main-loop observation at ~1Hz, so poll until
+      // the first one has landed rather than racing the very first tick.
+      for (let attempt = 0; attempt < 30; attempt++) {
+        const res = await fetch(`http://127.0.0.1:${port}/health`);
+        expect(res.ok).toBe(true);
+        health = await res.json();
+        if (health.planner?.mainLoopHeartbeat) break;
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
     } finally {
       child.kill("SIGTERM");
       await new Promise((resolve) => child.once("exit", resolve));
     }
     expect(health.ok).toBe(true);
+    expect(health.tick.deadlineSkipped).toBe(0);
+    // The planner worker is serve's only observer of a wedged main loop, so
+    // /health must carry its report (#2129).
+    expect(health.planner.mainLoopHeartbeat).toMatchObject({
+      stalled: false,
+    });
+    expect(typeof health.planner.mainLoopHeartbeat.lastAt).toBe("string");
   });
 
   test("a stalled Linear ticket read cannot wedge /health past the tick budget (#1835 AC3)", async () => {
@@ -759,7 +796,7 @@ export default async function start() {
 
     expect(logs).toEqual(
       expect.arrayContaining([
-        "proposal staleness: skipped 0 pending chain row(s) (0 memoised registry-stale); expired 1 unreplannable scheduler row(s)",
+        "proposal staleness: skipped 0 pending chain row(s) (0 memoised registry-stale; 0 deadline-truncated); expired 1 unreplannable scheduler row(s)",
       ]),
     );
     db.close();
@@ -811,6 +848,76 @@ export default async function start() {
     );
     expect(current).toBeNull();
     expect(Object.keys(result.stepMs)).toContain("auto-approve-chains");
+    db.close();
+  });
+
+  test("tick awaits asynchronous inbox reconciliation", async () => {
+    const { tick, TICK_SUBSYSTEMS } = await import("../cli.mjs");
+    const db = openDb(":memory:");
+    let release;
+    let entered;
+    const reconciled = new Promise((resolve) => {
+      release = resolve;
+    });
+    const enteredInbox = new Promise((resolve) => {
+      entered = resolve;
+    });
+    const subsystems = Object.fromEntries(
+      TICK_SUBSYSTEMS.filter((name) => name !== "inbox").map((name) => [
+        name,
+        () => {},
+      ]),
+    );
+    let finished = false;
+    const running = tick({
+      db,
+      now: 9000,
+      skipPlan: true,
+      subsystems,
+      reconcile: () => {
+        entered();
+        return reconciled;
+      },
+    }).then(() => {
+      finished = true;
+    });
+
+    await enteredInbox;
+    expect(finished).toBe(false);
+    release();
+    await running;
+    db.close();
+  });
+
+  test("tick abandons an overrunning inbox reconcile and logs late failures", async () => {
+    const { tick, TICK_SUBSYSTEMS } = await import("../cli.mjs");
+    const db = openDb(":memory:");
+    const subsystems = Object.fromEntries(
+      TICK_SUBSYSTEMS.filter((name) => name !== "inbox").map((name) => [
+        name,
+        () => {},
+      ]),
+    );
+    let rejectSweep;
+    const sweep = new Promise((_, reject) => {
+      rejectSweep = reject;
+    });
+    const lines = [];
+    await tick({
+      db,
+      now: 9000,
+      skipPlan: true,
+      subsystems,
+      inboxDeadlineMs: 5,
+      log: (line) => lines.push(String(line)),
+      reconcile: () => sweep,
+    });
+    expect(lines.some((l) => l.includes("inbox reconcile overran"))).toBe(true);
+    // The abandoned sweep stays attributed: a late failure logs rather than
+    // surfacing as an unhandled rejection.
+    rejectSweep(new Error("late forge failure"));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(lines.some((l) => l.includes("late forge failure"))).toBe(true);
     db.close();
   });
 

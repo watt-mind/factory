@@ -296,5 +296,68 @@
         }
       }
     }
+  },
+  "editorial-topic-scan@1": {
+    "recommendationField": "outcome",
+    "independent": true,
+    "edges": {
+      "TOPICS_PROPOSED": {
+        "eventType": "editorial.research.requested",
+        "whenItemsField": "claimed",
+        "mixedEventId": "chain-${runId}-research-${item.articleId}",
+        "itemsField": "claimed",
+        "itemKey": "articleId",
+        "input": {
+          "siteId": "$.artifact.siteId",
+          "cellEndpoint": "$.input.cellEndpoint"
+        },
+        "perItem": {
+          "articleId": "$.item.articleId",
+          "topic": "$.item.title",
+          "slug": "$.item.slug"
+        }
+      }
+    }
+  },
+  "editorial-research@1": {
+    "recommendationField": "outcome",
+    "edges": {
+      "RESEARCHED": {
+        "eventType": "editorial.draft.requested",
+        "input": {
+          "siteId": "$.input.siteId",
+          "articleId": "$.input.articleId",
+          "cellEndpoint": "$.input.cellEndpoint"
+        }
+      }
+    }
+  },
+  "editorial-draft@1": {
+    "recommendationField": "outcome",
+    "edges": {
+      "DRAFTED": {
+        "eventType": "editorial.review.requested",
+        "input": {
+          "siteId": "$.input.siteId",
+          "articleId": "$.input.articleId",
+          "cellEndpoint": "$.input.cellEndpoint",
+          "revisionHash": "$.artifact.revisionHash"
+        }
+      }
+    }
+  },
+  "editorial-review@1": {
+    "recommendationField": "verdict",
+    "edges": {
+      "REVISE": {
+        "eventType": "editorial.draft.requested",
+        "input": {
+          "siteId": "$.input.siteId",
+          "articleId": "$.input.articleId",
+          "cellEndpoint": "$.input.cellEndpoint",
+          "instructions": "$.artifact.instructions"
+        }
+      }
+    }
   }
 }

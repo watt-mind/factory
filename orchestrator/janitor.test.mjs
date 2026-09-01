@@ -320,46 +320,190 @@ describe("survey (WM-55: hold wiring and cannot-tell exclusion)", () => {
     getOpenPrs: () => [{ number: 261, headRefName: "feat/CLNT-520" }],
   };
 
-  test("batches more than 250 ticket numbers and categorizes every worktree", async () => {
+  test("resolves hundreds of worktrees with a bounded tracker fan-out", async () => {
     const worktrees = Array.from({ length: 501 }, (_, i) => `CLNT-${i + 1}`);
-    const calls = [];
+    const asked = [];
     let active = 0;
     let maxActive = 0;
-    const queryIssues = async (_team, nums) => {
-      calls.push(nums);
-      active += 1;
-      maxActive = Math.max(maxActive, active);
-      await Promise.resolve();
-      active -= 1;
-      // Match Linear's `issues(first: 250)` response limit. Passing all numbers
-      // in one request silently omits every worktree after the first 250.
-      return nums.slice(0, 250).map((number) => ({
-        identifier: `CLNT-${number}`,
-        state:
-          number % 2 === 0
-            ? { name: "Done", type: "completed" }
-            : { name: "In Progress", type: "started" },
-      }));
-    };
-
     const res = await survey(
       repo,
       { apply: false },
       {
         readdir: () => worktrees,
         exists: () => true,
-        queryIssues,
+        resolveControlPlane: () => ({
+          kind: "linear",
+          getTicket: async (identifier) => {
+            asked.push(identifier);
+            active += 1;
+            maxActive = Math.max(maxActive, active);
+            await Promise.resolve();
+            active -= 1;
+            const number = Number(identifier.split("-")[1]);
+            return {
+              identifier,
+              state:
+                number % 2 === 0
+                  ? { name: "Done", type: "completed" }
+                  : { name: "In Progress", type: "started" },
+            };
+          },
+        }),
         getBranches: () => ({}),
         getOpenPrs: () => [],
       },
     );
 
-    expect(calls.map((nums) => nums.length)).toEqual([250, 250, 1]);
-    expect(maxActive).toBe(3);
+    expect(asked).toHaveLength(501);
+    // Every worktree is resolved, but never as one 501-wide request burst.
+    expect(maxActive).toBeLessThanOrEqual(5);
+    expect(maxActive).toBeGreaterThan(1);
     expect(res.unknown).toEqual([]);
     expect(res.reclaimable).toHaveLength(250);
     expect(res.kept).toHaveLength(251);
     expect(res.kept.at(-1)).toEqual({ id: "CLNT-501", state: "In Progress" });
+  });
+
+  test("one unresolvable ticket lands in unknown without sinking the survey", async () => {
+    const res = await survey(
+      repo,
+      { apply: false },
+      {
+        readdir: () => ["CLNT-520", "CLNT-600"],
+        exists: () => true,
+        resolveControlPlane: () => ({
+          kind: "linear",
+          getTicket: async (identifier) => {
+            if (identifier === "CLNT-600") throw new Error("tracker 502");
+            return {
+              identifier,
+              state: { name: "Done", type: "completed" },
+            };
+          },
+        }),
+        getBranches: () => ({ "CLNT-520": "feat/CLNT-520" }),
+        getOpenPrs: () => [],
+      },
+    );
+
+    expect(res.unknown).toEqual(["CLNT-600"]);
+    expect(res.reclaimable).toEqual([{ id: "CLNT-520", state: "Done" }]);
+  });
+
+  test("uses the repository's GitHub control plane for gh worktrees", async () => {
+    const githubRepo = {
+      ...repo,
+      name: "factory",
+      control_plane: "github",
+      github: "watt-mind/factory",
+    };
+    const controlPlaneCalls = [];
+    const ticketCalls = [];
+    const res = await survey(
+      githubRepo,
+      { apply: true },
+      {
+        readdir: () => ["gh-2160", "release-scratch"],
+        exists: () => true,
+        resolveControlPlane: (opts) => {
+          controlPlaneCalls.push(opts);
+          return {
+            kind: "github",
+            getTicket: async (identifier) => {
+              ticketCalls.push(identifier);
+              return {
+                identifier,
+                state: { name: "Done", type: "completed" },
+              };
+            },
+          };
+        },
+        getBranches: () => ({ "gh-2160": "fix/gh-2160" }),
+        getOpenPrs: () => [],
+        doReclaim: (finished) => ({
+          removed: finished,
+          refused: [],
+          held: [],
+        }),
+      },
+    );
+
+    expect(controlPlaneCalls).toEqual([{ repoName: "factory" }]);
+    expect(ticketCalls).toEqual(["watt-mind/factory#2160"]);
+    expect(res.named).toEqual(["release-scratch"]);
+    expect(res.reclaimable).toEqual([{ id: "gh-2160", state: "Done" }]);
+    expect(res.removed).toEqual(["gh-2160"]);
+  });
+
+  test("a github-plane repo never treats a tracker-key worktree as a ticket", async () => {
+    // `PR-516` and `WM-87` are deliberate human checkouts. They slug cleanly,
+    // so a loose match would look up issues #516 and #87 in this repo, find
+    // them closed years ago, and offer both directories up for deletion.
+    const githubRepo = {
+      ...repo,
+      name: "factory",
+      control_plane: "github",
+      github: "watt-mind/factory",
+    };
+    const ticketCalls = [];
+    const res = await survey(
+      githubRepo,
+      { apply: true },
+      {
+        readdir: () => ["gh-2160", "PR-516", "WM-87", "release-scratch"],
+        exists: () => true,
+        resolveControlPlane: () => ({
+          kind: "github",
+          getTicket: async (identifier) => {
+            ticketCalls.push(identifier);
+            return { identifier, state: { name: "Done", type: "completed" } };
+          },
+        }),
+        getBranches: () => ({ "gh-2160": "fix/gh-2160" }),
+        getOpenPrs: () => [],
+        doReclaim: (finished) => ({
+          removed: finished,
+          refused: [],
+          held: [],
+        }),
+      },
+    );
+
+    expect(ticketCalls).toEqual(["watt-mind/factory#2160"]);
+    expect(res.named).toEqual(["PR-516", "WM-87", "release-scratch"]);
+    expect(res.reclaimable).toEqual([{ id: "gh-2160", state: "Done" }]);
+    expect(res.removed).toEqual(["gh-2160"]);
+    for (const dir of ["PR-516", "WM-87"]) {
+      expect(res.reclaimable.map((r) => r.id)).not.toContain(dir);
+      expect(res.removed).not.toContain(dir);
+      expect(res.unknown).not.toContain(dir);
+      expect(res.kept.map((k) => k.id)).not.toContain(dir);
+    }
+  });
+
+  test("a linear-plane repo never treats a gh-<n> worktree as a ticket", async () => {
+    const ticketCalls = [];
+    const res = await survey(
+      repo,
+      { apply: false },
+      {
+        readdir: () => ["CLNT-520", "gh-2160"],
+        exists: () => true,
+        resolveControlPlane: () => ({
+          kind: "linear",
+          getTicket: async (identifier) => {
+            ticketCalls.push(identifier);
+            return { identifier, state: { name: "Done", type: "completed" } };
+          },
+        }),
+        getBranches: () => ({ "CLNT-520": "feat/CLNT-520" }),
+        getOpenPrs: () => [],
+      },
+    );
+
+    expect(ticketCalls).toEqual(["CLNT-520"]);
+    expect(res.named).toEqual(["gh-2160"]);
+    expect(res.reclaimable).toEqual([{ id: "CLNT-520", state: "Done" }]);
   });
 
   test("an open-PR hold populates the held array and is excluded from reclaimable (dry run)", () => {

@@ -4,6 +4,8 @@ import {
 } from "../test-support/tmp.mjs?file=event-runtime-lib-api-artifacts-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { symlinkSync } from "node:fs";
+import { Readable, Writable } from "node:stream";
+import { streamArtifact } from "./api-artifacts.mjs";
 import { artifactReferenceIndex } from "./artifacts.mjs";
 import { canonicalJson, sha256Hex } from "./canonical.mjs";
 import {
@@ -519,6 +521,8 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
         canonicalJson(view.result.artifact),
       );
 
+      const corruptHash = sha256Hex("expected bytes");
+      writeFileSync(path.join(home, "artifacts", corruptHash), "corrupt");
       const inventory = await (
         await fetch(`http://127.0.0.1:${port}/artifacts`)
       ).json();
@@ -571,15 +575,121 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
         (await fetch(`http://127.0.0.1:${port}/artifacts/not-a-hash`)).status,
       ).toBe(404);
 
-      const corruptHash = sha256Hex("expected bytes");
-      writeFileSync(path.join(home, "artifacts", corruptHash), "corrupt");
       expect(
         (await fetch(`http://127.0.0.1:${port}/artifacts/${corruptHash}`))
           .status,
       ).toBe(404);
       expect(existsSync(path.join(home, "artifacts", corruptHash))).toBe(false);
+      expect(
+        (
+          await (await fetch(`http://127.0.0.1:${port}/artifacts`)).json()
+        ).artifacts.map((artifact) => artifact.sha256),
+      ).not.toContain(corruptHash);
     } finally {
       server.close();
+    }
+  });
+
+  test("artifact stream failures destroy the response without leaking an error", async () => {
+    const source = new Readable({
+      read() {
+        this.destroy(new Error("simulated read failure"));
+      },
+    });
+    const response = new Writable({
+      write(_chunk, _encoding, done) {
+        done();
+      },
+    });
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      await expect(streamArtifact(source, response)).resolves.toBeUndefined();
+    } finally {
+      console.warn = warn;
+    }
+    expect(response.destroyed).toBe(true);
+  });
+
+  test("artifact stream client aborts log debug while source failures warn", async () => {
+    const warnings = [];
+    const debugLogs = [];
+    const warn = console.warn;
+    const debug = console.debug;
+    console.warn = (message) => warnings.push(message);
+    console.debug = (message) => debugLogs.push(message);
+    try {
+      const clientAbort = async (
+        error,
+        response = new Writable({
+          write(_chunk, _encoding, done) {
+            done();
+          },
+        }),
+      ) => {
+        const source = new Readable({
+          read() {
+            this.destroy(error);
+          },
+        });
+        await streamArtifact(source, response);
+        expect(response.destroyed).toBe(true);
+      };
+
+      for (const code of [
+        "ERR_STREAM_PREMATURE_CLOSE",
+        "ECONNRESET",
+        "EPIPE",
+        "ERR_STREAM_DESTROYED",
+      ]) {
+        const error = new Error("client closed download");
+        error.code = code;
+        await clientAbort(error);
+      }
+      await clientAbort(new Error("aborted"));
+      expect(warnings).toEqual([]);
+      expect(debugLogs).toEqual([
+        "artifact download client aborted",
+        "artifact download client aborted",
+        "artifact download client aborted",
+        "artifact download client aborted",
+        "artifact download client aborted",
+      ]);
+
+      const alreadyClosedSource = new Readable({
+        read() {
+          this.destroy(new Error("client closed download"));
+        },
+      });
+      const alreadyClosedResponse = new Writable({
+        write(_chunk, _encoding, done) {
+          done();
+        },
+      });
+      alreadyClosedResponse.destroy();
+      await streamArtifact(alreadyClosedSource, alreadyClosedResponse);
+      expect(warnings).toEqual([]);
+      expect(debugLogs).toHaveLength(6);
+
+      const failedSource = new Readable({
+        read() {
+          this.destroy(new Error("artifact blob was pruned"));
+        },
+      });
+      const failedResponse = new Writable({
+        write(_chunk, _encoding, done) {
+          done();
+        },
+      });
+      await streamArtifact(failedSource, failedResponse);
+      expect(failedResponse.destroyed).toBe(true);
+      expect(warnings).toEqual([
+        "artifact download stream failed: artifact blob was pruned",
+      ]);
+      expect(debugLogs).toHaveLength(6);
+    } finally {
+      console.warn = warn;
+      console.debug = debug;
     }
   });
 

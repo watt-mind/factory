@@ -60,10 +60,15 @@ export const SANDBOX_REFUSAL_WINDOW_MS = 60 * 60 * 1000;
  */
 export const SCAN_LOOP_AGENTS = Object.freeze([
   "agy-smoke",
+  "celld-smoke",
   "ci-doctor",
   "ci-log-capture",
   "cursor-smoke",
   "disk-diagnose",
+  "editorial-draft",
+  "editorial-research",
+  "editorial-review",
+  "editorial-topic-scan",
   "factory-status-report",
   "janitor-scan",
   "merge-plan",

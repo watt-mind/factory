@@ -387,6 +387,36 @@ default 600 s) and its full output lands in the workspace (`.verify.log`,
 | no ticket command parses **and** the repo has no `verify:` | `handoff_verification_unspecified` |
 | deviations under `owned_paths_conformance: strict`         | `handoff_owned_paths_violation`    |
 
+#### The `baseline_red` route (gh-2167)
+
+A repo-verify failure is charged to the branch only once the worker has
+evidence the branch caused it. Two routes lead to `baseline_red` instead —
+still a refusal, still blocking the ticket, but named so triage reads it as
+"the tree was already red", and the ticket goes back to Todo without the
+branch being blamed:
+
+- **Recorded baseline.** `bin/worktree-up.sh` writes a red-baseline record for
+  a check that was already failing at the base commit. `web_build` has always
+  recorded one; with `FACTORY_WORKTREE_BASELINE_VERIFY=1` the script also runs
+  the repo's `verify:` command at the base commit and records that (off by
+  default — it is the full local gate, and every dispatch would pay it; a
+  worktree already ahead of `origin/<base>` is not a baseline and is skipped).
+  Matching is fail-closed: for a test failure, **every** test failing on the
+  branch must also have failed at the baseline. A branch that adds a failure is
+  never absorbed; a branch that fixes some of the baseline's failures still is.
+  Non-test failures keep exact normalized-signature matching.
+- **Merge-base re-run.** With no recorded baseline, the worker re-runs the same
+  verify command once at `merge-base(origin/<base>, HEAD)` in a disposable
+  detached checkout (never the shared repo, never a stash) — but only when the
+  runner attributed every failing test to a file the branch did not change. If
+  the identical failing-test set reproduces at the base, the result is
+  `baseline_red`; if the base is green, `handoff_verification_failed` stands.
+
+Ambiguity is always fail-closed: a timeout, output the runner-format parser
+cannot tie to a file, a failing test in a changed file, or a failing-test list
+long enough to be truncated (`…and N more`) all keep
+`handoff_verification_failed`.
+
 These are agent errors (bounded by `maxAttempts`, never an environment retry).
 The run is FAILED with no accepted result — nothing downstream chains a review
 — and the journal reason carries the last lines of the failing output. Because

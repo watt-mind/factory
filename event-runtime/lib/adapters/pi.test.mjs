@@ -24,6 +24,7 @@ import {
   mapStreamEvent,
   PUSH_CREDENTIAL_ENV,
   MUTATING_TOOLS,
+  PI_RESULT_ENVELOPE_CONTRACT,
   piExtensions,
   piTools,
   READ_ONLY_TOOLS,
@@ -767,8 +768,12 @@ process.stdin.on("end", () => {
     expect(record.env.CUSTOM_VAR).toBe("custom_value");
 
     // 3. Prompt on stdin, not argv; argv shape
-    expect(record.stdin).toBe(`You are a test agent.${PROMPT_SUFFIX}`);
-    expect(record.argv).not.toContain(`You are a test agent.${PROMPT_SUFFIX}`);
+    expect(record.stdin).toBe(
+      `You are a test agent.${PROMPT_SUFFIX}${PI_RESULT_ENVELOPE_CONTRACT}`,
+    );
+    expect(record.argv).not.toContain(
+      `You are a test agent.${PROMPT_SUFFIX}${PI_RESULT_ENVELOPE_CONTRACT}`,
+    );
     expect(record.argv).toContain("-p");
     expect(record.argv).toContain("--mode");
     expect(record.argv).toContain("json");
@@ -780,6 +785,9 @@ process.stdin.on("end", () => {
     expect(record.argv[record.argv.indexOf("--tools") + 1]).toBe(
       "read,grep,find,ls,write,bash,exec_command,apply_patch",
     );
+    expect(record.stdin).toContain("factory.agent-result/v1");
+    expect(record.stdin).toContain("verification");
+    expect(record.stdin).toContain("ticketGate");
 
     // 4. .transcript.json artifact capture
     const transcriptPath = path.join(workspaceDir, ".transcript.json");
@@ -799,6 +807,47 @@ process.stdin.on("end", () => {
     expect(usageEvent.payload.numTurns).toBe(1);
     expect(usageEvent.payload.costUSD).toBeCloseTo(0.001, 6);
     expect(usageEvent.payload.usage.input).toBe(15);
+  });
+
+  test("Codex repair prompt carries bounded validator errors with the envelope contract", async () => {
+    const workspaceDir = ws();
+    const recordFile = path.join(workspaceDir, "record.json");
+    await execute({
+      spec: { ...defaultSpec, model: "openai-codex/gpt-5.6-terra" },
+      def: defaultDef,
+      workspaceDir,
+      timeoutMs: 5000,
+      env: {
+        PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
+        FACTORY_TEST_BEHAVIOR: "normal",
+        FACTORY_TEST_RECORD_FILE: recordFile,
+      },
+      resultRepair: {
+        violations: ["$.schemaVersion: expected const factory.agent-result/v1"],
+        priorResultPath: path.join(workspaceDir, "result.json"),
+        priorResult: '{"status":"completed","summary":"invented shape"}',
+      },
+    });
+
+    const record = JSON.parse(readFileSync(recordFile, "utf8"));
+    expect(record.stdin).toContain("# Result envelope repair");
+    expect(record.stdin).toContain(
+      "$.schemaVersion: expected const factory.agent-result/v1",
+    );
+    // The envelope contract still rides along, so the agent knows the shape.
+    expect(record.stdin).toContain("factory.agent-result/v1");
+    // The rejected bytes are the only description of the completed work.
+    expect(record.stdin).toContain(
+      '{"status":"completed","summary":"invented shape"}',
+    );
+    expect(record.stdin).toContain(path.join(workspaceDir, "result.json"));
+    // A cold repair session must not be re-handed the dispatch task, or it
+    // redoes the work and opens a second PR.
+    expect(record.stdin).not.toContain("You are a test agent.");
+    expect(record.stdin).not.toContain(PROMPT_SUFFIX);
+    expect(record.stdin).toContain("Do not run any tools");
+    expect(record.stdin).toContain("do not open a pull request");
+    expect(record.stdin).toContain("Do not invent field values");
   });
 
   test("nonzero exit code propagates and timedOut is false", async () => {
@@ -1249,7 +1298,9 @@ describe("sandboxed execution (WM-313)", () => {
     );
     expect(
       readFileSync(path.join(workspaceDir, SANDBOX_PROMPT_FILE), "utf8"),
-    ).toBe(`You are a sandboxed test agent.${PROMPT_SUFFIX}`);
+    ).toBe(
+      `You are a sandboxed test agent.${PROMPT_SUFFIX}${PI_RESULT_ENVELOPE_CONTRACT}`,
+    );
 
     // 3. Guest env is built, not inherited: no host key, no push token, no
     //    caller var, no host HOME/PATH; PI_OFFLINE keeps update traffic off
