@@ -28,6 +28,7 @@ import { TERMINAL_STATES } from "./lifecycle.mjs";
 import { getRepo, loadRepos } from "./repos.mjs";
 import { materializeCheckout, releaseCheckout } from "./repository.mjs";
 import { findPriorResumeContext } from "./transcripts.mjs";
+import { renderCellsGuide } from "./cells-guide.mjs";
 export {
   confinedRegularFile,
   PathViolation,
@@ -665,6 +666,7 @@ export function createWorkspace({
   attempt,
   input,
   workspace = {},
+  capabilities = null,
   artifactStore = artifactsRoot(),
   worktreeTimeoutMs = worktreeScriptTimeoutMs(),
   adapter = null,
@@ -687,10 +689,17 @@ export function createWorkspace({
     "utf8",
   );
 
-  // Declared artifact inputs (§7 `artifacts`, OPS-372): the spec names hashes,
-  // the provider writes bytes, the agent reads files. An agent can never ask
-  // the store for something the spec did not declare.
   const materialized = [];
+
+  // Capability-Gated Cell Reference Guide injection (CELLS.md)
+  if (capabilities?.cells?.length > 0) {
+    const cellsGuide = renderCellsGuide({
+      cells: capabilities.cells,
+      cellEndpoint: input?.cellEndpoint,
+    });
+    writeFileSync(path.join(dir, "CELLS.md"), cellsGuide, "utf8");
+    materialized.push({ as: "CELLS.md", sizeBytes: Buffer.byteLength(cellsGuide) });
+  }
   let total = 0;
   if (workspace.type === "artifacts") {
     for (const entry of workspace.inputs ?? []) {
