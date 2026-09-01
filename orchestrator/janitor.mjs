@@ -212,6 +212,42 @@ function emptySurvey(repo, apply) {
   };
 }
 
+/** A github-plane worktree directory, and nothing else. */
+const GH_SLUG = /^gh-\d+$/;
+/** A tracker-key worktree for a linear-plane repo with no team configured. */
+const LINEAR_SLUG = /^[A-Z]+-\d+$/;
+
+/** Tracker reads issued at once; bounds control-plane fan-out. */
+export const TICKET_QUERY_CONCURRENCY = 5;
+
+/**
+ * Resolve every ticket through the control plane a few at a time.
+ *
+ * `Promise.all` over the whole list turned a checkout with hundreds of
+ * worktrees into a burst of hundreds of concurrent GraphQL reads, which is a
+ * quota storm rather than a survey. Each read settles independently: a ticket
+ * that fails to resolve is simply absent from the result, which puts it in
+ * `unknown` and therefore out of reach of --apply.
+ */
+export async function getTicketsBounded(
+  identifiers,
+  controlPlane,
+  concurrency = TICKET_QUERY_CONCURRENCY,
+) {
+  const width = Math.max(1, concurrency | 0);
+  const nodes = [];
+  for (let start = 0; start < identifiers.length; start += width) {
+    const settled = await Promise.allSettled(
+      identifiers
+        .slice(start, start + width)
+        .map((identifier) => controlPlane.getTicket(identifier)),
+    );
+    for (const r of settled)
+      if (r.status === "fulfilled" && r.value) nodes.push(r.value);
+  }
+  return nodes;
+}
+
 export async function survey(
   repo,
   { apply },
@@ -237,38 +273,58 @@ export async function survey(
   // GitHub tickets are gh-<number>, while Linear tickets retain ABC-<number>.
   // Named worktrees (a release branch, a scratch checkout) are somebody's
   // deliberate workspace and are not this tool's business.
+  //
+  // The match must be exact for the repo's own plane. `isSluggableTicket` is
+  // deliberately permissive — it slugs `PR-516` and `WM-87` just as happily as
+  // `gh-2160` — so trusting it here would send a github-plane repo off to look
+  // up issues #516 and #87, find them long closed, and offer somebody's
+  // deliberate `PR-516` checkout up for deletion. A directory only counts as a
+  // ticket when its shape is the one this plane actually names worktrees with;
+  // everything else is `named` and is never reclaimed.
   const all = readdir(root);
-  const tickets = all.filter(isSluggableTicket);
-  result.named = all.filter((d) => !isSluggableTicket(d) && !d.startsWith("."));
+  const visible = all.filter((d) => !d.startsWith("."));
+  const sluggable = visible.filter(isSluggableTicket);
+
+  const controlPlane =
+    sluggable.length && !queryIssues
+      ? resolveControlPlane({ repoName: repo.name })
+      : null;
+  const planeKind = controlPlane?.kind ?? repo.control_plane;
+  // A linear-plane repo keeps its own team's keys and must never accept a
+  // gh-<n> directory, exactly as a github-plane repo accepts nothing else.
+  const ticketPattern =
+    planeKind === "github"
+      ? GH_SLUG
+      : repo.team
+        ? new RegExp(`^${repo.team}-\\d+$`)
+        : LINEAR_SLUG;
+  const tickets = sluggable.filter((d) => ticketPattern.test(d));
+  const ticketSet = new Set(tickets);
+  result.named = visible.filter((d) => !ticketSet.has(d));
 
   let states = {};
   if (tickets.length) {
-    const controlPlane = queryIssues
-      ? null
-      : resolveControlPlane({ repoName: repo.name });
-    const planeKind = controlPlane?.kind ?? repo.control_plane;
     const identifiers = tickets.map((slug) =>
       planeKind === "github"
         ? `${repo.github}#${slug.slice("gh-".length)}`
         : slug,
     );
     const queryBatch =
-      queryIssues ??
-      (async (batch) =>
-        Promise.all(
-          batch.map((identifier) => controlPlane.getTicket(identifier)),
-        ));
+      queryIssues ?? ((batch) => getTicketsBounded(batch, controlPlane));
 
-    // Keep bounded batches and run independent reads together so a large
-    // checkout is resolved without a serial API crawl.
-    const batches = [];
-    for (let i = 0; i < identifiers.length; i += 250)
-      batches.push(identifiers.slice(i, i + 250));
-    const nodes = (
-      await Promise.all(batches.map((batch) => queryBatch(batch)))
-    ).flat();
+    // One tracker read per worktree, run a few at a time: a large checkout is
+    // resolved without a serial crawl and without opening hundreds of
+    // simultaneous API requests. A ticket that cannot be resolved settles on
+    // its own and lands in `unknown` (never reclaimable) rather than sinking
+    // the whole survey.
+    const nodes =
+      (await Promise.resolve()
+        .then(() => queryBatch(identifiers))
+        .catch(() => [])) ?? [];
     states = Object.fromEntries(
-      nodes.map((n) => [ticketSlug(n.identifier), n.state]),
+      nodes
+        .filter((n) => n?.identifier && n.state)
+        .map((n) => [ticketSlug(n.identifier), n.state]),
     );
   }
 
