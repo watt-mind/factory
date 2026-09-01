@@ -278,7 +278,8 @@ export function sweepRuntimeRetention(
   };
   log(
     `retention: ${trace} trace rows and ${deleted} artifacts (${freedBytes} bytes)` +
-      `, ${proposed.cancelled} proposed runs, ${rows.runs.deleted} runs, ${rows.proposals.deleted} proposals, ${rows.events.deleted} events ` +
+      `, ${proposed.cancelled} proposed runs ${apply ? "cancelled" : "would be cancelled"}` +
+      `, ${rows.runs.deleted} runs, ${rows.proposals.deleted} proposals, ${rows.events.deleted} events ` +
       `${apply ? "deleted (VACUUMed)" : "would be deleted"}`,
   );
   return result;

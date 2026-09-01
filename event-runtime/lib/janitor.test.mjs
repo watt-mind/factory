@@ -366,14 +366,29 @@ describe("terminal row retention (#1065)", () => {
         runId: "run-open",
       });
 
-      const dry = sweepRuntimeRetention(db, store, { now });
+      const dryLog = [];
+      const dry = sweepRuntimeRetention(db, store, {
+        now,
+        log: (message) => dryLog.push(message),
+      });
       expect(dry.proposed).toEqual({ cancelled: 6, dryRun: true });
+      expect(dryLog).toEqual([
+        "retention: 0 trace rows and 0 artifacts (0 bytes), 6 proposed runs would be cancelled, 0 runs, 0 proposals, 0 events would be deleted",
+      ]);
       expect(
         db.query(`SELECT COUNT(*) AS count FROM lifecycle_events`).get().count,
       ).toBe(0);
 
-      const applied = sweepRuntimeRetention(db, store, { now, apply: true });
+      const applyLog = [];
+      const applied = sweepRuntimeRetention(db, store, {
+        now,
+        apply: true,
+        log: (message) => applyLog.push(message),
+      });
       expect(applied.proposed).toEqual({ cancelled: 6, dryRun: false });
+      expect(applyLog).toEqual([
+        "retention: 0 trace rows and 0 artifacts (0 bytes), 6 proposed runs cancelled, 0 runs, 0 proposals, 0 events deleted (VACUUMed)",
+      ]);
       expect(
         db.query(`SELECT state FROM runs WHERE run_id = 'run-expired'`).get()
           .state,
