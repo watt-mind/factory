@@ -4,6 +4,8 @@ import {
 } from "../test-support/tmp.mjs?file=event-runtime-lib-api-artifacts-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { symlinkSync } from "node:fs";
+import { Readable, Writable } from "node:stream";
+import { streamArtifact } from "./api-artifacts.mjs";
 import { artifactReferenceIndex } from "./artifacts.mjs";
 import { canonicalJson, sha256Hex } from "./canonical.mjs";
 import {
@@ -519,6 +521,8 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
         canonicalJson(view.result.artifact),
       );
 
+      const corruptHash = sha256Hex("expected bytes");
+      writeFileSync(path.join(home, "artifacts", corruptHash), "corrupt");
       const inventory = await (
         await fetch(`http://127.0.0.1:${port}/artifacts`)
       ).json();
@@ -571,16 +575,40 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
         (await fetch(`http://127.0.0.1:${port}/artifacts/not-a-hash`)).status,
       ).toBe(404);
 
-      const corruptHash = sha256Hex("expected bytes");
-      writeFileSync(path.join(home, "artifacts", corruptHash), "corrupt");
       expect(
         (await fetch(`http://127.0.0.1:${port}/artifacts/${corruptHash}`))
           .status,
       ).toBe(404);
       expect(existsSync(path.join(home, "artifacts", corruptHash))).toBe(false);
+      expect(
+        (
+          await (await fetch(`http://127.0.0.1:${port}/artifacts`)).json()
+        ).artifacts.map((artifact) => artifact.sha256),
+      ).not.toContain(corruptHash);
     } finally {
       server.close();
     }
+  });
+
+  test("artifact stream failures destroy the response without leaking an error", async () => {
+    const source = new Readable({
+      read() {
+        this.destroy(new Error("simulated read failure"));
+      },
+    });
+    const response = new Writable({
+      write(_chunk, _encoding, done) {
+        done();
+      },
+    });
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      await expect(streamArtifact(source, response)).resolves.toBeUndefined();
+    } finally {
+      console.warn = warn;
+    }
+    expect(response.destroyed).toBe(true);
   });
 
   test("GET /artifacts/:hash streams large text and binary artifacts with bounded sniffing", async () => {

@@ -12,6 +12,7 @@ import {
   readSync,
   rmSync,
 } from "node:fs";
+import { pipeline } from "node:stream/promises";
 import { findArtifact, hashFileAsync, pruneArtifacts } from "./artifacts.mjs";
 import { artifactsRoot } from "./config.mjs";
 import { ApiParameterError, parseListLimit } from "./api-params.mjs";
@@ -74,6 +75,16 @@ export function artifactHead(
     return null;
   } finally {
     if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/** Stream an artifact while closing both ends when either side fails or aborts. */
+export async function streamArtifact(source, response) {
+  try {
+    await pipeline(source, response);
+  } catch (err) {
+    console.warn(`artifact download stream failed: ${err.message}`);
+    response.destroy();
   }
 }
 
@@ -188,6 +199,8 @@ export async function handleArtifactApiRoute({
     if (!found) return send(404, { error: `no artifact ${artifactGet[1]}` });
     if ((await hashFileAsync(found.file)) !== artifactGet[1]) {
       rmSync(found.file, { force: true });
+      clearStoreStats();
+      clearArtifactPage();
       return send(404, { error: `no artifact ${artifactGet[1]}` });
     }
     const rawName = url.searchParams.get("name");
@@ -205,7 +218,7 @@ export async function handleArtifactApiRoute({
           }
         : {}),
     });
-    createReadStream(found.file).pipe(res);
+    await streamArtifact(createReadStream(found.file), res);
     return;
   }
 
