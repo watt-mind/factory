@@ -37,7 +37,7 @@ const check = (label, ok, detail = "") => {
 
 const sha256hex = (data) => createHash("sha256").update(data).digest("hex");
 
-const inboxUrl = `http://${client.host}:${port}/inbox?status=open`;
+const inboxUrl = new URL("inbox?status=open", `${client.baseUrl}/`);
 const inboxHeaders = client.token
   ? { authorization: `Bearer ${client.token}` }
   : {};

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import path from "node:path";
-import { COMMAND_NAMES } from "./cli/commands.mjs";
+import { COMMAND_NAMES, COMMANDS } from "./cli/commands.mjs";
 import { events } from "./cli/events.mjs";
 import { inbox as legacyInbox } from "./cli/inbox.mjs";
 import { renderInspect } from "./cli/inspect.mjs";
@@ -444,12 +444,53 @@ describe("cli routing", () => {
     const originalLog = console.log;
     console.log = (...values) => logs.push(values.join(" "));
     try {
-      await legacyInbox({ host: "127.0.0.1", port: server.port, token });
+      await legacyInbox({
+        baseUrl: `http://127.0.0.1:${server.port}`,
+        host: "127.0.0.1",
+        port: server.port,
+        token,
+      });
       expect(authorization).toBe(`Bearer ${token}`);
       expect(logs).toEqual(["no open inbox items"]);
     } finally {
       console.log = originalLog;
       server.stop(true);
+    }
+  });
+
+  test("COMMANDS.inbox preserves an HTTPS target and path prefix", async () => {
+    const originalFetch = globalThis.fetch;
+    const originalLog = console.log;
+    const originalUrl = process.env.FACTORY_CONTROL_API_URL;
+    const originalHost = process.env.FACTORY_EVENT_HOST;
+    const originalToken = process.env.FACTORY_CONTROL_API_TOKEN;
+    let request;
+    globalThis.fetch = async (url, options) => {
+      request = new Request(url, options);
+      return Response.json({ items: [] });
+    };
+    console.log = () => {};
+    process.env.FACTORY_CONTROL_API_URL = "https://control.example.test/api";
+    delete process.env.FACTORY_EVENT_HOST;
+    process.env.FACTORY_CONTROL_API_TOKEN = "inbox-control-token";
+    try {
+      await COMMANDS.inbox([]);
+      expect(request.url).toBe(
+        "https://control.example.test/api/inbox?status=open",
+      );
+      expect(request.headers.get("authorization")).toBe(
+        "Bearer inbox-control-token",
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+      console.log = originalLog;
+      if (originalUrl === undefined) delete process.env.FACTORY_CONTROL_API_URL;
+      else process.env.FACTORY_CONTROL_API_URL = originalUrl;
+      if (originalHost === undefined) delete process.env.FACTORY_EVENT_HOST;
+      else process.env.FACTORY_EVENT_HOST = originalHost;
+      if (originalToken === undefined)
+        delete process.env.FACTORY_CONTROL_API_TOKEN;
+      else process.env.FACTORY_CONTROL_API_TOKEN = originalToken;
     }
   });
 
