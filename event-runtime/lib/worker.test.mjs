@@ -4154,6 +4154,218 @@ sh -c 'sleep 5 & wait'
     db.close();
   });
 
+  test("an unexpanded run trailer drafts the PR and returns the ticket to the queue", async () => {
+    const db = openDb(":memory:");
+    const ticket = "watt-mind/factory#2164";
+    let ticketState = "Todo";
+    const held = [];
+    const returned = [];
+    const spec = queueRun(
+      db,
+      makeSpec({
+        runId: "run_unexpanded_trailer",
+        agent: "dispatch@1",
+        input: { repo: "factory", ticket },
+        workspace: {
+          type: "worktree",
+          checkoutDir: "repo",
+          retainOnFailure: true,
+        },
+        outputContract: "factory.dispatch-result/v1",
+      }),
+    );
+    const o = opts({
+      verifyResult: () => {
+        throw new ContractViolation(["run trailer is literal"], {
+          reasonCode: "run_trailer_unexpanded",
+          handoff: {
+            prNumber: 2164,
+            prUrl: "https://github.com/watt-mind/factory/pull/2164",
+            github: "watt-mind/factory",
+            verification: [],
+          },
+        });
+      },
+      dispatch: {
+        configSnapshot: dispatchConfigSnapshot(),
+        locksDir: tmpDir("unexpanded-trailer-locks-"),
+        leasesDir: tmpDir("unexpanded-trailer-leases-"),
+        fetchTicket: () => ({
+          identifier: ticket,
+          state: { name: ticketState },
+          assignee: ticketState === "Todo" ? null : { name: "hdkiller" },
+          labels: {
+            nodes: [
+              {
+                name:
+                  ticketState === "Todo" ? "ai:agent-ready" : "ai:in-progress",
+              },
+            ],
+          },
+          description:
+            "## Owned Paths\n- event-runtime/lib/worker.mjs\n\n## Verification Command\n`bun test event-runtime/lib/worker.test.mjs`\n",
+        }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        budgetRefusal: () => null,
+        claimTicket: () => ((ticketState = "In Progress"), { ok: true }),
+        commentTicket: () => {},
+        holdPullRequest: (entry) => (held.push(entry), true),
+        returnHandoffTicket: (entry) => (
+          returned.push(entry),
+          (ticketState = "Todo"),
+          { agentReadyRestored: true }
+        ),
+        unclaimTicket: () => true,
+        projectTierEscalation: () => true,
+      },
+      materializeWorktree: () => ({
+        path: tmpDir("unexpanded-trailer-checkout-"),
+      }),
+    });
+
+    const result = await executeClaimed(
+      db,
+      registry,
+      {
+        fake: {
+          async execute() {
+            return { exitCode: 0, timedOut: false };
+          },
+        },
+      },
+      claimNext(db, o),
+      o,
+    );
+
+    expect(result).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "run_trailer_unexpanded",
+    });
+    expect(held).toEqual([
+      expect.objectContaining({ prNumber: 2164, github: "watt-mind/factory" }),
+    ]);
+    expect(returned).toEqual([
+      expect.objectContaining({
+        ticket,
+        why: expect.stringContaining("run_trailer_unexpanded"),
+      }),
+    ]);
+    expect(ticketState).toBe("Todo");
+    db.close();
+  });
+
+  test("a recovered pushed branch without a PR keeps its reason and releases the claim", async () => {
+    const db = openDb(":memory:");
+    const ticket = "watt-mind/factory#2164";
+    let ticketState = "Todo";
+    const unclaims = [];
+    const checkoutPath = tmpDir("pushed-branch-no-pr-checkout-");
+    const spec = queueRun(
+      db,
+      makeSpec({
+        runId: "run_pushed_branch_no_pr",
+        agent: "dispatch@1",
+        input: { repo: "factory", ticket },
+        workspace: { type: "worktree", checkoutDir: "repo" },
+        outputContract: "factory.dispatch-result/v1",
+      }),
+    );
+    let verificationCalls = 0;
+    const o = opts({
+      artifactStore: freshRoot(),
+      verifyResult: ({ workspaceDir }) => {
+        verificationCalls += 1;
+        if (verificationCalls === 1) {
+          throw new ContractViolation(["missing_result"]);
+        }
+        const recovered = JSON.parse(
+          readFileSync(path.join(workspaceDir, "result.json"), "utf8"),
+        );
+        return {
+          kind: "completed",
+          result: {
+            ...recovered,
+            runId: spec.runId,
+            attempt: 1,
+            outputContract: spec.outputContract,
+            artifactHash: hashJson(recovered.artifact),
+            evidenceSetHash: null,
+            verification: { status: "passed", checks: [] },
+            artifacts: [],
+          },
+          receipt: {},
+        };
+      },
+      dispatch: {
+        configSnapshot: dispatchConfigSnapshot(),
+        locksDir: tmpDir("pushed-branch-no-pr-locks-"),
+        leasesDir: tmpDir("pushed-branch-no-pr-leases-"),
+        fetchTicket: () => ({
+          identifier: ticket,
+          state: { name: ticketState },
+          assignee: ticketState === "Todo" ? null : { name: "hdkiller" },
+          labels: {
+            nodes: [
+              {
+                name:
+                  ticketState === "Todo" ? "ai:agent-ready" : "ai:in-progress",
+              },
+            ],
+          },
+          description:
+            "## Owned Paths\n- event-runtime/lib/worker.mjs\n\n## Verification Command\n`bun test event-runtime/lib/worker.test.mjs`\n",
+        }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        budgetRefusal: () => null,
+        claimTicket: () => ((ticketState = "In Progress"), { ok: true }),
+        commentTicket: () => {},
+        unclaimTicket: (entry) => (
+          unclaims.push(entry),
+          (ticketState = "Todo"),
+          true
+        ),
+        projectTierEscalation: () => true,
+        findWorkspacePullRequest: () => ({ pushedBranch: "feat/gh-2164" }),
+      },
+      materializeWorktree: () => ({
+        path: checkoutPath,
+        github: "watt-mind/factory",
+        base: "develop",
+      }),
+    });
+
+    const result = await executeClaimed(
+      db,
+      registry,
+      {
+        fake: {
+          async execute() {
+            return { exitCode: 0, timedOut: false };
+          },
+        },
+      },
+      claimNext(db, o),
+      o,
+    );
+
+    expect(result).toMatchObject({ terminalState: "COMPLETED" });
+    expect(verificationCalls).toBe(2);
+    expect(
+      JSON.parse(
+        db
+          .query(`SELECT result_json FROM results WHERE run_id = ?`)
+          .get(spec.runId).result_json,
+      ),
+    ).toMatchObject({ reasonCode: "pushed_branch_no_pr" });
+    expect(unclaims).toEqual([
+      { repo: "factory", ticket, why: "pushed_branch_no_pr", log: null },
+    ]);
+    expect(ticketState).toBe("Todo");
+    db.close();
+  });
+
   test("continuation handoff failures are matched per violation, anchored at its start", () => {
     const quoted =
       "repo_verify_failed: (fail) x\nweb_build_failed: quoted inside output";

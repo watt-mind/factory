@@ -5307,7 +5307,16 @@ export async function executeClaimed(
               fetchPullRequest: fetchHandoffPullRequestFn,
             });
           }
-          verified.result.reasonCode = RECOVERED_RESULT_REASON;
+          // A recovered candidate can name a more precise terminal outcome
+          // than ordinary missing-result recovery. In particular, a pushed
+          // branch with no PR must remain distinguishable so the ticket claim
+          // is released below instead of being completed as a normal recovery.
+          if (
+            !verified.result.reasonCode ||
+            verified.result.reasonCode === "ok"
+          ) {
+            verified.result.reasonCode = RECOVERED_RESULT_REASON;
+          }
           break verificationAttempt;
         } catch (recoveryError) {
           if (!(recoveryError instanceof ContractViolation)) {
@@ -5682,6 +5691,27 @@ export async function executeClaimed(
         reasonCode: verified.reasonCode,
         receipt: res.receipt,
       };
+    }
+
+    // Recovery found a remote branch but no PR. It is a completed, durable
+    // diagnostic rather than an agent handoff failure, so it does not use the
+    // handoff-return path; it must still release the claim for the next
+    // dispatcher instead of stranding the ticket In Progress.
+    if (
+      recovery?.candidate?.reasonCode === "pushed_branch_no_pr" &&
+      verified.result.reasonCode === "pushed_branch_no_pr" &&
+      mayMutateClaimedTicket()
+    ) {
+      try {
+        unclaimTicketFn({
+          repo: repoName,
+          ticket: ticketId,
+          why: "pushed_branch_no_pr",
+          log: null,
+        });
+      } catch {
+        /* intentionally ignored */
+      }
     }
 
     // The run is accepted: neither failed nor refused. Only now may the PR

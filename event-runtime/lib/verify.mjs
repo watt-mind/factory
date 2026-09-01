@@ -111,6 +111,7 @@ export const HANDOFF_REASON_CODES = new Set([
   "handoff_verification_unspecified",
   "handoff_owned_paths_violation",
   "handoff_pr_form_invalid",
+  "run_trailer_unexpanded",
   "event_runtime_lib_verify_failed",
   HANDOFF_DEPENDENCIES_MISSING,
 ]);
