@@ -80,10 +80,15 @@ export function artifactHead(
 
 /** Stream an artifact while closing both ends when either side fails or aborts. */
 export async function streamArtifact(source, response) {
+  const responseAlreadyClosed = response.destroyed || response.closed;
   try {
     await pipeline(source, response);
   } catch (err) {
-    console.warn(`artifact download stream failed: ${err.message}`);
+    const clientAborted =
+      err?.code === "ERR_STREAM_PREMATURE_CLOSE" || responseAlreadyClosed;
+    if (!clientAborted) {
+      console.warn(`artifact download stream failed: ${err.message}`);
+    }
     response.destroy();
   }
 }

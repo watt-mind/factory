@@ -611,6 +611,61 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
     expect(response.destroyed).toBe(true);
   });
 
+  test("artifact stream client aborts are silent while source failures warn", async () => {
+    const warnings = [];
+    const warn = console.warn;
+    console.warn = (message) => warnings.push(message);
+    try {
+      const clientAbort = new Readable({
+        read() {
+          const error = new Error("client closed download");
+          error.code = "ERR_STREAM_PREMATURE_CLOSE";
+          this.destroy(error);
+        },
+      });
+      const clientResponse = new Writable({
+        write(_chunk, _encoding, done) {
+          done();
+        },
+      });
+      await streamArtifact(clientAbort, clientResponse);
+      expect(clientResponse.destroyed).toBe(true);
+      expect(warnings).toEqual([]);
+
+      const alreadyClosedSource = new Readable({
+        read() {
+          this.destroy(new Error("client closed download"));
+        },
+      });
+      const alreadyClosedResponse = new Writable({
+        write(_chunk, _encoding, done) {
+          done();
+        },
+      });
+      alreadyClosedResponse.destroy();
+      await streamArtifact(alreadyClosedSource, alreadyClosedResponse);
+      expect(warnings).toEqual([]);
+
+      const failedSource = new Readable({
+        read() {
+          this.destroy(new Error("artifact blob was pruned"));
+        },
+      });
+      const failedResponse = new Writable({
+        write(_chunk, _encoding, done) {
+          done();
+        },
+      });
+      await streamArtifact(failedSource, failedResponse);
+      expect(failedResponse.destroyed).toBe(true);
+      expect(warnings).toEqual([
+        "artifact download stream failed: artifact blob was pruned",
+      ]);
+    } finally {
+      console.warn = warn;
+    }
+  });
+
   test("GET /artifacts/:hash streams large text and binary artifacts with bounded sniffing", async () => {
     const home = tmpDir("evrt-large-artifacts-api-");
     const store = path.join(home, "artifacts");
