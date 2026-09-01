@@ -63,10 +63,7 @@ control_target=""
 control_target_kind=""
 case "$cmd" in
   # Speaks to the control API and honours a remote target.
-  events|status|ps) control_target_supported=1 ;;
-  # Control-API commands that do not route through the targeted client yet.
-  # Rejecting is better than exporting an env these paths ignore (see #2190).
-  inbox|approve|reject|inject|decide|memos) control_target_supported=0 ;;
+  events|status|ps|inbox|approve|reject|inject|decide|memos) control_target_supported=1 ;;
   # Not a control-API command: leave argv alone.
   *) control_target_supported="" ;;
 esac
@@ -177,6 +174,8 @@ case "$cmd" in
   approve)      run_bun event-runtime/cli.mjs approve "$@" ;;
   reject)       run_bun event-runtime/cli.mjs reject "$@" ;;
   inject)       run_bun event-runtime/cli.mjs inject "$@" ;;
+  decide)       run_bun event-runtime/cli.mjs decide "$@" ;;
+  memos)        run_bun event-runtime/cli.mjs memos "$@" ;;
   serve)
     _has_web=0
     for _a in "$@"; do
@@ -469,10 +468,11 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   security      lib/security-check.sh (gitleaks + semgrep + actionlint on cwd repo)
   emit          build/emit.mjs (--link --link-bin --link-repos when called bare)
 
-Remote targeting (#2188): events, status and ps accept --host/--remote after
-the subcommand. A bare --host alias is dispatched over ssh; a URL or host:port
-targets the control API directly. Plaintext http to a non-loopback host is
-refused (use https:// or FACTORY_CONTROL_API_ALLOW_INSECURE=1).
+Remote targeting (#2188): events, status, ps, inbox, approve, reject, inject,
+decide, and memos accept --host/--remote after the subcommand. A bare --host
+alias is dispatched over ssh; a URL or host:port targets the control API
+directly. Plaintext http to a non-loopback host is refused (use https:// or
+FACTORY_CONTROL_API_ALLOW_INSECURE=1).
 
 Works from any cwd (worktrees included).
   factory notify "BLOCKED LAB-176: need approval"

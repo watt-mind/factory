@@ -67,11 +67,17 @@ export {
 } from "./cli/supervise.mjs";
 export { COMMAND_NAMES, COMMANDS } from "./cli/commands.mjs";
 
-async function callControl(method, pathname, body) {
-  // Keep these top-level verbs on the same resolved target as COMMANDS. The
-  // factory --host/--remote flags arrive as FACTORY_EVENT_HOST, which the
+let controlClient;
+
+/** Resolve the control target once so every leg of `decide` uses one client. */
+function getControlClient() {
+  // The factory --host/--remote flags arrive as FACTORY_EVENT_HOST, which the
   // client resolver validates before any bearer is sent.
-  const client = apiClient({ resolveTarget: true });
+  return (controlClient ??= apiClient({ resolveTarget: true }));
+}
+
+async function callControl(method, pathname, body) {
+  const client = getControlClient();
   const res = await fetch(`${client.baseUrl}${pathname}`, {
     method,
     headers: {
@@ -160,8 +166,7 @@ export async function memosCommand(args = []) {
 
 const INBOX_RESOLVE_USAGE = 'usage: inbox resolve <item-id> --reason "<text>"';
 
-/** `inbox resolve <item-id> --reason "<text>"` — POST /inbox/:id/resolve (AC3). */
-export async function inboxResolveCommand(args = []) {
+function parseInboxResolveArgs(args = []) {
   const [itemId, ...rest] = args;
   if (!itemId) throw new Error(INBOX_RESOLVE_USAGE);
   let reason;
@@ -172,13 +177,19 @@ export async function inboxResolveCommand(args = []) {
     reason = rest[++index];
   }
   if (!reason || !reason.trim()) throw new Error(INBOX_RESOLVE_USAGE);
+  return { itemId, reason: reason.trim() };
+}
+
+/** `inbox resolve <item-id> --reason "<text>"` — POST /inbox/:id/resolve (AC3). */
+export async function inboxResolveCommand(args = []) {
+  const { itemId, reason } = parseInboxResolveArgs(args);
   const result = await callControl(
     "POST",
     `/inbox/${encodeURIComponent(itemId)}/resolve`,
-    { reason: reason.trim() },
+    { reason },
   );
   console.log(
-    `${result.item.id}: resolved (${result.item.resolvedReason ?? reason.trim()})`,
+    `${result.item.id}: resolved (${result.item.resolvedReason ?? reason})`,
   );
   return result;
 }
@@ -218,12 +229,7 @@ function parseDecisionField(field, raw) {
 }
 
 export async function decideCommand(args) {
-  const [itemId, optionId, ...rest] = args;
-  if (!itemId || !optionId) {
-    throw new Error(
-      "usage: decide <item-id> <option-id> [--field key=value]...",
-    );
-  }
+  const [itemId, optionId, ...rest] = parseDecideArgs(args);
   const detail = await callControl(
     "GET",
     `/inbox/${encodeURIComponent(itemId)}`,
@@ -266,6 +272,16 @@ export async function decideCommand(args) {
     );
   }
   return result;
+}
+
+function parseDecideArgs(args = []) {
+  const [itemId, optionId] = args;
+  if (!itemId || !optionId) {
+    throw new Error(
+      "usage: decide <item-id> <option-id> [--field key=value]...",
+    );
+  }
+  return args;
 }
 
 /**
@@ -474,9 +490,15 @@ export async function dispatch(argv = process.argv.slice(2)) {
     return;
   }
   if (command === "init") return initCommand(args);
-  if (command === "decide") return decideCommand(args);
-  if (command === "inbox") return inboxCommand(args);
-  if (command === "memos") return memosCommand(args);
+  if (command === "decide") {
+    parseDecideArgs(args);
+    return withClient(() => decideCommand(args));
+  }
+  if (command === "inbox") {
+    if (args[0] === "resolve") parseInboxResolveArgs(args.slice(1));
+    return withClient(() => inboxCommand(args));
+  }
+  if (command === "memos") return withClient(() => memosCommand(args));
   if (command === "extensions") return extensionsCommand(args);
   if (command === "pack") return packCommand(args);
   if (command === "artifacts") return artifactsCommand(args);

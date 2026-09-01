@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import path from "node:path";
 import { COMMAND_NAMES } from "./cli/commands.mjs";
 import { events } from "./cli/events.mjs";
 import { inbox as legacyInbox } from "./cli/inbox.mjs";
@@ -19,6 +20,8 @@ import {
 } from "./cli/test-helpers.mjs";
 import { apiClient } from "./lib/client.mjs";
 import { tmpDir } from "./test-support/tmp.mjs?file=event-runtime-cli-test-mjs";
+
+const FACTORY = path.resolve(import.meta.dir, "../bin/factory");
 
 const EXPECTED_COMMANDS = [
   "serve",
@@ -86,7 +89,7 @@ describe("cli routing", () => {
     ["--host", (port) => `127.0.0.1:${port}`],
     ["--remote", (port) => `http://127.0.0.1:${port}`],
   ])(
-    "top-level inbox and decide use the target forwarded by factory %s",
+    "top-level inbox and decide honor FACTORY_EVENT_HOST %s",
     async (_flag, targetFor) => {
       const token = "cli-remote-control-token";
       const requests = [];
@@ -175,6 +178,171 @@ describe("cli routing", () => {
       }
     },
   );
+
+  test("factory forwards --host to inbox and decide", async () => {
+    const token = "factory-wrapper-target-token";
+    const requests = [];
+    const item = { id: "item-wrapper", decision: { fields: [] } };
+    const server = Bun.serve({
+      port: Number(freePort()),
+      async fetch(request) {
+        const url = new URL(request.url);
+        requests.push(`${request.method} ${url.pathname}${url.search}`);
+        if (request.method === "GET" && url.pathname === "/inbox") {
+          return Response.json({ items: [] });
+        }
+        if (
+          request.method === "GET" &&
+          url.pathname === "/inbox/item-wrapper"
+        ) {
+          return Response.json({ item });
+        }
+        if (
+          request.method === "POST" &&
+          url.pathname === "/inbox/item-wrapper/decide"
+        ) {
+          return Response.json({
+            item,
+            effect: { kind: "approve_proposal", outcome: "applied" },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    const env = {
+      ...process.env,
+      FACTORY_EVENT_HOME: tmpDir("evrt-cli-"),
+      FACTORY_RUN_DIR: throwawayRunDir(),
+      FACTORY_CONTROL_API_TOKEN: token,
+    };
+    const target = `127.0.0.1:${server.port}`;
+    try {
+      for (const args of [
+        ["inbox", "--host", target],
+        ["decide", "item-wrapper", "approve", "--host", target],
+      ]) {
+        const child = Bun.spawn(["bash", FACTORY, ...args], {
+          env,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [status, stderr] = await Promise.all([
+          child.exited,
+          new Response(child.stderr).text(),
+        ]);
+        expect(status, stderr).toBe(0);
+      }
+      expect(requests).toEqual([
+        "GET /inbox?status=open",
+        "GET /inbox/item-wrapper",
+        "POST /inbox/item-wrapper/decide",
+      ]);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("top-level control verbs pin no-target requests to loopback", async () => {
+    let hostname;
+    const server = Bun.serve({
+      port: Number(freePort()),
+      fetch(request) {
+        hostname = new URL(request.url).hostname;
+        return Response.json({ memos: [] });
+      },
+    });
+    try {
+      const child = Bun.spawn(["bun", CLI, "memos", "repo", "factory"], {
+        env: {
+          ...process.env,
+          HOME: tmpDir("evrt-cli-home-"),
+          FACTORY_EVENT_HOME: tmpDir("evrt-cli-"),
+          FACTORY_EVENT_PORT: String(server.port),
+          FACTORY_EVENT_HOST: "",
+          FACTORY_CONTROL_API_URL: "",
+          FACTORY_RUN_DIR: throwawayRunDir(),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [status, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stderr).text(),
+      ]);
+      expect(status, stderr).toBe(0);
+      expect(hostname).toBe("127.0.0.1");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("top-level control verbs refuse plaintext remote targets before requests", async () => {
+    let requests = 0;
+    const server = Bun.serve({
+      port: Number(freePort()),
+      fetch() {
+        requests++;
+        return Response.json({ memos: [] });
+      },
+    });
+    try {
+      const child = Bun.spawn(["bun", CLI, "memos", "repo", "factory"], {
+        env: {
+          ...process.env,
+          HOME: tmpDir("evrt-cli-home-"),
+          FACTORY_EVENT_HOME: tmpDir("evrt-cli-"),
+          FACTORY_EVENT_HOST: `example.test:${server.port}`,
+          FACTORY_CONTROL_API_URL: "",
+          FACTORY_CONTROL_API_ALLOW_INSECURE: "",
+          FACTORY_RUN_DIR: throwawayRunDir(),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [status, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      expect(status).not.toBe(0);
+      expect(`${stdout}${stderr}`).toContain(
+        "refusing to send the control API bearer in plaintext",
+      );
+      expect(requests).toBe(0);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test.each([
+    ["inbox"],
+    ["decide", "item-unreachable", "approve"],
+    ["memos", "repo", "factory"],
+  ])("top-level %s gives a friendly connection failure", async (...args) => {
+    const child = Bun.spawn(["bun", CLI, ...args], {
+      env: {
+        ...process.env,
+        HOME: tmpDir("evrt-cli-home-"),
+        FACTORY_EVENT_HOME: tmpDir("evrt-cli-"),
+        FACTORY_EVENT_PORT: DEAD_PORT,
+        FACTORY_EVENT_HOST: "",
+        FACTORY_CONTROL_API_URL: "",
+        FACTORY_RUN_DIR: throwawayRunDir(),
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [status, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect(status).not.toBe(0);
+    expect(`${stdout}${stderr}`).toContain(
+      `control API not reachable on 127.0.0.1:${DEAD_PORT}`,
+    );
+    expect(`${stdout}${stderr}`).not.toContain("at dispatch");
+  });
 
   test.each([
     [401, "unauthorized"],
