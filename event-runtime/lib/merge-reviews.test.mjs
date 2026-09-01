@@ -15,6 +15,7 @@ import {
   mergeFixDurableRefusalCooldownMs,
   mergeFixRefusalCooldownMs,
   persistMergeReviewFromResult,
+  rebaseSkipFreshCiMinutes,
   runScanCli,
   upsertMergeReview,
 } from "./merge-reviews.mjs";
@@ -42,41 +43,83 @@ const repos = new Map([
 describe("merge-fix refusal cooldown configuration", () => {
   test.each([
     [
+      "rebase fresh-CI",
+      rebaseSkipFreshCiMinutes,
+      "FACTORY_MERGE_REBASE_SKIP_FRESH_CI_MINUTES",
+      60,
+      60,
+    ],
+    [
       "transient",
       mergeFixRefusalCooldownMs,
       "FACTORY_MERGE_FIX_REFUSAL_COOLDOWN_MINUTES",
       15 * 60_000,
+      15,
     ],
     [
       "durable",
       mergeFixDurableRefusalCooldownMs,
       "FACTORY_MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MINUTES",
       6 * 60 * 60_000,
+      6 * 60,
     ],
   ])(
-    "uses the %s default when unset or invalid",
-    (_name, accessor, key, defaultMs) => {
-      expect(accessor({})).toBe(defaultMs);
-      expect(accessor({ [key]: "not-a-number" })).toBe(defaultMs);
-      expect(accessor({ [key]: "0" })).toBe(defaultMs);
-      expect(accessor({ [key]: "1.5" })).toBe(defaultMs);
+    "warns once and uses the %s default for invalid values",
+    (_name, accessor, key, defaultValue, defaultMinutes) => {
+      const warnings = [];
+      const warn = console.warn;
+      console.warn = (message) => warnings.push(message);
+      try {
+        expect(accessor({ [key]: "not-a-number" })).toBe(defaultValue);
+        expect(accessor({ [key]: "0" })).toBe(defaultValue);
+        expect(accessor({ [key]: "1.5" })).toBe(defaultValue);
+      } finally {
+        console.warn = warn;
+      }
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(key);
+      expect(warnings[0]).toContain("not-a-number");
+      expect(warnings[0]).toContain(`${defaultMinutes} minutes`);
     },
   );
 
   test.each([
     [
+      "rebase fresh-CI",
+      rebaseSkipFreshCiMinutes,
+      "FACTORY_MERGE_REBASE_SKIP_FRESH_CI_MINUTES",
+      60,
+      42,
+    ],
+    [
       "transient",
       mergeFixRefusalCooldownMs,
       "FACTORY_MERGE_FIX_REFUSAL_COOLDOWN_MINUTES",
+      15 * 60_000,
+      42 * 60_000,
     ],
     [
       "durable",
       mergeFixDurableRefusalCooldownMs,
       "FACTORY_MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MINUTES",
+      6 * 60 * 60_000,
+      42 * 60_000,
     ],
-  ])("honours the %s override", (_name, accessor, key) => {
-    expect(accessor({ [key]: "42" })).toBe(42 * 60_000);
-  });
+  ])(
+    "is silent when the %s value is unset or valid",
+    (_name, accessor, key, defaultValue, validValue) => {
+      const warnings = [];
+      const warn = console.warn;
+      console.warn = (message) => warnings.push(message);
+      try {
+        expect(accessor({})).toBe(defaultValue);
+        expect(accessor({ [key]: "42" })).toBe(validValue);
+      } finally {
+        console.warn = warn;
+      }
+      expect(warnings).toEqual([]);
+    },
+  );
 });
 
 function pr({

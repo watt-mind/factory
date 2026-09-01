@@ -56,6 +56,7 @@ const PR_VIEW_FIELDS = PR_LIST_FIELDS;
 const REBASE_FINDING = "rebase_onto_base";
 const FULL_VERIFICATION_CHECK = "Full verification";
 const REBASE_SKIP_FRESH_CI_DEFAULT_MINUTES = 60;
+const invalidMinuteConfigWarnings = new Set();
 const IN_FLIGHT_RUN_STATES = [
   "PROPOSED",
   "APPROVED",
@@ -273,11 +274,25 @@ function normalizeListedPr(raw, baseSha, github) {
   };
 }
 
-function rebaseSkipFreshCiMinutes(env = process.env) {
-  const value = Number(env.FACTORY_MERGE_REBASE_SKIP_FRESH_CI_MINUTES);
-  return Number.isInteger(value) && value > 0
-    ? value
-    : REBASE_SKIP_FRESH_CI_DEFAULT_MINUTES;
+function positiveIntegerMinutes(env, name, defaultMinutes) {
+  const raw = env[name];
+  const value = Number(raw);
+  if (Number.isInteger(value) && value > 0) return value;
+  if (raw !== undefined && !invalidMinuteConfigWarnings.has(name)) {
+    invalidMinuteConfigWarnings.add(name);
+    console.warn(
+      `invalid ${name}=${JSON.stringify(raw)}; using default ${defaultMinutes} minutes`,
+    );
+  }
+  return defaultMinutes;
+}
+
+export function rebaseSkipFreshCiMinutes(env = process.env) {
+  return positiveIntegerMinutes(
+    env,
+    "FACTORY_MERGE_REBASE_SKIP_FRESH_CI_MINUTES",
+    REBASE_SKIP_FRESH_CI_DEFAULT_MINUTES,
+  );
 }
 
 function fullVerificationRebaseSkip({ forge, github, pr, now }) {
@@ -474,22 +489,22 @@ const DURABLE_MERGE_FIX_REFUSALS = new Set([
 ]);
 
 export function mergeFixRefusalCooldownMs(env = process.env) {
-  const minutes = Number(env.FACTORY_MERGE_FIX_REFUSAL_COOLDOWN_MINUTES);
   return (
-    (Number.isInteger(minutes) && minutes > 0
-      ? minutes
-      : MERGE_FIX_REFUSAL_COOLDOWN_DEFAULT_MINUTES) * 60_000
+    positiveIntegerMinutes(
+      env,
+      "FACTORY_MERGE_FIX_REFUSAL_COOLDOWN_MINUTES",
+      MERGE_FIX_REFUSAL_COOLDOWN_DEFAULT_MINUTES,
+    ) * 60_000
   );
 }
 
 export function mergeFixDurableRefusalCooldownMs(env = process.env) {
-  const minutes = Number(
-    env.FACTORY_MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MINUTES,
-  );
   return (
-    (Number.isInteger(minutes) && minutes > 0
-      ? minutes
-      : MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_DEFAULT_MINUTES) * 60_000
+    positiveIntegerMinutes(
+      env,
+      "FACTORY_MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MINUTES",
+      MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_DEFAULT_MINUTES,
+    ) * 60_000
   );
 }
 
