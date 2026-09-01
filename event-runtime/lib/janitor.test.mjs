@@ -134,11 +134,19 @@ describe("terminal row retention (#1065)", () => {
     ).run(runId, `${runId}-key`, state, updatedAt, updatedAt);
   }
 
-  function insertProposal(db, id, status, createdAt, ttlSeconds) {
+  function insertProposal(
+    db,
+    id,
+    status,
+    createdAt,
+    ttlSeconds,
+    { runId = null, decision = "run" } = {},
+  ) {
     db.query(
-      `INSERT INTO proposals (id, event_source, event_id, decision, status, created_at, ttl_seconds)
-       VALUES (?, 'test', ?, 'run', ?, ?, ?)`,
-    ).run(id, `${id}-evt`, status, createdAt, ttlSeconds);
+      `INSERT INTO proposals
+         (id, event_source, event_id, run_id, decision, status, created_at, ttl_seconds)
+       VALUES (?, 'test', ?, ?, ?, ?, ?, ?)`,
+    ).run(id, `${id}-evt`, runId, decision, status, createdAt, ttlSeconds);
   }
 
   function insertEvent(db, eventId, admittedAt, archivedAt) {
@@ -289,6 +297,98 @@ describe("terminal row retention (#1065)", () => {
         .all()
         .map((r) => r.run_id);
       expect(remaining).toEqual(["run-at-cutoff"]);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("terminalizes PROPOSED runs only after every proposal is expired or decided", () => {
+    const root = tmpDir("evrt-proposed-rows-");
+    const store = path.join(root, "artifacts");
+    const db = openDb(path.join(root, "runtime.db"));
+    const expired = new Date(now - 2 * 60 * 60 * 1000).toISOString();
+    const fresh = new Date(now - 5 * 60 * 1000).toISOString();
+    try {
+      mkdirSync(store);
+      for (const runId of [
+        "run-expired",
+        "run-rejected",
+        "run-superseded",
+        "run-mixed",
+        "run-open",
+        "run-without-proposals",
+      ]) {
+        insertRun(db, runId, "PROPOSED", fresh);
+      }
+      insertProposal(db, "proposal-expired", "open", expired, 60, {
+        runId: "run-expired",
+      });
+      insertProposal(db, "proposal-rejected", "rejected", fresh, 3600, {
+        runId: "run-rejected",
+      });
+      insertProposal(db, "proposal-superseded", "superseded", fresh, 3600, {
+        runId: "run-superseded",
+      });
+      insertProposal(db, "proposal-mixed-expired", "open", expired, 60, {
+        runId: "run-mixed",
+      });
+      insertProposal(db, "proposal-mixed-open", "open", fresh, 3600, {
+        runId: "run-mixed",
+      });
+      insertProposal(db, "proposal-open", "open", fresh, 3600, {
+        runId: "run-open",
+      });
+
+      const dry = sweepRuntimeRetention(db, store, { now });
+      expect(dry.proposed).toEqual({ cancelled: 4, dryRun: true });
+      expect(
+        db.query(`SELECT COUNT(*) AS count FROM lifecycle_events`).get().count,
+      ).toBe(0);
+
+      const applied = sweepRuntimeRetention(db, store, { now, apply: true });
+      expect(applied.proposed).toEqual({ cancelled: 4, dryRun: false });
+      expect(
+        db.query(`SELECT state FROM runs WHERE run_id = 'run-expired'`).get()
+          .state,
+      ).toBe("CANCELLED");
+      expect(
+        db.query(`SELECT state FROM runs WHERE run_id = 'run-rejected'`).get()
+          .state,
+      ).toBe("CANCELLED");
+      expect(
+        db.query(`SELECT state FROM runs WHERE run_id = 'run-superseded'`).get()
+          .state,
+      ).toBe("CANCELLED");
+      expect(
+        db
+          .query(
+            `SELECT state FROM runs WHERE run_id = 'run-without-proposals'`,
+          )
+          .get().state,
+      ).toBe("CANCELLED");
+      expect(
+        db.query(`SELECT state FROM runs WHERE run_id = 'run-mixed'`).get()
+          .state,
+      ).toBe("PROPOSED");
+      expect(
+        db.query(`SELECT state FROM runs WHERE run_id = 'run-open'`).get()
+          .state,
+      ).toBe("PROPOSED");
+      expect(
+        db
+          .query(
+            `SELECT reason FROM lifecycle_events
+           WHERE run_id = 'run-expired' AND to_state = 'CANCELLED'`,
+          )
+          .get().reason,
+      ).toBe("proposal_expired");
+
+      expect(
+        sweepRuntimeRetention(db, store, { now, apply: true }).proposed,
+      ).toEqual({
+        cancelled: 0,
+        dryRun: false,
+      });
     } finally {
       db.close();
     }

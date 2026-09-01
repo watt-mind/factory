@@ -3,6 +3,8 @@ import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { artifactsRoot, runtimeHome } from "./config.mjs";
 import { openDb, txImmediate } from "./db.mjs";
+import { transition } from "./lifecycle.mjs";
+import { isProposalExpired } from "./proposals.mjs";
 import { reposRoot } from "./repos.mjs";
 
 /** Bound so a hung Linear call cannot freeze serve forever (OPS-301 review). */
@@ -94,6 +96,64 @@ function sweepTerminalRows(db, { rowCutoff, nowIso, apply }) {
   };
 }
 
+/**
+ * Find proposal runs that no longer have a possible admission path. A run
+ * without any proposal is also dead: its universal proposal condition is
+ * vacuously true and it cannot be approved.
+ */
+function expiredProposedRunIds(db, now) {
+  const proposalsByRun = new Map();
+  for (const row of db
+    .query(
+      `SELECT runs.run_id AS proposed_run_id, proposals.*
+         FROM runs
+         LEFT JOIN proposals ON proposals.run_id = runs.run_id
+        WHERE runs.state = 'PROPOSED'
+        ORDER BY runs.run_id, proposals.rowid`,
+    )
+    .all()) {
+    const proposals = proposalsByRun.get(row.proposed_run_id) ?? [];
+    if (row.id !== null) proposals.push(row);
+    proposalsByRun.set(row.proposed_run_id, proposals);
+  }
+  return [...proposalsByRun].flatMap(([runId, proposals]) =>
+    proposals.every(
+      (proposal) =>
+        proposal.status === "rejected" ||
+        proposal.status === "superseded" ||
+        isProposalExpired(proposal, now),
+    )
+      ? [runId]
+      : [],
+  );
+}
+
+/**
+ * Cancel PROPOSED runs after every proposal is expired or terminally decided.
+ * The candidate query and legal transitions share an immediate transaction so
+ * a concurrent replan cannot insert a fresh proposal between the two.
+ */
+function terminalizeExpiredProposedRuns(db, { now, apply }) {
+  const cancel = () => {
+    const runIds = expiredProposedRunIds(db, now);
+    if (apply) {
+      for (const runId of runIds) {
+        transition(db, {
+          runId,
+          to: "CANCELLED",
+          expectFrom: "PROPOSED",
+          actor: "janitor",
+          reason: "proposal_expired",
+          now,
+        });
+      }
+    }
+    return runIds.length;
+  };
+  const cancelled = apply ? txImmediate(db, cancel) : cancel();
+  return { cancelled, dryRun: !apply };
+}
+
 function retentionMs(days, name) {
   if (!Number.isFinite(days) || days <= 0)
     throw new Error(`${name} must be a positive number of days`);
@@ -138,6 +198,7 @@ export function sweepRuntimeRetention(
     now - retentionMs(rowRetentionDays, "rowRetentionDays"),
   ).toISOString();
   const nowIso = new Date(now).toISOString();
+  const proposed = terminalizeExpiredProposedRuns(db, { now, apply });
   const trace = db
     .query(`SELECT COUNT(*) AS count FROM attempt_trace WHERE ts < ?`)
     .get(traceCutoff).count;
@@ -198,6 +259,7 @@ export function sweepRuntimeRetention(
   const result = {
     trace: { deleted: trace, dryRun: !apply },
     artifacts: { deleted, freedBytes, retained, dryRun: !apply },
+    proposed,
     runs: rows.runs,
     proposals: rows.proposals,
     events: rows.events,
@@ -205,7 +267,7 @@ export function sweepRuntimeRetention(
   };
   log(
     `retention: ${trace} trace rows and ${deleted} artifacts (${freedBytes} bytes)` +
-      `, ${rows.runs.deleted} runs, ${rows.proposals.deleted} proposals, ${rows.events.deleted} events ` +
+      `, ${proposed.cancelled} proposed runs, ${rows.runs.deleted} runs, ${rows.proposals.deleted} proposals, ${rows.events.deleted} events ` +
       `${apply ? "deleted (VACUUMed)" : "would be deleted"}`,
   );
   return result;
