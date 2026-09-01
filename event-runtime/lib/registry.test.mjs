@@ -449,8 +449,10 @@ describe("registry", () => {
     // celld-smoke@1 on the claude adapter, so the merged view gains a mapping.
     // Regenerated (#2208): celld-smoke's documented interaction details are
     // optional artifact fields, and the definition was re-pinned.
+    // Regenerated (#2254): merge-fix and merge-scan document their refusal
+    // cooldown tunables and are re-pinned.
     const expected =
-      "sha256:f081d6b00380dd88c13822a7b532c107ae974befd8f5ff9e4543f72e733cc882";
+      "sha256:9d9c76cd1295cac210de3fbf6660521e6269ebe60b8bb28adb70e38637ca98b1";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
