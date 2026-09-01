@@ -1073,14 +1073,17 @@ const RELATIVE_SINCE_PATTERN =
 
 export function parseSinceDuration(since, nowMs = Date.now()) {
   if (since == null || since === "") {
-    return nowMs - 14 * 24 * 60 * 60 * 1000;
+    const durationMs = 14 * 24 * 60 * 60 * 1000;
+    return { sinceMs: nowMs - durationMs, kind: "relative", durationMs };
   }
   if (typeof since === "number") {
     if (!Number.isFinite(since) || since <= 0) {
       throw new ListQueryError("invalid_since", { since });
     }
-    if (since > 1e11) return since;
-    return nowMs - since;
+    if (since > 1e11) {
+      return { sinceMs: since, kind: "absolute", durationMs: null };
+    }
+    return { sinceMs: nowMs - since, kind: "relative", durationMs: since };
   }
   if (typeof since !== "string") {
     throw new ListQueryError("invalid_since", { since });
@@ -1099,11 +1102,11 @@ export function parseSinceDuration(since, nowMs = Date.now()) {
     else if (unit.startsWith("h")) ms = count * 60 * 60 * 1000;
     else if (unit.startsWith("m")) ms = count * 60 * 1000;
     else if (unit.startsWith("s")) ms = count * 1000;
-    return nowMs - ms;
+    return { sinceMs: nowMs - ms, kind: "relative", durationMs: ms };
   }
   const parsedDate = Date.parse(trimmed);
   if (Number.isFinite(parsedDate) && !/^\d+$/.test(trimmed)) {
-    return parsedDate;
+    return { sinceMs: parsedDate, kind: "absolute", durationMs: null };
   }
   throw new ListQueryError("invalid_since", { since });
 }
@@ -1159,14 +1162,8 @@ function ticketIndexCacheDatabaseId(db) {
   return id;
 }
 
-function ticketIndexCacheSinceKey(since, sinceMs, nowMs) {
-  if (since == null || since === "") return `relative:${nowMs - sinceMs}`;
-  if (typeof since === "number") {
-    return since > 1e11 ? `absolute:${sinceMs}` : `relative:${nowMs - sinceMs}`;
-  }
-  return RELATIVE_SINCE_PATTERN.test(since.trim())
-    ? `relative:${nowMs - sinceMs}`
-    : `absolute:${sinceMs}`;
+function ticketIndexCacheSinceKey({ sinceMs, kind, durationMs }) {
+  return kind === "relative" ? `relative:${durationMs}` : `absolute:${sinceMs}`;
 }
 
 /**
@@ -1175,7 +1172,8 @@ function ticketIndexCacheSinceKey(since, sinceMs, nowMs) {
  */
 export function ticketIndexView(db, options = {}) {
   const nowMs = options.nowMs ?? Date.now();
-  const sinceMs = parseSinceDuration(options.since, nowMs);
+  const parsedSince = parseSinceDuration(options.since, nowMs);
+  const { sinceMs } = parsedSince;
   const sinceIso = new Date(sinceMs).toISOString();
   const limit = options.limit
     ? Math.min(Math.max(1, Number(options.limit) || 50), 200)
@@ -1187,7 +1185,7 @@ export function ticketIndexView(db, options = {}) {
 
   const cacheKey = JSON.stringify([
     ticketIndexCacheDatabaseId(db),
-    ticketIndexCacheSinceKey(options.since, sinceMs, nowMs),
+    ticketIndexCacheSinceKey(parsedSince),
     limit,
     repoFilter,
   ]);

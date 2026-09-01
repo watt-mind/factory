@@ -26,6 +26,7 @@ import {
   clearRunSubjectCache,
   clearTicketDetailCache,
   clearTicketIndexCache,
+  parseSinceDuration,
   mergeTicketSupply,
   scanTicketSupply,
   setTicketDetailControlPlane,
@@ -1878,6 +1879,48 @@ describe("recent-ticket index (WM-821)", () => {
         since: "2w",
       });
       expect(refreshed.map((ticket) => ticket.id)).toEqual(["WM-2158"]);
+    } finally {
+      clearTicketIndexCache();
+      s.close();
+    }
+  });
+
+  test("classifies since values and keeps relative and absolute cache entries separate", async () => {
+    const nowMs = Date.parse("2026-08-18T12:00:00.000Z");
+    const relativeDurationMs = 14 * 24 * 60 * 60 * 1000;
+    const absoluteSinceMs = nowMs - relativeDurationMs;
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      expect(parseSinceDuration("14d", nowMs)).toEqual({
+        sinceMs: absoluteSinceMs,
+        kind: "relative",
+        durationMs: relativeDurationMs,
+      });
+      expect(parseSinceDuration(relativeDurationMs, nowMs)).toEqual({
+        sinceMs: absoluteSinceMs,
+        kind: "relative",
+        durationMs: relativeDurationMs,
+      });
+      expect(parseSinceDuration(absoluteSinceMs, nowMs)).toEqual({
+        sinceMs: absoluteSinceMs,
+        kind: "absolute",
+        durationMs: null,
+      });
+
+      clearTicketIndexCache();
+      const relative = ticketIndexView(s.db, { nowMs, since: "14d" });
+      const numericRelative = ticketIndexView(s.db, {
+        nowMs,
+        since: relativeDurationMs,
+      });
+      const absolute = ticketIndexView(s.db, { nowMs, since: absoluteSinceMs });
+      const isoAbsolute = ticketIndexView(s.db, {
+        nowMs,
+        since: new Date(absoluteSinceMs).toISOString(),
+      });
+      expect(numericRelative).toBe(relative);
+      expect(absolute).not.toBe(relative);
+      expect(isoAbsolute).toBe(absolute);
     } finally {
       clearTicketIndexCache();
       s.close();
