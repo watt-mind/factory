@@ -85,8 +85,17 @@ export async function streamArtifact(source, response) {
     await pipeline(source, response);
   } catch (err) {
     const clientAborted =
-      err?.code === "ERR_STREAM_PREMATURE_CLOSE" || responseAlreadyClosed;
-    if (!clientAborted) {
+      [
+        "ERR_STREAM_PREMATURE_CLOSE",
+        "ECONNRESET",
+        "EPIPE",
+        "ERR_STREAM_DESTROYED",
+      ].includes(err?.code) ||
+      err?.message === "aborted" ||
+      responseAlreadyClosed;
+    if (clientAborted) {
+      console.debug("artifact download client aborted");
+    } else {
       console.warn(`artifact download stream failed: ${err.message}`);
     }
     response.destroy();

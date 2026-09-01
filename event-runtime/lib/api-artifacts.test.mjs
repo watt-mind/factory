@@ -611,26 +611,50 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
     expect(response.destroyed).toBe(true);
   });
 
-  test("artifact stream client aborts are silent while source failures warn", async () => {
+  test("artifact stream client aborts log debug while source failures warn", async () => {
     const warnings = [];
+    const debugLogs = [];
     const warn = console.warn;
+    const debug = console.debug;
     console.warn = (message) => warnings.push(message);
+    console.debug = (message) => debugLogs.push(message);
     try {
-      const clientAbort = new Readable({
-        read() {
-          const error = new Error("client closed download");
-          error.code = "ERR_STREAM_PREMATURE_CLOSE";
-          this.destroy(error);
-        },
-      });
-      const clientResponse = new Writable({
-        write(_chunk, _encoding, done) {
-          done();
-        },
-      });
-      await streamArtifact(clientAbort, clientResponse);
-      expect(clientResponse.destroyed).toBe(true);
+      const clientAbort = async (
+        error,
+        response = new Writable({
+          write(_chunk, _encoding, done) {
+            done();
+          },
+        }),
+      ) => {
+        const source = new Readable({
+          read() {
+            this.destroy(error);
+          },
+        });
+        await streamArtifact(source, response);
+        expect(response.destroyed).toBe(true);
+      };
+
+      for (const code of [
+        "ERR_STREAM_PREMATURE_CLOSE",
+        "ECONNRESET",
+        "EPIPE",
+        "ERR_STREAM_DESTROYED",
+      ]) {
+        const error = new Error("client closed download");
+        error.code = code;
+        await clientAbort(error);
+      }
+      await clientAbort(new Error("aborted"));
       expect(warnings).toEqual([]);
+      expect(debugLogs).toEqual([
+        "artifact download client aborted",
+        "artifact download client aborted",
+        "artifact download client aborted",
+        "artifact download client aborted",
+        "artifact download client aborted",
+      ]);
 
       const alreadyClosedSource = new Readable({
         read() {
@@ -645,6 +669,7 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       alreadyClosedResponse.destroy();
       await streamArtifact(alreadyClosedSource, alreadyClosedResponse);
       expect(warnings).toEqual([]);
+      expect(debugLogs).toHaveLength(6);
 
       const failedSource = new Readable({
         read() {
@@ -661,8 +686,10 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       expect(warnings).toEqual([
         "artifact download stream failed: artifact blob was pruned",
       ]);
+      expect(debugLogs).toHaveLength(6);
     } finally {
       console.warn = warn;
+      console.debug = debug;
     }
   });
 
