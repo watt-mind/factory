@@ -13,6 +13,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   closeSync,
+  cpSync,
   existsSync,
   mkdtempSync,
   openSync,
@@ -1194,8 +1195,6 @@ function normalizeFailureOutput(output) {
 
 /**
  * Deterministic normalized signature of a failure payload.
- * Exact equality is intentionally strict: any new signal (even a single
- * additional line) proves the failure signature changed.
  */
 function failureSignature(output) {
   return normalizeFailureOutput(output).join("\n");
@@ -1203,11 +1202,21 @@ function failureSignature(output) {
 
 /**
  * Conservative evidence that post-agent verification hit the recorded red baseline.
- * Unlike partial line overlap, this compares full normalized signatures and fails
- * closed on ambiguous signal drift.
+ * Test failures are compared by name, so an unchanged red suite remains absorbed
+ * when the branch adds another test to its output. Non-test failures retain exact
+ * normalized-signature matching because there is no narrower stable identity.
  */
 function matchesRedBaseline(baseline, verifyOutput) {
   if (baseline?.status !== "red") return false;
+  const baselineTests = repoVerifyFailingTests(baseline.output);
+  const verifyTests = repoVerifyFailingTests(verifyOutput);
+  if (baselineTests.length > 0 || verifyTests.length > 0) {
+    return (
+      baselineTests.length > 0 &&
+      verifyTests.length > 0 &&
+      baselineTests.every((testName) => verifyTests.includes(testName))
+    );
+  }
   const baselineSig = failureSignature(baseline.output);
   const verifySig = failureSignature(verifyOutput);
   if (!baselineSig || !verifySig) return false;
@@ -1254,6 +1263,123 @@ export function repoVerifyFailingTests(output) {
   const shown = names.slice(0, REPO_VERIFY_FAILING_TESTS_MAX);
   shown.push(`…and ${names.length - REPO_VERIFY_FAILING_TESTS_MAX} more`);
   return shown;
+}
+
+// Bun prints a source-file heading before the tests it reports from that file.
+// Keep this deliberately narrow: an unrecognised runner format is ambiguous and
+// must not trigger the branch-external baseline retry.
+const REPO_VERIFY_TEST_FILE_LINE =
+  /^\s*(?<path>(?:\.?\/?[\w@.-]+\/)*[\w@.-]+\.(?:test|spec)\.[cm]?[jt]sx?)\s*:\s*$/i;
+
+/**
+ * Return the runner-reported source files for failing tests, or null when a
+ * failure cannot be tied to a file. The null result is the fail-closed path.
+ */
+export function repoVerifyFailingTestFiles(output) {
+  const files = new Set();
+  let currentFile = null;
+  let failures = 0;
+  for (const rawLine of stripAnsi(output).split("\n")) {
+    const line = rawLine.trim();
+    const match = REPO_VERIFY_TEST_FILE_LINE.exec(line);
+    if (match) {
+      currentFile = match.groups.path.replace(/^\.\//, "");
+      continue;
+    }
+    if (!REPO_VERIFY_TEST_FAILURE_LINE.test(line)) continue;
+    failures += 1;
+    if (!currentFile) return null;
+    files.add(currentFile);
+  }
+  return failures > 0 ? [...files] : null;
+}
+
+function sameFailingTestSet(left, right) {
+  return (
+    left.length > 0 &&
+    left.length === right.length &&
+    left.every((testName) => right.includes(testName))
+  );
+}
+
+function failingTestsAreOutsideChangedFiles(obs, changedFiles) {
+  const failingFiles = repoVerifyFailingTestFiles(obs.output);
+  return (
+    Array.isArray(changedFiles) &&
+    obs.failingTests.length > 0 &&
+    Array.isArray(failingFiles) &&
+    failingFiles.length > 0 &&
+    failingFiles.every((file) => !changedFiles.includes(file))
+  );
+}
+
+/**
+ * Execute a second repo verify at the branch's merge-base without mutating the
+ * dispatched checkout. Dependencies are copied only into the disposable
+ * checkout; a linked worktree otherwise has no ignored node_modules tree.
+ */
+function runRepoVerifyBaseline({
+  command,
+  worktreePath,
+  workspaceDir,
+  baseCommit,
+  timeoutMs,
+  runHandoffStep,
+}) {
+  const scratchPath = mkdtempSync(
+    path.join(workspaceDir, ".repo-verify-baseline-"),
+  );
+  rmSync(scratchPath, { recursive: true, force: true });
+  try {
+    try {
+      execFileSync(
+        "git",
+        ["worktree", "add", "--detach", "--force", scratchPath, baseCommit],
+        {
+          cwd: worktreePath,
+          stdio: ["ignore", "pipe", "pipe"],
+          timeout: 60_000,
+        },
+      );
+      const dependencies = path.join(worktreePath, "node_modules");
+      if (existsSync(dependencies)) {
+        cpSync(dependencies, path.join(scratchPath, "node_modules"), {
+          recursive: true,
+          verbatimSymlinks: true,
+        });
+      }
+    } catch (err) {
+      return {
+        passed: false,
+        timedOut: false,
+        setupFailed: true,
+        output: String(err?.stderr ?? err?.message ?? err),
+      };
+    }
+    const obs = runHandoffStep({
+      command,
+      cwd: scratchPath,
+      worktreePath: scratchPath,
+      logPath: path.join(workspaceDir, ".verify.baseline.log"),
+      timeoutMs,
+    });
+    obs.source = "repo_verify_baseline";
+    obs.executionContext = "merge_base_scratch";
+    obs.failingTests = repoVerifyFailingTests(obs.output);
+    obs.failingTestFiles = repoVerifyFailingTestFiles(obs.output);
+    return obs;
+  } finally {
+    try {
+      execFileSync("git", ["worktree", "remove", "--force", scratchPath], {
+        cwd: worktreePath,
+        stdio: "ignore",
+        timeout: 60_000,
+      });
+    } catch {
+      // The directory is disposable even if Git has already pruned its entry.
+    }
+    rmSync(scratchPath, { recursive: true, force: true });
+  }
 }
 
 function boundedDiagnostic(lines) {
@@ -2165,9 +2291,39 @@ function verifyCompleted({
         // clean-checkout reproduction at the same commit.
         obs.executionContext = "dispatch_worktree";
         obs.failingTests = repoVerifyFailingTests(obs.output);
+        obs.failingTestFiles = repoVerifyFailingTestFiles(obs.output);
         const baselineStillRed =
           !obs.timedOut &&
           matchesRedBaseline(worktreeRecord.baseline, obs.output);
+        const shouldRecheckBase =
+          !obs.timedOut &&
+          !baselineStillRed &&
+          handoff.diff.ok &&
+          failingTestsAreOutsideChangedFiles(obs, handoff.diff.files) &&
+          typeof handoff.diff.mergeBase === "string";
+        if (shouldRecheckBase) {
+          const baselineObs = runRepoVerifyBaseline({
+            command: worktreeRecord.verify,
+            worktreePath,
+            workspaceDir,
+            baseCommit: handoff.diff.mergeBase,
+            timeoutMs: verifyTimeoutMs,
+            runHandoffStep,
+          });
+          handoff.repoVerifyBaseline = baselineObs;
+          if (
+            !baselineObs.setupFailed &&
+            !baselineObs.timedOut &&
+            !baselineObs.passed &&
+            sameFailingTestSet(obs.failingTests, baselineObs.failingTests)
+          ) {
+            handoff.reasonCode = "baseline_red";
+            throw new ContractViolation(
+              [`repo_verify_failed: ${failureWhy(obs)}`],
+              { reasonCode: handoff.reasonCode, handoff },
+            );
+          }
+        }
         handoff.reasonCode = baselineStillRed
           ? "baseline_red"
           : "handoff_verification_failed";

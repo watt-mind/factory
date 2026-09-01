@@ -46,6 +46,7 @@ import {
   handoffSandboxFacts,
   policyHandoffSandboxTmpfsMb,
   policyOwnedPathsConformance,
+  repoVerifyFailingTestFiles,
   repoVerifyFailingTests,
   runHandoffCommand,
   runHandoffVerifySmoke,
@@ -1005,6 +1006,31 @@ describe("worktree baseline verification (WM-334)", () => {
     }
   });
 
+  test("a recorded test baseline survives additional branch test output", () => {
+    const baselineOutput = [
+      "event-runtime/lib/worker.test.mjs:",
+      "(fail) worker > pre-existing flaky probe",
+    ].join("\n");
+    const { dir, record } = worktreeWorkspace(
+      `printf '%s\\n' '${baselineOutput}' 'event-runtime/lib/new.test.mjs:' '(fail) new suite > branch-only failure' >&2; exit 9`,
+      { status: "red", check: "repo_verify", output: baselineOutput },
+    );
+    try {
+      verifyResult({
+        spec: dispatchSpec,
+        def: dispatchDef,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+        worktreeRecord: record,
+      });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.reasonCode).toBe("baseline_red");
+    }
+  });
+
   // WM-718: a post-agent repo verify failure at handoff is the handoff gate
   // refusing (`handoff_verification_failed`), no longer a generic
   // `contract_violation` — same FAILED path, but named so the ticket goes back
@@ -1060,6 +1086,86 @@ describe("worktree baseline verification (WM-334)", () => {
       expect(err.reasonCode).toBe("handoff_verification_failed");
       expect(err.violations[0]).toStartWith("repo_verify_failed:");
     }
+  });
+
+  test("rechecks an unchanged failing test file at the merge base before charging the branch", () => {
+    const { dir, record } = worktreeWorkspace("repo-verify", null);
+    record.handoff = { verificationCommand: "ticket-narrow" };
+    commitHandoffDiff(record, "docs/note.md");
+    const output = [
+      "event-runtime/lib/worker.test.mjs:",
+      "(fail) worker > drains a worktree adapter notification",
+    ].join("\n");
+    const calls = [];
+
+    try {
+      verifyResult({
+        spec: dispatchSpec,
+        def: dispatchDef,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+        worktreeRecord: record,
+        runHandoffCommandFn: ({ cwd, command }) => {
+          calls.push({ cwd, command });
+          return {
+            passed: false,
+            exitCode: 1,
+            output,
+            sandbox: { tmpfsMb: 1024 },
+          };
+        },
+      });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.reasonCode).toBe("baseline_red");
+      expect(err.handoff.repoVerify.failingTestFiles).toEqual([
+        "event-runtime/lib/worker.test.mjs",
+      ]);
+      expect(err.handoff.repoVerifyBaseline.executionContext).toBe(
+        "merge_base_scratch",
+      );
+      expect(err.handoff.repoVerifyBaseline.failingTests).toEqual(
+        err.handoff.repoVerify.failingTests,
+      );
+    }
+    expect(calls).toHaveLength(2);
+    expect(calls[0].cwd).toBe(record.path);
+    expect(calls[1].cwd).not.toBe(record.path);
+  });
+
+  test("does not retry a repo verify failure from a changed test file", () => {
+    const { dir, record } = worktreeWorkspace("repo-verify", null);
+    record.handoff = { verificationCommand: "ticket-narrow" };
+    commitHandoffDiff(record, "event-runtime/lib/worker.test.mjs");
+    const calls = [];
+
+    try {
+      verifyResult({
+        spec: dispatchSpec,
+        def: dispatchDef,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+        worktreeRecord: record,
+        runHandoffCommandFn: ({ command }) => {
+          calls.push(command);
+          return {
+            passed: false,
+            exitCode: 1,
+            output:
+              "event-runtime/lib/worker.test.mjs:\n(fail) worker > branch regression",
+            sandbox: { tmpfsMb: 1024 },
+          };
+        },
+      });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.reasonCode).toBe("handoff_verification_failed");
+    }
+    expect(calls).toEqual(["repo-verify"]);
   });
 
   test("a multi-line verification failure retains the failing test name and full log", () => {
@@ -1980,6 +2086,28 @@ describe("repoVerifyFailingTests", () => {
     const result = repoVerifyFailingTests(lines.join("\n"));
     expect(result).toHaveLength(20);
     expect(result.at(-1)).toBe("suite > case 19");
+  });
+
+  test("associates failures with Bun's source-file heading", () => {
+    expect(
+      repoVerifyFailingTestFiles(
+        [
+          "event-runtime/lib/worker.test.mjs:",
+          "(fail) worker > drains the queue [1ms]",
+          "event-runtime/lib/verify.test.mjs:",
+          "✗ verify > fails closed [2ms]",
+        ].join("\n"),
+      ),
+    ).toEqual([
+      "event-runtime/lib/worker.test.mjs",
+      "event-runtime/lib/verify.test.mjs",
+    ]);
+  });
+
+  test("fails closed when a runner failure lacks a source-file heading", () => {
+    expect(repoVerifyFailingTestFiles("(fail) worker > unknown source")).toBe(
+      null,
+    );
   });
 });
 
