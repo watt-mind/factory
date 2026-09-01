@@ -101,6 +101,22 @@ factory handoff --request-id handoff-original-id --repo factory watt-mind/factor
 
 A retry returns `duplicate: true` and the original event rather than dispatching a second run. Reusing that request ID for a different repo or ticket fails with `idempotency_conflict`; it never reports the original dispatch as if it covered the new request.
 
+## Inspecting runs and traces
+
+Once a ticket has been admitted and planned, its execution details, token costs, and live traces can be inspected on the runner:
+
+```sh
+# List recent runs across the fleet
+ssh runner "factory events runs --limit 10"
+
+# Inspect lifecycle history, duration, token usage, and failure reasons
+ssh runner "factory events inspect <runId>"
+
+# Stream or view the live agent trace
+ssh runner "factory events trace <runId> | tail -n 50"
+```
+
+
 ## Rollout
 
 1. Deploy code and regenerate/install the Factory CLI before installing any key.
