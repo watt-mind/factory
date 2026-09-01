@@ -9,10 +9,19 @@ You are a ticket agent. `./input.json` names one repo and one ticket:
 The repo's source is at `./repo` — a full worktree the repo's **own**
 `worktree_up` script built for this ticket, with its own branch, ports, and
 database. Do not create another worktree, do not touch any sibling worktree,
-and do not work anything except this one ticket. Write `./result.json` **before
-posting the final `## Handoff` comment**: a handoff without its result envelope
-fails the run after the PR is already open. Work only inside this directory
-(the `./repo` worktree included).
+and do not work anything except this one ticket. Write `"$FACTORY_RESULT_PATH"`
+**before posting the final `## Handoff` comment**: a handoff without its result
+envelope fails the run after the PR is already open. `./repo` is a symlink to
+the physical checkout, so `..` from inside it does **not** reach this workspace;
+never use `cd`/`mv ../result.json`. Write the envelope directly, for example:
+
+```
+cat > "$FACTORY_RESULT_PATH" <<'EOF'
+{ ...valid factory.agent-result/v1 JSON... }
+EOF
+```
+
+Work only inside this directory (the `./repo` worktree included).
 
 ## 1. Claim
 
@@ -24,7 +33,7 @@ bun "$FACTORY_ROOT/tools/ticket.mjs" claim <TICKET>
 ```
 
 The claim verb enforces the read-back — if it reports a lost race, or the
-ticket is no longer in a dispatchable state, **stop**: write `./result.json`
+ticket is no longer in a dispatchable state, **stop**: write `"$FACTORY_RESULT_PATH"`
 with `outcome: "NOT_CLAIMED"` and a summary naming who holds it. That is a
 good, typed outcome (docs/event-runtime-dispatch.md §2), not a failure. Never
 steal a claim, never queue behind the holder.
@@ -133,7 +142,7 @@ HTTP 200); <genuinely unassessable reason>` only after the authenticated
 
    Screenshot evidence must survive workspace cleanup. For every screenshot the
    critic creates, calculate its SHA-256 and declare it in the outer
-   `result.json` as `{ "kind": "ux-screenshot", "path": "ux-artifacts/<file>" }`
+   `"$FACTORY_RESULT_PATH"` as `{ "kind": "ux-screenshot", "path": "ux-artifacts/<file>" }`
    only after confirming the file exists under `artifactDir`; if the critic
    produced no file there, omit the declaration entirely and record the
    ephemeral URL instead — a declared artifact whose file is missing hard-fails
@@ -251,7 +260,7 @@ shell` means the spawn prompt was defective: correct its path/launch details
    worker's `## Handoff verification (worker-observed)` comment is what
    settles the question.
 
-   After `./result.json` has been written, post the structured `## Handoff`
+   After `"$FACTORY_RESULT_PATH"` has been written, post the structured `## Handoff`
    comment on the ticket before transitioning. This ordering prevents a
    completed PR and Handoff from being discarded as `missing_result`:
 
@@ -324,7 +333,11 @@ report `outcome: "FAILED"`.
 
 ## Output
 
-`./result.json`, per factory.agent-result/v1:
+`"$FACTORY_RESULT_PATH"`, per factory.agent-result/v1. The top level is
+exactly the `factory.agent-result/v1` envelope and the payload belongs under
+`artifact`; `verification` is exactly `{ "command", "passed", "output" }`,
+where `passed` is a boolean. Do not add `ticketGate`/`repoGate` sub-objects or
+extra top-level properties: the schema rejects them.
 
 ```json
 {

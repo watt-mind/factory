@@ -6,6 +6,7 @@ import {
   readFileSync,
   realpathSync,
   symlinkSync,
+  utimesSync,
   writeSync,
   writeFileSync,
 } from "node:fs";
@@ -445,6 +446,85 @@ describe("verifyResult", () => {
     } catch (err) {
       expect(err).toBeInstanceOf(ContractViolation);
       expect(err.violations).toEqual(["missing_result"]);
+    }
+  });
+
+  test("recovers a current stray result from the physical checkout and removes it", () => {
+    const workspaceDir = tmpDir("evrt-verify-workspace-");
+    const physicalParent = tmpDir("evrt-verify-checkout-parent-");
+    const checkout = path.join(physicalParent, "checkout");
+    mkdirSync(checkout);
+    symlinkSync(checkout, path.join(workspaceDir, "repo"), "dir");
+    const strayPath = path.join(physicalParent, "result.json");
+    const events = [];
+    writeFileSync(
+      strayPath,
+      JSON.stringify({
+        schemaVersion: "factory.agent-result/v1",
+        terminalState: "completed",
+        artifact: VALID_ARTIFACT,
+      }),
+      "utf8",
+    );
+
+    const out = verifyResult({
+      spec: makeSpec(),
+      def,
+      registry,
+      workspaceDir,
+      worktreeRecord: { path: checkout },
+      attempt: 1,
+      attemptStartedAt: new Date(Date.now() - 5_000).toISOString(),
+      onTrace: (kind, payload) => events.push({ kind, payload }),
+    });
+
+    expect(out.kind).toBe("completed");
+    expect(existsSync(strayPath)).toBe(false);
+    expect(events).toEqual([
+      {
+        kind: "lifecycle",
+        payload: {
+          note: "result_recovered_from_stray_path",
+          path: strayPath,
+        },
+      },
+    ]);
+  });
+
+  test("rejects a stale stray result from before this attempt", () => {
+    const workspaceDir = tmpDir("evrt-verify-workspace-");
+    const checkout = tmpDir("evrt-verify-checkout-");
+    const strayPath = path.join(checkout, "result.json");
+    writeFileSync(
+      strayPath,
+      JSON.stringify({ artifact: VALID_ARTIFACT }),
+      "utf8",
+    );
+    const attemptStartedAt = new Date(Date.now() - 5_000);
+    utimesSync(
+      strayPath,
+      new Date(attemptStartedAt.getTime() - 1_000),
+      new Date(attemptStartedAt.getTime() - 1_000),
+    );
+
+    try {
+      verifyResult({
+        spec: makeSpec(),
+        def,
+        registry,
+        workspaceDir,
+        worktreeRecord: { path: checkout },
+        attempt: 1,
+        attemptStartedAt: attemptStartedAt.toISOString(),
+      });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.violations).toEqual(["missing_result"]);
+      expect(err.missingResultPaths).toEqual([
+        { path: strayPath, mtime: expect.any(String) },
+      ]);
+      expect(existsSync(strayPath)).toBe(true);
     }
   });
 

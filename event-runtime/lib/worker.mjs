@@ -1094,6 +1094,7 @@ export function dispatchIdentityEnv({
   runId = null,
   ticketId = null,
   repoName = null,
+  resultPath = null,
 }) {
   if (!String(spec?.agent ?? "").startsWith("dispatch@")) return env;
   // A dispatched agent must never inherit the worker's control bearer. It can
@@ -1106,6 +1107,8 @@ export function dispatchIdentityEnv({
     identity.FACTORY_TICKET = String(ticketId);
   if (repoName != null && repoName !== "")
     identity.FACTORY_REPO = String(repoName);
+  if (resultPath != null && resultPath !== "")
+    identity.FACTORY_RESULT_PATH = String(resultPath);
   // A dispatched agent needs the location of its isolated runtime to retain
   // notifications, but never the worker's control bearer. The caller supplies
   // these two non-secret values explicitly rather than copying process.env.
@@ -1910,8 +1913,10 @@ export function defaultFindWorkspacePullRequest({ workspacePath, forge }) {
 
 const MISSING_RESULT_OUTPUT_CHARS = 2 * 1024;
 
-function missingResultFailure(workspaceDir) {
+function missingResultFailure(workspaceDir, error = null) {
   const resultPath = path.resolve(workspaceDir, "result.json");
+  const fallbackPaths = error?.missingResultFallbacks ?? [];
+  const stalePaths = error?.missingResultPaths ?? [];
   const output = [
     ["stdout", ".transcript.json"],
     ["stderr", ".stderr.txt"],
@@ -1930,7 +1935,13 @@ function missingResultFailure(workspaceDir) {
     .join("\n");
   const normalized = normalizeFailureOutput(output).join("\n");
   const tail = normalized.slice(-MISSING_RESULT_OUTPUT_CHARS);
-  return `missing_result: expected ${resultPath}; agent stdout/stderr (last 2 KB): ${tail || "(no captured output)"}`;
+  const fallbackDetail = fallbackPaths.length
+    ? `; probed fallbacks ${fallbackPaths.join(", ")}`
+    : "";
+  const staleDetail = stalePaths.length
+    ? `; stale result.json found at ${stalePaths.map(({ path: candidatePath, mtime }) => `${candidatePath} (mtime ${mtime}, before this attempt started)`).join(", ")}`
+    : "";
+  return `missing_result: expected ${resultPath}${fallbackDetail}${staleDetail}; agent stdout/stderr (last 2 KB): ${tail || "(no captured output)"}`;
 }
 
 /**
@@ -4198,7 +4209,7 @@ export async function executeClaimed(
       db.query(
         `UPDATE attempts SET started_at = ? WHERE run_id = ? AND attempt = ?`,
       ).run(iso(currentNow), runId, attempt);
-      return { ok: true };
+      return { ok: true, startedAt: iso(currentNow) };
     });
     if (started?.fenced) {
       return { fenced: true };
@@ -4964,6 +4975,7 @@ export async function executeClaimed(
         runId,
         ticketId,
         repoName,
+        resultPath: path.join(workspaceDir, "result.json"),
       });
       outcome = await adapter.execute({
         spec:
@@ -5107,8 +5119,10 @@ export async function executeClaimed(
           registry,
           workspaceDir,
           attempt,
+          attemptStartedAt: started.startedAt,
           extraArtifacts: RUNTIME_ARTIFACTS,
           worktreeRecord: {},
+          onTrace,
         });
         lateCompletion = true;
       } catch (err) {
@@ -5260,8 +5274,10 @@ export async function executeClaimed(
         registry,
         workspaceDir,
         attempt,
+        attemptStartedAt: started.startedAt,
         extraArtifacts: RUNTIME_ARTIFACTS,
         worktreeRecord,
+        onTrace,
       });
       // `prNumber` was optional on pre-WM-576 dispatch artifacts. Preserve
       // their accepted handoffs; current dispatch prompts require it, and all
@@ -5306,8 +5322,10 @@ export async function executeClaimed(
             registry,
             workspaceDir,
             attempt,
+            attemptStartedAt: started.startedAt,
             extraArtifacts: RUNTIME_ARTIFACTS,
             worktreeRecord,
+            onTrace,
           });
           if (verified.handoff && handoffPrNumber(verified.handoff)) {
             assertHandoffPullRequestBase({
@@ -5371,7 +5389,7 @@ export async function executeClaimed(
       let failureReason =
         activeError.violations.length === 1 &&
         activeError.violations[0] === "missing_result"
-          ? `${reasonCode}: ${missingResultFailure(workspaceDir)}`
+          ? `${reasonCode}: ${missingResultFailure(workspaceDir, activeError)}`
           : `${reasonCode}: ${activeError.violations.join(", ")}`;
       const continuationFailure = escalationHandoffFailure(
         activeError,

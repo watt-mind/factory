@@ -6411,6 +6411,7 @@ sh -c 'sleep 5 & wait'
       runId: "run-1",
       ticketId: 1497,
       repoName: "factory",
+      resultPath: "/workspace/result.json",
     });
     expect(full).toEqual({
       PATH: "/bin",
@@ -6420,6 +6421,7 @@ sh -c 'sleep 5 & wait'
       FACTORY_RUN_ID: "run-1",
       FACTORY_TICKET: "1497",
       FACTORY_REPO: "factory",
+      FACTORY_RESULT_PATH: "/workspace/result.json",
     });
     expect(full.FACTORY_CONTROL_API_TOKEN).toBeUndefined();
 
