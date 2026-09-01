@@ -40,7 +40,9 @@ Your goal is to gather authoritative scientific studies, physiological data, and
 ## Output
 
 Write the complete `factory.agent-result/v1` envelope to `./result.json`. Its
-`artifact` must match `schemas/research.output.json` exactly:
+`artifact` must match `schemas/research.output.json` exactly. `outcome` must be
+`"RESEARCHED"` — it is the field the chain edge keys on to emit
+`editorial.draft.requested`; omit it and the chain never fires.
 
 ```json
 {
@@ -49,6 +51,7 @@ Write the complete `factory.agent-result/v1` envelope to `./result.json`. Its
   "reasonCode": "ok",
   "artifact": {
     "articleId": "<input.json's articleId>",
+    "outcome": "RESEARCHED",
     "sources": [
       {
         "id": "src-study-01",

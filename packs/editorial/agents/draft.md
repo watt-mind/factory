@@ -38,7 +38,9 @@ Your goal is to write a comprehensive, engaging, science-backed guide adhering t
 ## Output
 
 Write the complete `factory.agent-result/v1` envelope to `./result.json`. Its
-`artifact` must match `schemas/draft.output.json` exactly:
+`artifact` must match `schemas/draft.output.json` exactly. `outcome` must be
+`"DRAFTED"` — it is the field the chain edge keys on to emit
+`editorial.review.requested`; omit it and the chain never fires.
 
 ```json
 {
@@ -47,6 +49,7 @@ Write the complete `factory.agent-result/v1` envelope to `./result.json`. Its
   "reasonCode": "ok",
   "artifact": {
     "articleId": "<input.json's articleId>",
+    "outcome": "DRAFTED",
     "title": "Article Title",
     "slug": "article-title",
     "revisionHash": "<sha256_hash>",

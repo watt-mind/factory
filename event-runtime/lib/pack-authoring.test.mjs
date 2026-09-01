@@ -203,3 +203,137 @@ test("the scope probe rejects an envelope-payload field", () => {
   expect(unsupportedScopeField("subject")).toBeNull();
   expect(unsupportedScopeField("inputHash")).toBeNull();
 });
+
+/**
+ * Maps every first-party agent definition to its `<namespace>/<id>@<version>`
+ * ref — the key `edges.json` uses — paired with its parsed output schema.
+ */
+function firstPartyAgents() {
+  const agents = new Map();
+  const packs = readdirSync(path.resolve("packs"), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name);
+  for (const pack of packs) {
+    const root = path.resolve("packs", pack);
+    const namespace = JSON.parse(
+      readFileSync(path.join(root, "pack.json"), "utf8"),
+    ).namespace;
+    const dir = path.join(root, "agents");
+    if (!existsSync(dir)) continue;
+    for (const file of readdirSync(dir).filter((f) => f.endsWith(".json"))) {
+      const agent = JSON.parse(readFileSync(path.join(dir, file), "utf8"));
+      agents.set(`${namespace}/${agent.id}@${agent.version}`, {
+        source: `packs/${pack}/agents/${file}`,
+        schema: JSON.parse(
+          readFileSync(path.join(root, agent.output_schema), "utf8"),
+        ),
+      });
+    }
+  }
+  return agents;
+}
+
+/**
+ * `resolveChains` reads `result.artifact[rule.recommendationField]` and drops
+ * the run when no edge key matches (chain.mjs §"selectedEdges"). An artifact
+ * schema that never declares that field — or declares it as an enum missing an
+ * edge key — makes the edge unreachable for every conforming result, silently:
+ * the run completes and no child event is ever emitted. Catch it in the tree.
+ */
+function unreachableChainEdges(edges, agents) {
+  const offenders = [];
+  for (const [ref, rule] of Object.entries(edges)) {
+    if (rule.independent) continue;
+    const agent = agents.get(ref);
+    if (!agent) {
+      offenders.push(`${ref}: no first-party agent declares this ref`);
+      continue;
+    }
+    const field = rule.recommendationField;
+    const declared = agent.schema.properties?.[field];
+    if (!declared) {
+      offenders.push(
+        `${ref}: ${agent.source} output schema declares no "${field}" property`,
+      );
+      continue;
+    }
+    if (!Array.isArray(declared.enum)) continue;
+    for (const key of Object.keys(rule.edges)) {
+      if (!declared.enum.includes(key)) {
+        offenders.push(
+          `${ref}: edge key "${key}" is not a member of the "${field}" enum`,
+        );
+      }
+    }
+  }
+  return offenders;
+}
+
+test("first-party chain edges key on a field the output schema declares", () => {
+  const agents = firstPartyAgents();
+  expect(agents.size).toBeGreaterThan(0);
+
+  const offenders = [];
+  let checked = 0;
+  const packs = readdirSync(path.resolve("packs"), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name);
+  for (const pack of packs) {
+    const source = path.resolve("packs", pack, "edges.json");
+    if (!existsSync(source)) continue;
+    const edges = JSON.parse(readFileSync(source, "utf8"));
+    checked += Object.keys(edges).length;
+    for (const offender of unreachableChainEdges(edges, agents)) {
+      offenders.push(`packs/${pack}/edges.json ${offender}`);
+    }
+  }
+  expect(checked).toBeGreaterThan(0);
+  expect(offenders).toEqual([]);
+});
+
+test("the chain-edge probe catches an undeclared field and a stray edge key", () => {
+  const agents = new Map([
+    [
+      "probe/agent@1",
+      {
+        source: "packs/probe/agents/agent.json",
+        schema: {
+          properties: { outcome: { type: "string", enum: ["DONE"] } },
+        },
+      },
+    ],
+  ]);
+
+  expect(
+    unreachableChainEdges(
+      { "probe/agent@1": { recommendationField: "outcome", edges: {} } },
+      agents,
+    ),
+  ).toEqual([]);
+  expect(
+    unreachableChainEdges(
+      {
+        "probe/agent@1": {
+          recommendationField: "verdict",
+          edges: { DONE: {} },
+        },
+      },
+      agents,
+    ),
+  ).toEqual([
+    'probe/agent@1: packs/probe/agents/agent.json output schema declares no "verdict" property',
+  ]);
+  expect(
+    unreachableChainEdges(
+      {
+        "probe/agent@1": {
+          recommendationField: "outcome",
+          edges: { DONE: {}, SKIPPED: {} },
+        },
+      },
+      agents,
+    ),
+  ).toEqual([
+    'probe/agent@1: edge key "SKIPPED" is not a member of the "outcome" enum',
+  ]);
+});

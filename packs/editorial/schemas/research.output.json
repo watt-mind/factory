@@ -1,9 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["articleId", "sources", "summary", "cellVersion"],
+  "required": ["articleId", "outcome", "sources", "summary", "cellVersion"],
   "properties": {
     "articleId": { "type": "string" },
+    "outcome": {
+      "type": "string",
+      "enum": ["RESEARCHED"],
+      "description": "Chain recommendation; keys the edges.json edge to editorial.draft.requested."
+    },
     "cellVersion": { "type": "integer" },
     "summary": { "type": "string" },
     "sources": {

@@ -3,6 +3,7 @@
   "type": "object",
   "required": [
     "articleId",
+    "outcome",
     "title",
     "slug",
     "revisionHash",
@@ -12,6 +13,11 @@
   ],
   "properties": {
     "articleId": { "type": "string" },
+    "outcome": {
+      "type": "string",
+      "enum": ["DRAFTED"],
+      "description": "Chain recommendation; keys the edges.json edge to editorial.review.requested."
+    },
     "title": { "type": "string" },
     "slug": { "type": "string" },
     "revisionHash": { "type": "string" },
