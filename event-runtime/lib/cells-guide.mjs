@@ -1,8 +1,34 @@
 /**
  * Generates capability-gated CELLS.md content for agent workspaces.
  */
+
+const DEFAULT_CELL_ENDPOINT = "http://100.74.142.98:8080";
+
+/**
+ * `cellEndpoint` arrives on the event payload, so it is caller-controlled, and
+ * it is interpolated verbatim into the agent's prompt markdown. Accept only a
+ * plain http/https URL with no characters that could close a code fence, break
+ * out of a line, or smuggle control bytes into the prompt; anything else falls
+ * back to the default.
+ */
+export function sanitizeCellEndpoint(value) {
+  if (typeof value !== "string" || value === "") return DEFAULT_CELL_ENDPOINT;
+  // eslint-disable-next-line no-control-regex
+  if (/[`\s\u0000-\u001f\u007f]/.test(value)) return DEFAULT_CELL_ENDPOINT;
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return DEFAULT_CELL_ENDPOINT;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return DEFAULT_CELL_ENDPOINT;
+  }
+  return value;
+}
+
 export function renderCellsGuide({ cells = [], cellEndpoint = null } = {}) {
-  const endpointDisplay = cellEndpoint || "http://100.74.142.98:8080";
+  const endpointDisplay = sanitizeCellEndpoint(cellEndpoint);
 
   let cellBindingsSection = "";
   if (cells.length > 0) {
@@ -29,7 +55,24 @@ Read \`./input.json\` in your workspace to get:
 
 ---
 
-## 2. Standard REST API Endpoints
+## 2. Authentication & Access Tier
+
+Every request except \`GET /health\` must carry the shared secret:
+
+\`\`\`
+Authorization: Bearer \${CELL_AUTH_TOKEN}
+\`\`\`
+
+The ingress fails closed — a missing or wrong token is a \`401\`. Read the secret
+from the \`CELL_AUTH_TOKEN\` environment variable.
+
+Declare your access tier on every request with \`X-Cell-Access\` (see the
+capabilities above). Omitting it is not a shortcut: an undeclared tier is
+treated as \`read-only\`, and an unknown value is a \`400\`.
+
+---
+
+## 3. Standard REST API Endpoints
 
 The full URL pattern is:
 \`\${cellEndpoint}/cells/\${encodeURIComponent(cellId)}/\${path}\`
@@ -56,7 +99,7 @@ The full URL pattern is:
 
 ---
 
-## 3. Code Snippets
+## 4. Code Snippets
 
 ### In Bash (curl):
 \`\`\`bash
@@ -64,13 +107,23 @@ ENDPOINT=$(jq -r .cellEndpoint ./input.json)
 CELL_ID=$(jq -r .articleId ./input.json)
 
 # Fetch latest state
-curl -s "\${ENDPOINT}/cells/\${CELL_ID}/v1/state"
+curl -s -H "Authorization: Bearer \${CELL_AUTH_TOKEN}" \\
+  -H "X-Cell-Access: data-only" \\
+  "\${ENDPOINT}/cells/\${CELL_ID}/v1/state"
 \`\`\`
 
 ### In JavaScript (fetch):
 \`\`\`javascript
 const input = JSON.parse(await Bun.file("./input.json").text());
-const res = await fetch(\`\${input.cellEndpoint}/cells/\${encodeURIComponent(input.articleId)}/v1/state\`);
+const res = await fetch(
+  \`\${input.cellEndpoint}/cells/\${encodeURIComponent(input.articleId)}/v1/state\`,
+  {
+    headers: {
+      Authorization: \`Bearer \${process.env.CELL_AUTH_TOKEN}\`,
+      "X-Cell-Access": "data-only",
+    },
+  },
+);
 const state = await res.json();
 \`\`\`
 `;

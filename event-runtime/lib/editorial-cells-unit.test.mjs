@@ -177,4 +177,38 @@ describe("Editorial Cells Pure In-Memory Unit Test (No live server, no subproces
     }
     expect(writeForbidden).toBe(true);
   });
+
+  it("fails closed: an undeclared X-Cell-Access tier is treated as read-only", async () => {
+    const mockFetch = createMockCellFetch();
+    const url =
+      "http://mock-cell.local/cells/" +
+      encodeURIComponent("site:coachwatts.com") +
+      "/v1/policy";
+
+    // A GET without the header is still allowed …
+    const readRes = await mockFetch(url, { method: "GET", headers: {} });
+    expect(readRes.status).toBe(200);
+
+    // … but a write without the header is refused, rather than defaulting to
+    // the most permissive tier.
+    const writeRes = await mockFetch(url, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tone: "x", audience: "y" }),
+    });
+    expect(writeRes.status).toBe(403);
+    expect((await writeRes.json()).code).toBe("read_only_access");
+  });
+
+  it("rejects an unknown X-Cell-Access tier with 400", async () => {
+    const mockFetch = createMockCellFetch();
+    const res = await mockFetch(
+      "http://mock-cell.local/cells/" +
+        encodeURIComponent("site:coachwatts.com") +
+        "/v1/policy",
+      { method: "GET", headers: { "X-Cell-Access": "root" } },
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("unknown_access_tier");
+  });
 });

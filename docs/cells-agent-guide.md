@@ -53,13 +53,33 @@ $$\mathtt{\$\{cellEndpoint\}/cells/\$\{encodeURIComponent(cellId)\}/\$\{path\}}$
 
 ---
 
-## 3. Access Control & Headers
+## 3. Authentication & Access Control
+
+### Bearer token (required)
+
+Every request except `GET /health` must carry the shared secret:
+
+```
+Authorization: Bearer ${CELL_AUTH_TOKEN}
+```
+
+The ingress router fails **closed**: it refuses all traffic when
+`CELL_AUTH_TOKEN` is unset on the daemon, and answers `401` for a missing or
+wrong token. The first-party clients (`CellClient`, `SiteCellClient`,
+`ArticleCellClient`) read the secret from `process.env.CELL_AUTH_TOKEN` by
+default, so a raw `curl` is the only place you normally set it by hand.
+
+### Access tier
 
 Your agent's assigned access tier is sent via the `X-Cell-Access` header:
 
 - `read-only`: Only `GET` requests permitted.
 - `data-only`: Full data read/write permitted; DDL schema migrations blocked with `403`.
+- `read-write`: Same as `data-only` for schema purposes; DDL blocked with `403`.
 - `malleable`: Full data read/write and DDL schema migrations permitted.
+
+Omitting the header is **not** a way to get more access: an undeclared tier is
+treated as `read-only`, and an unrecognised value is a `400`.
 
 ---
 
@@ -72,10 +92,14 @@ ENDPOINT=$(jq -r .cellEndpoint ./input.json)
 CELL_ID=$(jq -r .articleId ./input.json)
 
 # 1. Fetch live state
-curl -s "${ENDPOINT}/cells/${CELL_ID}/v1/state"
+curl -s -H "Authorization: Bearer ${CELL_AUTH_TOKEN}" \
+  -H "X-Cell-Access: data-only" \
+  "${ENDPOINT}/cells/${CELL_ID}/v1/state"
 
 # 2. Query sources via SQL
 curl -s -X POST "${ENDPOINT}/cells/${CELL_ID}/v1/query" \
+  -H "Authorization: Bearer ${CELL_AUTH_TOKEN}" \
+  -H "X-Cell-Access: data-only" \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT id, title, relevance_score FROM article_sources;"}'
 ```
@@ -85,15 +109,19 @@ curl -s -X POST "${ENDPOINT}/cells/${CELL_ID}/v1/query" \
 ```javascript
 const input = JSON.parse(await Bun.file("./input.json").text());
 const cellUrl = `${input.cellEndpoint}/cells/${encodeURIComponent(input.articleId)}`;
+const auth = {
+  Authorization: `Bearer ${process.env.CELL_AUTH_TOKEN}`,
+  "X-Cell-Access": "data-only",
+};
 
 // Fetch state
-const stateRes = await fetch(`${cellUrl}/v1/state`);
+const stateRes = await fetch(`${cellUrl}/v1/state`, { headers: auth });
 const state = await stateRes.json();
 
 // Commit draft revision
 const revRes = await fetch(`${cellUrl}/v1/revisions`, {
   method: "POST",
-  headers: { "Content-Type": "application/json" },
+  headers: { ...auth, "Content-Type": "application/json" },
   body: JSON.stringify({
     title: state.brief.title,
     body: "# Article Content...",

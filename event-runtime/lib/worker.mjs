@@ -4846,6 +4846,10 @@ export async function executeClaimed(
         attempt,
         input: executionInput,
         workspace: spec.workspace,
+        // Declared capabilities drive the capability-gated CELLS.md guide the
+        // workspace materializes (#2149); without this the injection is dead
+        // code.
+        capabilities: def?.capabilities ?? null,
         artifactStore,
         adapter: adapterKey,
         ticketLeaseOwner,

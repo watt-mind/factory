@@ -44,15 +44,24 @@ export class SiteCellClient {
     siteId,
     access = "malleable",
     fetch = globalThis.fetch,
+    authToken = null,
   } = {}) {
     this.endpoint = endpoint.replace(/\/+$/, "");
     this.siteId = siteId.startsWith("site:") ? siteId : `site:${siteId}`;
     this.access = access;
     this._fetch = fetch;
+    // Shared-secret bearer token for the loopback cell spike. Defaults to the
+    // daemon's own CELL_AUTH_TOKEN so a client in the same environment works
+    // without extra wiring.
+    this.authToken =
+      authToken ?? globalThis.process?.env?.CELL_AUTH_TOKEN ?? null;
   }
 
   _headers() {
-    return { "X-Cell-Access": this.access };
+    return {
+      "X-Cell-Access": this.access,
+      ...(this.authToken ? { Authorization: `Bearer ${this.authToken}` } : {}),
+    };
   }
 
   _url(path) {
@@ -116,6 +125,7 @@ export class ArticleCellClient {
     articleId,
     access = "malleable",
     fetch = globalThis.fetch,
+    authToken = null,
   } = {}) {
     this.endpoint = endpoint.replace(/\/+$/, "");
     this.articleId = articleId.startsWith("article:")
@@ -123,10 +133,16 @@ export class ArticleCellClient {
       : `article:${articleId}`;
     this.access = access;
     this._fetch = fetch;
+    // See SiteCellClient — same loopback-only shared-secret stop-gap.
+    this.authToken =
+      authToken ?? globalThis.process?.env?.CELL_AUTH_TOKEN ?? null;
   }
 
   _headers() {
-    return { "X-Cell-Access": this.access };
+    return {
+      "X-Cell-Access": this.access,
+      ...(this.authToken ? { Authorization: `Bearer ${this.authToken}` } : {}),
+    };
   }
 
   _url(path) {

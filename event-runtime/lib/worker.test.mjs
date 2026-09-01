@@ -1307,6 +1307,132 @@ sh -c 'sleep 5 & wait'
     );
   });
 
+  test("materializes CELLS.md from the agent definition's declared cell capabilities", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    // The CELLS.md guide is gated on the *definition's* declared capabilities,
+    // so the worker has to hand them to createWorkspace. It did not (#2149),
+    // which left the injection unreachable in production; this test fails if
+    // that argument is dropped again.
+    const cellsRegistry = {
+      ...registry,
+      agents: new Map(registry.agents),
+    };
+    const baseDef = getAgent(registry, "factory-status-report@1");
+    cellsRegistry.agents.set("factory-status-report@1", {
+      ...baseDef,
+      capabilities: {
+        ...(baseDef.capabilities ?? {}),
+        cells: [
+          {
+            binding: "ARTICLE_CELL",
+            access: "data-only",
+            description: "Article sources and drafts",
+          },
+        ],
+      },
+    });
+
+    const spec = queueRun(
+      db,
+      makeSpec({
+        adapter: "cells-probe",
+        input: {
+          repos: ["ok"],
+          cellEndpoint: "http://127.0.0.1:8080",
+        },
+      }),
+      now,
+    );
+
+    let seenGuide = null;
+    const probeAdapter = {
+      async execute({ workspaceDir }) {
+        const guidePath = path.join(workspaceDir, "CELLS.md");
+        seenGuide = existsSync(guidePath)
+          ? readFileSync(guidePath, "utf8")
+          : null;
+        writeFileSync(
+          path.join(workspaceDir, "result.json"),
+          JSON.stringify({
+            schemaVersion: "factory.agent-result/v1",
+            terminalState: "completed",
+            artifact: {
+              repos: [
+                {
+                  name: "factory",
+                  triage: 0,
+                  agentReady: 0,
+                  inProgress: 0,
+                  blocked: 0,
+                },
+              ],
+              recommendedAction: "wait",
+            },
+          }),
+        );
+        return { exitCode: 0, timedOut: false };
+      },
+    };
+
+    const summary = await runOnce(
+      db,
+      cellsRegistry,
+      { "cells-probe": probeAdapter },
+      opts({ now: () => Date.now() }),
+    );
+
+    expect(summary.terminalState).toBe("COMPLETED");
+    expect(seenGuide).toBeTruthy();
+    expect(seenGuide).toContain("ARTICLE_CELL");
+    expect(seenGuide).toContain("data-only");
+    expect(seenGuide).toContain("http://127.0.0.1:8080");
+    expect(spec.runId).toBeTruthy();
+  });
+
+  test("omits CELLS.md when the agent definition declares no cells", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    queueRun(db, makeSpec({ adapter: "cells-probe" }), now);
+
+    let sawGuide = true;
+    const probeAdapter = {
+      async execute({ workspaceDir }) {
+        sawGuide = existsSync(path.join(workspaceDir, "CELLS.md"));
+        writeFileSync(
+          path.join(workspaceDir, "result.json"),
+          JSON.stringify({
+            schemaVersion: "factory.agent-result/v1",
+            terminalState: "completed",
+            artifact: {
+              repos: [
+                {
+                  name: "factory",
+                  triage: 0,
+                  agentReady: 0,
+                  inProgress: 0,
+                  blocked: 0,
+                },
+              ],
+              recommendedAction: "wait",
+            },
+          }),
+        );
+        return { exitCode: 0, timedOut: false };
+      },
+    };
+
+    const summary = await runOnce(
+      db,
+      registry,
+      { "cells-probe": probeAdapter },
+      opts({ now: () => Date.now() }),
+    );
+
+    expect(summary.terminalState).toBe("COMPLETED");
+    expect(sawGuide).toBe(false);
+  });
+
   test("COMPLETED accepts register emitted memos and pinned memo verdicts", async () => {
     const db = openDb(":memory:");
     const now = Date.now();

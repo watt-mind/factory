@@ -73,6 +73,13 @@ export class ArticleCell extends GenericCell {
     `);
   }
 
+  _getState() {
+    const rows = [
+      ...this.sql.exec("SELECT value FROM _cell_meta WHERE key = 'state'"),
+    ];
+    return rows.length > 0 ? rows[0].value : "initialized";
+  }
+
   async fetch(request) {
     const url = new URL(request.url);
     const method = request.method.toUpperCase();
@@ -273,11 +280,18 @@ export class ArticleCell extends GenericCell {
       // POST /v1/revisions
       if (pathname === "/v1/revisions" && method === "POST") {
         const { title, body, revisionNumber } = await request.json();
-        if (!title || !body) {
+        // A whitespace-only body is not a draft: it would otherwise hash fine
+        // and be recorded with a word count of 1.
+        if (
+          typeof title !== "string" ||
+          title.trim() === "" ||
+          typeof body !== "string" ||
+          body.trim() === ""
+        ) {
           return new Response(
             JSON.stringify({
               error: "bad_request",
-              message: "title and body are required",
+              message: "title and body are required and must be non-empty",
             }),
             {
               status: 400,
@@ -290,8 +304,34 @@ export class ArticleCell extends GenericCell {
           .update(body)
           .digest("hex")
           .slice(0, 16);
-        const wordCount = body.trim().split(/\s+/).length;
+        const wordCount = body.trim().split(/\s+/).filter(Boolean).length;
         const now = Date.now();
+
+        // Revisions are immutable and content-addressed: an identical body is
+        // the revision that already exists, not a new one. Report it as such
+        // and leave the cell version alone so a replay is a true no-op.
+        const existing = [
+          ...this.sql.exec(
+            "SELECT hash, revision_number, word_count FROM article_revisions WHERE hash = ?",
+            hash,
+          ),
+        ];
+        if (existing.length > 0) {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              created: false,
+              duplicate: true,
+              revisionHash: existing[0].hash,
+              revisionNumber: existing[0].revision_number,
+              wordCount: existing[0].word_count,
+              cellVersion: this._getCellVersion(),
+              state: this._getState(),
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
         const revNum =
           revisionNumber ||
           ([
@@ -304,7 +344,6 @@ export class ArticleCell extends GenericCell {
           `
           INSERT INTO article_revisions (hash, revision_number, title, body, word_count, created_at)
           VALUES (?, ?, ?, ?, ?, ?)
-          ON CONFLICT(hash) DO NOTHING
         `,
           hash,
           revNum,
@@ -318,6 +357,7 @@ export class ArticleCell extends GenericCell {
         return new Response(
           JSON.stringify({
             ok: true,
+            created: true,
             revisionHash: hash,
             revisionNumber: revNum,
             wordCount,
@@ -500,12 +540,10 @@ export class ArticleCell extends GenericCell {
         },
       );
     } catch (err) {
+      // Log the stack locally; never leak it to the caller.
+      console.error("[article-cell] unhandled error", err);
       return new Response(
-        JSON.stringify({
-          error: "internal_error",
-          message: err.message,
-          stack: err.stack,
-        }),
+        JSON.stringify({ error: "internal_error", message: err.message }),
         {
           status: 500,
           headers: { "Content-Type": "application/json" },

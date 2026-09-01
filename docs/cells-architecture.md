@@ -132,7 +132,11 @@ curl -X POST http://100.74.142.98:8080/cells/editorial:article:01J.../v1/schema/
 
 To add new Durable Object classes, endpoints, or business logic:
 
-1. Edit [`cells/src/index.mjs`](../cells/src/index.mjs).
+1. Edit the relevant module: [`cells/src/base/generic-cell.mjs`](../cells/src/base/generic-cell.mjs)
+   for shared behaviour, [`cells/src/editorial/`](../cells/src/editorial/) for a domain
+   cell, or [`cells/src/router.mjs`](../cells/src/router.mjs) for ingress routing;
+   [`cells/src/index.mjs`](../cells/src/index.mjs) is the worker entrypoint that wires
+   them together.
 2. Run pure in-memory unit tests: `bun run cells:test`.
 3. Deploy to the fleet bucket: `bun run cells:deploy`.
 4. Running `celld` nodes detect the new version pointer in S3 and hot-swap in-place.
@@ -149,10 +153,39 @@ To protect cells from unauthorized modifications by untrusted, specialized, or r
 | `data-only` | Full data CRUD (`PUT /v1/entities/...`, `POST /v1/sources`, `POST /v1/revisions`) | Schema alterations & DDL migrations (`POST /v1/schema/migrate`) returns `403 Forbidden` | Standard drafters, researchers, and content writers who must not alter table schemas |
 | `malleable` | Full data CRUD + dynamic DDL schema migrations (`POST /v1/schema/migrate`)        | None at the cell level                                                                  | Cell engineer and autonomous architecture agents                                     |
 
+A request that omits `X-Cell-Access` is treated as **`read-only`** — the most
+restrictive tier — so a caller that forgets the header can never widen its own
+access. An unrecognised tier is a `400 Bad Request` rather than a silent
+fallback. Every first-party client (`CellClient`, `SiteCellClient`,
+`ArticleCellClient`) declares its tier explicitly.
+
+> The tier is still **declared by the caller**, not derived by the cell from an
+> authenticated identity. Server-side derivation is future work; until then this
+> is a guard rail against accidental writes, not an authorization boundary.
+
 ### Code Deployment Immutability:
 
 - Standard agents operate in isolated sandbox workspaces without Cloudflare R2 deployment credentials.
 - Only explicitly authorized CI / release workflows or designated engineering agents can execute `celld deploy`.
+
+---
+
+## 6a. Editorial Chaining (What the Event Graph Wires)
+
+The editorial agents chain through [`packs/editorial/edges.json`](../packs/editorial/edges.json)
+on their `outcome` (or, for the reviewer, `verdict`) field:
+
+| Source                   | Value             | Chains to                                               |
+| :----------------------- | :---------------- | :------------------------------------------------------ |
+| `editorial-topic-scan@1` | `TOPICS_PROPOSED` | one `editorial.research.requested` per claimed topic    |
+| `editorial-research@1`   | `RESEARCHED`      | `editorial.draft.requested`                             |
+| `editorial-draft@1`      | `DRAFTED`         | `editorial.review.requested`                            |
+| `editorial-review@1`     | `REVISE`          | `editorial.draft.requested` (redraft with instructions) |
+
+`APPROVE` and `NEEDS_HUMAN` deliberately have **no** outgoing edge. Approving a
+specific revision hash for publication is an operator act against the
+`ArticleCell` (`POST /v1/approvals`), and publication is recorded by the CMS
+adapter (`POST /v1/publication-receipt`) — neither is chained automatically.
 
 ---
 
@@ -169,6 +202,13 @@ Under no circumstances should automated tests touch live production `celld` or r
 ---
 
 ## 8. Production Network & Security Topology
+
+> **Bearer secret (spike stop-gap).** Every request except `GET /health` must
+> carry `Authorization: Bearer $CELL_AUTH_TOKEN`. The ingress router fails
+> closed when the secret is unset, so an unconfigured worker refuses all
+> traffic. This is a shared secret, not an authentication system: no per-caller
+> identity, no rotation, no per-cell authorization. The worker must not be
+> deployed beyond the loopback/tailnet spike until real auth lands.
 
 - **Private Tailnet Binding:** The `celld` daemon on `runner` binds exclusively to `100.74.142.98:8080` (with internal peer listen on `:8081`).
 - **Unproxied DNS Pointer:** `cells.servers.hdkiller.com` $\rightarrow$ `100.74.142.98` (Cloudflare DNS-only / Grey Cloud).

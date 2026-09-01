@@ -703,6 +703,9 @@ export function createWorkspace({
       sizeBytes: Buffer.byteLength(cellsGuide),
     });
   }
+  // Declared artifact inputs (§7 `artifacts`, OPS-372): the spec names hashes,
+  // the provider writes bytes, the agent reads files. An agent can never ask
+  // the store for something the spec did not declare.
   let total = 0;
   if (workspace.type === "artifacts") {
     for (const entry of workspace.inputs ?? []) {

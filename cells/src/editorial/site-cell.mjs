@@ -296,12 +296,10 @@ export class SiteCell extends GenericCell {
         },
       );
     } catch (err) {
+      // Log the stack locally; never leak it to the caller.
+      console.error("[site-cell] unhandled error", err);
       return new Response(
-        JSON.stringify({
-          error: "internal_error",
-          message: err.message,
-          stack: err.stack,
-        }),
+        JSON.stringify({ error: "internal_error", message: err.message }),
         {
           status: 500,
           headers: { "Content-Type": "application/json" },
