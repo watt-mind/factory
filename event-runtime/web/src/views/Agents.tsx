@@ -174,7 +174,12 @@ const AGENTS_DISPLAY: DisplayConfig<AgentDef> = {
   subGroups: ["pack", "adapter", "tier", "contract"],
   sorts: [
     { key: "ref", label: "Ref", get: (a) => a.ref, column: "ref" },
-    { key: "pack", label: "Pack", get: (a) => a.pack ?? "core", column: "pack" },
+    {
+      key: "pack",
+      label: "Pack",
+      get: (a) => a.pack ?? "core",
+      column: "pack",
+    },
     {
       key: "contract",
       label: "Contract",
@@ -823,7 +828,8 @@ export function Agents({
                           <span
                             className="rounded px-1.5 py-0.5 text-[10px] font-sans font-medium"
                             style={{
-                              background: "color-mix(in oklch, var(--accent) 12%, transparent)",
+                              background:
+                                "color-mix(in oklch, var(--accent) 12%, transparent)",
                               color: "var(--accent)",
                             }}
                           >
@@ -840,8 +846,12 @@ export function Agents({
                         <span
                           className="rounded px-1.5 py-0.5 text-[11px] font-medium"
                           style={{
-                            background: a.pack ? "color-mix(in oklch, var(--accent) 10%, var(--surface-1))" : "var(--surface-1)",
-                            color: a.pack ? "var(--accent)" : "var(--text-faint)",
+                            background: a.pack
+                              ? "color-mix(in oklch, var(--accent) 10%, var(--surface-1))"
+                              : "var(--surface-1)",
+                            color: a.pack
+                              ? "var(--accent)"
+                              : "var(--text-faint)",
                           }}
                         >
                           {a.pack ?? "core"}

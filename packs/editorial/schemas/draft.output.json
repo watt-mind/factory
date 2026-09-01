@@ -1,7 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["articleId", "title", "slug", "revisionHash", "revisionNumber", "wordCount", "cellVersion"],
+  "required": [
+    "articleId",
+    "title",
+    "slug",
+    "revisionHash",
+    "revisionNumber",
+    "wordCount",
+    "cellVersion"
+  ],
   "properties": {
     "articleId": { "type": "string" },
     "title": { "type": "string" },

@@ -10,7 +10,7 @@ export class CellRouter {
     this.routes.push({
       prefix,
       bindingName,
-      test: test || (cellId => cellId.startsWith(prefix))
+      test: test || ((cellId) => cellId.startsWith(prefix)),
     });
     return this;
   }
@@ -20,7 +20,8 @@ export class CellRouter {
 
     // Header override
     if (cellTypeHeader === "site") return env.SITE_CELL || env.GENERIC_CELL;
-    if (cellTypeHeader === "article") return env.ARTICLE_CELL || env.GENERIC_CELL;
+    if (cellTypeHeader === "article")
+      return env.ARTICLE_CELL || env.GENERIC_CELL;
     if (cellTypeHeader === "generic") return env.GENERIC_CELL;
 
     // Route matching
@@ -37,14 +38,17 @@ export class CellRouter {
     const url = new URL(request.url);
 
     if (url.pathname === "/health" || url.pathname === "/") {
-      return new Response(JSON.stringify({
-        status: "healthy",
-        service: "factory-cells",
-        routesCount: this.routes.length
-      }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" }
-      });
+      return new Response(
+        JSON.stringify({
+          status: "healthy",
+          service: "factory-cells",
+          routesCount: this.routes.length,
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
     }
 
     let cellId = request.headers.get("X-Cell-Id");
@@ -58,25 +62,32 @@ export class CellRouter {
     }
 
     if (!cellId) {
-      return new Response(JSON.stringify({
-        error: "missing_cell_id",
-        message: "Request must specify X-Cell-Id header or /cells/:cellId/ path"
-      }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" }
-      });
+      return new Response(
+        JSON.stringify({
+          error: "missing_cell_id",
+          message:
+            "Request must specify X-Cell-Id header or /cells/:cellId/ path",
+        }),
+        {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
     }
 
     const targetBinding = this.resolveBinding(cellId, env, request);
 
     if (!targetBinding) {
-      return new Response(JSON.stringify({
-        error: "binding_not_found",
-        message: "Target Durable Object binding is not configured"
-      }), {
-        status: 500,
-        headers: { "Content-Type": "application/json" }
-      });
+      return new Response(
+        JSON.stringify({
+          error: "binding_not_found",
+          message: "Target Durable Object binding is not configured",
+        }),
+        {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
     }
 
     const doId = targetBinding.idFromName(cellId);

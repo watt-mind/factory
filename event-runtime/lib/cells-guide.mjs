@@ -6,8 +6,14 @@ export function renderCellsGuide({ cells = [], cellEndpoint = null } = {}) {
 
   let cellBindingsSection = "";
   if (cells.length > 0) {
-    cellBindingsSection = `## Declared Cell Capabilities\n\n` +
-      cells.map(c => `- **Binding:** \`${c.binding}\` | **Access:** \`${c.access || "data-only"}\` | **Description:** ${c.description || "N/A"}`).join("\n") +
+    cellBindingsSection =
+      `## Declared Cell Capabilities\n\n` +
+      cells
+        .map(
+          (c) =>
+            `- **Binding:** \`${c.binding}\` | **Access:** \`${c.access || "data-only"}\` | **Description:** ${c.description || "N/A"}`,
+        )
+        .join("\n") +
       "\n\n";
   }
 

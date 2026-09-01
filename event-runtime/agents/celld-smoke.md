@@ -1,6 +1,7 @@
 # celld-smoke — smoke agent for celld Durable Objects runtime
 
 `./input.json` provides:
+
 - `cellId`: The target cell identifier.
 - `endpoint`: celld HTTP/RPC endpoint (defaults to `http://127.0.0.1:9876`).
 - `testKey`: Entity ID key to persist under collection `smoke_tests`.

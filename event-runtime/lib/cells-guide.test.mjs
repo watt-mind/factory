@@ -11,13 +11,15 @@ describe("Capability-Gated Cell Guide Injection (CELLS.md)", () => {
         {
           binding: "ARTICLE_CELL",
           access: "data-only",
-          description: "Article sources and drafts"
-        }
+          description: "Article sources and drafts",
+        },
       ],
-      cellEndpoint: "http://100.74.142.98:8080"
+      cellEndpoint: "http://100.74.142.98:8080",
     });
 
-    expect(guide).toContain("# Cells & Durable Objects Interaction Guide (CELLS.md)");
+    expect(guide).toContain(
+      "# Cells & Durable Objects Interaction Guide (CELLS.md)",
+    );
     expect(guide).toContain("`ARTICLE_CELL`");
     expect(guide).toContain("data-only");
     expect(guide).toContain("http://100.74.142.98:8080");
@@ -36,11 +38,11 @@ describe("Capability-Gated Cell Guide Injection (CELLS.md)", () => {
       attempt: 1,
       input: {
         cellEndpoint: "http://100.74.142.98:8080",
-        articleId: "editorial:article:coachwatts.com:test-001"
+        articleId: "editorial:article:coachwatts.com:test-001",
       },
       capabilities: {
-        cells: [{ binding: "ARTICLE_CELL", access: "data-only" }]
-      }
+        cells: [{ binding: "ARTICLE_CELL", access: "data-only" }],
+      },
     });
 
     const cellsMdPath = path.join(wsWithCells.dir, "CELLS.md");
@@ -55,7 +57,7 @@ describe("Capability-Gated Cell Guide Injection (CELLS.md)", () => {
       runId: "run-no-cell-test",
       attempt: 1,
       input: { ticket: "OPS-123" },
-      capabilities: { cells: [] }
+      capabilities: { cells: [] },
     });
 
     const noCellsMdPath = path.join(wsWithoutCells.dir, "CELLS.md");

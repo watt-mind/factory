@@ -698,7 +698,10 @@ export function createWorkspace({
       cellEndpoint: input?.cellEndpoint,
     });
     writeFileSync(path.join(dir, "CELLS.md"), cellsGuide, "utf8");
-    materialized.push({ as: "CELLS.md", sizeBytes: Buffer.byteLength(cellsGuide) });
+    materialized.push({
+      as: "CELLS.md",
+      sizeBytes: Buffer.byteLength(cellsGuide),
+    });
   }
   let total = 0;
   if (workspace.type === "artifacts") {

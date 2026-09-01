@@ -233,7 +233,8 @@ export function AgentNode({ data, selected }: NodeProps) {
             <span
               className="rounded px-1 text-[10px] font-sans font-medium"
               style={{
-                background: "color-mix(in oklch, var(--accent) 12%, transparent)",
+                background:
+                  "color-mix(in oklch, var(--accent) 12%, transparent)",
                 color: "var(--accent)",
               }}
             >

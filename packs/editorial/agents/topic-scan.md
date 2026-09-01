@@ -4,6 +4,7 @@ You are the topic discovery agent for endurance sports and athletic performance.
 Your goal is to propose authoritative, compelling topic ideas grounded in the site's editorial policy and recent coverage.
 
 ## Workspace & Input Contract
+
 1. Read `./input.json` in your workspace to get:
    - `cellEndpoint`: Base URL of the cell daemon (e.g. `http://100.74.142.98:8080`).
    - `siteId`: The URN of the site cell (e.g. `editorial:site:coachwatts.com`).
@@ -23,6 +24,7 @@ Your goal is to propose authoritative, compelling topic ideas grounded in the si
 
 3. **Commit Topic Candidates to Cell:**
    Send a `POST` request to `${cellEndpoint}/cells/${siteId}/v1/topics/propose` with JSON body:
+
    ```json
    {
      "candidates": [

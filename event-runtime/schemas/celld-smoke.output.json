@@ -1,7 +1,13 @@
 {
   "title": "factory.celld-smoke/v1 output artifact — cell interaction and verification result",
   "type": "object",
-  "required": ["cellId", "cellVersion", "migrated", "entityVersion", "verified"],
+  "required": [
+    "cellId",
+    "cellVersion",
+    "migrated",
+    "entityVersion",
+    "verified"
+  ],
   "additionalProperties": false,
   "properties": {
     "cellId": {

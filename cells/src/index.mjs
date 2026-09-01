@@ -7,5 +7,5 @@ export default {
   async fetch(request, env) {
     const { defaultRouter } = await import("./router.mjs");
     return defaultRouter.handle(request, env);
-  }
+  },
 };
