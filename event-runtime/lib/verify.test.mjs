@@ -499,6 +499,7 @@ describe("verifyResult", () => {
     symlinkSync(checkout, path.join(workspaceDir, "repo"), "dir");
     // The first candidate probed is <checkout>/result.json; a truncated file
     // there must not be destroyed, and must not stop the sibling lookup.
+    execFileSync("git", ["init", "--quiet", checkout]);
     const truncatedPath = path.join(checkout, "result.json");
     writeFileSync(truncatedPath, '{"schemaVersion": "factory.age', "utf8");
     const strayPath = path.join(physicalParent, "result.json");
@@ -581,9 +582,49 @@ describe("verifyResult", () => {
     ]);
   });
 
+  test("fails closed when the tracked check cannot answer (#2172)", () => {
+    // The checkout is not a git repository, so `git ls-files` exits 128
+    // rather than the definitive 1. An ambiguous git failure must never let
+    // the candidate be adopted and deleted: the file stays untouched.
+    const workspaceDir = tmpDir("evrt-verify-workspace-");
+    const physicalParent = tmpDir("evrt-verify-checkout-parent-");
+    const checkout = path.join(physicalParent, "checkout");
+    mkdirSync(checkout);
+    symlinkSync(checkout, path.join(workspaceDir, "repo"), "dir");
+    const candidatePath = path.join(checkout, "result.json");
+    const candidate = JSON.stringify({
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      artifact: VALID_ARTIFACT,
+    });
+    writeFileSync(candidatePath, candidate, "utf8");
+
+    try {
+      verifyResult({
+        spec: makeSpec(),
+        def,
+        registry,
+        workspaceDir,
+        worktreeRecord: { path: checkout },
+        attempt: 1,
+        attemptStartedAt: new Date(Date.now() - 5_000).toISOString(),
+      });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.violations).toEqual(["missing_result"]);
+      expect(err.missingResultPaths).toEqual([
+        { path: candidatePath, skipped: "tracked_in_checkout" },
+      ]);
+    }
+    expect(existsSync(candidatePath)).toBe(true);
+    expect(readFileSync(candidatePath, "utf8")).toBe(candidate);
+  });
+
   test("probes the checkout handed over separately from the worktree record", () => {
     const workspaceDir = tmpDir("evrt-verify-workspace-");
     const checkout = tmpDir("evrt-verify-checkout-");
+    execFileSync("git", ["init", "--quiet", checkout]);
     const strayPath = path.join(checkout, "result.json");
     writeFileSync(
       strayPath,
@@ -615,6 +656,7 @@ describe("verifyResult", () => {
   test("rejects a stale stray result from before this attempt", () => {
     const workspaceDir = tmpDir("evrt-verify-workspace-");
     const checkout = tmpDir("evrt-verify-checkout-");
+    execFileSync("git", ["init", "--quiet", checkout]);
     const strayPath = path.join(checkout, "result.json");
     writeFileSync(
       strayPath,
