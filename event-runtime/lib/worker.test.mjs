@@ -95,6 +95,7 @@ import {
   escalationHandoffFailure,
   createReloadWatcher,
   DEFAULT_MAX_ENVIRONMENT_RETRIES,
+  defaultBlockBaselineTicket,
   defaultFindWorkspacePullRequest,
   defaultLocksDir,
   defaultMarkHandoffPullRequestReady,
@@ -7103,6 +7104,108 @@ sh -c 'sleep 5 & wait'
     expect(capturedReadOnlyEnv.SSH_AUTH_SOCK).toBeUndefined();
     expect(capturedReadOnlyEnv.GITHUB_TOKEN).toBeUndefined();
     expect(capturedReadOnlyEnv.ANTHROPIC_API_KEY).toBeUndefined();
+  });
+
+  describe("Linear-plane tracker state mutations (#2165)", () => {
+    const repo = "linear-plane-repo";
+
+    test("unclaim sends its state transition to the injected repo", () => {
+      const calls = [];
+      expect(
+        defaultUnclaimTicket({
+          repo,
+          ticket: "WM-2165",
+          why: "test",
+          fetchTicket: () => ({
+            state: { name: "In Progress" },
+            labels: [{ name: "ai:in-progress" }],
+          }),
+          runCli: (args, options) => calls.push({ args, options }),
+        }),
+      ).toBe(true);
+
+      expect(calls.find(({ args }) => args[0] === "state")?.options).toEqual({
+        repo,
+      });
+    });
+
+    test("handoff return passes repo to its ticket read and state transition", () => {
+      const calls = [];
+      const fetchCalls = [];
+      expect(
+        defaultReturnHandoffTicket({
+          repo,
+          ticket: "WM-2165",
+          body: "returning ticket",
+          fetchTicket: (...args) => {
+            fetchCalls.push(args);
+            return { state: { name: "In Review" } };
+          },
+          runCli: (args, options) => calls.push({ args, options }),
+        }),
+      ).toMatchObject({ ok: true, agentReadyRestored: true });
+
+      expect(fetchCalls).toEqual([["WM-2165", repo]]);
+      expect(calls.find(({ args }) => args[0] === "state")?.options).toEqual({
+        repo,
+      });
+    });
+
+    test("handoff return preserves repo through its split state retry", () => {
+      const calls = [];
+      expect(
+        defaultReturnHandoffTicket({
+          repo,
+          ticket: "WM-2165",
+          body: "returning ticket",
+          fetchTicket: () => ({ state: { name: "In Review" } }),
+          runCli: (args, options) => {
+            calls.push({ args, options });
+            if (calls.length === 1) throw new Error("combined label failure");
+          },
+        }),
+      ).toMatchObject({ ok: true, agentReadyRestored: true });
+
+      expect(calls.filter(({ args }) => args[0] === "state")).toHaveLength(2);
+      expect(
+        calls
+          .filter(({ args }) => args[0] === "state")
+          .map(({ options }) => options),
+      ).toEqual([{ repo }, { repo }]);
+    });
+
+    test("baseline block sends its state transition to the injected repo", () => {
+      const calls = [];
+      expect(
+        defaultBlockBaselineTicket({
+          repo,
+          ticket: "WM-2165",
+          why: "baseline failed",
+          fetchTicket: () => ({
+            state: { name: "In Progress" },
+            labels: [{ name: "ai:in-progress" }],
+          }),
+          hasRecordedBaselineFailure: () => true,
+          runCli: (args, options) => calls.push({ args, options }),
+        }),
+      ).toBe(true);
+
+      expect(calls).toEqual([
+        {
+          args: [
+            "state",
+            "WM-2165",
+            "Blocked",
+            "--unassign",
+            "--add",
+            "ai:blocked",
+            "--remove",
+            "ai:in-progress",
+          ],
+          options: { repo },
+        },
+      ]);
+    });
   });
 
   describe("defaultReconcileVerifiedHandoffTicket (#1498)", () => {

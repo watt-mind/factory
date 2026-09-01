@@ -3042,14 +3042,17 @@ export function defaultUnclaimTicket({
       Array.isArray(cur.labels) ? cur.labels : (cur.labels?.nodes ?? [])
     ).map((l) => l.name);
     const { add, remove } = releaseLabels(currentNames, { to: "Todo" });
-    runCli([
-      "state",
-      ticket,
-      "Todo",
-      "--unassign",
-      ...add.flatMap((n) => ["--add", n]),
-      ...remove.flatMap((n) => ["--remove", n]),
-    ]);
+    runCli(
+      [
+        "state",
+        ticket,
+        "Todo",
+        "--unassign",
+        ...add.flatMap((n) => ["--add", n]),
+        ...remove.flatMap((n) => ["--remove", n]),
+      ],
+      { repo },
+    );
     const body = `Dispatch run failed, claim released back to Todo + ai:agent-ready.\n\n**Why:** ${why}${log ? `\n**Log:** \`${log.replace(homedir(), "~")}\`` : ""}`;
     runCli(["comment", ticket, body], { repo });
     return true;
@@ -3155,8 +3158,8 @@ export function defaultReturnHandoffTicket({
   try {
     const cur =
       typeof fetchTicket === "function"
-        ? fetchTicket(ticket)
-        : defaultFetchTicket(ticket);
+        ? fetchTicket(ticket, repo)
+        : defaultFetchTicket(ticket, repo);
     const state = cur?.state?.name;
     if (!cur || !["In Progress", "In Review"].includes(state)) return false;
     const args = [
@@ -3174,7 +3177,7 @@ export function defaultReturnHandoffTicket({
     let agentReadyRestored = true;
     let labelWarning = null;
     try {
-      runCli(args);
+      runCli(args, { repo });
     } catch {
       // `--add ai:agent-ready` can fail independently of the state move
       // (e.g. the Owned Paths closure check re-running on `--add`). Retry as
@@ -3184,6 +3187,7 @@ export function defaultReturnHandoffTicket({
       // dispatchable again.
       runCli(
         args.filter((a, i) => !(a === "--add" || args[i - 1] === "--add")),
+        { repo },
       );
       try {
         runCli(["labels", ticket, "--add", "ai:agent-ready"], { repo });
@@ -3547,13 +3551,15 @@ function hasRecordedBaselineFailureComment(ticket, signature, repo) {
   }
 }
 
-function defaultBlockBaselineTicket({
+export function defaultBlockBaselineTicket({
   repo,
   ticket,
   why,
   log = null,
   baseline = null,
   fetchTicket,
+  runCli = runLinearCli,
+  hasRecordedBaselineFailure = hasRecordedBaselineFailureComment,
 }) {
   try {
     let cur = null;
@@ -3571,22 +3577,25 @@ function defaultBlockBaselineTicket({
       return false;
 
     const signature = baselineFailureSignature({ why, log, baseline });
-    runLinearCli([
-      "state",
-      ticket,
-      "Blocked",
-      "--unassign",
-      "--add",
-      "ai:blocked",
-      "--remove",
-      "ai:in-progress",
-    ]);
+    runCli(
+      [
+        "state",
+        ticket,
+        "Blocked",
+        "--unassign",
+        "--add",
+        "ai:blocked",
+        "--remove",
+        "ai:in-progress",
+      ],
+      { repo },
+    );
 
-    if (!hasRecordedBaselineFailureComment(ticket, signature, repo)) {
+    if (!hasRecordedBaselineFailure(ticket, signature, repo)) {
       const marker = `${BASELINE_COMMENT_MARKER}${signature}`;
       const body = `Dispatch run blocked due pre-existing baseline red.\n\n**Why:** ${why}${log ? `\n**Log:** \`${log.replace(homedir(), "~")}\`` : ""}\n\n
 <!-- ${marker} -->`;
-      runLinearCli(["comment", ticket, body], { repo });
+      runCli(["comment", ticket, body], { repo });
     }
     return true;
   } catch {
