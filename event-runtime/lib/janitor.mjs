@@ -125,8 +125,7 @@ function expiredProposedRunIds(db, now) {
         proposal.status === "open" && !isProposalExpired(proposal, now),
     )
       ? []
-      : proposals.length === 0 &&
-          !isProposalLessRunExpired(createdAt, now)
+      : proposals.length === 0 && !isProposalLessRunExpired(createdAt, now)
         ? []
         : [runId],
   );
