@@ -417,6 +417,52 @@ else
   fi
 fi
 
+# ------------------------------------------------- repo verify baseline ---
+# gh-2167: the handoff gate's red-baseline absorber is keyed on a recorded
+# baseline, but web_build was the only check that ever recorded one — so a
+# repo-verify suite that is already red (or flaky under host load) at the base
+# commit was charged to whichever branch happened to be in flight. Recording
+# the repo verify command's result here gives the absorber a real baseline
+# instead of only the on-failure merge-base re-run.
+#
+# Off by default: the command is the full local gate (~70-90s on this host) and
+# every dispatch pays it. Set FACTORY_WORKTREE_BASELINE_VERIFY=1 to record it.
+# Only a tree that still sits exactly at the base commit is a valid baseline —
+# a resumed branch with its own commits is not the base, and its failures are
+# the branch's to answer for.
+if [[ "${FACTORY_WORKTREE_BASELINE_VERIFY:-0}" == "1" && ! -f "$BASELINE_REPORT" ]]; then
+  VERIFY_COMMAND="${FACTORY_WORKTREE_VERIFY_COMMAND:-$(
+    bun -e '
+      const [repoPath] = process.argv.slice(1);
+      try {
+        const { findRepoForPath, loadRepos } = await import(
+          `${repoPath}/event-runtime/lib/repos.mjs`
+        );
+        const repo = findRepoForPath(loadRepos(), repoPath);
+        process.stdout.write(repo?.verify ?? "");
+      } catch {
+        process.stdout.write("");
+      }
+    ' -- "$REPO" 2>/dev/null || true
+  )}"
+  AHEAD_OF_BASE="$(git -C "$WT" rev-list --count "origin/$BASE_BRANCH..HEAD" 2>/dev/null || echo 1)"
+  if [[ -z "$VERIFY_COMMAND" ]]; then
+    warn "no repo verify command resolved — skipping the repo_verify baseline"
+  elif [[ "$AHEAD_OF_BASE" != "0" ]]; then
+    info "worktree is ahead of origin/$BASE_BRANCH — skipping the repo_verify baseline"
+  else
+    info "recording the repo_verify baseline at origin/$BASE_BRANCH"
+    VERIFY_BASELINE_OUTPUT="$RUN_DIR/baseline-repo-verify.log"
+    if (cd "$WT" && eval "$VERIFY_COMMAND" >"$VERIFY_BASELINE_OUTPUT" 2>&1); then
+      rm -f "$VERIFY_BASELINE_OUTPUT"
+    else
+      verify_status=$?
+      warn "baseline is red: repo_verify failed (exit $verify_status) — continuing with the usable worktree"
+      record_red_baseline "repo_verify" "$VERIFY_COMMAND" "$verify_status" "$VERIFY_BASELINE_OUTPUT"
+    fi
+  fi
+fi
+
 WEB_AVAILABLE=1
 if [[ -f "$BASELINE_REPORT" && ! -f "$WEB_DIR/dist/index.html" ]]; then
   WEB_AVAILABLE=0

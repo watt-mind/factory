@@ -1006,7 +1006,7 @@ describe("worktree baseline verification (WM-334)", () => {
     }
   });
 
-  test("a recorded test baseline survives additional branch test output", () => {
+  test("a recorded test baseline does not absorb an additional branch-only failure", () => {
     const baselineOutput = [
       "event-runtime/lib/worker.test.mjs:",
       "(fail) worker > pre-existing flaky probe",
@@ -1027,7 +1027,58 @@ describe("worktree baseline verification (WM-334)", () => {
       throw new Error("expected ContractViolation");
     } catch (err) {
       expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.reasonCode).toBe("handoff_verification_failed");
+    }
+  });
+
+  test("a recorded test baseline still absorbs a branch that fixed some of its failures", () => {
+    const baselineOutput = [
+      "event-runtime/lib/worker.test.mjs:",
+      "(fail) worker > pre-existing flaky probe",
+      "(fail) worker > second pre-existing probe",
+    ].join("\n");
+    const { dir, record } = worktreeWorkspace(
+      `printf '%s\\n' 'event-runtime/lib/worker.test.mjs:' '(fail) worker > pre-existing flaky probe' >&2; exit 9`,
+      { status: "red", check: "repo_verify", output: baselineOutput },
+    );
+    try {
+      verifyResult({
+        spec: dispatchSpec,
+        def: dispatchDef,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+        worktreeRecord: record,
+      });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
       expect(err.reasonCode).toBe("baseline_red");
+    }
+  });
+
+  test("a truncated failing-test list is never absorbed by a recorded baseline", () => {
+    const names = Array.from({ length: 25 }, (_, i) => `probe ${i}`);
+    const lines = ["event-runtime/lib/worker.test.mjs:"].concat(
+      names.map((name) => `(fail) worker > ${name}`),
+    );
+    const { dir, record } = worktreeWorkspace(
+      `printf '%s\\n' ${lines.map((line) => `'${line}'`).join(" ")} >&2; exit 9`,
+      { status: "red", check: "repo_verify", output: lines.join("\n") },
+    );
+    try {
+      verifyResult({
+        spec: dispatchSpec,
+        def: dispatchDef,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+        worktreeRecord: record,
+      });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.reasonCode).toBe("handoff_verification_failed");
     }
   });
 
@@ -1133,6 +1184,38 @@ describe("worktree baseline verification (WM-334)", () => {
     expect(calls).toHaveLength(2);
     expect(calls[0].cwd).toBe(record.path);
     expect(calls[1].cwd).not.toBe(record.path);
+  });
+
+  test("a truncated merge-base failing-test list is not absorbed as baseline_red", () => {
+    const { dir, record } = worktreeWorkspace("repo-verify", null);
+    record.handoff = { verificationCommand: "ticket-narrow" };
+    commitHandoffDiff(record, "docs/note.md");
+    const output = ["event-runtime/lib/worker.test.mjs:"]
+      .concat(
+        Array.from({ length: 25 }, (_, i) => `(fail) worker > probe ${i}`),
+      )
+      .join("\n");
+
+    try {
+      verifyResult({
+        spec: dispatchSpec,
+        def: dispatchDef,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+        worktreeRecord: record,
+        runHandoffCommandFn: () => ({
+          passed: false,
+          exitCode: 1,
+          output,
+          sandbox: { tmpfsMb: 1024 },
+        }),
+      });
+      throw new Error("expected ContractViolation");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ContractViolation);
+      expect(err.reasonCode).toBe("handoff_verification_failed");
+    }
   });
 
   test("does not retry a repo verify failure from a changed test file", () => {

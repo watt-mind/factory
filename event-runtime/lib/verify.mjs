@@ -21,6 +21,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1202,19 +1203,26 @@ function failureSignature(output) {
 
 /**
  * Conservative evidence that post-agent verification hit the recorded red baseline.
- * Test failures are compared by name, so an unchanged red suite remains absorbed
- * when the branch adds another test to its output. Non-test failures retain exact
- * normalized-signature matching because there is no narrower stable identity.
+ * Test failures are compared by name in the fail-closed direction: every failure
+ * observed on the branch must also have failed at the recorded baseline, so a
+ * branch that *adds* a failure is never absorbed. A branch that fixes some of the
+ * baseline's failures still lands, because absorption only needs its remaining
+ * failures to be a subset. Non-test failures retain exact normalized-signature
+ * matching because there is no narrower stable identity.
  */
 function matchesRedBaseline(baseline, verifyOutput) {
   if (baseline?.status !== "red") return false;
   const baselineTests = repoVerifyFailingTests(baseline.output);
   const verifyTests = repoVerifyFailingTests(verifyOutput);
   if (baselineTests.length > 0 || verifyTests.length > 0) {
+    // A truncated list is not a complete failure set; containment over it could
+    // absorb a branch-introduced failure that fell past the cap.
+    if (isTruncatedTestList(baselineTests) || isTruncatedTestList(verifyTests))
+      return false;
     return (
       baselineTests.length > 0 &&
       verifyTests.length > 0 &&
-      baselineTests.every((testName) => verifyTests.includes(testName))
+      verifyTests.every((testName) => baselineTests.includes(testName))
     );
   }
   const baselineSig = failureSignature(baseline.output);
@@ -1265,11 +1273,30 @@ export function repoVerifyFailingTests(output) {
   return shown;
 }
 
+// The sentinel repoVerifyFailingTests appends once it caps the list. Any set
+// comparison over a truncated list is unsound in both directions, so both
+// absorption paths refuse rather than guess at the names they cannot see.
+const REPO_VERIFY_TRUNCATION_SENTINEL = /^…and \d+ more$/;
+
+/** True when a failing-test list was capped and is therefore incomplete. */
+export function isTruncatedTestList(names) {
+  return (
+    Array.isArray(names) &&
+    names.some(
+      (name) =>
+        typeof name === "string" && REPO_VERIFY_TRUNCATION_SENTINEL.test(name),
+    )
+  );
+}
+
 // Bun prints a source-file heading before the tests it reports from that file.
 // Keep this deliberately narrow: an unrecognised runner format is ambiguous and
 // must not trigger the branch-external baseline retry.
+// The path is one flat character class (no nested quantifier over a group) so
+// the match stays linear on adversarial input — CodeQL flags the grouped form
+// as polynomial-backtracking ReDoS.
 const REPO_VERIFY_TEST_FILE_LINE =
-  /^\s*(?<path>(?:\.?\/?[\w@.-]+\/)*[\w@.-]+\.(?:test|spec)\.[cm]?[jt]sx?)\s*:\s*$/i;
+  /^\s*(?<path>[\w@./-]+\.(?:test|spec)\.[cm]?[jt]sx?)\s*:\s*$/i;
 
 /**
  * Return the runner-reported source files for failing tests, or null when a
@@ -1295,6 +1322,9 @@ export function repoVerifyFailingTestFiles(output) {
 }
 
 function sameFailingTestSet(left, right) {
+  // A capped list hides names, so equality over it would absorb a branch
+  // failure the cap swallowed. Truncation is ambiguous; ambiguous is fail-closed.
+  if (isTruncatedTestList(left) || isTruncatedTestList(right)) return false;
   return (
     left.length > 0 &&
     left.length === right.length &&
@@ -1343,10 +1373,17 @@ function runRepoVerifyBaseline({
       );
       const dependencies = path.join(worktreePath, "node_modules");
       if (existsSync(dependencies)) {
-        cpSync(dependencies, path.join(scratchPath, "node_modules"), {
-          recursive: true,
-          verbatimSymlinks: true,
-        });
+        const scratchDependencies = path.join(scratchPath, "node_modules");
+        // node_modules is multi-GB here; a symlink makes the scratch checkout
+        // free. Copy only where a link is not usable (e.g. no symlink support).
+        try {
+          symlinkSync(dependencies, scratchDependencies, "dir");
+        } catch {
+          cpSync(dependencies, scratchDependencies, {
+            recursive: true,
+            verbatimSymlinks: true,
+          });
+        }
       }
     } catch (err) {
       return {
