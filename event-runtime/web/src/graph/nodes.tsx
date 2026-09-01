@@ -231,7 +231,7 @@ export function AgentNode({ data, selected }: NodeProps) {
         <div className="flex items-center gap-1">
           {node.pack && (
             <span
-              className="rounded px-1 text-[10px] font-sans font-medium"
+              className="rounded px-1 text-[11px] font-sans font-medium"
               style={{
                 background:
                   "color-mix(in oklch, var(--accent) 12%, transparent)",

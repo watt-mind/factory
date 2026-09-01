@@ -826,7 +826,7 @@ export function Agents({
                         <span>{a.ref}</span>
                         {a.pack && (
                           <span
-                            className="rounded px-1.5 py-0.5 text-[10px] font-sans font-medium"
+                            className="rounded px-1.5 py-0.5 text-[11px] font-sans font-medium"
                             style={{
                               background:
                                 "color-mix(in oklch, var(--accent) 12%, transparent)",
