@@ -29,10 +29,13 @@ const TRIAGE_SCAN_OUTPUT_SCHEMA = JSON.parse(
 // all-or-nothing — the factory could not complete a ticket cleanly, and at
 // least one agent discarded a correct fix because of it.
 //
-// 20s is ~2x the observed cost. CI stretches this liveness ceiling with its
-// measured load factor, while a genuine wrong-edge hang still fails here (and,
-// failing that, at the load-adjusted test timeout). Rediscovered as WM-487,
-// WM-492, WM-499 and WM-90 before WM-503.
+// 20s is ~2x the observed cost. CI run 33558811006 (OPS-464) measured
+// 22,518ms against the unscaled 20s ceiling under self-hosted runner load.
+// Its timing-bound lane supplies CI_LOAD_FACTOR before this module loads, so
+// loadAdjustedTimeout keeps the 20s budget on an unloaded machine (factor 1)
+// while stretching only the contention ceiling. A genuine wrong-edge hang
+// still fails here (and, failing that, at the load-adjusted test timeout).
+// Rediscovered as WM-487, WM-492, WM-499 and WM-90 before WM-503.
 const SEED_TIMEOUT_MS = loadAdjustedTimeout(20_000);
 
 const redact = (text) =>
