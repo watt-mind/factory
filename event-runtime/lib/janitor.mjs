@@ -111,14 +111,12 @@ function expiredProposedRunIds(db, now) {
     proposalsByRun.set(row.proposed_run_id, proposals);
   }
   return [...proposalsByRun].flatMap(([runId, proposals]) =>
-    proposals.every(
+    proposals.some(
       (proposal) =>
-        proposal.status === "rejected" ||
-        proposal.status === "superseded" ||
-        isProposalExpired(proposal, now),
+        proposal.status === "open" && !isProposalExpired(proposal, now),
     )
-      ? [runId]
-      : [],
+      ? []
+      : [runId],
   );
 }
 

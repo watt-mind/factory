@@ -302,7 +302,7 @@ describe("terminal row retention (#1065)", () => {
     }
   });
 
-  test("terminalizes PROPOSED runs only after every proposal is expired or decided", () => {
+  test("terminalizes PROPOSED runs when no live proposal remains", () => {
     const root = tmpDir("evrt-proposed-rows-");
     const store = path.join(root, "artifacts");
     const db = openDb(path.join(root, "runtime.db"));
@@ -314,6 +314,8 @@ describe("terminal row retention (#1065)", () => {
         "run-expired",
         "run-rejected",
         "run-superseded",
+        "run-resolved-noop",
+        "run-expired-human-needed",
         "run-mixed",
         "run-open",
         "run-without-proposals",
@@ -329,6 +331,21 @@ describe("terminal row retention (#1065)", () => {
       insertProposal(db, "proposal-superseded", "superseded", fresh, 3600, {
         runId: "run-superseded",
       });
+      insertProposal(db, "proposal-resolved-noop", "resolved", fresh, 3600, {
+        runId: "run-resolved-noop",
+        decision: "noop",
+      });
+      insertProposal(
+        db,
+        "proposal-expired-human-needed",
+        "expired",
+        fresh,
+        3600,
+        {
+          runId: "run-expired-human-needed",
+          decision: "human_needed",
+        },
+      );
       insertProposal(db, "proposal-mixed-expired", "open", expired, 60, {
         runId: "run-mixed",
       });
@@ -340,13 +357,13 @@ describe("terminal row retention (#1065)", () => {
       });
 
       const dry = sweepRuntimeRetention(db, store, { now });
-      expect(dry.proposed).toEqual({ cancelled: 4, dryRun: true });
+      expect(dry.proposed).toEqual({ cancelled: 6, dryRun: true });
       expect(
         db.query(`SELECT COUNT(*) AS count FROM lifecycle_events`).get().count,
       ).toBe(0);
 
       const applied = sweepRuntimeRetention(db, store, { now, apply: true });
-      expect(applied.proposed).toEqual({ cancelled: 4, dryRun: false });
+      expect(applied.proposed).toEqual({ cancelled: 6, dryRun: false });
       expect(
         db.query(`SELECT state FROM runs WHERE run_id = 'run-expired'`).get()
           .state,
@@ -358,6 +375,18 @@ describe("terminal row retention (#1065)", () => {
       expect(
         db.query(`SELECT state FROM runs WHERE run_id = 'run-superseded'`).get()
           .state,
+      ).toBe("CANCELLED");
+      expect(
+        db
+          .query(`SELECT state FROM runs WHERE run_id = 'run-resolved-noop'`)
+          .get().state,
+      ).toBe("CANCELLED");
+      expect(
+        db
+          .query(
+            `SELECT state FROM runs WHERE run_id = 'run-expired-human-needed'`,
+          )
+          .get().state,
       ).toBe("CANCELLED");
       expect(
         db
