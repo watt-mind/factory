@@ -928,6 +928,20 @@ export const HANDOFF_FORGE_UNAVAILABLE = "handoff_forge_unavailable";
 /** Non-`ContractViolation` throw from `verifyResult` / `assertHandoffPullRequestBase`. */
 const VERIFICATION_INTERNAL_ERROR = "verification_internal_error";
 
+/** A zero-exit Pi run gets one chance to correct its own invalid envelope. */
+function mayRepairPiResult({ adapterKey, outcome, error }) {
+  return (
+    adapterKey === "pi" &&
+    outcome?.exitCode === 0 &&
+    outcome?.timedOut !== true &&
+    error instanceof ContractViolation &&
+    error.reasonCode === "contract_violation" &&
+    !error.handoff &&
+    Array.isArray(error.violations) &&
+    error.violations.length > 0
+  );
+}
+
 const ENVIRONMENT_FAILURES = new Set([
   "adapter_error",
   "lease_expired",
@@ -4960,6 +4974,7 @@ export async function executeClaimed(
     const workerControlToken =
       env.FACTORY_CONTROL_API_TOKEN ?? process.env.FACTORY_CONTROL_API_TOKEN;
     let outcome;
+    let adapterEnv;
     try {
       // Dispatch identity comes from the immutable RunSpec, never the ambient
       // worker environment. The adapter's child-environment builder preserves
@@ -4969,7 +4984,7 @@ export async function executeClaimed(
         if (dispatchEnv[key] === undefined && process.env[key] !== undefined)
           dispatchEnv[key] = process.env[key];
       }
-      const adapterEnv = dispatchIdentityEnv({
+      adapterEnv = dispatchIdentityEnv({
         spec,
         env: dispatchEnv,
         runId,
@@ -5354,6 +5369,60 @@ export async function executeClaimed(
             return failVerificationInternal(recoveryError);
           }
           activeError = recoveryError;
+        }
+      }
+      // Codex-tier Pi sessions have historically completed the ticket while
+      // writing an invented result shape. Give only that zero-exit, pre-handoff
+      // contract failure one bounded turn with the validator diagnostics; a
+      // handoff-gate failure must never be retried as an envelope repair.
+      if (mayRepairPiResult({ adapterKey, outcome, error: activeError })) {
+        try {
+          const repairOutcome = await adapter.execute({
+            spec:
+              executionInput === spec.input
+                ? spec
+                : { ...spec, input: executionInput },
+            def,
+            workspaceDir,
+            timeoutMs: adapterExecuteTimeoutMs({
+              adapterKey,
+              spec,
+              maxRunMinutes: policyMaxRunMinutes(policyRoot),
+            }),
+            env: adapterEnv,
+            onTrace,
+            onUsage,
+            resume: created.resume ?? null,
+            abortSignal: abortController.signal,
+            signal: abortController.signal,
+            resultRepair: { violations: activeError.violations },
+          });
+          if (repairOutcome?.exitCode === 0 && !repairOutcome?.timedOut) {
+            verified = verifyResultFn({
+              spec,
+              def,
+              registry,
+              workspaceDir,
+              attempt,
+              attemptStartedAt: started.startedAt,
+              extraArtifacts: RUNTIME_ARTIFACTS,
+              worktreeRecord,
+              onTrace,
+            });
+            if (verified.handoff && handoffPrNumber(verified.handoff)) {
+              assertHandoffPullRequestBase({
+                handoff: verified.handoff,
+                base: worktreeRecord?.base,
+                fetchPullRequest: fetchHandoffPullRequestFn,
+              });
+            }
+            break verificationAttempt;
+          }
+        } catch (repairError) {
+          if (!(repairError instanceof ContractViolation)) {
+            return failVerificationInternal(repairError);
+          }
+          activeError = repairError;
         }
       }
       if (activeError.reasonCode === HANDOFF_FORGE_UNAVAILABLE) {

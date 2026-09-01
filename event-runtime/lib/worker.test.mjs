@@ -2146,6 +2146,88 @@ sh -c 'sleep 5 & wait'
     );
   });
 
+  test("Pi retries each observed malformed result shape once with validator detail", async () => {
+    const malformed = [
+      { status: "completed", summary: "done", verification: {} },
+      {
+        ticket: "watt-mind/factory#1952",
+        repo: "factory",
+        outcome: "PR_OPEN",
+        summary: "real work completed",
+        prUrl: "https://github.com/watt-mind/factory/pull/1952",
+        branch: "feat/1952",
+        verification: {},
+      },
+      {
+        schemaVersion: "factory.agent-result/v1",
+        terminalState: "completed",
+        reasonCode: "ok",
+        artifact: {
+          repos: [
+            {
+              name: "factory",
+              triage: 0,
+              agentReady: 0,
+              inProgress: 0,
+              blocked: 0,
+            },
+          ],
+          recommendedAction: "wait",
+        },
+        verification: { ticketGate: "pass", repoGate: "pass" },
+        followUpIssue: "WM-2076",
+      },
+    ];
+
+    for (const candidate of malformed) {
+      const db = openDb(":memory:");
+      const spec = queueRun(db, makeSpec({ adapter: "pi" }));
+      const repairs = [];
+      const pi = {
+        async execute({ workspaceDir, resultRepair }) {
+          if (!resultRepair) {
+            writeFileSync(
+              path.join(workspaceDir, "result.json"),
+              JSON.stringify(candidate),
+            );
+          } else {
+            repairs.push(resultRepair);
+            writeFileSync(
+              path.join(workspaceDir, "result.json"),
+              JSON.stringify({
+                schemaVersion: "factory.agent-result/v1",
+                terminalState: "completed",
+                reasonCode: "ok",
+                artifact: {
+                  repos: [
+                    {
+                      name: "factory",
+                      triage: 0,
+                      agentReady: 0,
+                      inProgress: 0,
+                      blocked: 0,
+                    },
+                  ],
+                  recommendedAction: "wait",
+                },
+              }),
+            );
+          }
+          return { exitCode: 0, timedOut: false };
+        },
+      };
+
+      const summary = await runOnce(db, registry, { pi }, opts());
+      expect(summary).toMatchObject({ terminalState: "COMPLETED" });
+      expect(repairs).toHaveLength(1);
+      expect(repairs[0].violations.join("\n")).toMatch(
+        /\$|required|additional/,
+      );
+      expect(runState(db, spec.runId)).toBe("COMPLETED");
+      db.close();
+    }
+  });
+
   test("escape: artifact outside the workspace is a contract violation", async () => {
     const db = openDb(":memory:");
     const spec = queueRun(db, makeSpec({ input: { repos: ["escape"] } }));

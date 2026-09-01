@@ -123,6 +123,36 @@ export const SANDBOX_PROMPT_FILE = ".prompt.md";
 /** Terminate a detached CLI and every subprocess it started (WM-263). */
 export { killProcessGroup };
 
+/**
+ * Pi's Codex sessions need the envelope called out in their own prompt bytes,
+ * rather than relying on a reference to the shared Claude suffix.  Keep this
+ * independent of an individual output artifact: every agent result uses this
+ * wrapper while the registered output contract defines `artifact`.
+ */
+export const PI_RESULT_ENVELOPE_CONTRACT = `
+
+## Result envelope (required)
+
+Before finishing, write exactly one \`factory.agent-result/v1\` JSON envelope
+to \`$FACTORY_RESULT_PATH\` (or \`./result.json\` when it is unset). Its top
+level includes \`schemaVersion\`, \`terminalState\`, \`reasonCode\`, and
+\`artifact\`; add only optional fields allowed by the registered contract. Do
+not invent top-level fields. In particular,
+\`verification\` belongs inside the dispatch artifact and is exactly
+\`{ command, passed, output }\`; never write \`ticketGate\` or \`repoGate\`.
+`;
+
+function piPrompt(def, resultRepair = null) {
+  const base = verifiedPrompt(def, "pi") + PI_RESULT_ENVELOPE_CONTRACT;
+  if (!resultRepair?.violations?.length) return base;
+
+  const violations = resultRepair.violations
+    .slice(0, 16)
+    .map((violation) => `- ${String(violation).slice(0, 500)}`)
+    .join("\n");
+  return `${base}\n\n## Bounded result repair\nThe prior result.json was rejected by the validator. Do not repeat completed work or open another PR. Rewrite only the result envelope at the required path, using these validator errors verbatim:\n${violations}`;
+}
+
 /** Trace events preview text; the recorder's byte bound is the real limit. */
 const TEXT_PREVIEW_CHARS = 4000;
 
@@ -601,6 +631,7 @@ async function executeSandboxed({
   onUsage,
   transcriptMaxBytes: maxTranscriptBytes,
   resume,
+  resultRepair,
   abortSignal,
   runSandbox,
 }) {
@@ -616,7 +647,7 @@ async function executeSandboxed({
   // this preflight also covers injected VM runners used by tests and leaves
   // no stray prompt behind when the definition itself is invalid.
   normalizePolicy(def.sandbox, { workspaceDir });
-  const prompt = verifiedPrompt(def, "pi");
+  const prompt = piPrompt(def, resultRepair);
   writeFileSync(path.join(workspaceDir, SANDBOX_PROMPT_FILE), prompt, "utf8");
   const argv = [
     bin,
@@ -679,6 +710,7 @@ export async function execute({
   onTrace,
   onUsage,
   resume = null,
+  resultRepair = null,
   abortSignal,
   signal,
   runSandbox,
@@ -697,12 +729,13 @@ export async function execute({
       onUsage,
       transcriptMaxBytes: maxTranscriptBytes,
       resume,
+      resultRepair,
       abortSignal: abortSignal ?? signal,
       runSandbox,
     });
   }
 
-  const prompt = verifiedPrompt(def, "pi");
+  const prompt = piPrompt(def, resultRepair);
   // A remote worker can execute this checked-out adapter from a persistent
   // runner checkout, whose ignored config/ is intentionally absent. Preserve
   // the launching operator's root for the ticket CLI instead of replacing it
