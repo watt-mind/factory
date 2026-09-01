@@ -54,47 +54,69 @@ show_banner() {
 cmd="${1:-}"
 shift || true
 
-# Targeting is global so operators can place it before or after the event
-# command. Strip it before command-specific parsers see it, and use the
-# documented FACTORY_EVENT_HOST precedence for direct HTTP(S) destinations.
+# Remote control-API targeting (#2188). --host/--remote are recognised only for
+# the subcommands that speak to the control API, and only *after* the
+# subcommand — `factory status --host …`, never `factory --host … status`,
+# because $1 is consumed as the subcommand above. Every other subcommand keeps
+# its own flags untouched, notably `factory handoff --host <ssh-alias>` (#2191).
 control_target=""
 control_target_kind=""
-forwarded_args=()
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --host|--remote)
-      if [[ $# -lt 2 || -z "${2:-}" || "$2" == --* ]]; then
-        echo "$1 requires a URL, host, or SSH alias" >&2
-        exit 2
-      fi
-      control_target="$2"
-      control_target_kind="${1#--}"
-      shift 2
-      ;;
-    --host=*|--remote=*)
-      control_target="${1#*=}"
-      control_target_kind="${1%%=*}"
-      control_target_kind="${control_target_kind#--}"
-      if [[ -z "$control_target" ]]; then
-        echo "--${control_target_kind} requires a URL, host, or SSH alias" >&2
-        exit 2
-      fi
-      shift
-      ;;
-    *)
-      forwarded_args+=("$1")
-      shift
-      ;;
-  esac
-done
-set -- "${forwarded_args[@]}"
+case "$cmd" in
+  # Speaks to the control API and honours a remote target.
+  events|status|ps) control_target_supported=1 ;;
+  # Control-API commands that do not route through the targeted client yet.
+  # Rejecting is better than exporting an env these paths ignore (see #2190).
+  inbox|approve|reject|inject|decide|memos) control_target_supported=0 ;;
+  # Not a control-API command: leave argv alone.
+  *) control_target_supported="" ;;
+esac
+
+if [[ -n "$control_target_supported" ]]; then
+  forwarded_args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --host|--remote)
+        if [[ $# -lt 2 || -z "${2:-}" || "$2" == --* ]]; then
+          echo "$1 requires a URL, host, or SSH alias" >&2
+          exit 2
+        fi
+        control_target="$2"
+        control_target_kind="${1#--}"
+        shift 2
+        ;;
+      --host=*|--remote=*)
+        control_target="${1#*=}"
+        control_target_kind="${1%%=*}"
+        control_target_kind="${control_target_kind#--}"
+        if [[ -z "$control_target" ]]; then
+          echo "--${control_target_kind} requires a URL, host, or SSH alias" >&2
+          exit 2
+        fi
+        shift
+        ;;
+      *)
+        forwarded_args+=("$1")
+        shift
+        ;;
+    esac
+  done
+  set -- ${forwarded_args[@]+"${forwarded_args[@]}"}
+
+  if [[ -n "$control_target" && "$control_target_supported" -eq 0 ]]; then
+    echo "factory: remote targeting not yet supported for $cmd (see #2190)" >&2
+    exit 2
+  fi
+fi
 
 if [[ -n "$control_target" ]]; then
   # A bare --host value without a domain or port is an SSH alias. --remote is
   # explicitly a URL, so it always remains a direct control-API destination.
   if [[ "$control_target_kind" == "host" && "$control_target" != *://* && "$control_target" != *.* && "$control_target" != *:* && "$control_target" != */* && "$control_target" != "localhost" ]]; then
-    exec ssh "$control_target" factory "$cmd" "$@"
+    # Quote every word so remote argv survives the shell ssh runs it under, and
+    # so a value containing ;, $( ) or backticks cannot execute there.
+    exec ssh "$control_target" "$(printf '%q ' factory "$cmd" "$@")"
   fi
+  # The library never reads argv; the flag reaches it as the documented env.
   export FACTORY_EVENT_HOST="$control_target"
 fi
 
@@ -446,6 +468,11 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   notify        durable human inbox + notify.py projection (direct fallback when serve is offline or its push fails)
   security      lib/security-check.sh (gitleaks + semgrep + actionlint on cwd repo)
   emit          build/emit.mjs (--link --link-bin --link-repos when called bare)
+
+Remote targeting (#2188): events, status and ps accept --host/--remote after
+the subcommand. A bare --host alias is dispatched over ssh; a URL or host:port
+targets the control API directly. Plaintext http to a non-loopback host is
+refused (use https:// or FACTORY_CONTROL_API_ALLOW_INSECURE=1).
 
 Works from any cwd (worktrees included).
   factory notify "BLOCKED LAB-176: need approval"

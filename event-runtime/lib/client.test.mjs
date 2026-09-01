@@ -62,22 +62,21 @@ test("sends the bearer when a token is passed", async () => {
   expect(lastAuthorization).toBe(`Bearer ${TOKEN}`);
 });
 
-test("resolves a CLI target before environment, local config, and the loopback default", () => {
+test("an explicit target outranks environment and local config", () => {
   expect(
     resolveControlApiTarget({
-      args: ["runs", "--host", "https://flag.example.test/api"],
+      target: "https://flag.example.test/api",
       env: {
         FACTORY_EVENT_HOST: "env.example.test:7444",
         FACTORY_CONTROL_API_URL: "https://control.example.test",
-        FACTORY_EVENT_URL: "https://event.example.test",
       },
-      localConfig: { host: "config.example.test:7555" },
+      localConfig: { url: "https://config.example.test:7555" },
     }),
   ).toEqual({
     baseUrl: "https://flag.example.test/api",
     host: "flag.example.test",
     port: 443,
-    source: "flag",
+    source: "explicit",
   });
 });
 
@@ -86,6 +85,7 @@ test("normalizes a configured bare host and preserves its non-default port", () 
     resolveControlApiTarget({
       env: {},
       localConfig: { host: "runner.whale-pike.ts.net:7389" },
+      allowInsecure: true,
     }),
   ).toEqual({
     baseUrl: "http://runner.whale-pike.ts.net:7389",
@@ -96,35 +96,120 @@ test("normalizes a configured bare host and preserves its non-default port", () 
 });
 
 test("uses the documented environment order before local config", () => {
-  const localConfig = { host: "config.example.test:7555" };
+  const localConfig = { url: "https://config.example.test:7555" };
   expect(
     resolveControlApiTarget({
-      args: [],
       env: {
         FACTORY_EVENT_HOST: "event-host.example.test:7444",
         FACTORY_CONTROL_API_URL: "https://control-url.example.test",
-        FACTORY_EVENT_URL: "https://event-url.example.test",
       },
       localConfig,
+      allowInsecure: true,
     }).baseUrl,
   ).toBe("http://event-host.example.test:7444");
   expect(
     resolveControlApiTarget({
-      args: [],
-      env: {
-        FACTORY_CONTROL_API_URL: "https://control-url.example.test",
-        FACTORY_EVENT_URL: "https://event-url.example.test",
-      },
+      env: { FACTORY_CONTROL_API_URL: "https://control-url.example.test" },
       localConfig,
     }).baseUrl,
   ).toBe("https://control-url.example.test");
+  expect(resolveControlApiTarget({ env: {}, localConfig }).baseUrl).toBe(
+    "https://config.example.test:7555",
+  );
+});
+
+// FACTORY_EVENT_URL already names the handoff event URL (tools/handoff.mjs,
+// docs/remote-handoff.md). Honouring it here would silently redirect a handoff
+// operator's control bearer, so #2188's AC was narrowed to exclude it.
+test("ignores FACTORY_EVENT_URL — it belongs to remote handoff", () => {
   expect(
     resolveControlApiTarget({
-      args: [],
       env: { FACTORY_EVENT_URL: "https://event-url.example.test" },
-      localConfig,
+      localConfig: {},
+      defaultPort: 7381,
+    }),
+  ).toEqual({
+    baseUrl: "http://127.0.0.1:7381",
+    host: "127.0.0.1",
+    port: 7381,
+    source: "default",
+  });
+});
+
+test("refuses to send the bearer in plaintext to a non-loopback host", () => {
+  expect(() =>
+    resolveControlApiTarget({
+      env: { FACTORY_EVENT_HOST: "runner.example.test:7381" },
+      localConfig: {},
+    }),
+  ).toThrow(/refusing to send the control API bearer in plaintext/);
+  expect(() =>
+    resolveControlApiTarget({
+      env: { FACTORY_EVENT_HOST: "runner.example.test:7381" },
+      localConfig: {},
+    }),
+  ).toThrow(/FACTORY_CONTROL_API_ALLOW_INSECURE=1/);
+
+  // https is always fine, and so is plaintext that never leaves the box.
+  expect(
+    resolveControlApiTarget({
+      env: { FACTORY_EVENT_HOST: "https://runner.example.test" },
+      localConfig: {},
     }).baseUrl,
-  ).toBe("https://event-url.example.test");
+  ).toBe("https://runner.example.test");
+  for (const loopback of [
+    "127.0.0.1:7381",
+    "localhost:7381",
+    "127.9.9.9:7000",
+  ]) {
+    expect(
+      resolveControlApiTarget({
+        env: { FACTORY_EVENT_HOST: loopback },
+        localConfig: {},
+      }).baseUrl,
+    ).toBe(`http://${loopback}`);
+  }
+
+  // The explicit opt-in is honoured, so a trusted tailnet stays reachable.
+  expect(
+    resolveControlApiTarget({
+      env: {
+        FACTORY_EVENT_HOST: "runner.example.test:7381",
+        FACTORY_CONTROL_API_ALLOW_INSECURE: "1",
+      },
+      localConfig: {},
+    }).baseUrl,
+  ).toBe("http://runner.example.test:7381");
+});
+
+// The reviewer's blocking concern on #2192: a library that reads ambient state
+// would retarget every existing caller. Only a caller that names no target at
+// all resolves; `{ port }` keeps the historic loopback pin (§14).
+test("apiClient({ port }) stays pinned to loopback whatever the environment says", () => {
+  const saved = process.env.FACTORY_EVENT_HOST;
+  process.env.FACTORY_EVENT_HOST = "https://elsewhere.example.test";
+  try {
+    const client = apiClient({ port: 7999, token: null });
+    expect(client.host).toBe("127.0.0.1");
+    expect(client.port).toBe(7999);
+    expect(client.baseUrl).toBe("http://127.0.0.1:7999");
+  } finally {
+    if (saved === undefined) delete process.env.FACTORY_EVENT_HOST;
+    else process.env.FACTORY_EVENT_HOST = saved;
+  }
+});
+
+test("apiClient with no target resolves the environment target", () => {
+  const saved = process.env.FACTORY_EVENT_HOST;
+  process.env.FACTORY_EVENT_HOST = "https://elsewhere.example.test";
+  try {
+    expect(apiClient({ token: null }).baseUrl).toBe(
+      "https://elsewhere.example.test",
+    );
+  } finally {
+    if (saved === undefined) delete process.env.FACTORY_EVENT_HOST;
+    else process.env.FACTORY_EVENT_HOST = saved;
+  }
 });
 
 test("uses the resolved URL while preserving bearer propagation", async () => {
