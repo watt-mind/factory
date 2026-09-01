@@ -6329,6 +6329,65 @@ sh -c 'sleep 5 & wait'
     expect(await runOnce(db, registry, adapters, opts())).toBeNull();
   });
 
+  test("a slow merge-fix ticket read does not hold the dispatch claim lock", async () => {
+    const db = openDb(":memory:");
+    const locksDir = tmpDir("merge-fix-ticket-read-locks-");
+    const ticket = "watt-mind/factory#2221";
+    const spec = queueRun(
+      db,
+      makeSpec({
+        agent: "merge-fix@1",
+        input: {
+          repo: "factory",
+          github: "watt-mind/factory",
+          base: "develop",
+          pr: 2221,
+          headSha: "a".repeat(40),
+          baseSha: "b".repeat(40),
+          headRef: "fix/gh-2221",
+          ticket,
+          finding: "rebase_onto_base",
+          findingHash: "c".repeat(64),
+          round: 1,
+          mechanical: true,
+          withinOwnedPaths: true,
+          ownedPaths: ["event-runtime/lib/worker.mjs"],
+        },
+        workspace: { type: "worktree", retainOnFailure: true },
+      }),
+    );
+    const lockFile = dispatchLockPath("factory", locksDir);
+    let concurrentClaimantAcquired = false;
+    const summary = await executeClaimed(
+      db,
+      registry,
+      adapters,
+      claimNext(db, opts()),
+      opts({
+        dispatch: {
+          locksDir,
+          fetchTicket: () => {
+            concurrentClaimantAcquired = acquireClaimLock(lockFile, {
+              pid: 2222,
+              isAlive: () => true,
+            });
+            if (concurrentClaimantAcquired) releaseClaimLock(lockFile);
+            throw new Error("tracker read timed out");
+          },
+        },
+      }),
+    );
+
+    expect(summary).toMatchObject({
+      runId: spec.runId,
+      terminalState: "REFUSED",
+      reasonCode: "merge_fix_ticket_read_failed",
+    });
+    expect(concurrentClaimantAcquired).toBe(true);
+    expect(existsSync(lockFile)).toBe(false);
+    db.close();
+  });
+
   test("accurate attempt timestamps: started_at < finished_at with clock function (OPS-430)", async () => {
     const db = openDb(":memory:");
     const spec = queueRun(db, makeSpec());

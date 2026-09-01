@@ -101,6 +101,31 @@ function insertRun(db, { runId, agent, pr, headSha, state, github = GITHUB }) {
   ).run(runId, `idem-${runId}`, spec, state, now, now);
 }
 
+function insertRefusedMergeFix(
+  db,
+  {
+    runId,
+    pr,
+    headSha = HEAD,
+    findingHash = REBASE_HASH,
+    reasonCode,
+    finishedAt = "2026-08-19T16:45:00.000Z",
+  },
+) {
+  const spec = JSON.stringify({
+    agent: "merge-fix@1",
+    input: { github: GITHUB, pr, headSha, baseSha: BASE, findingHash },
+  });
+  db.query(
+    `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+     VALUES (?, ?, ?, 'sha256:test', 'REFUSED', 1, ?, ?)`,
+  ).run(runId, `idem-${runId}`, spec, finishedAt, finishedAt);
+  db.query(
+    `INSERT INTO attempts (run_id, attempt, fencing_token, finished_at, terminal_state, reason_code)
+     VALUES (?, 1, 1, ?, 'REFUSED', ?)`,
+  ).run(runId, finishedAt, reasonCode);
+}
+
 function insertOpenProposal(db, { id, agent, pr, headSha, github = GITHUB }) {
   const now = "2026-08-19T16:45:00.000Z";
   const runId = `run-${id}`;
@@ -1095,13 +1120,117 @@ describe("merge-scan enumerator (WM-936)", () => {
     const result = enumerateMergeScan({
       input: { repo: "factory" },
       db,
-      forge: forgeWith([pr({ number: 9, headRefName: "feat/WM-9" })], {
-        baseSha: BASE2,
-      }),
+      forge: forgeWith(
+        [
+          pr({
+            number: 9,
+            headRefName: "feat/WM-9",
+            mergeable: "CONFLICTING",
+          }),
+        ],
+        {
+          baseSha: BASE2,
+        },
+      ),
       repos,
     });
     expect(result.artifact.fix).toEqual([]);
     expect(result.artifact.reviews).toEqual([]);
+  });
+
+  test("a refused escalated merge-fix does not re-emit the identical finding", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    insertRefusedMergeFix(db, {
+      runId: "run_fix_escalated",
+      pr: 9,
+      reasonCode: "merge_fix_ticket_escalated",
+    });
+
+    const result = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith(
+        [
+          pr({
+            number: 9,
+            headRefName: "feat/WM-9",
+            mergeable: "CONFLICTING",
+          }),
+        ],
+        {
+          baseSha: BASE2,
+        },
+      ),
+      repos,
+    });
+
+    expect(result.artifact.fix).toEqual([]);
+  });
+
+  test("a refused ticket-read merge-fix retries only after its cooldown", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    const refusedAt = Date.parse("2026-08-19T16:45:00.000Z");
+    insertRefusedMergeFix(db, {
+      runId: "run_fix_read_failed",
+      pr: 9,
+      reasonCode: "merge_fix_ticket_read_failed",
+    });
+
+    const beforeCooldown = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith(
+        [
+          pr({
+            number: 9,
+            headRefName: "feat/WM-9",
+            mergeable: "CONFLICTING",
+          }),
+        ],
+        {
+          baseSha: BASE2,
+        },
+      ),
+      repos,
+      now: refusedAt + 60_000,
+    });
+    const afterCooldown = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith(
+        [
+          pr({
+            number: 9,
+            headRefName: "feat/WM-9",
+            mergeable: "CONFLICTING",
+          }),
+        ],
+        {
+          baseSha: BASE2,
+        },
+      ),
+      repos,
+      now: refusedAt + 16 * 60_000,
+    });
+
+    expect(beforeCooldown.artifact.fix).toEqual([]);
+    expect(afterCooldown.artifact.fix).toHaveLength(1);
   });
 });
 

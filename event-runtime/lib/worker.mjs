@@ -4463,56 +4463,89 @@ export async function executeClaimed(
         };
       }
 
-      const lockAcquired = acquireClaimLock(lockFile, {
-        pid: process.pid,
-        now: nowFn(),
-        isAlive: isAliveFn,
-      });
-      if (!lockAcquired) {
-        const deferred = deferClaimLockContention(db, {
-          runId,
-          attempt,
-          fencingToken,
-          owner,
-          policyVersion,
-          now: nowFn,
-          maxRequeues: Number.isInteger(
-            dispatchOpts?.maxClaimLockContentionRequeues,
-          )
-            ? Math.max(0, dispatchOpts.maxClaimLockContentionRequeues)
-            : DEFAULT_MAX_CLAIM_LOCK_REQUEUES,
-          random: dispatchOpts?.random ?? Math.random,
-        });
-        if (deferred?.fenced) {
-          stopCancellationMonitor();
-          return { fenced: true };
-        }
-        if (deferred?.requeued) {
-          stopCancellationMonitor();
-          return {
-            runId,
-            attempt,
-            terminalState: "QUEUED",
-            reasonCode: "claim_lock_contention",
-            requeueAfterMs: deferred.backoffMs,
-          };
-        }
-        const res = refuseTerminal("claim_lock_starvation", [
-          "dispatch_claim_lock",
-        ]);
-        stopCancellationMonitor();
+      // WM-469 de-hardcoded the merge-fix role from the kernel: the definition
+      // declares `dispatchGateExempt: true` (validated by the registry) instead
+      // of a `gate: "merge-fix"` literal the worker string-matched. Keep the
+      // planner and worker keyed off the SAME declarative field — a legacy
+      // `gate` value is still honoured so an older pinned spec cannot silently
+      // fall through to the dispatch claim gate and refuse with ticket_assigned.
+      const gate =
+        def?.dispatchGateExempt === true
+          ? "merge-fix"
+          : (def?.gate ?? "dispatch");
+      if (!["dispatch", "merge-fix"].includes(gate)) {
+        const reasonCode = "worktree_gate_unknown";
+        const res = refuseTerminal(reasonCode, ["worktree_gate"]);
         if (res?.fenced) return { fenced: true };
         return {
           runId,
           attempt,
           terminalState: "REFUSED",
-          reasonCode: "claim_lock_starvation",
+          reasonCode,
           receipt: res?.receipt,
         };
       }
 
-      const deferTransientGate = (reasonCode) => {
+      // Merge-fix never claims a ticket: it only revalidates the already-owned
+      // review ticket. Its tracker read can take the full read timeout, so do
+      // not serialize unrelated dispatch claims behind it.
+      let claimLockHeld = false;
+      if (gate === "dispatch") {
+        claimLockHeld = acquireClaimLock(lockFile, {
+          pid: process.pid,
+          now: nowFn(),
+          isAlive: isAliveFn,
+        });
+        if (!claimLockHeld) {
+          const deferred = deferClaimLockContention(db, {
+            runId,
+            attempt,
+            fencingToken,
+            owner,
+            policyVersion,
+            now: nowFn,
+            maxRequeues: Number.isInteger(
+              dispatchOpts?.maxClaimLockContentionRequeues,
+            )
+              ? Math.max(0, dispatchOpts.maxClaimLockContentionRequeues)
+              : DEFAULT_MAX_CLAIM_LOCK_REQUEUES,
+            random: dispatchOpts?.random ?? Math.random,
+          });
+          if (deferred?.fenced) {
+            stopCancellationMonitor();
+            return { fenced: true };
+          }
+          if (deferred?.requeued) {
+            stopCancellationMonitor();
+            return {
+              runId,
+              attempt,
+              terminalState: "QUEUED",
+              reasonCode: "claim_lock_contention",
+              requeueAfterMs: deferred.backoffMs,
+            };
+          }
+          const res = refuseTerminal("claim_lock_starvation", [
+            "dispatch_claim_lock",
+          ]);
+          stopCancellationMonitor();
+          if (res?.fenced) return { fenced: true };
+          return {
+            runId,
+            attempt,
+            terminalState: "REFUSED",
+            reasonCode: "claim_lock_starvation",
+            receipt: res?.receipt,
+          };
+        }
+      }
+      const releaseGateLock = () => {
+        if (!claimLockHeld) return;
         releaseClaimLock(lockFile);
+        claimLockHeld = false;
+      };
+      const deferTransientGate = (reasonCode) => {
+        releaseGateLock();
         const deferred = deferTransientDispatchGate(db, {
           runId,
           attempt,
@@ -4549,30 +4582,6 @@ export async function executeClaimed(
           receipt: res?.receipt,
         };
       };
-
-      // WM-469 de-hardcoded the merge-fix role from the kernel: the definition
-      // declares `dispatchGateExempt: true` (validated by the registry) instead
-      // of a `gate: "merge-fix"` literal the worker string-matched. Keep the
-      // planner and worker keyed off the SAME declarative field — a legacy
-      // `gate` value is still honoured so an older pinned spec cannot silently
-      // fall through to the dispatch claim gate and refuse with ticket_assigned.
-      const gate =
-        def?.dispatchGateExempt === true
-          ? "merge-fix"
-          : (def?.gate ?? "dispatch");
-      if (!["dispatch", "merge-fix"].includes(gate)) {
-        releaseClaimLock(lockFile);
-        const reasonCode = "worktree_gate_unknown";
-        const res = refuseTerminal(reasonCode, ["worktree_gate"]);
-        if (res?.fenced) return { fenced: true };
-        return {
-          runId,
-          attempt,
-          terminalState: "REFUSED",
-          reasonCode,
-          receipt: res?.receipt,
-        };
-      }
 
       let gateResult;
       try {
@@ -4665,7 +4674,7 @@ export async function executeClaimed(
         ) {
           return deferTransientGate("linear_read_failed");
         }
-        releaseClaimLock(lockFile);
+        releaseGateLock();
         throw err;
       }
 
@@ -4694,7 +4703,7 @@ export async function executeClaimed(
           }
           return deferred;
         }
-        releaseClaimLock(lockFile);
+        releaseGateLock();
         // The retained PR was rejected by the failed run's handoff gate and is
         // still open as a ready (non-draft) PR. Route it to review rather than
         // silently stranding it behind a refused continuation that cannot
@@ -4766,7 +4775,7 @@ export async function executeClaimed(
         // The ticket is already assigned and under review by definition. The
         // merge-fix gate proved those live facts; trying the dispatch claim
         // verb here would reject the valid run as ticket_assigned.
-        releaseClaimLock(lockFile);
+        releaseGateLock();
       } else {
         // The retry gate has already re-read and authenticated the surviving
         // claim. Do not run the mutating claim command again: besides being
@@ -4784,7 +4793,7 @@ export async function executeClaimed(
               harness: spec.adapter ?? "claude",
             });
           } finally {
-            releaseClaimLock(lockFile);
+            releaseGateLock();
           }
 
           if (!claimRes?.ok) {
@@ -4800,7 +4809,7 @@ export async function executeClaimed(
             };
           }
         } else {
-          releaseClaimLock(lockFile);
+          releaseGateLock();
         }
 
         ticketClaimed = true;
