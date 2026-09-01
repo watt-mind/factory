@@ -8,6 +8,7 @@ import {
   AGENT_LABEL_PREFIX,
   gql,
 } from "./reaper.mjs";
+import { LINEAR_TELEMETRY } from "../tools/ticket.mjs";
 
 describe("Linear GraphQL cancellation", () => {
   test("forwards an AbortSignal to fetch and stops retrying when aborted", async () => {
@@ -48,6 +49,76 @@ describe("Linear GraphQL cancellation", () => {
         delete process.env.FACTORY_LINEAR_ALLOW_NETWORK;
       else process.env.FACTORY_LINEAR_ALLOW_NETWORK = previousAllow;
     }
+  });
+});
+
+describe("Linear request telemetry (GH-2203)", () => {
+  async function withStubbedFetch(run) {
+    const previous = {
+      fetch: globalThis.fetch,
+      key: process.env.LINEAR_API_KEY,
+      allow: process.env.FACTORY_LINEAR_ALLOW_NETWORK,
+      offline: process.env.FACTORY_LINEAR_OFFLINE,
+    };
+    const inits = [];
+    process.env.LINEAR_API_KEY = "test-key";
+    process.env.FACTORY_LINEAR_ALLOW_NETWORK = "1";
+    delete process.env.FACTORY_LINEAR_OFFLINE;
+    // Requests are answered from memory; the suite never opens a socket.
+    globalThis.fetch = async (_url, init) => {
+      inits.push(init);
+      return new Response(JSON.stringify({ data: { ping: true } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    try {
+      await run(inits);
+    } finally {
+      globalThis.fetch = previous.fetch;
+      const restore = (name, value) => {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      };
+      restore("LINEAR_API_KEY", previous.key);
+      restore("FACTORY_LINEAR_ALLOW_NETWORK", previous.allow);
+      restore("FACTORY_LINEAR_OFFLINE", previous.offline);
+    }
+  }
+
+  test("threads the caller and ticket into the fetch init", async () => {
+    await withStubbedFetch(async (inits) => {
+      await gql(
+        "query { ping }",
+        {},
+        { retries: 1, caller: "lib/control-plane/linear", ticket: "WM-2203" },
+      );
+      expect(inits).toHaveLength(1);
+      expect(inits[0][LINEAR_TELEMETRY]).toEqual({
+        caller: "lib/control-plane/linear",
+        ticket: "WM-2203",
+      });
+    });
+  });
+
+  test("defaults the telemetry caller to the reaper transport", async () => {
+    await withStubbedFetch(async (inits) => {
+      await gql("query { ping }", {}, { retries: 1 });
+      expect(inits[0][LINEAR_TELEMETRY]).toEqual({
+        caller: "orchestrator/reaper",
+        ticket: null,
+      });
+    });
+  });
+
+  test("does not install a global fetch hook from the request path", async () => {
+    await withStubbedFetch(async () => {
+      const stub = globalThis.fetch;
+      await gql("query { ping }", {}, { retries: 1 });
+      // GH-2203: patching a process-wide global per request would let one
+      // import swap `fetch` under a running serve tick.
+      expect(globalThis.fetch).toBe(stub);
+    });
   });
 });
 

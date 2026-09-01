@@ -528,11 +528,15 @@ function rotateLinearRequestLog(dir) {
     if (statSync(current).size < LINEAR_REQUEST_LOG_MAX_BYTES) return;
     try {
       unlinkSync(`${current}.${LINEAR_REQUEST_LOG_ROTATIONS}`);
-    } catch {}
+    } catch {
+      // The oldest generation may simply not exist yet; nothing to discard.
+    }
     for (let i = LINEAR_REQUEST_LOG_ROTATIONS - 1; i >= 1; i -= 1) {
       try {
         renameSync(`${current}.${i}`, `${current}.${i + 1}`);
-      } catch {}
+      } catch {
+        // A generation that was never written yet leaves a gap, not an error.
+      }
     }
     renameSync(current, `${current}.1`);
   } catch {
@@ -611,10 +615,30 @@ export function linearBudgetStatus(budget) {
 }
 
 /**
+ * Identity of the process that issued a Linear request. `caller` alone names
+ * the module (there are only two), which cannot separate serve from a worker
+ * from a CLI invocation on the same box — and separating them is the entire
+ * point of this log. The entry-point basename, pid and declared role do.
+ */
+function linearProcessIdentity() {
+  return {
+    process: path.basename(process.argv[1] ?? ""),
+    pid: process.pid,
+    role: process.env.FACTORY_ROLE ?? null,
+  };
+}
+
+/**
  * Persist telemetry for one Linear response. It shares the budget snapshot so
  * the logged delta is the exact change the existing rate-limit guard observes.
  */
-export function recordLinearResponse(res, context = {}, { now = Date } = {}) {
+export function recordLinearResponse(
+  res,
+  context = {},
+  // `Date` as a bare default would be called as `Date()`, whose string form
+  // has no milliseconds; a thunk keeps the entry at full resolution.
+  { now = () => new Date() } = {},
+) {
   try {
     const parsed = parseRateLimitHeaders(res?.headers);
     const prior = loadLinearBudget() ?? {};
@@ -636,6 +660,7 @@ export function recordLinearResponse(res, context = {}, { now = Date } = {}) {
     appendLinearRequestLog({
       timestamp: new Date(now()).toISOString(),
       caller: context.caller ?? "fetch",
+      ...linearProcessIdentity(),
       ticket: context.ticket ?? null,
       status: Number.isInteger(res?.status) ? res.status : null,
       rateLimit: linearRateLimitLogHeaders(res?.headers),
@@ -674,8 +699,14 @@ export function summarizeLinearRequests({
         const timestamp = Date.parse(entry.timestamp);
         if (!Number.isFinite(timestamp) || timestamp < cutoff) continue;
         const caller = String(entry.caller ?? "unknown");
-        const row = rows.get(caller) ?? {
+        // Rows are keyed on caller AND process: one module is reached from
+        // serve, workers and the CLI at once, and "who is spending the
+        // budget" is only answerable when those stay apart.
+        const proc = String(entry.process ?? "");
+        const key = `${caller}\u0000${proc}`;
+        const row = rows.get(key) ?? {
           caller,
+          process: proc,
           requests: 0,
           failures: 0,
           latestRemaining: null,
@@ -687,13 +718,16 @@ export function summarizeLinearRequests({
           row.latestRemaining = entry.rateLimit.requestsRemaining;
         if (Number.isFinite(entry.budgetDelta))
           row.budgetDelta += entry.budgetDelta;
-        rows.set(caller, row);
+        rows.set(key, row);
       } catch {
         // A partial append or manually edited telemetry line is ignorable.
       }
     }
   }
-  return [...rows.values()].sort((a, b) => a.caller.localeCompare(b.caller));
+  return [...rows.values()].sort(
+    (a, b) =>
+      a.caller.localeCompare(b.caller) || a.process.localeCompare(b.process),
+  );
 }
 
 function formatLinearRequestSummary(rows, minutes) {
@@ -702,7 +736,8 @@ function formatLinearRequestSummary(rows, minutes) {
   const lines = [`Linear requests in the last ${minutes}m:`];
   for (const row of rows)
     lines.push(
-      `${row.caller}: ${row.requests} request(s), ${row.failures} failure(s), ` +
+      `${row.caller}${row.process ? ` (${row.process})` : ""}: ` +
+        `${row.requests} request(s), ${row.failures} failure(s), ` +
         `budget delta ${row.budgetDelta}, remaining ${row.latestRemaining ?? "unknown"}`,
     );
   return lines.join("\n");
@@ -712,6 +747,10 @@ let fetchHookInstalled = false;
 
 export function installLinearBudgetCapture() {
   if (fetchHookInstalled) return;
+  // `bind` does not carry own properties across, so the marker is read here.
+  const wasOfflineGuarded = Boolean(
+    globalThis.fetch?.__factoryLinearOfflineGuard,
+  );
   const originalFetch = globalThis.fetch.bind(globalThis);
   fetchHookInstalled = true;
   globalThis.fetch = async function linearBudgetFetch(input, init) {
@@ -728,6 +767,10 @@ export function installLinearBudgetCapture() {
       throw error;
     }
   };
+  // The capture hook delegates to whatever `fetch` it wrapped, so a test
+  // process's offline guard stays in the chain — carry its marker forward so
+  // the guard is still recognised as installed rather than reinstalled on top.
+  if (wasOfflineGuarded) globalThis.fetch.__factoryLinearOfflineGuard = true;
 }
 
 /**
