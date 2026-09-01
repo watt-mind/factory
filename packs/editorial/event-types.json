@@ -2,26 +2,21 @@
   "editorial.topic-scan.requested": {
     "agent": "editorial/topic-scan@1",
     "adapter": "claude",
-    "idempotencyScope": ["siteId", "correlationId"]
+    "idempotencyScope": ["correlationId", "inputHash"]
   },
   "editorial.research.requested": {
     "agent": "editorial/research@1",
     "adapter": "claude",
-    "idempotencyScope": ["siteId", "articleId", "correlationId"]
+    "idempotencyScope": ["correlationId", "inputHash"]
   },
   "editorial.draft.requested": {
     "agent": "editorial/draft@1",
     "adapter": "claude",
-    "idempotencyScope": [
-      "siteId",
-      "articleId",
-      "revisionNumber",
-      "correlationId"
-    ]
+    "idempotencyScope": ["correlationId", "inputHash"]
   },
   "editorial.review.requested": {
     "agent": "editorial/review@1",
     "adapter": "claude",
-    "idempotencyScope": ["siteId", "articleId", "revisionHash", "correlationId"]
+    "idempotencyScope": ["correlationId", "inputHash"]
   }
 }

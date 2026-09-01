@@ -5,6 +5,7 @@ import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-pack-auth
 import { packCommand } from "../cli.mjs";
 import { initPack } from "./pack-init.mjs";
 import { validatePack } from "./pack-validate.mjs";
+import { idempotencyKeyFor } from "./run-spec.mjs";
 import { validate } from "./schema.mjs";
 
 test("pack init creates a pinned pack the registry loader accepts", () => {
@@ -102,4 +103,65 @@ test("first-party pack schemas use only keywords lib/schema.mjs supports", () =>
     }
   }
   expect(offenders).toEqual([]);
+});
+
+/**
+ * The supported scope vocabulary is `idempotencyKeyFor`'s switch in
+ * run-spec.mjs (docs/event-runtime.md §5.4): `correlationId`, `subject`,
+ * `inputHash`. Rather than restate that trio here and let the copy drift, the
+ * check asks the runtime itself — one probe call per declared field, which
+ * throws on anything the switch does not know. A pack that declares an
+ * envelope-payload field (`siteId`, `articleId`, …) fails closed at plan time
+ * and dead-letters the event, so catch it in the tree instead.
+ */
+function unsupportedScopeField(field) {
+  try {
+    idempotencyKeyFor(
+      { idempotencyScope: [field] },
+      { ref: "probe/scope@1", output_contract: "probe.output@1" },
+      { eventId: "evt-probe", correlationId: "corr-probe", subject: "probe" },
+      "sha256:probe",
+    );
+    return null;
+  } catch (error) {
+    return error.message;
+  }
+}
+
+test("first-party pack idempotency scopes use only §5.4 fields", () => {
+  const packs = readdirSync(path.resolve("packs"), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name);
+  expect(packs.length).toBeGreaterThan(0);
+
+  const offenders = [];
+  let checked = 0;
+  for (const pack of packs) {
+    const source = path.resolve("packs", pack, "event-types.json");
+    if (!existsSync(source)) continue;
+    const mappings = JSON.parse(readFileSync(source, "utf8"));
+    for (const [eventType, mapping] of Object.entries(mappings)) {
+      expect(mapping.idempotencyScope?.length ?? 0).toBeGreaterThan(0);
+      for (const field of mapping.idempotencyScope) {
+        checked += 1;
+        const failure = unsupportedScopeField(field);
+        if (failure) {
+          offenders.push(
+            `packs/${pack}/event-types.json ${eventType}: ${failure}`,
+          );
+        }
+      }
+    }
+  }
+  expect(checked).toBeGreaterThan(0);
+  expect(offenders).toEqual([]);
+});
+
+test("the scope probe rejects an envelope-payload field", () => {
+  expect(unsupportedScopeField("siteId")).toMatch(
+    /unknown idempotency scope field "siteId"/,
+  );
+  expect(unsupportedScopeField("correlationId")).toBeNull();
+  expect(unsupportedScopeField("subject")).toBeNull();
+  expect(unsupportedScopeField("inputHash")).toBeNull();
 });
