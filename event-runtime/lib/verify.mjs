@@ -1794,6 +1794,15 @@ function readResultFile({ workspaceDir, checkout, attemptStartedAt, onTrace }) {
   const nowMs = Date.now();
   const stalePaths = [];
   for (const candidatePath of [...new Set(candidates)]) {
+    // A checkout can legitimately own a root result.json. Never adopt or
+    // delete that repository file; only untracked checkout output is a stray.
+    if (
+      checkout &&
+      candidatePath === path.join(checkout, "result.json") &&
+      checkoutResultIsTracked(checkout)
+    ) {
+      continue;
+    }
     let stat;
     try {
       stat = statSync(candidatePath);
@@ -1832,6 +1841,19 @@ function readResultFile({ workspaceDir, checkout, attemptStartedAt, onTrace }) {
   if (stalePaths.length > 0) err.missingResultPaths = stalePaths;
   if (candidates.length > 0) err.missingResultFallbacks = candidates;
   throw err;
+}
+
+function checkoutResultIsTracked(checkout) {
+  try {
+    execFileSync(
+      "git",
+      ["-C", checkout, "ls-files", "--error-unmatch", "result.json"],
+      { stdio: "ignore" },
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

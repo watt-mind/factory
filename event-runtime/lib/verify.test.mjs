@@ -529,6 +529,58 @@ describe("verifyResult", () => {
     );
   });
 
+  test("leaves a tracked checkout result in place and tries the next candidate", () => {
+    const workspaceDir = tmpDir("evrt-verify-workspace-");
+    const physicalParent = tmpDir("evrt-verify-checkout-parent-");
+    const checkout = path.join(physicalParent, "checkout");
+    mkdirSync(checkout);
+    symlinkSync(checkout, path.join(workspaceDir, "repo"), "dir");
+    const trackedPath = path.join(checkout, "result.json");
+    const trackedResult = JSON.stringify({
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      artifact: VALID_ARTIFACT,
+    });
+    writeFileSync(trackedPath, trackedResult, "utf8");
+    execFileSync("git", ["init", "--quiet", checkout]);
+    execFileSync("git", ["-C", checkout, "add", "result.json"]);
+    const strayPath = path.join(physicalParent, "result.json");
+    const events = [];
+    writeFileSync(
+      strayPath,
+      JSON.stringify({
+        schemaVersion: "factory.agent-result/v1",
+        terminalState: "completed",
+        artifact: VALID_ARTIFACT,
+      }),
+      "utf8",
+    );
+
+    const out = verifyResult({
+      spec: makeSpec(),
+      def,
+      registry,
+      workspaceDir,
+      worktreeRecord: { path: checkout },
+      attempt: 1,
+      attemptStartedAt: new Date(Date.now() - 5_000).toISOString(),
+      onTrace: (kind, payload) => events.push({ kind, payload }),
+    });
+
+    expect(out.kind).toBe("completed");
+    expect(readFileSync(trackedPath, "utf8")).toBe(trackedResult);
+    expect(existsSync(strayPath)).toBe(false);
+    expect(events).toEqual([
+      {
+        kind: "lifecycle",
+        payload: {
+          note: "result_recovered_from_stray_path",
+          path: strayPath,
+        },
+      },
+    ]);
+  });
+
   test("probes the checkout handed over separately from the worktree record", () => {
     const workspaceDir = tmpDir("evrt-verify-workspace-");
     const checkout = tmpDir("evrt-verify-checkout-");
