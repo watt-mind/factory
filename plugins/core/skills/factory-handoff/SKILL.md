@@ -36,21 +36,25 @@ Follow the existing capture and specification protocols before handoff:
 When an operator asks for the status of a handed-off ticket or wants to inspect execution:
 
 1. **Query receipt state via request ID** (idempotent; returns event, proposal, and run status):
+
    ```sh
    factory handoff --request-id <requestId> [--repo <repo>] <ticket>
    ```
 
 2. **Check the ticket on the control plane**:
+
    ```sh
    factory ticket get [--repo <repo>] <ticket>
    ```
 
 3. **Inspect run details, token usage, and lifecycle history on the runner**:
+
    ```sh
    ssh runner "factory events inspect <runId>"
    ```
 
 4. **Stream or view the agent execution trace**:
+
    ```sh
    ssh runner "factory events trace <runId> | tail -n 50"
    ```
@@ -66,4 +70,3 @@ factory handoff --request-id <original-id> --repo <repo> <ticket>
 ```
 
 Never use `factory dispatch`, `/replay`, direct HTTP, a caller-selected `source`, or a local implementation agent as a substitute. The client sends only `{schemaVersion, requestId, repo, ticket}` and does not possess the runtime signing secret.
-

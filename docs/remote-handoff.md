@@ -116,7 +116,6 @@ ssh runner "factory events inspect <runId>"
 ssh runner "factory events trace <runId> | tail -n 50"
 ```
 
-
 ## Rollout
 
 1. Deploy code and regenerate/install the Factory CLI before installing any key.
