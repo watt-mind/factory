@@ -447,8 +447,10 @@ describe("registry", () => {
     // pinned prompt/definition digest changes with that recovery contract.
     // Regenerated (#2149): factory.celld-smoke.requested routes to
     // celld-smoke@1 on the claude adapter, so the merged view gains a mapping.
+    // Regenerated (#2208): celld-smoke's documented interaction details are
+    // optional artifact fields, and the definition was re-pinned.
     const expected =
-      "sha256:e23895b901edd0d011c1e60af256621dca969e869d94505a619b9562712693d9";
+      "sha256:f081d6b00380dd88c13822a7b532c107ae974befd8f5ff9e4543f72e733cc882";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 

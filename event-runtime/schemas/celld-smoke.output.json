@@ -32,6 +32,31 @@
     "verified": {
       "type": "boolean",
       "description": "True if post-write read-back matched input payload"
+    },
+    "endpoint": {
+      "type": "string",
+      "format": "uri",
+      "description": "celld endpoint used for the smoke interaction"
+    },
+    "migrationId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Migration the smoke agent ensured was applied"
+    },
+    "collection": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Collection containing the smoke-test entity"
+    },
+    "entityId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Identifier of the persisted smoke-test entity"
+    },
+    "cellVersionAfterMigration": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Cell version returned immediately after migration"
     }
   }
 }

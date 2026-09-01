@@ -33,7 +33,12 @@ Write `./result.json`:
     "cellVersion": 2,
     "migrated": true,
     "entityVersion": 1,
-    "verified": true
+    "verified": true,
+    "endpoint": "http://127.0.0.1:9876",
+    "migrationId": "001_celld_smoke_init",
+    "collection": "smoke_tests",
+    "entityId": "<input.json's testKey>",
+    "cellVersionAfterMigration": 2
   },
   "evidence": { "commands": [] }
 }
