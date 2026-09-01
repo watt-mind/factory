@@ -12,6 +12,8 @@ import {
   enumerateMergeScan,
   latestMergeFixTerminalAttempt,
   lookupMergeReview,
+  mergeFixDurableRefusalCooldownMs,
+  mergeFixRefusalCooldownMs,
   persistMergeReviewFromResult,
   runScanCli,
   upsertMergeReview,
@@ -36,6 +38,46 @@ const repos = new Map([
     },
   ],
 ]);
+
+describe("merge-fix refusal cooldown configuration", () => {
+  test.each([
+    [
+      "transient",
+      mergeFixRefusalCooldownMs,
+      "FACTORY_MERGE_FIX_REFUSAL_COOLDOWN_MINUTES",
+      15 * 60_000,
+    ],
+    [
+      "durable",
+      mergeFixDurableRefusalCooldownMs,
+      "FACTORY_MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MINUTES",
+      6 * 60 * 60_000,
+    ],
+  ])(
+    "uses the %s default when unset or invalid",
+    (_name, accessor, key, defaultMs) => {
+      expect(accessor({})).toBe(defaultMs);
+      expect(accessor({ [key]: "not-a-number" })).toBe(defaultMs);
+      expect(accessor({ [key]: "0" })).toBe(defaultMs);
+      expect(accessor({ [key]: "1.5" })).toBe(defaultMs);
+    },
+  );
+
+  test.each([
+    [
+      "transient",
+      mergeFixRefusalCooldownMs,
+      "FACTORY_MERGE_FIX_REFUSAL_COOLDOWN_MINUTES",
+    ],
+    [
+      "durable",
+      mergeFixDurableRefusalCooldownMs,
+      "FACTORY_MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MINUTES",
+    ],
+  ])("honours the %s override", (_name, accessor, key) => {
+    expect(accessor({ [key]: "42" })).toBe(42 * 60_000);
+  });
+});
 
 function pr({
   number,

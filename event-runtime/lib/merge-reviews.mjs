@@ -462,12 +462,32 @@ function hasInFlightAgent(db, agent, { github, pr, headSha }) {
   return Boolean(proposal);
 }
 
-const MERGE_FIX_REFUSAL_COOLDOWN_MS = 15 * 60_000;
-const MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MS = 6 * 60 * 60_000;
+const MERGE_FIX_REFUSAL_COOLDOWN_DEFAULT_MINUTES = 15;
+const MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_DEFAULT_MINUTES = 6 * 60;
 const DURABLE_MERGE_FIX_REFUSALS = new Set([
   "merge_fix_ticket_escalated",
   "merge_fix_ticket_security",
 ]);
+
+export function mergeFixRefusalCooldownMs(env = process.env) {
+  const minutes = Number(env.FACTORY_MERGE_FIX_REFUSAL_COOLDOWN_MINUTES);
+  return (
+    (Number.isInteger(minutes) && minutes > 0
+      ? minutes
+      : MERGE_FIX_REFUSAL_COOLDOWN_DEFAULT_MINUTES) * 60_000
+  );
+}
+
+export function mergeFixDurableRefusalCooldownMs(env = process.env) {
+  const minutes = Number(
+    env.FACTORY_MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MINUTES,
+  );
+  return (
+    (Number.isInteger(minutes) && minutes > 0
+      ? minutes
+      : MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_DEFAULT_MINUTES) * 60_000
+  );
+}
 
 // Slack between a run's creation and its final attempt finishing. Runs are
 // bounded well below this by dispatch timeouts, so a run created before
@@ -475,16 +495,13 @@ const DURABLE_MERGE_FIX_REFUSALS = new Set([
 const MERGE_FIX_MAX_RUN_LIFETIME_MS = 24 * 60 * 60_000;
 
 export function latestMergeFixTerminalAttempt(db, item, { github, now }) {
-  const refusalCutoff = new Date(
-    Number(now) - MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MS,
-  ).toISOString();
+  const durableCooldownMs = mergeFixDurableRefusalCooldownMs();
+  const refusalCutoff = new Date(Number(now) - durableCooldownMs).toISOString();
   // Pure prefilter on the join's outer loop: it keeps whole runs (and their
   // json_extract work) out of the scan without ever being the deciding term —
   // `a.finished_at > refusalCutoff` remains the correctness bound.
   const runCreatedCutoff = new Date(
-    Number(now) -
-      MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MS -
-      MERGE_FIX_MAX_RUN_LIFETIME_MS,
+    Number(now) - durableCooldownMs - MERGE_FIX_MAX_RUN_LIFETIME_MS,
   ).toISOString();
   return db
     .query(
@@ -543,8 +560,8 @@ function refusedMergeFixSuppressed(db, item, { github, now }) {
   const cooldownMs = DURABLE_MERGE_FIX_REFUSALS.has(
     latestTerminalAttempt.reasonCode,
   )
-    ? MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MS
-    : MERGE_FIX_REFUSAL_COOLDOWN_MS;
+    ? mergeFixDurableRefusalCooldownMs()
+    : mergeFixRefusalCooldownMs();
   const finishedAt = Date.parse(latestTerminalAttempt.finishedAt ?? "");
   if (!Number.isFinite(finishedAt)) return null;
   if (Number(now) - finishedAt >= cooldownMs) return null;
