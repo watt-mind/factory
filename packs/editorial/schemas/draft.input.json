@@ -6,7 +6,7 @@
     "siteId": { "type": "string" },
     "articleId": { "type": "string" },
     "cellEndpoint": { "type": "string" },
-    "revisionNumber": { "type": "integer", "default": 1 },
+    "revisionNumber": { "type": "integer" },
     "instructions": { "type": "string" }
   },
   "additionalProperties": false

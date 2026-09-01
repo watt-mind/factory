@@ -5,7 +5,7 @@
   "properties": {
     "siteId": { "type": "string" },
     "cellEndpoint": { "type": "string" },
-    "maxCandidates": { "type": "integer", "default": 3 },
+    "maxCandidates": { "type": "integer" },
     "focusPillars": { "type": "array", "items": { "type": "string" } }
   },
   "additionalProperties": false

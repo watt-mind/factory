@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-pack-authoring-test-mjs";
 import { packCommand } from "../cli.mjs";
 import { initPack } from "./pack-init.mjs";
 import { validatePack } from "./pack-validate.mjs";
+import { validate } from "./schema.mjs";
 
 test("pack init creates a pinned pack the registry loader accepts", () => {
   const root = path.join(tmpDir("pack-init-"), "author-kit");
@@ -56,4 +57,49 @@ test("the first-party reference packs all pass authoring validation", () => {
       agents,
     });
   }
+});
+
+/**
+ * Walks every subschema node (the object itself, each `properties` value, and
+ * `items`) so a keyword buried under a nested property is checked too —
+ * `validate` returns at the first node that fails, and only descends into
+ * subschemas the sample value reaches.
+ */
+function schemaNodes(node, at, out = []) {
+  if (!node || typeof node !== "object" || Array.isArray(node)) return out;
+  out.push([at, node]);
+  if (node.properties && typeof node.properties === "object") {
+    for (const [key, child] of Object.entries(node.properties)) {
+      schemaNodes(child, `${at}.${key}`, out);
+    }
+  }
+  if (node.items) schemaNodes(node.items, `${at}[]`, out);
+  return out;
+}
+
+test("first-party pack schemas use only keywords lib/schema.mjs supports", () => {
+  const packs = readdirSync(path.resolve("packs"), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name);
+  expect(packs.length).toBeGreaterThan(0);
+
+  const offenders = [];
+  for (const pack of packs) {
+    const dir = path.resolve("packs", pack, "schemas");
+    if (!existsSync(dir)) continue;
+    for (const file of readdirSync(dir).filter((f) => f.endsWith(".json"))) {
+      const source = path.join(dir, file);
+      const schema = JSON.parse(readFileSync(source, "utf8"));
+      for (const [at, node] of schemaNodes(schema, "$")) {
+        // The contract validator fails closed on unknown keywords and formats;
+        // an undefined value never masks that check, which runs first.
+        for (const error of validate(node, undefined, at).errors) {
+          if (error.includes("unsupported")) {
+            offenders.push(`packs/${pack}/schemas/${file} ${error}`);
+          }
+        }
+      }
+    }
+  }
+  expect(offenders).toEqual([]);
 });

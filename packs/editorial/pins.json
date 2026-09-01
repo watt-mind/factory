@@ -1,14 +1,14 @@
 {
-  "agents/topic-scan.md": "sha256:3ae4bbec280a7076d159101125ed0ae1cc0ef52c0516f6721b71cb4e910a1b4e",
-  "schemas/topic-scan.input.json": "sha256:b67c35526589722e4b58a102ebe8b870fa9cb5eed2f663a242a926c61ba76ae9",
-  "schemas/topic-scan.output.json": "sha256:9e58e880bf857271c2b425b4d48ef510be414a2198e77fe3858f93af93e0f395",
+  "agents/draft.md": "sha256:04296881cad40466849654dc37778e1a776f94863056f1b3566bc42a29024a76",
+  "schemas/draft.input.json": "sha256:b1bb319c307469ed183cffeb7304db993a540ae293a7c1c6886e523df722ebc0",
+  "schemas/draft.output.json": "sha256:08059b5ad568f98c142ee771c9ca37f9dbcb0c5104db5976afe2847a91f93af9",
   "agents/research.md": "sha256:2490666a03338ea4277974b1a758b4b9e6f30fe31592f6464895e5f2697009c9",
   "schemas/research.input.json": "sha256:681c812737f0fb5eb7d197b0f77468ca49b41102c348558ea9a17fa99e4bf8dd",
   "schemas/research.output.json": "sha256:f67596b0ee56f83e99d288ccd5f250e23ab96b7e1ac2aa450f6f7f66a82285ab",
-  "agents/draft.md": "sha256:50c77afbf0ad6aa43cc081d34f113f8c99584338f32cf3ff54244b879e13345c",
-  "schemas/draft.input.json": "sha256:4fef0d88c3745f6261cc2a4b941671ba3eb605d37cc7fccfc92349fa8b1e47af",
-  "schemas/draft.output.json": "sha256:08059b5ad568f98c142ee771c9ca37f9dbcb0c5104db5976afe2847a91f93af9",
   "agents/review.md": "sha256:fccd80f7835b890745afdacb7479579034f14ba4cbc82231886fac384583a8de",
   "schemas/review.input.json": "sha256:3a15c07b0c268470d3e94c67bd7f8b332f58a8a4383248adab9bb584a951044e",
-  "schemas/review.output.json": "sha256:147f259f03816286d70ddbf2a8b572ef1958f3e438a064cb3ea2c5d2e2dd728d"
+  "schemas/review.output.json": "sha256:147f259f03816286d70ddbf2a8b572ef1958f3e438a064cb3ea2c5d2e2dd728d",
+  "agents/topic-scan.md": "sha256:3ae4bbec280a7076d159101125ed0ae1cc0ef52c0516f6721b71cb4e910a1b4e",
+  "schemas/topic-scan.input.json": "sha256:4439977e3c3ae89f1424ca3417ef2e3cb6d4d31087d911c655be7e0cb45dc6f2",
+  "schemas/topic-scan.output.json": "sha256:9e58e880bf857271c2b425b4d48ef510be414a2198e77fe3858f93af93e0f395"
 }

@@ -9,7 +9,7 @@ Your goal is to write a comprehensive, engaging, science-backed guide adhering t
    - `cellEndpoint`: Base URL of the cell daemon (e.g. `http://100.74.142.98:8080`).
    - `articleId`: The URN of the article cell (e.g. `editorial:article:coachwatts.com:01J98ABC`).
    - `siteId`: The URN of the site cell (e.g. `editorial:site:coachwatts.com`).
-   - `revisionNumber`: (Optional) Next revision index.
+   - `revisionNumber`: (Optional) Next revision index (default: 1).
 
 ## Step-by-Step Instructions
 
