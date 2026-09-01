@@ -1355,6 +1355,70 @@ describe("merge-scan enumerator (WM-936)", () => {
     },
   );
 
+  test.each(["COMPLETED", "FAILED"])(
+    "a newer refusal suppresses an older %s merge-fix",
+    (terminalState) => {
+      const db = openDb(":memory:");
+      upsertMergeReview(db, {
+        github: GITHUB,
+        pr: 9,
+        headSha: HEAD,
+        baseSha: BASE,
+        verdict: "MERGE",
+        plan: planItem(9),
+      });
+      insertRefusedMergeFix(db, {
+        runId: `run_fix_${terminalState.toLowerCase()}_first`,
+        pr: 9,
+        terminalState,
+      });
+      insertRefusedMergeFix(db, {
+        runId: "run_fix_refused_latest",
+        pr: 9,
+        reasonCode: "merge_fix_ticket_escalated",
+        finishedAt: "2026-08-19T16:45:01.000Z",
+      });
+
+      expect(
+        conflictingScan(db, { now: REFUSED_AT + 60_000 }).artifact.fix,
+      ).toEqual([]);
+    },
+  );
+
+  test.each([
+    ["a refusal inserted after a completed attempt", "COMPLETED", "REFUSED", 0],
+    ["a completed attempt inserted after a refusal", "REFUSED", "COMPLETED", 1],
+  ])(
+    "equal finished_at uses rowid when %s",
+    (_name, firstState, secondState, expectedFixes) => {
+      const db = openDb(":memory:");
+      upsertMergeReview(db, {
+        github: GITHUB,
+        pr: 9,
+        headSha: HEAD,
+        baseSha: BASE,
+        verdict: "MERGE",
+        plan: planItem(9),
+      });
+      insertRefusedMergeFix(db, {
+        runId: "run_fix_first_at_tie",
+        pr: 9,
+        terminalState: firstState,
+        reasonCode: "merge_fix_ticket_escalated",
+      });
+      insertRefusedMergeFix(db, {
+        runId: "run_fix_second_at_tie",
+        pr: 9,
+        terminalState: secondState,
+        reasonCode: "merge_fix_ticket_escalated",
+      });
+
+      expect(
+        conflictingScan(db, { now: REFUSED_AT + 60_000 }).artifact.fix,
+      ).toHaveLength(expectedFixes);
+    },
+  );
+
   test("a durable refusal is retried once its long cooldown expires", () => {
     const db = openDb(":memory:");
     upsertMergeReview(db, {
