@@ -56,7 +56,13 @@ async function registeredWorker(home, { timeoutMs = 5_000 } = {}) {
 
 async function seedSkippedRun(
   home,
-  { runId, placement, promptVersion = WORKER_POLICY_VERSION, queuedReason },
+  {
+    runId,
+    placement,
+    promptVersion = WORKER_POLICY_VERSION,
+    queuedReason,
+    queuedAt = Date.now(),
+  },
 ) {
   const { createRun, transition } = await import("../lib/lifecycle.mjs");
   const { canonicalJson, hashJson } = await import("../lib/canonical.mjs");
@@ -87,15 +93,15 @@ async function seedSkippedRun(
     specHash: hashJson(spec),
     actor: "test",
     policyVersion: "test",
-    now: Date.now(),
+    now: queuedAt,
   });
-  transition(db, { runId, to: "APPROVED", actor: "test", now: Date.now() });
+  transition(db, { runId, to: "APPROVED", actor: "test", now: queuedAt });
   transition(db, {
     runId,
     to: "QUEUED",
     actor: "test",
     ...(queuedReason ? { reason: queuedReason } : {}),
-    now: Date.now(),
+    now: queuedAt,
   });
   db.close();
 }
@@ -187,7 +193,7 @@ describe("work command", () => {
   );
 
   test(
-    "folds stale registry refusals into the rate-limited skip report",
+    "folds a mismatched run still inside the deploy window into the skip report",
     async () => {
       const home = tmpDir("evrt-work-registry-skip-");
       await seedSkippedRun(home, {
@@ -213,11 +219,11 @@ describe("work command", () => {
             (box.out.match(/"runId":"run_registry_skip"/g) ?? []).length >= 2,
           { timeoutMs: 5_000, everyMs: 10 },
         );
-        expect(box.out.match(/"runId":"run_registry_skip"/g)).toHaveLength(2);
         expect(box.out).toMatch(
           /registry_stale:spec=git:older-registry\/git:older-registry:worker=git:[^:"]+:checkout=git:[^"}]+/,
         );
         expect(box.out).not.toContain("refused run_registry_skip");
+        expect(box.out).not.toContain("dead-lettered run_registry_skip");
         const worker = await registeredWorker(home);
         expect(worker.skipped).toEqual([
           {
@@ -226,6 +232,57 @@ describe("work command", () => {
             reason: expect.stringMatching(/^registry_stale:/),
           },
         ]);
+        const db = openDb(path.join(home, "runtime.db"));
+        const state = db
+          .query(`SELECT state FROM runs WHERE run_id = ?`)
+          .get("run_registry_skip")?.state;
+        db.close();
+        expect(state).toBe("QUEUED");
+      } finally {
+        box.child.kill("SIGTERM");
+        await exitOf(box.child);
+        rmSync(home, { recursive: true, force: true });
+      }
+    },
+    loadAdjustedTimeout(30_000),
+  );
+
+  test(
+    "dead-letters a queued run that stayed stale past the deploy window",
+    async () => {
+      const home = tmpDir("evrt-work-registry-dead-letter-");
+      await seedSkippedRun(home, {
+        runId: "run_registry_stale",
+        promptVersion: "git:older-registry",
+        queuedAt: Date.now() - 60 * 60_000,
+      });
+      const box = spawnWorker(
+        [
+          "--adapter-override",
+          "fake",
+          "--poll-ms",
+          "25",
+          "--skip-report-ms",
+          "100",
+        ],
+        { FACTORY_EVENT_HOME: home },
+      );
+      try {
+        await until(
+          "the stale queued run to be terminalized",
+          () => {
+            const db = openDb(path.join(home, "runtime.db"));
+            const state = db
+              .query(`SELECT state FROM runs WHERE run_id = ?`)
+              .get("run_registry_stale")?.state;
+            db.close();
+            return state === "CANCELLED";
+          },
+          { timeoutMs: 5_000, everyMs: 10 },
+        );
+        await waitFor(box, "dead-lettered run_registry_stale");
+        expect(box.out).toContain("dead-lettered run_registry_stale");
+        expect(box.out).not.toContain("refused run_registry_stale");
       } finally {
         box.child.kill("SIGTERM");
         await exitOf(box.child);

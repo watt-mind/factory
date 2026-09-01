@@ -132,6 +132,7 @@ import {
   resolveLinearApiKey,
   reconcileTierEscalations,
   scheduleTierEscalation,
+  STALE_DEAD_LETTER_MS,
   sweepOrphanedLocalNotifyOutbox,
   tierEscalationContinuationGuard,
   tierEscalationEligibility,
@@ -6457,7 +6458,7 @@ sh -c 'sleep 5 & wait'
     ).toHaveLength(0);
   });
 
-  test("claimNext does not restart-loop a fresh worker on an older queued spec (WM-613)", () => {
+  test("claimNext dead-letters an old queued spec so a singleton can schedule again (GH-2226)", async () => {
     const db = openDb(":memory:");
     const staleSpec = queueRun(
       db,
@@ -6469,6 +6470,7 @@ sh -c 'sleep 5 & wait'
 
     const refusal = claimNext(db, {
       ...opts(),
+      now: T0 + STALE_DEAD_LETTER_MS,
       policyVersion: "git:current",
       registryVersion: "git:current",
       currentRegistryVersion: "git:current",
@@ -6480,8 +6482,38 @@ sh -c 'sleep 5 & wait'
       retryable: true,
       reloadRequired: false,
       reasonCode: "registry_stale",
+      deadLettered: [
+        expect.objectContaining({
+          runId: staleSpec.runId,
+          specVersion: "git:old/git:old",
+          workerRegistryVersion: "git:current",
+          checkoutRegistryVersion: "git:current",
+        }),
+      ],
     });
-    expect(runState(db, staleSpec.runId)).toBe("QUEUED");
+    expect(runState(db, staleSpec.runId)).toBe("CANCELLED");
+    expect(lifecycleOf(db, staleSpec.runId).at(-1)).toMatchObject({
+      from_state: "QUEUED",
+      to_state: "CANCELLED",
+      reason: "registry_stale",
+    });
+
+    const { inFlightRunsForAgent } = await import("./in-flight-runs.mjs");
+    expect(inFlightRunsForAgent(db, staleSpec.agent)).toEqual([]);
+
+    // The next singleton schedule slot can now enqueue a replacement rather
+    // than being deduped against an impossible pre-redeploy run.
+    const freshSpec = queueRun(
+      db,
+      makeSpec({
+        promptVersion: "git:current",
+        policyVersion: "git:current",
+      }),
+      T0 + 1000,
+    );
+    expect(inFlightRunsForAgent(db, staleSpec.agent)).toEqual([
+      expect.objectContaining({ run_id: freshSpec.runId, state: "QUEUED" }),
+    ]);
   });
 
   test("claimNext skips an incompatible old spec and claims compatible queued work (WM-613)", () => {
@@ -6511,8 +6543,102 @@ sh -c 'sleep 5 & wait'
     });
 
     expect(claim.runId).toBe(compatibleSpec.runId);
+    // Still inside the deploy window: skipped, not terminalized.
     expect(runState(db, staleSpec.runId)).toBe("QUEUED");
+    expect(claim.deadLettered).toBeUndefined();
     expect(runState(db, compatibleSpec.runId)).toBe("LEASED");
+  });
+
+  test("claimNext leaves a freshly queued mismatched run QUEUED until it outlives the deploy window (GH-2226)", () => {
+    const db = openDb(":memory:");
+    const staleSpec = queueRun(
+      db,
+      makeSpec({ promptVersion: "git:old", policyVersion: "git:old" }),
+    );
+
+    const refusal = claimNext(db, {
+      ...opts(),
+      now: T0 + STALE_DEAD_LETTER_MS - 1,
+      policyVersion: "git:current",
+      registryVersion: "git:current",
+      currentRegistryVersion: "git:current",
+    });
+
+    expect(refusal).toMatchObject({
+      runId: staleSpec.runId,
+      refused: true,
+      reloadRequired: false,
+      reasonCode: "registry_stale",
+    });
+    expect(refusal.deadLettered).toBeUndefined();
+    expect(runState(db, staleSpec.runId)).toBe("QUEUED");
+  });
+
+  test("claimNext never dead-letters against an unreadable checkout version (GH-2226)", () => {
+    const db = openDb(":memory:");
+    const staleSpec = queueRun(
+      db,
+      makeSpec({ promptVersion: "git:old", policyVersion: "git:old" }),
+    );
+
+    // checkoutPolicyVersion() degrades to "unknown" when `git rev-parse` fails.
+    // A mismatch against a version we could not read is not evidence of a
+    // stale run, so one transient probe failure must terminalize nothing.
+    const refusal = claimNext(db, {
+      ...opts(),
+      now: T0 + STALE_DEAD_LETTER_MS * 10,
+      policyVersion: "git:current",
+      registryVersion: "git:current",
+      currentRegistryVersion: "unknown",
+    });
+
+    expect(refusal).toMatchObject({
+      runId: staleSpec.runId,
+      refused: true,
+      reloadRequired: false,
+      reasonCode: "registry_stale",
+      checkoutRegistryVersion: "unknown",
+    });
+    expect(refusal.deadLettered).toBeUndefined();
+    expect(runState(db, staleSpec.runId)).toBe("QUEUED");
+  });
+
+  test("claimNext dead-letters only adapters this worker serves, even under an override (GH-2226)", () => {
+    const db = openDb(":memory:");
+    const foreignSpec = queueRun(
+      db,
+      makeSpec({
+        adapter: "other_adapter",
+        promptVersion: "git:old",
+        policyVersion: "git:old",
+      }),
+    );
+    const ownSpec = queueRun(
+      db,
+      makeSpec({
+        adapter: "fake",
+        promptVersion: "git:old",
+        policyVersion: "git:old",
+      }),
+      T0 + 1,
+    );
+
+    const refusal = claimNext(db, {
+      ...opts(),
+      now: T0 + STALE_DEAD_LETTER_MS + 1000,
+      policyVersion: "git:current",
+      registryVersion: "git:current",
+      currentRegistryVersion: "git:current",
+      adapters: ["fake"],
+      adapterOverride: "fake",
+    });
+
+    expect(refusal.refused).toBe(true);
+    expect(runState(db, foreignSpec.runId)).toBe("QUEUED");
+    expect(runState(db, ownSpec.runId)).toBe("CANCELLED");
+    expect(refusal.deadLettered).toEqual([
+      expect.objectContaining({ runId: ownSpec.runId }),
+    ]);
   });
 
   test("claimNext unconstrained candidate query: 60 unsatisfiable placement runs do not starve matching run (OPS-454)", () => {

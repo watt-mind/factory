@@ -213,6 +213,19 @@ export default async function work(args) {
     ];
   }
 
+  /**
+   * One line per run claimNext terminalized as unclaimable, so a dead-letter is
+   * never silent — the skip report can no longer show these rows, since they
+   * have left QUEUED.
+   */
+  function logDeadLettered(claim) {
+    for (const entry of claim?.deadLettered ?? []) {
+      log(
+        `dead-lettered ${entry.runId} (registry_stale): run ${entry.specVersion}, worker registry ${entry.workerRegistryVersion}, checkout registry ${entry.checkoutRegistryVersion}`,
+      );
+    }
+  }
+
   /** Refresh the bounded snapshot the registry row and heartbeat publish. */
   function snapshotSkippedQueuedRuns(now) {
     skippedQueuedRuns = inspectSkippedQueuedRuns(now);
@@ -364,7 +377,10 @@ export default async function work(args) {
           registryVersion: pv,
           currentRegistryVersion: checkoutPolicyVersion,
           labels,
-          adapters: adapterOverride ? null : adapterNames,
+          // Always hand over the allow-list: --adapter-override lets the
+          // worker execute anything, but claimNext still needs the list to
+          // scope which stale runs it may dead-letter (GH-2226).
+          adapters: adapterNames,
           ...(adapterOverride ? { adapterOverride } : {}),
         });
         if (!claim) {
@@ -379,10 +395,12 @@ export default async function work(args) {
             );
           if (claim.reloadRequired)
             return finish("registry_stale", CODE_RELOAD_EXIT);
+          logDeadLettered(claim);
           reportSkipsWhenDue(Date.now());
           await new Promise((resolve) => setTimeout(resolve, pollMs));
           continue;
         }
+        logDeadLettered(claim);
         inFlight = claim.runId;
         idleSince = null;
         for (const key of reportedSkips.keys()) {

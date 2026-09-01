@@ -521,6 +521,14 @@ const RUNTIME_ARTIFACTS = [
 export const LEASE_GRACE_SECONDS = 120;
 
 /**
+ * How long a QUEUED run planned against a checkout nobody runs any more must
+ * sit before a worker dead-letters it (GH-2226). A deploy legitimately leaves
+ * freshly planned runs mismatched for the length of the rollout, so only a run
+ * still stale after this window is treated as unclaimable rather than early.
+ */
+export const STALE_DEAD_LETTER_MS = 15 * 60_000;
+
+/**
  * Adapters that honor AbortSignal, so the worker's durable DB-backed deadline
  * monitor — not the adapter's own TERM/KILL timer — is the authoritative
  * timer and can move while an attempt is running (WM-566). Their `timeoutMs`
@@ -2405,6 +2413,8 @@ export function claimNext(
     let row = null;
     let spec = null;
     let staleRefusal = null;
+    /** Runs terminalized in this transaction, so the caller can log each one. */
+    const deadLettered = [];
     let checkoutVersion;
     const resolveCheckoutVersion = () => {
       if (checkoutVersion !== undefined) return checkoutVersion;
@@ -2426,17 +2436,20 @@ export function claimNext(
         continue;
       const candidateSpec = JSON.parse(candidate.spec_json);
       if (!satisfiesPlacement(labels, candidateSpec.placement)) continue;
-      if (
-        adapters &&
-        !adapterOverride &&
-        !adapters.includes(candidateSpec.adapter)
-      )
-        continue;
-      // The worker snapshots the registry and policy at startup. A run planned
-      // against another checkout must stay QUEUED; leasing it would execute and
-      // validate with incompatible definitions. Compare the live checkout too
-      // so only an actually stale worker reloads — an older queued spec must not
-      // put a fresh supervisor into an endless exit-75 loop.
+      // An allow-list bounds what this worker may claim; --adapter-override
+      // lets it execute anything with the forced adapter, so the claim path
+      // ignores the list. The dead-letter path below does not: terminalizing a
+      // run is a decision about work this worker is actually responsible for.
+      const adapterAllowed =
+        !adapters || adapters.includes(candidateSpec.adapter);
+      if (adapters && !adapterOverride && !adapterAllowed) continue;
+      // The worker snapshots the registry and policy at startup. Leasing a run
+      // planned against another checkout would execute and validate with
+      // incompatible definitions. Compare the live checkout too: a run matching
+      // the current checkout asks this stale worker to reload, while a run that
+      // differs from the current checkout can never become claimable and — once
+      // it has outlived a deploy window — must not keep singleton schedules in
+      // flight forever.
       if (
         registryVersion &&
         (candidateSpec.promptVersion !== registryVersion ||
@@ -2459,13 +2472,44 @@ export function claimNext(
         };
         if (reloadRequired) return refusal;
         staleRefusal ??= refusal;
+        // Dead-letter only what is provably unclaimable. checkoutPolicyVersion()
+        // degrades to "unknown" on a transient `git rev-parse` failure, and a
+        // mismatch against a version we could not read is no evidence at all —
+        // one failed probe must not terminalize the whole queue.
+        const queuedAt = Date.parse(candidate.queued_at);
+        const aged =
+          Number.isFinite(queuedAt) &&
+          queuedAt + STALE_DEAD_LETTER_MS <= claimNow;
+        if (current && current !== "unknown" && adapterAllowed && aged) {
+          transition(db, {
+            runId: candidate.run_id,
+            to: "CANCELLED",
+            expectFrom: "QUEUED",
+            actor: owner,
+            reason: "registry_stale",
+            policyVersion,
+            now: claimNow,
+          });
+          deadLettered.push({
+            runId: candidate.run_id,
+            specVersion: `${candidateSpec.promptVersion}/${candidateSpec.policyVersion}`,
+            workerRegistryVersion: registryVersion,
+            checkoutRegistryVersion: current,
+          });
+        }
+        // Continue looking so one orphaned run cannot keep compatible queued
+        // work behind it from being leased in this claim transaction.
         continue;
       }
       row = candidate;
       spec = candidateSpec;
       break;
     }
-    if (!row) return staleRefusal;
+    if (!row) {
+      if (staleRefusal && deadLettered.length)
+        staleRefusal.deadLettered = deadLettered;
+      return staleRefusal;
+    }
     const attempt = row.attempts + 1;
     const fencingToken = nextCounter(db, "fencing");
     const leaseExpiresAt = iso(
@@ -2490,7 +2534,13 @@ export function claimNext(
       now: claimNow,
     });
 
-    return { runId: row.run_id, attempt, fencingToken, spec };
+    return {
+      runId: row.run_id,
+      attempt,
+      fencingToken,
+      spec,
+      ...(deadLettered.length ? { deadLettered } : {}),
+    };
   });
 }
 
