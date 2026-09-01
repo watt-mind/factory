@@ -443,7 +443,7 @@ describe("registry", () => {
     // was captured.
     // Regenerated (#2149): added editorial agent definitions, event-types, and edges.
     const expected =
-      "sha256:4799d841ea992cf84d7f24aba3aefd474a0cf0841593ea53c1101f5589b88333";
+      "sha256:3900f9db80ca33c23f6f8f3a673b66498042f0a0d3067500e77a4ae7655af2ad";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 

@@ -22,7 +22,7 @@
   "limits": { "timeout_seconds": 180, "attempts": 1 },
   "mutating": false,
   "pins": {
-    "agents/editorial-review.md": "sha256:5847a804b79ee76d9c504b94ab1d4e8f296c6e3f6edeca32cc407c2361d4e2fa",
+    "agents/editorial-review.md": "sha256:8139a577e60923c70af02ab680ad9ddbd7643e5c30298a06060fdaf0b37e2208",
     "schemas/editorial-review.input.json": "sha256:3a15c07b0c268470d3e94c67bd7f8b332f58a8a4383248adab9bb584a951044e",
     "schemas/editorial-review.output.json": "sha256:b9d2b7583c9250c467eb987808460bac4e1fac9ebf08033bf5674b34d57ebac3"
   }

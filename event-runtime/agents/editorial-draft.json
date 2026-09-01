@@ -22,7 +22,7 @@
   "limits": { "timeout_seconds": 300, "attempts": 1 },
   "mutating": false,
   "pins": {
-    "agents/editorial-draft.md": "sha256:85cfa69eec7189bd300926ef0646d7cd2986d38a7665954d8f8eb6184cd8e0e9",
+    "agents/editorial-draft.md": "sha256:b88b3f0de13912e370e87db3bc4b87c3f29d131607832122f46fae98bf792507",
     "schemas/editorial-draft.input.json": "sha256:4fef0d88c3745f6261cc2a4b941671ba3eb605d37cc7fccfc92349fa8b1e47af",
     "schemas/editorial-draft.output.json": "sha256:21aad893cf5cf8899eb07bd819c945ebdc8d7c03443efab376e644363aa0797f"
   }
