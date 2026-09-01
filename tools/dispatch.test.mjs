@@ -1,13 +1,20 @@
 import { expect, test } from "bun:test";
 import path from "node:path";
+import { ALL_TERMINAL_STATES } from "../event-runtime/lib/lifecycle.mjs";
 import {
   DEFAULT_PORT,
   DEFAULT_TIMEOUT_MS,
   resolvePort,
   resolveTimeoutMs,
+  TERMINAL_STATES,
 } from "./dispatch.mjs";
 
 const DISPATCH = path.join(import.meta.dir, "dispatch.mjs");
+
+test("dispatch terminal states derive from the lifecycle terminal states", () => {
+  expect(TERMINAL_STATES).toBe(ALL_TERMINAL_STATES);
+  expect([...TERMINAL_STATES].sort()).toEqual([...ALL_TERMINAL_STATES].sort());
+});
 
 async function runDispatch(server, args, extraEnv = {}) {
   const child = Bun.spawn(["bun", DISPATCH, ...args], {

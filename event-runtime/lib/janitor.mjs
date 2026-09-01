@@ -1,7 +1,11 @@
 import { spawn } from "node:child_process";
 import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
-import { artifactsRoot, runtimeHome } from "./config.mjs";
+import {
+  artifactsRoot,
+  DEFAULT_PROPOSAL_TTL_SECONDS,
+  runtimeHome,
+} from "./config.mjs";
 import { openDb, txImmediate } from "./db.mjs";
 import { ALL_TERMINAL_STATES, transition } from "./lifecycle.mjs";
 import { isProposalExpired } from "./proposals.mjs";
@@ -92,31 +96,46 @@ function sweepTerminalRows(db, { rowCutoff, nowIso, apply }) {
 
 /**
  * Find proposal runs that no longer have a possible admission path. A run
- * without any proposal is also dead: its universal proposal condition is
- * vacuously true and it cannot be approved.
+ * without any proposal is only dead after the proposal TTL: a just-created
+ * run may still be between its creation and proposal insert statements.
  */
 function expiredProposedRunIds(db, now) {
   const proposalsByRun = new Map();
   for (const row of db
     .query(
-      `SELECT runs.run_id AS proposed_run_id, proposals.*
+      `SELECT runs.run_id AS proposed_run_id,
+              runs.created_at AS run_created_at,
+              proposals.*
          FROM runs
          LEFT JOIN proposals ON proposals.run_id = runs.run_id
         WHERE runs.state = 'PROPOSED'
         ORDER BY runs.run_id, proposals.rowid`,
     )
     .all()) {
-    const proposals = proposalsByRun.get(row.proposed_run_id) ?? [];
-    if (row.id !== null) proposals.push(row);
-    proposalsByRun.set(row.proposed_run_id, proposals);
+    const entry = proposalsByRun.get(row.proposed_run_id) ?? {
+      createdAt: row.run_created_at,
+      proposals: [],
+    };
+    if (row.id !== null) entry.proposals.push(row);
+    proposalsByRun.set(row.proposed_run_id, entry);
   }
-  return [...proposalsByRun].flatMap(([runId, proposals]) =>
+  return [...proposalsByRun].flatMap(([runId, { createdAt, proposals }]) =>
     proposals.some(
       (proposal) =>
         proposal.status === "open" && !isProposalExpired(proposal, now),
     )
       ? []
-      : [runId],
+      : proposals.length === 0 && !isProposalLessRunExpired(createdAt, now)
+        ? []
+        : [runId],
+  );
+}
+
+function isProposalLessRunExpired(createdAt, now) {
+  const createdAtMs = Date.parse(createdAt);
+  return (
+    Number.isFinite(createdAtMs) &&
+    createdAtMs + DEFAULT_PROPOSAL_TTL_SECONDS * 1000 < now
   );
 }
 

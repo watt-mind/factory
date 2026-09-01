@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-janitor-test-mjs";
+import { DEFAULT_PROPOSAL_TTL_SECONDS } from "./config.mjs";
 import { openDb } from "./db.mjs";
 import {
   DEFAULT_ARTIFACT_RETENTION_DAYS,
@@ -308,6 +309,9 @@ describe("terminal row retention (#1065)", () => {
     const db = openDb(path.join(root, "runtime.db"));
     const expired = new Date(now - 2 * 60 * 60 * 1000).toISOString();
     const fresh = new Date(now - 5 * 60 * 1000).toISOString();
+    const oldWithoutProposals = new Date(
+      now - DEFAULT_PROPOSAL_TTL_SECONDS * 1000 - 1,
+    ).toISOString();
     try {
       mkdirSync(store);
       for (const runId of [
@@ -318,9 +322,15 @@ describe("terminal row retention (#1065)", () => {
         "run-expired-human-needed",
         "run-mixed",
         "run-open",
-        "run-without-proposals",
+        "run-without-proposals-fresh",
+        "run-without-proposals-old",
       ]) {
-        insertRun(db, runId, "PROPOSED", fresh);
+        insertRun(
+          db,
+          runId,
+          "PROPOSED",
+          runId === "run-without-proposals-old" ? oldWithoutProposals : fresh,
+        );
       }
       insertProposal(db, "proposal-expired", "open", expired, 60, {
         runId: "run-expired",
@@ -391,7 +401,16 @@ describe("terminal row retention (#1065)", () => {
       expect(
         db
           .query(
-            `SELECT state FROM runs WHERE run_id = 'run-without-proposals'`,
+            `SELECT state FROM runs
+             WHERE run_id = 'run-without-proposals-fresh'`,
+          )
+          .get().state,
+      ).toBe("PROPOSED");
+      expect(
+        db
+          .query(
+            `SELECT state FROM runs
+             WHERE run_id = 'run-without-proposals-old'`,
           )
           .get().state,
       ).toBe("CANCELLED");

@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { ALL_TERMINAL_STATES } from "../event-runtime/lib/lifecycle.mjs";
 import {
   assessServeHealth,
   controlApiFailureCode,
@@ -14,10 +15,17 @@ import {
   runIdleWatchdogTick,
   runWatchdogCheck,
   FLEET_CHECK_TIMEOUT_MS,
+  IDLE_TERMINAL_RUN_STATES,
   SANDBOX_REFUSAL_MAX_PAGES,
   SANDBOX_REFUSAL_MAX_RUNS,
   SCAN_LOOP_AGENTS,
 } from "./watchdog.mjs";
+
+test("idle terminal states add only PROPOSED to lifecycle terminal states", () => {
+  expect([...IDLE_TERMINAL_RUN_STATES].sort()).toEqual(
+    [...ALL_TERMINAL_STATES, "PROPOSED"].sort(),
+  );
+});
 
 test("assessServeHealth flags a served stale registry and reload error", () => {
   const result = assessServeHealth(
