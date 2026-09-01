@@ -159,9 +159,124 @@ export function environmentName(home = runtimeHome()) {
   return base.replace(/^event-runtime-?/, "") || base;
 }
 
-/** Loopback only in the MVP — the control API is a local trust surface (§14). */
+/** Loopback is the default control API target; clients can override it safely. */
 export const API_HOST = "127.0.0.1";
 export const DEFAULT_PORT = Number(process.env.FACTORY_EVENT_PORT || 7381);
+
+const CONTROL_API_ENV_KEYS = Object.freeze([
+  "FACTORY_EVENT_HOST",
+  "FACTORY_CONTROL_API_URL",
+  "FACTORY_EVENT_URL",
+]);
+
+/**
+ * Read the operator's optional control target without making a malformed local
+ * config prevent an explicit flag or environment override from working.
+ */
+export function loadControlApiConfig({
+  configPath = path.join(homedir(), ".factory", "config.json"),
+} = {}) {
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Return the last supported targeting flag, matching normal CLI override order. */
+export function controlApiFlagValue(args = []) {
+  let value = null;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--host" || arg === "--remote") {
+      const next = args[index + 1];
+      if (!next || next.startsWith("--")) {
+        throw new Error(`${arg} requires a URL, host, or SSH alias`);
+      }
+      value = next;
+      index += 1;
+    } else if (arg.startsWith("--host=") || arg.startsWith("--remote=")) {
+      value = arg.slice(arg.indexOf("=") + 1);
+      if (!value) throw new Error(`${arg.split("=", 1)[0]} requires a value`);
+    }
+  }
+  return value;
+}
+
+function normalizedControlApiTarget(value, { defaultPort, source }) {
+  const raw = String(value ?? "").trim();
+  if (!raw) throw new Error("control API target must not be empty");
+  const hasScheme = /^[a-z][a-z\d+.-]*:\/\//i.test(raw);
+  let parsed;
+  try {
+    parsed = new URL(hasScheme ? raw : `http://${raw}`);
+  } catch {
+    throw new Error(`invalid control API target: ${raw}`);
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("control API target must use http or https");
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error("control API target must not contain credentials");
+  }
+  if (parsed.search || parsed.hash) {
+    throw new Error("control API target must not contain a query or fragment");
+  }
+  if (!hasScheme && !parsed.port) parsed.port = String(defaultPort);
+
+  const pathname = parsed.pathname.replace(/\/+$/, "");
+  const protocolDefault = parsed.protocol === "https:" ? 443 : 80;
+  return {
+    baseUrl: `${parsed.protocol}//${parsed.host}${pathname}`,
+    host: parsed.hostname,
+    port: Number(parsed.port || protocolDefault),
+    source,
+  };
+}
+
+/**
+ * Resolve the control API target consistently for every client command.
+ *
+ * An explicit target (used by apiClient's programmatic API) and CLI flags win,
+ * then the documented environment sequence, then `~/.factory/config.json`,
+ * and finally the loopback development runtime.
+ */
+export function resolveControlApiTarget({
+  target = null,
+  args = process.argv.slice(2),
+  env = process.env,
+  localConfig = undefined,
+  defaultPort = Number(env.FACTORY_EVENT_PORT || DEFAULT_PORT),
+} = {}) {
+  let value = target;
+  let source = target ? "explicit" : null;
+  if (!value) {
+    value = controlApiFlagValue(args);
+    source = value ? "flag" : null;
+  }
+  if (!value) {
+    for (const key of CONTROL_API_ENV_KEYS) {
+      if (env[key]) {
+        value = env[key];
+        source = "environment";
+        break;
+      }
+    }
+  }
+  if (!value) {
+    const config =
+      localConfig === undefined ? loadControlApiConfig() : localConfig;
+    if (config?.host) {
+      value = config.host;
+      source = "config";
+    }
+  }
+  return normalizedControlApiTarget(value || API_HOST, {
+    defaultPort,
+    source: source || "default",
+  });
+}
 
 /** Shared secret for webhook HMAC. Absent secret means intake refuses webhooks. */
 export function webhookSecret() {

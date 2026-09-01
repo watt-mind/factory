@@ -4,7 +4,11 @@
  * 401 comes back as an actionable message that never carries the token value.
  */
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { apiClient, unauthorizedMessage } from "./client.mjs";
+import {
+  apiClient,
+  resolveControlApiTarget,
+  unauthorizedMessage,
+} from "./client.mjs";
 
 const TOKEN = "test-secret-token-1132";
 let server;
@@ -55,6 +59,83 @@ test("sends the bearer when a token is passed", async () => {
   const client = apiClient({ port, token: TOKEN });
   lastAuthorization = undefined;
   await expect(client.runs()).resolves.toEqual({ runs: [] });
+  expect(lastAuthorization).toBe(`Bearer ${TOKEN}`);
+});
+
+test("resolves a CLI target before environment, local config, and the loopback default", () => {
+  expect(
+    resolveControlApiTarget({
+      args: ["runs", "--host", "https://flag.example.test/api"],
+      env: {
+        FACTORY_EVENT_HOST: "env.example.test:7444",
+        FACTORY_CONTROL_API_URL: "https://control.example.test",
+        FACTORY_EVENT_URL: "https://event.example.test",
+      },
+      localConfig: { host: "config.example.test:7555" },
+    }),
+  ).toEqual({
+    baseUrl: "https://flag.example.test/api",
+    host: "flag.example.test",
+    port: 443,
+    source: "flag",
+  });
+});
+
+test("normalizes a configured bare host and preserves its non-default port", () => {
+  expect(
+    resolveControlApiTarget({
+      env: {},
+      localConfig: { host: "runner.whale-pike.ts.net:7389" },
+    }),
+  ).toEqual({
+    baseUrl: "http://runner.whale-pike.ts.net:7389",
+    host: "runner.whale-pike.ts.net",
+    port: 7389,
+    source: "config",
+  });
+});
+
+test("uses the documented environment order before local config", () => {
+  const localConfig = { host: "config.example.test:7555" };
+  expect(
+    resolveControlApiTarget({
+      args: [],
+      env: {
+        FACTORY_EVENT_HOST: "event-host.example.test:7444",
+        FACTORY_CONTROL_API_URL: "https://control-url.example.test",
+        FACTORY_EVENT_URL: "https://event-url.example.test",
+      },
+      localConfig,
+    }).baseUrl,
+  ).toBe("http://event-host.example.test:7444");
+  expect(
+    resolveControlApiTarget({
+      args: [],
+      env: {
+        FACTORY_CONTROL_API_URL: "https://control-url.example.test",
+        FACTORY_EVENT_URL: "https://event-url.example.test",
+      },
+      localConfig,
+    }).baseUrl,
+  ).toBe("https://control-url.example.test");
+  expect(
+    resolveControlApiTarget({
+      args: [],
+      env: { FACTORY_EVENT_URL: "https://event-url.example.test" },
+      localConfig,
+    }).baseUrl,
+  ).toBe("https://event-url.example.test");
+});
+
+test("uses the resolved URL while preserving bearer propagation", async () => {
+  lastAuthorization = undefined;
+  const client = apiClient({
+    url: `http://127.0.0.1:${port}`,
+    token: TOKEN,
+  });
+  await expect(client.runs()).resolves.toEqual({ runs: [] });
+  expect(client.host).toBe("127.0.0.1");
+  expect(client.port).toBe(port);
   expect(lastAuthorization).toBe(`Bearer ${TOKEN}`);
 });
 

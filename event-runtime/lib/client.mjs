@@ -7,7 +7,9 @@
  * non-2xx response. A connection failure (serve not running) surfaces as an
  * error with no `.status`, which callers use to say exactly that.
  */
-import { API_HOST, DEFAULT_PORT } from "./config.mjs";
+import { resolveControlApiTarget } from "./config.mjs";
+
+export { resolveControlApiTarget } from "./config.mjs";
 
 /**
  * Actionable text for a control-API auth failure (#1132). Names the variable and the
@@ -21,15 +23,22 @@ export function unauthorizedMessage(tokenPresent) {
 }
 
 export function apiClient({
-  port = DEFAULT_PORT,
-  host = API_HOST,
+  /** A complete HTTP(S) control API URL, including an optional path prefix. */
+  url,
+  /** Backwards-compatible host override; a bare host uses the selected port. */
+  host,
+  port,
   // WM-1152: bearer the control API requires when FACTORY_CONTROL_API_TOKEN is
   // set. Read from env by default so every CLI/worker caller authenticates
   // without changes; sent on every request (webhook/health ignore it). Never
   // logged. Unset means no header, matching the pre-token behavior.
   token = process.env.FACTORY_CONTROL_API_TOKEN || null,
 } = {}) {
-  const base = `http://${host}:${port}`;
+  const target = resolveControlApiTarget({
+    target: url ?? host,
+    defaultPort: port,
+  });
+  const base = target.baseUrl;
   const authHeader = token ? { authorization: `Bearer ${token}` } : {};
 
   async function call(method, path, { body, headers = {} } = {}) {
@@ -67,8 +76,9 @@ export function apiClient({
   }
 
   return {
-    host,
-    port,
+    host: target.host,
+    port: target.port,
+    baseUrl: target.baseUrl,
     token,
     health: () => call("GET", "/health"),
     /** Webhook intake: raw body string plus the §14 signature headers. */

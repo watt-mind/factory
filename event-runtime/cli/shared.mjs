@@ -43,7 +43,7 @@ export async function withClient(fn) {
   } catch (err) {
     if (err.status === undefined) {
       fail(
-        `control API not reachable on ${client.host}:${client.port} — start it with: bun event-runtime/cli.mjs serve`,
+        `control API not reachable at ${client.baseUrl} — start it with: bun event-runtime/cli.mjs serve`,
       );
     }
     fail(err.message);
