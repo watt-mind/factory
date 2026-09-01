@@ -83,6 +83,100 @@ describe("cli routing", () => {
   });
 
   test.each([
+    ["--host", (port) => `127.0.0.1:${port}`],
+    ["--remote", (port) => `http://127.0.0.1:${port}`],
+  ])(
+    "top-level inbox and decide use the target forwarded by factory %s",
+    async (_flag, targetFor) => {
+      const token = "cli-remote-control-token";
+      const requests = [];
+      const item = { id: "item-remote", decision: { fields: [] } };
+      const server = Bun.serve({
+        port: Number(freePort()),
+        async fetch(request) {
+          const url = new URL(request.url);
+          requests.push({
+            method: request.method,
+            pathname: url.pathname,
+            search: url.search,
+            authorization: request.headers.get("authorization"),
+          });
+          if (request.method === "GET" && url.pathname === "/inbox") {
+            return Response.json({ items: [] });
+          }
+          if (
+            request.method === "GET" &&
+            url.pathname === "/inbox/item-remote"
+          ) {
+            return Response.json({ item });
+          }
+          if (
+            request.method === "POST" &&
+            url.pathname === "/inbox/item-remote/decide"
+          ) {
+            return Response.json({
+              item,
+              effect: { kind: "approve_proposal", outcome: "applied" },
+            });
+          }
+          return new Response("not found", { status: 404 });
+        },
+      });
+      const env = {
+        ...process.env,
+        FACTORY_EVENT_HOME: tmpDir("evrt-cli-"),
+        FACTORY_EVENT_HOST: targetFor(server.port),
+        FACTORY_CONTROL_API_TOKEN: token,
+        FACTORY_RUN_DIR: throwawayRunDir(),
+      };
+      try {
+        const inbox = Bun.spawn(["bun", CLI, "inbox"], {
+          env,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [inboxStatus, inboxStderr] = await Promise.all([
+          inbox.exited,
+          new Response(inbox.stderr).text(),
+        ]);
+        expect(inboxStatus, inboxStderr).toBe(0);
+
+        const decide = Bun.spawn(
+          ["bun", CLI, "decide", "item-remote", "approve"],
+          { env, stdout: "pipe", stderr: "pipe" },
+        );
+        const [decideStatus, decideStderr] = await Promise.all([
+          decide.exited,
+          new Response(decide.stderr).text(),
+        ]);
+        expect(decideStatus, decideStderr).toBe(0);
+        expect(requests).toEqual([
+          {
+            method: "GET",
+            pathname: "/inbox",
+            search: "?status=open",
+            authorization: `Bearer ${token}`,
+          },
+          {
+            method: "GET",
+            pathname: "/inbox/item-remote",
+            search: "",
+            authorization: `Bearer ${token}`,
+          },
+          {
+            method: "POST",
+            pathname: "/inbox/item-remote/decide",
+            search: "",
+            authorization: `Bearer ${token}`,
+          },
+        ]);
+      } finally {
+        server.stop(true);
+      }
+    },
+  );
+
+  test.each([
     [401, "unauthorized"],
     [503, "control_api_token_unset"],
   ])(

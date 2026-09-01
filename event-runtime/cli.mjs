@@ -9,8 +9,6 @@ import { backfillResultArtifacts } from "./lib/artifacts.mjs";
 import { initPack } from "./lib/pack-init.mjs";
 import { validatePack } from "./lib/pack-validate.mjs";
 import {
-  API_HOST,
-  DEFAULT_PORT,
   FACTORY_ROOT,
   artifactsRoot,
   initializeLocalConfig,
@@ -18,7 +16,7 @@ import {
 } from "./lib/config.mjs";
 import { openDb } from "./lib/db.mjs";
 import { decisionRequestHash } from "./lib/decision.mjs";
-import { unauthorizedMessage } from "./lib/client.mjs";
+import { apiClient, unauthorizedMessage } from "./lib/client.mjs";
 import { resolveRefs } from "./lib/presentation.mjs";
 import { renderText } from "./lib/presentation-text.mjs";
 import {
@@ -69,18 +67,16 @@ export {
 } from "./cli/supervise.mjs";
 export { COMMAND_NAMES, COMMANDS } from "./cli/commands.mjs";
 
-function controlUrl(pathname) {
-  const port = Number(process.env.FACTORY_EVENT_PORT ?? DEFAULT_PORT);
-  return `http://${API_HOST}:${port}${pathname}`;
-}
-
 async function callControl(method, pathname, body) {
-  const token = process.env.FACTORY_CONTROL_API_TOKEN || null;
-  const res = await fetch(controlUrl(pathname), {
+  // Keep these top-level verbs on the same resolved target as COMMANDS. The
+  // factory --host/--remote flags arrive as FACTORY_EVENT_HOST, which the
+  // client resolver validates before any bearer is sent.
+  const client = apiClient({ resolveTarget: true });
+  const res = await fetch(`${client.baseUrl}${pathname}`, {
     method,
     headers: {
       "content-type": "application/json",
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...(client.token ? { authorization: `Bearer ${client.token}` } : {}),
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
@@ -89,7 +85,7 @@ async function callControl(method, pathname, body) {
     const err = new Error(
       res.status === 401 ||
         (res.status === 503 && payload?.error === "control_api_token_unset")
-        ? unauthorizedMessage(Boolean(token))
+        ? unauthorizedMessage(Boolean(client.token))
         : (payload?.message ?? payload?.error ?? `HTTP ${res.status}`),
     );
     err.status = res.status;
