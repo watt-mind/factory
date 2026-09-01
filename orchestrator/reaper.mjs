@@ -45,6 +45,8 @@ import { HEARTBEAT_STALE_MS } from "../event-runtime/lib/workers.mjs";
 import { ticketSlug } from "../lib/ticket-slug.mjs";
 import {
   assertLinearNetworkAllowed,
+  installLinearBudgetCapture,
+  LINEAR_TELEMETRY,
   parseRateLimitReset,
 } from "../tools/ticket.mjs";
 
@@ -211,10 +213,18 @@ export async function gql(
       : retriesOrOptions instanceof AbortSignal
         ? { retries: 5, signal: retriesOrOptions }
         : (retriesOrOptions ?? {});
-  const { retries = 5, signal } = options;
+  const {
+    retries = 5,
+    signal,
+    caller = "orchestrator/reaper",
+    ticket = null,
+  } = options;
   // This must precede credential loading: offline/test invocations should
   // explain the deterministic network refusal, not report a missing key.
   assertLinearNetworkAllowed(LINEAR_API_URL);
+  // This is the one Linear transport; installing here also covers direct
+  // reaper invocations, rather than relying on a particular CLI entry point.
+  installLinearBudgetCapture();
   const apiKey = getApiKey();
   const headers = {
     "Content-Type": "application/json",
@@ -231,6 +241,7 @@ export async function gql(
         headers,
         body,
         signal,
+        [LINEAR_TELEMETRY]: { caller, ticket },
       });
 
       if (!res.ok) {

@@ -23,6 +23,7 @@
  *   bun tools/ticket.mjs file --from owner/repo#123 --title "..." --body "..." --type bug
  *   bun tools/ticket.mjs queue --repo bj29
  *   bun tools/ticket.mjs budget
+ *   bun tools/ticket.mjs linear-summary --minutes 60
  *   bun tools/ticket.mjs raw '<graphql>' --var key=value
  *
  * Linear network safety: requests are blocked when `FACTORY_LINEAR_OFFLINE=1`,
@@ -59,7 +60,16 @@
  * `loadControlPlane()` (WM-894); retries, backoff and key loading stay in
  * `orchestrator/reaper.mjs` as the Linear transport behind the adapter.
  */
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { loadRepos } from "../event-runtime/lib/repos.mjs";
@@ -331,6 +341,10 @@ export async function fileTicket(
 const CACHE_DIR = path.join(homedir(), ".factory/cache/linear");
 const BUDGET_FILE = "budget.json";
 const LINEAR_API_HOST = "api.linear.app";
+const LINEAR_REQUEST_LOG_FILE = "linear-requests.jsonl";
+const LINEAR_REQUEST_LOG_MAX_BYTES = 1_000_000;
+const LINEAR_REQUEST_LOG_ROTATIONS = 3;
+export const LINEAR_TELEMETRY = Symbol.for("factory.linear.telemetry");
 
 /**
  * Test processes must never spend the operator's shared Linear budget. The
@@ -481,6 +495,65 @@ export function linearCacheDir() {
   return CACHE_DIR;
 }
 
+/** Directory for fail-open Linear request telemetry, scoped in test stacks. */
+export function linearRequestLogDir() {
+  if (process.env.LINEAR_REQUEST_LOG_DIR)
+    return process.env.LINEAR_REQUEST_LOG_DIR;
+  if (process.env.FACTORY_EVENT_HOME)
+    return path.join(process.env.FACTORY_EVENT_HOME, "run");
+  return path.join(homedir(), ".factory/run");
+}
+
+function numberHeader(headers, name) {
+  return parseHeaderNumber(headers?.get?.(name));
+}
+
+function linearRateLimitLogHeaders(headers) {
+  return {
+    requestsRemaining: numberHeader(headers, "x-ratelimit-requests-remaining"),
+    requestsLimit: numberHeader(headers, "x-ratelimit-requests-limit"),
+    requestsReset: headers?.get?.("x-ratelimit-requests-reset") ?? null,
+    complexityRemaining: numberHeader(
+      headers,
+      "x-ratelimit-complexity-remaining",
+    ),
+    complexityLimit: numberHeader(headers, "x-ratelimit-complexity-limit"),
+    complexityReset: headers?.get?.("x-ratelimit-complexity-reset") ?? null,
+  };
+}
+
+function rotateLinearRequestLog(dir) {
+  const current = path.join(dir, LINEAR_REQUEST_LOG_FILE);
+  try {
+    if (statSync(current).size < LINEAR_REQUEST_LOG_MAX_BYTES) return;
+    try {
+      unlinkSync(`${current}.${LINEAR_REQUEST_LOG_ROTATIONS}`);
+    } catch {}
+    for (let i = LINEAR_REQUEST_LOG_ROTATIONS - 1; i >= 1; i -= 1) {
+      try {
+        renameSync(`${current}.${i}`, `${current}.${i + 1}`);
+      } catch {}
+    }
+    renameSync(current, `${current}.1`);
+  } catch {
+    // Logging is telemetry only and must never affect a Linear request.
+  }
+}
+
+function appendLinearRequestLog(entry) {
+  try {
+    const dir = linearRequestLogDir();
+    mkdirSync(dir, { recursive: true });
+    rotateLinearRequestLog(dir);
+    appendFileSync(
+      path.join(dir, LINEAR_REQUEST_LOG_FILE),
+      `${JSON.stringify(entry)}\n`,
+    );
+  } catch {
+    // Fail open: a full or unavailable local disk must not break Linear.
+  }
+}
+
 export function loadLinearBudget() {
   try {
     return JSON.parse(
@@ -537,25 +610,102 @@ export function linearBudgetStatus(budget) {
   return "pass";
 }
 
-function recordLinearBudgetFromResponse(res) {
-  const parsed = parseRateLimitHeaders(res.headers);
-  if (!parsed && res.status !== 400 && res.status !== 429) return;
-  const prior = loadLinearBudget() ?? {};
-  const rateLimited =
-    res.status === 429 ||
-    (res.status === 400 && parsed?.remaining === 0) ||
-    parsed?.remaining === 0;
-  saveLinearBudget({
-    remaining:
-      parsed?.remaining ?? (rateLimited ? 0 : (prior.remaining ?? null)),
-    limit: parsed?.limit ?? prior.limit ?? LINEAR_REQUESTS_LIMIT,
-    resetAt: parsed?.resetAt ?? prior.resetAt ?? null,
-    // A successful response with capacity clears a previous refusal. Keeping
-    // `prior.rateLimited` here made a recovered account appear offline until
-    // somebody manually removed budget.json.
-    rateLimited,
-    status: res.status,
-  });
+/**
+ * Persist telemetry for one Linear response. It shares the budget snapshot so
+ * the logged delta is the exact change the existing rate-limit guard observes.
+ */
+export function recordLinearResponse(res, context = {}, { now = Date } = {}) {
+  try {
+    const parsed = parseRateLimitHeaders(res?.headers);
+    const prior = loadLinearBudget() ?? {};
+    const rateLimited =
+      res?.status === 429 ||
+      (res?.status === 400 && parsed?.remaining === 0) ||
+      parsed?.remaining === 0;
+    const remaining =
+      parsed?.remaining ?? (rateLimited ? 0 : (prior.remaining ?? null));
+    if (parsed || res?.status === 400 || res?.status === 429) {
+      saveLinearBudget({
+        remaining,
+        limit: parsed?.limit ?? prior.limit ?? LINEAR_REQUESTS_LIMIT,
+        resetAt: parsed?.resetAt ?? prior.resetAt ?? null,
+        rateLimited,
+        status: res?.status ?? null,
+      });
+    }
+    appendLinearRequestLog({
+      timestamp: new Date(now()).toISOString(),
+      caller: context.caller ?? "fetch",
+      ticket: context.ticket ?? null,
+      status: Number.isInteger(res?.status) ? res.status : null,
+      rateLimit: linearRateLimitLogHeaders(res?.headers),
+      budgetDelta:
+        Number.isFinite(parsed?.remaining) && Number.isFinite(prior.remaining)
+          ? remaining - prior.remaining
+          : null,
+    });
+  } catch {
+    // Response instrumentation is strictly fail-open.
+  }
+}
+
+/** Aggregate a recent request log window by caller without touching Linear. */
+export function summarizeLinearRequests({
+  dir = linearRequestLogDir(),
+  minutes = 60,
+  now = Date.now(),
+} = {}) {
+  const cutoff = now - Math.max(0, Number(minutes) || 0) * 60_000;
+  const rows = new Map();
+  for (let i = LINEAR_REQUEST_LOG_ROTATIONS; i >= 0; i -= 1) {
+    const file = path.join(
+      dir,
+      i === 0 ? LINEAR_REQUEST_LOG_FILE : `${LINEAR_REQUEST_LOG_FILE}.${i}`,
+    );
+    let text;
+    try {
+      text = readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of text.split("\n")) {
+      try {
+        const entry = JSON.parse(line);
+        const timestamp = Date.parse(entry.timestamp);
+        if (!Number.isFinite(timestamp) || timestamp < cutoff) continue;
+        const caller = String(entry.caller ?? "unknown");
+        const row = rows.get(caller) ?? {
+          caller,
+          requests: 0,
+          failures: 0,
+          latestRemaining: null,
+          budgetDelta: 0,
+        };
+        row.requests += 1;
+        if (Number(entry.status) >= 400) row.failures += 1;
+        if (Number.isFinite(entry.rateLimit?.requestsRemaining))
+          row.latestRemaining = entry.rateLimit.requestsRemaining;
+        if (Number.isFinite(entry.budgetDelta))
+          row.budgetDelta += entry.budgetDelta;
+        rows.set(caller, row);
+      } catch {
+        // A partial append or manually edited telemetry line is ignorable.
+      }
+    }
+  }
+  return [...rows.values()].sort((a, b) => a.caller.localeCompare(b.caller));
+}
+
+function formatLinearRequestSummary(rows, minutes) {
+  if (!rows.length)
+    return `No Linear requests recorded in the last ${minutes}m`;
+  const lines = [`Linear requests in the last ${minutes}m:`];
+  for (const row of rows)
+    lines.push(
+      `${row.caller}: ${row.requests} request(s), ${row.failures} failure(s), ` +
+        `budget delta ${row.budgetDelta}, remaining ${row.latestRemaining ?? "unknown"}`,
+    );
+  return lines.join("\n");
 }
 
 let fetchHookInstalled = false;
@@ -567,9 +717,16 @@ export function installLinearBudgetCapture() {
   globalThis.fetch = async function linearBudgetFetch(input, init) {
     const url = String(input?.url ?? input);
     assertLinearNetworkAllowed(url);
-    const res = await originalFetch(input, init);
-    if (url.includes(LINEAR_API_HOST)) recordLinearBudgetFromResponse(res);
-    return res;
+    try {
+      const res = await originalFetch(input, init);
+      if (url.includes(LINEAR_API_HOST))
+        recordLinearResponse(res, init?.[LINEAR_TELEMETRY]);
+      return res;
+    } catch (error) {
+      if (url.includes(LINEAR_API_HOST))
+        recordLinearResponse(null, init?.[LINEAR_TELEMETRY]);
+      throw error;
+    }
   };
 }
 
@@ -1232,6 +1389,16 @@ const VERBS = {
       },
       formatLinearBudgetLine(budget),
     );
+  },
+
+  async "linear-summary"() {
+    const minutes = Number(flag("minutes", "60"));
+    if (!Number.isFinite(minutes) || minutes < 0)
+      throw new Error(
+        `usage: linear-summary [--minutes <non-negative number>]`,
+      );
+    const rows = summarizeLinearRequests({ minutes });
+    out(rows, formatLinearRequestSummary(rows, minutes));
   },
 
   async raw() {
