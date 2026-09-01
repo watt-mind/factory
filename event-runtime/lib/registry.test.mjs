@@ -446,7 +446,7 @@ describe("registry", () => {
     // Regenerated (#2170): dispatch writes to FACTORY_RESULT_PATH and the
     // pinned prompt/definition digest changes with that recovery contract.
     const expected =
-      "sha256:f39e83489b66ae02295fbedf030a830733693b7d1956cbbe401aef8dc7fdd49c";
+      "sha256:107cbe7bcd70a2aefa8cd9928c957c6994a63e28b6a172d1cb76f21368b0aef5";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 

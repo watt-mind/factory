@@ -227,29 +227,5 @@
     "adapter": "cursor",
     "idempotencyScope": ["inputHash"],
     "proposalTtlSeconds": 1800
-  },
-  "editorial.topic-scan.requested": {
-    "agent": "editorial-topic-scan@1",
-    "adapter": "pi",
-    "idempotencyScope": ["inputHash"],
-    "proposalTtlSeconds": 3600
-  },
-  "editorial.research.requested": {
-    "agent": "editorial-research@1",
-    "adapter": "pi",
-    "idempotencyScope": ["inputHash"],
-    "proposalTtlSeconds": 3600
-  },
-  "editorial.draft.requested": {
-    "agent": "editorial-draft@1",
-    "adapter": "pi",
-    "idempotencyScope": ["inputHash"],
-    "proposalTtlSeconds": 3600
-  },
-  "editorial.review.requested": {
-    "agent": "editorial-review@1",
-    "adapter": "pi",
-    "idempotencyScope": ["inputHash"],
-    "proposalTtlSeconds": 3600
   }
 }
