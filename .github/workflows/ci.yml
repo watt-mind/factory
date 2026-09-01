@@ -221,23 +221,6 @@ jobs:
           else
             bun --version
           fi
-      - name: Measure shared-host load factor
-        shell: bash
-        run: |
-          set -euo pipefail
-          cpu_count="$(nproc)"
-          runner_jobs="$(pgrep -fc 'Runner\.Worker' || true)"
-          read -r _ _ _ runnable _ < /proc/loadavg
-          runnable="${runnable%%/*}"
-          runner_jobs="${runner_jobs:-1}"
-          pressure="$runner_jobs"
-          if [ "$runnable" -gt "$pressure" ]; then pressure="$runnable"; fi
-          load_factor=$(( (pressure + cpu_count - 1) / cpu_count ))
-          if [ "$load_factor" -lt 1 ]; then load_factor=1; fi
-          if [ "$load_factor" -gt 4 ]; then load_factor=4; fi
-          echo "CI_LOAD_FACTOR=$load_factor" >> "$GITHUB_ENV"
-          echo "Spawn-test load factor: $load_factor ($pressure runnable/jobs across $cpu_count CPUs)."
-
       - name: Install root dependencies
         run: bun install --frozen-lockfile
 
@@ -254,6 +237,27 @@ jobs:
         run: |
           bin/factory init
           git diff --exit-code
+
+      - name: Measure shared-host load factor
+        shell: bash
+        run: |
+          set -euo pipefail
+          cpu_count="$(nproc)"
+          runner_jobs="$(pgrep -fc 'Runner\.Worker' || true)"
+          read -r _ _ _ runnable _ < /proc/loadavg
+          runnable="${runnable%%/*}"
+          runner_jobs="${runner_jobs:-1}"
+          pressure="$runner_jobs"
+          if [ "$runnable" -gt "$pressure" ]; then pressure="$runnable"; fi
+          load_factor="$(awk -v pressure="$pressure" -v cpu_count="$cpu_count" '
+            BEGIN {
+              load_factor = 1 + pressure / cpu_count
+              if (load_factor > 4) load_factor = 4
+              printf "%.2f", load_factor
+            }
+          ')"
+          echo "CI_LOAD_FACTOR=$load_factor" >> "$GITHUB_ENV"
+          echo "Spawn-test load factor: $load_factor ($pressure runnable/jobs across $cpu_count CPUs)."
 
       - name: Test event-runtime library
         # Spawn-heavy suites can exceed Bun's 5s default on the shared host.
@@ -346,23 +350,6 @@ jobs:
           else
             bun --version
           fi
-      - name: Measure shared-host load factor
-        shell: bash
-        run: |
-          set -euo pipefail
-          cpu_count="$(nproc)"
-          runner_jobs="$(pgrep -fc 'Runner\.Worker' || true)"
-          read -r _ _ _ runnable _ < /proc/loadavg
-          runnable="${runnable%%/*}"
-          runner_jobs="${runner_jobs:-1}"
-          pressure="$runner_jobs"
-          if [ "$runnable" -gt "$pressure" ]; then pressure="$runnable"; fi
-          load_factor=$(( (pressure + cpu_count - 1) / cpu_count ))
-          if [ "$load_factor" -lt 1 ]; then load_factor=1; fi
-          if [ "$load_factor" -gt 4 ]; then load_factor=4; fi
-          echo "CI_LOAD_FACTOR=$load_factor" >> "$GITHUB_ENV"
-          echo "Spawn-test load factor: $load_factor ($pressure runnable/jobs across $cpu_count CPUs)."
-
       - name: Install root dependencies
         run: bun install --frozen-lockfile
 
@@ -379,6 +366,27 @@ jobs:
         run: |
           bin/factory init
           git diff --exit-code
+
+      - name: Measure shared-host load factor
+        shell: bash
+        run: |
+          set -euo pipefail
+          cpu_count="$(nproc)"
+          runner_jobs="$(pgrep -fc 'Runner\.Worker' || true)"
+          read -r _ _ _ runnable _ < /proc/loadavg
+          runnable="${runnable%%/*}"
+          runner_jobs="${runner_jobs:-1}"
+          pressure="$runner_jobs"
+          if [ "$runnable" -gt "$pressure" ]; then pressure="$runnable"; fi
+          load_factor="$(awk -v pressure="$pressure" -v cpu_count="$cpu_count" '
+            BEGIN {
+              load_factor = 1 + pressure / cpu_count
+              if (load_factor > 4) load_factor = 4
+              printf "%.2f", load_factor
+            }
+          ')"
+          echo "CI_LOAD_FACTOR=$load_factor" >> "$GITHUB_ENV"
+          echo "Spawn-test load factor: $load_factor ($pressure runnable/jobs across $cpu_count CPUs)."
 
       - name: Run timing-group tests
         shell: bash
@@ -584,23 +592,6 @@ jobs:
           else
             bun --version
           fi
-      - name: Measure shared-host load factor
-        shell: bash
-        run: |
-          set -euo pipefail
-          cpu_count="$(nproc)"
-          runner_jobs="$(pgrep -fc 'Runner\.Worker' || true)"
-          read -r _ _ _ runnable _ < /proc/loadavg
-          runnable="${runnable%%/*}"
-          runner_jobs="${runner_jobs:-1}"
-          pressure="$runner_jobs"
-          if [ "$runnable" -gt "$pressure" ]; then pressure="$runnable"; fi
-          load_factor=$(( (pressure + cpu_count - 1) / cpu_count ))
-          if [ "$load_factor" -lt 1 ]; then load_factor=1; fi
-          if [ "$load_factor" -gt 4 ]; then load_factor=4; fi
-          echo "CI_LOAD_FACTOR=$load_factor" >> "$GITHUB_ENV"
-          echo "Spawn-test load factor: $load_factor ($pressure runnable/jobs across $cpu_count CPUs)."
-
       - name: Install root dependencies
         run: bun install --frozen-lockfile
 
@@ -690,6 +681,27 @@ jobs:
             printf '::error::Runtime-spawning test suite is outside a host-locked route: %s\n' "${unexpected[*]}"
             exit 1
           fi
+
+      - name: Measure shared-host load factor
+        shell: bash
+        run: |
+          set -euo pipefail
+          cpu_count="$(nproc)"
+          runner_jobs="$(pgrep -fc 'Runner\.Worker' || true)"
+          read -r _ _ _ runnable _ < /proc/loadavg
+          runnable="${runnable%%/*}"
+          runner_jobs="${runner_jobs:-1}"
+          pressure="$runner_jobs"
+          if [ "$runnable" -gt "$pressure" ]; then pressure="$runnable"; fi
+          load_factor="$(awk -v pressure="$pressure" -v cpu_count="$cpu_count" '
+            BEGIN {
+              load_factor = 1 + pressure / cpu_count
+              if (load_factor > 4) load_factor = 4
+              printf "%.2f", load_factor
+            }
+          ')"
+          echo "CI_LOAD_FACTOR=$load_factor" >> "$GITHUB_ENV"
+          echo "Spawn-test load factor: $load_factor ($pressure runnable/jobs across $cpu_count CPUs)."
 
       - name: Integration and spawn tests
         # event-runtime/lib runs in the separately rerunnable fast-unit job.
