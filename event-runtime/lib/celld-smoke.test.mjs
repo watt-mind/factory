@@ -1,10 +1,11 @@
 import { describe, it, beforeAll, afterAll, expect } from "bun:test";
 import { spawn } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CellClient, VersionConflictError } from "./cell-client.mjs";
+import { validate } from "./schema.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "../..");
@@ -13,6 +14,33 @@ const TMP_TEST_DIR = path.resolve(
   REPO_ROOT,
   ".factory/test-celld-smoke-" + Date.now(),
 );
+
+test("celld-smoke documented artifact matches its closed output schema", () => {
+  const prompt = readFileSync(
+    path.join(REPO_ROOT, "event-runtime", "agents", "celld-smoke.md"),
+    "utf8",
+  );
+  const example = prompt.match(/```json\n([\s\S]*?)\n```/);
+  expect(example).not.toBeNull();
+
+  const artifact = JSON.parse(example[1]).artifact;
+  const schema = JSON.parse(
+    readFileSync(
+      path.join(
+        REPO_ROOT,
+        "event-runtime",
+        "schemas",
+        "celld-smoke.output.json",
+      ),
+      "utf8",
+    ),
+  );
+
+  expect(Object.keys(artifact).sort()).toEqual(
+    Object.keys(schema.properties).sort(),
+  );
+  expect(validate(schema, artifact)).toEqual({ valid: true, errors: [] });
+});
 
 // `celld` is a local developer daemon; it is not provisioned in CI or in the
 // sandbox, so the whole suite is gated on the binary being present.

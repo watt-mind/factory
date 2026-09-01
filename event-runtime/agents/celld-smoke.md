@@ -23,6 +23,11 @@ This is a wiring and durable cell storage verification agent.
 
 Write `./result.json`:
 
+The `artifact` is the closed five-field contract below. Do not report transport
+details (`endpoint`), migration IDs, collection names, entity IDs, or any other
+diagnostic fields in `artifact`; keep those details in the run transcript or
+`evidence` instead.
+
 ```json
 {
   "schemaVersion": "factory.agent-result/v1",
