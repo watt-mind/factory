@@ -67,6 +67,11 @@ When `--host` is omitted, the client resolves the SSH alias in this order:
 5. `handoff.host` or `handoff_host` in `config/policy.yaml`
 6. the canonical `factory-runner` SSH alias
 
+`~/.factory/handoff.json` also accepts the bare top-level shorthand
+`{"host":"factory-runner"}`. In `~/.factory/secrets.env`, unquoted inline
+comments are stripped, so `FACTORY_HANDOFF_HOST=factory-runner # alias` uses
+the `factory-runner` alias.
+
 For example, an operator can set a repository-wide default without changing
 client shells:
 

@@ -131,7 +131,9 @@ export function resolveHandoffRepo({ repos, cwd = process.cwd(), repo } = {}) {
 }
 
 function nonemptyString(value) {
-  return typeof value === "string" && value.trim() ? value : null;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed || null;
 }
 
 function handoffHostFromConfig(config, { directHost = false } = {}) {
@@ -169,6 +171,11 @@ function parseDotenvFile(file, readFile) {
     if (equals <= 0) continue;
     const key = entry.slice(0, equals).trim();
     let value = entry.slice(equals + 1).trim();
+    // Match common dotenv syntax without treating a # inside a quoted value as
+    // a comment. A comment must be separated from an unquoted value by space.
+    if (!value.startsWith('"') && !value.startsWith("'")) {
+      value = value.replace(/\s+#.*$/, "").trimEnd();
+    }
     if (
       (value.startsWith('"') && value.endsWith('"')) ||
       (value.startsWith("'") && value.endsWith("'"))
@@ -184,6 +191,9 @@ function loadHandoffConfig({ root, readFile }) {
   let repos = null;
   let policy = null;
   try {
+    // Deliberately parse the operator-owned registry directly rather than use
+    // loadRepos(): its in-repo .factory.yaml merge must not let a PR redirect
+    // this SSH destination.
     repos = Bun.YAML.parse(
       readFile(resolveConfigPath("repos", { root }), "utf8"),
     );
@@ -214,6 +224,9 @@ export function resolveHandoffHost({
   repoConfig,
   policy,
 } = {}) {
+  if (host !== undefined && nonemptyString(host) === null) {
+    fail("ssh_host_missing", "ssh_host_missing");
+  }
   const configured =
     repoConfig === undefined || policy === undefined
       ? loadHandoffConfig({ root, readFile })

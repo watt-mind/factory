@@ -170,6 +170,32 @@ describe("handoff SSH host resolution", () => {
       }),
     ).toBe("policy-runner");
   });
+
+  test("trims aliases, rejects an explicit blank flag, and strips dotenv comments", () => {
+    const files = filesFor();
+    expect(resolve(files, { host: " runner " })).toBe("runner");
+    expect(() => resolve(files, { host: "" })).toThrow(/ssh_host_missing/);
+
+    files.delete("/home/operator/.factory/config.json");
+    files.delete("/home/operator/.factory/handoff.json");
+    files.set(
+      "/home/operator/.factory/secrets.env",
+      "FACTORY_HANDOFF_HOST=secrets-runner # operator alias\n",
+    );
+    expect(resolve(files)).toBe("secrets-runner");
+  });
+
+  test("falls back when local JSON or raw configuration YAML is malformed", () => {
+    const files = filesFor();
+    files.set("/home/operator/.factory/config.json", "{oops");
+    files.delete("/home/operator/.factory/handoff.json");
+    files.delete("/home/operator/.factory/secrets.env");
+    files.set("/factory/config/repos.yaml", "repos: [");
+    expect(resolve(files)).toBe("policy-runner");
+
+    files.set("/factory/config/policy.yaml", "handoff: [");
+    expect(resolve(files)).toBe("factory-runner");
+  });
 });
 
 describe("forced-command accept server", () => {
