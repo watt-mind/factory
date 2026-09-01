@@ -1068,6 +1068,9 @@ function collectionPage(url) {
   }
 }
 
+const RELATIVE_SINCE_PATTERN =
+  /^(\d+)\s*(d|day|days|h|hour|hours|m|min|mins|minute|minutes|s|sec|secs|second|seconds|w|week|weeks)$/i;
+
 export function parseSinceDuration(since, nowMs = Date.now()) {
   if (since == null || since === "") {
     return nowMs - 14 * 24 * 60 * 60 * 1000;
@@ -1083,9 +1086,7 @@ export function parseSinceDuration(since, nowMs = Date.now()) {
     throw new ListQueryError("invalid_since", { since });
   }
   const trimmed = since.trim();
-  const match = trimmed.match(
-    /^(\d+)\s*(d|day|days|h|hour|hours|m|min|mins|minute|minutes|s|sec|secs|second|seconds|w|week|weeks)$/i,
-  );
+  const match = trimmed.match(RELATIVE_SINCE_PATTERN);
   if (match) {
     const count = Number(match[1]);
     if (!Number.isFinite(count) || count <= 0) {
@@ -1158,9 +1159,14 @@ function ticketIndexCacheDatabaseId(db) {
   return id;
 }
 
-function ticketIndexCacheSinceKey(since) {
-  if (since == null || since === "") return "";
-  return typeof since === "string" ? since.trim() : String(since);
+function ticketIndexCacheSinceKey(since, sinceMs, nowMs) {
+  if (since == null || since === "") return `relative:${nowMs - sinceMs}`;
+  if (typeof since === "number") {
+    return since > 1e11 ? `absolute:${sinceMs}` : `relative:${nowMs - sinceMs}`;
+  }
+  return RELATIVE_SINCE_PATTERN.test(since.trim())
+    ? `relative:${nowMs - sinceMs}`
+    : `absolute:${sinceMs}`;
 }
 
 /**
@@ -1181,7 +1187,7 @@ export function ticketIndexView(db, options = {}) {
 
   const cacheKey = JSON.stringify([
     ticketIndexCacheDatabaseId(db),
-    ticketIndexCacheSinceKey(options.since),
+    ticketIndexCacheSinceKey(options.since, sinceMs, nowMs),
     limit,
     repoFilter,
   ]);

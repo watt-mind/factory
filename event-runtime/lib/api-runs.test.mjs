@@ -1823,7 +1823,33 @@ describe("recent-ticket index (WM-821)", () => {
     }
   });
 
-  test("caches ticket index requests across advancing clocks until its TTL expires", async () => {
+  test("normalizes equivalent absolute since values to one ticket-index cache entry", async () => {
+    const nowMs = Date.parse("2026-08-18T12:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      clearTicketIndexCache();
+      const utc = ticketIndexView(s.db, {
+        nowMs,
+        since: "2026-08-01T00:00:00Z",
+      });
+      const offset = ticketIndexView(s.db, {
+        nowMs,
+        since: "2026-08-01T00:00:00+00:00",
+      });
+      const milliseconds = ticketIndexView(s.db, {
+        nowMs,
+        since: "2026-08-01T00:00:00.000Z",
+      });
+
+      expect(offset).toBe(utc);
+      expect(milliseconds).toBe(utc);
+    } finally {
+      clearTicketIndexCache();
+      s.close();
+    }
+  });
+
+  test("normalizes equivalent duration cache entries and reanchors them after TTL expiry", async () => {
     const nowMs = Date.parse("2026-08-18T12:00:00.000Z");
     const s = await makeServer({ now: () => nowMs });
     try {
@@ -1842,14 +1868,14 @@ describe("recent-ticket index (WM-821)", () => {
 
       const cached = ticketIndexView(s.db, {
         nowMs: nowMs + 10,
-        since: "14d",
+        since: "336h",
       });
       expect(cached).toBe(initial);
       expect(cached).toEqual([]);
 
       const refreshed = ticketIndexView(s.db, {
         nowMs: nowMs + 5001,
-        since: "14d",
+        since: "2w",
       });
       expect(refreshed.map((ticket) => ticket.id)).toEqual(["WM-2158"]);
     } finally {
