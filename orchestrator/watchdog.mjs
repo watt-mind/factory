@@ -712,6 +712,8 @@ export async function sendWatchdogNotification(issues) {
  * Run states that do not occupy the factory. Mirrors the singleton predicate
  * in event-runtime/lib/schedules.mjs — PROPOSED is deliberately *not* in
  * flight (an unapproved proposal is exactly the stall we are here to clear).
+ * This intentionally differs from ALL_TERMINAL_STATES because it includes
+ * PROPOSED; do not replace it with the lifecycle export.
  */
 export const IDLE_TERMINAL_RUN_STATES = new Set([
   "PROPOSED",
