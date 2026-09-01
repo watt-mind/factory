@@ -30,6 +30,12 @@ export const TERMINAL_STATES = new Set([
   "CANCELLED",
 ]);
 
+/**
+ * Every finished run state. Unlike TERMINAL_STATES, this includes FAILED for
+ * consumers that only need to know whether a run has finished its attempt.
+ */
+export const ALL_TERMINAL_STATES = new Set([...TERMINAL_STATES, "FAILED"]);
+
 const LEGAL = {
   PROPOSED: ["APPROVED", "CANCELLED"],
   APPROVED: ["QUEUED", "CANCELLED"],

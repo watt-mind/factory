@@ -3,7 +3,7 @@ import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { artifactsRoot, runtimeHome } from "./config.mjs";
 import { openDb, txImmediate } from "./db.mjs";
-import { transition } from "./lifecycle.mjs";
+import { ALL_TERMINAL_STATES, transition } from "./lifecycle.mjs";
 import { isProposalExpired } from "./proposals.mjs";
 import { reposRoot } from "./repos.mjs";
 
@@ -25,13 +25,7 @@ const SHA256 = /^[a-f0-9]{64}$/;
  * to sweep here. Active/in-flight states (PROPOSED, APPROVED, QUEUED, LEASED,
  * RUNNING, VERIFYING) are deliberately absent so they can never be removed.
  */
-const TERMINAL_RUN_STATES = [
-  "COMPLETED",
-  "REFUSED",
-  "TIMED_OUT",
-  "CANCELLED",
-  "FAILED",
-];
+const TERMINAL_RUN_STATES = [...ALL_TERMINAL_STATES];
 
 /** Per-run child tables keyed by run_id, cleared alongside a swept run. */
 const RUN_CHILD_TABLES = [

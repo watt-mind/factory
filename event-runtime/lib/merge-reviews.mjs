@@ -14,6 +14,7 @@ import path from "node:path";
 import { loadForge, ForgeError } from "../../lib/forge/index.mjs";
 import { sha256Hex } from "./canonical.mjs";
 import { openDb } from "./db.mjs";
+import { ALL_TERMINAL_STATES } from "./lifecycle.mjs";
 import { policyMergeBatchSize } from "./planner.mjs";
 import { getRepo, loadRepos, RepoError } from "./repos.mjs";
 import {
@@ -35,6 +36,9 @@ const GITHUB_REF_TICKET = /(?:^|\/)gh-([0-9]+)$/i;
 const BARE_GITHUB_REF_TICKET = /^([0-9]+)$/;
 const GITHUB_BODY_TICKET =
   /(?:^|\n)\s*fixes\s+([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+)\b/i;
+const allTerminalStateList = [...ALL_TERMINAL_STATES]
+  .map((state) => `'${state}'`)
+  .join(", ");
 const PR_LIST_FIELDS = [
   "number",
   "state",
@@ -518,8 +522,8 @@ export function latestMergeFixTerminalAttempt(db, item, { github, now }) {
               a.finished_at AS finishedAt
          FROM runs r
          JOIN attempts a ON a.run_id = r.run_id AND a.attempt = r.attempts
-        WHERE r.state IN ('REFUSED', 'FAILED', 'COMPLETED', 'TIMED_OUT', 'CANCELLED')
-          AND a.terminal_state IN ('REFUSED', 'FAILED', 'COMPLETED', 'TIMED_OUT', 'CANCELLED')
+        WHERE r.state IN (${allTerminalStateList})
+          AND a.terminal_state IN (${allTerminalStateList})
           AND a.finished_at > ?
           AND r.created_at > ?
           AND json_extract(r.spec_json, '$.agent') = 'merge-fix@1'

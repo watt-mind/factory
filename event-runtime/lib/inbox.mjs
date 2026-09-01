@@ -24,6 +24,7 @@ import {
   templateFor,
 } from "./decision-templates.mjs";
 import { txImmediate } from "./db.mjs";
+import { ALL_TERMINAL_STATES } from "./lifecycle.mjs";
 import { registerInboxDecisionMemos } from "./memos.mjs";
 import { loadRepos } from "./repos.mjs";
 
@@ -1531,13 +1532,6 @@ const LINEAR_POLL_INTERVAL_MS = 60_000;
 const linearPollAt = new WeakMap();
 /** Unactionable parked notices must not remain in the operator queue forever. */
 export const MAX_PARKED_INBOX_AGE_MS = 48 * 60 * 60 * 1000;
-const TERMINAL_RUN_STATES = new Set([
-  "COMPLETED",
-  "FAILED",
-  "REFUSED",
-  "TIMED_OUT",
-  "CANCELLED",
-]);
 // Notices that only report how a run went. Their referent is the run itself,
 // so a terminal run makes them stale. Asks are deliberately excluded: an
 // ESCALATED item is *born* on a REFUSED run, and a decision the operator has
@@ -1942,7 +1936,7 @@ export function reconcileInbox(
       const run = db
         .query("SELECT state FROM runs WHERE run_id = ?")
         .get(refs.runId);
-      if (run && TERMINAL_RUN_STATES.has(run.state)) {
+      if (run && ALL_TERMINAL_STATES.has(run.state)) {
         resolvedBy = "auto:stale_ref";
         resolvedReason = "stale_ref";
       }

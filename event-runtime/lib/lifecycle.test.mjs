@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import path from "node:path";
 import { openDb } from "./db.mjs";
 import {
+  ALL_TERMINAL_STATES,
   IllegalTransition,
   TERMINAL_STATES,
   createRun,
@@ -57,6 +58,22 @@ function failRun(db, runId, attempts) {
 }
 
 describe("lifecycle", () => {
+  test("exports distinct terminal state sets with pinned memberships", () => {
+    expect([...TERMINAL_STATES]).toEqual([
+      "COMPLETED",
+      "REFUSED",
+      "TIMED_OUT",
+      "CANCELLED",
+    ]);
+    expect([...ALL_TERMINAL_STATES]).toEqual([
+      "COMPLETED",
+      "REFUSED",
+      "TIMED_OUT",
+      "CANCELLED",
+      "FAILED",
+    ]);
+  });
+
   test("createRun persists a normalized ticket subject", () => {
     const db = openDb(":memory:");
     createRun(db, {
