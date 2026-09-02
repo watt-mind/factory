@@ -22,6 +22,7 @@ import { approveProposal, openProposals } from "./lib/proposals.mjs";
 import { loadRegistry } from "./lib/registry.mjs";
 import { emitDueTicks } from "./lib/schedules.mjs";
 import { runOnce } from "./lib/worker.mjs";
+import { sandboxTest } from "./test-support/sandbox.mjs";
 
 const registry = loadRegistry();
 const PV = "git:test-pv";
@@ -224,44 +225,47 @@ describe("dispatch-completion edge registration (WM-112)", () => {
 });
 
 describe("dispatch-completion edge: a finished dispatch re-fires the work-scan (WM-112)", () => {
-  test("PR_OPEN chains to work.requested with inherited correlation — and plans a fresh watched scan", async () => {
-    const { db, planAll, runId } = await dispatchTo(
-      "PR_OPEN",
-      "loop-pr-open",
-      "WM-601",
-    );
+  sandboxTest(
+    "PR_OPEN chains to work.requested with inherited correlation — and plans a fresh watched scan",
+    async () => {
+      const { db, planAll, runId } = await dispatchTo(
+        "PR_OPEN",
+        "loop-pr-open",
+        "WM-601",
+      );
 
-    expect(resolveChains(db, registry)).toEqual({
-      emitted: 1,
-      skipped: 0,
-      errors: [],
-    });
-    const chainEvent = db
-      .query(`SELECT * FROM events WHERE source = 'chain' AND event_id = ?`)
-      .get(`chain-${runId}`);
-    expect(chainEvent.type).toBe("factory.work.requested");
-    expect(chainEvent.correlation_id).toBe("loop-pr-open"); // inherited from the dispatch's event
-    expect(chainEvent.causation_id).toBe(runId);
-    expect(JSON.parse(chainEvent.envelope_json).payload).toEqual({
-      repo: "wt29",
-    });
+      expect(resolveChains(db, registry)).toEqual({
+        emitted: 1,
+        skipped: 0,
+        errors: [],
+      });
+      const chainEvent = db
+        .query(`SELECT * FROM events WHERE source = 'chain' AND event_id = ?`)
+        .get(`chain-${runId}`);
+      expect(chainEvent.type).toBe("factory.work.requested");
+      expect(chainEvent.correlation_id).toBe("loop-pr-open"); // inherited from the dispatch's event
+      expect(chainEvent.causation_id).toBe(runId);
+      expect(JSON.parse(chainEvent.envelope_json).payload).toEqual({
+        repo: "wt29",
+      });
 
-    // The latency half of rolling dispatch: the freed slot is re-scanned NOW,
-    // through the ordinary planner, as a watched proposal — never auto.
-    planAll();
-    const scan = openProposals(db, {}).find(
-      (p) => p.spec?.agent === "work-scan@1",
-    );
-    expect(scan).toBeTruthy();
-    expect(scan.status).toBe("open");
+      // The latency half of rolling dispatch: the freed slot is re-scanned NOW,
+      // through the ordinary planner, as a watched proposal — never auto.
+      planAll();
+      const scan = openProposals(db, {}).find(
+        (p) => p.spec?.agent === "work-scan@1",
+      );
+      expect(scan).toBeTruthy();
+      expect(scan.status).toBe("open");
 
-    // One chain event per run, ever.
-    expect(resolveChains(db, registry)).toEqual({
-      emitted: 0,
-      skipped: 0,
-      errors: [],
-    });
-  });
+      // One chain event per run, ever.
+      expect(resolveChains(db, registry)).toEqual({
+        emitted: 0,
+        skipped: 0,
+        errors: [],
+      });
+    },
+  );
 
   test("NOT_CLAIMED chains the same way — a lost claim frees the slot just as a PR does", async () => {
     const { db, runId } = await dispatchTo(

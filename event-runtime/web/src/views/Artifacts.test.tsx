@@ -509,7 +509,10 @@ describe("Artifacts inventory (WM-207)", () => {
     });
     jest.useFakeTimers();
     jest.setSystemTime(new Date("2026-08-30T00:00:00.000Z"));
-    const formatContent = mock(formattedContent);
+    // This is a memoization test, not a 10,000-line DOM benchmark. Keep the
+    // expensive input but return a compact preview so React can settle before
+    // Testing Library's timeout on GitHub-hosted runners.
+    const formatContent = mock(() => "formatted artifact");
     globalThis.fetch = mock(
       async () => new Response(raw, { status: 200 }),
     ) as unknown as typeof fetch;

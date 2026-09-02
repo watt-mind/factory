@@ -234,7 +234,7 @@ describe("ArtifactView with the shipped merge-scan view", () => {
     expect(r.queryByText("noopReason")).toBeNull();
   });
 
-  test("run chips call onJumpRun when the host provides it, else link to #/runs/<id>", () => {
+  test("run chips call onJumpRun when the host provides it, else link to #/runs/<id> with project context", () => {
     const view: ArtifactViewDoc = {
       schemaVersion: "factory.artifact-view/v1",
       sections: [
@@ -253,12 +253,13 @@ describe("ArtifactView with the shipped merge-scan view", () => {
     fireEvent.click(r.getByRole("button", { name: "run_44fa5716" }));
     expect(jumped).toEqual(["run_44fa5716-0304-49b1-8b65-a45500d0d784"]);
     cleanup();
+    window.location.hash = "#/runs?project=factory";
     const r2 = render(<ArtifactView artifact={artifact} view={view} />);
     expect(
       (
         r2.getByRole("link", { name: "run_44fa5716" }) as HTMLAnchorElement
       ).getAttribute("href"),
-    ).toBe("#/runs/run_44fa5716-0304-49b1-8b65-a45500d0d784");
+    ).toBe("#/runs/run_44fa5716-0304-49b1-8b65-a45500d0d784?project=factory");
   });
 });
 
