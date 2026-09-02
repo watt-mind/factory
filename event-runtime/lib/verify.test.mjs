@@ -716,6 +716,10 @@ describe("verifyResult", () => {
         worktreeRecord: { path: checkout },
         attempt: 1,
         attemptStartedAt: attemptStartedAt.toISOString(),
+        // This staleness test needs a known-untracked checkout result. Injecting
+        // that fact avoids making its assertion depend on a contended CI host
+        // scheduling an unrelated git subprocess.
+        checkoutResultIsTrackedFn: () => false,
       });
       throw new Error("expected ContractViolation");
     } catch (err) {
