@@ -1877,10 +1877,17 @@ export function Disclosure({
   label,
   children,
   defaultOpen,
+  deferChildren,
 }: {
   label: ReactNode;
   children: ReactNode;
   defaultOpen?: boolean;
+  /**
+   * Keep `children` unmounted until the disclosure is first opened. `details`
+   * renders collapsed content into the DOM, so a body that fetches on mount
+   * costs a request per row even while nobody has looked at it.
+   */
+  deferChildren?: boolean;
 }) {
   const [open, setOpen] = useState(!!defaultOpen);
   return (
@@ -1896,7 +1903,7 @@ export function Disclosure({
         <DisclosureChevron open={open} />
         <span>{label}</span>
       </summary>
-      <div className="mt-1.5">{children}</div>
+      <div className="mt-1.5">{deferChildren && !open ? null : children}</div>
     </details>
   );
 }

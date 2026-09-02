@@ -38,6 +38,7 @@ import {
   Table,
   Th,
 } from "./ui";
+import { FieldValue } from "./FieldValue";
 
 // ---------------------------------------------------------------------------
 // Raw toggle persistence
@@ -835,6 +836,7 @@ export function EventPanel({
   agents = [],
   requestedAgent: requestedAgentProp,
   runId: suppliedRunId,
+  now = Date.now(),
   onJumpRun,
   onJumpArtifact,
   onJumpChain,
@@ -844,6 +846,8 @@ export function EventPanel({
   /** The registry's top-level route resolution, when the host has it. */
   requestedAgent?: AgentDef | null;
   runId?: string | null;
+  /** Clock for relative timestamps; hosts pass their shared `useNow()`. */
+  now?: number;
   onJumpRun?: (runId: string) => void;
   onJumpArtifact?: (sha256: string) => void;
   onJumpChain?: (correlationId: string) => void;
@@ -896,13 +900,20 @@ export function EventPanel({
     ? resultAgent?.outputView
     : inputViewOf(requestedAgent?.outputView);
   const rendered = digest ? artifactQ.data : payload;
+  // `isPending` stays true for a *disabled* query, so it only means "loading"
+  // while the fetch can actually run (digest && runId).
+  const artifactLoading = Boolean(digest && runId) && artifactQ.isPending;
+  const runError =
+    runQ.isError &&
+    `Run detail unavailable: ${runQ.error instanceof Error ? runQ.error.message : "request failed"}`;
   const unavailable =
-    digest &&
-    (artifactQ.isError
-      ? `Result artifact unavailable: ${artifactQ.error instanceof Error ? artifactQ.error.message : "request failed"}`
-      : artifactQ.isPending
-        ? "Loading result artifact…"
-        : null);
+    digest && artifactQ.data === undefined
+      ? artifactQ.isError
+        ? `Result artifact unavailable: ${artifactQ.error instanceof Error ? artifactQ.error.message : "request failed"}`
+        : artifactLoading
+          ? "Loading result artifact…"
+          : runError || null
+      : null;
 
   return (
     <div data-event-panel className="space-y-3 text-[12px]">
@@ -967,78 +978,75 @@ export function EventPanel({
       </div>
       {raw ? (
         <JsonBlock value={envelope} />
-      ) : unavailable ? (
-        <div
-          role="status"
-          className="rounded-md border border-(--border) p-2 text-(--text-faint)"
-        >
-          {unavailable}
-        </div>
-      ) : view && rendered ? (
-        <ArtifactView
-          artifact={rendered}
-          schema={
-            digest ? resultAgent?.outputSchema : requestedAgent?.inputSchema
-          }
-          view={view}
-          onJumpRun={onJumpRun}
-        />
-      ) : payload ? (
-        <PayloadFields payload={payload} />
       ) : (
-        <div className="text-(--text-faint)">No event payload.</div>
+        <>
+          {unavailable && (
+            <div
+              role="status"
+              className="rounded-md border border-(--border) p-2 text-(--text-faint)"
+            >
+              {unavailable}
+            </div>
+          )}
+          {view && rendered ? (
+            <ArtifactView
+              artifact={rendered}
+              schema={
+                digest ? resultAgent?.outputSchema : requestedAgent?.inputSchema
+              }
+              view={view}
+              onJumpRun={onJumpRun}
+            />
+          ) : digest && artifactQ.data !== undefined ? (
+            // The artifact resolved but no view applies (an agent without an
+            // output view, or the run lookup failed). Show what was fetched
+            // rather than discarding it for the four-key envelope payload.
+            <>
+              {runError && (
+                <div
+                  role="status"
+                  className="rounded-md border border-(--border) p-2 text-(--text-faint)"
+                >
+                  {runError} — showing the raw artifact.
+                </div>
+              )}
+              <JsonBlock value={artifactQ.data} />
+            </>
+          ) : payload ? (
+            // A degraded artifact must not also cost the operator the
+            // envelope's own payload fields.
+            <PayloadFields payload={payload} now={now} />
+          ) : unavailable ? null : (
+            <div className="text-(--text-faint)">No event payload.</div>
+          )}
+        </>
       )}
     </div>
   );
 }
 
 /** Safe, useful generic presentation when no route-side view applies. */
-function PayloadFields({ payload }: { payload: Envelope }) {
+function PayloadFields({ payload, now }: { payload: Envelope; now: number }) {
   const repo = text(payload.repo);
+  const runId = text(payload.runId);
   return (
     <dl className="space-y-1.5" aria-label="Payload">
-      {Object.entries(payload).map(([key, value]) => {
-        const valueText = text(value);
-        let rendered: ReactNode = valueText ?? (
-          <span className="mono">{JSON.stringify(value)}</span>
-        );
-        if (key === "repo" && valueText) {
-          rendered = (
-            <a
-              className="text-(--accent) hover:underline"
-              href={`https://github.com/${valueText}`}
-              target="_blank"
-              rel="noreferrer"
-            >
-              {valueText}
-            </a>
-          );
-        } else if (key === "runId" && valueText && repo) {
-          rendered = (
-            <a
-              className="text-(--accent) hover:underline"
-              href={`https://github.com/${repo}/actions/runs/${valueText}`}
-              target="_blank"
-              rel="noreferrer"
-            >
-              run #{valueText}
-            </a>
-          );
-        }
-        return (
-          <div
-            key={key}
-            className="grid grid-cols-[minmax(0,9rem)_1fr] gap-x-3"
-          >
-            <dt className="truncate text-(--text-faint)" title={key}>
-              {key}
-            </dt>
-            <dd className="min-w-0 break-words text-(--text-dim)">
-              {rendered}
-            </dd>
-          </div>
-        );
-      })}
+      {Object.entries(payload).map(([key, value]) => (
+        <div key={key} className="grid grid-cols-[minmax(0,9rem)_1fr] gap-x-3">
+          <dt className="truncate text-(--text-faint)" title={key}>
+            {key}
+          </dt>
+          <dd className="min-w-0 break-words text-(--text-dim)">
+            <FieldValue
+              field={key}
+              value={value}
+              repo={repo}
+              runId={runId}
+              now={now}
+            />
+          </dd>
+        </div>
+      ))}
     </dl>
   );
 }

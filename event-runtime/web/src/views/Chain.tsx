@@ -280,10 +280,12 @@ export function Chain({
   // older envelopes retain an explicit Events escape hatch until #2285 adds
   // them to the chain response itself.
   const eventEnvelopesQ = useQuery({
-    queryKey: ["events", "chain-envelopes"],
-    queryFn: () => api.events(undefined, { limit: 500 }),
+    queryKey: ["events", "chain-envelopes", focusNodeId ?? ""],
+    queryFn: () => api.events(undefined, { limit: 100 }),
     enabled: Boolean(focusNodeId),
-    ...refetchIntervals.secondary,
+    // A one-shot lookup for the selected node: envelopes are immutable, so
+    // polling this list would only add load to the shared events endpoint.
+    staleTime: 60_000,
   });
   const agentsQ = useQuery({
     queryKey: ["agents"],
@@ -1076,8 +1078,8 @@ export function Chain({
                   <KV k="repos" v={selected.event.repos.join(", ")} />
                 )}
               </Section>
-              {selectedEnvelope ? (
-                <Section id="chain-envelope" title="Envelope">
+              <Section id="chain-envelope" title="Envelope">
+                {selectedEnvelope ? (
                   <Suspense
                     fallback={
                       <div className="text-(--text-faint)">
@@ -1089,6 +1091,7 @@ export function Chain({
                       envelope={selectedEnvelope.envelope}
                       agents={agentsQ.data?.agents}
                       runId={selectedEnvelope.runId}
+                      now={now}
                       onJumpRun={onJumpRun}
                       onJumpChain={(id) => {
                         window.location.hash = `#/chain/${id}`;
@@ -1098,16 +1101,13 @@ export function Chain({
                       }}
                     />
                   </Suspense>
-                </Section>
-              ) : (
-                <Section id="chain-envelope" title="Envelope">
+                ) : (
                   <div className="text-[12px] text-(--text-faint)">
                     Complete envelope unavailable in this chain response. Open
                     the event in Events to inspect its View or Raw form.
-                    Historical chain envelopes are pending #2285.
                   </div>
-                </Section>
-              )}
+                )}
+              </Section>
             </>
           )}
           {selected.kind === "chainRun" && (

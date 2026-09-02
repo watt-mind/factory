@@ -1761,6 +1761,7 @@ export function Events({
                 agents={agentsQ.data?.agents}
                 requestedAgent={requestedAgentByEventType.get(sel.type)}
                 runId={sel.runId}
+                now={now}
                 onJumpRun={onJumpRun}
                 onJumpChain={onJumpChain}
                 onJumpArtifact={(sha256) => {

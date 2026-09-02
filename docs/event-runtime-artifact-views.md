@@ -186,7 +186,9 @@ its payload. For `*.requested` events, the routed agent's existing
 `*.input.view.json` sidecars. For completed events that name a run and a
 valid content hash, the result artifact uses that run agent's output view.
 Missing, pruned, or non-JSON artifacts show a named unavailable state while
-Raw remains usable. Hashes are requested only when they are a strict lowercase
+Raw and the envelope's own payload fields remain visible; a resolved artifact
+whose run names no output view falls back to its JSON rather than being
+discarded. Hashes are requested only when they are a strict lowercase
 SHA-256 digest (optionally prefixed by `sha256:`), and responses are cached by
 that digest so a later selection cannot paint an earlier event's result.
 

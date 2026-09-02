@@ -11,7 +11,12 @@ import {
   EventPanel,
 } from "./ArtifactView";
 import { inputViewOf } from "../lib/artifactView";
-import { createAgentsFixture, renderWithClient } from "../test-render";
+import {
+  createAgentsFixture,
+  createRunDetailFixture,
+  renderWithClient,
+  restoreApi,
+} from "../test-render";
 
 const AGENTS = path.resolve(import.meta.dir, "../../../agents");
 const readView = (name: string): ArtifactViewDoc =>
@@ -376,6 +381,121 @@ describe("EventPanel", () => {
     expect(r.container.querySelector("pre")?.textContent).toContain(
       '"eventId": "evt_dispatch"',
     );
+  });
+
+  test("renders the completed artifact through the run agent's output view", async () => {
+    const sha256 = "c".repeat(64);
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify(triageArtifact), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch;
+    try {
+      const r = renderWithClient(
+        <EventPanel
+          envelope={{
+            type: "factory.work.completed",
+            source: "worker",
+            payload: { artifactHash: `sha256:${sha256}` },
+          }}
+          runId="run_complete"
+          agents={
+            createAgentsFixture({
+              agents: [
+                {
+                  ref: "triage-scan@1",
+                  outputView: triageView,
+                  eventTypes: [],
+                },
+              ] as any,
+            }).agents
+          }
+        />,
+        {
+          apiMocks: {
+            run: (async (id: string) =>
+              createRunDetailFixture({
+                run: {
+                  runId: id,
+                  state: "SUCCEEDED",
+                  spec: { agent: "triage-scan@1" },
+                } as any,
+              })) as any,
+          },
+        },
+      );
+      expect(await r.findByText(/Three issues moved/)).toBeTruthy();
+    } finally {
+      globalThis.fetch = realFetch;
+      restoreApi();
+    }
+  });
+
+  test("a 404 artifact degrades visibly and keeps the payload fields", async () => {
+    const sha256 = "d".repeat(64);
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response("nope", { status: 404 })) as unknown as typeof fetch;
+    try {
+      const r = renderWithClient(
+        <EventPanel
+          envelope={{
+            type: "factory.work.completed",
+            source: "worker",
+            payload: {
+              artifactHash: `sha256:${sha256}`,
+              repo: "watt-mind/factory",
+            },
+          }}
+          runId="run_degraded"
+        />,
+      );
+      expect((await r.findByRole("status")).textContent).toContain(
+        "Result artifact unavailable",
+      );
+      expect(r.getByRole("link", { name: "watt-mind/factory" })).toBeTruthy();
+    } finally {
+      globalThis.fetch = realFetch;
+      restoreApi();
+    }
+  });
+
+  test("payload fields keep the semantic FieldValue formatting", () => {
+    const r = renderWithClient(
+      <EventPanel
+        now={Date.parse("2025-01-01T01:00:00.000Z")}
+        envelope={{
+          type: "demo.type",
+          source: "operator",
+          payload: {
+            repo: "watt-mind/factory",
+            ticket: "WM-2122",
+            prNumber: 81,
+            headSha: "0123456789abcdef",
+            receivedAt: "2025-01-01T00:00:00.000Z",
+            optional: undefined,
+          },
+        }}
+      />,
+    );
+
+    expect(r.getByRole("link", { name: "WM-2122" }).getAttribute("href")).toBe(
+      "#/tickets/WM-2122",
+    );
+    expect(r.getByRole("link", { name: "#81" }).getAttribute("href")).toBe(
+      "https://github.com/watt-mind/factory/pull/81",
+    );
+    expect(r.getByRole("link", { name: "01234567" }).getAttribute("href")).toBe(
+      "https://github.com/watt-mind/factory/commit/0123456789abcdef",
+    );
+    expect(
+      r.getByText("receivedAt").closest("div")?.querySelector("dd")
+        ?.textContent,
+    ).toContain("1h");
+    expect(
+      r.getByText("optional").closest("div")?.querySelector("dd")?.textContent,
+    ).toBe("—");
   });
 
   test("does not fetch malformed artifact hashes and keeps Raw available", () => {

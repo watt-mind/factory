@@ -26,6 +26,7 @@ import type { WorkerHealthFilter } from "./Workers";
 import {
   Button,
   Dialog,
+  Disclosure,
   EVENT_STATUS_HUES,
   STATE_HUES,
   JumpLink,
@@ -2259,7 +2260,7 @@ export function Overview({
                           </span>
                         )}
                       </div>
-                      <div className="mt-2">
+                      <Disclosure label="envelope" deferChildren>
                         <Suspense
                           fallback={
                             <div className="text-(--text-faint)">
@@ -2270,6 +2271,7 @@ export function Overview({
                           <EventPanel
                             envelope={o.event}
                             agents={agentsQ.data?.agents}
+                            now={now}
                             onJumpRun={onJumpRun}
                             onJumpChain={(correlationId) =>
                               onJumpEvents({
@@ -2282,7 +2284,7 @@ export function Overview({
                             }}
                           />
                         </Suspense>
-                      </div>
+                      </Disclosure>
                     </div>
                   );
                 })}
