@@ -1,8 +1,8 @@
 /**
  * FieldValue — the shared formatter for generic (viewless) payload rendering.
  *
- * Both generic payload paths render through it — `EventEnvelopeView`'s field
- * list and `ArtifactView`'s `PayloadFields` — so an operator sees the same
+ * Both generic payload paths render through it — `EventPanel`'s field list
+ * and `ArtifactView`'s `PayloadFields` — so an operator sees the same
  * ticket hover cards, PR/commit links and relative timestamps wherever an
  * event's payload is shown. It lives in its own module so neither renderer
  * has to import the other.

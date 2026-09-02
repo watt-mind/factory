@@ -23,7 +23,7 @@ import type {
 import type { OperatorContext } from "../context";
 import { scopedCount, scopedTally } from "../context";
 import { EMPTY, formatBytes, formatRelative } from "../format";
-import { headerFor, inputViewOf } from "../lib/artifactView";
+import { headerFor, inputViewOf, viewApplies } from "../lib/artifactView";
 import type { WorkerHealthFilter } from "./Workers";
 import {
   Button,
@@ -71,21 +71,26 @@ export function outboxSummary(
   payload: Record<string, unknown>,
   agents: readonly AgentDef[],
 ): string | null {
+  // Deliberately duplicate ArtifactView's private routeAgent to avoid loading
+  // EventPanel's lazy chunk just to render this compact outbox cue.
   const requestedAgent = agents.find((agent) =>
     agent.eventTypes.some((route) => route.type === type),
   );
   const view = inputViewOf(requestedAgent?.outputView);
-  if (view) {
-    const header = headerFor(view, payload, requestedAgent?.inputSchema);
-    return header.status?.value ?? header.summary;
-  }
-  return typeof payload.outcome === "string"
-    ? payload.outcome
-    : typeof payload.recommendation === "string"
-      ? payload.recommendation
-      : typeof payload.verdict === "string"
-        ? payload.verdict
-        : null;
+  const header = viewApplies(view, payload)
+    ? headerFor(view, payload, requestedAgent?.inputSchema)
+    : null;
+  return (
+    header?.status?.value ??
+    header?.summary ??
+    (typeof payload.outcome === "string"
+      ? payload.outcome
+      : typeof payload.recommendation === "string"
+        ? payload.recommendation
+        : typeof payload.verdict === "string"
+          ? payload.verdict
+          : null)
+  );
 }
 
 export function SectionTitle({

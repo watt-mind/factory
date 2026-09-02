@@ -283,6 +283,22 @@ describe("outboxSummary", () => {
       "legacy outcome",
     );
   });
+
+  test("falls back to the payload heuristic when a view header is empty", () => {
+    expect(
+      outboxSummary("factory.work.requested", { outcome: "PR_OPEN" }, agents),
+    ).toBe("PR_OPEN");
+  });
+
+  test("uses the view summary when its status pointer resolves to nothing", () => {
+    expect(
+      outboxSummary(
+        "factory.work.requested",
+        { summary: "Ready for review" },
+        agents,
+      ),
+    ).toBe("Ready for review");
+  });
 });
 
 describe("groupJournalEntries (WM-100)", () => {
