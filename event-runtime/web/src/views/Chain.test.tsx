@@ -646,7 +646,7 @@ describe("Chain navigation shortcuts (WM-875)", () => {
               chainEvent(FIX_EVENT, {
                 source: "chain",
                 correlationId: CORR,
-                envelope: { malformed: true },
+                envelope: { __malformed: true },
               }),
             ],
           }),
@@ -656,7 +656,7 @@ describe("Chain navigation shortcuts (WM-875)", () => {
     await waitFor(() => {
       expect(
         view.getByText(
-          "Stored envelope is malformed; its raw envelope is unavailable.",
+          "Stored envelope is malformed; its raw form cannot be shown.",
         ),
       ).toBeTruthy();
     });

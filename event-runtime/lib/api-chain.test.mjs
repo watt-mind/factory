@@ -186,7 +186,7 @@ describe("GET /chain/:correlationId (WM-527)", () => {
       const event = chainView(s.db, "corr-1").events.find(
         (item) => item.eventId === "chain-run-1-B",
       );
-      expect(event.envelope).toEqual({ malformed: true });
+      expect(event.envelope).toEqual({ __malformed: true });
       expect(event.repos).toEqual([]);
     } finally {
       s.db
@@ -206,6 +206,7 @@ describe("GET /chain/:correlationId (WM-527)", () => {
       correlationId: "corr-1",
       causationId: "run-1",
       payload: { repo: "factory", outcome: "completed" },
+      malformed: true,
     });
     s.db
       .query("UPDATE events SET type = ?, envelope_json = ? WHERE event_id = ?")
@@ -218,7 +219,9 @@ describe("GET /chain/:correlationId (WM-527)", () => {
       expect(event.envelope).toMatchObject({
         type: "factory.work.completed",
         payload: { repo: "factory", outcome: "completed" },
+        malformed: true,
       });
+      expect(event.envelope.__malformed).toBeUndefined();
     } finally {
       s.db
         .query(

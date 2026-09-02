@@ -40,7 +40,7 @@ function chainEnvelope(envelopeJson) {
     // A named fallback makes the degraded record explicit without returning
     // unparsed database bytes to the control surface.
   }
-  return { malformed: true };
+  return { __malformed: true };
 }
 
 export function chainView(db, correlationId) {
@@ -67,7 +67,7 @@ export function chainView(db, correlationId) {
 
   const events = eventRows.map((row) => {
     const envelope = chainEnvelope(row.envelope_json);
-    const payload = envelope.malformed ? null : (envelope.payload ?? null);
+    const payload = envelope.__malformed ? null : (envelope.payload ?? null);
     return {
       source: row.source,
       eventId: row.event_id,
@@ -83,6 +83,9 @@ export function chainView(db, correlationId) {
       proposalStatus: row.proposal_status ?? null,
       proposalDecision: row.proposal_decision ?? null,
       runId: row.run_id ?? null,
+      // Long chains re-transfer these complete envelopes on every primary poll.
+      // If they become common, consider an on-demand GET /event/:source/:id/envelope
+      // endpoint or including an envelope only for the selected row.
       envelope,
       repos: repoNamesFromInput(payload),
     };
