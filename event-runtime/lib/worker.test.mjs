@@ -6449,6 +6449,7 @@ sh -c 'sleep 5 & wait'
       }),
     );
     const lockStatesDuringTrackerReads = [];
+    let acquireClaimLockCalls = 0;
     let concurrentClaimantAcquired = false;
     let claimHeldLock = false;
     const summary = await runOnce(
@@ -6456,6 +6457,10 @@ sh -c 'sleep 5 & wait'
       registry,
       adapters,
       opts({
+        acquireClaimLock: (...args) => {
+          acquireClaimLockCalls += 1;
+          return acquireClaimLock(...args);
+        },
         dispatch: {
           configSnapshot: dispatchConfigSnapshot(),
           locksDir,
@@ -6496,6 +6501,7 @@ sh -c 'sleep 5 & wait'
       terminalState: "REFUSED",
       reasonCode: "ticket_claim_lost",
     });
+    expect(acquireClaimLockCalls).toBeGreaterThan(0);
     expect(lockStatesDuringTrackerReads).toEqual([false, false]);
     expect(concurrentClaimantAcquired).toBe(true);
     expect(claimHeldLock).toBe(true);

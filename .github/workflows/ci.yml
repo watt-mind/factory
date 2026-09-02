@@ -167,6 +167,13 @@ jobs:
     # skipped on the cloud lane (WM-1122). It stays fail-closed: a cancelled
     # workflow or a failed `route` skips it, and on the self-hosted lane it
     # still requires a healthy shadow fleet.
+    #
+    # This suite runs on BOTH lanes and is required on both: fork and
+    # Dependabot PRs must keep full unit/lint/format/build coverage (GH-2267).
+    # The handful of cases that need a real unprivileged user+mount namespace
+    # self-skip on hosts without one, via the `handoffSandboxAvailable` probe
+    # in event-runtime/lib/verify.mjs — a host-capability probe, never an
+    # env flag a PR could set.
     if: >-
       ${{
         !cancelled() &&
@@ -419,17 +426,25 @@ jobs:
   sandboxed-verify-smoke:
     name: Sandboxed verify smoke
     # This is the production handoff boundary exercised against the PR head,
-    # not an approximation of it. Unlike the non-blocking Timing-bound tests,
-    # a red sandbox smoke is merge-blocking through required-verify below:
-    # host/CI green plus this lane red is a hermeticity regression. A future
-    # flaky quarantine must be explicit in this workflow and leave a visible,
-    # non-green signal; it must never silently make the smoke advisory.
+    # not an approximation of it. It is the ONLY job gated on the self-hosted
+    # lane: GitHub-hosted runners cannot create the unprivileged user+mount
+    # namespace it exists to exercise, so on the cloud lane there is nothing to
+    # smoke and required-verify records the gap as an explicit annotated skip
+    # (GH-2267). Every other check — unit tests, lint, format, typecheck,
+    # build — still runs on the cloud lane.
+    #
+    # On the self-hosted lane this smoke is merge-blocking through
+    # required-verify below: host/CI green plus this lane red is a hermeticity
+    # regression. A future flaky quarantine must be explicit in this workflow
+    # and leave a visible, non-green signal; it must never silently make the
+    # smoke advisory on the self-hosted lane.
     if: >-
       ${{
         !cancelled() &&
         needs.route.result == 'success' &&
+        needs.route.outputs.self_hosted == 'true' &&
         (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
-        (needs.route.outputs.self_hosted != 'true' || needs.shadow-runner-health.result == 'success')
+        needs.shadow-runner-health.result == 'success'
       }}
     needs: [route, shadow-runner-health]
     runs-on: ${{ fromJSON(needs.route.outputs.verify_labels) }}
@@ -866,20 +881,32 @@ jobs:
 
           # This job is intentionally `always()` so it reports cancelled and
           # skipped dependencies instead of inheriting GitHub's implicit
-          # success gate. The cloud lane is the sole expected skipped job.
+          # success gate. Exactly two jobs are expected to be skipped on the
+          # cloud lane — the shadow fleet health check and the sandbox smoke,
+          # both of which exercise host facilities GitHub-hosted runners do not
+          # have (GH-2267). Everything else, on either lane, must be `success`:
+          # a fork or Dependabot PR gets the same unit/lint/format/build gate a
+          # self-hosted PR does.
           require_success "Route CI lane" "$ROUTE_RESULT"
-          if [ "$SELF_HOSTED" = "true" ]; then
-            require_success "Shadow runner fleet available" "$HEALTH_RESULT"
-          else
-            echo "Shadow runner fleet available=$HEALTH_RESULT (expected skipped on cloud lane)"
-            if [ "$HEALTH_RESULT" != "skipped" ]; then
-              echo "::error::Cloud lane expected Shadow runner fleet available to be skipped."
-              failed=1
-            fi
-          fi
           require_success "Fast unit tests" "$FAST_RESULT"
           require_success "Full verification" "$FULL_RESULT"
-          require_success "Sandboxed verify smoke" "$SANDBOX_SMOKE_RESULT"
+          if [ "$SELF_HOSTED" = "true" ]; then
+            require_success "Shadow runner fleet available" "$HEALTH_RESULT"
+            require_success "Sandboxed verify smoke" "$SANDBOX_SMOKE_RESULT"
+          else
+            for check in \
+              "Shadow runner fleet available=$HEALTH_RESULT" \
+              "Sandboxed verify smoke=$SANDBOX_SMOKE_RESULT"; do
+              name="${check%%=*}"
+              result="${check#*=}"
+              echo "$name=$result (expected skipped on cloud lane)"
+              if [ "$result" != "skipped" ]; then
+                echo "::error::Cloud lane expected $name to be skipped."
+                failed=1
+              fi
+            done
+            echo "::notice::Sandboxed verify smoke skipped: GitHub-hosted runners cannot create the unprivileged user+mount namespace the handoff sandbox requires. This run has no sandbox-boundary coverage; all other checks ran."
+          fi
 
           if [ "$failed" -ne 0 ]; then
             echo "::error::One or more required verification jobs did not succeed; Verify cannot be green."

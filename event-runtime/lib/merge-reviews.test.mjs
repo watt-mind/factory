@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 import path from "node:path";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { Database } from "bun:sqlite";
@@ -16,6 +16,7 @@ import {
   mergeFixRefusalCooldownMs,
   persistMergeReviewFromResult,
   rebaseSkipFreshCiMinutes,
+  resetInvalidMinuteConfigWarnings,
   runScanCli,
   upsertMergeReview,
 } from "./merge-reviews.mjs";
@@ -39,6 +40,10 @@ const repos = new Map([
     },
   ],
 ]);
+
+beforeEach(() => {
+  resetInvalidMinuteConfigWarnings();
+});
 
 describe("merge-fix refusal cooldown configuration", () => {
   test.each([
@@ -106,13 +111,14 @@ describe("merge-fix refusal cooldown configuration", () => {
       42 * 60_000,
     ],
   ])(
-    "is silent when the %s value is unset or valid",
+    "is silent when the %s value is unset, empty, or valid",
     (_name, accessor, key, defaultValue, validValue) => {
       const warnings = [];
       const warn = console.warn;
       console.warn = (message) => warnings.push(message);
       try {
         expect(accessor({})).toBe(defaultValue);
+        expect(accessor({ [key]: "" })).toBe(defaultValue);
         expect(accessor({ [key]: "42" })).toBe(validValue);
       } finally {
         console.warn = warn;

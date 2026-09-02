@@ -140,7 +140,9 @@ function isProposalLessRunExpired(createdAt, now) {
 }
 
 /**
- * Cancel PROPOSED runs after every proposal is expired or terminally decided.
+ * Cancel PROPOSED runs when no open proposal remains within its TTL. Runs
+ * without proposals wait one proposal TTL, allowing proposal insertion to
+ * follow run creation.
  * The candidate query and legal transitions share an immediate transaction so
  * a concurrent replan cannot insert a fresh proposal between the two.
  */
@@ -278,7 +280,8 @@ export function sweepRuntimeRetention(
   };
   log(
     `retention: ${trace} trace rows and ${deleted} artifacts (${freedBytes} bytes)` +
-      `, ${proposed.cancelled} proposed runs, ${rows.runs.deleted} runs, ${rows.proposals.deleted} proposals, ${rows.events.deleted} events ` +
+      `, ${proposed.cancelled} proposed runs ${apply ? "cancelled" : "would be cancelled"}` +
+      `, ${rows.runs.deleted} runs, ${rows.proposals.deleted} proposals, ${rows.events.deleted} events ` +
       `${apply ? "deleted (VACUUMed)" : "would be deleted"}`,
   );
   return result;
