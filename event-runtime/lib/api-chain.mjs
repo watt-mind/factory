@@ -35,12 +35,12 @@ function chainEnvelope(envelopeJson) {
   try {
     const envelope = JSON.parse(envelopeJson);
     if (envelope && typeof envelope === "object" && !Array.isArray(envelope))
-      return envelope;
+      return { envelope, malformed: false };
   } catch {
-    // A named fallback makes the degraded record explicit without returning
-    // unparsed database bytes to the control surface.
+    // Do not return unparsed database bytes to the control surface.
   }
-  return { __malformed: true };
+  // Keep the safe envelope shape separate from the unambiguous row signal.
+  return { envelope: {}, malformed: true };
 }
 
 export function chainView(db, correlationId) {
@@ -66,8 +66,10 @@ export function chainView(db, correlationId) {
   if (eventRows.length === 0) return null;
 
   const events = eventRows.map((row) => {
-    const envelope = chainEnvelope(row.envelope_json);
-    const payload = envelope.__malformed ? null : (envelope.payload ?? null);
+    const { envelope, malformed: envelopeMalformed } = chainEnvelope(
+      row.envelope_json,
+    );
+    const payload = envelopeMalformed ? null : (envelope.payload ?? null);
     return {
       source: row.source,
       eventId: row.event_id,
@@ -87,6 +89,7 @@ export function chainView(db, correlationId) {
       // If they become common, consider an on-demand GET /event/:source/:id/envelope
       // endpoint or including an envelope only for the selected row.
       envelope,
+      envelopeMalformed,
       repos: repoNamesFromInput(payload),
     };
   });

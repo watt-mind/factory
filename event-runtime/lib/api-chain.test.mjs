@@ -175,7 +175,7 @@ describe("GET /chain/:correlationId (WM-527)", () => {
     expect(run3.finishedAt).toBeNull();
   });
 
-  test("names a safe fallback when a historic envelope is malformed", () => {
+  test("marks a historic malformed envelope without overloading its payload", () => {
     const original = s.db
       .query("SELECT envelope_json FROM events WHERE event_id = ?")
       .get("chain-run-1-B").envelope_json;
@@ -186,7 +186,8 @@ describe("GET /chain/:correlationId (WM-527)", () => {
       const event = chainView(s.db, "corr-1").events.find(
         (item) => item.eventId === "chain-run-1-B",
       );
-      expect(event.envelope).toEqual({ __malformed: true });
+      expect(event.envelope).toEqual({});
+      expect(event.envelopeMalformed).toBe(true);
       expect(event.repos).toEqual([]);
     } finally {
       s.db
@@ -221,7 +222,7 @@ describe("GET /chain/:correlationId (WM-527)", () => {
         payload: { repo: "factory", outcome: "completed" },
         malformed: true,
       });
-      expect(event.envelope.__malformed).toBeUndefined();
+      expect(event.envelopeMalformed).toBe(false);
     } finally {
       s.db
         .query(

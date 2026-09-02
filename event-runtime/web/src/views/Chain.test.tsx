@@ -96,9 +96,20 @@ function chainEvent(
       causationId: null,
       payload: {},
     },
+    envelopeMalformed: false,
     repos: [],
     ...overrides,
   };
+}
+
+/** Reproducible damaged-history fixture for the selected-chain envelope UI. */
+function malformedChainEvent(eventId: string): ChainEvent {
+  return chainEvent(eventId, {
+    source: "chain",
+    correlationId: CORR,
+    envelope: {},
+    envelopeMalformed: true,
+  });
 }
 
 function renderChainGraph() {
@@ -625,7 +636,7 @@ describe("Chain navigation shortcuts (WM-875)", () => {
     });
   });
 
-  test("names the safe malformed envelope fallback", async () => {
+  test("names the safe malformed envelope fallback from the row flag", async () => {
     const evtNodeId = `event:chain:${FIX_EVENT}`;
     const view = renderWithClient(
       <Chain
@@ -642,13 +653,7 @@ describe("Chain navigation shortcuts (WM-875)", () => {
         apiMocks: {
           chain: async () => ({
             ...chainView(),
-            events: [
-              chainEvent(FIX_EVENT, {
-                source: "chain",
-                correlationId: CORR,
-                envelope: { __malformed: true },
-              }),
-            ],
+            events: [malformedChainEvent(FIX_EVENT)],
           }),
         },
       },
