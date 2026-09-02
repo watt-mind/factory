@@ -85,6 +85,17 @@ function chainEvent(
     proposalStatus: null,
     proposalDecision: null,
     runId: null,
+    envelope: {
+      schemaVersion: "factory.event/v1",
+      eventId,
+      type: "factory.dispatch.requested",
+      source: "factory",
+      subject: "WM-273",
+      occurredAt: NOW,
+      correlationId: "operator:dispatch:WM-518",
+      causationId: null,
+      payload: {},
+    },
     repos: [],
     ...overrides,
   };
@@ -128,6 +139,17 @@ function chainView(): ChainView {
         proposalStatus: "approved",
         proposalDecision: "run",
         runId: FIX_RUN,
+        envelope: {
+          schemaVersion: "factory.event/v1",
+          eventId: FIX_EVENT,
+          type: "factory.merge-fix.requested",
+          source: "chain",
+          subject: "factory",
+          occurredAt: "2026-08-17T19:05:58.000Z",
+          correlationId: CORR,
+          causationId: null,
+          payload: { repo: "factory" },
+        },
         repos: ["factory"],
       },
     ],
@@ -585,12 +607,58 @@ describe("Chain navigation shortcuts (WM-875)", () => {
     expect(view.jumpedEvents).toContain(`chain:${FIX_EVENT}`);
   });
 
-  test("when event node is selected, renders Envelope section with id chain-envelope (WM-192)", async () => {
+  test("when an old event node is selected, renders its chain envelope without a recent-events lookup", async () => {
+    localStorage.clear();
     const evtNodeId = `event:chain:${FIX_EVENT}`;
-    const view = renderChain({ focusNodeId: evtNodeId });
+    const events = mock(async () => {
+      throw new Error("recent event window must not be queried");
+    });
+    await withApi({ events }, async () => {
+      const view = renderChain({ focusNodeId: evtNodeId });
+      await waitFor(() => {
+        expect(view.getByText("Envelope")).toBeTruthy();
+        expect(
+          view.getAllByText("factory.merge-fix.requested").length,
+        ).toBeGreaterThan(0);
+      });
+      expect(events).not.toHaveBeenCalled();
+    });
+  });
 
+  test("names the safe malformed envelope fallback", async () => {
+    const evtNodeId = `event:chain:${FIX_EVENT}`;
+    const view = renderWithClient(
+      <Chain
+        correlationId={CORR}
+        focusNodeId={evtNodeId}
+        onSelectNode={noop}
+        onJumpEvent={noop}
+        onJumpRun={noop}
+        onOpenRunFull={noop}
+        onJumpProposal={noop}
+        onJumpAgent={noop}
+      />,
+      {
+        apiMocks: {
+          chain: async () => ({
+            ...chainView(),
+            events: [
+              chainEvent(FIX_EVENT, {
+                source: "chain",
+                correlationId: CORR,
+                envelope: { malformed: true },
+              }),
+            ],
+          }),
+        },
+      },
+    );
     await waitFor(() => {
-      expect(view.getByText("Envelope")).toBeTruthy();
+      expect(
+        view.getByText(
+          "Stored envelope is malformed; its raw envelope is unavailable.",
+        ),
+      ).toBeTruthy();
     });
   });
 });

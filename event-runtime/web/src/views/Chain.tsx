@@ -275,18 +275,6 @@ export function Chain({
     retry: (count, err) =>
       !(err instanceof ApiError && err.status === 404) && count < 2,
   });
-  // Chain rows intentionally remain compact server projections. Reuse the
-  // admitted-event envelope when it is in the bounded recent-event window;
-  // older envelopes retain an explicit Events escape hatch until #2285 adds
-  // them to the chain response itself.
-  const eventEnvelopesQ = useQuery({
-    queryKey: ["events", "chain-envelopes", focusNodeId ?? ""],
-    queryFn: () => api.events(undefined, { limit: 100 }),
-    enabled: Boolean(focusNodeId),
-    // A one-shot lookup for the selected node: envelopes are immutable, so
-    // polling this list would only add load to the shared events endpoint.
-    staleTime: 60_000,
-  });
   const agentsQ = useQuery({
     queryKey: ["agents"],
     queryFn: api.agents,
@@ -537,14 +525,8 @@ export function Chain({
   );
   const selectedEnvelope = useMemo(() => {
     if (selected?.kind !== "chainEvent") return null;
-    return (
-      eventEnvelopesQ.data?.events.find(
-        (event) =>
-          event.source === selected.event.source &&
-          event.eventId === selected.event.eventId,
-      ) ?? null
-    );
-  }, [eventEnvelopesQ.data, selected]);
+    return selected.event.envelope ?? null;
+  }, [selected]);
 
   const timelineListRef = useRef<HTMLOListElement | null>(null);
   const revealSelected = () => {
@@ -1079,7 +1061,15 @@ export function Chain({
                 )}
               </Section>
               <Section id="chain-envelope" title="Envelope">
-                {selectedEnvelope ? (
+                {selectedEnvelope?.malformed === true ? (
+                  <div
+                    role="status"
+                    className="text-[12px] text-(--text-faint)"
+                  >
+                    Stored envelope is malformed; its raw envelope is
+                    unavailable.
+                  </div>
+                ) : selectedEnvelope ? (
                   <Suspense
                     fallback={
                       <div className="text-(--text-faint)">
@@ -1088,9 +1078,9 @@ export function Chain({
                     }
                   >
                     <EventPanel
-                      envelope={selectedEnvelope.envelope}
+                      envelope={selectedEnvelope}
                       agents={agentsQ.data?.agents}
-                      runId={selectedEnvelope.runId}
+                      runId={selected.event.runId}
                       now={now}
                       onJumpRun={onJumpRun}
                       onJumpChain={(id) => {
@@ -1103,8 +1093,7 @@ export function Chain({
                   </Suspense>
                 ) : (
                   <div className="text-[12px] text-(--text-faint)">
-                    Complete envelope unavailable in this chain response. Open
-                    the event in Events to inspect its View or Raw form.
+                    Complete envelope unavailable in this chain response.
                   </div>
                 )}
               </Section>

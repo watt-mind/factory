@@ -138,6 +138,8 @@ export interface ChainEvent {
   proposalStatus: string | null;
   proposalDecision: string | null;
   runId: string | null;
+  /** Complete persisted envelope, or `{ malformed: true }` for damaged history. */
+  envelope?: Record<string, unknown>;
   repos: string[];
 }
 
