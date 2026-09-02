@@ -23,7 +23,7 @@ import type {
 import type { OperatorContext } from "../context";
 import { scopedCount, scopedTally } from "../context";
 import { EMPTY, formatBytes, formatRelative } from "../format";
-import { headerFor, inputViewOf, viewApplies } from "../lib/artifactView";
+import { headerFor, inputViewOf } from "../lib/artifactView";
 import type { WorkerHealthFilter } from "./Workers";
 import {
   Button,
@@ -77,7 +77,7 @@ export function outboxSummary(
     agent.eventTypes.some((route) => route.type === type),
   );
   const view = inputViewOf(requestedAgent?.outputView);
-  const header = viewApplies(view, payload)
+  const header = view
     ? headerFor(view, payload, requestedAgent?.inputSchema)
     : null;
   return (

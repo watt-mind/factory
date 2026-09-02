@@ -284,7 +284,7 @@ describe("outboxSummary", () => {
     );
   });
 
-  test("falls back to the payload heuristic when a view header is empty", () => {
+  test("falls back to the payload heuristic when no view applies", () => {
     expect(
       outboxSummary("factory.work.requested", { outcome: "PR_OPEN" }, agents),
     ).toBe("PR_OPEN");

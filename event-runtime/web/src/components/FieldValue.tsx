@@ -1,11 +1,10 @@
 /**
  * FieldValue — the shared formatter for generic (viewless) payload rendering.
  *
- * Both generic payload paths render through it — `EventPanel`'s field list
- * and `ArtifactView`'s `PayloadFields` — so an operator sees the same
- * ticket hover cards, PR/commit links and relative timestamps wherever an
- * event's payload is shown. It lives in its own module so neither renderer
- * has to import the other.
+ * `ArtifactView`'s `PayloadFields` is its sole call site, so an operator sees
+ * consistent ticket hover cards, PR/commit links, and relative timestamps
+ * wherever that event payload is shown. It lives in its own module so the
+ * renderer can stay focused on layout.
  */
 import type { ReactNode } from "react";
 import { TicketHoverCard } from "./TicketHoverCard";
