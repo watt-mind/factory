@@ -1745,6 +1745,7 @@ export function verifyResult({
   worktreeRecord = null,
   checkoutPath = null,
   onTrace = null,
+  checkoutResultIsTrackedFn = checkoutResultIsTracked,
   verifyTimeoutMs = repoVerifyTimeoutMs(),
   runHandoffCommandFn = runHandoffCommand,
   dependencyInstaller = defaultDependencyInstaller,
@@ -1756,6 +1757,7 @@ export function verifyResult({
     checkout: checkoutPath ?? worktreeRecord?.path ?? null,
     attemptStartedAt,
     onTrace,
+    checkoutResultIsTrackedFn,
   });
 
   let candidate;
@@ -1794,7 +1796,13 @@ export function verifyResult({
  * their mtime proves they belong to this attempt; an old sibling ticket's
  * envelope is never a valid substitute for this run's result.
  */
-function readResultFile({ workspaceDir, checkout, attemptStartedAt, onTrace }) {
+function readResultFile({
+  workspaceDir,
+  checkout,
+  attemptStartedAt,
+  onTrace,
+  checkoutResultIsTrackedFn,
+}) {
   const resultPath = path.join(workspaceDir, "result.json");
   try {
     return readFileSync(resultPath, "utf8");
@@ -1829,7 +1837,7 @@ function readResultFile({ workspaceDir, checkout, attemptStartedAt, onTrace }) {
     if (
       checkout &&
       candidatePath === path.join(checkout, "result.json") &&
-      checkoutResultIsTracked(checkout)
+      checkoutResultIsTrackedSafely(checkout, checkoutResultIsTrackedFn)
     ) {
       stalePaths.push({ path: candidatePath, skipped: "tracked_in_checkout" });
       continue;
@@ -1866,6 +1874,17 @@ function readResultFile({ workspaceDir, checkout, attemptStartedAt, onTrace }) {
   if (stalePaths.length > 0) err.missingResultPaths = stalePaths;
   if (candidates.length > 0) err.missingResultFallbacks = candidates;
   throw err;
+}
+
+// A failed subprocess probe is indistinguishable from a tracked file at this
+// deletion boundary. Keep that fail-closed decision outside the subprocess
+// helper so recovery tests can exercise it without relying on host git timing.
+function checkoutResultIsTrackedSafely(checkout, checkoutResultIsTrackedFn) {
+  try {
+    return checkoutResultIsTrackedFn(checkout);
+  } catch {
+    return true;
+  }
 }
 
 function checkoutResultIsTracked(checkout) {
