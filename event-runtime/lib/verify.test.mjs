@@ -518,8 +518,10 @@ describe("verifyResult", () => {
     execFileSync("git", ["init", "--quiet", checkout]);
     const truncatedPath = path.join(checkout, "result.json");
     writeFileSync(truncatedPath, '{"schemaVersion": "factory.age', "utf8");
-    // Use the same physical sibling path that readResultFile() probes.
-    const strayPath = path.join(realpathSync(checkout), "..", "result.json");
+    // The sibling of the checkout's physical parent is what readResultFile()
+    // probes; name it directly rather than restating the implementation's
+    // own path expression.
+    const strayPath = path.join(realpathSync(physicalParent), "result.json");
     writeFileSync(
       strayPath,
       JSON.stringify({
@@ -563,8 +565,10 @@ describe("verifyResult", () => {
     writeFileSync(trackedPath, trackedResult, "utf8");
     execFileSync("git", ["init", "--quiet", checkout]);
     execFileSync("git", ["-C", checkout, "add", "result.json"]);
-    // Use the same physical sibling path that readResultFile() probes.
-    const strayPath = path.join(realpathSync(checkout), "..", "result.json");
+    // The sibling of the checkout's physical parent is what readResultFile()
+    // probes; name it directly rather than restating the implementation's
+    // own path expression.
+    const strayPath = path.join(realpathSync(physicalParent), "result.json");
     const events = [];
     writeFileSync(
       strayPath,
@@ -644,7 +648,6 @@ describe("verifyResult", () => {
   test("probes the checkout handed over separately from the worktree record", () => {
     const workspaceDir = tmpDir("evrt-verify-workspace-");
     const checkout = tmpDir("evrt-verify-checkout-");
-    execFileSync("git", ["init", "--quiet", checkout]);
     const strayPath = path.join(checkout, "result.json");
     writeFileSync(
       strayPath,
@@ -668,10 +671,45 @@ describe("verifyResult", () => {
       checkoutPath: checkout,
       attempt: 1,
       attemptStartedAt: RECOVERY_ATTEMPT_STARTED_AT,
+      // This recovery test needs a known-untracked checkout result. Injecting
+      // that fact avoids making its assertion depend on a contended CI host
+      // scheduling an unrelated git subprocess.
+      checkoutResultIsTrackedFn: () => false,
     });
 
     expect(out.kind).toBe("completed");
     expect(existsSync(strayPath)).toBe(false);
+  });
+
+  test("fails closed when an injected tracked-file probe errors", () => {
+    const workspaceDir = tmpDir("evrt-verify-workspace-");
+    const checkout = tmpDir("evrt-verify-checkout-");
+    const candidatePath = path.join(checkout, "result.json");
+    writeFileSync(
+      candidatePath,
+      JSON.stringify({
+        schemaVersion: "factory.agent-result/v1",
+        terminalState: "completed",
+        artifact: VALID_ARTIFACT,
+      }),
+      "utf8",
+    );
+
+    expect(() =>
+      verifyResult({
+        spec: makeSpec(),
+        def,
+        registry,
+        workspaceDir,
+        checkoutPath: checkout,
+        attempt: 1,
+        attemptStartedAt: new Date(Date.now() - 5_000).toISOString(),
+        checkoutResultIsTrackedFn: () => {
+          throw new Error("git probe timed out");
+        },
+      }),
+    ).toThrow(ContractViolation);
+    expect(existsSync(candidatePath)).toBe(true);
   });
 
   test("rejects a stale stray result from before this attempt", () => {
@@ -700,6 +738,10 @@ describe("verifyResult", () => {
         worktreeRecord: { path: checkout },
         attempt: 1,
         attemptStartedAt: attemptStartedAt.toISOString(),
+        // This staleness test needs a known-untracked checkout result. Injecting
+        // that fact avoids making its assertion depend on a contended CI host
+        // scheduling an unrelated git subprocess.
+        checkoutResultIsTrackedFn: () => false,
       });
       throw new Error("expected ContractViolation");
     } catch (err) {
