@@ -63,8 +63,17 @@ const def = getAgent(registry, "factory-status-report@1");
 const dispatchDef = getAgent(registry, "dispatch@1");
 const workScanDef = getAgent(registry, "work-scan@1");
 // Path-selection fixtures do not test age; the stale-result test below does.
-// A broad window keeps their candidate selection independent of host clocks.
+// This fixed timestamp is valid on both the host and CI clock domains.
 const RECOVERY_ATTEMPT_STARTED_AT = "1970-01-01T00:00:00.000Z";
+const RECOVERY_CANDIDATE_TIMESTAMP = new Date("2000-01-01T00:00:00.000Z");
+
+function markRecoveryCandidate(filePath) {
+  utimesSync(
+    filePath,
+    RECOVERY_CANDIDATE_TIMESTAMP,
+    RECOVERY_CANDIDATE_TIMESTAMP,
+  );
+}
 
 function makeSpec(input = { repos: ["bj29"] }) {
   return {
@@ -472,27 +481,18 @@ describe("verifyResult", () => {
       }),
       "utf8",
     );
+    markRecoveryCandidate(strayPath);
 
-    let out;
-    try {
-      out = verifyResult({
-        spec: makeSpec(),
-        def,
-        registry,
-        workspaceDir,
-        worktreeRecord: { path: checkout },
-        attempt: 1,
-        attemptStartedAt: RECOVERY_ATTEMPT_STARTED_AT,
-        onTrace: (kind, payload) => events.push({ kind, payload }),
-      });
-    } catch (err) {
-      throw new Error(
-        `recovery diagnostics: ${JSON.stringify({
-          missingResultPaths: err.missingResultPaths,
-          missingResultFallbacks: err.missingResultFallbacks,
-        })}`,
-      );
-    }
+    const out = verifyResult({
+      spec: makeSpec(),
+      def,
+      registry,
+      workspaceDir,
+      worktreeRecord: { path: checkout },
+      attempt: 1,
+      attemptStartedAt: RECOVERY_ATTEMPT_STARTED_AT,
+      onTrace: (kind, payload) => events.push({ kind, payload }),
+    });
 
     expect(out.kind).toBe("completed");
     expect(existsSync(strayPath)).toBe(false);
@@ -518,8 +518,7 @@ describe("verifyResult", () => {
     execFileSync("git", ["init", "--quiet", checkout]);
     const truncatedPath = path.join(checkout, "result.json");
     writeFileSync(truncatedPath, '{"schemaVersion": "factory.age', "utf8");
-    // Match the physical sibling path that readResultFile() probes. TMPDIR may
-    // itself be symlinked on hosted runners, so physicalParent is not reliable.
+    // Use the same physical sibling path that readResultFile() probes.
     const strayPath = path.join(realpathSync(checkout), "..", "result.json");
     writeFileSync(
       strayPath,
@@ -530,6 +529,7 @@ describe("verifyResult", () => {
       }),
       "utf8",
     );
+    markRecoveryCandidate(strayPath);
 
     const out = verifyResult({
       spec: makeSpec(),
@@ -563,8 +563,7 @@ describe("verifyResult", () => {
     writeFileSync(trackedPath, trackedResult, "utf8");
     execFileSync("git", ["init", "--quiet", checkout]);
     execFileSync("git", ["-C", checkout, "add", "result.json"]);
-    // Match the physical sibling path that readResultFile() probes. TMPDIR may
-    // itself be symlinked on hosted runners, so physicalParent is not reliable.
+    // Use the same physical sibling path that readResultFile() probes.
     const strayPath = path.join(realpathSync(checkout), "..", "result.json");
     const events = [];
     writeFileSync(
@@ -576,27 +575,18 @@ describe("verifyResult", () => {
       }),
       "utf8",
     );
+    markRecoveryCandidate(strayPath);
 
-    let out;
-    try {
-      out = verifyResult({
-        spec: makeSpec(),
-        def,
-        registry,
-        workspaceDir,
-        worktreeRecord: { path: checkout },
-        attempt: 1,
-        attemptStartedAt: RECOVERY_ATTEMPT_STARTED_AT,
-        onTrace: (kind, payload) => events.push({ kind, payload }),
-      });
-    } catch (err) {
-      throw new Error(
-        `recovery diagnostics: ${JSON.stringify({
-          missingResultPaths: err.missingResultPaths,
-          missingResultFallbacks: err.missingResultFallbacks,
-        })}`,
-      );
-    }
+    const out = verifyResult({
+      spec: makeSpec(),
+      def,
+      registry,
+      workspaceDir,
+      worktreeRecord: { path: checkout },
+      attempt: 1,
+      attemptStartedAt: RECOVERY_ATTEMPT_STARTED_AT,
+      onTrace: (kind, payload) => events.push({ kind, payload }),
+    });
 
     expect(out.kind).toBe("completed");
     expect(readFileSync(trackedPath, "utf8")).toBe(trackedResult);
@@ -665,29 +655,20 @@ describe("verifyResult", () => {
       }),
       "utf8",
     );
+    markRecoveryCandidate(strayPath);
 
     // The timed-out preflight suppresses worktree command verification with an
     // empty record while still naming the checkout for the stray probe.
-    let out;
-    try {
-      out = verifyResult({
-        spec: makeSpec(),
-        def,
-        registry,
-        workspaceDir,
-        worktreeRecord: {},
-        checkoutPath: checkout,
-        attempt: 1,
-        attemptStartedAt: RECOVERY_ATTEMPT_STARTED_AT,
-      });
-    } catch (err) {
-      throw new Error(
-        `recovery diagnostics: ${JSON.stringify({
-          missingResultPaths: err.missingResultPaths,
-          missingResultFallbacks: err.missingResultFallbacks,
-        })}`,
-      );
-    }
+    const out = verifyResult({
+      spec: makeSpec(),
+      def,
+      registry,
+      workspaceDir,
+      worktreeRecord: {},
+      checkoutPath: checkout,
+      attempt: 1,
+      attemptStartedAt: RECOVERY_ATTEMPT_STARTED_AT,
+    });
 
     expect(out.kind).toBe("completed");
     expect(existsSync(strayPath)).toBe(false);
