@@ -571,7 +571,9 @@ describe("verifyResult", () => {
       workspaceDir,
       worktreeRecord: { path: checkout },
       attempt: 1,
-      attemptStartedAt: new Date(Date.now() - 5_000).toISOString(),
+      // Keep the fixture's recovery window independent of hosted runner
+      // filesystem timestamp precision; stale-rejection is tested separately.
+      attemptStartedAt: new Date(Date.now() - 60_000).toISOString(),
       onTrace: (kind, payload) => events.push({ kind, payload }),
     });
 
@@ -653,7 +655,9 @@ describe("verifyResult", () => {
       worktreeRecord: {},
       checkoutPath: checkout,
       attempt: 1,
-      attemptStartedAt: new Date(Date.now() - 5_000).toISOString(),
+      // Keep the fixture's recovery window independent of hosted runner
+      // filesystem timestamp precision; stale-rejection is tested separately.
+      attemptStartedAt: new Date(Date.now() - 60_000).toISOString(),
     });
 
     expect(out.kind).toBe("completed");
