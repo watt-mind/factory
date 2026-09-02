@@ -204,6 +204,24 @@ describe("registry", () => {
     );
   });
 
+  test("merge-review requires reviewable visual evidence or an explicit exception", () => {
+    const prompt = readFileSync(
+      path.join(RUNTIME_ROOT, "agents", "merge-review.md"),
+      "utf8",
+    );
+    const flat = prompt.replace(/\s+/g, " ");
+    expect(flat).toContain("one representative, reviewable visual artifact");
+    expect(flat).toContain(
+      "A workspace path, a bare `sha256:` identifier, an unreachable URL, or prose that says a screenshot was taken is not reviewable evidence.",
+    );
+    expect(flat).toContain(
+      "emit the blocking protocol finding `visual_evidence_missing` and return FIX",
+    );
+    expect(flat).toContain(
+      "Prefer a bounded, mobile-viewport or element-scoped screenshot",
+    );
+  });
+
   test("merge-agent documented result envelopes validate their registered artifact schemas", () => {
     const expectedCompletedExamples = new Map([
       ["merge-fix@1", 2],
@@ -451,8 +469,11 @@ describe("registry", () => {
     // optional artifact fields, and the definition was re-pinned.
     // Regenerated (#2254): merge-fix and merge-scan document their refusal
     // cooldown tunables and are re-pinned.
+    // Regenerated (#2219): merge-review requires one reviewable visual
+    // artifact or a concrete exception for user-facing visual PRs, and the
+    // prompt was re-pinned.
     const expected =
-      "sha256:9d9c76cd1295cac210de3fbf6660521e6269ebe60b8bb28adb70e38637ca98b1";
+      "sha256:dfbde9727dbe25d189af86936a1db647c843427f96a8423e8896ef188e49a9eb";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
