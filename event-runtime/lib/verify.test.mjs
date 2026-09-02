@@ -38,6 +38,8 @@ import {
   handoffRuntimeBinaries,
   handoffGitMounts,
   handoffSandboxAvailable,
+  handoffSandboxSkipReason,
+  HANDOFF_SANDBOX_UNAVAILABLE,
   HANDOFF_SANDBOX_PYTHON,
   MAX_HANDOFF_SANDBOX_TMPFS_MB,
   clampHandoffSandboxTmpfsMb,
@@ -54,6 +56,7 @@ import {
   ticketVerifyCoveredByRepoVerify,
   verifyResult,
 } from "./verify.mjs";
+import { sandboxTest } from "../test-support/sandbox.mjs";
 
 const registry = loadRegistry();
 const def = getAgent(registry, "factory-status-report@1");
@@ -1223,164 +1226,182 @@ describe("worktree baseline verification (WM-334)", () => {
     return { dir, record };
   }
 
-  test("a matching pre-existing failure is rejected with the distinct baseline_red reason", () => {
-    const { dir, record } = worktreeWorkspace(
-      "printf 'entry chunk exceeds budget\\n' >&2; exit 9",
-      {
-        status: "red",
-        check: "web_build",
-        output: "entry chunk exceeds budget",
-      },
-    );
-    try {
-      verifyResult({
-        spec: dispatchSpec,
-        def: dispatchDef,
-        registry,
-        workspaceDir: dir,
-        attempt: 1,
-        worktreeRecord: record,
-      });
-      throw new Error("expected ContractViolation");
-    } catch (err) {
-      expect(err).toBeInstanceOf(ContractViolation);
-      expect(err.reasonCode).toBe("baseline_red");
-      expect(err.violations[0]).toContain("repo_verify_failed");
-    }
-  });
+  sandboxTest(
+    "a matching pre-existing failure is rejected with the distinct baseline_red reason",
+    () => {
+      const { dir, record } = worktreeWorkspace(
+        "printf 'entry chunk exceeds budget\\n' >&2; exit 9",
+        {
+          status: "red",
+          check: "web_build",
+          output: "entry chunk exceeds budget",
+        },
+      );
+      try {
+        verifyResult({
+          spec: dispatchSpec,
+          def: dispatchDef,
+          registry,
+          workspaceDir: dir,
+          attempt: 1,
+          worktreeRecord: record,
+        });
+        throw new Error("expected ContractViolation");
+      } catch (err) {
+        expect(err).toBeInstanceOf(ContractViolation);
+        expect(err.reasonCode).toBe("baseline_red");
+        expect(err.violations[0]).toContain("repo_verify_failed");
+      }
+    },
+  );
 
-  test("a recorded test baseline does not absorb an additional branch-only failure", () => {
-    const baselineOutput = [
-      "event-runtime/lib/worker.test.mjs:",
-      "(fail) worker > pre-existing flaky probe",
-    ].join("\n");
-    const { dir, record } = worktreeWorkspace(
-      `printf '%s\\n' '${baselineOutput}' 'event-runtime/lib/new.test.mjs:' '(fail) new suite > branch-only failure' >&2; exit 9`,
-      { status: "red", check: "repo_verify", output: baselineOutput },
-    );
-    try {
-      verifyResult({
-        spec: dispatchSpec,
-        def: dispatchDef,
-        registry,
-        workspaceDir: dir,
-        attempt: 1,
-        worktreeRecord: record,
-      });
-      throw new Error("expected ContractViolation");
-    } catch (err) {
-      expect(err).toBeInstanceOf(ContractViolation);
-      expect(err.reasonCode).toBe("handoff_verification_failed");
-    }
-  });
+  sandboxTest(
+    "a recorded test baseline does not absorb an additional branch-only failure",
+    () => {
+      const baselineOutput = [
+        "event-runtime/lib/worker.test.mjs:",
+        "(fail) worker > pre-existing flaky probe",
+      ].join("\n");
+      const { dir, record } = worktreeWorkspace(
+        `printf '%s\\n' '${baselineOutput}' 'event-runtime/lib/new.test.mjs:' '(fail) new suite > branch-only failure' >&2; exit 9`,
+        { status: "red", check: "repo_verify", output: baselineOutput },
+      );
+      try {
+        verifyResult({
+          spec: dispatchSpec,
+          def: dispatchDef,
+          registry,
+          workspaceDir: dir,
+          attempt: 1,
+          worktreeRecord: record,
+        });
+        throw new Error("expected ContractViolation");
+      } catch (err) {
+        expect(err).toBeInstanceOf(ContractViolation);
+        expect(err.reasonCode).toBe("handoff_verification_failed");
+      }
+    },
+  );
 
-  test("a recorded test baseline still absorbs a branch that fixed some of its failures", () => {
-    const baselineOutput = [
-      "event-runtime/lib/worker.test.mjs:",
-      "(fail) worker > pre-existing flaky probe",
-      "(fail) worker > second pre-existing probe",
-    ].join("\n");
-    const { dir, record } = worktreeWorkspace(
-      `printf '%s\\n' 'event-runtime/lib/worker.test.mjs:' '(fail) worker > pre-existing flaky probe' >&2; exit 9`,
-      { status: "red", check: "repo_verify", output: baselineOutput },
-    );
-    try {
-      verifyResult({
-        spec: dispatchSpec,
-        def: dispatchDef,
-        registry,
-        workspaceDir: dir,
-        attempt: 1,
-        worktreeRecord: record,
-      });
-      throw new Error("expected ContractViolation");
-    } catch (err) {
-      expect(err).toBeInstanceOf(ContractViolation);
-      expect(err.reasonCode).toBe("baseline_red");
-    }
-  });
+  sandboxTest(
+    "a recorded test baseline still absorbs a branch that fixed some of its failures",
+    () => {
+      const baselineOutput = [
+        "event-runtime/lib/worker.test.mjs:",
+        "(fail) worker > pre-existing flaky probe",
+        "(fail) worker > second pre-existing probe",
+      ].join("\n");
+      const { dir, record } = worktreeWorkspace(
+        `printf '%s\\n' 'event-runtime/lib/worker.test.mjs:' '(fail) worker > pre-existing flaky probe' >&2; exit 9`,
+        { status: "red", check: "repo_verify", output: baselineOutput },
+      );
+      try {
+        verifyResult({
+          spec: dispatchSpec,
+          def: dispatchDef,
+          registry,
+          workspaceDir: dir,
+          attempt: 1,
+          worktreeRecord: record,
+        });
+        throw new Error("expected ContractViolation");
+      } catch (err) {
+        expect(err).toBeInstanceOf(ContractViolation);
+        expect(err.reasonCode).toBe("baseline_red");
+      }
+    },
+  );
 
-  test("a truncated failing-test list is never absorbed by a recorded baseline", () => {
-    const names = Array.from({ length: 25 }, (_, i) => `probe ${i}`);
-    const lines = ["event-runtime/lib/worker.test.mjs:"].concat(
-      names.map((name) => `(fail) worker > ${name}`),
-    );
-    const { dir, record } = worktreeWorkspace(
-      `printf '%s\\n' ${lines.map((line) => `'${line}'`).join(" ")} >&2; exit 9`,
-      { status: "red", check: "repo_verify", output: lines.join("\n") },
-    );
-    try {
-      verifyResult({
-        spec: dispatchSpec,
-        def: dispatchDef,
-        registry,
-        workspaceDir: dir,
-        attempt: 1,
-        worktreeRecord: record,
-      });
-      throw new Error("expected ContractViolation");
-    } catch (err) {
-      expect(err).toBeInstanceOf(ContractViolation);
-      expect(err.reasonCode).toBe("handoff_verification_failed");
-    }
-  });
+  sandboxTest(
+    "a truncated failing-test list is never absorbed by a recorded baseline",
+    () => {
+      const names = Array.from({ length: 25 }, (_, i) => `probe ${i}`);
+      const lines = ["event-runtime/lib/worker.test.mjs:"].concat(
+        names.map((name) => `(fail) worker > ${name}`),
+      );
+      const { dir, record } = worktreeWorkspace(
+        `printf '%s\\n' ${lines.map((line) => `'${line}'`).join(" ")} >&2; exit 9`,
+        { status: "red", check: "repo_verify", output: lines.join("\n") },
+      );
+      try {
+        verifyResult({
+          spec: dispatchSpec,
+          def: dispatchDef,
+          registry,
+          workspaceDir: dir,
+          attempt: 1,
+          worktreeRecord: record,
+        });
+        throw new Error("expected ContractViolation");
+      } catch (err) {
+        expect(err).toBeInstanceOf(ContractViolation);
+        expect(err.reasonCode).toBe("handoff_verification_failed");
+      }
+    },
+  );
 
   // WM-718: a post-agent repo verify failure at handoff is the handoff gate
   // refusing (`handoff_verification_failed`), no longer a generic
   // `contract_violation` — same FAILED path, but named so the ticket goes back
   // to Todo + ai:agent-ready and the PR is held as draft.
-  test("shared baseline output plus a new failure does not classify as baseline_red", () => {
-    const { dir, record } = worktreeWorkspace(
-      "printf 'entry chunk exceeds budget\\nnew failure in CI\\n' >&2; exit 9",
-      {
-        status: "red",
-        check: "web_build",
-        output: "entry chunk exceeds budget",
-      },
-    );
-    try {
-      verifyResult({
-        spec: dispatchSpec,
-        def: dispatchDef,
-        registry,
-        workspaceDir: dir,
-        attempt: 1,
-        worktreeRecord: record,
-      });
-      throw new Error("expected ContractViolation");
-    } catch (err) {
-      expect(err).toBeInstanceOf(ContractViolation);
-      expect(err.reasonCode).toBe("handoff_verification_failed");
-      expect(err.handoff.repoVerify.exitCode).toBe(9);
-    }
-  });
+  sandboxTest(
+    "shared baseline output plus a new failure does not classify as baseline_red",
+    () => {
+      const { dir, record } = worktreeWorkspace(
+        "printf 'entry chunk exceeds budget\\nnew failure in CI\\n' >&2; exit 9",
+        {
+          status: "red",
+          check: "web_build",
+          output: "entry chunk exceeds budget",
+        },
+      );
+      try {
+        verifyResult({
+          spec: dispatchSpec,
+          def: dispatchDef,
+          registry,
+          workspaceDir: dir,
+          attempt: 1,
+          worktreeRecord: record,
+        });
+        throw new Error("expected ContractViolation");
+      } catch (err) {
+        expect(err).toBeInstanceOf(ContractViolation);
+        expect(err.reasonCode).toBe("handoff_verification_failed");
+        expect(err.handoff.repoVerify.exitCode).toBe(9);
+      }
+    },
+  );
 
-  test("an unrelated post-agent failure refuses the handoff (not baseline_red)", () => {
-    const { dir, record } = worktreeWorkspace(
-      "printf 'new test regression\\nerror: script \"build\" exited with code 1\\n' >&2; exit 9",
-      {
-        status: "red",
-        check: "web_build",
-        output:
-          'entry chunk exceeds budget\nerror: script "build" exited with code 1',
-      },
-    );
-    try {
-      verifyResult({
-        spec: dispatchSpec,
-        def: dispatchDef,
-        registry,
-        workspaceDir: dir,
-        attempt: 1,
-        worktreeRecord: record,
-      });
-      throw new Error("expected ContractViolation");
-    } catch (err) {
-      expect(err).toBeInstanceOf(ContractViolation);
-      expect(err.reasonCode).toBe("handoff_verification_failed");
-      expect(err.violations[0]).toStartWith("repo_verify_failed:");
-    }
-  });
+  sandboxTest(
+    "an unrelated post-agent failure refuses the handoff (not baseline_red)",
+    () => {
+      const { dir, record } = worktreeWorkspace(
+        "printf 'new test regression\\nerror: script \"build\" exited with code 1\\n' >&2; exit 9",
+        {
+          status: "red",
+          check: "web_build",
+          output:
+            'entry chunk exceeds budget\nerror: script "build" exited with code 1',
+        },
+      );
+      try {
+        verifyResult({
+          spec: dispatchSpec,
+          def: dispatchDef,
+          registry,
+          workspaceDir: dir,
+          attempt: 1,
+          worktreeRecord: record,
+        });
+        throw new Error("expected ContractViolation");
+      } catch (err) {
+        expect(err).toBeInstanceOf(ContractViolation);
+        expect(err.reasonCode).toBe("handoff_verification_failed");
+        expect(err.violations[0]).toStartWith("repo_verify_failed:");
+      }
+    },
+  );
 
   test("rechecks an unchanged failing test file at the merge base before charging the branch", () => {
     const { dir, record } = worktreeWorkspace("repo-verify", null);
@@ -1494,216 +1515,208 @@ describe("worktree baseline verification (WM-334)", () => {
     expect(calls).toEqual(["repo-verify"]);
   });
 
-  test("a multi-line verification failure retains the failing test name and full log", () => {
-    const { dir, record } = worktreeWorkspace(
-      "printf 'suite start\\n(pass) timing-test registry (WM-918) > parseFailingTests reads bun (fail) and ✗ lines\\n(fail) totals > rejects an invalid total\\nRan 2045 tests across 150 files.\\n'; printf 'error: expected 400, received 200\\n' >&2; exit 1",
-      null,
-    );
-    try {
-      verifyResult({
-        spec: dispatchSpec,
-        def: dispatchDef,
-        registry,
-        workspaceDir: dir,
-        attempt: 1,
-        worktreeRecord: record,
-      });
-      throw new Error("expected ContractViolation");
-    } catch (err) {
-      expect(err).toBeInstanceOf(ContractViolation);
-      expect(err.violations[0]).toContain(
-        "(fail) totals > rejects an invalid total",
-      );
-      expect(err.violations[0]).toContain("error: expected 400, received 200");
-      // A passing test whose name contains "(fail)" is not a failure marker.
-      expect(err.violations[0]).not.toContain("(pass) timing-test registry");
-      expect(err.handoff.repoVerify.executionContext).toBe("dispatch_worktree");
-      expect(err.handoff.repoVerify.failingTests).toEqual([
-        "totals > rejects an invalid total",
-      ]);
-    }
-
-    const verifyLog = readFileSync(path.join(dir, ".verify.log"), "utf8");
-    expect(verifyLog).toContain("suite start");
-    expect(verifyLog).toContain("(fail) totals > rejects an invalid total");
-    expect(verifyLog).toContain("Ran 2045 tests across 150 files.");
-    expect(verifyLog).toContain("error: expected 400, received 200");
-  });
-
-  test("handoff commands scrub instance FACTORY_* values and pin the worktree root", () => {
-    const instanceRoot = tmpDir("evrt-handoff-instance-");
-    const { dir, record } = worktreeWorkspace(
-      'printf \'repos=%s\\nroot=%s\\nhome=%s\\nport=%s\\n\' "$FACTORY_REPOS_ROOT" "${FACTORY_ROOT-unset}" "${FACTORY_EVENT_HOME-unset}" "${FACTORY_EVENT_PORT-unset}"',
-      null,
-    );
-    const keys = [
-      "FACTORY_REPOS_ROOT",
-      "FACTORY_ROOT",
-      "FACTORY_EVENT_HOME",
-      "FACTORY_EVENT_PORT",
-    ];
-    const previous = Object.fromEntries(
-      keys.map((key) => [key, process.env[key]]),
-    );
-    Object.assign(process.env, {
-      FACTORY_REPOS_ROOT: instanceRoot,
-      FACTORY_ROOT: instanceRoot,
-      FACTORY_EVENT_HOME: instanceRoot,
-      FACTORY_EVENT_PORT: "9999",
-    });
-    try {
-      const out = verifyResult({
-        spec: dispatchSpec,
-        def: dispatchDef,
-        registry,
-        workspaceDir: dir,
-        attempt: 1,
-        worktreeRecord: record,
-      });
-      expect(out.kind).toBe("completed");
-      const observed = out.handoff.repoVerify.output;
-      // The worktree is mounted at /workspace in the sandbox (#967); the pin
-      // still names the worktree root, in the coordinates the command sees.
-      // When this suite is itself running inside a sandbox the boundary does
-      // not nest and the command keeps the real paths.
-      expect(observed).toContain(
-        `repos=${insideHandoffSandbox() ? realpathSync(record.path) : "/workspace"}`,
-      );
-      expect(observed).toContain("root=unset");
-      expect(observed).toContain("home=unset");
-      expect(observed).toContain("port=unset");
-      expect(observed).not.toContain(instanceRoot);
-    } finally {
-      for (const key of keys) {
-        if (previous[key] === undefined) delete process.env[key];
-        else process.env[key] = previous[key];
-      }
-    }
-  });
-
-  test("the web build pins FACTORY_REPOS_ROOT to the worktree root, not its web cwd", () => {
-    const instanceRoot = tmpDir("evrt-handoff-instance-");
-    const { dir, record } = worktreeWorkspace("true", null);
-    record.base = "develop";
-    const repo = record.path;
-    const git = (...args) => execFileSync("git", args, { cwd: repo });
-    git("init", "-q", "-b", "develop");
-    git("config", "user.email", "t@t");
-    git("config", "user.name", "t");
-    const webDir = path.join(repo, "event-runtime", "web");
-    mkdirSync(path.join(webDir, "src"), { recursive: true });
-    writeFileSync(
-      path.join(webDir, "package.json"),
-      JSON.stringify({
-        name: "web-fixture",
-        scripts: {
-          build:
-            'printf \'cwd=%s\\nrepos=%s\\nroot=%s\\ntimeout=%s\\n\' "$PWD" "$FACTORY_REPOS_ROOT" "${FACTORY_ROOT-unset}" "${FACTORY_REPO_VERIFY_TIMEOUT_MS-unset}"',
-        },
-      }),
-    );
-    git("add", "-A");
-    git("commit", "-qm", "base");
-    git("update-ref", "refs/remotes/origin/develop", "HEAD");
-    git("checkout", "-qb", "feat/x");
-    writeFileSync(path.join(webDir, "src", "app.ts"), "export {};\n");
-    git("add", "-A");
-    git("commit", "-qm", "work");
-    const keys = ["FACTORY_REPOS_ROOT", "FACTORY_ROOT"];
-    const previous = Object.fromEntries(
-      keys.map((key) => [key, process.env[key]]),
-    );
-    Object.assign(process.env, {
-      FACTORY_REPOS_ROOT: instanceRoot,
-      FACTORY_ROOT: instanceRoot,
-    });
-    try {
-      const out = verifyResult({
-        spec: dispatchSpec,
-        def: dispatchDef,
-        registry,
-        workspaceDir: dir,
-        attempt: 1,
-        worktreeRecord: record,
-      });
-      expect(out.kind).toBe("completed");
-      expect(out.result.verification.checks).toContain("web_build_passed");
-      const observed = out.handoff.webBuild.output;
-      const guestRoot = insideHandoffSandbox()
-        ? realpathSync(repo)
-        : "/workspace";
-      expect(observed).toContain(`cwd=${guestRoot}/event-runtime/web`);
-      expect(observed).toContain(`repos=${guestRoot}\n`);
-      expect(observed).not.toContain(`repos=${guestRoot}/event-runtime/web`);
-      expect(observed).toContain("root=unset");
-      expect(observed).toContain("timeout=unset");
-      expect(observed).not.toContain(instanceRoot);
-    } finally {
-      for (const key of keys) {
-        if (previous[key] === undefined) delete process.env[key];
-        else process.env[key] = previous[key];
-      }
-    }
-  });
-
-  test("later error noise cannot displace a failing test name from the bounded reason", () => {
-    const { dir, record } = worktreeWorkspace(
-      "printf '(fail) billing > rejects a duplicate charge\\n'; i=1; while [ \"$i\" -le 45 ]; do printf 'error: detail %s\\n' \"$i\"; i=$((i + 1)); done; exit 1",
-      null,
-    );
-    try {
-      verifyResult({
-        spec: dispatchSpec,
-        def: dispatchDef,
-        registry,
-        workspaceDir: dir,
-        attempt: 1,
-        worktreeRecord: record,
-      });
-      throw new Error("expected ContractViolation");
-    } catch (err) {
-      expect(err).toBeInstanceOf(ContractViolation);
-      expect(err.violations[0]).toContain(
-        "(fail) billing > rejects a duplicate charge",
-      );
-      expect(err.violations[0].split("\n").length).toBeLessThanOrEqual(40);
-    }
-  });
-
-  test("a recorded red baseline never weakens a now-green post-agent verification", () => {
-    const { dir, record } = worktreeWorkspace(
-      "printf 'verification repaired\\n'",
-      {
-        status: "red",
-        check: "web_build",
-        output: "entry chunk exceeds budget",
-      },
-    );
-    const out = verifyResult({
-      spec: dispatchSpec,
-      def: dispatchDef,
-      registry,
-      workspaceDir: dir,
-      attempt: 1,
-      worktreeRecord: record,
-    });
-    expect(out.kind).toBe("completed");
-    expect(out.result.verification.checks).toContain("repo_verify_passed");
-  });
-
-  test("a worker-recovered result.json is never reported as an agent claim (#1592)", () => {
-    for (const [reasonCode, recovered] of [
-      ["worker_recovered_missing_result", true],
-      ["ok", false],
-    ]) {
+  sandboxTest(
+    "a multi-line verification failure retains the failing test name and full log",
+    () => {
       const { dir, record } = worktreeWorkspace(
-        "printf 'verification passed\\n'",
+        "printf 'suite start\\n(pass) timing-test registry (WM-918) > parseFailingTests reads bun (fail) and ✗ lines\\n(fail) totals > rejects an invalid total\\nRan 2045 tests across 150 files.\\n'; printf 'error: expected 400, received 200\\n' >&2; exit 1",
         null,
       );
+      try {
+        verifyResult({
+          spec: dispatchSpec,
+          def: dispatchDef,
+          registry,
+          workspaceDir: dir,
+          attempt: 1,
+          worktreeRecord: record,
+        });
+        throw new Error("expected ContractViolation");
+      } catch (err) {
+        expect(err).toBeInstanceOf(ContractViolation);
+        expect(err.violations[0]).toContain(
+          "(fail) totals > rejects an invalid total",
+        );
+        expect(err.violations[0]).toContain(
+          "error: expected 400, received 200",
+        );
+        // A passing test whose name contains "(fail)" is not a failure marker.
+        expect(err.violations[0]).not.toContain("(pass) timing-test registry");
+        expect(err.handoff.repoVerify.executionContext).toBe(
+          "dispatch_worktree",
+        );
+        expect(err.handoff.repoVerify.failingTests).toEqual([
+          "totals > rejects an invalid total",
+        ]);
+      }
+
+      const verifyLog = readFileSync(path.join(dir, ".verify.log"), "utf8");
+      expect(verifyLog).toContain("suite start");
+      expect(verifyLog).toContain("(fail) totals > rejects an invalid total");
+      expect(verifyLog).toContain("Ran 2045 tests across 150 files.");
+      expect(verifyLog).toContain("error: expected 400, received 200");
+    },
+  );
+
+  sandboxTest(
+    "handoff commands scrub instance FACTORY_* values and pin the worktree root",
+    () => {
+      const instanceRoot = tmpDir("evrt-handoff-instance-");
+      const { dir, record } = worktreeWorkspace(
+        'printf \'repos=%s\\nroot=%s\\nhome=%s\\nport=%s\\n\' "$FACTORY_REPOS_ROOT" "${FACTORY_ROOT-unset}" "${FACTORY_EVENT_HOME-unset}" "${FACTORY_EVENT_PORT-unset}"',
+        null,
+      );
+      const keys = [
+        "FACTORY_REPOS_ROOT",
+        "FACTORY_ROOT",
+        "FACTORY_EVENT_HOME",
+        "FACTORY_EVENT_PORT",
+      ];
+      const previous = Object.fromEntries(
+        keys.map((key) => [key, process.env[key]]),
+      );
+      Object.assign(process.env, {
+        FACTORY_REPOS_ROOT: instanceRoot,
+        FACTORY_ROOT: instanceRoot,
+        FACTORY_EVENT_HOME: instanceRoot,
+        FACTORY_EVENT_PORT: "9999",
+      });
+      try {
+        const out = verifyResult({
+          spec: dispatchSpec,
+          def: dispatchDef,
+          registry,
+          workspaceDir: dir,
+          attempt: 1,
+          worktreeRecord: record,
+        });
+        expect(out.kind).toBe("completed");
+        const observed = out.handoff.repoVerify.output;
+        // The worktree is mounted at /workspace in the sandbox (#967); the pin
+        // still names the worktree root, in the coordinates the command sees.
+        // When this suite is itself running inside a sandbox the boundary does
+        // not nest and the command keeps the real paths.
+        expect(observed).toContain(
+          `repos=${insideHandoffSandbox() ? realpathSync(record.path) : "/workspace"}`,
+        );
+        expect(observed).toContain("root=unset");
+        expect(observed).toContain("home=unset");
+        expect(observed).toContain("port=unset");
+        expect(observed).not.toContain(instanceRoot);
+      } finally {
+        for (const key of keys) {
+          if (previous[key] === undefined) delete process.env[key];
+          else process.env[key] = previous[key];
+        }
+      }
+    },
+  );
+
+  sandboxTest(
+    "the web build pins FACTORY_REPOS_ROOT to the worktree root, not its web cwd",
+    () => {
+      const instanceRoot = tmpDir("evrt-handoff-instance-");
+      const { dir, record } = worktreeWorkspace("true", null);
+      record.base = "develop";
+      const repo = record.path;
+      const git = (...args) => execFileSync("git", args, { cwd: repo });
+      git("init", "-q", "-b", "develop");
+      git("config", "user.email", "t@t");
+      git("config", "user.name", "t");
+      const webDir = path.join(repo, "event-runtime", "web");
+      mkdirSync(path.join(webDir, "src"), { recursive: true });
       writeFileSync(
-        path.join(dir, "result.json"),
-        JSON.stringify({ ...dispatchResult, reasonCode }),
-        "utf8",
+        path.join(webDir, "package.json"),
+        JSON.stringify({
+          name: "web-fixture",
+          scripts: {
+            build:
+              'printf \'cwd=%s\\nrepos=%s\\nroot=%s\\ntimeout=%s\\n\' "$PWD" "$FACTORY_REPOS_ROOT" "${FACTORY_ROOT-unset}" "${FACTORY_REPO_VERIFY_TIMEOUT_MS-unset}"',
+          },
+        }),
+      );
+      git("add", "-A");
+      git("commit", "-qm", "base");
+      git("update-ref", "refs/remotes/origin/develop", "HEAD");
+      git("checkout", "-qb", "feat/x");
+      writeFileSync(path.join(webDir, "src", "app.ts"), "export {};\n");
+      git("add", "-A");
+      git("commit", "-qm", "work");
+      const keys = ["FACTORY_REPOS_ROOT", "FACTORY_ROOT"];
+      const previous = Object.fromEntries(
+        keys.map((key) => [key, process.env[key]]),
+      );
+      Object.assign(process.env, {
+        FACTORY_REPOS_ROOT: instanceRoot,
+        FACTORY_ROOT: instanceRoot,
+      });
+      try {
+        const out = verifyResult({
+          spec: dispatchSpec,
+          def: dispatchDef,
+          registry,
+          workspaceDir: dir,
+          attempt: 1,
+          worktreeRecord: record,
+        });
+        expect(out.kind).toBe("completed");
+        expect(out.result.verification.checks).toContain("web_build_passed");
+        const observed = out.handoff.webBuild.output;
+        const guestRoot = insideHandoffSandbox()
+          ? realpathSync(repo)
+          : "/workspace";
+        expect(observed).toContain(`cwd=${guestRoot}/event-runtime/web`);
+        expect(observed).toContain(`repos=${guestRoot}\n`);
+        expect(observed).not.toContain(`repos=${guestRoot}/event-runtime/web`);
+        expect(observed).toContain("root=unset");
+        expect(observed).toContain("timeout=unset");
+        expect(observed).not.toContain(instanceRoot);
+      } finally {
+        for (const key of keys) {
+          if (previous[key] === undefined) delete process.env[key];
+          else process.env[key] = previous[key];
+        }
+      }
+    },
+  );
+
+  sandboxTest(
+    "later error noise cannot displace a failing test name from the bounded reason",
+    () => {
+      const { dir, record } = worktreeWorkspace(
+        "printf '(fail) billing > rejects a duplicate charge\\n'; i=1; while [ \"$i\" -le 45 ]; do printf 'error: detail %s\\n' \"$i\"; i=$((i + 1)); done; exit 1",
+        null,
+      );
+      try {
+        verifyResult({
+          spec: dispatchSpec,
+          def: dispatchDef,
+          registry,
+          workspaceDir: dir,
+          attempt: 1,
+          worktreeRecord: record,
+        });
+        throw new Error("expected ContractViolation");
+      } catch (err) {
+        expect(err).toBeInstanceOf(ContractViolation);
+        expect(err.violations[0]).toContain(
+          "(fail) billing > rejects a duplicate charge",
+        );
+        expect(err.violations[0].split("\n").length).toBeLessThanOrEqual(40);
+      }
+    },
+  );
+
+  sandboxTest(
+    "a recorded red baseline never weakens a now-green post-agent verification",
+    () => {
+      const { dir, record } = worktreeWorkspace(
+        "printf 'verification repaired\\n'",
+        {
+          status: "red",
+          check: "web_build",
+          output: "entry chunk exceeds budget",
+        },
       );
       const out = verifyResult({
         spec: dispatchSpec,
@@ -1714,59 +1727,94 @@ describe("worktree baseline verification (WM-334)", () => {
         worktreeRecord: record,
       });
       expect(out.kind).toBe("completed");
-      // The persisted artifact's reasonCode is the source of the marker; the
-      // schema keeps `verification` closed, so nothing is stamped into it.
-      expect(out.handoff.agentReported).toMatchObject({
-        command: "bun test",
-        passed: true,
-        recovered,
-      });
-      const body = composeHandoffVerification(out.handoff);
-      if (recovered) {
-        expect(body).toContain("agent-reported: recovered — not agent-claimed");
-      } else {
-        expect(body).toContain("agent-reported: `bun test`");
+      expect(out.result.verification.checks).toContain("repo_verify_passed");
+    },
+  );
+
+  sandboxTest(
+    "a worker-recovered result.json is never reported as an agent claim (#1592)",
+    () => {
+      for (const [reasonCode, recovered] of [
+        ["worker_recovered_missing_result", true],
+        ["ok", false],
+      ]) {
+        const { dir, record } = worktreeWorkspace(
+          "printf 'verification passed\\n'",
+          null,
+        );
+        writeFileSync(
+          path.join(dir, "result.json"),
+          JSON.stringify({ ...dispatchResult, reasonCode }),
+          "utf8",
+        );
+        const out = verifyResult({
+          spec: dispatchSpec,
+          def: dispatchDef,
+          registry,
+          workspaceDir: dir,
+          attempt: 1,
+          worktreeRecord: record,
+        });
+        expect(out.kind).toBe("completed");
+        // The persisted artifact's reasonCode is the source of the marker; the
+        // schema keeps `verification` closed, so nothing is stamped into it.
+        expect(out.handoff.agentReported).toMatchObject({
+          command: "bun test",
+          passed: true,
+          recovered,
+        });
+        const body = composeHandoffVerification(out.handoff);
+        if (recovered) {
+          expect(body).toContain(
+            "agent-reported: recovered — not agent-claimed",
+          );
+        } else {
+          expect(body).toContain("agent-reported: `bun test`");
+        }
       }
-    }
-  });
+    },
+  );
 
-  test("a ticket test command covered by the repo verify does not run a second sandbox step", () => {
-    const { dir, record } = worktreeWorkspace(
-      "bun test event-runtime/lib --timeout 20000",
-      null,
-    );
-    const testFile = path.join(
-      record.path,
-      "event-runtime",
-      "lib",
-      "covered.test.mjs",
-    );
-    mkdirSync(path.dirname(testFile), { recursive: true });
-    writeFileSync(
-      testFile,
-      'import { expect, test } from "bun:test"; test("covered", () => expect(true).toBe(true));\n',
-    );
-    record.handoff = {
-      verificationCommand:
-        "bun test event-runtime/lib/covered.test.mjs --timeout 30000",
-    };
+  sandboxTest(
+    "a ticket test command covered by the repo verify does not run a second sandbox step",
+    () => {
+      const { dir, record } = worktreeWorkspace(
+        "bun test event-runtime/lib --timeout 20000",
+        null,
+      );
+      const testFile = path.join(
+        record.path,
+        "event-runtime",
+        "lib",
+        "covered.test.mjs",
+      );
+      mkdirSync(path.dirname(testFile), { recursive: true });
+      writeFileSync(
+        testFile,
+        'import { expect, test } from "bun:test"; test("covered", () => expect(true).toBe(true));\n',
+      );
+      record.handoff = {
+        verificationCommand:
+          "bun test event-runtime/lib/covered.test.mjs --timeout 30000",
+      };
 
-    const out = verifyResult({
-      spec: dispatchSpec,
-      def: dispatchDef,
-      registry,
-      workspaceDir: dir,
-      attempt: 1,
-      worktreeRecord: record,
-    });
+      const out = verifyResult({
+        spec: dispatchSpec,
+        def: dispatchDef,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+        worktreeRecord: record,
+      });
 
-    expect(out.kind).toBe("completed");
-    expect(out.handoff.verification).toBe(out.handoff.repoVerify);
-    expect(out.result.verification.checks).toContain(
-      "ticket_verify_covered_by_repo_verify",
-    );
-    expect(existsSync(path.join(dir, ".verify.ticket.log"))).toBe(false);
-  });
+      expect(out.kind).toBe("completed");
+      expect(out.handoff.verification).toBe(out.handoff.repoVerify);
+      expect(out.result.verification.checks).toContain(
+        "ticket_verify_covered_by_repo_verify",
+      );
+      expect(existsSync(path.join(dir, ".verify.ticket.log"))).toBe(false);
+    },
+  );
 
   function commitHandoffDiff(record, changedPath) {
     record.base = "develop";
@@ -2322,7 +2370,7 @@ describe("worktree baseline verification (WM-334)", () => {
     expect(installs).toBe(2);
   });
 
-  test("a ticket-step failure names its sandbox limits", () => {
+  sandboxTest("a ticket-step failure names its sandbox limits", () => {
     const { dir, record } = worktreeWorkspace("true", null);
     record.handoff = { verificationCommand: "printf ticket-red >&2; exit 7" };
     try {
@@ -2343,39 +2391,42 @@ describe("worktree baseline verification (WM-334)", () => {
     }
   });
 
-  test("a timed-out repository verification fails closed without hanging", () => {
-    const { dir, record } = worktreeWorkspace("while :; do :; done", null);
-    const previous = process.env.FACTORY_REPO_VERIFY_TIMEOUT_MS;
-    process.env.FACTORY_REPO_VERIFY_TIMEOUT_MS = "25";
-    const started = Date.now();
-    try {
+  sandboxTest(
+    "a timed-out repository verification fails closed without hanging",
+    () => {
+      const { dir, record } = worktreeWorkspace("while :; do :; done", null);
+      const previous = process.env.FACTORY_REPO_VERIFY_TIMEOUT_MS;
+      process.env.FACTORY_REPO_VERIFY_TIMEOUT_MS = "25";
+      const started = Date.now();
       try {
-        verifyResult({
-          spec: dispatchSpec,
-          def: dispatchDef,
-          registry,
-          workspaceDir: dir,
-          attempt: 1,
-          worktreeRecord: record,
-        });
-        throw new Error("expected ContractViolation");
-      } catch (err) {
-        expect(err).toBeInstanceOf(ContractViolation);
-        expect(err.violations).toEqual([
-          "repo_verify_failed: timed out after 25ms",
-        ]);
-        expect(err.handoff.repoVerify.executionContext).toBe(
-          "dispatch_worktree",
-        );
-        expect(err.handoff.repoVerify.failingTests).toEqual([]);
-        expect(Date.now() - started).toBeLessThan(1_000);
+        try {
+          verifyResult({
+            spec: dispatchSpec,
+            def: dispatchDef,
+            registry,
+            workspaceDir: dir,
+            attempt: 1,
+            worktreeRecord: record,
+          });
+          throw new Error("expected ContractViolation");
+        } catch (err) {
+          expect(err).toBeInstanceOf(ContractViolation);
+          expect(err.violations).toEqual([
+            "repo_verify_failed: timed out after 25ms",
+          ]);
+          expect(err.handoff.repoVerify.executionContext).toBe(
+            "dispatch_worktree",
+          );
+          expect(err.handoff.repoVerify.failingTests).toEqual([]);
+          expect(Date.now() - started).toBeLessThan(1_000);
+        }
+      } finally {
+        if (previous === undefined)
+          delete process.env.FACTORY_REPO_VERIFY_TIMEOUT_MS;
+        else process.env.FACTORY_REPO_VERIFY_TIMEOUT_MS = previous;
       }
-    } finally {
-      if (previous === undefined)
-        delete process.env.FACTORY_REPO_VERIFY_TIMEOUT_MS;
-      else process.env.FACTORY_REPO_VERIFY_TIMEOUT_MS = previous;
-    }
-  });
+    },
+  );
 });
 
 describe("repoVerifyFailingTests", () => {
@@ -2531,30 +2582,33 @@ describe("handoff gate provenance (#944)", () => {
     expect(existsSync(path.join(dir, ".verify.ticket.log"))).toBe(false);
   });
 
-  test("the worker's in-memory record still drives the gate for the same workspace", () => {
-    const dir = forgedWorkspace({
-      repo: "factory",
-      verify: "printf 'forged\\n'",
-    });
-    // Same on-disk marker, but the worker hands over the record it created:
-    // the gate runs the worker's command, not the marker's.
-    const out = verifyResult({
-      spec: dispatchSpec,
-      def: dispatchDef,
-      registry,
-      workspaceDir: dir,
-      attempt: 1,
-      worktreeRecord: {
-        path: path.join(dir, "repo"),
-        verify: "printf 'worker verification\\n'",
-      },
-    });
-    expect(out.kind).toBe("completed");
-    expect(out.result.verification.checks).toContain("repo_verify_passed");
-    expect(readFileSync(path.join(dir, ".verify.log"), "utf8")).toContain(
-      "worker verification",
-    );
-  });
+  sandboxTest(
+    "the worker's in-memory record still drives the gate for the same workspace",
+    () => {
+      const dir = forgedWorkspace({
+        repo: "factory",
+        verify: "printf 'forged\\n'",
+      });
+      // Same on-disk marker, but the worker hands over the record it created:
+      // the gate runs the worker's command, not the marker's.
+      const out = verifyResult({
+        spec: dispatchSpec,
+        def: dispatchDef,
+        registry,
+        workspaceDir: dir,
+        attempt: 1,
+        worktreeRecord: {
+          path: path.join(dir, "repo"),
+          verify: "printf 'worker verification\\n'",
+        },
+      });
+      expect(out.kind).toBe("completed");
+      expect(out.result.verification.checks).toContain("repo_verify_passed");
+      expect(readFileSync(path.join(dir, ".verify.log"), "utf8")).toContain(
+        "worker verification",
+      );
+    },
+  );
 });
 
 describe("evidence retention (OPS-206)", () => {
@@ -2869,6 +2923,59 @@ describe("handoff verification helpers (WM-718)", () => {
         nested: false,
       }),
     ).toBe(true);
+  });
+
+  // GH-2267: the seam suites use to self-skip sandbox-requiring cases on a
+  // host that cannot build the boundary (GitHub-hosted cloud runners). It must
+  // answer from the real probe alone — never from an env flag or CI marker a
+  // pull request could set to shed the coverage it is held to.
+  test("handoffSandboxSkipReason answers from the capability probe, not the environment", () => {
+    const capable = { spawn: () => ({ status: 0, error: null }) };
+    const incapable = { spawn: () => ({ status: 1, error: null }) };
+    const base = { cache: false, nested: false, exists: () => true };
+
+    expect(handoffSandboxSkipReason({ ...base, ...capable })).toBeNull();
+
+    const reason = handoffSandboxSkipReason({ ...base, ...incapable });
+    expect(typeof reason).toBe("string");
+    expect(reason).toContain(HANDOFF_SANDBOX_UNAVAILABLE);
+    // The reason is loggable: it names what the host lacks, so a skipped case
+    // reads as an environment fault rather than as missing coverage.
+    expect(reason).toContain("namespace");
+
+    // A missing setup interpreter is equally disqualifying, and is decided
+    // before any spawn.
+    expect(
+      handoffSandboxSkipReason({
+        ...base,
+        ...capable,
+        exists: (p) => p !== HANDOFF_SANDBOX_PYTHON,
+      }),
+    ).toContain(HANDOFF_SANDBOX_UNAVAILABLE);
+
+    // No environment variable can flip the verdict either way.
+    const spoofed = {
+      CI: "true",
+      GITHUB_ACTIONS: "true",
+      FACTORY_SANDBOX_UNAVAILABLE: "1",
+      FACTORY_SKIP_SANDBOX_TESTS: "1",
+    };
+    const restore = {};
+    for (const [k, v] of Object.entries(spoofed)) {
+      restore[k] = process.env[k];
+      process.env[k] = v;
+    }
+    try {
+      expect(handoffSandboxSkipReason({ ...base, ...capable })).toBeNull();
+      expect(handoffSandboxSkipReason({ ...base, ...incapable })).toContain(
+        HANDOFF_SANDBOX_UNAVAILABLE,
+      );
+    } finally {
+      for (const [k, v] of Object.entries(restore)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
   });
 
   test("only timeout's own verdict counts as a timeout", () => {

@@ -500,6 +500,28 @@ export function resetHandoffSandboxProbe() {
   sandboxProbeCache = null;
 }
 
+/**
+ * Why a suite whose case genuinely drives the production handoff boundary must
+ * not run here — or `null` when this host can build the sandbox (GH-2267).
+ *
+ * A few end-to-end cases (the WM-108 dispatch e2e in particular) assert a
+ * COMPLETED terminal state that is only reachable when the verified-PR handoff
+ * can actually enter a namespace; on a host without one the run legitimately
+ * refuses with `sandbox_unavailable`, and the case fails for an environment
+ * reason rather than a code one. GitHub-hosted cloud runners are exactly such
+ * a host, and the cloud lane must keep running the rest of the suite.
+ *
+ * The decision comes from `handoffSandboxAvailable` — the same real `unshare`
+ * probe the production gate uses — and from nothing else. There is
+ * deliberately no environment variable or CI flag in this path: a skip that a
+ * pull request could switch on for itself would let a fork drop the coverage
+ * it is supposed to be held to.
+ */
+export function handoffSandboxSkipReason(options = {}) {
+  if (handoffSandboxAvailable(options)) return null;
+  return `${HANDOFF_SANDBOX_UNAVAILABLE}: host cannot create an unprivileged user+mount namespace (probed with ${HANDOFF_SANDBOX_PYTHON} + /usr/bin/unshare); skipping the cases that require a real handoff sandbox`;
+}
+
 /** Thrown when the host cannot provide the handoff sandbox (GH-967). */
 export class SandboxUnavailable extends Error {
   constructor() {

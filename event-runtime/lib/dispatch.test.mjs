@@ -19,6 +19,7 @@ import {
 } from "./planner.mjs";
 import { approveProposal, openProposals } from "./proposals.mjs";
 import { loadRegistry } from "./registry.mjs";
+import { sandboxTest } from "../test-support/sandbox.mjs";
 import { runOnce } from "./worker.mjs";
 
 const registry = loadRegistry();
@@ -461,88 +462,97 @@ describe("dispatch e2e: propose → approve → execute → receipt (WM-108)", (
     },
   };
 
-  test("an approved dispatch run builds the worktree by delegation, completes, and tears it down", async () => {
-    const db = openDb(path.join(tmpDir("evrt-dispatch-db-"), "runtime.db"));
-    const workspaces = tmpDir("evrt-dispatch-ws-");
-    const trackerCalls = [];
-    fixtures.push(path.dirname(db.filename ?? workspaces), workspaces);
+  // GH-2267: this case drives the verified-PR handoff to a COMPLETED terminal
+  // state, which only a host that can enter a namespace can reach. See
+  // ../test-support/sandbox.mjs for why it self-skips where it cannot.
+  sandboxTest(
+    "an approved dispatch run builds the worktree by delegation, completes, and tears it down",
+    async () => {
+      const db = openDb(path.join(tmpDir("evrt-dispatch-db-"), "runtime.db"));
+      const workspaces = tmpDir("evrt-dispatch-ws-");
+      const trackerCalls = [];
+      fixtures.push(path.dirname(db.filename ?? workspaces), workspaces);
 
-    admitEvent(
-      db,
-      registry,
-      dispatchEnvelope({ repo: "wt29", ticket: "WM-501" }, "d-e2e"),
-    );
-    planAdmittedEvents(db, registry, {
-      policyVersion: PV,
-      dispatch: openWorld(),
-    });
-
-    const proposal = openProposals(db, {}).find(
-      (p) => p.spec?.agent === "dispatch@1",
-    );
-    expect(proposal).toBeTruthy();
-    expect(proposal.status).toBe("open"); // watched: nothing mutates without approval
-    expect(proposal.spec.workspace).toEqual({
-      type: "worktree",
-      checkoutDir: "repo",
-      retainOnFailure: true,
-    });
-    // WM-810 (#724): the planner folds declared memos into input.memoPin on
-    // every dispatch spec; with no memos declared the pin is empty but present.
-    expect(proposal.spec.input).toEqual({
-      repo: "wt29",
-      ticket: "WM-501",
-      memoPin: { entries: [], foldedAt: expect.any(String) },
-    });
-    expect(calls()).not.toContain("up WM-501"); // claim → worktree → spawn: nothing before approval
-
-    const approved = approveProposal(db, registry, proposal.id, {
-      actor: "operator",
-      policyVersion: PV,
-    });
-    const summary = await runOnce(
-      db,
-      registry,
-      // dispatch@1 rides cursor (WM-215/WM-694).
-      { cursor: dispatchFake },
-      {
-        workspacesRoot: workspaces,
-        owner: "w-test",
+      admitEvent(
+        db,
+        registry,
+        dispatchEnvelope({ repo: "wt29", ticket: "WM-501" }, "d-e2e"),
+      );
+      planAdmittedEvents(db, registry, {
         policyVersion: PV,
-        // The verified PR handoff performs tracker state/comment projections.
-        // Keep this end-to-end worker test hermetic and make both projections
-        // explicit rather than falling through to the real tracker CLI.
-        dispatch: openWorld({
-          reconcileVerifiedHandoffTicket: ({ ticket }) => {
-            trackerCalls.push(`state ${ticket} In Review`);
-            return true;
-          },
-          commentTicket: ({ ticket }) => {
-            trackerCalls.push(`comment ${ticket}`);
-            return true;
-          },
-        }),
-      },
-    );
+        dispatch: openWorld(),
+      });
 
-    expect(summary.terminalState).toBe("COMPLETED");
-    expect(summary.reasonCode).toBe("ok");
-    expect(summary.receipt).toBeTruthy();
-    expect(calls()).toContain("up WM-501");
-    expect(calls()).toContain("down WM-501"); // torn down on completion
-    expect(existsSync(path.join(wtRoot, "WM-501"))).toBe(false);
-    expect(trackerCalls).toEqual(["state WM-501 In Review", "comment WM-501"]);
+      const proposal = openProposals(db, {}).find(
+        (p) => p.spec?.agent === "dispatch@1",
+      );
+      expect(proposal).toBeTruthy();
+      expect(proposal.status).toBe("open"); // watched: nothing mutates without approval
+      expect(proposal.spec.workspace).toEqual({
+        type: "worktree",
+        checkoutDir: "repo",
+        retainOnFailure: true,
+      });
+      // WM-810 (#724): the planner folds declared memos into input.memoPin on
+      // every dispatch spec; with no memos declared the pin is empty but present.
+      expect(proposal.spec.input).toEqual({
+        repo: "wt29",
+        ticket: "WM-501",
+        memoPin: { entries: [], foldedAt: expect.any(String) },
+      });
+      expect(calls()).not.toContain("up WM-501"); // claim → worktree → spawn: nothing before approval
 
-    const row = db
-      .query(`SELECT result_json, receipt_json FROM results WHERE run_id = ?`)
-      .get(approved.runId);
-    const result = JSON.parse(row.result_json);
-    expect(result.artifact.outcome).toBe("PR_OPEN");
-    expect(result.artifact.prUrl).toContain("/pull/42");
-    expect(result.artifact.verification.passed).toBe(true);
-    expect(result.evidence.treeVisible).toBe(true);
-    expect(JSON.parse(row.receipt_json).runId).toBe(approved.runId);
-  });
+      const approved = approveProposal(db, registry, proposal.id, {
+        actor: "operator",
+        policyVersion: PV,
+      });
+      const summary = await runOnce(
+        db,
+        registry,
+        // dispatch@1 rides cursor (WM-215/WM-694).
+        { cursor: dispatchFake },
+        {
+          workspacesRoot: workspaces,
+          owner: "w-test",
+          policyVersion: PV,
+          // The verified PR handoff performs tracker state/comment projections.
+          // Keep this end-to-end worker test hermetic and make both projections
+          // explicit rather than falling through to the real tracker CLI.
+          dispatch: openWorld({
+            reconcileVerifiedHandoffTicket: ({ ticket }) => {
+              trackerCalls.push(`state ${ticket} In Review`);
+              return true;
+            },
+            commentTicket: ({ ticket }) => {
+              trackerCalls.push(`comment ${ticket}`);
+              return true;
+            },
+          }),
+        },
+      );
+
+      expect(summary.terminalState).toBe("COMPLETED");
+      expect(summary.reasonCode).toBe("ok");
+      expect(summary.receipt).toBeTruthy();
+      expect(calls()).toContain("up WM-501");
+      expect(calls()).toContain("down WM-501"); // torn down on completion
+      expect(existsSync(path.join(wtRoot, "WM-501"))).toBe(false);
+      expect(trackerCalls).toEqual([
+        "state WM-501 In Review",
+        "comment WM-501",
+      ]);
+
+      const row = db
+        .query(`SELECT result_json, receipt_json FROM results WHERE run_id = ?`)
+        .get(approved.runId);
+      const result = JSON.parse(row.result_json);
+      expect(result.artifact.outcome).toBe("PR_OPEN");
+      expect(result.artifact.prUrl).toContain("/pull/42");
+      expect(result.artifact.verification.passed).toBe(true);
+      expect(result.evidence.treeVisible).toBe(true);
+      expect(JSON.parse(row.receipt_json).runId).toBe(approved.runId);
+    },
+  );
 
   test("execution rechecks stale security eligibility before worktree and adapter", async () => {
     const db = openDb(":memory:");
