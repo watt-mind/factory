@@ -138,8 +138,8 @@ export interface ChainEvent {
   proposalStatus: string | null;
   proposalDecision: string | null;
   runId: string | null;
-  /** Complete persisted envelope. Empty when a damaged historic row is omitted. */
-  envelope?: Record<string, unknown>;
+  /** Complete persisted envelope, or null when a historic row is damaged. */
+  envelope?: Record<string, unknown> | null;
   /** True when the stored historic envelope could not be parsed. */
   envelopeMalformed?: boolean;
   repos: string[];

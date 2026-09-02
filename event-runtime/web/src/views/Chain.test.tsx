@@ -107,7 +107,7 @@ function malformedChainEvent(eventId: string): ChainEvent {
   return chainEvent(eventId, {
     source: "chain",
     correlationId: CORR,
-    envelope: {},
+    envelope: null,
     envelopeMalformed: true,
   });
 }
@@ -636,7 +636,7 @@ describe("Chain navigation shortcuts (WM-875)", () => {
     });
   });
 
-  test("names the safe malformed envelope fallback from the row flag", async () => {
+  test("uses the complete-envelope fallback for a malformed stored envelope", async () => {
     const evtNodeId = `event:chain:${FIX_EVENT}`;
     const view = renderWithClient(
       <Chain
@@ -660,9 +660,7 @@ describe("Chain navigation shortcuts (WM-875)", () => {
     );
     await waitFor(() => {
       expect(
-        view.getByText(
-          "Stored envelope is malformed; its raw form cannot be shown.",
-        ),
+        view.getByText("Complete envelope unavailable in this chain response."),
       ).toBeTruthy();
     });
   });

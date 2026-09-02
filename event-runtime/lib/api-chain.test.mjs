@@ -186,7 +186,7 @@ describe("GET /chain/:correlationId (WM-527)", () => {
       const event = chainView(s.db, "corr-1").events.find(
         (item) => item.eventId === "chain-run-1-B",
       );
-      expect(event.envelope).toEqual({});
+      expect(event.envelope).toBeNull();
       expect(event.envelopeMalformed).toBe(true);
       expect(event.repos).toEqual([]);
     } finally {

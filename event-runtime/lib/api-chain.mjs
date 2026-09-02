@@ -39,8 +39,7 @@ function chainEnvelope(envelopeJson) {
   } catch {
     // Do not return unparsed database bytes to the control surface.
   }
-  // Keep the safe envelope shape separate from the unambiguous row signal.
-  return { envelope: {}, malformed: true };
+  return { envelope: null, malformed: true };
 }
 
 export function chainView(db, correlationId) {

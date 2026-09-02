@@ -525,7 +525,8 @@ export function Chain({
   );
   const selectedEnvelope = useMemo(() => {
     if (selected?.kind !== "chainEvent") return null;
-    return selected.event.envelope ?? null;
+    if (selected.event.envelopeMalformed) return null;
+    return selected.event.envelope;
   }, [selected]);
 
   const timelineListRef = useRef<HTMLOListElement | null>(null);
@@ -1061,15 +1062,7 @@ export function Chain({
                 )}
               </Section>
               <Section id="chain-envelope" title="Envelope">
-                {selected.event.envelopeMalformed === true ? (
-                  /* No inline escape hatch here: the header "Open in Events" button already covers navigating to the raw event. */
-                  <div
-                    role="status"
-                    className="text-[12px] text-(--text-faint)"
-                  >
-                    Stored envelope is malformed; its raw form cannot be shown.
-                  </div>
-                ) : selectedEnvelope ? (
+                {selectedEnvelope ? (
                   <Suspense
                     fallback={
                       <div className="text-(--text-faint)">
