@@ -38,6 +38,8 @@
  *   Admitted & anomaly events:
  *     - dead-lettered event (lastPlanError present)
  *     - duplicate delivery suppression
+ *     - malformed stored chain envelope (Chain returns envelope: null and
+ *       envelopeMalformed: true, so the degraded envelope UI is inspectable)
  *
  *   RUNNING     repos:["hang"] (approved LAST — single worker holds until 600s timeout)
  *
@@ -845,6 +847,41 @@ try {
   );
   log(
     `${dispatchRunId} → COMPLETED (dispatch@1, simulated working PR workflow with PR_OPEN)`,
+  );
+
+  // A deliberately damaged historic chain envelope makes the Chain view's
+  // degraded state inspectable in every seeded worktree. `chainView` rejects
+  // this stored non-JSON value and safely exposes `envelope: null` with
+  // `envelopeMalformed: true`; it is not a malformed live intake event.
+  const malformedChainEventId = `chain-${dispatchRunId}-malformed-envelope`;
+  db.query(
+    `INSERT INTO events
+       (source, event_id, type, subject, occurred_at, received_at,
+        correlation_id, causation_id, envelope_json, payload_hash, status, admitted_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(source, event_id) DO UPDATE SET
+       correlation_id = excluded.correlation_id,
+       causation_id = excluded.causation_id,
+       envelope_json = excluded.envelope_json,
+       payload_hash = excluded.payload_hash,
+       status = excluded.status,
+       admitted_at = excluded.admitted_at`,
+  ).run(
+    "chain",
+    malformedChainEventId,
+    "factory.dispatch.requested",
+    dispatchTicket,
+    nowStr,
+    nowStr,
+    dispatchEventId,
+    dispatchRunId,
+    "{demo seed intentionally malformed chain envelope",
+    "demo-malformed-chain-envelope",
+    "planned",
+    nowStr,
+  );
+  log(
+    `${malformedChainEventId} inserted (malformed chain envelope; open #/chain/${dispatchEventId})`,
   );
 
   // A hand-authored open item gives web UX review a stable, information-rich

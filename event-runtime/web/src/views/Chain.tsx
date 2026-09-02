@@ -526,7 +526,7 @@ export function Chain({
   const selectedEnvelope = useMemo(() => {
     if (selected?.kind !== "chainEvent") return null;
     if (selected.event.envelopeMalformed) return null;
-    return selected.event.envelope;
+    return selected.event.envelope ?? null;
   }, [selected]);
 
   const timelineListRef = useRef<HTMLOListElement | null>(null);
@@ -1085,7 +1085,10 @@ export function Chain({
                     />
                   </Suspense>
                 ) : (
-                  <div className="text-[12px] text-(--text-faint)">
+                  <div
+                    className="text-[12px] text-(--text-faint)"
+                    role="status"
+                  >
                     Complete envelope unavailable in this chain response.
                   </div>
                 )}

@@ -660,8 +660,10 @@ describe("Chain navigation shortcuts (WM-875)", () => {
     );
     await waitFor(() => {
       expect(
-        view.getByText("Complete envelope unavailable in this chain response."),
-      ).toBeTruthy();
+        view
+          .getByText("Complete envelope unavailable in this chain response.")
+          .getAttribute("role"),
+      ).toBe("status");
     });
   });
 });
