@@ -469,6 +469,9 @@ describe("registry", () => {
     // optional artifact fields, and the definition was re-pinned.
     // Regenerated (#2254): merge-fix and merge-scan document their refusal
     // cooldown tunables and are re-pinned.
+    // Regenerated (#2219): merge-review requires one reviewable visual
+    // artifact or a concrete exception for user-facing visual PRs, and the
+    // prompt was re-pinned.
     const expected =
       "sha256:dfbde9727dbe25d189af86936a1db647c843427f96a8423e8896ef188e49a9eb";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
