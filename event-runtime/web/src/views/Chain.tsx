@@ -1062,6 +1062,7 @@ export function Chain({
               </Section>
               <Section id="chain-envelope" title="Envelope">
                 {selectedEnvelope?.__malformed === true ? (
+                  /* No inline escape hatch here: the header "Open in Events" button already covers navigating to the raw event. */
                   <div
                     role="status"
                     className="text-[12px] text-(--text-faint)"
