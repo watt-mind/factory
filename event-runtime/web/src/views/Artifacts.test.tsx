@@ -87,6 +87,7 @@ function renderArtifacts(
     agents?: unknown[];
     nextBefore?: string | null;
     formatContent?: typeof formattedContent;
+    content?: { sha256: string; text: string };
   } = {},
   onOpenFull: ((sha256: string, backHash?: string) => void) | null = mock(
     () => {},
@@ -121,6 +122,11 @@ function renderArtifacts(
       eventTypes: [],
       contracts: {},
     });
+  if (seed.content !== undefined)
+    client.setQueryData(
+      ["artifact-content", seed.content.sha256],
+      seed.content.text,
+    );
   client.setQueryData(["events", "all-for-artifacts"], {
     events: [
       {
@@ -513,13 +519,13 @@ describe("Artifacts inventory (WM-207)", () => {
     // expensive input but return a compact preview so React can settle before
     // Testing Library's timeout on GitHub-hosted runners.
     const formatContent = mock(() => "formatted artifact");
-    globalThis.fetch = mock(
-      async () => new Response(raw, { status: 200 }),
-    ) as unknown as typeof fetch;
     window.location.hash = `#/artifacts/${"a".repeat(64)}`;
 
     try {
-      const view = renderArtifacts(undefined, undefined, { formatContent });
+      const view = renderArtifacts(undefined, undefined, {
+        formatContent,
+        content: { sha256: "a".repeat(64), text: raw },
+      });
       await view.findByRole("region", { name: "Artifact content" });
       expect(formatContent).toHaveBeenCalledTimes(1);
 
