@@ -320,6 +320,7 @@ describe("terminal row retention (#1065)", () => {
         "run-superseded",
         "run-resolved-noop",
         "run-expired-human-needed",
+        "run-approved",
         "run-mixed",
         "run-open",
         "run-without-proposals-fresh",
@@ -356,6 +357,13 @@ describe("terminal row retention (#1065)", () => {
           decision: "human_needed",
         },
       );
+      // This fixture must remain otherwise unreachable: approveRun transitions
+      // PROPOSED -> APPROVED -> QUEUED before it marks the proposal approved,
+      // and tier escalation transitions before inserting its approved proposal.
+      // If either ordering changes, the janitor correctly sweeps this run.
+      insertProposal(db, "proposal-approved", "approved", fresh, 3600, {
+        runId: "run-approved",
+      });
       insertProposal(db, "proposal-mixed-expired", "open", expired, 60, {
         runId: "run-mixed",
       });
@@ -366,14 +374,29 @@ describe("terminal row retention (#1065)", () => {
         runId: "run-open",
       });
 
-      const dry = sweepRuntimeRetention(db, store, { now });
-      expect(dry.proposed).toEqual({ cancelled: 6, dryRun: true });
+      const dryLog = [];
+      const dry = sweepRuntimeRetention(db, store, {
+        now,
+        log: (message) => dryLog.push(message),
+      });
+      expect(dry.proposed).toEqual({ cancelled: 7, dryRun: true });
+      expect(dryLog).toEqual([
+        "retention: 0 trace rows and 0 artifacts (0 bytes), 7 proposed runs would be cancelled, 0 runs, 0 proposals, 0 events would be deleted",
+      ]);
       expect(
         db.query(`SELECT COUNT(*) AS count FROM lifecycle_events`).get().count,
       ).toBe(0);
 
-      const applied = sweepRuntimeRetention(db, store, { now, apply: true });
-      expect(applied.proposed).toEqual({ cancelled: 6, dryRun: false });
+      const applyLog = [];
+      const applied = sweepRuntimeRetention(db, store, {
+        now,
+        apply: true,
+        log: (message) => applyLog.push(message),
+      });
+      expect(applied.proposed).toEqual({ cancelled: 7, dryRun: false });
+      expect(applyLog).toEqual([
+        "retention: 0 trace rows and 0 artifacts (0 bytes), 7 proposed runs cancelled, 0 runs, 0 proposals, 0 events deleted (VACUUMed)",
+      ]);
       expect(
         db.query(`SELECT state FROM runs WHERE run_id = 'run-expired'`).get()
           .state,
@@ -397,6 +420,10 @@ describe("terminal row retention (#1065)", () => {
             `SELECT state FROM runs WHERE run_id = 'run-expired-human-needed'`,
           )
           .get().state,
+      ).toBe("CANCELLED");
+      expect(
+        db.query(`SELECT state FROM runs WHERE run_id = 'run-approved'`).get()
+          .state,
       ).toBe("CANCELLED");
       expect(
         db

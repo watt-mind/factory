@@ -52,6 +52,7 @@ import {
   registry,
   T0,
 } from "./worker-test-helpers.mjs";
+import { sandboxTest } from "../test-support/sandbox.mjs";
 
 registerTestProcessCleanup(import.meta.url);
 
@@ -508,251 +509,260 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     db.close();
   });
 
-  test("tier escalation continuation is deferred, not refused, while its projection is pending (#1290)", async () => {
-    const db = openDb(":memory:");
-    const failed = queueRun(
-      db,
-      makeDispatchSpec({
-        runId: "run_pending_projection_light",
-        input: {
-          repo: "wt-worker",
-          ticket: "WM-1290",
+  sandboxTest(
+    "tier escalation continuation is deferred, not refused, while its projection is pending (#1290)",
+    async () => {
+      const db = openDb(":memory:");
+      const failed = queueRun(
+        db,
+        makeDispatchSpec({
+          runId: "run_pending_projection_light",
+          input: {
+            repo: "wt-worker",
+            ticket: "WM-1290",
+            modelTier: "light",
+          },
           modelTier: "light",
+          model: null,
+          maxAttempts: 1,
+        }),
+      );
+      linkEvent(db, failed.runId, {
+        type: "factory.dispatch.requested",
+        correlationId: "pending-projection-tier-root",
+      });
+      let now = T0;
+      let projectionWorks = false;
+      const dispatchOpts = {
+        locksDir: tmpDir("tier-pending-locks-"),
+        leasesDir: tmpDir("tier-pending-leases-"),
+        random: () => 0,
+        fetchTicket: () =>
+          readyDispatchTicket("WM-1290", {
+            labels: {
+              nodes: [{ name: "ai:agent-ready" }, { name: "tier:light" }],
+            },
+          }),
+        fetchViewer: () => ({ id: "factory-owner", name: "Factory" }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        budgetRefusal: () => null,
+        claimTicket: () => ({ ok: true }),
+        unclaimTicket: () => true,
+        projectTierEscalation: () => projectionWorks,
+        onTierEscalationProjectionError: () => {},
+      };
+      const o = opts({
+        now: () => now,
+        onTierEscalationProjectionError: () => {},
+        dispatch: dispatchOpts,
+      });
+      const failure = await runOnce(
+        db,
+        registry,
+        {
+          fake: {
+            async execute() {
+              return { exitCode: 1, timedOut: false };
+            },
+          },
         },
-        modelTier: "light",
-        model: null,
-        maxAttempts: 1,
-      }),
-    );
-    linkEvent(db, failed.runId, {
-      type: "factory.dispatch.requested",
-      correlationId: "pending-projection-tier-root",
-    });
-    let now = T0;
-    let projectionWorks = false;
-    const dispatchOpts = {
-      locksDir: tmpDir("tier-pending-locks-"),
-      leasesDir: tmpDir("tier-pending-leases-"),
-      random: () => 0,
-      fetchTicket: () =>
-        readyDispatchTicket("WM-1290", {
-          labels: {
-            nodes: [{ name: "ai:agent-ready" }, { name: "tier:light" }],
+        o,
+      );
+      expect(failure).toMatchObject({
+        terminalState: "FAILED",
+        reasonCode: "agent_exit_1",
+      });
+      const continuationRunId = failure.escalatedRunId;
+      const projectionState = () =>
+        db
+          .query(
+            `SELECT projection_state AS projectionState
+             FROM tier_escalations WHERE continuation_run_id = ?`,
+          )
+          .get(continuationRunId).projectionState;
+      expect(projectionState()).toBe("pending");
+      expect(runState(db, continuationRunId)).toBe("APPROVED");
+
+      // A continuation admitted to the queue before its projection landed must
+      // not reach the eligibility gate: the planner would refuse it terminally.
+      transition(db, {
+        runId: continuationRunId,
+        to: "QUEUED",
+        expectFrom: "APPROVED",
+        actor: "test",
+        reason: "queued_before_projection",
+        now,
+      });
+      const deferred = await runOnce(
+        db,
+        registry,
+        { fake: dispatchFakeAdapter },
+        o,
+      );
+      expect(deferred).toMatchObject({
+        runId: continuationRunId,
+        terminalState: "QUEUED",
+        reasonCode: "tier_escalation_projection_pending",
+      });
+      expect(deferred.requeueAfterMs).toBeGreaterThan(0);
+      expect(runState(db, continuationRunId)).toBe("QUEUED");
+      expect(projectionState()).toBe("pending");
+      expect(claimNext(db, o)).toBeNull();
+
+      // Once the projection is applied the same continuation proceeds as before.
+      projectionWorks = true;
+      now += deferred.requeueAfterMs;
+      const completed = await runOnce(
+        db,
+        registry,
+        { fake: dispatchFakeAdapter },
+        o,
+      );
+      expect(completed).toMatchObject({
+        runId: continuationRunId,
+        terminalState: "COMPLETED",
+        reasonCode: "ok",
+      });
+      expect(projectionState()).toBe("applied");
+      db.close();
+    },
+  );
+
+  sandboxTest(
+    "only a durable escalation handoff authorises the operator bypass at execute time (GH-845)",
+    async () => {
+      // Regression: an inherited spec field must never be an authorisation.
+      // approvalPolicy — dispatchEvidence included — is copied onto chain runs
+      // by stableChainApprovalPolicyForHash, so a chain descended from one
+      // operator dispatch would otherwise carry a permanent security bypass.
+      const laundered = openDb(":memory:");
+      const chainSpec = queueRun(
+        laundered,
+        makeDispatchSpec({
+          runId: "run_chain_launders_operator",
+          input: { repo: "wt-worker", ticket: "WM-847" },
+          approvalPolicy: {
+            source: "chain",
+            mode: "auto",
+            eventType: "factory.dispatch.requested",
+            escalation: {
+              rootRunId: "run_some_other_root",
+              failedRunId: "run_some_other_root",
+              operatorAuthorized: true,
+            },
+            dispatchEvidence: { checks: { operator_authorized: true } },
           },
         }),
-      fetchViewer: () => ({ id: "factory-owner", name: "Factory" }),
-      fetchInFlight: () => [],
-      countLeases: () => 0,
-      budgetRefusal: () => null,
-      claimTicket: () => ({ ok: true }),
-      unclaimTicket: () => true,
-      projectTierEscalation: () => projectionWorks,
-      onTierEscalationProjectionError: () => {},
-    };
-    const o = opts({
-      now: () => now,
-      onTierEscalationProjectionError: () => {},
-      dispatch: dispatchOpts,
-    });
-    const failure = await runOnce(
-      db,
-      registry,
-      {
-        fake: {
-          async execute() {
-            return { exitCode: 1, timedOut: false };
+      );
+      linkEvent(laundered, chainSpec.runId, {
+        type: "factory.dispatch.requested",
+        source: "chain",
+      });
+      const launderedSummary = await runOnce(
+        laundered,
+        registry,
+        { fake: dispatchFakeAdapter },
+        opts({
+          dispatch: {
+            locksDir: tmpDir("evrt-gh845-chain-locks-"),
+            leasesDir: tmpDir("evrt-gh845-chain-leases-"),
+            fetchTicket: () =>
+              readyDispatchTicket("WM-847", {
+                labels: {
+                  nodes: [
+                    { name: "ai:agent-ready" },
+                    { name: "type:security" },
+                  ],
+                },
+              }),
+            fetchInFlight: () => [],
+            countLeases: () => 0,
+            claimTicket: () => ({ ok: true }),
+          },
+        }),
+      );
+      expect(launderedSummary).toMatchObject({
+        terminalState: "REFUSED",
+        reasonCode: "ticket_security",
+      });
+      laundered.close();
+
+      // The same bypass IS granted to a continuation the durable
+      // tier_escalations row authenticates, when the failed run it continues
+      // was operator-sourced.
+      const db = openDb(":memory:");
+      const failed = queueRun(
+        db,
+        makeDispatchSpec({
+          runId: "run_operator_security_light",
+          input: { repo: "wt-worker", ticket: "WM-848", modelTier: "light" },
+          modelTier: "light",
+          model: null,
+          maxAttempts: 1,
+        }),
+      );
+      linkEvent(db, failed.runId, {
+        type: "factory.dispatch.requested",
+        source: "operator",
+      });
+      let ticket = readyDispatchTicket("WM-848", {
+        labels: {
+          nodes: [{ name: "ai:agent-ready" }, { name: "type:security" }],
+        },
+      });
+      const dispatchOpts = {
+        locksDir: tmpDir("evrt-gh845-escalation-locks-"),
+        leasesDir: tmpDir("evrt-gh845-escalation-leases-"),
+        fetchTicket: () => ticket,
+        fetchViewer: () => ({ id: "factory" }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        budgetRefusal: () => null,
+        claimTicket: () => ({ ok: true }),
+        unclaimTicket: () => true,
+        projectTierEscalation: () => true,
+      };
+      const failure = await runOnce(
+        db,
+        registry,
+        {
+          fake: {
+            async execute() {
+              return { exitCode: 1, timedOut: false };
+            },
           },
         },
-      },
-      o,
-    );
-    expect(failure).toMatchObject({
-      terminalState: "FAILED",
-      reasonCode: "agent_exit_1",
-    });
-    const continuationRunId = failure.escalatedRunId;
-    const projectionState = () =>
-      db
-        .query(
-          `SELECT projection_state AS projectionState
-             FROM tier_escalations WHERE continuation_run_id = ?`,
-        )
-        .get(continuationRunId).projectionState;
-    expect(projectionState()).toBe("pending");
-    expect(runState(db, continuationRunId)).toBe("APPROVED");
+        opts({ dispatch: dispatchOpts }),
+      );
+      expect(failure).toMatchObject({
+        terminalState: "FAILED",
+        reasonCode: "agent_exit_1",
+      });
+      expect(runState(db, failure.escalatedRunId)).toBe("QUEUED");
 
-    // A continuation admitted to the queue before its projection landed must
-    // not reach the eligibility gate: the planner would refuse it terminally.
-    transition(db, {
-      runId: continuationRunId,
-      to: "QUEUED",
-      expectFrom: "APPROVED",
-      actor: "test",
-      reason: "queued_before_projection",
-      now,
-    });
-    const deferred = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      o,
-    );
-    expect(deferred).toMatchObject({
-      runId: continuationRunId,
-      terminalState: "QUEUED",
-      reasonCode: "tier_escalation_projection_pending",
-    });
-    expect(deferred.requeueAfterMs).toBeGreaterThan(0);
-    expect(runState(db, continuationRunId)).toBe("QUEUED");
-    expect(projectionState()).toBe("pending");
-    expect(claimNext(db, o)).toBeNull();
-
-    // Once the projection is applied the same continuation proceeds as before.
-    projectionWorks = true;
-    now += deferred.requeueAfterMs;
-    const completed = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      o,
-    );
-    expect(completed).toMatchObject({
-      runId: continuationRunId,
-      terminalState: "COMPLETED",
-      reasonCode: "ok",
-    });
-    expect(projectionState()).toBe("applied");
-    db.close();
-  });
-
-  test("only a durable escalation handoff authorises the operator bypass at execute time (GH-845)", async () => {
-    // Regression: an inherited spec field must never be an authorisation.
-    // approvalPolicy — dispatchEvidence included — is copied onto chain runs
-    // by stableChainApprovalPolicyForHash, so a chain descended from one
-    // operator dispatch would otherwise carry a permanent security bypass.
-    const laundered = openDb(":memory:");
-    const chainSpec = queueRun(
-      laundered,
-      makeDispatchSpec({
-        runId: "run_chain_launders_operator",
-        input: { repo: "wt-worker", ticket: "WM-847" },
-        approvalPolicy: {
-          source: "chain",
-          mode: "auto",
-          eventType: "factory.dispatch.requested",
-          escalation: {
-            rootRunId: "run_some_other_root",
-            failedRunId: "run_some_other_root",
-            operatorAuthorized: true,
-          },
-          dispatchEvidence: { checks: { operator_authorized: true } },
+      // The continuation resumes the factory's own claim: assigned, In
+      // Progress, and still carrying the security label that only an operator
+      // dispatch may pass.
+      ticket = readyDispatchTicket("WM-848", {
+        state: { name: "In Progress" },
+        assignee: { id: "factory" },
+        labels: {
+          nodes: [{ name: "ai:in-progress" }, { name: "type:security" }],
         },
-      }),
-    );
-    linkEvent(laundered, chainSpec.runId, {
-      type: "factory.dispatch.requested",
-      source: "chain",
-    });
-    const launderedSummary = await runOnce(
-      laundered,
-      registry,
-      { fake: dispatchFakeAdapter },
-      opts({
-        dispatch: {
-          locksDir: tmpDir("evrt-gh845-chain-locks-"),
-          leasesDir: tmpDir("evrt-gh845-chain-leases-"),
-          fetchTicket: () =>
-            readyDispatchTicket("WM-847", {
-              labels: {
-                nodes: [{ name: "ai:agent-ready" }, { name: "type:security" }],
-              },
-            }),
-          fetchInFlight: () => [],
-          countLeases: () => 0,
-          claimTicket: () => ({ ok: true }),
-        },
-      }),
-    );
-    expect(launderedSummary).toMatchObject({
-      terminalState: "REFUSED",
-      reasonCode: "ticket_security",
-    });
-    laundered.close();
-
-    // The same bypass IS granted to a continuation the durable
-    // tier_escalations row authenticates, when the failed run it continues
-    // was operator-sourced.
-    const db = openDb(":memory:");
-    const failed = queueRun(
-      db,
-      makeDispatchSpec({
-        runId: "run_operator_security_light",
-        input: { repo: "wt-worker", ticket: "WM-848", modelTier: "light" },
-        modelTier: "light",
-        model: null,
-        maxAttempts: 1,
-      }),
-    );
-    linkEvent(db, failed.runId, {
-      type: "factory.dispatch.requested",
-      source: "operator",
-    });
-    let ticket = readyDispatchTicket("WM-848", {
-      labels: {
-        nodes: [{ name: "ai:agent-ready" }, { name: "type:security" }],
-      },
-    });
-    const dispatchOpts = {
-      locksDir: tmpDir("evrt-gh845-escalation-locks-"),
-      leasesDir: tmpDir("evrt-gh845-escalation-leases-"),
-      fetchTicket: () => ticket,
-      fetchViewer: () => ({ id: "factory" }),
-      fetchInFlight: () => [],
-      countLeases: () => 0,
-      budgetRefusal: () => null,
-      claimTicket: () => ({ ok: true }),
-      unclaimTicket: () => true,
-      projectTierEscalation: () => true,
-    };
-    const failure = await runOnce(
-      db,
-      registry,
-      {
-        fake: {
-          async execute() {
-            return { exitCode: 1, timedOut: false };
-          },
-        },
-      },
-      opts({ dispatch: dispatchOpts }),
-    );
-    expect(failure).toMatchObject({
-      terminalState: "FAILED",
-      reasonCode: "agent_exit_1",
-    });
-    expect(runState(db, failure.escalatedRunId)).toBe("QUEUED");
-
-    // The continuation resumes the factory's own claim: assigned, In
-    // Progress, and still carrying the security label that only an operator
-    // dispatch may pass.
-    ticket = readyDispatchTicket("WM-848", {
-      state: { name: "In Progress" },
-      assignee: { id: "factory" },
-      labels: {
-        nodes: [{ name: "ai:in-progress" }, { name: "type:security" }],
-      },
-    });
-    const continued = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      opts({ dispatch: dispatchOpts }),
-    );
-    expect(continued.runId).toBe(failure.escalatedRunId);
-    expect(continued.reasonCode).not.toBe("ticket_security");
-    expect(continued.terminalState).toBe("COMPLETED");
-    db.close();
-  });
+      });
+      const continued = await runOnce(
+        db,
+        registry,
+        { fake: dispatchFakeAdapter },
+        opts({ dispatch: dispatchOpts }),
+      );
+      expect(continued.runId).toBe(failure.escalatedRunId);
+      expect(continued.reasonCode).not.toBe("ticket_security");
+      expect(continued.terminalState).toBe("COMPLETED");
+      db.close();
+    },
+  );
 
   test("resolves Linear credentials from env first, then an opt-in env file", () => {
     const dir = tmpDir("evrt-linear-key-");
@@ -863,17 +873,45 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     }
   });
 
-  test("FACTORY_DISPATCH_STUB enables the demo stub with a bounded owned-paths fixture", async () => {
-    const previousStub = process.env.FACTORY_DISPATCH_STUB;
-    process.env.FACTORY_DISPATCH_STUB = "1";
-    try {
+  sandboxTest(
+    "FACTORY_DISPATCH_STUB enables the demo stub with a bounded owned-paths fixture",
+    async () => {
+      const previousStub = process.env.FACTORY_DISPATCH_STUB;
+      process.env.FACTORY_DISPATCH_STUB = "1";
+      try {
+        const db = openDb(":memory:");
+        queueRun(db, makeDispatchSpec({ adapter: "pi" }));
+        const summary = await runOnce(
+          db,
+          registry,
+          { pi: dispatchFakeAdapter },
+          opts({
+            resolveLinearKey: () => null,
+          }),
+        );
+        expect(summary).toMatchObject({
+          terminalState: "COMPLETED",
+          reasonCode: "ok",
+        });
+      } finally {
+        if (previousStub === undefined)
+          delete process.env.FACTORY_DISPATCH_STUB;
+        else process.env.FACTORY_DISPATCH_STUB = previousStub;
+      }
+    },
+  );
+
+  sandboxTest(
+    "the fake adapter override explicitly enables the demo dispatch stub",
+    async () => {
       const db = openDb(":memory:");
       queueRun(db, makeDispatchSpec({ adapter: "pi" }));
       const summary = await runOnce(
         db,
         registry,
-        { pi: dispatchFakeAdapter },
+        { fake: dispatchFakeAdapter },
         opts({
+          adapterOverride: "fake",
           resolveLinearKey: () => null,
         }),
       );
@@ -881,29 +919,8 @@ describe("execute-side dispatch hardening (WM-115)", () => {
         terminalState: "COMPLETED",
         reasonCode: "ok",
       });
-    } finally {
-      if (previousStub === undefined) delete process.env.FACTORY_DISPATCH_STUB;
-      else process.env.FACTORY_DISPATCH_STUB = previousStub;
-    }
-  });
-
-  test("the fake adapter override explicitly enables the demo dispatch stub", async () => {
-    const db = openDb(":memory:");
-    queueRun(db, makeDispatchSpec({ adapter: "pi" }));
-    const summary = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      opts({
-        adapterOverride: "fake",
-        resolveLinearKey: () => null,
-      }),
-    );
-    expect(summary).toMatchObject({
-      terminalState: "COMPLETED",
-      reasonCode: "ok",
-    });
-  });
+    },
+  );
 
   // WM-115 / #1252: a partial `dispatch` override used to disable the demo
   // stub wholesale, so the seams the caller left out — notably the WM-718
@@ -911,40 +928,43 @@ describe("execute-side dispatch hardening (WM-115)", () => {
   // then spawned `bun tools/ticket.mjs comment` per run: real Linear writes
   // from the test suite, and a wall-clock dependency that timed the burst test
   // out on CI. Use the shared fake tracker CLI and assert nothing reaches it.
-  test("a partial dispatch override still never reaches the tracker CLI under the fake adapter", async () => {
-    const fakeCli = fakeTrackerCli();
-    const previousPath = process.env.PATH;
-    process.env.PATH = `${fakeCli.path}:${previousPath}`;
-    try {
-      const db = openDb(":memory:");
-      const spec = queueRun(
-        db,
-        makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-742" } }),
-      );
-      const summary = await runOnce(
-        db,
-        registry,
-        { fake: dispatchFakeAdapter },
-        opts({
-          dispatch: {
-            locksDir: tmpDir("evrt-lock-partial-"),
-            fetchTicket: (ticket) => readyDispatchTicket(ticket),
-            fetchInFlight: () => [],
-            countLeases: () => 0,
-            claimTicket: () => ({ ok: true }),
-          },
-        }),
-      );
-      expect(summary).toMatchObject({
-        terminalState: "COMPLETED",
-        reasonCode: "ok",
-      });
-      expect(runState(db, spec.runId)).toBe("COMPLETED");
-      expect(fakeCli.calls()).toBe("");
-    } finally {
-      process.env.PATH = previousPath;
-    }
-  });
+  sandboxTest(
+    "a partial dispatch override still never reaches the tracker CLI under the fake adapter",
+    async () => {
+      const fakeCli = fakeTrackerCli();
+      const previousPath = process.env.PATH;
+      process.env.PATH = `${fakeCli.path}:${previousPath}`;
+      try {
+        const db = openDb(":memory:");
+        const spec = queueRun(
+          db,
+          makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-742" } }),
+        );
+        const summary = await runOnce(
+          db,
+          registry,
+          { fake: dispatchFakeAdapter },
+          opts({
+            dispatch: {
+              locksDir: tmpDir("evrt-lock-partial-"),
+              fetchTicket: (ticket) => readyDispatchTicket(ticket),
+              fetchInFlight: () => [],
+              countLeases: () => 0,
+              claimTicket: () => ({ ok: true }),
+            },
+          }),
+        );
+        expect(summary).toMatchObject({
+          terminalState: "COMPLETED",
+          reasonCode: "ok",
+        });
+        expect(runState(db, spec.runId)).toBe("COMPLETED");
+        expect(fakeCli.calls()).toBe("");
+      } finally {
+        process.env.PATH = previousPath;
+      }
+    },
+  );
 
   test("acquireClaimLock acquires lock file and prevents concurrent acquire, release unlocks", () => {
     const lockDir = tmpDir("evrt-lock-");
@@ -1048,68 +1068,71 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     }
   });
 
-  test("contended claim lock requeues with jittered backoff without consuming an attempt, then runs", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-lock-busy-");
-    const lockFile = dispatchLockPath("wt-worker", lockDir);
-    acquireClaimLock(lockFile, { pid: process.pid, now: T0 });
+  sandboxTest(
+    "contended claim lock requeues with jittered backoff without consuming an attempt, then runs",
+    async () => {
+      const db = openDb(":memory:");
+      const lockDir = tmpDir("evrt-lock-busy-");
+      const lockFile = dispatchLockPath("wt-worker", lockDir);
+      acquireClaimLock(lockFile, { pid: process.pid, now: T0 });
 
-    const spec = queueRun(db, makeDispatchSpec());
-    let now = T0;
-    const o = opts({
-      now: () => now,
-      dispatch: {
-        locksDir: lockDir,
-        random: () => 0,
-        fetchTicket: () => readyDispatchTicket("WM-701"),
-        fetchInFlight: () => [],
-        countLeases: () => 0,
-        claimTicket: () => ({ ok: true }),
-      },
-    });
+      const spec = queueRun(db, makeDispatchSpec());
+      let now = T0;
+      const o = opts({
+        now: () => now,
+        dispatch: {
+          locksDir: lockDir,
+          random: () => 0,
+          fetchTicket: () => readyDispatchTicket("WM-701"),
+          fetchInFlight: () => [],
+          countLeases: () => 0,
+          claimTicket: () => ({ ok: true }),
+        },
+      });
 
-    const deferred = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      o,
-    );
-    expect(deferred).toMatchObject({
-      terminalState: "QUEUED",
-      reasonCode: "claim_lock_contention",
-    });
-    expect(runState(db, spec.runId)).toBe("QUEUED");
-    expect(
-      db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId)
-        .attempts,
-    ).toBe(0);
-    expect(
-      db.query(`SELECT * FROM attempts WHERE run_id = ?`).all(spec.runId),
-    ).toHaveLength(0);
-    expect(
-      db.query(`SELECT * FROM results WHERE run_id = ?`).all(spec.runId),
-    ).toHaveLength(0);
-    expect(claimNext(db, o)).toBeNull();
+      const deferred = await runOnce(
+        db,
+        registry,
+        { fake: dispatchFakeAdapter },
+        o,
+      );
+      expect(deferred).toMatchObject({
+        terminalState: "QUEUED",
+        reasonCode: "claim_lock_contention",
+      });
+      expect(runState(db, spec.runId)).toBe("QUEUED");
+      expect(
+        db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId)
+          .attempts,
+      ).toBe(0);
+      expect(
+        db.query(`SELECT * FROM attempts WHERE run_id = ?`).all(spec.runId),
+      ).toHaveLength(0);
+      expect(
+        db.query(`SELECT * FROM results WHERE run_id = ?`).all(spec.runId),
+      ).toHaveLength(0);
+      expect(claimNext(db, o)).toBeNull();
 
-    releaseClaimLock(lockFile);
-    now += deferred.requeueAfterMs;
-    const completed = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      o,
-    );
-    expect(completed).toMatchObject({
-      terminalState: "COMPLETED",
-      reasonCode: "ok",
-      attempt: 1,
-    });
-    expect(runState(db, spec.runId)).toBe("COMPLETED");
-    expect(
-      db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId)
-        .attempts,
-    ).toBe(1);
-  });
+      releaseClaimLock(lockFile);
+      now += deferred.requeueAfterMs;
+      const completed = await runOnce(
+        db,
+        registry,
+        { fake: dispatchFakeAdapter },
+        o,
+      );
+      expect(completed).toMatchObject({
+        terminalState: "COMPLETED",
+        reasonCode: "ok",
+        attempt: 1,
+      });
+      expect(runState(db, spec.runId)).toBe("COMPLETED");
+      expect(
+        db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId)
+          .attempts,
+      ).toBe(1);
+    },
+  );
 
   test("claim lock starvation refuses with a distinct reason after the requeue ceiling", async () => {
     const db = openDb(":memory:");
@@ -1153,92 +1176,101 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     releaseClaimLock(lockFile);
   });
 
-  test("concurrent disjoint dispatches drain through the claim lock with mutually exclusive claims", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-lock-burst-");
-    const specs = ["WM-710", "WM-711", "WM-712"].map((ticket, index) =>
-      queueRun(
-        db,
-        makeDispatchSpec({
-          runId: `run_lock_burst_${index + 1}`,
-          input: { repo: "wt-worker", ticket },
-        }),
-      ),
-    );
-    let now = T0;
-    let releaseFirst;
-    let markFirstStarted;
-    const firstStarted = new Promise((resolve) => {
-      markFirstStarted = resolve;
-    });
-    const firstRelease = new Promise((resolve) => {
-      releaseFirst = resolve;
-    });
-    let activeClaims = 0;
-    let maxActiveClaims = 0;
-    const claimedTickets = [];
-    const o = opts({
-      now: () => now,
-      dispatch: {
-        locksDir: lockDir,
-        random: () => 1,
-        fetchTicket: (ticket) => readyDispatchTicket(ticket),
-        fetchInFlight: () => [],
-        countLeases: () => 0,
-        claimTicket: async ({ ticket }) => {
-          activeClaims += 1;
-          maxActiveClaims = Math.max(maxActiveClaims, activeClaims);
-          claimedTickets.push(ticket);
-          if (ticket === "WM-710") {
-            markFirstStarted();
-            await firstRelease;
-          }
-          activeClaims -= 1;
-          return { ok: true };
+  sandboxTest(
+    "concurrent disjoint dispatches drain through the claim lock with mutually exclusive claims",
+    async () => {
+      const db = openDb(":memory:");
+      const lockDir = tmpDir("evrt-lock-burst-");
+      const specs = ["WM-710", "WM-711", "WM-712"].map((ticket, index) =>
+        queueRun(
+          db,
+          makeDispatchSpec({
+            runId: `run_lock_burst_${index + 1}`,
+            input: { repo: "wt-worker", ticket },
+          }),
+        ),
+      );
+      let now = T0;
+      let releaseFirst;
+      let markFirstStarted;
+      const firstStarted = new Promise((resolve) => {
+        markFirstStarted = resolve;
+      });
+      const firstRelease = new Promise((resolve) => {
+        releaseFirst = resolve;
+      });
+      let activeClaims = 0;
+      let maxActiveClaims = 0;
+      const claimedTickets = [];
+      const o = opts({
+        now: () => now,
+        dispatch: {
+          locksDir: lockDir,
+          random: () => 1,
+          fetchTicket: (ticket) => readyDispatchTicket(ticket),
+          fetchInFlight: () => [],
+          countLeases: () => 0,
+          claimTicket: async ({ ticket }) => {
+            activeClaims += 1;
+            maxActiveClaims = Math.max(maxActiveClaims, activeClaims);
+            claimedTickets.push(ticket);
+            if (ticket === "WM-710") {
+              markFirstStarted();
+              await firstRelease;
+            }
+            activeClaims -= 1;
+            return { ok: true };
+          },
         },
-      },
-    });
+      });
 
-    const first = runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
-    await firstStarted;
-    const second = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      o,
-    );
-    const third = await runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
-    expect([second.reasonCode, third.reasonCode]).toEqual([
-      "claim_lock_contention",
-      "claim_lock_contention",
-    ]);
-    releaseFirst();
-    expect((await first).terminalState).toBe("COMPLETED");
+      const first = runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
+      await firstStarted;
+      const second = await runOnce(
+        db,
+        registry,
+        { fake: dispatchFakeAdapter },
+        o,
+      );
+      const third = await runOnce(
+        db,
+        registry,
+        { fake: dispatchFakeAdapter },
+        o,
+      );
+      expect([second.reasonCode, third.reasonCode]).toEqual([
+        "claim_lock_contention",
+        "claim_lock_contention",
+      ]);
+      releaseFirst();
+      expect((await first).terminalState).toBe("COMPLETED");
 
-    now += Math.max(second.requeueAfterMs, third.requeueAfterMs);
-    const drained = [
-      await runOnce(db, registry, { fake: dispatchFakeAdapter }, o),
-      await runOnce(db, registry, { fake: dispatchFakeAdapter }, o),
-    ];
-    expect(drained.map((summary) => summary.terminalState)).toEqual([
-      "COMPLETED",
-      "COMPLETED",
-    ]);
-    expect(specs.map((spec) => runState(db, spec.runId))).toEqual([
-      "COMPLETED",
-      "COMPLETED",
-      "COMPLETED",
-    ]);
-    expect(
-      specs.map(
-        (spec) =>
-          db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId)
-            .attempts,
-      ),
-    ).toEqual([1, 1, 1]);
-    expect(claimedTickets.sort()).toEqual(["WM-710", "WM-711", "WM-712"]);
-    expect(maxActiveClaims).toBe(1);
-  });
+      now += Math.max(second.requeueAfterMs, third.requeueAfterMs);
+      const drained = [
+        await runOnce(db, registry, { fake: dispatchFakeAdapter }, o),
+        await runOnce(db, registry, { fake: dispatchFakeAdapter }, o),
+      ];
+      expect(drained.map((summary) => summary.terminalState)).toEqual([
+        "COMPLETED",
+        "COMPLETED",
+      ]);
+      expect(specs.map((spec) => runState(db, spec.runId))).toEqual([
+        "COMPLETED",
+        "COMPLETED",
+        "COMPLETED",
+      ]);
+      expect(
+        specs.map(
+          (spec) =>
+            db
+              .query(`SELECT attempts FROM runs WHERE run_id = ?`)
+              .get(spec.runId).attempts,
+        ),
+      ).toEqual([1, 1, 1]);
+      expect(claimedTickets.sort()).toEqual(["WM-710", "WM-711", "WM-712"]);
+      expect(maxActiveClaims).toBe(1);
+    },
+  );
 
   // WM-1124: a full-width same-repo dispatch burst must not starve itself. One
   // worker holds the claim lock across a long claim window while the rest of the
@@ -1251,145 +1283,149 @@ describe("execute-side dispatch hardening (WM-115)", () => {
   // in-memory SQLite/fake-clock stress case with 570 deliberate contention
   // passes; any wall-clock timeout is the test's genuine load-scaled execution
   // budget, while its liveness assertions remain deterministic.
-  test("a same-repo dispatch burst never claim_lock_starves against a live holder", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-lock-burst20-");
-    const BURST = 20;
-    const tickets = Array.from({ length: BURST }, (_, i) => `WM-${720 + i}`);
-    const specs = tickets.map((ticket, index) =>
-      queueRun(
-        db,
-        makeDispatchSpec({
-          runId: `run_burst_${String(index + 1).padStart(2, "0")}`,
-          input: { repo: "wt-worker", ticket },
-        }),
-      ),
-    );
+  sandboxTest(
+    "a same-repo dispatch burst never claim_lock_starves against a live holder",
+    async () => {
+      const db = openDb(":memory:");
+      const lockDir = tmpDir("evrt-lock-burst20-");
+      const BURST = 20;
+      const tickets = Array.from({ length: BURST }, (_, i) => `WM-${720 + i}`);
+      const specs = tickets.map((ticket, index) =>
+        queueRun(
+          db,
+          makeDispatchSpec({
+            runId: `run_burst_${String(index + 1).padStart(2, "0")}`,
+            input: { repo: "wt-worker", ticket },
+          }),
+        ),
+      );
 
-    let now = T0;
-    let releaseHolder;
-    let markHolderStarted;
-    const holderStarted = new Promise((resolve) => {
-      markHolderStarted = resolve;
-    });
-    const holderRelease = new Promise((resolve) => {
-      releaseHolder = resolve;
-    });
-    let activeClaims = 0;
-    let maxActiveClaims = 0;
-    const claimedTickets = [];
-    const holderTicket = tickets[0];
+      let now = T0;
+      let releaseHolder;
+      let markHolderStarted;
+      const holderStarted = new Promise((resolve) => {
+        markHolderStarted = resolve;
+      });
+      const holderRelease = new Promise((resolve) => {
+        releaseHolder = resolve;
+      });
+      let activeClaims = 0;
+      let maxActiveClaims = 0;
+      const claimedTickets = [];
+      const holderTicket = tickets[0];
 
-    const o = opts({
-      now: () => now,
-      dispatch: {
-        locksDir: lockDir,
-        // Deterministic worst case: full backoff (random -> the cap) every time.
-        random: () => 1,
-        fetchTicket: (ticket) => readyDispatchTicket(ticket),
-        fetchInFlight: () => [],
-        countLeases: () => 0,
-        claimTicket: async ({ ticket }) => {
-          activeClaims += 1;
-          maxActiveClaims = Math.max(maxActiveClaims, activeClaims);
-          claimedTickets.push(ticket);
-          if (ticket === holderTicket) {
-            // Pin the lock open so the rest of the burst repeatedly contends.
-            markHolderStarted();
-            await holderRelease;
-          }
-          activeClaims -= 1;
-          return { ok: true };
+      const o = opts({
+        now: () => now,
+        dispatch: {
+          locksDir: lockDir,
+          // Deterministic worst case: full backoff (random -> the cap) every time.
+          random: () => 1,
+          fetchTicket: (ticket) => readyDispatchTicket(ticket),
+          fetchInFlight: () => [],
+          countLeases: () => 0,
+          claimTicket: async ({ ticket }) => {
+            activeClaims += 1;
+            maxActiveClaims = Math.max(maxActiveClaims, activeClaims);
+            claimedTickets.push(ticket);
+            if (ticket === holderTicket) {
+              // Pin the lock open so the rest of the burst repeatedly contends.
+              markHolderStarted();
+              await holderRelease;
+            }
+            activeClaims -= 1;
+            return { ok: true };
+          },
         },
-      },
-    });
+      });
 
-    // One worker wins the lock and holds it across a long claim window.
-    const holder = runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
-    await holderStarted;
+      // One worker wins the lock and holds it across a long claim window.
+      const holder = runOnce(db, registry, { fake: dispatchFakeAdapter }, o);
+      await holderStarted;
 
-    // While the live holder keeps the lock, sweep the other 19 through far more
-    // contention cycles than the old fixed ceiling (24) permitted. Every sweep
-    // must defer (QUEUED / claim_lock_contention); none may terminally REFUSE.
-    const CONTENTION_ROUNDS = 30;
-    const contenders = specs.slice(1);
-    for (let round = 0; round < CONTENTION_ROUNDS; round++) {
-      // Advance past every deferred not-before so the whole cohort is eligible.
-      now += CLAIM_LOCK_BACKOFF_MAX_MS;
-      for (let i = 0; i < contenders.length; i++) {
-        const summary = await runOnce(
-          db,
-          registry,
-          { fake: dispatchFakeAdapter },
-          o,
-        );
-        expect(summary).toMatchObject({
-          terminalState: "QUEUED",
-          reasonCode: "claim_lock_contention",
-        });
+      // While the live holder keeps the lock, sweep the other 19 through far more
+      // contention cycles than the old fixed ceiling (24) permitted. Every sweep
+      // must defer (QUEUED / claim_lock_contention); none may terminally REFUSE.
+      const CONTENTION_ROUNDS = 30;
+      const contenders = specs.slice(1);
+      for (let round = 0; round < CONTENTION_ROUNDS; round++) {
+        // Advance past every deferred not-before so the whole cohort is eligible.
+        now += CLAIM_LOCK_BACKOFF_MAX_MS;
+        for (let i = 0; i < contenders.length; i++) {
+          const summary = await runOnce(
+            db,
+            registry,
+            { fake: dispatchFakeAdapter },
+            o,
+          );
+          expect(summary).toMatchObject({
+            terminalState: "QUEUED",
+            reasonCode: "claim_lock_contention",
+          });
+        }
+        // The holder is RUNNING and the rest are deferred to a future not-before,
+        // so nothing else is claimable within this round.
+        expect(claimNext(db, o)).toBeNull();
       }
-      // The holder is RUNNING and the rest are deferred to a future not-before,
-      // so nothing else is claimable within this round.
-      expect(claimNext(db, o)).toBeNull();
-    }
 
-    // Contention must not have spent an execution attempt or left an attempt row.
-    for (const spec of contenders) {
-      expect(
-        db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId)
-          .attempts,
-      ).toBe(0);
-      expect(
-        db.query(`SELECT * FROM attempts WHERE run_id = ?`).all(spec.runId),
-      ).toHaveLength(0);
-    }
-
-    // Release the holder and drain the whole burst.
-    releaseHolder();
-    expect((await holder).terminalState).toBe("COMPLETED");
-
-    let completed = 1; // the holder
-    let guard = 0;
-    while (completed < BURST && guard++ < BURST * 3) {
-      now += CLAIM_LOCK_BACKOFF_MAX_MS;
-      let summary;
-      while (
-        (summary = await runOnce(
-          db,
-          registry,
-          { fake: dispatchFakeAdapter },
-          o,
-        ))
-      ) {
-        expect(summary.terminalState).toBe("COMPLETED");
-        completed += 1;
-      }
-    }
-
-    // Every burst member ran to completion — none terminally REFUSED.
-    expect(completed).toBe(BURST);
-    expect(specs.map((spec) => runState(db, spec.runId))).toEqual(
-      Array.from({ length: BURST }, () => "COMPLETED"),
-    );
-    expect(
-      db
-        .query(
-          `SELECT COUNT(*) AS n FROM attempts WHERE reason_code = 'claim_lock_starvation'`,
-        )
-        .get().n,
-    ).toBe(0);
-    // Claim atomicity: exactly one claim in flight at a time, each ticket once.
-    expect(maxActiveClaims).toBe(1);
-    expect(claimedTickets.slice().sort()).toEqual(tickets.slice().sort());
-    expect(new Set(claimedTickets).size).toBe(BURST);
-    expect(
-      specs.map(
-        (spec) =>
+      // Contention must not have spent an execution attempt or left an attempt row.
+      for (const spec of contenders) {
+        expect(
           db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId)
             .attempts,
-      ),
-    ).toEqual(Array.from({ length: BURST }, () => 1));
-  });
+        ).toBe(0);
+        expect(
+          db.query(`SELECT * FROM attempts WHERE run_id = ?`).all(spec.runId),
+        ).toHaveLength(0);
+      }
+
+      // Release the holder and drain the whole burst.
+      releaseHolder();
+      expect((await holder).terminalState).toBe("COMPLETED");
+
+      let completed = 1; // the holder
+      let guard = 0;
+      while (completed < BURST && guard++ < BURST * 3) {
+        now += CLAIM_LOCK_BACKOFF_MAX_MS;
+        let summary;
+        while (
+          (summary = await runOnce(
+            db,
+            registry,
+            { fake: dispatchFakeAdapter },
+            o,
+          ))
+        ) {
+          expect(summary.terminalState).toBe("COMPLETED");
+          completed += 1;
+        }
+      }
+
+      // Every burst member ran to completion — none terminally REFUSED.
+      expect(completed).toBe(BURST);
+      expect(specs.map((spec) => runState(db, spec.runId))).toEqual(
+        Array.from({ length: BURST }, () => "COMPLETED"),
+      );
+      expect(
+        db
+          .query(
+            `SELECT COUNT(*) AS n FROM attempts WHERE reason_code = 'claim_lock_starvation'`,
+          )
+          .get().n,
+      ).toBe(0);
+      // Claim atomicity: exactly one claim in flight at a time, each ticket once.
+      expect(maxActiveClaims).toBe(1);
+      expect(claimedTickets.slice().sort()).toEqual(tickets.slice().sort());
+      expect(new Set(claimedTickets).size).toBe(BURST);
+      expect(
+        specs.map(
+          (spec) =>
+            db
+              .query(`SELECT attempts FROM runs WHERE run_id = ?`)
+              .get(spec.runId).attempts,
+        ),
+      ).toEqual(Array.from({ length: BURST }, () => 1));
+    },
+  );
 
   test("merge-fix gate accepts an assigned In Review ticket without invoking the dispatch claim", async () => {
     const db = openDb(":memory:");
@@ -1477,54 +1513,57 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     }
   });
 
-  test("claim-time dispatch gate honors only operator-sourced security runs (GH-1004)", async () => {
-    for (const [source, expectedTerminalState, expectedReasonCode] of [
-      ["operator", "COMPLETED", "ok"],
-      ["chain", "REFUSED", "ticket_security"],
-    ]) {
-      const db = openDb(":memory:");
-      const ticket = source === "operator" ? "WM-701" : "WM-702";
-      const spec = queueRun(
-        db,
-        makeDispatchSpec({
-          runId: `run_security_${source}`,
-          input: { repo: "wt-worker", ticket },
-        }),
-      );
-      linkEvent(db, spec.runId, {
-        type: "factory.dispatch.requested",
-        source,
-      });
+  sandboxTest(
+    "claim-time dispatch gate honors only operator-sourced security runs (GH-1004)",
+    async () => {
+      for (const [source, expectedTerminalState, expectedReasonCode] of [
+        ["operator", "COMPLETED", "ok"],
+        ["chain", "REFUSED", "ticket_security"],
+      ]) {
+        const db = openDb(":memory:");
+        const ticket = source === "operator" ? "WM-701" : "WM-702";
+        const spec = queueRun(
+          db,
+          makeDispatchSpec({
+            runId: `run_security_${source}`,
+            input: { repo: "wt-worker", ticket },
+          }),
+        );
+        linkEvent(db, spec.runId, {
+          type: "factory.dispatch.requested",
+          source,
+        });
 
-      const summary = await runOnce(
-        db,
-        registry,
-        { fake: dispatchFakeAdapter },
-        opts({
-          dispatch: {
-            locksDir: tmpDir(`evrt-security-${source}-locks-`),
-            fetchTicket: () =>
-              readyDispatchTicket(ticket, {
-                labels: {
-                  nodes: [
-                    { name: "ai:agent-ready" },
-                    { name: "type:security" },
-                  ],
-                },
-              }),
-            fetchInFlight: () => [],
-            countLeases: () => 0,
-            claimTicket: () => ({ ok: true }),
-          },
-        }),
-      );
+        const summary = await runOnce(
+          db,
+          registry,
+          { fake: dispatchFakeAdapter },
+          opts({
+            dispatch: {
+              locksDir: tmpDir(`evrt-security-${source}-locks-`),
+              fetchTicket: () =>
+                readyDispatchTicket(ticket, {
+                  labels: {
+                    nodes: [
+                      { name: "ai:agent-ready" },
+                      { name: "type:security" },
+                    ],
+                  },
+                }),
+              fetchInFlight: () => [],
+              countLeases: () => 0,
+              claimTicket: () => ({ ok: true }),
+            },
+          }),
+        );
 
-      expect(summary).toMatchObject({
-        terminalState: expectedTerminalState,
-        reasonCode: expectedReasonCode,
-      });
-    }
-  });
+        expect(summary).toMatchObject({
+          terminalState: expectedTerminalState,
+          reasonCode: expectedReasonCode,
+        });
+      }
+    },
+  );
 
   test("execute-time re-checks refuse on ticket_not_todo, ticket_assigned, capacity_full, owned_paths_overlap, ticket_claim_lost", async () => {
     const db = openDb(":memory:");
@@ -1752,195 +1791,204 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     }
   });
 
-  test("lease-loss attempt 2 resumes its own claim while stale attempt 1 cannot unclaim it (WM-621)", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-claim-retry-locks-");
-    const leaseDir = tmpDir("evrt-claim-retry-leases-");
-    const spec = queueRun(
-      db,
-      makeDispatchSpec({
-        input: { repo: "wt-worker", ticket: "WM-621" },
-      }),
-    );
-    let now = T0;
-    let ticket = readyDispatchTicket("WM-621");
-    let claimCalls = 0;
-    let unclaimCalls = 0;
-    let adapterCalls = 0;
-    let releaseFirst;
-    let releaseSecond;
-    let markFirstStarted;
-    let markSecondStarted;
-    const firstStarted = new Promise((resolve) => {
-      markFirstStarted = resolve;
-    });
-    const secondStarted = new Promise((resolve) => {
-      markSecondStarted = resolve;
-    });
-    const firstRelease = new Promise((resolve) => {
-      releaseFirst = resolve;
-    });
-    const secondRelease = new Promise((resolve) => {
-      releaseSecond = resolve;
-    });
-    const retryAdapter = {
-      async execute(args) {
-        adapterCalls += 1;
-        if (adapterCalls === 1) {
-          markFirstStarted();
-          await firstRelease;
-          return { exitCode: 1, timedOut: false };
-        }
-        markSecondStarted();
-        await secondRelease;
-        return dispatchFakeAdapter.execute(args);
-      },
-    };
-    const o = opts({
-      now: () => now,
-      workspacesRoot: freshRoot(),
-      dispatch: {
-        locksDir: lockDir,
-        leasesDir: leaseDir,
-        fetchTicket: () => ticket,
-        fetchViewer: () => ({ id: "factory-user", name: "Factory" }),
-        fetchInFlight: () => [],
-        countLeases: () => 0,
-        claimTicket: () => {
-          claimCalls += 1;
-          ticket = readyDispatchTicket("WM-621", {
-            state: { name: "In Progress" },
-            assignee: { id: "factory-user", name: "Factory" },
-            labels: {
-              nodes: [
-                { name: "ai:in-progress" },
-                { name: "agent:claude-code" },
-              ],
-            },
-          });
-          return { ok: true };
+  sandboxTest(
+    "lease-loss attempt 2 resumes its own claim while stale attempt 1 cannot unclaim it (WM-621)",
+    async () => {
+      const db = openDb(":memory:");
+      const lockDir = tmpDir("evrt-claim-retry-locks-");
+      const leaseDir = tmpDir("evrt-claim-retry-leases-");
+      const spec = queueRun(
+        db,
+        makeDispatchSpec({
+          input: { repo: "wt-worker", ticket: "WM-621" },
+        }),
+      );
+      let now = T0;
+      let ticket = readyDispatchTicket("WM-621");
+      let claimCalls = 0;
+      let unclaimCalls = 0;
+      let adapterCalls = 0;
+      let releaseFirst;
+      let releaseSecond;
+      let markFirstStarted;
+      let markSecondStarted;
+      const firstStarted = new Promise((resolve) => {
+        markFirstStarted = resolve;
+      });
+      const secondStarted = new Promise((resolve) => {
+        markSecondStarted = resolve;
+      });
+      const firstRelease = new Promise((resolve) => {
+        releaseFirst = resolve;
+      });
+      const secondRelease = new Promise((resolve) => {
+        releaseSecond = resolve;
+      });
+      const retryAdapter = {
+        async execute(args) {
+          adapterCalls += 1;
+          if (adapterCalls === 1) {
+            markFirstStarted();
+            await firstRelease;
+            return { exitCode: 1, timedOut: false };
+          }
+          markSecondStarted();
+          await secondRelease;
+          return dispatchFakeAdapter.execute(args);
         },
-        unclaimTicket: () => {
-          unclaimCalls += 1;
-          ticket = readyDispatchTicket("WM-621");
-          return true;
+      };
+      const o = opts({
+        now: () => now,
+        workspacesRoot: freshRoot(),
+        dispatch: {
+          locksDir: lockDir,
+          leasesDir: leaseDir,
+          fetchTicket: () => ticket,
+          fetchViewer: () => ({ id: "factory-user", name: "Factory" }),
+          fetchInFlight: () => [],
+          countLeases: () => 0,
+          claimTicket: () => {
+            claimCalls += 1;
+            ticket = readyDispatchTicket("WM-621", {
+              state: { name: "In Progress" },
+              assignee: { id: "factory-user", name: "Factory" },
+              labels: {
+                nodes: [
+                  { name: "ai:in-progress" },
+                  { name: "agent:claude-code" },
+                ],
+              },
+            });
+            return { ok: true };
+          },
+          unclaimTicket: () => {
+            unclaimCalls += 1;
+            ticket = readyDispatchTicket("WM-621");
+            return true;
+          },
         },
-      },
-    });
+      });
 
-    const firstClaim = claimNext(db, o);
-    const firstExecution = executeClaimed(
-      db,
-      registry,
-      { fake: retryAdapter },
-      firstClaim,
-      o,
-    );
-    let retryExecution;
-    try {
-      await firstStarted;
-      expect(claimCalls).toBe(1);
-      expect(ticket.state.name).toBe("In Progress");
+      const firstClaim = claimNext(db, o);
+      const firstExecution = executeClaimed(
+        db,
+        registry,
+        { fake: retryAdapter },
+        firstClaim,
+        o,
+      );
+      let retryExecution;
+      try {
+        await firstStarted;
+        expect(claimCalls).toBe(1);
+        expect(ticket.state.name).toBe("In Progress");
 
-      now = T0 + (spec.timeoutSeconds + 120) * 1000 + 1;
-      expect(reapExpiredLeases(db, { now, policyVersion: "test" })).toBe(1);
+        now = T0 + (spec.timeoutSeconds + 120) * 1000 + 1;
+        expect(reapExpiredLeases(db, { now, policyVersion: "test" })).toBe(1);
+        expect(runState(db, spec.runId)).toBe("QUEUED");
+
+        retryExecution = runOnce(db, registry, { fake: retryAdapter }, o);
+        await secondStarted;
+        expect(claimCalls).toBe(1);
+        expect(
+          readFileSync(callsLog, "utf8")
+            .trim()
+            .split("\n")
+            .filter((call) => call === "up WM-621"),
+        ).toHaveLength(2);
+        expect(lifecycleOf(db, spec.runId)).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ to_state: "RUNNING", attempt: 2 }),
+          ]),
+        );
+
+        releaseFirst();
+        expect(await firstExecution).toEqual({ fenced: true });
+        expect(unclaimCalls).toBe(0);
+        expect(ticket.state.name).toBe("In Progress");
+        expect(
+          liveWorkerLeases("wt-worker", { dir: leaseDir, now }),
+        ).toHaveLength(1);
+
+        releaseSecond();
+        const retried = await retryExecution;
+        expect(retried).toMatchObject({
+          attempt: 2,
+          terminalState: "COMPLETED",
+        });
+      } finally {
+        releaseFirst();
+        releaseSecond();
+        await Promise.allSettled(
+          [firstExecution, retryExecution].filter(Boolean),
+        );
+      }
+    },
+  );
+
+  sandboxTest(
+    "claim-time Linear read failure contradicting plan evidence requeues with backoff",
+    async () => {
+      const db = openDb(":memory:");
+      const lockDir = tmpDir("evrt-transient-linear-");
+      const description = "## Owned Paths\n- src/feature/**\n";
+      const spec = queueRun(
+        db,
+        makeDispatchSpec({
+          input: { repo: "wt-worker", ticket: "WM-707" },
+          approvalPolicy: planTimeDispatchEvidence(description),
+        }),
+      );
+      let now = T0;
+      let reads = 0;
+      const o = opts({
+        now: () => now,
+        dispatch: {
+          locksDir: lockDir,
+          random: () => 0,
+          fetchTicket: () => {
+            reads += 1;
+            if (reads === 1) throw new Error("linear_read_failed: HTTP 503");
+            return readyDispatchTicket("WM-707", { description });
+          },
+          fetchInFlight: () => [],
+          countLeases: () => 0,
+          claimTicket: () => ({ ok: true }),
+        },
+      });
+
+      const deferred = await runOnce(
+        db,
+        registry,
+        { fake: dispatchFakeAdapter },
+        o,
+      );
+      expect(deferred).toMatchObject({
+        terminalState: "QUEUED",
+        reasonCode: "linear_read_failed",
+      });
+      expect(deferred.requeueAfterMs).toBeGreaterThan(0);
       expect(runState(db, spec.runId)).toBe("QUEUED");
-
-      retryExecution = runOnce(db, registry, { fake: retryAdapter }, o);
-      await secondStarted;
-      expect(claimCalls).toBe(1);
       expect(
-        readFileSync(callsLog, "utf8")
-          .trim()
-          .split("\n")
-          .filter((call) => call === "up WM-621"),
-      ).toHaveLength(2);
-      expect(lifecycleOf(db, spec.runId)).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ to_state: "RUNNING", attempt: 2 }),
-        ]),
+        db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId)
+          .attempts,
+      ).toBe(0);
+      expect(claimNext(db, o)).toBeNull();
+
+      now += deferred.requeueAfterMs;
+      const completed = await runOnce(
+        db,
+        registry,
+        { fake: dispatchFakeAdapter },
+        o,
       );
-
-      releaseFirst();
-      expect(await firstExecution).toEqual({ fenced: true });
-      expect(unclaimCalls).toBe(0);
-      expect(ticket.state.name).toBe("In Progress");
-      expect(
-        liveWorkerLeases("wt-worker", { dir: leaseDir, now }),
-      ).toHaveLength(1);
-
-      releaseSecond();
-      const retried = await retryExecution;
-      expect(retried).toMatchObject({ attempt: 2, terminalState: "COMPLETED" });
-    } finally {
-      releaseFirst();
-      releaseSecond();
-      await Promise.allSettled(
-        [firstExecution, retryExecution].filter(Boolean),
-      );
-    }
-  });
-
-  test("claim-time Linear read failure contradicting plan evidence requeues with backoff", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-transient-linear-");
-    const description = "## Owned Paths\n- src/feature/**\n";
-    const spec = queueRun(
-      db,
-      makeDispatchSpec({
-        input: { repo: "wt-worker", ticket: "WM-707" },
-        approvalPolicy: planTimeDispatchEvidence(description),
-      }),
-    );
-    let now = T0;
-    let reads = 0;
-    const o = opts({
-      now: () => now,
-      dispatch: {
-        locksDir: lockDir,
-        random: () => 0,
-        fetchTicket: () => {
-          reads += 1;
-          if (reads === 1) throw new Error("linear_read_failed: HTTP 503");
-          return readyDispatchTicket("WM-707", { description });
-        },
-        fetchInFlight: () => [],
-        countLeases: () => 0,
-        claimTicket: () => ({ ok: true }),
-      },
-    });
-
-    const deferred = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      o,
-    );
-    expect(deferred).toMatchObject({
-      terminalState: "QUEUED",
-      reasonCode: "linear_read_failed",
-    });
-    expect(deferred.requeueAfterMs).toBeGreaterThan(0);
-    expect(runState(db, spec.runId)).toBe("QUEUED");
-    expect(
-      db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId)
-        .attempts,
-    ).toBe(0);
-    expect(claimNext(db, o)).toBeNull();
-
-    now += deferred.requeueAfterMs;
-    const completed = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      o,
-    );
-    expect(completed).toMatchObject({
-      terminalState: "COMPLETED",
-      reasonCode: "ok",
-      attempt: 1,
-    });
-  });
+      expect(completed).toMatchObject({
+        terminalState: "COMPLETED",
+        reasonCode: "ok",
+        attempt: 1,
+      });
+    },
+  );
 
   test("empty claim-time description retries only when its hash contradicts plan evidence, then explains recovery", async () => {
     const db = openDb(":memory:");
@@ -2001,84 +2049,90 @@ describe("execute-side dispatch hardening (WM-115)", () => {
     );
   });
 
-  test("worker lease is acquired during execution and released on completion", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-lease-locks-");
-    const leaseDir = tmpDir("evrt-lease-dir-");
+  sandboxTest(
+    "worker lease is acquired during execution and released on completion",
+    async () => {
+      const db = openDb(":memory:");
+      const lockDir = tmpDir("evrt-lease-locks-");
+      const leaseDir = tmpDir("evrt-lease-dir-");
 
-    let sawActiveLease = false;
-    const leaseCheckAdapter = {
-      async execute({ spec, workspaceDir }) {
-        const active = liveWorkerLeases("wt-worker", {
-          dir: leaseDir,
-          now: T0,
-        });
-        sawActiveLease = active.some((l) => l.ticket === spec.input.ticket);
-        return dispatchFakeAdapter.execute({ spec, workspaceDir });
-      },
-    };
-
-    const spec = queueRun(
-      db,
-      makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-710" } }),
-    );
-    const summary = await runOnce(
-      db,
-      registry,
-      { fake: leaseCheckAdapter },
-      opts({
-        dispatch: {
-          locksDir: lockDir,
-          leasesDir: leaseDir,
-          fetchTicket: () => readyDispatchTicket("WM-710"),
-          fetchInFlight: () => [],
-          countLeases: () => 0,
-          claimTicket: () => ({ ok: true }),
+      let sawActiveLease = false;
+      const leaseCheckAdapter = {
+        async execute({ spec, workspaceDir }) {
+          const active = liveWorkerLeases("wt-worker", {
+            dir: leaseDir,
+            now: T0,
+          });
+          sawActiveLease = active.some((l) => l.ticket === spec.input.ticket);
+          return dispatchFakeAdapter.execute({ spec, workspaceDir });
         },
-      }),
-    );
+      };
 
-    expect(sawActiveLease).toBe(true);
-    expect(summary.terminalState).toBe("COMPLETED");
-    // After execution, the lease must be released
-    expect(
-      liveWorkerLeases("wt-worker", { dir: leaseDir, now: T0 }),
-    ).toHaveLength(0);
-  });
+      const spec = queueRun(
+        db,
+        makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-710" } }),
+      );
+      const summary = await runOnce(
+        db,
+        registry,
+        { fake: leaseCheckAdapter },
+        opts({
+          dispatch: {
+            locksDir: lockDir,
+            leasesDir: leaseDir,
+            fetchTicket: () => readyDispatchTicket("WM-710"),
+            fetchInFlight: () => [],
+            countLeases: () => 0,
+            claimTicket: () => ({ ok: true }),
+          },
+        }),
+      );
 
-  test("mutating worktree is exempt from read-only clean check and runs repo verify command", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-verify-locks-");
-    const leaseDir = tmpDir("evrt-verify-leases-");
+      expect(sawActiveLease).toBe(true);
+      expect(summary.terminalState).toBe("COMPLETED");
+      // After execution, the lease must be released
+      expect(
+        liveWorkerLeases("wt-worker", { dir: leaseDir, now: T0 }),
+      ).toHaveLength(0);
+    },
+  );
 
-    const spec = queueRun(
-      db,
-      makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-720" } }),
-    );
-    const summary = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      opts({
-        dispatch: {
-          locksDir: lockDir,
-          leasesDir: leaseDir,
-          fetchTicket: () => readyDispatchTicket("WM-720"),
-          fetchInFlight: () => [],
-          countLeases: () => 0,
-          claimTicket: () => ({ ok: true }),
-        },
-      }),
-    );
+  sandboxTest(
+    "mutating worktree is exempt from read-only clean check and runs repo verify command",
+    async () => {
+      const db = openDb(":memory:");
+      const lockDir = tmpDir("evrt-verify-locks-");
+      const leaseDir = tmpDir("evrt-verify-leases-");
 
-    expect(summary.terminalState).toBe("COMPLETED");
-    expect(summary.reasonCode).toBe("ok");
-    const resRow = db
-      .query(`SELECT result_json FROM results WHERE run_id = ?`)
-      .get(spec.runId);
-    const result = JSON.parse(resRow.result_json);
-    expect(result.verification.checks).toContain("repo_verify_passed");
-  });
+      const spec = queueRun(
+        db,
+        makeDispatchSpec({ input: { repo: "wt-worker", ticket: "WM-720" } }),
+      );
+      const summary = await runOnce(
+        db,
+        registry,
+        { fake: dispatchFakeAdapter },
+        opts({
+          dispatch: {
+            locksDir: lockDir,
+            leasesDir: leaseDir,
+            fetchTicket: () => readyDispatchTicket("WM-720"),
+            fetchInFlight: () => [],
+            countLeases: () => 0,
+            claimTicket: () => ({ ok: true }),
+          },
+        }),
+      );
+
+      expect(summary.terminalState).toBe("COMPLETED");
+      expect(summary.reasonCode).toBe("ok");
+      const resRow = db
+        .query(`SELECT result_json FROM results WHERE run_id = ?`)
+        .get(spec.runId);
+      const result = JSON.parse(resRow.result_json);
+      expect(result.verification.checks).toContain("repo_verify_passed");
+    },
+  );
 
   test("forceFailRun aborts a RUNNING adapter and releases its ticket claim promptly", async () => {
     const db = openDb(":memory:");
@@ -2251,106 +2305,112 @@ describe("execute-side dispatch hardening (WM-115)", () => {
   // WM-718: at handoff (PR_OPEN) a red repo verify is the handoff gate
   // refusing — named `handoff_verification_failed` so the ticket returns to
   // Todo + ai:agent-ready and the PR is held; still FAILED, still no result row.
-  test("failing repo verify command at handoff fails handoff_verification_failed", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-fverify-locks-");
-    const leaseDir = tmpDir("evrt-fverify-leases-");
+  sandboxTest(
+    "failing repo verify command at handoff fails handoff_verification_failed",
+    async () => {
+      const db = openDb(":memory:");
+      const lockDir = tmpDir("evrt-fverify-locks-");
+      const leaseDir = tmpDir("evrt-fverify-leases-");
 
-    const spec = queueRun(
-      db,
-      makeDispatchSpec({
-        input: { repo: "wt-failing-verify", ticket: "WM-730" },
-      }),
-    );
-    const summary = await runOnce(
-      db,
-      registry,
-      { fake: dispatchFakeAdapter },
-      opts({
-        dispatch: {
-          locksDir: lockDir,
-          leasesDir: leaseDir,
-          fetchTicket: () => readyDispatchTicket("WM-730"),
-          fetchInFlight: () => [],
-          countLeases: () => 0,
-          claimTicket: () => ({ ok: true }),
-        },
-      }),
-    );
-
-    expect(summary.terminalState).toBe("FAILED");
-    expect(summary.reasonCode).toBe("handoff_verification_failed");
-    expect(summary.detail).toContain("repo_verify_failed");
-    expect(summary.handoff.repoVerify.exitCode).toBe(42);
-  });
-
-  test("a deliberately red baseline still reaches the agent with failure context, then terminates baseline_red", async () => {
-    const db = openDb(":memory:");
-    const lockDir = tmpDir("evrt-baseline-locks-");
-    const leaseDir = tmpDir("evrt-baseline-leases-");
-    let executionInput = null;
-    const unclaimCalls = [];
-    const blockCalls = [];
-    const observingAdapter = {
-      async execute({ spec, workspaceDir }) {
-        executionInput = JSON.parse(
-          readFileSync(path.join(workspaceDir, "input.json"), "utf8"),
-        );
-        return dispatchFakeAdapter.execute({ spec, workspaceDir });
-      },
-    };
-
-    const spec = queueRun(
-      db,
-      makeDispatchSpec({
-        input: { repo: "wt-baseline-red", ticket: "WM-731" },
-      }),
-    );
-    const summary = await runOnce(
-      db,
-      registry,
-      { fake: observingAdapter },
-      opts({
-        dispatch: {
-          locksDir: lockDir,
-          leasesDir: leaseDir,
-          fetchTicket: () => readyDispatchTicket("WM-731"),
-          fetchInFlight: () => [],
-          countLeases: () => 0,
-          claimTicket: () => ({ ok: true }),
-          unclaimTicket: (payload) => {
-            unclaimCalls.push(payload);
-            return false;
+      const spec = queueRun(
+        db,
+        makeDispatchSpec({
+          input: { repo: "wt-failing-verify", ticket: "WM-730" },
+        }),
+      );
+      const summary = await runOnce(
+        db,
+        registry,
+        { fake: dispatchFakeAdapter },
+        opts({
+          dispatch: {
+            locksDir: lockDir,
+            leasesDir: leaseDir,
+            fetchTicket: () => readyDispatchTicket("WM-730"),
+            fetchInFlight: () => [],
+            countLeases: () => 0,
+            claimTicket: () => ({ ok: true }),
           },
-          blockBaselineTicket: (payload) => {
-            blockCalls.push(payload);
-            return true;
-          },
+        }),
+      );
+
+      expect(summary.terminalState).toBe("FAILED");
+      expect(summary.reasonCode).toBe("handoff_verification_failed");
+      expect(summary.detail).toContain("repo_verify_failed");
+      expect(summary.handoff.repoVerify.exitCode).toBe(42);
+    },
+  );
+
+  sandboxTest(
+    "a deliberately red baseline still reaches the agent with failure context, then terminates baseline_red",
+    async () => {
+      const db = openDb(":memory:");
+      const lockDir = tmpDir("evrt-baseline-locks-");
+      const leaseDir = tmpDir("evrt-baseline-leases-");
+      let executionInput = null;
+      const unclaimCalls = [];
+      const blockCalls = [];
+      const observingAdapter = {
+        async execute({ spec, workspaceDir }) {
+          executionInput = JSON.parse(
+            readFileSync(path.join(workspaceDir, "input.json"), "utf8"),
+          );
+          return dispatchFakeAdapter.execute({ spec, workspaceDir });
         },
-      }),
-    );
+      };
 
-    expect(executionInput).toMatchObject({
-      repo: "wt-baseline-red",
-      ticket: "WM-731",
-      baseline: {
-        status: "red",
-        check: "web_build",
-        output: "entry chunk exceeds budget",
-      },
-    });
-    expect(summary.terminalState).toBe("FAILED");
-    expect(summary.reasonCode).toBe("baseline_red");
-    expect(blockCalls).toHaveLength(1);
-    expect(unclaimCalls).toHaveLength(0);
-    expect(
-      db
-        .query(`SELECT reason_code FROM attempts WHERE run_id = ?`)
-        .get(spec.runId).reason_code,
-    ).toBe("baseline_red");
-  });
+      const spec = queueRun(
+        db,
+        makeDispatchSpec({
+          input: { repo: "wt-baseline-red", ticket: "WM-731" },
+        }),
+      );
+      const summary = await runOnce(
+        db,
+        registry,
+        { fake: observingAdapter },
+        opts({
+          dispatch: {
+            locksDir: lockDir,
+            leasesDir: leaseDir,
+            fetchTicket: () => readyDispatchTicket("WM-731"),
+            fetchInFlight: () => [],
+            countLeases: () => 0,
+            claimTicket: () => ({ ok: true }),
+            unclaimTicket: (payload) => {
+              unclaimCalls.push(payload);
+              return false;
+            },
+            blockBaselineTicket: (payload) => {
+              blockCalls.push(payload);
+              return true;
+            },
+          },
+        }),
+      );
 
-  test(
+      expect(executionInput).toMatchObject({
+        repo: "wt-baseline-red",
+        ticket: "WM-731",
+        baseline: {
+          status: "red",
+          check: "web_build",
+          output: "entry chunk exceeds budget",
+        },
+      });
+      expect(summary.terminalState).toBe("FAILED");
+      expect(summary.reasonCode).toBe("baseline_red");
+      expect(blockCalls).toHaveLength(1);
+      expect(unclaimCalls).toHaveLength(0);
+      expect(
+        db
+          .query(`SELECT reason_code FROM attempts WHERE run_id = ?`)
+          .get(spec.runId).reason_code,
+      ).toBe("baseline_red");
+    },
+  );
+
+  sandboxTest(
     "worktree-up handles an actual baseline-red repo verification and deduplicates baseline blocker comments",
     // This test provisions real git worktrees and child processes twice. The
     // 45s ceiling has headroom over the ~9s observed under the 8-run burst

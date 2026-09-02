@@ -18,6 +18,7 @@ import {
 } from "./worker.mjs";
 import { registerTestProcessCleanup } from "./test-helpers-process.mjs";
 import { opts, queueRun, registry } from "./worker-test-helpers.mjs";
+import { sandboxTest } from "../test-support/sandbox.mjs";
 
 registerTestProcessCleanup(import.meta.url);
 
@@ -316,70 +317,73 @@ describe("handoff verification gate (WM-718)", () => {
     return { db, summary, calls, artifactStore };
   }
 
-  test("a fake agent that leaves a failing test is refused handoff_verification_failed: no result row, ticket back to Todo + agent-ready, PR held, tail in the receipt", async () => {
-    const spec = handoffSpec({ ticket: "WM-7181" });
-    const { db, summary, calls } = await dispatch({
-      spec,
-      description: withCommand("bash run-tests.sh"),
-      adapter: agent({
-        files: {
-          "src/feature/impl.txt": "done\n",
-          "run-tests.sh":
-            'echo "suite start"\necho "(fail) totals > rejects an invalid total"\necho "1 fail" >&2\nexit 1\n',
-        },
-      }),
-    });
+  sandboxTest(
+    "a fake agent that leaves a failing test is refused handoff_verification_failed: no result row, ticket back to Todo + agent-ready, PR held, tail in the receipt",
+    async () => {
+      const spec = handoffSpec({ ticket: "WM-7181" });
+      const { db, summary, calls } = await dispatch({
+        spec,
+        description: withCommand("bash run-tests.sh"),
+        adapter: agent({
+          files: {
+            "src/feature/impl.txt": "done\n",
+            "run-tests.sh":
+              'echo "suite start"\necho "(fail) totals > rejects an invalid total"\necho "1 fail" >&2\nexit 1\n',
+          },
+        }),
+      });
 
-    expect(summary.terminalState).toBe("FAILED");
-    expect(summary.reasonCode).toBe("handoff_verification_failed");
-    expect(summary.detail).toContain("ticket_verify_failed");
-    expect(summary.handoff.verification.command).toBe("bash run-tests.sh");
-    expect(summary.handoff.verification.exitCode).toBe(1);
-    expect(summary.handoff.verification.tail).toContain(
-      "(fail) totals > rejects an invalid total",
-    );
-    // The repo verify passed; the ticket's own command is what caught it.
-    expect(summary.handoff.repoVerify.passed).toBe(true);
+      expect(summary.terminalState).toBe("FAILED");
+      expect(summary.reasonCode).toBe("handoff_verification_failed");
+      expect(summary.detail).toContain("ticket_verify_failed");
+      expect(summary.handoff.verification.command).toBe("bash run-tests.sh");
+      expect(summary.handoff.verification.exitCode).toBe(1);
+      expect(summary.handoff.verification.tail).toContain(
+        "(fail) totals > rejects an invalid total",
+      );
+      // The repo verify passed; the ticket's own command is what caught it.
+      expect(summary.handoff.repoVerify.passed).toBe(true);
 
-    // No PR_OPEN result was published — nothing downstream chains a review.
-    expect(
-      db
-        .query(`SELECT COUNT(*) AS n FROM results WHERE run_id = ?`)
-        .get(spec.runId).n,
-    ).toBe(0);
-    expect(
-      db
-        .query(`SELECT reason_code FROM attempts WHERE run_id = ?`)
-        .get(spec.runId).reason_code,
-    ).toBe("handoff_verification_failed");
-    const journal = lifecycleOf(db, spec.runId)
-      .map((row) => row.reason)
-      .join("\n");
-    expect(journal).toContain("(fail) totals > rejects an invalid total");
-    expect(classifyFailureCause("handoff_verification_failed")).toBe(
-      "agent_error",
-    );
+      // No PR_OPEN result was published — nothing downstream chains a review.
+      expect(
+        db
+          .query(`SELECT COUNT(*) AS n FROM results WHERE run_id = ?`)
+          .get(spec.runId).n,
+      ).toBe(0);
+      expect(
+        db
+          .query(`SELECT reason_code FROM attempts WHERE run_id = ?`)
+          .get(spec.runId).reason_code,
+      ).toBe("handoff_verification_failed");
+      const journal = lifecycleOf(db, spec.runId)
+        .map((row) => row.reason)
+        .join("\n");
+      expect(journal).toContain("(fail) totals > rejects an invalid total");
+      expect(classifyFailureCause("handoff_verification_failed")).toBe(
+        "agent_error",
+      );
 
-    // Ticket returned (Todo + agent-ready), never Blocked, never the plain unclaim.
-    expect(calls.returned).toHaveLength(1);
-    expect(calls.returned[0].ticket).toBe("WM-7181");
-    expect(calls.returned[0].body).toContain(
-      "## Handoff verification (worker-observed)",
-    );
-    expect(calls.returned[0].body).toContain(
-      "(fail) totals > rejects an invalid total",
-    );
-    expect(calls.returned[0].body).toContain("Todo + ai:agent-ready");
-    expect(calls.unclaim).toHaveLength(0);
-    // The agent's PR is converted to draft with the observed failure quoted.
-    expect(calls.held).toHaveLength(1);
-    expect(calls.held[0]).toMatchObject({
-      prNumber: 77,
-      github: "watt-mind/wt-handoff",
-    });
-    expect(calls.held[0].body).toContain("exit 1 (FAIL)");
-    expect(calls.comments).toHaveLength(0);
-  });
+      // Ticket returned (Todo + agent-ready), never Blocked, never the plain unclaim.
+      expect(calls.returned).toHaveLength(1);
+      expect(calls.returned[0].ticket).toBe("WM-7181");
+      expect(calls.returned[0].body).toContain(
+        "## Handoff verification (worker-observed)",
+      );
+      expect(calls.returned[0].body).toContain(
+        "(fail) totals > rejects an invalid total",
+      );
+      expect(calls.returned[0].body).toContain("Todo + ai:agent-ready");
+      expect(calls.unclaim).toHaveLength(0);
+      // The agent's PR is converted to draft with the observed failure quoted.
+      expect(calls.held).toHaveLength(1);
+      expect(calls.held[0]).toMatchObject({
+        prNumber: 77,
+        github: "watt-mind/wt-handoff",
+      });
+      expect(calls.held[0].body).toContain("exit 1 (FAIL)");
+      expect(calls.comments).toHaveLength(0);
+    },
+  );
 
   test("no Verification Command and no repo verify: refused handoff_verification_unspecified (fail-closed)", async () => {
     const spec = handoffSpec({
@@ -398,323 +402,346 @@ describe("handoff verification gate (WM-718)", () => {
     expect(calls.returned[0].body).toContain("Verification: NONE");
   });
 
-  test("without a Verification Command the repo verify stands in and the run completes with a worker-observed line", async () => {
-    const spec = handoffSpec({ ticket: "WM-7183" });
-    const { db, summary, calls } = await dispatch({
-      spec,
-      description: OWNED,
-      adapter: agent({ files: { "src/feature/impl.txt": "done\n" } }),
-    });
-    expect(summary.terminalState).toBe("COMPLETED");
-    const result = JSON.parse(
-      db
-        .query(`SELECT result_json FROM results WHERE run_id = ?`)
-        .get(spec.runId).result_json,
-    );
-    expect(result.verification.checks).toContain("repo_verify_passed");
-    expect(result.verification.checks).not.toContain("ticket_verify_passed");
-    expect(calls.comments).toHaveLength(1);
-    expect(calls.comments[0].body).toContain(
-      "- Verification: `echo repo_verified` — exit 0 (pass)",
-    );
-    expect(calls.comments[0].body).toContain("repo `verify:` command stood in");
-  });
+  sandboxTest(
+    "without a Verification Command the repo verify stands in and the run completes with a worker-observed line",
+    async () => {
+      const spec = handoffSpec({ ticket: "WM-7183" });
+      const { db, summary, calls } = await dispatch({
+        spec,
+        description: OWNED,
+        adapter: agent({ files: { "src/feature/impl.txt": "done\n" } }),
+      });
+      expect(summary.terminalState).toBe("COMPLETED");
+      const result = JSON.parse(
+        db
+          .query(`SELECT result_json FROM results WHERE run_id = ?`)
+          .get(spec.runId).result_json,
+      );
+      expect(result.verification.checks).toContain("repo_verify_passed");
+      expect(result.verification.checks).not.toContain("ticket_verify_passed");
+      expect(calls.comments).toHaveLength(1);
+      expect(calls.comments[0].body).toContain(
+        "- Verification: `echo repo_verified` — exit 0 (pass)",
+      );
+      expect(calls.comments[0].body).toContain(
+        "repo `verify:` command stood in",
+      );
+    },
+  );
 
-  test("declared UX screenshots are content-addressed before workspace cleanup and their evidence stays durable", async () => {
-    const screenshot = Buffer.from("fake-png-bytes");
-    const sha256 = sha256Hex(screenshot);
-    let screenshotPath;
-    const spec = handoffSpec({ ticket: "WM-2023" });
-    const { artifactStore, db, summary } = await dispatch({
-      spec,
-      description: withCommand("bash run-tests.sh"),
-      adapter: agent({
-        files: {
-          "run-tests.sh": "echo ux handoff verified\n",
-          "src/feature/impl.txt": "done\n",
+  sandboxTest(
+    "declared UX screenshots are content-addressed before workspace cleanup and their evidence stays durable",
+    async () => {
+      const screenshot = Buffer.from("fake-png-bytes");
+      const sha256 = sha256Hex(screenshot);
+      let screenshotPath;
+      const spec = handoffSpec({ ticket: "WM-2023" });
+      const { artifactStore, db, summary } = await dispatch({
+        spec,
+        description: withCommand("bash run-tests.sh"),
+        adapter: agent({
+          files: {
+            "run-tests.sh": "echo ux handoff verified\n",
+            "src/feature/impl.txt": "done\n",
+          },
+          workspaceFiles: { "ux-artifacts/runs.png": screenshot },
+          artifacts: [{ kind: "ux-screenshot", path: "ux-artifacts/runs.png" }],
+          uxCritique: {
+            status: "required",
+            verdict: "SHIP",
+            evidence: [`sha256:${sha256}`],
+            rounds: 1,
+            prReady: true,
+          },
+          onWorkspace: (workspaceDir) => {
+            screenshotPath = path.join(workspaceDir, "ux-artifacts/runs.png");
+          },
+        }),
+      });
+
+      expect(summary.terminalState).toBe("COMPLETED");
+      const result = JSON.parse(
+        db
+          .query(`SELECT result_json FROM results WHERE run_id = ?`)
+          .get(spec.runId).result_json,
+      );
+      const stored = result.artifacts.find(
+        (entry) => entry.kind === "ux-screenshot",
+      );
+      const storedPath = path.join(artifactStore, sha256);
+      expect(stored).toEqual({
+        kind: "ux-screenshot",
+        sha256,
+        uri: `file://${storedPath}`,
+        sizeBytes: screenshot.length,
+      });
+      expect(result.artifact.uxCritique.evidence).toEqual([`sha256:${sha256}`]);
+      expect(existsSync(screenshotPath)).toBe(false);
+      expect(readFileSync(storedPath)).toEqual(screenshot);
+    },
+  );
+
+  sandboxTest(
+    "a PR targeting the wrong base fails handoff verification and is returned",
+    async () => {
+      const spec = handoffSpec({ ticket: "WM-9381" });
+      const { summary, calls } = await dispatch({
+        spec,
+        description: OWNED,
+        adapter: agent({ files: { "src/feature/impl.txt": "done\n" } }),
+        hooks: {
+          fetchHandoffPullRequest: () => ({ baseRefName: "main" }),
         },
-        workspaceFiles: { "ux-artifacts/runs.png": screenshot },
-        artifacts: [{ kind: "ux-screenshot", path: "ux-artifacts/runs.png" }],
-        uxCritique: {
-          status: "required",
-          verdict: "SHIP",
-          evidence: [`sha256:${sha256}`],
-          rounds: 1,
-          prReady: true,
+      });
+
+      expect(summary.terminalState).toBe("FAILED");
+      expect(summary.reasonCode).toBe("handoff_verification_failed");
+      expect(summary.detail).toContain(
+        "PR #77 targets main, expected configured base develop",
+      );
+      expect(calls.held).toHaveLength(1);
+      expect(calls.returned).toHaveLength(1);
+    },
+  );
+
+  sandboxTest(
+    "a rate-limited handoff PR read defers without drafting the PR, returning the ticket, or spending an attempt",
+    async () => {
+      const spec = handoffSpec({ ticket: "WM-1870" });
+      const { db, summary, calls } = await dispatch({
+        spec,
+        description: OWNED,
+        adapter: agent({ files: { "src/feature/impl.txt": "done\n" } }),
+        hooks: {
+          fetchHandoffPullRequest: () => {
+            const error = new Error("GitHub secondary rate limit");
+            error.code = "forge_rate_limited";
+            throw error;
+          },
         },
-        onWorkspace: (workspaceDir) => {
-          screenshotPath = path.join(workspaceDir, "ux-artifacts/runs.png");
-        },
-      }),
-    });
+      });
 
-    expect(summary.terminalState).toBe("COMPLETED");
-    const result = JSON.parse(
-      db
-        .query(`SELECT result_json FROM results WHERE run_id = ?`)
-        .get(spec.runId).result_json,
-    );
-    const stored = result.artifacts.find(
-      (entry) => entry.kind === "ux-screenshot",
-    );
-    const storedPath = path.join(artifactStore, sha256);
-    expect(stored).toEqual({
-      kind: "ux-screenshot",
-      sha256,
-      uri: `file://${storedPath}`,
-      sizeBytes: screenshot.length,
-    });
-    expect(result.artifact.uxCritique.evidence).toEqual([`sha256:${sha256}`]);
-    expect(existsSync(screenshotPath)).toBe(false);
-    expect(readFileSync(storedPath)).toEqual(screenshot);
-  });
+      expect(summary).toMatchObject({
+        terminalState: "QUEUED",
+        reasonCode: "handoff_forge_unavailable",
+      });
+      expect(calls.held).toHaveLength(0);
+      expect(calls.returned).toHaveLength(0);
+      expect(
+        db
+          .query(`SELECT COUNT(*) AS n FROM attempts WHERE run_id = ?`)
+          .get(spec.runId).n,
+      ).toBe(0);
+      expect(
+        db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId)
+          .attempts,
+      ).toBe(0);
+    },
+  );
 
-  test("a PR targeting the wrong base fails handoff verification and is returned", async () => {
-    const spec = handoffSpec({ ticket: "WM-9381" });
-    const { summary, calls } = await dispatch({
-      spec,
-      description: OWNED,
-      adapter: agent({ files: { "src/feature/impl.txt": "done\n" } }),
-      hooks: {
-        fetchHandoffPullRequest: () => ({ baseRefName: "main" }),
-      },
-    });
-
-    expect(summary.terminalState).toBe("FAILED");
-    expect(summary.reasonCode).toBe("handoff_verification_failed");
-    expect(summary.detail).toContain(
-      "PR #77 targets main, expected configured base develop",
-    );
-    expect(calls.held).toHaveLength(1);
-    expect(calls.returned).toHaveLength(1);
-  });
-
-  test("a rate-limited handoff PR read defers without drafting the PR, returning the ticket, or spending an attempt", async () => {
-    const spec = handoffSpec({ ticket: "WM-1870" });
-    const { db, summary, calls } = await dispatch({
-      spec,
-      description: OWNED,
-      adapter: agent({ files: { "src/feature/impl.txt": "done\n" } }),
-      hooks: {
-        fetchHandoffPullRequest: () => {
-          const error = new Error("GitHub secondary rate limit");
-          error.code = "forge_rate_limited";
-          throw error;
-        },
-      },
-    });
-
-    expect(summary).toMatchObject({
-      terminalState: "QUEUED",
-      reasonCode: "handoff_forge_unavailable",
-    });
-    expect(calls.held).toHaveLength(0);
-    expect(calls.returned).toHaveLength(0);
-    expect(
-      db
-        .query(`SELECT COUNT(*) AS n FROM attempts WHERE run_id = ?`)
-        .get(spec.runId).n,
-    ).toBe(0);
-    expect(
-      db.query(`SELECT attempts FROM runs WHERE run_id = ?`).get(spec.runId)
-        .attempts,
-    ).toBe(0);
-  });
-
-  test("a change under event-runtime/web/src/** runs the web build and a red build refuses the handoff", async () => {
-    const description = withCommand("bash run-tests.sh");
-    const files = {
-      "run-tests.sh": "echo ok\n",
-      "event-runtime/web/src/index.ts": "export const x: number = 2;\n",
-    };
-    // Green build: gate runs it (marker written) and records the check.
-    const green = handoffSpec({ ticket: "WM-7184" });
-    const g = await dispatch({
-      spec: green,
-      description,
-      adapter: agent({ files }),
-    });
-    expect(g.summary.terminalState).toBe("COMPLETED");
-    // The chroot maps the worktree at /workspace; when this suite itself runs
-    // inside a handoff sandbox the command is passed through and keeps the
-    // real path. Either way the build ran in the web directory, not the root.
-    expect(g.summary.handoff.webBuild.tail).toContain(
-      `web_built:${insideHandoffSandbox() ? "" : "/workspace"}`,
-    );
-    expect(g.summary.handoff.webBuild.tail).toContain("/event-runtime/web");
-    const result = JSON.parse(
-      g.db
-        .query(`SELECT result_json FROM results WHERE run_id = ?`)
-        .get(green.runId).result_json,
-    );
-    expect(result.verification.checks).toEqual(
-      expect.arrayContaining(["ticket_verify_passed", "web_build_passed"]),
-    );
-    expect(g.calls.comments[0].body).toContain(
-      "- Web build (event-runtime/web/src/** changed): `cd event-runtime/web && bun run build` — exit 0 (pass)",
-    );
-
-    // Red build (tsc-style error) even though the ticket's command is green.
-    const red = handoffSpec({ ticket: "WM-7185" });
-    const r = await dispatch({
-      spec: red,
-      description,
-      adapter: agent({
-        files: {
-          ...files,
-          "event-runtime/web/package.json":
-            '{"name":"web","private":true,"scripts":{"build":"echo \'src/index.ts(1,14): error TS6133: unused local\' >&2; exit 2"}}\n',
-        },
-      }),
-    });
-    expect(r.summary.terminalState).toBe("FAILED");
-    expect(r.summary.reasonCode).toBe("handoff_verification_failed");
-    expect(r.summary.detail).toContain("web_build_failed");
-    expect(r.summary.detail).toContain("error TS6133");
-    expect(r.summary.handoff.webBuild.exitCode).toBe(2);
-    expect(r.calls.held).toHaveLength(1);
-    expect(r.calls.returned).toHaveLength(1);
-
-    // No web/src change: the build is not run at all.
-    const skip = handoffSpec({ ticket: "WM-7186" });
-    const s = await dispatch({
-      spec: skip,
-      description,
-      adapter: agent({
-        files: { "run-tests.sh": "echo ok\n", "src/feature/x.txt": "x\n" },
-      }),
-    });
-    expect(s.summary.terminalState).toBe("COMPLETED");
-    expect(s.summary.handoff.webBuild).toBeNull();
-    expect(s.calls.comments[0].body).toContain("- Web build: skipped");
-  });
-
-  test("the Handoff Verification line is worker-authored: the agent's 'pass' claim cannot override an observed red, and rides below labelled agent-reported", async () => {
-    const description = withCommand("bash run-tests.sh");
-    const failing = handoffSpec({ ticket: "WM-7187" });
-    const f = await dispatch({
-      spec: failing,
-      description,
-      adapter: agent({
-        files: { "run-tests.sh": 'echo "regression in totals"; exit 3\n' },
-        claim: {
-          command: "bash run-tests.sh",
-          passed: true,
-          output: "pass, 2045 tests green",
-        },
-      }),
-    });
-    expect(f.summary.terminalState).toBe("FAILED");
-    const body = f.calls.returned[0].body;
-    const verificationLine = body
-      .split("\n")
-      .find((l) => l.startsWith("- Verification:"));
-    expect(verificationLine).toBe(
-      "- Verification: `bash run-tests.sh` — exit 3 (FAIL)",
-    );
-    expect(body).toContain("regression in totals");
-    expect(body).toContain(
-      "- agent-reported: `bash run-tests.sh` — pass, pass, 2045 tests green",
-    );
-    expect(body).not.toContain("- Verification: `bash run-tests.sh` — pass");
-
-    // Green run: the line still comes from the worker's observation, and a
-    // claim naming a different command is quoted only as agent-reported.
-    const passing = handoffSpec({ ticket: "WM-7188" });
-    const p = await dispatch({
-      spec: passing,
-      description,
-      adapter: agent({
-        files: { "run-tests.sh": 'echo "42 tests, 0 failures"\n' },
-        claim: {
-          command: "bun test --only-my-file",
-          passed: true,
-          output: "green",
-        },
-      }),
-    });
-    expect(p.summary.terminalState).toBe("COMPLETED");
-    const okBody = p.calls.comments[0].body;
-    expect(
-      okBody.split("\n").find((l) => l.startsWith("- Verification:")),
-    ).toBe("- Verification: `bash run-tests.sh` — exit 0 (pass)");
-    expect(okBody).toContain("42 tests, 0 failures");
-    expect(okBody).toContain(
-      "- agent-reported: `bun test --only-my-file` — pass, green",
-    );
-  });
-
-  test("Owned Paths deviations are computed from the diff: listed under advisory (default), refused under strict", async () => {
-    const description = withCommand("bash run-tests.sh");
-    const files = {
-      "run-tests.sh": "echo ok\n",
-      "src/feature/impl.txt": "done\n",
-      "docs/stray.md": "out of scope reflow\n",
-      "orchestrator/tick.mjs": "// out of scope\n",
-    };
-    setPolicy("{}\n"); // key absent → advisory
-    const adv = handoffSpec({ ticket: "WM-7189" });
-    const a = await dispatch({
-      spec: adv,
-      description,
-      adapter: agent({ files }),
-    });
-    expect(a.summary.terminalState).toBe("COMPLETED");
-    expect(a.summary.handoff.ownedPathsDeviations).toEqual([
-      "docs/stray.md",
-      "orchestrator/tick.mjs",
-      "run-tests.sh",
-    ]);
-    const result = JSON.parse(
-      a.db
-        .query(`SELECT result_json FROM results WHERE run_id = ?`)
-        .get(adv.runId).result_json,
-    );
-    expect(result.verification.checks).toContain(
-      "owned_paths_deviations_advisory",
-    );
-    const body = a.calls.comments[0].body;
-    expect(body).toContain("- Files: 4 changed vs origin/develop");
-    expect(body).toContain("- Owned Paths deviations (advisory): 3 file(s)");
-    expect(body).toContain("  - `docs/stray.md`");
-    expect(body).toContain("  - `orchestrator/tick.mjs`");
-    expect(body).toContain("  - `run-tests.sh`");
-    expect(body).not.toContain("  - `src/feature/impl.txt`");
-
-    setPolicy("dispatch:\n  owned_paths_conformance: strict\n");
-    try {
-      const strict = handoffSpec({ ticket: "WM-7190" });
-      const s = await dispatch({
-        spec: strict,
+  sandboxTest(
+    "a change under event-runtime/web/src/** runs the web build and a red build refuses the handoff",
+    async () => {
+      const description = withCommand("bash run-tests.sh");
+      const files = {
+        "run-tests.sh": "echo ok\n",
+        "event-runtime/web/src/index.ts": "export const x: number = 2;\n",
+      };
+      // Green build: gate runs it (marker written) and records the check.
+      const green = handoffSpec({ ticket: "WM-7184" });
+      const g = await dispatch({
+        spec: green,
         description,
         adapter: agent({ files }),
       });
-      expect(s.summary.terminalState).toBe("FAILED");
-      expect(s.summary.reasonCode).toBe("handoff_owned_paths_violation");
-      expect(s.summary.detail).toContain("docs/stray.md");
-      expect(s.calls.returned).toHaveLength(1);
-      expect(s.calls.held).toHaveLength(1);
-      expect(s.calls.returned[0].body).toContain(
-        "Owned Paths deviations (strict): 3 file(s)",
+      expect(g.summary.terminalState).toBe("COMPLETED");
+      // The chroot maps the worktree at /workspace; when this suite itself runs
+      // inside a handoff sandbox the command is passed through and keeps the
+      // real path. Either way the build ran in the web directory, not the root.
+      expect(g.summary.handoff.webBuild.tail).toContain(
+        `web_built:${insideHandoffSandbox() ? "" : "/workspace"}`,
       );
-    } finally {
-      setPolicy("{}\n");
-    }
+      expect(g.summary.handoff.webBuild.tail).toContain("/event-runtime/web");
+      const result = JSON.parse(
+        g.db
+          .query(`SELECT result_json FROM results WHERE run_id = ?`)
+          .get(green.runId).result_json,
+      );
+      expect(result.verification.checks).toEqual(
+        expect.arrayContaining(["ticket_verify_passed", "web_build_passed"]),
+      );
+      expect(g.calls.comments[0].body).toContain(
+        "- Web build (event-runtime/web/src/** changed): `cd event-runtime/web && bun run build` — exit 0 (pass)",
+      );
 
-    // Conformant diff: no deviations, the check is recorded.
-    const clean = handoffSpec({ ticket: "WM-7191" });
-    const c = await dispatch({
-      spec: clean,
-      description: `## Owned Paths\n- src/feature/**\n- run-tests.sh\n\n## Verification Command\n\n\`\`\`\nbash run-tests.sh\n\`\`\`\n`,
-      adapter: agent({
-        files: { "run-tests.sh": "echo ok\n", "src/feature/y.txt": "y\n" },
-      }),
-    });
-    expect(c.summary.terminalState).toBe("COMPLETED");
-    expect(c.calls.comments[0].body).toContain(
-      "- Owned Paths deviations: none",
-    );
-  });
+      // Red build (tsc-style error) even though the ticket's command is green.
+      const red = handoffSpec({ ticket: "WM-7185" });
+      const r = await dispatch({
+        spec: red,
+        description,
+        adapter: agent({
+          files: {
+            ...files,
+            "event-runtime/web/package.json":
+              '{"name":"web","private":true,"scripts":{"build":"echo \'src/index.ts(1,14): error TS6133: unused local\' >&2; exit 2"}}\n',
+          },
+        }),
+      });
+      expect(r.summary.terminalState).toBe("FAILED");
+      expect(r.summary.reasonCode).toBe("handoff_verification_failed");
+      expect(r.summary.detail).toContain("web_build_failed");
+      expect(r.summary.detail).toContain("error TS6133");
+      expect(r.summary.handoff.webBuild.exitCode).toBe(2);
+      expect(r.calls.held).toHaveLength(1);
+      expect(r.calls.returned).toHaveLength(1);
+
+      // No web/src change: the build is not run at all.
+      const skip = handoffSpec({ ticket: "WM-7186" });
+      const s = await dispatch({
+        spec: skip,
+        description,
+        adapter: agent({
+          files: { "run-tests.sh": "echo ok\n", "src/feature/x.txt": "x\n" },
+        }),
+      });
+      expect(s.summary.terminalState).toBe("COMPLETED");
+      expect(s.summary.handoff.webBuild).toBeNull();
+      expect(s.calls.comments[0].body).toContain("- Web build: skipped");
+    },
+  );
+
+  sandboxTest(
+    "the Handoff Verification line is worker-authored: the agent's 'pass' claim cannot override an observed red, and rides below labelled agent-reported",
+    async () => {
+      const description = withCommand("bash run-tests.sh");
+      const failing = handoffSpec({ ticket: "WM-7187" });
+      const f = await dispatch({
+        spec: failing,
+        description,
+        adapter: agent({
+          files: { "run-tests.sh": 'echo "regression in totals"; exit 3\n' },
+          claim: {
+            command: "bash run-tests.sh",
+            passed: true,
+            output: "pass, 2045 tests green",
+          },
+        }),
+      });
+      expect(f.summary.terminalState).toBe("FAILED");
+      const body = f.calls.returned[0].body;
+      const verificationLine = body
+        .split("\n")
+        .find((l) => l.startsWith("- Verification:"));
+      expect(verificationLine).toBe(
+        "- Verification: `bash run-tests.sh` — exit 3 (FAIL)",
+      );
+      expect(body).toContain("regression in totals");
+      expect(body).toContain(
+        "- agent-reported: `bash run-tests.sh` — pass, pass, 2045 tests green",
+      );
+      expect(body).not.toContain("- Verification: `bash run-tests.sh` — pass");
+
+      // Green run: the line still comes from the worker's observation, and a
+      // claim naming a different command is quoted only as agent-reported.
+      const passing = handoffSpec({ ticket: "WM-7188" });
+      const p = await dispatch({
+        spec: passing,
+        description,
+        adapter: agent({
+          files: { "run-tests.sh": 'echo "42 tests, 0 failures"\n' },
+          claim: {
+            command: "bun test --only-my-file",
+            passed: true,
+            output: "green",
+          },
+        }),
+      });
+      expect(p.summary.terminalState).toBe("COMPLETED");
+      const okBody = p.calls.comments[0].body;
+      expect(
+        okBody.split("\n").find((l) => l.startsWith("- Verification:")),
+      ).toBe("- Verification: `bash run-tests.sh` — exit 0 (pass)");
+      expect(okBody).toContain("42 tests, 0 failures");
+      expect(okBody).toContain(
+        "- agent-reported: `bun test --only-my-file` — pass, green",
+      );
+    },
+  );
+
+  sandboxTest(
+    "Owned Paths deviations are computed from the diff: listed under advisory (default), refused under strict",
+    async () => {
+      const description = withCommand("bash run-tests.sh");
+      const files = {
+        "run-tests.sh": "echo ok\n",
+        "src/feature/impl.txt": "done\n",
+        "docs/stray.md": "out of scope reflow\n",
+        "orchestrator/tick.mjs": "// out of scope\n",
+      };
+      setPolicy("{}\n"); // key absent → advisory
+      const adv = handoffSpec({ ticket: "WM-7189" });
+      const a = await dispatch({
+        spec: adv,
+        description,
+        adapter: agent({ files }),
+      });
+      expect(a.summary.terminalState).toBe("COMPLETED");
+      expect(a.summary.handoff.ownedPathsDeviations).toEqual([
+        "docs/stray.md",
+        "orchestrator/tick.mjs",
+        "run-tests.sh",
+      ]);
+      const result = JSON.parse(
+        a.db
+          .query(`SELECT result_json FROM results WHERE run_id = ?`)
+          .get(adv.runId).result_json,
+      );
+      expect(result.verification.checks).toContain(
+        "owned_paths_deviations_advisory",
+      );
+      const body = a.calls.comments[0].body;
+      expect(body).toContain("- Files: 4 changed vs origin/develop");
+      expect(body).toContain("- Owned Paths deviations (advisory): 3 file(s)");
+      expect(body).toContain("  - `docs/stray.md`");
+      expect(body).toContain("  - `orchestrator/tick.mjs`");
+      expect(body).toContain("  - `run-tests.sh`");
+      expect(body).not.toContain("  - `src/feature/impl.txt`");
+
+      setPolicy("dispatch:\n  owned_paths_conformance: strict\n");
+      try {
+        const strict = handoffSpec({ ticket: "WM-7190" });
+        const s = await dispatch({
+          spec: strict,
+          description,
+          adapter: agent({ files }),
+        });
+        expect(s.summary.terminalState).toBe("FAILED");
+        expect(s.summary.reasonCode).toBe("handoff_owned_paths_violation");
+        expect(s.summary.detail).toContain("docs/stray.md");
+        expect(s.calls.returned).toHaveLength(1);
+        expect(s.calls.held).toHaveLength(1);
+        expect(s.calls.returned[0].body).toContain(
+          "Owned Paths deviations (strict): 3 file(s)",
+        );
+      } finally {
+        setPolicy("{}\n");
+      }
+
+      // Conformant diff: no deviations, the check is recorded.
+      const clean = handoffSpec({ ticket: "WM-7191" });
+      const c = await dispatch({
+        spec: clean,
+        description: `## Owned Paths\n- src/feature/**\n- run-tests.sh\n\n## Verification Command\n\n\`\`\`\nbash run-tests.sh\n\`\`\`\n`,
+        adapter: agent({
+          files: { "run-tests.sh": "echo ok\n", "src/feature/y.txt": "y\n" },
+        }),
+      });
+      expect(c.summary.terminalState).toBe("COMPLETED");
+      expect(c.calls.comments[0].body).toContain(
+        "- Owned Paths deviations: none",
+      );
+    },
+  );
 });
 
 // The describe block above only exercises the handoff gate through mocked

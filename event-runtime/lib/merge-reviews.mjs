@@ -276,15 +276,20 @@ function normalizeListedPr(raw, baseSha, github) {
 
 function positiveIntegerMinutes(env, name, defaultMinutes) {
   const raw = env[name];
+  if (raw === undefined || raw === "") return defaultMinutes;
   const value = Number(raw);
   if (Number.isInteger(value) && value > 0) return value;
-  if (raw !== undefined && !invalidMinuteConfigWarnings.has(name)) {
+  if (!invalidMinuteConfigWarnings.has(name)) {
     invalidMinuteConfigWarnings.add(name);
     console.warn(
       `invalid ${name}=${JSON.stringify(raw)}; using default ${defaultMinutes} minutes`,
     );
   }
   return defaultMinutes;
+}
+
+export function resetInvalidMinuteConfigWarnings() {
+  invalidMinuteConfigWarnings.clear();
 }
 
 export function rebaseSkipFreshCiMinutes(env = process.env) {

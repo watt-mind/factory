@@ -26,6 +26,13 @@ running `merge-review@1` proposal or run already exists at the same
 queued as `planRequests[]` so `merge-plan@1` can batch them. `plan[]` on a
 scan artifact is always empty.
 
+The scan also suppresses a prior refused merge-fix finding for
+`FACTORY_MERGE_FIX_REFUSAL_COOLDOWN_MINUTES` (default 15 minutes). The durable
+cooldown, `FACTORY_MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MINUTES` (default 360
+minutes), applies to `merge_fix_ticket_escalated` and
+`merge_fix_ticket_security` refusals. Its refusal lookup is bounded by the
+larger cooldown, so raising either setting widens the scan window for both.
+
 When `prNumbers` is absent, enumerate **all** open PRs and consider every
 base-targeting, non-draft PR. Emit an `escalate[]` item for every non-draft PR
 with an identifiable ticket that targets a different base, and name every

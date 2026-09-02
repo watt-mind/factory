@@ -54,6 +54,15 @@ isolated worktree for the ticket. This is not a general implementation run.
      gh api "repos/<github>/commits/${expectedRemoteSha}/check-runs?per_page=100"
      ```
 
+     Refused merge-fix findings are retried after
+     `FACTORY_MERGE_FIX_REFUSAL_COOLDOWN_MINUTES` (default `15` minutes).
+     Refusals with reason `merge_fix_ticket_escalated` or
+     `merge_fix_ticket_security` use the longer
+     `FACTORY_MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MINUTES` (default `360`
+     minutes) because they need a human to clear a blocker. The refusal lookup
+     is bounded by the larger of these two cooldowns, so raising either one
+     widens the scan window for both kinds of refusal.
+
      A `CONFLICTING` PR still needs a rebase even when CI is running or fresh.
      Query the live PR labels too (`gh pr view <pr> --repo <github> --json
 labels`); an `ai:landing` label always blocks this mechanical rebase with
