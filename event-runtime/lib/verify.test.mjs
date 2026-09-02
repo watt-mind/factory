@@ -548,7 +548,9 @@ describe("verifyResult", () => {
     writeFileSync(trackedPath, trackedResult, "utf8");
     execFileSync("git", ["init", "--quiet", checkout]);
     execFileSync("git", ["-C", checkout, "add", "result.json"]);
-    const strayPath = path.join(physicalParent, "result.json");
+    // Match the physical sibling path that readResultFile() probes. TMPDIR may
+    // itself be symlinked on hosted runners, so physicalParent is not reliable.
+    const strayPath = path.join(realpathSync(checkout), "..", "result.json");
     const events = [];
     writeFileSync(
       strayPath,

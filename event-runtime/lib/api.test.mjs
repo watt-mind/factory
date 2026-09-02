@@ -752,7 +752,9 @@ describe("bearer-token auth on the control API (WM-1152)", () => {
           );
         });
         req.on("error", reject);
-        req.end();
+        // Send the declared bytes too: Bun 1.3's node:http client rewrites an
+        // empty request's Content-Length, which otherwise bypasses this guard.
+        req.end(Buffer.alloc(1024 * 1024 + 1));
       });
       expect(res.status).toBe(413);
       expect(res.body).toEqual({
