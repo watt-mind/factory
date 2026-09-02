@@ -800,8 +800,12 @@ describe("work chain: scan → chained dispatch proposal (WM-110, WM-119)", () =
       planAll();
 
       const dispatch = await approveNext("dispatch@1");
-      expect(dispatch.summary.terminalState).toBe("COMPLETED");
-      expect(dispatch.summary.reasonCode).toBe("ok");
+      // GH-2281: state and reason in one assertion — a bare `Expected
+      // "COMPLETED", received "FAILED"` hides whether this is a real bug or an
+      // environment fault (e.g. `sandbox_unavailable`).
+      expect(
+        `${dispatch.summary.terminalState} ${dispatch.summary.reasonCode}`,
+      ).toBe("COMPLETED ok");
       const resultRow = db
         .query(`SELECT result_json FROM results WHERE run_id = ?`)
         .get(dispatch.runId);

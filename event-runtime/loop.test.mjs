@@ -191,7 +191,15 @@ async function dispatchTo(outcome, eventId, ticket) {
       dispatch: openWorld,
     },
   );
-  expect(summary.terminalState).toBe("COMPLETED");
+  // GH-2281: assert on state *and* reason together. A bare terminal-state
+  // assertion reports only `Expected "COMPLETED", received "FAILED"`, which
+  // hides whether the run tripped a real bug or an environment fault such as
+  // `sandbox_unavailable` — the exact ambiguity that made the hosted-lane
+  // failure expensive to diagnose.
+  if (summary.terminalState !== "COMPLETED")
+    throw new Error(
+      `dispatch to ${outcome} ended ${summary.terminalState} (${summary.reasonCode ?? "no reasonCode"})`,
+    );
   return { db, planAll, runId: approved.runId };
 }
 

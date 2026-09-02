@@ -56,9 +56,17 @@ const mergeArtifact = {
   summary: "Thirteen open PRs; no PR met the MERGE bar.",
 };
 
-beforeEach(() => localStorage.removeItem(ARTIFACT_RAW_KEY));
+// The run-chip href is built from `window.location.hash`, so a case that does
+// not pin the hash inherits whatever the previously executed case left behind.
+// Which case ran last differs between the self-hosted and GitHub-hosted lanes,
+// so pin it on both edges rather than trusting the ambient value (GH-2281).
+beforeEach(() => {
+  window.location.hash = "#/";
+  localStorage.removeItem(ARTIFACT_RAW_KEY);
+});
 afterEach(() => {
   cleanup();
+  window.location.hash = "#/";
   localStorage.removeItem(ARTIFACT_RAW_KEY);
 });
 
@@ -234,7 +242,7 @@ describe("ArtifactView with the shipped merge-scan view", () => {
     expect(r.queryByText("noopReason")).toBeNull();
   });
 
-  test("run chips call onJumpRun when the host provides it, else link to #/runs/<id> with project context", () => {
+  test("run chips call onJumpRun when the host provides it, else link to #/runs/<id> carrying the current project", () => {
     const view: ArtifactViewDoc = {
       schemaVersion: "factory.artifact-view/v1",
       sections: [
@@ -253,11 +261,23 @@ describe("ArtifactView with the shipped merge-scan view", () => {
     fireEvent.click(r.getByRole("button", { name: "run_44fa5716" }));
     expect(jumped).toEqual(["run_44fa5716-0304-49b1-8b65-a45500d0d784"]);
     cleanup();
-    window.location.hash = "#/runs?project=factory";
+
+    // No project in the current hash — the link carries none either.
+    window.location.hash = "#/artifacts";
     const r2 = render(<ArtifactView artifact={artifact} view={view} />);
     expect(
       (
         r2.getByRole("link", { name: "run_44fa5716" }) as HTMLAnchorElement
+      ).getAttribute("href"),
+    ).toBe("#/runs/run_44fa5716-0304-49b1-8b65-a45500d0d784");
+    cleanup();
+
+    // A project in the current hash is carried across the jump.
+    window.location.hash = "#/artifacts?project=factory";
+    const r3 = render(<ArtifactView artifact={artifact} view={view} />);
+    expect(
+      (
+        r3.getByRole("link", { name: "run_44fa5716" }) as HTMLAnchorElement
       ).getAttribute("href"),
     ).toBe("#/runs/run_44fa5716-0304-49b1-8b65-a45500d0d784?project=factory");
   });
