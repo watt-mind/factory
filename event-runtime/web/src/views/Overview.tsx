@@ -25,11 +25,9 @@ import { EMPTY, formatBytes, formatRelative } from "../format";
 import type { WorkerHealthFilter } from "./Workers";
 import {
   Button,
-  Disclosure,
   Dialog,
   EVENT_STATUS_HUES,
   STATE_HUES,
-  JsonBlock,
   JumpLink,
   StateBadge,
   StateIcon,
@@ -52,6 +50,11 @@ const OverviewNeedsYou = lazy(() =>
 const PanelGrid = lazy(() =>
   import("../components/PanelGrid").then(({ PanelGrid }) => ({
     default: PanelGrid,
+  })),
+);
+const EventPanel = lazy(() =>
+  import("../components/ArtifactView").then((module) => ({
+    default: module.EventPanel,
   })),
 );
 
@@ -896,6 +899,11 @@ export function Overview({
     queryKey: ["outbox"],
     queryFn: () => api.outbox(15),
     ...refetchIntervals.fast,
+  });
+  const agentsQ = useQuery({
+    queryKey: ["agents"],
+    queryFn: api.agents,
+    ...refetchIntervals.secondary,
   });
   const proposalsForDeck = useQuery({
     queryKey: ["proposals"],
@@ -2198,6 +2206,8 @@ export function Overview({
                     string,
                     unknown
                   >;
+                  // Keep the compact legacy cue when no resolved event view is
+                  // available; EventPanel supplies a view's summary/status.
                   const summary =
                     typeof payload.outcome === "string"
                       ? payload.outcome
@@ -2249,9 +2259,30 @@ export function Overview({
                           </span>
                         )}
                       </div>
-                      <Disclosure label="event JSON">
-                        <JsonBlock value={o.event} />
-                      </Disclosure>
+                      <div className="mt-2">
+                        <Suspense
+                          fallback={
+                            <div className="text-(--text-faint)">
+                              Loading event view…
+                            </div>
+                          }
+                        >
+                          <EventPanel
+                            envelope={o.event}
+                            agents={agentsQ.data?.agents}
+                            onJumpRun={onJumpRun}
+                            onJumpChain={(correlationId) =>
+                              onJumpEvents({
+                                source: "chain",
+                                eventId: correlationId,
+                              })
+                            }
+                            onJumpArtifact={(sha256) => {
+                              window.location.hash = `#/artifact/${sha256}`;
+                            }}
+                          />
+                        </Suspense>
+                      </div>
                     </div>
                   );
                 })}

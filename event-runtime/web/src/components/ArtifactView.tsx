@@ -10,9 +10,12 @@ import { Button as PrimitiveButton } from "./ui";
  * display options) and falls back to `JsonBlock` when no view applies.
  */
 import { Fragment, useMemo, useState, type ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { api, artifactUrl } from "../api";
 import { hashPath, hashProject, withProject } from "../hash";
 import {
   headerFor,
+  inputViewOf,
   sectionsFor,
   TONE_HUES,
   viewApplies,
@@ -22,7 +25,11 @@ import {
   type SectionModel,
   type TableRow,
 } from "../lib/artifactView";
-import type { ArtifactTone, ArtifactView as ArtifactViewDoc } from "../types";
+import type {
+  AgentDef,
+  ArtifactTone,
+  ArtifactView as ArtifactViewDoc,
+} from "../types";
 import {
   DisclosureChevron,
   JsonBlock,
@@ -779,5 +786,259 @@ export function ArtifactPanel({
         </div>
       }
     />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Event envelope panel
+// ---------------------------------------------------------------------------
+
+type Envelope = Record<string, unknown>;
+
+const asRecord = (value: unknown): Envelope | null =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Envelope)
+    : null;
+
+/** Accept the two durable hash spellings used in event/result payloads. */
+function artifactDigest(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const match = /^(?:sha256:)?([a-f0-9]{64})$/.exec(value);
+  return match?.[1] ?? null;
+}
+
+function text(value: unknown): string | null {
+  return typeof value === "string" || typeof value === "number"
+    ? String(value)
+    : null;
+}
+
+function routeAgent(
+  type: string,
+  agents: readonly AgentDef[],
+): AgentDef | null {
+  // The registry index is authoritative, including when it deliberately names
+  // an agent without an input view.
+  const indexed = agents
+    .flatMap((agent) => agent.eventTypes.map((route) => ({ agent, route })))
+    .find(({ route }) => route.type === type)?.agent;
+  return indexed ?? null;
+}
+
+/**
+ * One shared event renderer for Events and Outbox. It keeps the immutable
+ * envelope glance outside the View/Raw switch so an agent view never hides
+ * provenance, while Raw always round-trips the complete envelope.
+ */
+export function EventPanel({
+  envelope,
+  agents = [],
+  requestedAgent: requestedAgentProp,
+  runId: suppliedRunId,
+  onJumpRun,
+  onJumpArtifact,
+  onJumpChain,
+}: {
+  envelope: unknown;
+  agents?: readonly AgentDef[];
+  /** The registry's top-level route resolution, when the host has it. */
+  requestedAgent?: AgentDef | null;
+  runId?: string | null;
+  onJumpRun?: (runId: string) => void;
+  onJumpArtifact?: (sha256: string) => void;
+  onJumpChain?: (correlationId: string) => void;
+}) {
+  const [raw, setRawState] = useState(loadArtifactRaw);
+  const record = asRecord(envelope);
+  const payload = asRecord(record?.payload);
+  const type = text(record?.type) ?? "unknown event";
+  const source = text(record?.source);
+  const subject = text(record?.subject);
+  const occurredAt = text(record?.occurredAt);
+  const correlationId = text(record?.correlationId);
+  const causationId = text(record?.causationId);
+  const runId =
+    suppliedRunId ?? text(record?.runId) ?? text(payload?.runId) ?? null;
+  const digest = artifactDigest(payload?.artifactHash ?? record?.artifactHash);
+  const requestedAgent =
+    requestedAgentProp === undefined
+      ? routeAgent(type, agents)
+      : requestedAgentProp;
+  const runQ = useQuery({
+    queryKey: ["event-panel-run", runId],
+    queryFn: () => api.run(runId!),
+    enabled: Boolean(runId && digest),
+    staleTime: 30_000,
+  });
+  const resultAgent = agents.find(
+    (agent) => agent.ref === runQ.data?.run.spec.agent,
+  );
+  const artifactQ = useQuery({
+    queryKey: ["event-panel-artifact", digest],
+    queryFn: async () => {
+      const response = await fetch(artifactUrl(digest!));
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const text = await response.text();
+      try {
+        return JSON.parse(text);
+      } catch {
+        throw new Error("artifact is not valid JSON");
+      }
+    },
+    enabled: Boolean(digest && runId),
+    staleTime: Infinity,
+  });
+  const setRaw = (next: boolean) => {
+    saveArtifactRaw(next);
+    setRawState(next);
+  };
+  const view = digest
+    ? resultAgent?.outputView
+    : inputViewOf(requestedAgent?.outputView);
+  const rendered = digest ? artifactQ.data : payload;
+  const unavailable =
+    digest &&
+    (artifactQ.isError
+      ? `Result artifact unavailable: ${artifactQ.error instanceof Error ? artifactQ.error.message : "request failed"}`
+      : artifactQ.isPending
+        ? "Loading result artifact…"
+        : null);
+
+  return (
+    <div data-event-panel className="space-y-3 text-[12px]">
+      <dl className="grid grid-cols-[minmax(0,7rem)_1fr] gap-x-3 gap-y-1">
+        <dt className="text-(--text-faint)">type</dt>
+        <dd className="mono break-all">{type}</dd>
+        <dt className="text-(--text-faint)">source</dt>
+        <dd>{source ?? "—"}</dd>
+        <dt className="text-(--text-faint)">subject</dt>
+        <dd>{subject ?? "—"}</dd>
+        <dt className="text-(--text-faint)">occurredAt</dt>
+        <dd>{occurredAt ?? "—"}</dd>
+        <dt className="text-(--text-faint)">correlation</dt>
+        <dd>
+          {correlationId && onJumpChain ? (
+            <JumpLink onClick={() => onJumpChain(correlationId)}>
+              {correlationId}
+            </JumpLink>
+          ) : (
+            (correlationId ?? "—")
+          )}
+        </dd>
+        <dt className="text-(--text-faint)">causation</dt>
+        <dd>
+          {causationId && onJumpRun ? (
+            <JumpLink onClick={() => onJumpRun(causationId)}>
+              {causationId}
+            </JumpLink>
+          ) : (
+            (causationId ?? "—")
+          )}
+        </dd>
+        {runId && (
+          <>
+            <dt className="text-(--text-faint)">run</dt>
+            <dd>
+              {onJumpRun ? (
+                <JumpLink onClick={() => onJumpRun(runId)}>{runId}</JumpLink>
+              ) : (
+                runId
+              )}
+            </dd>
+          </>
+        )}
+        {digest && (
+          <>
+            <dt className="text-(--text-faint)">artifact</dt>
+            <dd>
+              {onJumpArtifact ? (
+                <JumpLink onClick={() => onJumpArtifact(digest)}>
+                  {digest}
+                </JumpLink>
+              ) : (
+                digest
+              )}
+            </dd>
+          </>
+        )}
+      </dl>
+      <div className="flex justify-end">
+        <RawToggle raw={raw} onChange={setRaw} />
+      </div>
+      {raw ? (
+        <JsonBlock value={envelope} />
+      ) : unavailable ? (
+        <div
+          role="status"
+          className="rounded-md border border-(--border) p-2 text-(--text-faint)"
+        >
+          {unavailable}
+        </div>
+      ) : view && rendered ? (
+        <ArtifactView
+          artifact={rendered}
+          schema={
+            digest ? resultAgent?.outputSchema : requestedAgent?.inputSchema
+          }
+          view={view}
+          onJumpRun={onJumpRun}
+        />
+      ) : payload ? (
+        <PayloadFields payload={payload} />
+      ) : (
+        <div className="text-(--text-faint)">No event payload.</div>
+      )}
+    </div>
+  );
+}
+
+/** Safe, useful generic presentation when no route-side view applies. */
+function PayloadFields({ payload }: { payload: Envelope }) {
+  const repo = text(payload.repo);
+  return (
+    <dl className="space-y-1.5" aria-label="Payload">
+      {Object.entries(payload).map(([key, value]) => {
+        const valueText = text(value);
+        let rendered: ReactNode = valueText ?? (
+          <span className="mono">{JSON.stringify(value)}</span>
+        );
+        if (key === "repo" && valueText) {
+          rendered = (
+            <a
+              className="text-(--accent) hover:underline"
+              href={`https://github.com/${valueText}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {valueText}
+            </a>
+          );
+        } else if (key === "runId" && valueText && repo) {
+          rendered = (
+            <a
+              className="text-(--accent) hover:underline"
+              href={`https://github.com/${repo}/actions/runs/${valueText}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              run #{valueText}
+            </a>
+          );
+        }
+        return (
+          <div
+            key={key}
+            className="grid grid-cols-[minmax(0,9rem)_1fr] gap-x-3"
+          >
+            <dt className="truncate text-(--text-faint)" title={key}>
+              {key}
+            </dt>
+            <dd className="min-w-0 break-words text-(--text-dim)">
+              {rendered}
+            </dd>
+          </div>
+        );
+      })}
+    </dl>
   );
 }

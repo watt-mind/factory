@@ -4,7 +4,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { retriggerEnvelope } from "../templates";
 import {
@@ -43,7 +43,6 @@ import { ScopeCaption } from "../components/ContextTabs";
 import type {
   AdmittedEvent,
   AgentDef,
-  ArtifactView,
   EventFocus,
   Proposal,
   RunSummary,
@@ -74,7 +73,6 @@ import {
   ListToolbar,
   ListPane,
   DetailPane,
-  JsonBlock,
   JumpLink,
   KV,
   ListEmpty,
@@ -91,17 +89,9 @@ import {
   shortId,
 } from "../components/ui";
 import { Button as PrimitiveButton } from "../components/ui";
-
-/**
- * The envelope renderer pulls in the schema-derived ArtifactView (WM-455) for
- * routes that declare an input view, and Events is an eager view with a
- * budgeted entry chunk (vite.config.ts). Fetch it on demand, exactly as
- * RunDetailBlocks does for the same renderer; until the chunk lands the raw
- * JSON block stands in, which is what the detail pane showed before.
- */
-const EventEnvelopeView = lazy(() =>
-  import("../components/EventEnvelopeView").then((m) => ({
-    default: m.EventEnvelopeView,
+const EventPanel = lazy(() =>
+  import("../components/ArtifactView").then((module) => ({
+    default: module.EventPanel,
   })),
 );
 
@@ -534,37 +524,22 @@ export function Events({
     }
     return schemas;
   }, [agentsQ.data]);
-  // Event routes identify the producer whose output view owns the matching
-  // input presentation. Keep this alongside the schema lookup above so both
-  // registry shapes (top-level routes and per-agent routes) remain useful.
-  const inputViewByEventType = useMemo(() => {
+  const requestedAgentByEventType = useMemo(() => {
     const registry = agentsQ.data;
     const byRef = new Map(registry?.agents.map((agent) => [agent.ref, agent]));
-    const views = new Map<string, ArtifactView>();
-    const claimed = new Set<string>();
-    const add = (type: string, agent: AgentDef | undefined) => {
-      const input = agent?.outputView?.input;
-      if (input && agent?.outputView) {
-        views.set(type, {
-          schemaVersion: agent.outputView.schemaVersion,
-          ...input,
-          sections: input.sections ?? [],
-        });
-      }
-    };
-    // A top-level route claims the type even when the named agent has no
-    // input view. The per-agent fallback must not then attach a different
-    // agent's presentation to a type the index already assigned.
+    const resolved = new Map<string, AgentDef | null>();
     for (const route of registry?.eventTypes ?? []) {
-      claimed.add(route.type);
-      add(route.type, route.agent ? byRef.get(route.agent) : undefined);
+      resolved.set(
+        route.type,
+        route.agent ? (byRef.get(route.agent) ?? null) : null,
+      );
     }
     for (const agent of registry?.agents ?? []) {
       for (const route of agent.eventTypes) {
-        if (!claimed.has(route.type)) add(route.type, agent);
+        if (!resolved.has(route.type)) resolved.set(route.type, agent);
       }
     }
-    return views;
+    return resolved;
   }, [agentsQ.data]);
   const decisions = useMemo(() => {
     const byId = new Map<string, Proposal>();
@@ -1776,11 +1751,21 @@ export function Events({
           })()}
 
           <Section title="Envelope">
-            <Suspense fallback={<JsonBlock value={sel.envelope} />}>
-              <EventEnvelopeView
+            <Suspense
+              fallback={
+                <div className="text-(--text-faint)">Loading event view…</div>
+              }
+            >
+              <EventPanel
                 envelope={sel.envelope}
-                inputView={inputViewByEventType.get(sel.type)}
-                now={now}
+                agents={agentsQ.data?.agents}
+                requestedAgent={requestedAgentByEventType.get(sel.type)}
+                runId={sel.runId}
+                onJumpRun={onJumpRun}
+                onJumpChain={onJumpChain}
+                onJumpArtifact={(sha256) => {
+                  window.location.hash = `#/artifact/${sha256}`;
+                }}
               />
             </Suspense>
           </Section>

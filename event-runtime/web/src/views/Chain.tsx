@@ -13,7 +13,15 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useQueries, useQuery } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { api, ApiError } from "../api";
 import { keyGuard, refetchIntervals, useNow } from "../hooks";
 import { hashSearch } from "../hash";
@@ -59,6 +67,12 @@ import {
   shortId,
 } from "../components/ui";
 import type { RunDetail } from "../types";
+
+const EventPanel = lazy(() =>
+  import("../components/ArtifactView").then((module) => ({
+    default: module.EventPanel,
+  })),
+);
 
 // React Flow treats a unitless number as a ratio; the ticket's 24 means px.
 const FIT_PADDING = "24px" as const;
@@ -260,6 +274,22 @@ export function Chain({
     ...refetchIntervals.primary,
     retry: (count, err) =>
       !(err instanceof ApiError && err.status === 404) && count < 2,
+  });
+  // Chain rows intentionally remain compact server projections. Reuse the
+  // admitted-event envelope when it is in the bounded recent-event window;
+  // older envelopes retain an explicit Events escape hatch until #2285 adds
+  // them to the chain response itself.
+  const eventEnvelopesQ = useQuery({
+    queryKey: ["events", "chain-envelopes"],
+    queryFn: () => api.events(undefined, { limit: 500 }),
+    enabled: Boolean(focusNodeId),
+    ...refetchIntervals.secondary,
+  });
+  const agentsQ = useQuery({
+    queryKey: ["agents"],
+    queryFn: api.agents,
+    enabled: Boolean(focusNodeId),
+    ...refetchIntervals.secondary,
   });
   const now = useNow();
   const notFound =
@@ -503,6 +533,16 @@ export function Chain({
   const selected: ChainNode | undefined = graph?.nodes.find(
     (n) => n.id === focusNodeId,
   );
+  const selectedEnvelope = useMemo(() => {
+    if (selected?.kind !== "chainEvent") return null;
+    return (
+      eventEnvelopesQ.data?.events.find(
+        (event) =>
+          event.source === selected.event.source &&
+          event.eventId === selected.event.eventId,
+      ) ?? null
+    );
+  }, [eventEnvelopesQ.data, selected]);
 
   const timelineListRef = useRef<HTMLOListElement | null>(null);
   const revealSelected = () => {
@@ -1036,6 +1076,38 @@ export function Chain({
                   <KV k="repos" v={selected.event.repos.join(", ")} />
                 )}
               </Section>
+              {selectedEnvelope ? (
+                <Section title="Envelope">
+                  <Suspense
+                    fallback={
+                      <div className="text-(--text-faint)">
+                        Loading event view…
+                      </div>
+                    }
+                  >
+                    <EventPanel
+                      envelope={selectedEnvelope.envelope}
+                      agents={agentsQ.data?.agents}
+                      runId={selectedEnvelope.runId}
+                      onJumpRun={onJumpRun}
+                      onJumpChain={(id) => {
+                        window.location.hash = `#/chain/${id}`;
+                      }}
+                      onJumpArtifact={(sha256) => {
+                        window.location.hash = `#/artifact/${sha256}`;
+                      }}
+                    />
+                  </Suspense>
+                </Section>
+              ) : (
+                <Section title="Envelope">
+                  <div className="text-[12px] text-(--text-faint)">
+                    Complete envelope unavailable in this chain response. Open
+                    the event in Events to inspect its View or Raw form.
+                    Historical chain envelopes are pending #2285.
+                  </div>
+                </Section>
+              )}
             </>
           )}
           {selected.kind === "chainRun" && (

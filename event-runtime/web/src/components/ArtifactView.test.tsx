@@ -4,8 +4,14 @@ import { cleanup, fireEvent, render, within } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import type { ArtifactView as ArtifactViewDoc } from "../types";
-import { ARTIFACT_RAW_KEY, ArtifactPanel, ArtifactView } from "./ArtifactView";
+import {
+  ARTIFACT_RAW_KEY,
+  ArtifactPanel,
+  ArtifactView,
+  EventPanel,
+} from "./ArtifactView";
 import { inputViewOf } from "../lib/artifactView";
+import { createAgentsFixture, renderWithClient } from "../test-render";
 
 const AGENTS = path.resolve(import.meta.dir, "../../../agents");
 const readView = (name: string): ArtifactViewDoc =>
@@ -325,6 +331,66 @@ describe("input view (WM-897)", () => {
     expect(r2.queryByText(/WM-108/)).toBeNull();
     expect(r2.queryByText(/already-queued/)).toBeNull();
     expect(r2.getByText("Input")).toBeTruthy();
+  });
+});
+
+describe("EventPanel", () => {
+  test("renders a requested input view and Raw round-trips the full envelope", () => {
+    const dispatchView = readView("dispatch");
+    const r = renderWithClient(
+      <EventPanel
+        envelope={{
+          schemaVersion: "factory.event/v1",
+          eventId: "evt_dispatch",
+          type: "factory.work.requested",
+          source: "operator",
+          subject: "factory",
+          occurredAt: "2026-09-02T12:00:00.000Z",
+          correlationId: "evt_dispatch",
+          payload: { repo: "factory", ticket: "WM-856" },
+        }}
+        agents={
+          createAgentsFixture({
+            agents: [
+              {
+                ref: "dispatch@1",
+                outputView: dispatchView,
+                eventTypes: [{ type: "factory.work.requested" }],
+              },
+            ] as any,
+          }).agents
+        }
+      />,
+    );
+    expect(r.getByText("Input")).toBeTruthy();
+    expect(r.getByRole("link", { name: "WM-856" })).toBeTruthy();
+    fireEvent.click(
+      within(r.getByRole("group", { name: "Artifact rendering" })).getByRole(
+        "button",
+        { name: "Raw" },
+      ),
+    );
+    expect(r.container.querySelector("pre")?.textContent).toContain(
+      '"schemaVersion": "factory.event/v1"',
+    );
+    expect(r.container.querySelector("pre")?.textContent).toContain(
+      '"eventId": "evt_dispatch"',
+    );
+  });
+
+  test("does not fetch malformed artifact hashes and keeps Raw available", () => {
+    const r = renderWithClient(
+      <EventPanel
+        envelope={{
+          type: "factory.work.completed",
+          source: "worker",
+          payload: { artifactHash: "not-a-hash" },
+        }}
+        runId="run_1"
+      />,
+    );
+    expect(r.getByText("artifactHash")).toBeTruthy();
+    expect(r.getByRole("button", { name: "Raw" })).toBeTruthy();
   });
 });
 
