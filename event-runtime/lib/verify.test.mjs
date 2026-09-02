@@ -62,6 +62,9 @@ const registry = loadRegistry();
 const def = getAgent(registry, "factory-status-report@1");
 const dispatchDef = getAgent(registry, "dispatch@1");
 const workScanDef = getAgent(registry, "work-scan@1");
+// Path-selection fixtures do not test age; the stale-result test below does.
+// A broad window keeps their candidate selection independent of host clocks.
+const RECOVERY_ATTEMPT_STARTED_AT = "1970-01-01T00:00:00.000Z";
 
 function makeSpec(input = { repos: ["bj29"] }) {
   return {
@@ -477,7 +480,7 @@ describe("verifyResult", () => {
       workspaceDir,
       worktreeRecord: { path: checkout },
       attempt: 1,
-      attemptStartedAt: new Date(Date.now() - 5_000).toISOString(),
+      attemptStartedAt: RECOVERY_ATTEMPT_STARTED_AT,
       onTrace: (kind, payload) => events.push({ kind, payload }),
     });
 
@@ -525,7 +528,7 @@ describe("verifyResult", () => {
       workspaceDir,
       worktreeRecord: { path: checkout },
       attempt: 1,
-      attemptStartedAt: new Date(Date.now() - 5_000).toISOString(),
+      attemptStartedAt: RECOVERY_ATTEMPT_STARTED_AT,
     });
 
     expect(out.kind).toBe("completed");
@@ -571,9 +574,7 @@ describe("verifyResult", () => {
       workspaceDir,
       worktreeRecord: { path: checkout },
       attempt: 1,
-      // Keep the fixture's recovery window independent of hosted runner
-      // filesystem timestamp precision; stale-rejection is tested separately.
-      attemptStartedAt: new Date(Date.now() - 60_000).toISOString(),
+      attemptStartedAt: RECOVERY_ATTEMPT_STARTED_AT,
       onTrace: (kind, payload) => events.push({ kind, payload }),
     });
 
@@ -655,9 +656,7 @@ describe("verifyResult", () => {
       worktreeRecord: {},
       checkoutPath: checkout,
       attempt: 1,
-      // Keep the fixture's recovery window independent of hosted runner
-      // filesystem timestamp precision; stale-rejection is tested separately.
-      attemptStartedAt: new Date(Date.now() - 60_000).toISOString(),
+      attemptStartedAt: RECOVERY_ATTEMPT_STARTED_AT,
     });
 
     expect(out.kind).toBe("completed");
