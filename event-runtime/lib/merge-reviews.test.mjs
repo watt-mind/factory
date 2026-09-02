@@ -524,7 +524,7 @@ describe("merge_reviews ledger keying (WM-907 / WM-936)", () => {
 });
 
 describe("merge-scan enumerator (WM-907)", () => {
-  test("canonicalizes GitHub ref slugs and falls back to a Fixes body reference", () => {
+  test("canonicalizes GitHub ref slugs and derives only uppercase ref tickets", () => {
     const result = enumerateMergeScan({
       input: { repo: "factory" },
       db: openDb(":memory:"),
@@ -535,9 +535,20 @@ describe("merge-scan enumerator (WM-907)", () => {
         pr({
           number: 880,
           headRefName: "feat/no-ticket",
-          body: "Fixes watt-mind/factory#880",
+          body: "Fixes watt-mind/factory#881",
         }),
         pr({ number: 123, headRefName: "feat/WM-123" }),
+        pr({
+          number: 7,
+          headRefName: "dependabot/github_actions/develop/actions/setup-node-7",
+          title: "Bump actions/setup-node-7",
+        }),
+        pr({
+          number: 2261,
+          headRefName: "feat/no-ticket",
+          title: "No ticket",
+          body: "Fixes watt-mind/factory#2261",
+        }),
       ]),
       repos,
     });
@@ -546,8 +557,10 @@ describe("merge-scan enumerator (WM-907)", () => {
       "watt-mind/factory#877",
       "watt-mind/factory#878",
       "watt-mind/factory#879",
-      "watt-mind/factory#880",
+      "watt-mind/factory#881",
       "WM-123",
+      undefined,
+      undefined,
     ]);
   });
 
@@ -1100,6 +1113,37 @@ describe("merge-scan enumerator (WM-936)", () => {
       repos,
     });
     expect(result.artifact.fix).toHaveLength(1);
+  });
+
+  test("ticketless dependabot rebase records the skipped mechanical fix", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "FIX",
+      fix: rebaseItem(9),
+    });
+    const result = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith([
+        pr({
+          number: 9,
+          headRefName: "dependabot/github_actions/develop/actions/checkout-7",
+          title: "Bump actions/checkout from 6 to 7",
+          mergeable: "CONFLICTING",
+          mergeStateStatus: "DIRTY",
+        }),
+      ]),
+      repos,
+    });
+
+    expect(result.artifact.fix).toEqual([]);
+    expect(result.artifact.summary).toContain(
+      "rebase_skipped:ticket_missing #9",
+    );
   });
 
   test("ai:landing PR never emits a rebase item", () => {

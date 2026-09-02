@@ -31,7 +31,7 @@ export const MERGE_SCAN_AGENT = "merge-scan@2";
 export const MERGE_REVIEW_AGENT = "merge-review@1";
 
 const SHA40 = /^[0-9a-f]{40}$/;
-const TICKET = /[A-Z]+-[0-9]+/;
+const REF_TICKET = /(?:^|[^A-Za-z0-9_])([A-Z]+-[0-9]+)(?=$|[^A-Za-z0-9_])/;
 const GITHUB_REF_TICKET = /(?:^|\/)gh-([0-9]+)$/i;
 const BARE_GITHUB_REF_TICKET = /^([0-9]+)$/;
 const GITHUB_BODY_TICKET =
@@ -82,7 +82,14 @@ function asPr(value) {
   return Number.isInteger(n) && n >= 1 ? n : null;
 }
 
-function ticketFromRef(headRef, title, body, github) {
+function githubTicketFromText(text, prNumber) {
+  const match =
+    typeof text === "string" ? text.match(GITHUB_BODY_TICKET) : null;
+  if (!match || Number(match[1].split("#")[1]) === prNumber) return null;
+  return match[1];
+}
+
+function ticketFromRef(headRef, title, body, github, prNumber) {
   const githubRef =
     typeof headRef === "string"
       ? (headRef.match(GITHUB_REF_TICKET) ??
@@ -92,14 +99,14 @@ function ticketFromRef(headRef, title, body, github) {
     return `${github}#${githubRef[1] ?? githubRef[2]}`;
   }
   const fromRef =
-    typeof headRef === "string" ? headRef.toUpperCase().match(TICKET) : null;
-  if (fromRef) return fromRef[0];
-  const fromBody =
-    typeof body === "string" ? body.match(GITHUB_BODY_TICKET) : null;
-  if (fromBody) return fromBody[1];
-  const fromTitle =
-    typeof title === "string" ? title.toUpperCase().match(TICKET) : null;
-  return fromTitle ? fromTitle[0] : null;
+    typeof headRef === "string" ? headRef.match(REF_TICKET) : null;
+  if (fromRef) return fromRef[1];
+  const fromBody = githubTicketFromText(body, prNumber);
+  if (fromBody) return fromBody;
+  const fromTitleGithub = githubTicketFromText(title, prNumber);
+  if (fromTitleGithub) return fromTitleGithub;
+  const fromTitle = typeof title === "string" ? title.match(REF_TICKET) : null;
+  return fromTitle ? fromTitle[1] : null;
 }
 
 function parseJsonColumn(raw, fallback) {
@@ -263,7 +270,7 @@ function normalizeListedPr(raw, baseSha, github) {
     baseSha: base,
     headRef: typeof raw.headRefName === "string" ? raw.headRefName : null,
     baseRefName: typeof raw.baseRefName === "string" ? raw.baseRefName : null,
-    ticket: ticketFromRef(raw.headRefName, raw.title, raw.body, github),
+    ticket: ticketFromRef(raw.headRefName, raw.title, raw.body, github, number),
     mergeable:
       typeof raw.mergeable === "string" ? raw.mergeable.toUpperCase() : "",
     mergeStateStatus:
@@ -798,6 +805,10 @@ function assemble({
           headSha: pr.headSha,
         })
       ) {
+        continue;
+      }
+      if (!pr.ticket) {
+        rebaseSkipped.push({ pr: pr.number, reason: "ticket_missing" });
         continue;
       }
       const item = rebaseFixItem(pr, hit, { forge, github });
