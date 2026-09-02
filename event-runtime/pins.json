@@ -6,7 +6,7 @@
     "files": {
       "agents/factory-ci-doctor.md": "sha256:62c6c8ed0d2a6f671f4f4d742e38804091c693a5fcdb31f9e580db4497690bd0",
       "agents/factory-infra-scout.md": "sha256:4025fa714189b0480a5e052746ce7d4949ed4f0d4d8519a4c25da843aa716987",
-      "agents/factory-merge-reviewer.md": "sha256:119a35059fc965e0564f5270debad2c11dfe4f9959b731ea01cb7b5d3ab47428",
+      "agents/factory-merge-reviewer.md": "sha256:f40d46f30e089480fa9c1a8e3fe58cc8c74de379ef16f1cf8cb0a2a73a4ee7e2",
       "agents/factory-ux-critic.md": "sha256:e7df9de18af0e160b14b198f5a9b2633578c7e7a4145fca464879948616d3e98",
       "commands/factory-audit.md": "sha256:68f87be9a5d17c3753db3260317853fb3def6e9593bb4239b098654c99ee757a",
       "commands/factory-capture.md": "sha256:f67044989f33695340d723b7e85ddcdd21d412a1f416aea58d1a39d943f4ff57",
@@ -17,10 +17,10 @@
       "commands/factory-retro.md": "sha256:644d6e3e6f4b6efed28a69dfa296bbf5189c9153c57d202fec11aff77b77a163",
       "commands/factory-ship.md": "sha256:b3c96ecec4b8af7237500b2bf952d3e872a1957ab2519c19e853f65151b936ba",
       "commands/factory-sweep.md": "sha256:f7dc737e45bcce94442cd78aea01868c5d9cce3312da83d3cc51322ab0bef4b4",
-      "commands/factory-ticket.md": "sha256:22c8a5ea5556f309f6ca7b36e9f5a4496b1d1fe275acda28a355f8337ef31c24",
+      "commands/factory-ticket.md": "sha256:c8e07f4bb90f95f27c5889fb5b04acf66eb1374d96de622632e8430d70b6c84e",
       "commands/factory-triage.md": "sha256:20d538ca3c7358b22ea2f263fa1ec8b75affbf222e58c77989b43d34750c0ff1",
       "commands/factory-unblock.md": "sha256:496bffc002afea8eca9d6c1b80f38c6732eb2163f3e41f6d04f0357c4e2905cb",
-      "commands/factory-work.md": "sha256:c69095b7697fb4f0599ed6f2da40a4f6495e74bc5cfed90f41a4bc786d9cc72a",
+      "commands/factory-work.md": "sha256:a10ab4b0497d5fb8dcbeba44ce60c3a6c49931f8e8d8070add0eb7ee441f5890",
       "floor.md": "sha256:d3658d5c8ce6090c57fc3ff89dccdf3050180adb2e041352de2ea4a327c71fe8",
       "skills/factory-handoff/SKILL.md": "sha256:139b10c02c9425ce9fbd415d215f5d28042bb76e59850cf70b62242637e1a4c4",
       "skills/ticket-spec/SKILL.md": "sha256:6cd7e613072a1f4bd360389b62f3482432cbeb167b1e34b27b4a6099d4685b23"

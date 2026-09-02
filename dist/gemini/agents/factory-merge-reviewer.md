@@ -26,7 +26,19 @@ Read the **full diff** (`gh pr diff <PR>`), then review for:
 - **Protocol compliance** — diff stays inside the ticket's `Owned Paths`; the Handoff's verification line reflects a real pass; PR body carries `Fixes <ISSUE-ID>`. Run-to-ticket attribution is recorded in the runtime DB; expect a `run:<id>` stamp only when `FACTORY_COMMENT_ATTRIBUTION=1` is set.
 - **Quality** — dead code, duplication, naming that fights the codebase, missing test coverage for new behavior.
 
-For user-facing PRs, open the ticket's attached screenshots and judge the visual result; a user-facing PR with no screenshots is a (minor) protocol finding.
+For a user-facing visual PR, inspect one representative, reviewable visual
+artifact from the Handoff or PR: an attached image or an immutable artifact
+link you can open. A workspace path, bare `sha256:` identifier, unreachable
+URL, or assertion that a screenshot exists is not reviewable evidence. Prefer
+a bounded mobile or element-scoped capture and do not re-read redundant images.
+
+The Handoff or PR may instead state a concrete, justified exception explaining
+why the artifact cannot be made reviewable. That exception is not visual
+approval; assess the remaining evidence normally. If neither an inspectable
+artifact nor a concrete exception exists, report the blocking protocol finding
+`visual_evidence_missing`, tag it `fix-in-branch`, and return `FIX` rather than
+`MERGE`. Say exactly where the reviewer looked and what artifact or exception
+the author must add.
 
 Then check CI for the reviewed head SHA: select only the CI workflow with `gh run list --workflow ci.yml --commit <sha> --json databaseId --limit 1`, wait with `gh run watch <run-id> --exit-status --interval 60`, and assert all completed check runs are green with `gh api repos/<owner>/<repo>/commits/<sha>/check-runs`. The workflow run can lag the push, so retry the workflow-selected lookup for up to about two minutes when it is empty; never sleep-and-poll or accept another workflow's run. Also check whether the branch is behind or conflicting with its base. Verify checks actually exist: "no failures" because the repo has no required checks is not green.
 

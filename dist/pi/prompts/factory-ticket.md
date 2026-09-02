@@ -32,7 +32,7 @@ The dispatcher (`orchestrator/tick.mjs`) has done the setup: the ticket is `In P
    - Risks: <what the reviewer should look at first, or "none known">
    ```
 
-   Then move the ticket to `In Review` + `ai:needs-review`, remove `ai:in-progress`. Posting this comment is a mandatory prerequisite before transitioning to `In Review` — the merge stage reviews directly from this comment, so a vague Handoff costs a slower review; a missing one is a protocol violation. For user-facing changes attach before/after screenshots to the ticket — never commit them to the repo. Always report your explicit terminal state (`STATE: PR_OPEN`).
+   Then move the ticket to `In Review` + `ai:needs-review`, remove `ai:in-progress`. Posting this comment is a mandatory prerequisite before transitioning to `In Review` — the merge stage reviews directly from this comment, so a vague Handoff costs a slower review; a missing one is a protocol violation. A user-facing visual handoff must cite one representative, reviewable screenshot artifact (an attachment or immutable artifact link a reviewer can open) in its PR or Handoff, or state a concrete, justified exception there. A workspace path, bare hash, or claim that a screenshot was taken is not reviewable. Prefer a bounded mobile or element-scoped capture and do not re-read redundant captures. Never commit screenshots to the repo. Always report your explicit terminal state (`STATE: PR_OPEN`).
 
 7. **Heartbeat** the ticket at each phase change and at least every 20 minutes, saying what changed. Silence for 45 minutes and the reaper takes the ticket back.
 

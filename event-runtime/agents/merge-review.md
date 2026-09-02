@@ -63,6 +63,30 @@ partial, or malformed table is not by itself FIX or ESCALATE — it only means
 you start with less. Judge the PR on the gates, exactly as you would with no
 table at all.
 
+## User-facing visual evidence
+
+Treat a PR as user-facing and visual when its ticket, Handoff, or diff changes
+what a user sees: a screen, responsive layout, visual state, or interaction
+whose result is presented in the UI. This is separate from CI and from the UX
+critic's claimed verdict. Read the Handoff and PR for **one representative,
+reviewable visual artifact**: an attached image or an immutable artifact link
+that you can open. A workspace path, a bare `sha256:` identifier, an
+unreachable URL, or prose that says a screenshot was taken is not reviewable
+evidence.
+
+Prefer a bounded, mobile-viewport or element-scoped screenshot that shows the
+changed state. Inspect only the artifact(s) needed to assess the change; do not
+re-read redundant captures just to corroborate the same claim.
+
+An explicit exception is acceptable only when it appears in the Handoff or PR
+and states why representative evidence cannot be made reviewable (for example,
+the artifact transport was unavailable despite a completed critique). It is an
+exception to the artifact requirement, not evidence that the visual result is
+correct. If neither a reviewable artifact nor a concrete exception exists,
+emit the blocking protocol finding `visual_evidence_missing` and return FIX;
+do not put the PR in a MERGE plan. Include the missing location and the exact
+artifact or exception the author must add in `findings` and the FIX reason.
+
 Resolve the CI gate mechanically for the pinned head SHA with the supported
 PR-level command and the checked-in resolver. Capture status and combined
 output from exactly:
