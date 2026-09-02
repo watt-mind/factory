@@ -577,16 +577,26 @@ describe("verifyResult", () => {
       "utf8",
     );
 
-    const out = verifyResult({
-      spec: makeSpec(),
-      def,
-      registry,
-      workspaceDir,
-      worktreeRecord: { path: checkout },
-      attempt: 1,
-      attemptStartedAt: RECOVERY_ATTEMPT_STARTED_AT,
-      onTrace: (kind, payload) => events.push({ kind, payload }),
-    });
+    let out;
+    try {
+      out = verifyResult({
+        spec: makeSpec(),
+        def,
+        registry,
+        workspaceDir,
+        worktreeRecord: { path: checkout },
+        attempt: 1,
+        attemptStartedAt: RECOVERY_ATTEMPT_STARTED_AT,
+        onTrace: (kind, payload) => events.push({ kind, payload }),
+      });
+    } catch (err) {
+      throw new Error(
+        `recovery diagnostics: ${JSON.stringify({
+          missingResultPaths: err.missingResultPaths,
+          missingResultFallbacks: err.missingResultFallbacks,
+        })}`,
+      );
+    }
 
     expect(out.kind).toBe("completed");
     expect(readFileSync(trackedPath, "utf8")).toBe(trackedResult);
