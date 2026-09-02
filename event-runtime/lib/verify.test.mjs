@@ -505,7 +505,9 @@ describe("verifyResult", () => {
     execFileSync("git", ["init", "--quiet", checkout]);
     const truncatedPath = path.join(checkout, "result.json");
     writeFileSync(truncatedPath, '{"schemaVersion": "factory.age', "utf8");
-    const strayPath = path.join(physicalParent, "result.json");
+    // Match the physical sibling path that readResultFile() probes. TMPDIR may
+    // itself be symlinked on hosted runners, so physicalParent is not reliable.
+    const strayPath = path.join(realpathSync(checkout), "..", "result.json");
     writeFileSync(
       strayPath,
       JSON.stringify({
