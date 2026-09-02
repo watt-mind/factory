@@ -38,6 +38,7 @@ import {
   writeFileSync,
 } from "./api-test-helpers.mjs";
 import { cpSync } from "node:fs";
+import { MAX_BODY_BYTES, PayloadTooLargeError, readBody } from "./api-http.mjs";
 import { emitDueTicks } from "./schedules.mjs";
 import { createInboxItem } from "./inbox.mjs";
 import { decisionRequestHash } from "./decision.mjs";
@@ -726,7 +727,7 @@ describe("bearer-token auth on the control API (WM-1152)", () => {
     }
   });
 
-  test("POST /events rejects an oversized declared body before reading it", async () => {
+  test("POST /events rejects an oversized streamed body", async () => {
     const s = await makeServer({ autoAuthorize: false });
     try {
       const res = await new Promise((resolve, reject) => {
@@ -752,7 +753,9 @@ describe("bearer-token auth on the control API (WM-1152)", () => {
           );
         });
         req.on("error", reject);
-        req.end();
+        // Send the declared bytes too: Bun 1.3's node:http client rewrites an
+        // empty request's Content-Length, which otherwise bypasses this guard.
+        req.end(Buffer.alloc(1024 * 1024 + 1));
       });
       expect(res.status).toBe(413);
       expect(res.body).toEqual({
@@ -762,6 +765,34 @@ describe("bearer-token auth on the control API (WM-1152)", () => {
     } finally {
       s.close();
     }
+  });
+
+  test("readBody rejects an oversized declared body before reading it", async () => {
+    // Transport-agnostic: this request emits no data at all, so only the
+    // Content-Length pre-check can reject it. Deleting that pre-check makes
+    // this promise hang rather than reject, which is exactly the regression
+    // the over-the-wire streaming case above cannot distinguish.
+    let dataListeners = 0;
+    const req = {
+      headers: { "content-length": String(MAX_BODY_BYTES + 1) },
+      on(event) {
+        if (event === "data") dataListeners += 1;
+        return this;
+      },
+    };
+
+    const err = await readBody(req).then(
+      () => {
+        throw new Error("expected PayloadTooLargeError");
+      },
+      (e) => e,
+    );
+    expect(err).toBeInstanceOf(PayloadTooLargeError);
+    expect(err.status).toBe(413);
+    expect(err.code).toBe("payload_too_large");
+    expect(err.limitBytes).toBe(MAX_BODY_BYTES);
+    // The body was never consumed: rejection happened before any read.
+    expect(dataListeners).toBe(0);
   });
 
   test("token unset: every privileged mutation fails closed before side effects", async () => {

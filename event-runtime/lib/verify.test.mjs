@@ -62,6 +62,18 @@ const registry = loadRegistry();
 const def = getAgent(registry, "factory-status-report@1");
 const dispatchDef = getAgent(registry, "dispatch@1");
 const workScanDef = getAgent(registry, "work-scan@1");
+// Path-selection fixtures do not test age; the stale-result test below does.
+// This fixed timestamp is valid on both the host and CI clock domains.
+const RECOVERY_ATTEMPT_STARTED_AT = "1970-01-01T00:00:00.000Z";
+const RECOVERY_CANDIDATE_TIMESTAMP = new Date("2000-01-01T00:00:00.000Z");
+
+function markRecoveryCandidate(filePath) {
+  utimesSync(
+    filePath,
+    RECOVERY_CANDIDATE_TIMESTAMP,
+    RECOVERY_CANDIDATE_TIMESTAMP,
+  );
+}
 
 function makeSpec(input = { repos: ["bj29"] }) {
   return {
@@ -469,6 +481,7 @@ describe("verifyResult", () => {
       }),
       "utf8",
     );
+    markRecoveryCandidate(strayPath);
 
     const out = verifyResult({
       spec: makeSpec(),
@@ -477,7 +490,7 @@ describe("verifyResult", () => {
       workspaceDir,
       worktreeRecord: { path: checkout },
       attempt: 1,
-      attemptStartedAt: new Date(Date.now() - 5_000).toISOString(),
+      attemptStartedAt: RECOVERY_ATTEMPT_STARTED_AT,
       onTrace: (kind, payload) => events.push({ kind, payload }),
     });
 
@@ -505,7 +518,10 @@ describe("verifyResult", () => {
     execFileSync("git", ["init", "--quiet", checkout]);
     const truncatedPath = path.join(checkout, "result.json");
     writeFileSync(truncatedPath, '{"schemaVersion": "factory.age', "utf8");
-    const strayPath = path.join(physicalParent, "result.json");
+    // The sibling of the checkout's physical parent is what readResultFile()
+    // probes; name it directly rather than restating the implementation's
+    // own path expression.
+    const strayPath = path.join(realpathSync(physicalParent), "result.json");
     writeFileSync(
       strayPath,
       JSON.stringify({
@@ -515,6 +531,7 @@ describe("verifyResult", () => {
       }),
       "utf8",
     );
+    markRecoveryCandidate(strayPath);
 
     const out = verifyResult({
       spec: makeSpec(),
@@ -523,7 +540,7 @@ describe("verifyResult", () => {
       workspaceDir,
       worktreeRecord: { path: checkout },
       attempt: 1,
-      attemptStartedAt: new Date(Date.now() - 5_000).toISOString(),
+      attemptStartedAt: RECOVERY_ATTEMPT_STARTED_AT,
     });
 
     expect(out.kind).toBe("completed");
@@ -548,7 +565,10 @@ describe("verifyResult", () => {
     writeFileSync(trackedPath, trackedResult, "utf8");
     execFileSync("git", ["init", "--quiet", checkout]);
     execFileSync("git", ["-C", checkout, "add", "result.json"]);
-    const strayPath = path.join(physicalParent, "result.json");
+    // The sibling of the checkout's physical parent is what readResultFile()
+    // probes; name it directly rather than restating the implementation's
+    // own path expression.
+    const strayPath = path.join(realpathSync(physicalParent), "result.json");
     const events = [];
     writeFileSync(
       strayPath,
@@ -559,6 +579,7 @@ describe("verifyResult", () => {
       }),
       "utf8",
     );
+    markRecoveryCandidate(strayPath);
 
     const out = verifyResult({
       spec: makeSpec(),
@@ -567,7 +588,7 @@ describe("verifyResult", () => {
       workspaceDir,
       worktreeRecord: { path: checkout },
       attempt: 1,
-      attemptStartedAt: new Date(Date.now() - 5_000).toISOString(),
+      attemptStartedAt: RECOVERY_ATTEMPT_STARTED_AT,
       onTrace: (kind, payload) => events.push({ kind, payload }),
     });
 
@@ -637,6 +658,7 @@ describe("verifyResult", () => {
       }),
       "utf8",
     );
+    markRecoveryCandidate(strayPath);
 
     // The timed-out preflight suppresses worktree command verification with an
     // empty record while still naming the checkout for the stray probe.
@@ -648,7 +670,7 @@ describe("verifyResult", () => {
       worktreeRecord: {},
       checkoutPath: checkout,
       attempt: 1,
-      attemptStartedAt: new Date(Date.now() - 5_000).toISOString(),
+      attemptStartedAt: RECOVERY_ATTEMPT_STARTED_AT,
       // This recovery test needs a known-untracked checkout result. Injecting
       // that fact avoids making its assertion depend on a contended CI host
       // scheduling an unrelated git subprocess.
