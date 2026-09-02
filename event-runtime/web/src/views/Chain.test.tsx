@@ -666,4 +666,39 @@ describe("Chain navigation shortcuts (WM-875)", () => {
       ).toBe("status");
     });
   });
+
+  test("announces the malformed-envelope fallback as a live status region", async () => {
+    const evtNodeId = `event:chain:${FIX_EVENT}`;
+    const view = renderWithClient(
+      <Chain
+        correlationId={CORR}
+        focusNodeId={evtNodeId}
+        onSelectNode={noop}
+        onJumpEvent={noop}
+        onJumpRun={noop}
+        onOpenRunFull={noop}
+        onJumpProposal={noop}
+        onJumpAgent={noop}
+      />,
+      {
+        apiMocks: {
+          chain: async () => ({
+            ...chainView(),
+            events: [malformedChainEvent(FIX_EVENT)],
+          }),
+        },
+      },
+    );
+    await waitFor(() => {
+      expect(
+        view.getByText("Complete envelope unavailable in this chain response."),
+      ).toBeTruthy();
+    });
+    // Assistive tech reaches this text through the status role, so assert the
+    // role lookup itself resolves to the node carrying the fallback copy.
+    const status = view.getByRole("status");
+    expect(status.textContent).toBe(
+      "Complete envelope unavailable in this chain response.",
+    );
+  });
 });

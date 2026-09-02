@@ -853,6 +853,16 @@ try {
   // degraded state inspectable in every seeded worktree. `chainView` rejects
   // this stored non-JSON value and safely exposes `envelope: null` with
   // `envelopeMalformed: true`; it is not a malformed live intake event.
+  //
+  // This row knowingly violates the invariant every other seeded event upholds:
+  // a `factory.dispatch.requested` event normally carries a parseable envelope
+  // and owns a proposal (and, once approved, a run). This one has neither, so
+  // nothing downstream can plan or execute from it. It stays inert because its
+  // status is 'planned' rather than 'admitted' — planner scans only pick up
+  // admitted events — and because it is written straight to `events` rather
+  // than replayed through intake, no schema validation ever sees it. Read paths
+  // must therefore treat stored envelope JSON as untrusted: `chainView` guards
+  // via `chainEnvelope`, and `eventsView` via `parseObject` (#2301).
   const malformedChainEventId = `chain-${dispatchRunId}-malformed-envelope`;
   db.query(
     `INSERT INTO events

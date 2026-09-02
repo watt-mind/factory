@@ -984,6 +984,39 @@ describe("list views carry repos[] (OPS-356)", () => {
     }
   });
 
+  test("GET /events survives a malformed stored envelope (#2301)", async () => {
+    const s = await makeServer();
+    try {
+      await s.client.replay(
+        envelope({ eventId: "envelope-ok", payload: { repos: ["ok"] } }),
+      );
+      await s.client.replay(
+        envelope({ eventId: "envelope-broken", payload: { repos: ["bad"] } }),
+      );
+      // Matches the demo seed's deliberately damaged chain envelope.
+      s.db
+        .query(`UPDATE events SET envelope_json = ? WHERE event_id = ?`)
+        .run(
+          "{demo seed intentionally malformed chain envelope",
+          "envelope-broken",
+        );
+
+      const res = await fetch(s.url("/events"));
+      expect(res.status).toBe(200);
+      const { events } = await res.json();
+      const broken = events.find((e) => e.eventId === "envelope-broken");
+      expect(broken).toBeDefined();
+      expect(broken.envelope).toEqual({});
+      expect(broken.repos).toEqual([]);
+      // The healthy row is still rendered normally.
+      expect(events.find((e) => e.eventId === "envelope-ok").repos).toEqual([
+        "ok",
+      ]);
+    } finally {
+      s.close();
+    }
+  });
+
   test("GET /events defaults to a cursor page and walks tied timestamps", async () => {
     const s = await makeServer({ now: () => 1_700_000_000_000 });
     try {

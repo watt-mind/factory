@@ -201,7 +201,13 @@ function eventsView(
   const hasNextPage = rows.length > page.limit;
   const pageRows = hasNextPage ? rows.slice(0, -1) : rows;
   const events = pageRows.map((row) => {
-    const envelope = JSON.parse(row.envelope_json);
+    // Stored envelopes are not guaranteed to be parseable JSON: rows written by
+    // older writers, hand-repaired databases, and the demo seed's deliberately
+    // damaged chain row all survive in `events`. A bare JSON.parse here threw a
+    // SyntaxError out of GET /events (only ListQueryError is handled), taking
+    // the whole list down for one bad row, so degrade to an empty envelope and
+    // keep listing the row instead.
+    const envelope = parseObject(row.envelope_json);
     return {
       source: row.source,
       eventId: row.event_id,

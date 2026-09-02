@@ -488,6 +488,47 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
       expect(fixture.body).toContain(
         "```\nbun test event-runtime/demo/seed.test.mjs\n```",
       );
+
+      // The seeded malformed chain envelope (#2301) is what makes the degraded
+      // Chain UI state browser-observable, so assert the API actually degrades
+      // rather than trusting the seed log line alone.
+      const malformedLog = seedRes.stdout.match(
+        /^seed: (\S+) inserted \(malformed chain envelope; open #\/chain\/(\S+)\)$/m,
+      );
+      expect(
+        malformedLog,
+        `seed stdout lacked the malformed-envelope line:\n${seedRes.stdout}`,
+      ).toBeTruthy();
+      const [, malformedEventId, malformedCorrelationId] = malformedLog;
+
+      const chainResponse = await fetch(
+        `http://127.0.0.1:${port}/chain/${encodeURIComponent(malformedCorrelationId)}`,
+        { headers: controlAuthHeaders() },
+      );
+      expect(chainResponse.ok).toBe(true);
+      const chain = await chainResponse.json();
+      const malformedEvents = chain.events.filter(
+        (event) => event.eventId === malformedEventId,
+      );
+      // The hardcoded payload_hash + ON CONFLICT upsert keep re-seeding from
+      // producing a second copy of this row.
+      expect(malformedEvents).toHaveLength(1);
+      expect(malformedEvents[0]).toMatchObject({
+        envelope: null,
+        envelopeMalformed: true,
+        repos: [],
+        status: "planned",
+      });
+
+      // The same row must not take down the flat events list (#2301).
+      const eventsResponse = await fetch(`http://127.0.0.1:${port}/events`, {
+        headers: controlAuthHeaders(),
+      });
+      expect(eventsResponse.status).toBe(200);
+      const { events } = await eventsResponse.json();
+      expect(events.some((event) => event.eventId === malformedEventId)).toBe(
+        true,
+      );
     },
     loadAdjustedTimeout(30_000),
   );
