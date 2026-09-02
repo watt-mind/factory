@@ -15,6 +15,7 @@ import {
 } from "@tanstack/react-query";
 import {
   Overview,
+  outboxSummary,
   groupJournalEntries,
   formatActivityGroup,
   buildAnomalyRows,
@@ -28,6 +29,7 @@ import { scopedCount, scopedTally } from "../context";
 import { restoreApi, withApi } from "../test-render";
 import type {
   AdmittedEvent,
+  AgentDef,
   EventFocus,
   InboxItem,
   JournalEntry,
@@ -251,6 +253,37 @@ function entry(
     ...overrides,
   };
 }
+
+describe("outboxSummary", () => {
+  const agents = [
+    {
+      eventTypes: [{ type: "factory.work.requested" }],
+      outputView: {
+        schemaVersion: "factory.artifact-view/v1",
+        input: {
+          status: { path: "/status", tone: {} },
+          summary: "/summary",
+          sections: [],
+        },
+      },
+    } as unknown as AgentDef,
+  ];
+
+  test("prefers a resolved event view header and uses the payload heuristic without one", () => {
+    const payload = {
+      status: "READY",
+      summary: "Ready for review",
+      outcome: "legacy outcome",
+    };
+
+    expect(outboxSummary("factory.work.requested", payload, agents)).toBe(
+      "READY",
+    );
+    expect(outboxSummary("factory.unrouted", payload, agents)).toBe(
+      "legacy outcome",
+    );
+  });
+});
 
 describe("groupJournalEntries (WM-100)", () => {
   test("collapses consecutive transitions of one run into a single row spanning first → last state", () => {

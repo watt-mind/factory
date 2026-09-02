@@ -14,6 +14,7 @@ import { goPrefixActive } from "../goSequence";
 import { keyGuard, refetchIntervals, useNow, useRequeuePoll } from "../hooks";
 import type {
   JournalEntry,
+  AgentDef,
   EventFocus,
   Proposal,
   RunState,
@@ -22,6 +23,7 @@ import type {
 import type { OperatorContext } from "../context";
 import { scopedCount, scopedTally } from "../context";
 import { EMPTY, formatBytes, formatRelative } from "../format";
+import { headerFor, inputViewOf } from "../lib/artifactView";
 import type { WorkerHealthFilter } from "./Workers";
 import {
   Button,
@@ -58,6 +60,33 @@ const EventPanel = lazy(() =>
     default: module.EventPanel,
   })),
 );
+
+/**
+ * Keep the compact Outbox cue aligned with EventPanel's requested-event view.
+ * A completed event resolves its output view only after EventPanel fetches its
+ * artifact, so its legacy payload cue remains the available compact fallback.
+ */
+export function outboxSummary(
+  type: string,
+  payload: Record<string, unknown>,
+  agents: readonly AgentDef[],
+): string | null {
+  const requestedAgent = agents.find((agent) =>
+    agent.eventTypes.some((route) => route.type === type),
+  );
+  const view = inputViewOf(requestedAgent?.outputView);
+  if (view) {
+    const header = headerFor(view, payload, requestedAgent?.inputSchema);
+    return header.status?.value ?? header.summary;
+  }
+  return typeof payload.outcome === "string"
+    ? payload.outcome
+    : typeof payload.recommendation === "string"
+      ? payload.recommendation
+      : typeof payload.verdict === "string"
+        ? payload.verdict
+        : null;
+}
 
 export function SectionTitle({
   title,
@@ -2207,16 +2236,11 @@ export function Overview({
                     string,
                     unknown
                   >;
-                  // Keep the compact legacy cue when no resolved event view is
-                  // available; EventPanel supplies a view's summary/status.
-                  const summary =
-                    typeof payload.outcome === "string"
-                      ? payload.outcome
-                      : typeof payload.recommendation === "string"
-                        ? payload.recommendation
-                        : typeof payload.verdict === "string"
-                          ? payload.verdict
-                          : null;
+                  const summary = outboxSummary(
+                    type,
+                    payload,
+                    agentsQ.data?.agents ?? [],
+                  );
 
                   return (
                     <div

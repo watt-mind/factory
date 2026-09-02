@@ -882,9 +882,9 @@ export function EventPanel({
     queryFn: async () => {
       const response = await fetch(artifactUrl(digest!));
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const text = await response.text();
+      const body = await response.text();
       try {
-        return JSON.parse(text);
+        return JSON.parse(body);
       } catch {
         throw new Error("artifact is not valid JSON");
       }
