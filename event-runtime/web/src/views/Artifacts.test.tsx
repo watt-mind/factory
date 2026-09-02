@@ -506,7 +506,7 @@ describe("Artifacts inventory (WM-207)", () => {
     expect(writeText).toHaveBeenNthCalledWith(2, "a".repeat(64));
   });
 
-  test("formats a large artifact once across a useNow tick", async () => {
+  test("formats a large artifact once across a useNow tick", () => {
     const raw = JSON.stringify({
       entries: Array.from({ length: 10_000 }, (_, index) => ({
         index,
@@ -515,10 +515,24 @@ describe("Artifacts inventory (WM-207)", () => {
     });
     jest.useFakeTimers();
     jest.setSystemTime(new Date("2026-08-30T00:00:00.000Z"));
-    // This is a memoization test, not a 10,000-line DOM benchmark. Keep the
-    // expensive input but return a compact preview so React can settle before
-    // Testing Library's timeout on GitHub-hosted runners.
+    // GH-2281. Two hosted-lane hazards are designed out here:
+    //
+    //  * This is a memoization test, not a 10,000-line DOM benchmark. The
+    //    expensive input is kept, but the formatter returns a compact preview
+    //    so the render cost does not scale with it.
+    //  * Nothing is awaited while fake timers are installed. A `findByRole`
+    //    under fake timers polls by advancing a clock that never really moves,
+    //    so a missing element does not time out — it hangs the whole test
+    //    process, which is exactly how this case took a hosted job to its
+    //    45-minute limit. Seeding the content cache makes the inspector render
+    //    synchronously, so a plain `getByRole` either passes or fails at once.
     const formatContent = mock(() => "formatted artifact");
+    // Pin `fetch` rather than inheriting whichever mock the previously executed
+    // case happened to leave behind: any background refetch must resolve to the
+    // same body the cache was seeded with, on every lane.
+    globalThis.fetch = mock(
+      async () => new Response(raw, { status: 200 }),
+    ) as unknown as typeof fetch;
     window.location.hash = `#/artifacts/${"a".repeat(64)}`;
 
     try {
@@ -526,7 +540,7 @@ describe("Artifacts inventory (WM-207)", () => {
         formatContent,
         content: { sha256: "a".repeat(64), text: raw },
       });
-      await view.findByRole("region", { name: "Artifact content" });
+      view.getByRole("region", { name: "Artifact content" });
       expect(formatContent).toHaveBeenCalledTimes(1);
 
       act(() => jest.advanceTimersByTime(1_000));
