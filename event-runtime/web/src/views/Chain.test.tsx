@@ -584,4 +584,13 @@ describe("Chain navigation shortcuts (WM-875)", () => {
     fireEvent.keyDown(document.body, { key: "e" });
     expect(view.jumpedEvents).toContain(`chain:${FIX_EVENT}`);
   });
+
+  test("when event node is selected, renders Envelope section with id chain-envelope (WM-192)", async () => {
+    const evtNodeId = `event:chain:${FIX_EVENT}`;
+    const view = renderChain({ focusNodeId: evtNodeId });
+
+    await waitFor(() => {
+      expect(view.getByText("Envelope")).toBeTruthy();
+    });
+  });
 });

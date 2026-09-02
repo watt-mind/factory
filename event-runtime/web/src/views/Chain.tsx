@@ -1077,7 +1077,7 @@ export function Chain({
                 )}
               </Section>
               {selectedEnvelope ? (
-                <Section title="Envelope">
+                <Section id="chain-envelope" title="Envelope">
                   <Suspense
                     fallback={
                       <div className="text-(--text-faint)">
@@ -1100,7 +1100,7 @@ export function Chain({
                   </Suspense>
                 </Section>
               ) : (
-                <Section title="Envelope">
+                <Section id="chain-envelope" title="Envelope">
                   <div className="text-[12px] text-(--text-faint)">
                     Complete envelope unavailable in this chain response. Open
                     the event in Events to inspect its View or Raw form.
