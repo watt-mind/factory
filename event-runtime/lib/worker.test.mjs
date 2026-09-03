@@ -84,6 +84,7 @@ import {
   acquireClaimLock,
   adapterExecuteTimeoutMs,
   assertHandoffPullRequestBase,
+  boundedWorkspaceIntegrityStatus,
   cancelRun,
   CLAIM_LOCK_BACKOFF_MAX_MS,
   claimNext,
@@ -140,6 +141,7 @@ import {
   runLinearCli,
   runOnce,
   ticketHandoffContext,
+  writeWorkspaceIntegrityStatus,
 } from "./worker.mjs";
 import {
   liveWorkerLeases,
@@ -1184,9 +1186,15 @@ sh -c 'sleep 5 & wait'
       reasonCode: "workspace_integrity_violation",
     });
     const workspace = path.join(o.workspacesRoot, `${spec.runId}-a1`);
-    expect(existsSync(path.join(workspace, "repo", "agent-write.log"))).toBe(
-      true,
+    const evidenceFile = path.join(workspace, "workspace-integrity-status.txt");
+    expect(existsSync(evidenceFile)).toBe(true);
+    expect(readFileSync(evidenceFile, "utf8")).toContain("agent-write.log");
+    expect(readFileSync(evidenceFile, "utf8")).toContain(
+      "checkoutBaselineSha256: sha256:",
     );
+    // The retained wrapper preserves the evidence file, not a live checkout
+    // registration in its mirror.
+    expect(existsSync(path.join(workspace, "repo"))).toBe(false);
     const evidence = db
       .query(
         `SELECT payload_json FROM attempt_trace
@@ -1201,6 +1209,52 @@ sh -c 'sleep 5 & wait'
       }),
     );
     db.close();
+  });
+
+  test("bounds workspace integrity status without splitting UTF-8 characters", () => {
+    const status = `${"x".repeat(12 * 1024 - 1)}é`;
+    const evidence = boundedWorkspaceIntegrityStatus(status);
+
+    expect(evidence.truncated).toBe(true);
+    expect(evidence.value).not.toContain("\uFFFD");
+    expect(Buffer.byteLength(evidence.value, "utf8")).toBeLessThanOrEqual(
+      12 * 1024,
+    );
+  });
+
+  test("preserves null workspace integrity status", () => {
+    expect(boundedWorkspaceIntegrityStatus(null)).toEqual({
+      value: null,
+      bytes: null,
+      truncated: false,
+    });
+  });
+
+  test("writes bounded status, baseline, and hashes to retained evidence", () => {
+    const workspace = tmpDir("evrt-integrity-evidence-");
+    writeWorkspaceIntegrityStatus(workspace, {
+      checkoutStatus: "?? agent-write.log\n",
+      checkoutBaseline: "!! generated/setup.log\n",
+    });
+
+    expect(
+      readFileSync(
+        path.join(workspace, "workspace-integrity-status.txt"),
+        "utf8",
+      ),
+    ).toContain("?? agent-write.log");
+    expect(
+      readFileSync(
+        path.join(workspace, "workspace-integrity-status.txt"),
+        "utf8",
+      ),
+    ).toContain("!! generated/setup.log");
+    expect(
+      readFileSync(
+        path.join(workspace, "workspace-integrity-status.txt"),
+        "utf8",
+      ),
+    ).toMatch(/checkout(?:Status|Baseline)Sha256: sha256:[a-f0-9]{64}/);
   });
 
   test("repository status returns null when git exceeds its timeout", () => {

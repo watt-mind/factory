@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-janitor-test-mjs";
 import { DEFAULT_PROPOSAL_TTL_SECONDS } from "./config.mjs";
@@ -7,6 +7,7 @@ import { openDb } from "./db.mjs";
 import {
   DEFAULT_ARTIFACT_RETENTION_DAYS,
   DEFAULT_ROW_RETENTION_DAYS,
+  DEFAULT_WORKSPACE_RETENTION_DAYS,
   janitorArgv,
   JANITOR_MAX_BUFFER,
   JANITOR_TIMEOUT_MS,
@@ -118,6 +119,66 @@ describe("runtime retention", () => {
 
   test("retention defaults preserve the documented 30-day artifact window", () => {
     expect(DEFAULT_ARTIFACT_RETENTION_DAYS).toBe(30);
+  });
+
+  test("retains recent integrity evidence workspaces and removes old ones", () => {
+    const root = tmpDir("evrt-integrity-workspace-retention-");
+    const store = path.join(root, "artifacts");
+    const workspaces = path.join(root, "workspaces");
+    const db = openDb(path.join(root, "runtime.db"));
+    const now = Date.parse("2026-08-20T12:00:00.000Z");
+    const old = new Date(now - 31 * 24 * 60 * 60 * 1000);
+    const recent = new Date(now - 24 * 60 * 60 * 1000);
+    const stale = path.join(workspaces, "run-stale-a1");
+    const kept = path.join(workspaces, "run-kept-a1");
+    const unrelated = path.join(workspaces, "run-unrelated-a1");
+    try {
+      mkdirSync(store);
+      for (const [dir, mtime, evidence] of [
+        [stale, old, true],
+        [kept, recent, true],
+        [unrelated, old, false],
+      ]) {
+        mkdirSync(dir, { recursive: true });
+        if (evidence)
+          writeFileSync(
+            path.join(dir, "workspace-integrity-status.txt"),
+            "checkoutBaselineSha256: sha256:test\n",
+          );
+        utimesSync(dir, mtime, mtime);
+      }
+
+      const dry = sweepRuntimeRetention(db, store, {
+        now,
+        workspaceRoot: workspaces,
+      });
+      expect(dry.workspaces).toEqual({
+        deleted: 1,
+        retained: 1,
+        dryRun: true,
+      });
+      expect(existsSync(stale)).toBe(true);
+
+      const applied = sweepRuntimeRetention(db, store, {
+        now,
+        workspaceRoot: workspaces,
+        apply: true,
+      });
+      expect(applied.workspaces).toEqual({
+        deleted: 1,
+        retained: 1,
+        dryRun: false,
+      });
+      expect(existsSync(stale)).toBe(false);
+      expect(existsSync(kept)).toBe(true);
+      expect(existsSync(unrelated)).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("workspace retention default follows the 30-day retention convention", () => {
+    expect(DEFAULT_WORKSPACE_RETENTION_DAYS).toBe(30);
   });
 });
 
@@ -381,7 +442,7 @@ describe("terminal row retention (#1065)", () => {
       });
       expect(dry.proposed).toEqual({ cancelled: 7, dryRun: true });
       expect(dryLog).toEqual([
-        "retention: 0 trace rows and 0 artifacts (0 bytes), 7 proposed runs would be cancelled, 0 runs, 0 proposals, 0 events would be deleted",
+        "retention: 0 trace rows and 0 artifacts (0 bytes), 7 proposed runs would be cancelled, 0 runs, 0 proposals, 0 events, 0 retained integrity workspaces would be deleted",
       ]);
       expect(
         db.query(`SELECT COUNT(*) AS count FROM lifecycle_events`).get().count,
@@ -395,7 +456,7 @@ describe("terminal row retention (#1065)", () => {
       });
       expect(applied.proposed).toEqual({ cancelled: 7, dryRun: false });
       expect(applyLog).toEqual([
-        "retention: 0 trace rows and 0 artifacts (0 bytes), 7 proposed runs cancelled, 0 runs, 0 proposals, 0 events deleted (VACUUMed)",
+        "retention: 0 trace rows and 0 artifacts (0 bytes), 7 proposed runs cancelled, 0 runs, 0 proposals, 0 events, 0 retained integrity workspaces deleted (VACUUMed)",
       ]);
       expect(
         db.query(`SELECT state FROM runs WHERE run_id = 'run-expired'`).get()

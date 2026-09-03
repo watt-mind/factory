@@ -5,6 +5,7 @@ import {
   artifactsRoot,
   DEFAULT_PROPOSAL_TTL_SECONDS,
   runtimeHome,
+  workspacesRoot,
 } from "./config.mjs";
 import { openDb, txImmediate } from "./db.mjs";
 import { ALL_TERMINAL_STATES, transition } from "./lifecycle.mjs";
@@ -17,6 +18,7 @@ export const JANITOR_MAX_BUFFER = 1_000_000;
 export const DEFAULT_TRACE_RETENTION_DAYS = 14;
 export const DEFAULT_ARTIFACT_RETENTION_DAYS = 30;
 export const DEFAULT_ROW_RETENTION_DAYS = 30;
+export const DEFAULT_WORKSPACE_RETENTION_DAYS = 30;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -185,6 +187,30 @@ function resultArtifactHashes(result, fallbackHash) {
   return hashes;
 }
 
+/** Remove only expired retained workspace-integrity evidence directories. */
+function sweepRetainedIntegrityWorkspaces(
+  root,
+  { cutoffMs, apply = false } = {},
+) {
+  let deleted = 0;
+  let retained = 0;
+  if (!root || !existsSync(root)) return { deleted, retained, dryRun: !apply };
+
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const workspace = path.join(root, entry.name);
+    if (!existsSync(path.join(workspace, "workspace-integrity-status.txt")))
+      continue;
+    if (statSync(workspace).mtimeMs >= cutoffMs) {
+      retained += 1;
+      continue;
+    }
+    deleted += 1;
+    if (apply) rmSync(workspace, { recursive: true, force: true });
+  }
+  return { deleted, retained, dryRun: !apply };
+}
+
 /**
  * Retain recent trace audit rows and artifacts referenced by recently-created
  * runs. This is deliberately a standalone maintenance operation: dry-run is
@@ -197,6 +223,8 @@ export function sweepRuntimeRetention(
     traceRetentionDays = DEFAULT_TRACE_RETENTION_DAYS,
     artifactRetentionDays = DEFAULT_ARTIFACT_RETENTION_DAYS,
     rowRetentionDays = DEFAULT_ROW_RETENTION_DAYS,
+    workspaceRetentionDays = DEFAULT_WORKSPACE_RETENTION_DAYS,
+    workspaceRoot = null,
     now = Date.now(),
     apply = false,
     log = () => {},
@@ -210,6 +238,8 @@ export function sweepRuntimeRetention(
   const rowCutoff = new Date(
     now - retentionMs(rowRetentionDays, "rowRetentionDays"),
   ).toISOString();
+  const workspaceCutoffMs =
+    now - retentionMs(workspaceRetentionDays, "workspaceRetentionDays");
   const nowIso = new Date(now).toISOString();
   const proposed = terminalizeExpiredProposedRuns(db, { now, apply });
   const trace = db
@@ -264,6 +294,10 @@ export function sweepRuntimeRetention(
     }
   }
   const rows = sweepTerminalRows(db, { rowCutoff, nowIso, apply });
+  const workspaces = sweepRetainedIntegrityWorkspaces(workspaceRoot, {
+    cutoffMs: workspaceCutoffMs,
+    apply,
+  });
 
   // VACUUM reclaims the file space freed by the row deletions (#1065). It must
   // run outside any transaction, so it follows the sweep's own commit.
@@ -276,12 +310,13 @@ export function sweepRuntimeRetention(
     runs: rows.runs,
     proposals: rows.proposals,
     events: rows.events,
+    workspaces,
     vacuum: { ran: apply },
   };
   log(
     `retention: ${trace} trace rows and ${deleted} artifacts (${freedBytes} bytes)` +
       `, ${proposed.cancelled} proposed runs ${apply ? "cancelled" : "would be cancelled"}` +
-      `, ${rows.runs.deleted} runs, ${rows.proposals.deleted} proposals, ${rows.events.deleted} events ` +
+      `, ${rows.runs.deleted} runs, ${rows.proposals.deleted} proposals, ${rows.events.deleted} events, ${workspaces.deleted} retained integrity workspaces ` +
       `${apply ? "deleted (VACUUMed)" : "would be deleted"}`,
   );
   return result;
@@ -293,15 +328,18 @@ export function runtimeRetentionCommand(args = [], options = {}) {
   let traceRetentionDays = DEFAULT_TRACE_RETENTION_DAYS;
   let artifactRetentionDays = DEFAULT_ARTIFACT_RETENTION_DAYS;
   let rowRetentionDays = DEFAULT_ROW_RETENTION_DAYS;
+  let workspaceRetentionDays = DEFAULT_WORKSPACE_RETENTION_DAYS;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--apply") apply = true;
     else if (args[i] === "--trace-days") traceRetentionDays = Number(args[++i]);
     else if (args[i] === "--artifact-days")
       artifactRetentionDays = Number(args[++i]);
     else if (args[i] === "--row-days") rowRetentionDays = Number(args[++i]);
+    else if (args[i] === "--workspace-days")
+      workspaceRetentionDays = Number(args[++i]);
     else
       throw new Error(
-        "usage: janitor.mjs retention [--apply] [--trace-days N] [--artifact-days N] [--row-days N]",
+        "usage: janitor.mjs retention [--apply] [--trace-days N] [--artifact-days N] [--row-days N] [--workspace-days N]",
       );
   }
   const db = options.db ?? openDb();
@@ -313,6 +351,8 @@ export function runtimeRetentionCommand(args = [], options = {}) {
         traceRetentionDays,
         artifactRetentionDays,
         rowRetentionDays,
+        workspaceRetentionDays,
+        workspaceRoot: options.workspaceRoot ?? workspacesRoot(runtimeHome()),
         apply,
         now: options.now,
         log: options.log ?? console.log,

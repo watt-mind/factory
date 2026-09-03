@@ -1663,7 +1663,7 @@ export function repositoryStatus(
 const WORKSPACE_INTEGRITY_STATUS_MAX_BYTES = 12 * 1024;
 
 /** Keep checkout dirt evidence useful without letting one run grow trace storage unbounded. */
-function boundedWorkspaceIntegrityStatus(status) {
+export function boundedWorkspaceIntegrityStatus(status) {
   if (status === null) {
     return { value: null, bytes: null, truncated: false };
   }
@@ -1672,13 +1672,47 @@ function boundedWorkspaceIntegrityStatus(status) {
     return { value: status, bytes, truncated: false };
   }
   const suffix = `\n… truncated; ${bytes} bytes total\n`;
-  const previewBytes =
+  let previewBytes =
     WORKSPACE_INTEGRITY_STATUS_MAX_BYTES - Buffer.byteLength(suffix);
+  const encoded = Buffer.from(status, "utf8");
+  // `Buffer#toString` replaces a partial UTF-8 sequence with U+FFFD. Walk
+  // back from the byte boundary to preserve only complete characters.
+  while (previewBytes > 0 && (encoded[previewBytes] & 0xc0) === 0x80)
+    previewBytes -= 1;
   return {
-    value: `${Buffer.from(status).subarray(0, previewBytes).toString("utf8")}${suffix}`,
+    value: `${encoded.subarray(0, previewBytes).toString("utf8")}${suffix}`,
     bytes,
     truncated: true,
   };
+}
+
+export function writeWorkspaceIntegrityStatus(
+  workspaceDir,
+  { checkoutStatus, checkoutBaseline },
+) {
+  const status = boundedWorkspaceIntegrityStatus(checkoutStatus);
+  const baseline = boundedWorkspaceIntegrityStatus(checkoutBaseline);
+  const hash = (value) => (value === null ? null : hashBytes(value));
+  const text = [
+    "workspace integrity violation",
+    `checkoutStatusBytes: ${status.bytes ?? "null"}`,
+    `checkoutStatusTruncated: ${status.truncated}`,
+    `checkoutStatusSha256: ${hash(checkoutStatus) ?? "null"}`,
+    "checkoutStatus:",
+    status.value ?? "null",
+    `checkoutBaselineBytes: ${baseline.bytes ?? "null"}`,
+    `checkoutBaselineTruncated: ${baseline.truncated}`,
+    `checkoutBaselineSha256: ${hash(checkoutBaseline) ?? "null"}`,
+    "checkoutBaseline:",
+    baseline.value ?? "null",
+    "",
+  ].join("\n");
+  writeFileSync(
+    path.join(workspaceDir, "workspace-integrity-status.txt"),
+    text,
+    "utf8",
+  );
+  return { status, baseline };
 }
 
 /** Fail closed: a read-only repository workspace is acceptable only if clean. */
@@ -3848,10 +3882,7 @@ export async function executeClaimed(
   let worktreePath = null;
   let checkoutBaseline;
   let worktreeRecord;
-  const cleanupWorkspace = ({
-    retainWorkspace = false,
-    retainCheckout = false,
-  } = {}) => {
+  const cleanupWorkspace = ({ retainWorkspace = false } = {}) => {
     if (!workspaceDir) return;
     const fenced = !assertCurrentToken(db, runId, fencingToken);
     if (fenced && spec.workspace?.type === "worktree") {
@@ -3866,10 +3897,9 @@ export async function executeClaimed(
     }
     destroyWorkspace(workspaceDir, {
       retain: retainWorkspace,
-      // A retained integrity failure needs its dirty checkout for diagnosis.
-      // Releasing a repository checkout removes it before the retained wrapper
-      // can be inspected, which makes this guard's failure opaque.
-      checkout: fenced || retainCheckout ? null : checkoutPath,
+      // Integrity evidence is persisted in the retained wrapper, so its
+      // repository checkout can always be released and deregistered.
+      checkout: fenced ? null : checkoutPath,
       repoName,
     });
   };
@@ -5470,19 +5500,20 @@ export async function executeClaimed(
       (checkoutBaseline === null || checkoutStatus !== checkoutBaseline)
     ) {
       const reasonCode = "workspace_integrity_violation";
-      const evidence = boundedWorkspaceIntegrityStatus(checkoutStatus);
+      const evidence = writeWorkspaceIntegrityStatus(workspaceDir, {
+        checkoutStatus,
+        checkoutBaseline,
+      });
       recorder("lifecycle", {
         note: reasonCode,
-        checkoutStatus: evidence.value,
-        checkoutStatusBytes: evidence.bytes,
-        checkoutStatusTruncated: evidence.truncated,
+        checkoutStatus: evidence.status.value,
+        checkoutStatusBytes: evidence.status.bytes,
+        checkoutStatusTruncated: evidence.status.truncated,
         checkoutBaselineSha256:
-          checkoutBaseline === null
-            ? null
-            : `sha256:${hashBytes(checkoutBaseline)}`,
+          checkoutBaseline === null ? null : hashBytes(checkoutBaseline),
       });
       const res = failTerminal("FAILED", reasonCode, reasonCode);
-      cleanupWorkspace({ retainWorkspace: true, retainCheckout: true });
+      cleanupWorkspace({ retainWorkspace: true });
       if (res?.fenced) return { fenced: true };
       return { runId, attempt, terminalState: "FAILED", reasonCode };
     }
