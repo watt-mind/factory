@@ -1144,6 +1144,65 @@ sh -c 'sleep 5 & wait'
     expect(repositoryStatus(repo)).not.toBe(baseline);
   });
 
+  test("workspace integrity failure records dirty checkout evidence and retains it", async () => {
+    const db = openDb(":memory:");
+    const o = opts();
+    const spec = queueRun(
+      db,
+      makeSpec({
+        adapter: "dirty-read-only-checkout",
+        input: {
+          repos: ["ok"],
+          repoPin: { repo: "factory", sha: "0".repeat(40) },
+        },
+        workspace: {
+          type: "repository",
+          checkoutDir: "repo",
+          retainOnFailure: false,
+        },
+      }),
+    );
+    const dirtyAdapter = {
+      async execute(args) {
+        writeFileSync(
+          path.join(args.workspaceDir, "repo", "agent-write.log"),
+          "dirty\n",
+        );
+        return fake.execute(args);
+      },
+    };
+
+    const summary = await runOnce(
+      db,
+      registry,
+      { "dirty-read-only-checkout": dirtyAdapter },
+      o,
+    );
+
+    expect(summary).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "workspace_integrity_violation",
+    });
+    const workspace = path.join(o.workspacesRoot, `${spec.runId}-a1`);
+    expect(existsSync(path.join(workspace, "repo", "agent-write.log"))).toBe(
+      true,
+    );
+    const evidence = db
+      .query(
+        `SELECT payload_json FROM attempt_trace
+         WHERE run_id = ? AND kind = 'lifecycle' ORDER BY seq`,
+      )
+      .all(spec.runId)
+      .map((row) => JSON.parse(row.payload_json))
+      .find((payload) => payload.note === "workspace_integrity_violation");
+    expect(evidence).toEqual(
+      expect.objectContaining({
+        checkoutStatus: expect.stringContaining("agent-write.log"),
+      }),
+    );
+    db.close();
+  });
+
   test("repository status returns null when git exceeds its timeout", () => {
     const dir = tmpDir("evrt-hanging-git-");
     const hangingGit = path.join(dir, "git");

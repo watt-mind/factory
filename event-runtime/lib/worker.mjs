@@ -1660,6 +1660,27 @@ export function repositoryStatus(
   return result.status === 0 ? result.stdout : null;
 }
 
+const WORKSPACE_INTEGRITY_STATUS_MAX_BYTES = 12 * 1024;
+
+/** Keep checkout dirt evidence useful without letting one run grow trace storage unbounded. */
+function boundedWorkspaceIntegrityStatus(status) {
+  if (status === null) {
+    return { value: null, bytes: null, truncated: false };
+  }
+  const bytes = Buffer.byteLength(status, "utf8");
+  if (bytes <= WORKSPACE_INTEGRITY_STATUS_MAX_BYTES) {
+    return { value: status, bytes, truncated: false };
+  }
+  const suffix = `\n… truncated; ${bytes} bytes total\n`;
+  const previewBytes =
+    WORKSPACE_INTEGRITY_STATUS_MAX_BYTES - Buffer.byteLength(suffix);
+  return {
+    value: `${Buffer.from(status).subarray(0, previewBytes).toString("utf8")}${suffix}`,
+    bytes,
+    truncated: true,
+  };
+}
+
 /** Fail closed: a read-only repository workspace is acceptable only if clean. */
 export function repositoryIsClean(checkoutPath) {
   return repositoryStatus(checkoutPath)?.trim() === "";
@@ -3827,7 +3848,10 @@ export async function executeClaimed(
   let worktreePath = null;
   let checkoutBaseline;
   let worktreeRecord;
-  const cleanupWorkspace = ({ retainWorkspace = false } = {}) => {
+  const cleanupWorkspace = ({
+    retainWorkspace = false,
+    retainCheckout = false,
+  } = {}) => {
     if (!workspaceDir) return;
     const fenced = !assertCurrentToken(db, runId, fencingToken);
     if (fenced && spec.workspace?.type === "worktree") {
@@ -3842,7 +3866,10 @@ export async function executeClaimed(
     }
     destroyWorkspace(workspaceDir, {
       retain: retainWorkspace,
-      checkout: fenced ? null : checkoutPath,
+      // A retained integrity failure needs its dirty checkout for diagnosis.
+      // Releasing a repository checkout removes it before the retained wrapper
+      // can be inspected, which makes this guard's failure opaque.
+      checkout: fenced || retainCheckout ? null : checkoutPath,
       repoName,
     });
   };
@@ -5433,16 +5460,29 @@ export async function executeClaimed(
     // The settings policy is preventative; this is the independent, durable
     // check before a repository-read run's output can be accepted or emitted.
     // Mutating worktree workspaces are exempt.
+    const mustCheckWorkspaceIntegrity =
+      !isWorktree && !def.mutating && checkoutPath;
+    const checkoutStatus = mustCheckWorkspaceIntegrity
+      ? repositoryStatus(checkoutPath)
+      : null;
     if (
-      !isWorktree &&
-      !def.mutating &&
-      checkoutPath &&
-      (checkoutBaseline === null ||
-        repositoryStatus(checkoutPath) !== checkoutBaseline)
+      mustCheckWorkspaceIntegrity &&
+      (checkoutBaseline === null || checkoutStatus !== checkoutBaseline)
     ) {
       const reasonCode = "workspace_integrity_violation";
+      const evidence = boundedWorkspaceIntegrityStatus(checkoutStatus);
+      recorder("lifecycle", {
+        note: reasonCode,
+        checkoutStatus: evidence.value,
+        checkoutStatusBytes: evidence.bytes,
+        checkoutStatusTruncated: evidence.truncated,
+        checkoutBaselineSha256:
+          checkoutBaseline === null
+            ? null
+            : `sha256:${hashBytes(checkoutBaseline)}`,
+      });
       const res = failTerminal("FAILED", reasonCode, reasonCode);
-      cleanupWorkspace({ retainWorkspace: true });
+      cleanupWorkspace({ retainWorkspace: true, retainCheckout: true });
       if (res?.fenced) return { fenced: true };
       return { runId, attempt, terminalState: "FAILED", reasonCode };
     }
