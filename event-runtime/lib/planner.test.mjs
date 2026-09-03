@@ -169,6 +169,40 @@ describe("merge concurrency policy", () => {
 });
 
 describe("planEvent", () => {
+  test("parks a malformed stored envelope while planning an unrelated event", () => {
+    const db = openDb(":memory:");
+    const malformed = admit(db, {
+      eventId: "malformed-stored-envelope",
+      correlationId: "malformed-stored-envelope",
+    });
+    const healthy = admit(db, {
+      eventId: "healthy-after-malformed-envelope",
+      correlationId: "healthy-after-malformed-envelope",
+    });
+    db.query(
+      `UPDATE events SET envelope_json = ? WHERE source = ? AND event_id = ?`,
+    ).run("{damaged stored envelope", malformed.source, malformed.eventId);
+
+    expect(
+      planAdmittedEvents(db, registry, { now: NOW, policyVersion: "git:test" }),
+    ).toEqual({ planned: 2, failed: 0, deadLettered: 0 });
+    expect(
+      db
+        .query(`SELECT status, plan_failures FROM events WHERE event_id = ?`)
+        .get(malformed.eventId),
+    ).toEqual({ status: "human_needed", plan_failures: 0 });
+    expect(
+      db
+        .query(`SELECT reason FROM proposals WHERE event_id = ?`)
+        .get(malformed.eventId).reason,
+    ).toBe("malformed_event_envelope");
+    expect(
+      db
+        .query(`SELECT status FROM events WHERE event_id = ?`)
+        .get(healthy.eventId).status,
+    ).toBe("planned");
+  });
+
   test("pins workspace-only intent into the RunSpec for the execute-time admission backstop (#962)", () => {
     const db = openDb(":memory:");
     const ref = admit(db, {

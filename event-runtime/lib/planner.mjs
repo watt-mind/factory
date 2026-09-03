@@ -2528,6 +2528,18 @@ function existingOutcome(db, event) {
   };
 }
 
+/** Historic event rows may have bypassed intake validation. */
+function parseStoredEnvelope(json) {
+  try {
+    const value = JSON.parse(json);
+    if (value && typeof value === "object" && !Array.isArray(value))
+      return value;
+  } catch {
+    // The planner records a typed refusal below instead of poisoning its pass.
+  }
+  return null;
+}
+
 /**
  * Plan one admitted event: NOOP | HUMAN_NEEDED | RUN (§4). All writes for one
  * plan happen in one transaction; re-planning is idempotent.
@@ -2563,56 +2575,60 @@ export function planEvent(
       )
       .get(source, eventId);
     if (row?.status === "admitted") {
-      const preEnvelope = JSON.parse(row.envelope_json);
-      const preMapping = getEventType(registry, preEnvelope.type);
-      const preDef =
-        preMapping && preMapping.observe !== true
-          ? registry.agents.get(preMapping.agent)
-          : null;
-      // An event already outside the definition's repo scope (WM-64) skips
-      // the gate's Linear/lease reads entirely — the transaction below parks
-      // it repo_not_allowed before anything else happens.
-      if (
-        worktreeGateFor(preDef) === "dispatch" &&
-        typeof preEnvelope.payload?.repo === "string" &&
-        typeof preEnvelope.payload?.ticket === "string" &&
-        !(
-          preEnvelope.type === "factory.dispatch.requested" &&
-          preEnvelope.source !== "operator" &&
-          policyDispatchPaused(undefined, configSnapshot)
-        ) &&
-        !repoNotAllowed(preDef, preEnvelope.payload)
-      ) {
-        if (preEnvelope.type === "factory.dispatch.requested") {
-          toolchainEligibility = dispatchToolchainEligibility(
-            preEnvelope.payload,
-            { configSnapshot, toolchain },
-          );
-        }
-        if (toolchainEligibility?.ready !== false) {
-          try {
-            worktreeEligibility = worktreeDispatchAutoEligibility(
+      const preEnvelope = parseStoredEnvelope(row.envelope_json);
+      if (!preEnvelope) {
+        // The transaction below records the malformed row as human-needed.
+      } else {
+        const preMapping = getEventType(registry, preEnvelope.type);
+        const preDef =
+          preMapping && preMapping.observe !== true
+            ? registry.agents.get(preMapping.agent)
+            : null;
+        // An event already outside the definition's repo scope (WM-64) skips
+        // the gate's Linear/lease reads entirely — the transaction below parks
+        // it repo_not_allowed before anything else happens.
+        if (
+          worktreeGateFor(preDef) === "dispatch" &&
+          typeof preEnvelope.payload?.repo === "string" &&
+          typeof preEnvelope.payload?.ticket === "string" &&
+          !(
+            preEnvelope.type === "factory.dispatch.requested" &&
+            preEnvelope.source !== "operator" &&
+            policyDispatchPaused(undefined, configSnapshot)
+          ) &&
+          !repoNotAllowed(preDef, preEnvelope.payload)
+        ) {
+          if (preEnvelope.type === "factory.dispatch.requested") {
+            toolchainEligibility = dispatchToolchainEligibility(
               preEnvelope.payload,
-              {
-                ...dispatch,
-                operatorAuthorized: preEnvelope.source === "operator",
-                configSnapshot,
-              },
+              { configSnapshot, toolchain },
             );
-          } catch (err) {
-            if (!isLinearReadDeferred(err)) throw err;
-            const reason = linearReadDeferredReason(err);
-            worktreeEligibility = {
-              ok: false,
-              linearReadDeferred: true,
-              reason,
-              resetAt: err.resetAt ?? null,
-              refusal: {
-                decision: "retry_later",
+          }
+          if (toolchainEligibility?.ready !== false) {
+            try {
+              worktreeEligibility = worktreeDispatchAutoEligibility(
+                preEnvelope.payload,
+                {
+                  ...dispatch,
+                  operatorAuthorized: preEnvelope.source === "operator",
+                  configSnapshot,
+                },
+              );
+            } catch (err) {
+              if (!isLinearReadDeferred(err)) throw err;
+              const reason = linearReadDeferredReason(err);
+              worktreeEligibility = {
+                ok: false,
+                linearReadDeferred: true,
                 reason,
-                detail: err.message,
-              },
-            };
+                resetAt: err.resetAt ?? null,
+                refusal: {
+                  decision: "retry_later",
+                  reason,
+                  detail: err.message,
+                },
+              };
+            }
           }
         }
       }
@@ -2642,8 +2658,16 @@ export function planEvent(
     if (!event) throw new Error(`no admitted event (${source}, ${eventId})`);
     if (event.status !== "admitted") return existingOutcome(db, event);
 
-    const envelope = JSON.parse(event.envelope_json);
     const at = new Date(now).toISOString();
+    const envelope = parseStoredEnvelope(event.envelope_json);
+    if (!envelope)
+      return humanNeeded(
+        db,
+        event,
+        "malformed_event_envelope",
+        at,
+        DEFAULT_PROPOSAL_TTL_SECONDS,
+      );
 
     const gitMapping = getEventType(registry, envelope.type);
     if (!gitMapping)

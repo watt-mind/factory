@@ -59,8 +59,23 @@ function recordedSpecPinsVersion(spec) {
   );
 }
 
+/** Stored proposal JSON can outlive the writer that validated it. */
+function parseStoredObject(json) {
+  try {
+    const value = JSON.parse(json);
+    if (value && typeof value === "object" && !Array.isArray(value))
+      return value;
+  } catch {
+    // A hand-repaired or legacy row must not take down the approval surface.
+  }
+  return null;
+}
+
 function withSpec(row) {
-  return { ...row, spec: row.spec_json ? JSON.parse(row.spec_json) : null };
+  return {
+    ...row,
+    spec: row.spec_json ? parseStoredObject(row.spec_json) : null,
+  };
 }
 
 /** Open proposals, oldest first, annotated with `expired` and parsed `spec`. */
@@ -151,7 +166,7 @@ function loadEnvelope(db, proposal) {
     throw new Error(
       `proposal ${proposal.id} references missing event (${proposal.event_source}, ${proposal.event_id})`,
     );
-  return JSON.parse(event.envelope_json);
+  return parseStoredObject(event.envelope_json);
 }
 
 /**
@@ -248,7 +263,8 @@ function approveRun(
  * proposal is returned instead (§12).
  *
  * @returns {{ approved: true, runId: string }
- *         | { approved: false, replanned: true, proposal: object }}
+ *         | { approved: false, replanned: true, proposal: object }
+ *         | { approved: false, malformed: true, reason: string, proposal: object }}
  */
 export function approveProposal(
   db,
@@ -277,6 +293,13 @@ export function approveProposal(
       );
 
     const envelope = loadEnvelope(db, proposal);
+    if (!envelope)
+      return {
+        approved: false,
+        malformed: true,
+        reason: "malformed_event_envelope",
+        proposal: withSpec(proposal),
+      };
     // Structural no-auto-approval (docs/event-runtime-dispatch.md §7, WM-111):
     // a humanApprovalOnly event type rejects every non-operator actor —
     // schedule auto-approval included — fail-closed, before any state moves.
@@ -292,8 +315,15 @@ export function approveProposal(
       throw err;
     }
     const recordedSpec = proposal.spec_json
-      ? JSON.parse(proposal.spec_json)
+      ? parseStoredObject(proposal.spec_json)
       : null;
+    if (proposal.spec_json && !recordedSpec)
+      return {
+        approved: false,
+        malformed: true,
+        reason: "malformed_proposal_spec",
+        proposal: withSpec(proposal),
+      };
     // Fail-closed: an unknown/omitted caller version is *not equal* to a
     // recorded pin. Skipping the comparison here used to approve the
     // recorded spec as-is whenever a caller forwarded the default.
@@ -352,7 +382,7 @@ export function approveProposal(
       throw new Error(
         `proposal ${id} requires re-planning but event type ${envelope.type} is no longer registered`,
       );
-    const storedSpec = recordedSpec ?? JSON.parse(proposal.spec_json);
+    const storedSpec = recordedSpec;
     const replanOptions = ttlReplanOptions(storedSpec, mapping.adapter);
     const built = {
       ...buildRunSpec(registry, envelope, mapping, {

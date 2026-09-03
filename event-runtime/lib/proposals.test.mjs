@@ -169,6 +169,17 @@ describe("openProposals / getProposal", () => {
     expect(getProposal(db, "prop_nope")).toBeNull();
   });
 
+  test("keeps malformed stored proposal specs inspectable without throwing", () => {
+    const { db, proposal } = planned();
+    db.query(`UPDATE proposals SET spec_json = ? WHERE id = ?`).run(
+      "{damaged proposal spec",
+      proposal.id,
+    );
+
+    expect(getProposal(db, proposal.id).spec).toBeNull();
+    expect(openProposals(db)).toMatchObject([{ id: proposal.id, spec: null }]);
+  });
+
   test("does not expire a parked non-run proposal by TTL", () => {
     const db = openDb(":memory:");
     const admitted = admitEvent(
@@ -282,6 +293,32 @@ describe("approveProposal within TTL", () => {
     expect(journal[1].actor).toBe("operator");
     expect(journal[1].correlation_id).toBe("workflow-01");
     expect(journal.at(-1).reason).toBe("approved");
+  });
+
+  test("refuses malformed stored envelope or spec without changing the proposed run", () => {
+    for (const [column, value, reason] of [
+      ["envelope_json", "{damaged event envelope", "malformed_event_envelope"],
+      ["spec_json", "{damaged proposal spec", "malformed_proposal_spec"],
+    ]) {
+      const { db, proposal, runId } = planned();
+      const table = column === "envelope_json" ? "events" : "proposals";
+      const idColumn = column === "envelope_json" ? "event_id" : "id";
+      const id = column === "envelope_json" ? proposal.event_id : proposal.id;
+      db.query(`UPDATE ${table} SET ${column} = ? WHERE ${idColumn} = ?`).run(
+        value,
+        id,
+      );
+
+      expect(
+        approveProposal(db, registry, proposal.id, {
+          actor: "operator",
+          now: NOW + 60_000,
+          policyVersion: "git:test",
+        }),
+      ).toMatchObject({ approved: false, malformed: true, reason });
+      expect(runState(db, runId)).toBe("PROPOSED");
+      expect(getProposal(db, proposal.id).status).toBe("open");
+    }
   });
 
   test("re-plans a stale registry version, then queues the refreshed spec when only its versions changed", () => {
