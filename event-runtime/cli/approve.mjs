@@ -15,6 +15,7 @@ export async function approveProposal(client, id) {
     if (err?.body?.reason !== MALFORMED_STORED_ROW) throw err;
     throw new Error(
       `proposal ${id} cannot be approved — its stored row is corrupt (${err.body.kind ?? MALFORMED_STORED_ROW}); repair or reject the proposal, approving again will not clear it`,
+      { cause: err },
     );
   }
   if (outcome.approved) console.log(`approved — run ${outcome.runId} queued`);
