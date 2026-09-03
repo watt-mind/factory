@@ -2528,7 +2528,12 @@ function existingOutcome(db, event) {
   };
 }
 
-/** Historic event rows may have bypassed intake validation. */
+/**
+ * Historic event rows may have bypassed intake validation. A non-object
+ * (array or scalar) is rejected deliberately alongside unparsable JSON:
+ * planning reads `type`/`payload`/`source` off the envelope, so a valid-JSON
+ * `[]` or `"x"` is exactly as unplannable as a truncated row.
+ */
 function parseStoredEnvelope(json) {
   try {
     const value = JSON.parse(json);

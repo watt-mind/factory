@@ -59,22 +59,56 @@ function recordedSpecPinsVersion(spec) {
   );
 }
 
-/** Stored proposal JSON can outlive the writer that validated it. */
-function parseStoredObject(json) {
-  try {
-    const value = JSON.parse(json);
-    if (value && typeof value === "object" && !Array.isArray(value))
-      return value;
-  } catch {
-    // A hand-repaired or legacy row must not take down the approval surface.
+/**
+ * A stored row whose JSON no longer parses as an object. Approval refuses
+ * such a row loudly: callers funnel a thrown error into their existing
+ * failure paths, whereas a success-shaped `{ approved: false }` return reads
+ * as a completed re-plan at every call site.
+ */
+export class MalformedStoredRowError extends Error {
+  constructor(proposalId, kind) {
+    super(`proposal ${proposalId}: ${kind}`);
+    this.name = "MalformedStoredRowError";
+    this.code = "malformed_stored_row";
+    this.proposalId = proposalId;
+    /** `malformed_event_envelope` | `malformed_proposal_spec` */
+    this.kind = kind;
   }
+}
+
+/**
+ * Stored proposal JSON can outlive the writer that validated it. A non-object
+ * (array or scalar) is rejected deliberately: every caller reads named fields
+ * off the result, so a valid-JSON `[]` or `7` is as unusable as a parse error.
+ */
+function parseStoredObject(json, { field, id } = {}) {
+  let value;
+  try {
+    value = JSON.parse(json);
+  } catch (err) {
+    // A hand-repaired or legacy row must not take down the approval surface.
+    console.error(
+      `proposals_stored_json_unparsable: ${field ?? "json"} ${id ?? "?"}: ${String(err?.message ?? err)}`,
+    );
+    return null;
+  }
+  if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  console.error(
+    `proposals_stored_json_not_object: ${field ?? "json"} ${id ?? "?"}: parsed as ${Array.isArray(value) ? "array" : typeof value}`,
+  );
   return null;
 }
 
 function withSpec(row) {
+  const spec = row.spec_json
+    ? parseStoredObject(row.spec_json, { field: "spec_json", id: row.id })
+    : null;
   return {
     ...row,
-    spec: row.spec_json ? parseStoredObject(row.spec_json) : null,
+    spec,
+    // Read paths degrade to `spec: null`; the flag tells an inbox or CLI view
+    // apart from a proposal that legitimately records no spec.
+    ...(row.spec_json && !spec ? { specMalformed: true } : {}),
   };
 }
 
@@ -166,7 +200,10 @@ function loadEnvelope(db, proposal) {
     throw new Error(
       `proposal ${proposal.id} references missing event (${proposal.event_source}, ${proposal.event_id})`,
     );
-  return parseStoredObject(event.envelope_json);
+  return parseStoredObject(event.envelope_json, {
+    field: "envelope_json",
+    id: `${proposal.event_source}/${proposal.event_id}`,
+  });
 }
 
 /**
@@ -262,9 +299,13 @@ function approveRun(
  * superseded, the still-PROPOSED run gets the fresh spec, and a new open
  * proposal is returned instead (§12).
  *
+ * A row whose stored envelope or spec JSON no longer parses as an object
+ * throws {@link MalformedStoredRowError} rather than returning: corruption is
+ * an operator-visible failure, never a silent success-shaped outcome.
+ *
  * @returns {{ approved: true, runId: string }
- *         | { approved: false, replanned: true, proposal: object }
- *         | { approved: false, malformed: true, reason: string, proposal: object }}
+ *         | { approved: false, replanned: true, proposal: object }}
+ * @throws {MalformedStoredRowError} when spec_json or envelope_json is corrupt
  */
 export function approveProposal(
   db,
@@ -294,12 +335,7 @@ export function approveProposal(
 
     const envelope = loadEnvelope(db, proposal);
     if (!envelope)
-      return {
-        approved: false,
-        malformed: true,
-        reason: "malformed_event_envelope",
-        proposal: withSpec(proposal),
-      };
+      throw new MalformedStoredRowError(id, "malformed_event_envelope");
     // Structural no-auto-approval (docs/event-runtime-dispatch.md §7, WM-111):
     // a humanApprovalOnly event type rejects every non-operator actor —
     // schedule auto-approval included — fail-closed, before any state moves.
@@ -315,15 +351,10 @@ export function approveProposal(
       throw err;
     }
     const recordedSpec = proposal.spec_json
-      ? parseStoredObject(proposal.spec_json)
+      ? parseStoredObject(proposal.spec_json, { field: "spec_json", id })
       : null;
     if (proposal.spec_json && !recordedSpec)
-      return {
-        approved: false,
-        malformed: true,
-        reason: "malformed_proposal_spec",
-        proposal: withSpec(proposal),
-      };
+      throw new MalformedStoredRowError(id, "malformed_proposal_spec");
     // Fail-closed: an unknown/omitted caller version is *not equal* to a
     // recorded pin. Skipping the comparison here used to approve the
     // recorded spec as-is whenever a caller forwarded the default.
@@ -382,8 +413,7 @@ export function approveProposal(
       throw new Error(
         `proposal ${id} requires re-planning but event type ${envelope.type} is no longer registered`,
       );
-    const storedSpec = recordedSpec;
-    const replanOptions = ttlReplanOptions(storedSpec, mapping.adapter);
+    const replanOptions = ttlReplanOptions(recordedSpec, mapping.adapter);
     const built = {
       ...buildRunSpec(registry, envelope, mapping, {
         runId: proposal.run_id,
@@ -394,18 +424,18 @@ export function approveProposal(
       // configSnapshot can affect planning and is itself part of specs that
       // explicitly pin it. Keep the pin in the rebuilt spec as well as
       // supplying it to buildRunSpec above.
-      ...(Object.hasOwn(storedSpec, "configSnapshot")
-        ? { configSnapshot: storedSpec.configSnapshot }
+      ...(Object.hasOwn(recordedSpec, "configSnapshot")
+        ? { configSnapshot: recordedSpec.configSnapshot }
         : {}),
       // A run is its existing idempotency generation, not a new family
       // member. Reapply the stored key after buildRunSpec derives its normal
       // declaration key.
-      idempotencyKey: storedSpec.idempotencyKey,
+      idempotencyKey: recordedSpec.idempotencyKey,
     };
     // Preserve the definition-attestation generation of the recorded spec.
     // Older rows without defHash remain byte-compatible; pinned rows always
     // receive a fresh pin rather than losing the guard during re-planning.
-    const fresh = storedSpec?.defHash
+    const fresh = recordedSpec?.defHash
       ? {
           ...built,
           defHash: computeDefHash(getAgent(registry, built.agent)),
@@ -425,7 +455,7 @@ export function approveProposal(
       registryVersionMismatch &&
       isKnownPolicyVersion(policyVersion) &&
       !registryReloadMismatch &&
-      matchesAfterRegistryVersionRefresh(storedSpec, fresh);
+      matchesAfterRegistryVersionRefresh(recordedSpec, fresh);
     if (
       !registryReloadMismatch &&
       (freshHash === proposal.spec_hash || versionRefreshMatches)

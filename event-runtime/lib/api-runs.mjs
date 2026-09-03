@@ -2537,6 +2537,14 @@ export async function handleRunApiRoute({
     } catch (err) {
       if (isBusyError(err))
         return send(503, { error: "db_busy", retryable: true });
+      // A corrupt stored row is a refusal, not a re-plan: the response must
+      // never look like the 200 `{ approved: false, replanned: true }` body.
+      if (err?.code === "malformed_stored_row")
+        return send(409, {
+          error: err.message,
+          reason: err.code,
+          kind: err.kind,
+        });
       const status = String(err.message).startsWith("unknown proposal")
         ? 404
         : 409;

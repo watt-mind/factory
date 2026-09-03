@@ -792,6 +792,34 @@ describe("chain auto approval (WM-357)", () => {
     ]);
   });
 
+  // approveProposal throws MalformedStoredRowError on a corrupt stored row, so
+  // this pass can never mistake corruption for a completed re-plan. Chain
+  // eligibility catches both corruption kinds first, with a typed reason, and
+  // the row is held open rather than approved or dropped.
+  test("a malformed stored row is held open, never approved or reported as re-planned", async () => {
+    for (const [id, table, column, reason] of [
+      ["malformed-envelope", "events", "envelope_json", "event_unparseable"],
+      ["malformed-spec", "proposals", "spec_json", "proposal_unparseable"],
+    ]) {
+      const db = openDb(":memory:");
+      const candidate = seed(db, { id });
+      const idColumn = table === "events" ? "event_id" : "id";
+      const rowId = table === "events" ? `event-${id}` : candidate.id;
+      db.query(`UPDATE ${table} SET ${column} = ? WHERE ${idColumn} = ?`).run(
+        "{damaged stored row",
+        rowId,
+      );
+
+      const result = await auto(db, { runtimeGuard: () => null });
+
+      expect(result.approved).toEqual([]);
+      expect(result.errors).toEqual([]);
+      expect(result.open).toEqual([{ proposalId: candidate.id, reason }]);
+      expect(runState(db, candidate.runId)).toBe("PROPOSED");
+      expect(reasonOf(db, candidate.id)).toContain(reason);
+    }
+  });
+
   test("dispatch.paused skips open chain proposals and resumes them after it clears", async () => {
     const db = openDb(":memory:");
     const candidate = seed(db, { id: "paused" });

@@ -13,6 +13,7 @@ import {
   approveProposal,
   closeOpenProposalForRun,
   getProposal,
+  MalformedStoredRowError,
   openProposals,
   rejectProposal,
   sweepOrphanedNonRunProposals,
@@ -176,8 +177,13 @@ describe("openProposals / getProposal", () => {
       proposal.id,
     );
 
-    expect(getProposal(db, proposal.id).spec).toBeNull();
-    expect(openProposals(db)).toMatchObject([{ id: proposal.id, spec: null }]);
+    expect(getProposal(db, proposal.id)).toMatchObject({
+      spec: null,
+      specMalformed: true,
+    });
+    expect(openProposals(db)).toMatchObject([
+      { id: proposal.id, spec: null, specMalformed: true },
+    ]);
   });
 
   test("does not expire a parked non-run proposal by TTL", () => {
@@ -309,13 +315,25 @@ describe("approveProposal within TTL", () => {
         id,
       );
 
-      expect(
+      // A success-shaped `{ approved: false }` return reads as a completed
+      // re-plan at every call site, so corruption throws instead.
+      let thrown = null;
+      try {
         approveProposal(db, registry, proposal.id, {
           actor: "operator",
           now: NOW + 60_000,
           policyVersion: "git:test",
-        }),
-      ).toMatchObject({ approved: false, malformed: true, reason });
+        });
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeInstanceOf(MalformedStoredRowError);
+      expect(thrown).toMatchObject({
+        code: "malformed_stored_row",
+        kind: reason,
+        proposalId: proposal.id,
+      });
+      expect(thrown.message).toContain(proposal.id);
       expect(runState(db, runId)).toBe("PROPOSED");
       expect(getProposal(db, proposal.id).status).toBe("open");
     }

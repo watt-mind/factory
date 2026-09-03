@@ -2329,6 +2329,28 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
     expect(again.message).toContain("not open");
   });
 
+  // A corrupt stored row is a refusal, not the 200 `replanned: true` body:
+  // an operator client that reads `approved === false` as "re-planned" would
+  // otherwise chase a fresh proposal that was never created.
+  test("approve a proposal whose stored envelope is corrupt → 409, not a re-plan", async () => {
+    const prop = await planned("malformed-envelope-1");
+    s.db
+      .query(`UPDATE events SET envelope_json = ? WHERE event_id = ?`)
+      .run("{damaged stored envelope", "malformed-envelope-1");
+
+    const err = await rejection(s.client.approve(prop.id));
+
+    expect(err.status).toBe(409);
+    expect(err.body).toMatchObject({
+      reason: "malformed_stored_row",
+      kind: "malformed_event_envelope",
+    });
+    expect(err.message).toContain(prop.id);
+    expect((await s.client.run(prop.runId)).run.state).toBe("PROPOSED");
+    const { proposals } = await s.client.proposals();
+    expect(proposals.find((p) => p.id === prop.id)?.status).toBe("open");
+  });
+
   test("reject an open proposal → run CANCELLED", async () => {
     const prop = await planned("rej-1");
     const rejected = await s.client.reject(prop.id, "not today");
