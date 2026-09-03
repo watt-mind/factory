@@ -4,7 +4,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { retriggerEnvelope } from "../templates";
 import {
@@ -40,7 +40,13 @@ import {
 import { chainKeyOfEvent, eventNodeId } from "../graph/chainModel";
 import { setContextActions } from "../palette";
 import { ScopeCaption } from "../components/ContextTabs";
-import type { AdmittedEvent, EventFocus, Proposal, RunSummary } from "../types";
+import type {
+  AdmittedEvent,
+  AgentDef,
+  EventFocus,
+  Proposal,
+  RunSummary,
+} from "../types";
 import type { OperatorContext } from "../context";
 import { matchesRepo } from "../context";
 import {
@@ -62,13 +68,11 @@ import {
   Button,
   CopyActions,
   Dialog,
-  Disclosure,
   EVENT_STATUS_HUES,
   FilterInput,
   ListToolbar,
   ListPane,
   DetailPane,
-  JsonBlock,
   JumpLink,
   KV,
   ListEmpty,
@@ -85,6 +89,11 @@ import {
   shortId,
 } from "../components/ui";
 import { Button as PrimitiveButton } from "../components/ui";
+const EventPanel = lazy(() =>
+  import("../components/ArtifactView").then((module) => ({
+    default: module.EventPanel,
+  })),
+);
 
 function removeTokensFromQuery(
   filter: string,
@@ -459,11 +468,11 @@ export function Events({
   const [confirmReplay, setConfirmReplay] = useState(false);
   const [replayedEventKey, setReplayedEventKey] = useState<string | null>(null);
 
-  const fetchAll = context.kind === "repo";
+  const repoScoped = context.kind === "repo";
   const list = useInfiniteQuery({
-    queryKey: ["events", fetchAll ? "all" : tab],
+    queryKey: ["events", tab],
     queryFn: ({ pageParam }) =>
-      api.events(fetchAll || tab === "all" ? undefined : tab, {
+      api.events(tab === "all" ? undefined : tab, {
         before: pageParam,
       }),
     initialPageParam: undefined as string | undefined,
@@ -515,6 +524,23 @@ export function Events({
     }
     return schemas;
   }, [agentsQ.data]);
+  const requestedAgentByEventType = useMemo(() => {
+    const registry = agentsQ.data;
+    const byRef = new Map(registry?.agents.map((agent) => [agent.ref, agent]));
+    const resolved = new Map<string, AgentDef | null>();
+    for (const route of registry?.eventTypes ?? []) {
+      resolved.set(
+        route.type,
+        route.agent ? (byRef.get(route.agent) ?? null) : null,
+      );
+    }
+    for (const agent of registry?.agents ?? []) {
+      for (const route of agent.eventTypes) {
+        if (!resolved.has(route.type)) resolved.set(route.type, agent);
+      }
+    }
+    return resolved;
+  }, [agentsQ.data]);
   const decisions = useMemo(() => {
     const byId = new Map<string, Proposal>();
     const byEvent = new Map<string, Proposal>();
@@ -555,12 +581,7 @@ export function Events({
     );
   }, [rows, context, focusEvent?.source, focusEvent?.eventId]);
 
-  const tabScoped = useMemo(() => {
-    if (fetchAll && tab !== "all") {
-      return scoped.filter((e) => e.status === tab);
-    }
-    return scoped;
-  }, [scoped, fetchAll, tab]);
+  const tabScoped = scoped;
 
   const typeCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -644,10 +665,9 @@ export function Events({
 
   const visible = useMemo(() => {
     return scoped.filter((e) => {
-      if (fetchAll && tab !== "all" && e.status !== tab) return false;
       return matchesFilterQuery(e, parsed, EVENT_FACETS, undefined);
     });
-  }, [scoped, parsed, fetchAll, tab]);
+  }, [scoped, parsed]);
 
   // Display options (OPS-493): partition into sections, order inside them,
   // and feed keyboard navigation only the rows of open sections. Under a
@@ -740,9 +760,7 @@ export function Events({
   // Reveal a hash-selected row only when current filters hide it. Latch until
   // the row is on the active tab (inject / tab switch / poll); decide once so a
   // later 2s poll does not wipe a typed filter. j/k/click on a visible row
-  // keeps the chips. Under `fetchAll` the row can sit in `rows` while another
-  // status tab is active, so deciding on presence alone would clear the chips
-  // before the tab effect below has made the row renderable.
+  // keeps the chips.
   const pendingReveal = useRef<{
     key: string;
     snapshot: { filter: string };
@@ -766,7 +784,6 @@ export function Events({
     if (!latch || latch.key !== selectedKey) return;
     const row = rows.find((e) => keyOf(e) === latch.key);
     if (!row) return; // tab switch / poll still pending
-    if (fetchAll && tab !== "all" && row.status !== tab) return; // waiting on the tab switch
     pendingReveal.current = null; // decided once
     const isVisible = visible.some((e) => keyOf(e) === latch.key);
     const currentFilters = { filter };
@@ -804,15 +821,12 @@ export function Events({
     visible,
     focusEvent?.type,
     focusEvent?.eventId,
-    fetchAll,
     tab,
     filter,
     onSelectType,
   ]);
 
   // Hash id: switch to All if the row isn't on this tab. Don't strip the hash.
-  // With a repo context the fetch ignores the tab, so the row's own status —
-  // not its presence in `rows` — decides whether this tab can render it.
   useEffect(() => {
     if (!focusEvent?.source || !focusEvent?.eventId) {
       tabChangedFor.current = null;
@@ -822,13 +836,6 @@ export function Events({
     if (list.isPending || !list.data) return;
     const key = `${focusEvent.source}:${focusEvent.eventId}`;
     const row = rows.find((e) => keyOf(e) === key);
-    if (fetchAll) {
-      if (row && tab !== "all" && row.status !== tab) {
-        tabChangedFor.current = key;
-        setTab("all");
-      }
-      return;
-    }
     if (!row && tab !== "all") {
       tabChangedFor.current = key;
       setTab("all");
@@ -839,7 +846,6 @@ export function Events({
     focusEvent?.status,
     rows,
     tab,
-    fetchAll,
     list.isPending,
     list.data,
   ]);
@@ -1035,11 +1041,14 @@ export function Events({
 
   const eventCounts = statusQ.data?.events ?? {};
   const allCount = Object.values(eventCounts).reduce((n, v) => n + v, 0);
+  // In repo context each status tab is paged server-side, so `scoped` only
+  // holds the active tab's loaded rows — counting other statuses over it
+  // would falsely read 0. Badge only the active tab (gh-1894 review).
   const tabCount = (t: StatusTab) =>
-    fetchAll
-      ? t === "all"
+    repoScoped
+      ? t === tab
         ? scoped.length
-        : scoped.filter((e) => e.status === t).length
+        : 0
       : t === "all"
         ? allCount
         : (eventCounts[t] ?? 0);
@@ -1073,8 +1082,8 @@ export function Events({
               {rows.length} loaded {rows.length === 1 ? "row" : "rows"}
               {list.hasNextPage && " · more events available"}. Facet counts
               reflect loaded rows.
-              {fetchAll
-                ? " Status-tab counts reflect loaded rows."
+              {repoScoped
+                ? " Only the active status tab shows a count, from loaded rows."
                 : " Status-tab counts reflect all available events."}
             </p>
 
@@ -1742,9 +1751,24 @@ export function Events({
           })()}
 
           <Section title="Envelope">
-            <Disclosure label="payload JSON">
-              <JsonBlock value={sel.envelope} />
-            </Disclosure>
+            <Suspense
+              fallback={
+                <div className="text-(--text-faint)">Loading event view…</div>
+              }
+            >
+              <EventPanel
+                envelope={sel.envelope}
+                agents={agentsQ.data?.agents}
+                requestedAgent={requestedAgentByEventType.get(sel.type)}
+                runId={sel.runId}
+                now={now}
+                onJumpRun={onJumpRun}
+                onJumpChain={onJumpChain}
+                onJumpArtifact={(sha256) => {
+                  window.location.hash = `#/artifact/${sha256}`;
+                }}
+              />
+            </Suspense>
           </Section>
 
           <VerbError error={requeue.error ?? replay.error} />

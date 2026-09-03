@@ -11,10 +11,8 @@
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
-  lstatSync,
   mkdirSync,
   readFileSync,
-  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -30,25 +28,25 @@ import { TERMINAL_STATES } from "./lifecycle.mjs";
 import { getRepo, loadRepos } from "./repos.mjs";
 import { materializeCheckout, releaseCheckout } from "./repository.mjs";
 import { findPriorResumeContext } from "./transcripts.mjs";
+import { renderCellsGuide } from "./cells-guide.mjs";
+export {
+  confinedRegularFile,
+  PathViolation,
+  safeJoin,
+} from "./workspace-paths.mjs";
+import { safeJoin } from "./workspace-paths.mjs";
 
 /** Hard ceiling for repository-owned worktree lifecycle scripts (WM-262). */
 export const DEFAULT_WORKTREE_SCRIPT_TIMEOUT_MS = 120_000;
+
+/** Bound tracker notifications so a preserved worktree cannot wedge its worker. */
+export const PRESERVATION_COMMENT_TIMEOUT_MS = 30_000;
 
 function worktreeScriptTimeoutMs() {
   const configured = Number(process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS);
   return Number.isFinite(configured) && configured > 0
     ? configured
     : DEFAULT_WORKTREE_SCRIPT_TIMEOUT_MS;
-}
-
-export class PathViolation extends Error {
-  constructor(workspaceDir, relPath, detail = "escapes workspace") {
-    super(`path "${relPath}" ${detail} ${workspaceDir}`);
-    this.name = "PathViolation";
-    this.workspaceDir = workspaceDir;
-    this.relPath = relPath;
-    this.detail = detail;
-  }
 }
 
 /** Tier-2 worktree delegation failure — always typed, never a bare throw. */
@@ -100,106 +98,6 @@ function worktreeScriptFailure(result) {
     stdout,
     stderr,
   };
-}
-
-/**
- * Canonicalize the workspace root for containment checks. A root that no
- * longer exists (destroyed or retained-then-removed workspace) is reported as
- * a PathViolation rather than a raw ENOENT so callers see one error class.
- */
-function canonicalWorkspaceRoot(workspaceDir, relPath) {
-  try {
-    return realpathSync(path.resolve(workspaceDir));
-  } catch {
-    throw new PathViolation(
-      workspaceDir,
-      relPath,
-      "workspace root not resolvable",
-    );
-  }
-}
-
-/**
- * Resolve a declared workspace-relative path to an absolute one, rejecting
- * absolute inputs and anything that resolves outside the workspace. Strict:
- * the workspace directory itself is not a valid artifact path. Returns the
- * canonical (realpath) absolute path, so symlinked roots resolve to their
- * real location.
- */
-export function safeJoin(workspaceDir, relPath) {
-  if (typeof relPath !== "string" || relPath.length === 0) {
-    throw new PathViolation(workspaceDir, relPath);
-  }
-  if (path.isAbsolute(relPath)) throw new PathViolation(workspaceDir, relPath);
-  // Keep both ends of containment checks in the same namespace. On macOS the
-  // system temp root may enter as /var while realpath resolves it as
-  // /private/var; comparing a candidate in one spelling with a root in the
-  // other incorrectly rejects an in-workspace artifact as an escape.
-  const root = canonicalWorkspaceRoot(workspaceDir, relPath);
-  const resolved = path.resolve(root, relPath);
-  if (!resolved.startsWith(root + path.sep))
-    throw new PathViolation(workspaceDir, relPath);
-  return resolved;
-}
-
-/**
- * Resolve one existing workspace-relative artifact source without following
- * symlinks. Lexical confinement alone is insufficient here: the host later
- * interprets symlinks preserved from a sandboxed guest in the host namespace.
- * Every component beneath the workspace root is therefore checked with lstat,
- * then both endpoints are canonicalized and the final source must be a regular
- * file.
- *
- * This deliberately centralizes the preflight used by result verification and
- * durable artifact storage. A check/open TOCTOU window remains between this
- * path-based preflight and callers' subsequent read/hash/copy operations. Fully
- * closing it requires descriptor-relative openat-style traversal with no-follow
- * semantics, which node:fs does not expose; callers re-run this helper at each
- * trust boundary and verify the copied bytes by hash in the meantime.
- */
-export function confinedRegularFile(workspaceDir, relPath) {
-  const root = canonicalWorkspaceRoot(workspaceDir, relPath);
-  const source = safeJoin(root, relPath);
-  const relative = path.relative(root, source);
-  const components = relative.split(path.sep).filter(Boolean);
-  let cursor = root;
-
-  for (const [index, component] of components.entries()) {
-    cursor = path.join(cursor, component);
-    const stat = lstatSync(cursor);
-    if (stat.isSymbolicLink()) {
-      throw new PathViolation(
-        workspaceDir,
-        relPath,
-        `contains symlink component "${components.slice(0, index + 1).join(path.sep)}" beneath workspace`,
-      );
-    }
-    const final = index === components.length - 1;
-    if (!final && !stat.isDirectory()) {
-      throw new PathViolation(
-        workspaceDir,
-        relPath,
-        `contains non-directory component "${components.slice(0, index + 1).join(path.sep)}" beneath workspace`,
-      );
-    }
-    if (final && !stat.isFile()) {
-      throw new PathViolation(
-        workspaceDir,
-        relPath,
-        "does not name a regular file beneath workspace",
-      );
-    }
-  }
-
-  const canonicalSource = realpathSync(source);
-  if (!canonicalSource.startsWith(root + path.sep)) {
-    throw new PathViolation(
-      workspaceDir,
-      relPath,
-      "canonically escapes workspace",
-    );
-  }
-  return canonicalSource;
 }
 
 /**
@@ -358,25 +256,37 @@ export function detectWorktreeOwnershipConflict({
   databasePath = dbPath(),
   leasesDir,
   leases = liveWorkerLeases(repo, { dir: leasesDir }),
+  staleOwnerLog = (staleRunId) =>
+    console.warn(`worktree_owner_stale:${staleRunId}`),
 } = {}) {
   const runs = [];
+  const staleOwners = [];
   if (existsSync(databasePath)) {
     let db;
     try {
       db = new Database(databasePath, { readonly: true });
       for (const row of db
-        .query(`SELECT run_id, state, spec_json FROM runs`)
+        .query(`SELECT run_id, state, spec_json, attempts FROM runs`)
         .all()) {
         if (row.run_id === runId || TERMINAL_STATES.has(row.state)) continue;
+        let spec;
         let input;
         try {
-          input = JSON.parse(row.spec_json)?.input;
+          spec = JSON.parse(row.spec_json);
+          input = spec?.input;
         } catch {
           continue;
         }
-        if (input?.repo === repo && input?.ticket === ticket) {
-          runs.push({ runId: row.run_id, state: row.state });
+        if (input?.repo !== repo || input?.ticket !== ticket) continue;
+        if (
+          row.state === "FAILED" &&
+          spec?.maxAttempts != null &&
+          row.attempts >= spec.maxAttempts
+        ) {
+          staleOwners.push(row.run_id);
+          continue;
         }
+        runs.push({ runId: row.run_id, state: row.state });
       }
     } catch (err) {
       return {
@@ -410,7 +320,12 @@ export function detectWorktreeOwnershipConflict({
       return tokenSeparator <= 0 || identity.slice(0, tokenSeparator) !== runId;
     })
     .map((lease) => ({ owner: lease.owner, pid: lease.pid }));
-  if (runs.length === 0 && competingLeases.length === 0) return null;
+  if (runs.length === 0 && competingLeases.length === 0) {
+    // Only announce a release once nothing else still holds the ticket; an
+    // exhausted owner next to a live one is not stale ownership being reclaimed.
+    for (const staleRunId of staleOwners) staleOwnerLog(staleRunId);
+    return null;
+  }
   return {
     reason: "ticket has a non-terminal run or live worker lease",
     runs,
@@ -418,16 +333,35 @@ export function detectWorktreeOwnershipConflict({
   };
 }
 
-function commentOnPreservedWorktree({ ticket, preservation }) {
+export function preservationCommentTimeoutMs() {
+  return Math.min(worktreeScriptTimeoutMs(), PRESERVATION_COMMENT_TIMEOUT_MS);
+}
+
+export function commentOnPreservedWorktree({
+  ticket,
+  preservation,
+  spawn = spawnSync,
+  timeoutMs = preservationCommentTimeoutMs(),
+}) {
   const text = `Recovered an abandoned dirty worktree before re-dispatch: preserved its uncommitted changes at \`${preservation.ref}\` (commit ${preservation.commit}, ${preservation.push === "pushed" ? "pushed to origin" : "kept locally because push failed"}).`;
-  const result = spawnSync(
+  const result = spawn(
     "bun",
-    [path.join(FACTORY_ROOT, "tools", "linear.mjs"), "comment", ticket, text],
+    [path.join(FACTORY_ROOT, "tools", "ticket.mjs"), "comment", ticket, text],
     {
       cwd: FACTORY_ROOT,
       encoding: "utf8",
+      timeout: timeoutMs,
     },
   );
+  if (result.error?.code === "ETIMEDOUT") {
+    throw new Error(`Linear comment timed out after ${timeoutMs}ms`);
+  }
+  if (result.error) {
+    // ENOENT / signal kills leave status null and stderr empty; keep the cause.
+    throw new Error(
+      `Linear comment failed to run: ${result.error.message || result.error.code || String(result.error)}`,
+    );
+  }
   if (result.status !== 0) {
     throw new Error(
       String(
@@ -599,6 +533,10 @@ function materializeWorktree({
     env: {
       ...process.env,
       FACTORY_WORKTREE_REPORT: reportPath,
+      // Dispatched agents need an isolated checkout and daemons, not the
+      // interactive demo fixture. Keep the script's default seeded for direct
+      // developer use; dispatch opts out explicitly.
+      FACTORY_WORKTREE_SEED: "0",
       FACTORY_WORKTREE_PRESERVE_ABANDONED: "1",
       FACTORY_WORKTREE_PRESERVATION_REPORT: preservationPath,
       // Revalidated by factory's worktree-up while it holds the per-ticket
@@ -728,11 +666,13 @@ export function createWorkspace({
   attempt,
   input,
   workspace = {},
+  capabilities = null,
   artifactStore = artifactsRoot(),
   worktreeTimeoutMs = worktreeScriptTimeoutMs(),
   adapter = null,
   ticketLeaseOwner = null,
   workerLeasesDir,
+  materializeWorktree: materializeWorktreeFn = materializeWorktree,
   worktreeOwnershipConflict = detectWorktreeOwnershipConflict,
   worktreePreservationComment = commentOnPreservedWorktree,
   worktreeHandoff = null,
@@ -749,10 +689,23 @@ export function createWorkspace({
     "utf8",
   );
 
+  const materialized = [];
+
+  // Capability-Gated Cell Reference Guide injection (CELLS.md)
+  if (capabilities?.cells?.length > 0) {
+    const cellsGuide = renderCellsGuide({
+      cells: capabilities.cells,
+      cellEndpoint: input?.cellEndpoint,
+    });
+    writeFileSync(path.join(dir, "CELLS.md"), cellsGuide, "utf8");
+    materialized.push({
+      as: "CELLS.md",
+      sizeBytes: Buffer.byteLength(cellsGuide),
+    });
+  }
   // Declared artifact inputs (§7 `artifacts`, OPS-372): the spec names hashes,
   // the provider writes bytes, the agent reads files. An agent can never ask
   // the store for something the spec did not declare.
-  const materialized = [];
   let total = 0;
   if (workspace.type === "artifacts") {
     for (const entry of workspace.inputs ?? []) {
@@ -795,7 +748,7 @@ export function createWorkspace({
   let worktree = null;
   if (workspace.type === "worktree") {
     try {
-      worktree = materializeWorktree({
+      worktree = materializeWorktreeFn({
         workspaceDir: dir,
         input,
         checkoutDir: workspace.checkoutDir ?? "repo",

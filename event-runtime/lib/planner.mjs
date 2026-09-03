@@ -31,7 +31,11 @@ import { liveWorkerLeases } from "../../lib/worker-leases.mjs";
 import { findArtifact, pinRunArtifact } from "./artifacts.mjs";
 import { canonicalJson, hashBytes, hashJson } from "./canonical.mjs";
 import { resolveConfigPath } from "./config.mjs";
-import { hashHarnessRoots } from "./pins.mjs";
+import {
+  DEFAULT_DISPATCH_SECURITY,
+  loadRuntimePolicy,
+  policyDispatchSecurity,
+} from "./runtime-policy.mjs";
 import { isTrustedAssociation } from "./triage.mjs";
 import { listMemos } from "./memos.mjs";
 import {
@@ -67,50 +71,49 @@ import {
   RepoError,
   getRepo,
   loadRepos,
+  repoDispatchPreflightSync,
   reposConfigPath,
   reposRoot,
+  toolchainHash,
 } from "./repos.mjs";
 import { validate } from "./schema.mjs";
-import { inFlightRunsForAgent } from "./schedules.mjs";
-import { resolveInputRef } from "./workspace.mjs";
-import { computeDefHash } from "./receipts.mjs";
+import { inFlightRunsForAgent } from "./in-flight-runs.mjs";
 import {
-  autoApproveChains,
-  buildChainApprovalPolicy,
-} from "./auto-approval.mjs";
+  buildRunSpec,
+  idempotencyKeyFor,
+  modelAdapterMismatch,
+} from "./run-spec.mjs";
+export {
+  buildRunSpec,
+  HARNESS_KINDS,
+  HARNESS_NAME_PATTERN,
+  harnessFromDef,
+  harnessPinsForSpec,
+  idempotencyKeyFor,
+  modelAdapterMismatch,
+  normalizeHarness,
+} from "./run-spec.mjs";
+import { resolveInputRef } from "./workspace.mjs";
+import { HANDOFF_REASON_CODES } from "./verify.mjs";
+import { buildChainApprovalPolicy } from "./chain-approval-policy.mjs";
+import { autoApproveChains } from "./auto-approval.mjs";
 import {
   LINEAR_RATE_LIMIT_EXIT,
   LinearRateLimitError,
   isLinearRateLimitMessage,
   isLinearRateLimited,
-} from "../../tools/linear.mjs";
+  linearRateLimitState,
+  loadLinearBudget,
+} from "../../tools/ticket.mjs";
 
 /** In-flight issues list is stable across one scan; 60s is the ticket cap. */
 export const IN_FLIGHT_CACHE_TTL_MS = 60_000;
 export { DEFAULT_MAX_IN_FLIGHT };
 
-/**
- * §5.4 idempotency key: agent ref, output contract, then the event type's
- * declared scope fields in declared order. Unknown scope fields fail closed —
- * a typo in a mapping must not silently widen or narrow dedup.
- */
-export function idempotencyKeyFor(mapping, def, envelope, inputHash) {
-  const parts = mapping.idempotencyScope.map((field) => {
-    switch (field) {
-      case "correlationId":
-        return envelope.correlationId ?? envelope.eventId;
-      case "subject":
-        return envelope.subject ?? "";
-      case "inputHash":
-        return inputHash;
-      default:
-        throw new Error(
-          `unknown idempotency scope field "${field}" (docs/event-runtime.md §5.4 — fail closed)`,
-        );
-    }
-  });
-  return `${def.ref}:${def.output_contract}:${parts.join(":")}`;
-}
+// Readiness belongs to this planner process and a repo's declared constraints,
+// not to an individual event. Cache failures too: dispatch bursts must run one
+// bounded probe set per repo/toolchain declaration.
+const dispatchToolchainPreflightCache = new Map();
 
 /**
  * Per-agent repo scoping (WM-64), the repo analogue of the actions adapter's
@@ -146,7 +149,13 @@ export function pinMemos(
   db,
   def,
   payload,
-  { now = Date.now(), descriptionHash, headSha } = {},
+  {
+    now = Date.now(),
+    descriptionHash,
+    headSha,
+    artifactStore = artifactsRoot(),
+    onArtifactMissing,
+  } = {},
 ) {
   const declarations = def?.memos;
   if (!Array.isArray(declarations) || declarations.length === 0) return payload;
@@ -170,6 +179,8 @@ export function pinMemos(
         descriptionHash:
           decl.subject.type === "ticket" ? descriptionHash : undefined,
         headSha: decl.subject.type === "repo" ? headSha : undefined,
+        artifactStore,
+        onArtifactMissing,
       },
     );
     for (const row of folded) {
@@ -192,241 +203,6 @@ export function pinMemos(
       foldedAt: new Date(now).toISOString(),
       entries,
     },
-  };
-}
-
-/**
- * Closed identifiers for `def.harness.{skills,commands,subagents}` (WM-851).
- * No slashes: namespaced third-party pack names wait on WM-849's catalog.
- */
-export const HARNESS_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
-export const HARNESS_KINDS = Object.freeze(["skills", "commands", "subagents"]);
-
-/**
- * Shape-check an agent definition's `harness` block. Pure: no catalog I/O —
- * unknown names are a worker refusal, not a plan-time fetch.
- * Absent field → undefined so undeclared specs stay byte-identical.
- */
-export function harnessFromDef(def) {
-  if (def?.harness === undefined) return undefined;
-  return normalizeHarness(def.harness, def.ref ?? def.id ?? "harness");
-}
-
-/**
- * The catalog defaults to the built-in shared pack when no extension roots
- * were supplied, matching worker.mjs's materialization lookup. Keep the
- * source pins in the approved RunSpec even for a core-only runtime.
- */
-function harnessRootsForSpec(registry) {
-  if (Array.isArray(registry?.harnessRoots) && registry.harnessRoots.length) {
-    return registry.harnessRoots;
-  }
-  const dir = path.join(FACTORY_ROOT, "shared");
-  return [
-    {
-      dir,
-      plugin: "core",
-      origin: "builtin",
-      name: "factory/core",
-      version: "0.1.0",
-      floor: path.join(dir, "floor.md"),
-      commands: path.join(dir, "commands"),
-      skills: path.join(dir, "skills"),
-      subagents: path.join(dir, "agents"),
-    },
-  ];
-}
-
-/**
- * Pin only the declared source components, not every component currently in a
- * harness catalog. The worker separately attests the emitted bytes it copied
- * into the workspace because emit output may legitimately transform them.
- */
-export function harnessPinsForSpec(registry, harness) {
-  if (!harness || typeof harness !== "object") return undefined;
-  const roots = harnessRootsForSpec(registry);
-  const catalogPins = hashHarnessRoots(roots);
-  const selected = {};
-
-  for (const root of roots) {
-    const files = catalogPins[root.plugin]?.files ?? {};
-    const picked = {};
-    for (const kind of HARNESS_KINDS) {
-      const dir = root[kind];
-      const names = Array.isArray(harness[kind]) ? harness[kind] : [];
-      if (typeof dir !== "string") continue;
-      for (const name of names) {
-        const source = path.relative(
-          root.dir,
-          path.join(dir, kind === "skills" ? name : `${name}.md`),
-        );
-        for (const [file, hash] of Object.entries(files)) {
-          if (file === source || file.startsWith(`${source}/`)) {
-            picked[file] = hash;
-          }
-        }
-      }
-    }
-    if (Object.keys(picked).length > 0) {
-      selected[root.plugin] = { ...catalogPins[root.plugin], files: picked };
-    }
-  }
-  return Object.keys(selected).length > 0 ? selected : undefined;
-}
-
-export function normalizeHarness(raw, source = "harness") {
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
-    throw new Error(
-      `${source}: "harness" must be an object { skills?, commands?, subagents? }`,
-    );
-  }
-  const allowed = new Set(HARNESS_KINDS);
-  for (const key of Object.keys(raw)) {
-    if (!allowed.has(key)) {
-      throw new Error(
-        `${source}: "harness" unknown key "${key}" (allowed: ${HARNESS_KINDS.join(", ")})`,
-      );
-    }
-  }
-  const out = {};
-  for (const kind of HARNESS_KINDS) {
-    if (raw[kind] === undefined) continue;
-    const names = raw[kind];
-    const wellFormed =
-      Array.isArray(names) &&
-      names.every((n) => typeof n === "string" && HARNESS_NAME_PATTERN.test(n));
-    if (!wellFormed) {
-      throw new Error(
-        `${source}: "harness.${kind}" must be an array of names matching ${HARNESS_NAME_PATTERN}`,
-      );
-    }
-    out[kind] = [...names];
-  }
-  return out;
-}
-
-/**
- * Pure assembly of the §5.2 RunSpec from a registered mapping. No I/O, no
- * clock reads beyond the injected `now` — same inputs, same spec, always.
- */
-export function buildRunSpec(
-  registry,
-  envelope,
-  mapping,
-  {
-    runId,
-    policyVersion,
-    adapterOverride,
-    now = Date.now(),
-    approvalPolicy = null,
-    modelTierOverride,
-    modelOverride,
-    configSnapshot = null,
-  } = {},
-) {
-  const def = getAgent(registry, mapping.agent);
-  const planned = plannedDef(def, { modelTierOverride, modelOverride });
-  let payload = envelope.payload;
-  if (def.workspace?.type === "repository" && payload?.repo) {
-    try {
-      payload = {
-        ...payload,
-        repoPin: pinRepo(payload.repo, payload.ref ?? undefined),
-      };
-    } catch (err) {
-      if (!payload?.repoPin) throw err;
-    }
-  }
-  // Hand the work scan the same security-dispatch verdict the dispatch gate
-  // will apply (WM-1060), so it stops pre-filtering security tickets the gate
-  // would now admit. Scoped to work-scan to keep every other agent's input —
-  // and thus its idempotency key — untouched.
-  if (mapping.agent?.startsWith("work-scan") && payload?.repo) {
-    payload = {
-      ...payload,
-      dispatchSecurity: policyDispatchSecurity(
-        configSnapshot?.root ?? reposRoot(),
-        configSnapshot,
-      ),
-    };
-  }
-  const inputHash = hashJson(payload);
-  const placement = def.placement ?? mapping.placement ?? undefined;
-  const specEnvelope =
-    payload === envelope.payload ? envelope : { ...envelope, payload };
-  let idempotencyKey = idempotencyKeyFor(mapping, def, specEnvelope, inputHash);
-  const correlation = envelope.correlationId ?? envelope.eventId ?? null;
-  if (
-    correlation &&
-    !mapping.idempotencyScope.includes("correlationId") &&
-    !mapping.idempotencyScope.includes("eventId")
-  ) {
-    idempotencyKey = `${idempotencyKey}:${correlation}`;
-  }
-  return {
-    schemaVersion: "factory.run-spec/v1",
-    runId,
-    agent: mapping.agent,
-    input: payload,
-    inputHash,
-    workspace: def.workspace,
-    adapter: adapterOverride ?? mapping.adapter,
-    promptVersion: policyVersion,
-    policyVersion,
-    outputContract: def.output_contract,
-    // Attested definition pin (WM-1056): the content sha256 of the registered
-    // agent definition, computed with the same helper the worker's claim-time
-    // verifyDefHash and the receipt seam use. Pinned at plan time so a proposal
-    // that crosses a registry reload is compared against the exact def it was
-    // planned against. Computed from `def`, NOT `planned`, so per-ticket
-    // model/model-tier overrides never redefine the attested definition or make
-    // otherwise identical planner inputs nondeterministic.
-    defHash: computeDefHash(def),
-    capabilities: def.capabilities.services,
-    // Pin workspace-only intent into new RunSpecs so the worker's execution
-    // backstop does not depend solely on a mutable live definition. Legacy
-    // model specs without defHash are refused by the worker instead.
-    ...(def.mutating === false &&
-    def.capabilities.filesystem === "workspace-only"
-      ? { filesystem: "workspace-only" }
-      : {}),
-    // Declared repo scope (WM-64) rides in the spec so the proposal the
-    // operator approves names it, same as capabilities.
-    ...(def.repos ? { repos: def.repos } : {}),
-    // Declared harness content (WM-851): skills/commands/subagents the
-    // worker materializes into the run workspace. Omitted when the
-    // definition does not declare the field, so undeclared specs stay
-    // byte-identical to before.
-    ...(def.harness !== undefined
-      ? (() => {
-          const harness = harnessFromDef(def);
-          const harnessPins = harnessPinsForSpec(registry, harness);
-          return { harness, ...(harnessPins ? { harnessPins } : {}) };
-        })()
-      : {}),
-    // Model-tier routing (WM-135), the house repoPin pattern: the tier is
-    // resolved HERE, at plan time, and the concrete value is pinned so the
-    // proposal, receipt, and inspect output all name the exact model. Fields
-    // appear only when the definition declares intent — an undeclared
-    // definition's spec is byte-identical to before (regression contract).
-    // Resolution keys off mapping.adapter. Process-wide `--adapter-override`
-    // substitutes execution only (fake still pins the registered route's
-    // model). A runtime overlay (WM-887) changes mapping.adapter itself so
-    // the model follows the effective harness. A null model means the routed
-    // adapter takes none (not applicable).
-    ...(modelTierOverride !== undefined ||
-    planned.model_tier !== undefined ||
-    planned.model !== undefined
-      ? {
-          modelTier: modelTierOverride ?? planned.model_tier ?? null,
-          model: resolveModel(planned, mapping.adapter, registry.modelTiers),
-        }
-      : {}),
-    timeoutSeconds: def.limits.timeout_seconds,
-    maxAttempts: def.limits.attempts,
-    ...(approvalPolicy ? { approvalPolicy } : {}),
-    idempotencyKey,
-    ...(placement ? { placement } : {}),
   };
 }
 
@@ -483,8 +259,95 @@ function resolveNow(now) {
   return typeof now === "function" ? now() : now;
 }
 
+// Planning normally runs in the planner worker, but `serve --no-planner` still
+// plans inline on the serve loop, so a stalled read can block the tick itself.
+// Bound each event's Linear CLI reads so one stalled ticket cannot delay the
+// next event forever; the default leaves room for normal control-plane reads
+// without holding an operator's planner pass hostage. Operators may set the
+// positive millisecond FACTORY_LINEAR_READ_TIMEOUT_MS environment variable to
+// tune this deadline.
+export const LINEAR_READ_TIMEOUT_MS = (() => {
+  const n = Number(process.env.FACTORY_LINEAR_READ_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? n : 25_000;
+})();
+
+/**
+ * The whole-tick Linear read budget is spent. `linearReadTimeout` raises this
+ * *before* spawning the child, so it surfaces from inside the same `try` that
+ * wraps the read: every such catch must rethrow it untouched. Rewrapping it as
+ * `linear_read_failed` would turn a deferrable "come back next tick" into a
+ * hard dead-letter on every read past the deadline (#1890).
+ */
+class LinearReadBudgetExceededError extends Error {
+  constructor() {
+    super("linear_read_budget_exhausted");
+    this.name = "LinearReadBudgetExceededError";
+  }
+}
+
+function createLinearReadBudget({
+  now = Date.now,
+  timeoutMs = LINEAR_READ_TIMEOUT_MS,
+} = {}) {
+  const clock = typeof now === "function" ? now : () => now;
+  return { deadline: clock() + timeoutMs, now: clock };
+}
+
+function linearReadTimeout(readBudget) {
+  if (!readBudget) return LINEAR_READ_TIMEOUT_MS;
+  const remaining = Math.floor(readBudget.deadline - readBudget.now());
+  if (remaining <= 0) throw new LinearReadBudgetExceededError();
+  return Math.min(LINEAR_READ_TIMEOUT_MS, remaining);
+}
+
+function linearReadTimedOut(err) {
+  return (
+    err?.code === "ETIMEDOUT" ||
+    (err?.signal === "SIGTERM" && err?.status == null)
+  );
+}
+
+function throwIfLinearReadBudgetExhausted(err, readBudget) {
+  if (
+    readBudget &&
+    linearReadTimedOut(err) &&
+    readBudget.deadline - readBudget.now() <= 0
+  )
+    throw new LinearReadBudgetExceededError();
+}
+
+function isLinearReadDeferred(err) {
+  return (
+    isLinearRateLimited(err) || err instanceof LinearReadBudgetExceededError
+  );
+}
+
+function linearReadDeferredReason(err) {
+  return err instanceof LinearReadBudgetExceededError
+    ? "linear_read_budget_exhausted"
+    : "linear_rate_limited";
+}
+
 function linearCli() {
-  return path.join(FACTORY_ROOT, "tools", "linear.mjs");
+  // Test seam: point the planner's ticket reads at a stand-in CLI.
+  return (
+    process.env.FACTORY_LINEAR_CLI ||
+    path.join(FACTORY_ROOT, "tools", "ticket.mjs")
+  );
+}
+
+function linearReadFailureReason(err) {
+  const stderr = String(err?.stderr ?? "");
+  const underlyingStderr = stderr
+    .trim()
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .pop();
+  return (
+    underlyingStderr ||
+    (linearReadTimedOut(err) ? "linear read timed out" : err.message)
+  );
 }
 
 function throwIfLinearCliRateLimited(err) {
@@ -521,6 +384,7 @@ export function createLinearReadCache() {
     rateLimitError: null,
     rateLimitedUntil: 0,
     inFlightCalls: 0,
+    linearReadBudget: null,
   };
 }
 
@@ -529,16 +393,41 @@ export function createLinearReadCache() {
  * in-flight lists by team+project for ≤60s. A rate-limit throw is remembered
  * so later candidates in the same pass do not hit Linear again.
  */
-export function wrapLinearReads(dispatch = {}, cache, now) {
+export function wrapLinearReads(
+  dispatch = {},
+  cache,
+  now,
+  configSnapshot = null,
+) {
   const resolveNow = () => {
     const clock = now ?? Date.now;
     return typeof clock === "function" ? clock() : clock;
   };
-  const throwIfLimited = () => {
+  const linearRateLimit = cache.budgetRateLimit ?? null;
+  const repoUsesLinear = (repoOrName) => {
+    if (repoOrName && typeof repoOrName === "object")
+      return repoOrName.controlPlane !== "github";
+    try {
+      return (
+        getRepo(snapshotRepos(configSnapshot), repoOrName).controlPlane !==
+        "github"
+      );
+    } catch {
+      // The normal eligibility proof supplies the useful unknown-repo refusal.
+      return false;
+    }
+  };
+  const throwIfLimited = (repo) => {
+    if (!repoUsesLinear(repo)) return;
+    if (linearRateLimit) throw linearRateLimit;
     if (!cache.rateLimitError) return;
     if (resolveNow() < cache.rateLimitedUntil) throw cache.rateLimitError;
     cache.rateLimitError = null;
     cache.rateLimitedUntil = 0;
+  };
+  const throwIfReadBudgetExhausted = (repo) => {
+    if (!repoUsesLinear(repo)) return;
+    linearReadTimeout(cache.linearReadBudget);
   };
   const remember = (err) => {
     if (!isLinearRateLimited(err)) return;
@@ -548,52 +437,84 @@ export function wrapLinearReads(dispatch = {}, cache, now) {
       ? resetMs
       : resolveNow() + 60_000;
   };
+  // The serve-loop chain pass injects awaited readers, so a rate limit arrives
+  // as a rejected promise the synchronous `catch` below never sees. Latch it
+  // from the promise too, and drop the memo entry so one transient failure is
+  // not replayed to every later row in the pass as a cached value.
+  const trackAsync = (value, forget) => {
+    if (!value || typeof value.then !== "function") return value;
+    value.then(undefined, (err) => {
+      remember(err);
+      forget();
+    });
+    return value;
+  };
 
-  const fetchTicket = dispatch.fetchTicket ?? fetchTicketDefault;
-  const fetchViewer = dispatch.fetchViewer ?? fetchViewerDefault;
-  const fetchInFlight = dispatch.fetchInFlight ?? fetchInFlightDefault;
+  // Bind policy dependencies into production fetchers rather than appending
+  // them to every call. In particular, fetchViewer's second positional value
+  // is its config snapshot, so a caller that omits it must not receive the
+  // budget object in its place.
+  const fetchTicket =
+    dispatch.fetchTicket ??
+    ((ticketId, repo) =>
+      fetchTicketDefault(ticketId, repo, {
+        readBudget: cache.linearReadBudget,
+      }));
+  const fetchViewer =
+    dispatch.fetchViewer ??
+    ((repoName, snapshot = configSnapshot) =>
+      fetchViewerDefault(repoName, snapshot, {
+        readBudget: cache.linearReadBudget,
+      }));
+  const fetchInFlight =
+    dispatch.fetchInFlight ??
+    ((repo) =>
+      fetchInFlightDefault(repo, { readBudget: cache.linearReadBudget }));
 
   return {
     ...dispatch,
     fetchTicket: (id, repo) => {
-      throwIfLimited();
+      throwIfLimited(repo);
       // Cache per (id, repo): the same identifier read against different
       // control planes is a different lookup.
       const key = repo ? `${repo}::${id}` : id;
       if (cache.tickets.has(key)) return cache.tickets.get(key);
+      throwIfReadBudgetExhausted(repo);
       try {
         const value = fetchTicket(id, repo);
         cache.tickets.set(key, value);
-        return value;
+        return trackAsync(value, () => cache.tickets.delete(key));
       } catch (err) {
         remember(err);
         throw err;
       }
     },
-    fetchViewer: (repo) => {
-      throwIfLimited();
+    fetchViewer: (repo, ...args) => {
+      throwIfLimited(repo);
       const key = repo ?? "__default__";
       if (cache.viewers.has(key)) return cache.viewers.get(key);
+      throwIfReadBudgetExhausted(repo);
       try {
-        const value = fetchViewer(repo);
+        const value = fetchViewer(repo, ...args);
         cache.viewers.set(key, value);
-        return value;
+        return trackAsync(value, () => cache.viewers.delete(key));
       } catch (err) {
         remember(err);
         throw err;
       }
     },
     fetchInFlight: (repo) => {
-      throwIfLimited();
+      throwIfLimited(repo);
       const key = `${repo?.team ?? ""}::${repo?.project ?? ""}`;
       const hit = cache.inFlight.get(key);
       const at = resolveNow();
       if (hit && at - hit.at < IN_FLIGHT_CACHE_TTL_MS) return hit.value;
+      throwIfReadBudgetExhausted(repo);
       try {
         cache.inFlightCalls += 1;
         const value = fetchInFlight(repo);
         cache.inFlight.set(key, { value, at });
-        return value;
+        return trackAsync(value, () => cache.inFlight.delete(key));
       } catch (err) {
         remember(err);
         throw err;
@@ -602,7 +523,7 @@ export function wrapLinearReads(dispatch = {}, cache, now) {
   };
 }
 
-function fetchTicketDefault(ticketId, repo) {
+function fetchTicketDefault(ticketId, repo, { readBudget = null } = {}) {
   try {
     // Pass --repo so tools/ticket.mjs resolves the ticket's OWN control plane
     // (linear for CLNT repos, github for factory) instead of falling back to
@@ -615,20 +536,27 @@ function fetchTicketDefault(ticketId, repo) {
       execFileSync("bun", args, {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
+        timeout: linearReadTimeout(readBudget),
       }),
     );
   } catch (err) {
+    // Budget exhaustion is deferrable, not a read failure (see the class).
+    if (err instanceof LinearReadBudgetExceededError) throw err;
     throwIfLinearCliRateLimited(err);
     const stderr = String(err?.stderr ?? "");
     if (stderr.includes("no such issue")) return null;
-    throw new Error(
-      `linear_read_failed: ${stderr.trim().split("\n").pop() || err.message}`,
-      { cause: err },
-    );
+    throwIfLinearReadBudgetExhausted(err, readBudget);
+    throw new Error(`linear_read_failed: ${linearReadFailureReason(err)}`, {
+      cause: err,
+    });
   }
 }
 
-function fetchViewerDefault(repoName, configSnapshot = null) {
+function fetchViewerDefault(
+  repoName,
+  configSnapshot = null,
+  { readBudget = null } = {},
+) {
   try {
     const repo = repoName
       ? getRepo(snapshotRepos(configSnapshot), repoName)
@@ -644,6 +572,7 @@ function fetchViewerDefault(repoName, configSnapshot = null) {
     const out = execFileSync("bun", args, {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
+      timeout: linearReadTimeout(readBudget),
     });
     const parsed = JSON.parse(out);
     if (repo?.controlPlane === "github") {
@@ -656,12 +585,13 @@ function fetchViewerDefault(repoName, configSnapshot = null) {
     }
     return parsed?.viewer ?? null;
   } catch (err) {
+    // Budget exhaustion is deferrable, not a read failure (see the class).
+    if (err instanceof LinearReadBudgetExceededError) throw err;
     throwIfLinearCliRateLimited(err);
-    const stderr = String(err?.stderr ?? "");
-    throw new Error(
-      `linear_read_failed: ${stderr.trim().split("\n").pop() || err.message}`,
-      { cause: err },
-    );
+    throwIfLinearReadBudgetExhausted(err, readBudget);
+    throw new Error(`linear_read_failed: ${linearReadFailureReason(err)}`, {
+      cause: err,
+    });
   }
 }
 
@@ -680,6 +610,26 @@ function fetchPullRequestDefault(payload) {
   }
 }
 
+function findWorkspacePullRequestDefault(payload) {
+  const workspacePath = payload?.workspacePath;
+  if (!workspacePath || !existsSync(workspacePath)) return null;
+  const branch = execFileSync(
+    "git",
+    ["-C", workspacePath, "branch", "--show-current"],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+  ).trim();
+  if (!branch) return null;
+  return (
+    loadForge()
+      .prList(payload?.github, {
+        cwd: workspacePath,
+        state: "open",
+        fields: ["number", "url", "headRefName", "isDraft", "state"],
+      })
+      .find((pr) => pr?.headRefName === branch) ?? null
+  );
+}
+
 // WM-1006: in-flight tickets come from the control-plane adapter via the
 // `inflight` CLI verb — never raw tracker GraphQL (plane-specific).
 
@@ -696,6 +646,10 @@ function pinManifestFreshness(repo) {
   const patterns = Array.isArray(policy.pinManifests)
     ? policy.pinManifests
     : [];
+  // Compiled root-free, matching `matchingManifestPaths`. Both matchers must
+  // agree on which manifests a pattern covers: anchoring only one of them
+  // would let a closure cache be keyed off a manifest set the other never
+  // scanned, and serve a stale closure.
   const matchers = patterns.map(globToRegExp);
   const manifests = [];
 
@@ -767,7 +721,7 @@ function ownedPathsClosureDetails(repoName, repo, ticketDescription) {
   });
 }
 
-function fetchInFlightDefault(repoConfig) {
+function fetchInFlightDefault(repoConfig, { readBudget = null } = {}) {
   try {
     // --repo so ticket.mjs resolves this repo's own control plane (a Linear
     // team/project query against the GitHub plane fails as a project-title
@@ -785,17 +739,235 @@ function fetchInFlightDefault(repoConfig) {
     const out = execFileSync("bun", args, {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
+      timeout: linearReadTimeout(readBudget),
     });
     const rows = JSON.parse(out);
     return Array.isArray(rows) ? rows : [];
   } catch (err) {
+    // Budget exhaustion is deferrable, not a read failure (see the class).
+    if (err instanceof LinearReadBudgetExceededError) throw err;
+    throwIfLinearCliRateLimited(err);
+    throwIfLinearReadBudgetExhausted(err, readBudget);
+    throw new Error(`linear_read_failed: ${linearReadFailureReason(err)}`, {
+      cause: err,
+    });
+  }
+}
+
+// The general planner and execute-time gate intentionally retain their
+// synchronous public contract (several non-serve callers rely on it). Chain
+// auto-approval runs on serve's event loop, so it uses this async reader set
+// instead. Keeping the boundary explicit prevents a Promise from silently
+// becoming a successful or failed synchronous eligibility verdict.
+export const AUTO_APPROVAL_CONTROL_PLANE_READ_TIMEOUT_MS = (() => {
+  const value = Number(process.env.FACTORY_AUTO_APPROVAL_READ_TIMEOUT_MS);
+  return Number.isFinite(value) && value > 0 ? value : 5_000;
+})();
+
+async function spawnRead(args, timeoutMs) {
+  const proc = Bun.spawn(args, {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    // Backstop only: the explicit timer below owns the classification, and a
+    // child that ignores SIGTERM still has to die.
+    timeout: Math.max(1, timeoutMs) + 500,
+    killSignal: "SIGKILL",
+  });
+  let timedOut = false;
+  const timer = setTimeout(
+    () => {
+      timedOut = true;
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        // Already exited: the awaited result below is authoritative.
+      }
+    },
+    Math.max(1, timeoutMs),
+  );
+  let stdout;
+  let stderr;
+  let exitCode;
+  try {
+    [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+  if (exitCode === 0) return stdout;
+  // `linearReadTimedOut` is the only thing standing between a stalled control
+  // plane and a hard `dispatch_recheck_failed: linear_read_failed` that the
+  // chain memo then holds for a full stale window. It recognises a timeout by
+  // `code === "ETIMEDOUT"` or by `signal === "SIGTERM" && status == null` —
+  // the shape `child_process` gives a killed sync read — so reproduce exactly
+  // that shape here instead of a bare non-zero exit.
+  if (timedOut) {
+    const err = new Error(
+      `command timed out after ${timeoutMs}ms: ${args.join(" ")}`,
+    );
+    err.code = "ETIMEDOUT";
+    err.signal = proc.signalCode ?? "SIGTERM";
+    err.status = null;
+    err.stderr = stderr;
+    err.stdout = stdout;
+    throw err;
+  }
+  const err = new Error(stderr.trim() || `command exited ${exitCode}`);
+  err.stderr = stderr;
+  err.stdout = stdout;
+  err.status = exitCode;
+  err.signal = proc.signalCode ?? null;
+  throw err;
+}
+
+function autoApprovalReadTimeout(readBudget) {
+  return Math.min(
+    AUTO_APPROVAL_CONTROL_PLANE_READ_TIMEOUT_MS,
+    linearReadTimeout(readBudget),
+  );
+}
+
+async function fetchTicketAsync(ticketId, repo, { readBudget = null } = {}) {
+  try {
+    const args = [linearCli(), "get", ticketId, "--json"];
+    if (repo) args.push("--repo", repo);
+    return JSON.parse(
+      await spawnRead(["bun", ...args], autoApprovalReadTimeout(readBudget)),
+    );
+  } catch (err) {
+    if (err instanceof LinearReadBudgetExceededError) throw err;
     throwIfLinearCliRateLimited(err);
     const stderr = String(err?.stderr ?? "");
-    throw new Error(
-      `linear_read_failed: ${stderr.trim().split("\n").pop() || err.message}`,
-      { cause: err },
-    );
+    if (stderr.includes("no such issue")) return null;
+    throwIfLinearReadBudgetExhausted(err, readBudget);
+    throw new Error(`linear_read_failed: ${linearReadFailureReason(err)}`, {
+      cause: err,
+    });
   }
+}
+
+async function fetchViewerAsync(
+  repoName,
+  configSnapshot = null,
+  { readBudget = null } = {},
+) {
+  try {
+    const repo = repoName
+      ? getRepo(snapshotRepos(configSnapshot), repoName)
+      : null;
+    const query =
+      repo?.controlPlane === "github" ? "/user" : "query{ viewer{ id name } }";
+    const args = [linearCli(), "raw", query];
+    if (repoName) args.push("--repo", repoName);
+    const parsed = JSON.parse(
+      await spawnRead(["bun", ...args], autoApprovalReadTimeout(readBudget)),
+    );
+    return repo?.controlPlane === "github"
+      ? parsed?.id == null
+        ? null
+        : { id: String(parsed.id), name: parsed.login ?? parsed.name ?? null }
+      : (parsed?.viewer ?? null);
+  } catch (err) {
+    if (err instanceof LinearReadBudgetExceededError) throw err;
+    throwIfLinearCliRateLimited(err);
+    throwIfLinearReadBudgetExhausted(err, readBudget);
+    throw new Error(`linear_read_failed: ${linearReadFailureReason(err)}`, {
+      cause: err,
+    });
+  }
+}
+
+async function fetchInFlightAsync(repoConfig, { readBudget = null } = {}) {
+  try {
+    const args = [
+      linearCli(),
+      "inflight",
+      "--team",
+      String(repoConfig.team),
+      "--project",
+      String(repoConfig.project),
+      "--json",
+    ];
+    if (repoConfig.name) args.push("--repo", repoConfig.name);
+    const rows = JSON.parse(
+      await spawnRead(["bun", ...args], autoApprovalReadTimeout(readBudget)),
+    );
+    return Array.isArray(rows) ? rows : [];
+  } catch (err) {
+    if (err instanceof LinearReadBudgetExceededError) throw err;
+    throwIfLinearCliRateLimited(err);
+    throwIfLinearReadBudgetExhausted(err, readBudget);
+    throw new Error(`linear_read_failed: ${linearReadFailureReason(err)}`, {
+      cause: err,
+    });
+  }
+}
+
+// Escalation-only forge reads. These run at most twice per escalated
+// continuation (never on the ordinary dispatch path), so they reuse the forge
+// client the synchronous gate already uses rather than re-deriving the REST
+// shapes: `prView`'s field projection, `prList`'s `cwd: workspacePath` repo
+// resolution, and the explicit `headRefName === branch` match that a bare
+// `pulls[0]` would silently get wrong when the forge returns more than one row.
+async function fetchPullRequestAsync(payload) {
+  return fetchPullRequestDefault(payload);
+}
+
+async function findWorkspacePullRequestAsync(payload) {
+  return findWorkspacePullRequestDefault(payload);
+}
+
+/**
+ * The dispatch bag for serve's chain-approval pass.
+ *
+ * Before this existed the serve tick handed `autoApproveChains` the raw SQLite
+ * handle, which is not a dispatch bag at all: `withPassInFlightCache` saw no
+ * `fetchInFlight` and returned it unchanged (so #1064's per-pass in-flight
+ * cache was inert under serve), the eligibility gate found no injected readers
+ * and fell back to the uncached synchronous `*Default` fetchers, and
+ * `wrapLinearReads` — the ticket/viewer/in-flight memo *and* the rate-limit
+ * latch — never applied on this path at all. This wires all three together
+ * with awaited readers and a per-row read deadline.
+ *
+ * `resetReadBudget` is called by the async gate at the start of every row, so a
+ * stalled row cannot spend the next row's read time (the same rule
+ * `planAdmittedEvents` applies per event).
+ */
+export function createAutoApprovalDispatch({
+  now = Date.now,
+  configSnapshot = null,
+  cache = null,
+  readTimeoutMs = AUTO_APPROVAL_CONTROL_PLANE_READ_TIMEOUT_MS,
+} = {}) {
+  const snapshot = configSnapshot ?? policySnapshot();
+  const readCache = cache ?? createLinearReadCache();
+  const newBudget = () =>
+    createLinearReadBudget({ now, timeoutMs: readTimeoutMs });
+  readCache.linearReadBudget = newBudget();
+  const readBudget = () => readCache.linearReadBudget;
+  return wrapLinearReads(
+    {
+      configSnapshot: snapshot,
+      resetReadBudget: () => {
+        readCache.linearReadBudget = newBudget();
+      },
+      fetchTicket: (ticketId, repo) =>
+        fetchTicketAsync(ticketId, repo, { readBudget: readBudget() }),
+      fetchViewer: (repoName, snap = snapshot) =>
+        fetchViewerAsync(repoName, snap, { readBudget: readBudget() }),
+      fetchInFlight: (repo) =>
+        fetchInFlightAsync(repo, { readBudget: readBudget() }),
+      fetchPullRequest: fetchPullRequestAsync,
+      findWorkspacePullRequest: findWorkspacePullRequestAsync,
+    },
+    readCache,
+    now,
+    snapshot,
+  );
 }
 
 /**
@@ -832,6 +1004,43 @@ function snapshotRepos(snapshot) {
   return snapshot?.repos ?? loadRepos();
 }
 
+function dispatchToolchainEligibility(
+  payload,
+  { configSnapshot = null, toolchain = {} } = {},
+) {
+  let repos;
+  try {
+    repos = snapshotRepos(configSnapshot);
+  } catch (err) {
+    // A registry failure is not an unknown-repo lookup. Avoid a toolchain
+    // probe; the worktree gate records its typed refusal and evidence.
+    return { registryInvalid: true, error: err };
+  }
+  let repo;
+  try {
+    repo = getRepo(repos, payload?.repo);
+  } catch (err) {
+    // An unknown repo is not a toolchain fact: leave it to the worktree gate,
+    // which refuses it as `human_needed repo_unknown` with full evidence.
+    if (err instanceof RepoError) return null;
+    throw err;
+  }
+  // Preserve the additive path exactly: no declared tools means no probe and
+  // no new dispatch behavior.
+  if (!repo.toolchain?.length) return null;
+  const cache = toolchain.cache ?? dispatchToolchainPreflightCache;
+  const key = `${repo.name}:${toolchainHash(repo.toolchain)}`;
+  if (cache.has(key)) return cache.get(key);
+  const result = repoDispatchPreflightSync(repo, {
+    node: toolchain.node,
+    now: toolchain.now,
+    which: toolchain.which,
+    spawn: toolchain.spawn,
+  });
+  cache.set(key, result);
+  return result;
+}
+
 function policyMaxInFlight(root = reposRoot(), snapshot = null) {
   const value = loadRuntimePolicy(root, snapshot)?.concurrency
     ?.max_in_flight_per_repo;
@@ -856,19 +1065,14 @@ export function policyOwnedPathsCollision(root = reposRoot(), snapshot = null) {
   return value === "advisory" ? "advisory" : DEFAULT_OWNED_PATHS_COLLISION;
 }
 
-/**
- * Whether a `type:security` ticket may enter the dispatch loop (WM-1060).
- * `excluded` (the fail-closed default) keeps the historical behavior: only an
- * operator-sourced dispatch may work a security ticket. `auto` lets the normal
- * work loop dispatch them too — safe because the merge lane still refuses to
- * merge any PR whose ticket holds a security flag (merge-plan §escalation), so
- * a security ticket becomes a PR held for human merge, never an auto-merge. The
- * `escalate_paths` sensitive-file gate is unaffected and still applies.
- */
-export const DEFAULT_DISPATCH_SECURITY = "excluded";
-export function policyDispatchSecurity(root = reposRoot(), snapshot = null) {
-  const value = loadRuntimePolicy(root, snapshot)?.dispatch?.security_tickets;
-  return value === "auto" ? "auto" : DEFAULT_DISPATCH_SECURITY;
+/** Re-exported from ./runtime-policy.mjs (single source of truth). */
+export { DEFAULT_DISPATCH_SECURITY, policyDispatchSecurity };
+
+/** Whether unattended dispatch admission is temporarily paused by an operator. */
+export const DEFAULT_DISPATCH_PAUSED = false;
+export function policyDispatchPaused(root = reposRoot(), snapshot = null) {
+  const value = loadRuntimePolicy(root, snapshot)?.dispatch?.paused;
+  return value === true ? true : DEFAULT_DISPATCH_PAUSED;
 }
 
 /** Fail-safe merge admission cap when policy is absent or malformed. */
@@ -952,70 +1156,25 @@ export function inFlightDispatchForTicket(db, payload) {
 }
 
 function loadRepoEscalatePaths(repoName, root = reposRoot(), snapshot = null) {
-  if (snapshot) {
-    let repo;
-    try {
-      repo = getRepo(snapshotRepos(snapshot), repoName);
-    } catch (err) {
-      throw new RepoError(
-        `${reposConfigPath(root)}: cannot verify escalate_paths: ${err.message}`,
-      );
-    }
-    if (!Array.isArray(repo.escalatePaths)) {
-      throw new RepoError(
-        `${reposConfigPath(root)}: repo ${repoName} must declare escalate_paths as an array (use [] only when deliberately empty)`,
-      );
-    }
-    return [...new Set(repo.escalatePaths.map((item) => item.trim()))];
-  }
-  const file = reposConfigPath(root);
-  if (!existsSync(file)) {
-    throw new RepoError(
-      `${file}: cannot verify escalate_paths because repos.yaml is missing`,
-    );
-  }
-  let parsed;
+  let repo;
   try {
-    parsed = Bun.YAML.parse(readFileSync(file, "utf8"));
+    // `loadRepos` validates the entire host registry deliberately: host-wide
+    // routing, lifecycle, and capacity facts must come from one coherent
+    // configuration revision. An invalid unrelated stanza therefore blocks
+    // dispatch rather than letting this gate evaluate against a partial view.
+    const repos = snapshot ? snapshotRepos(snapshot) : loadRepos({ root });
+    repo = getRepo(repos, repoName);
   } catch (err) {
     throw new RepoError(
-      `${file}: cannot verify escalate_paths: ${err.message}`,
+      `${reposConfigPath(root)}: cannot verify escalate_paths: ${err.message}`,
     );
   }
-  const entry = (parsed?.repos ?? []).find((row) => row?.name === repoName);
-  if (!entry) {
+  if (!Array.isArray(repo.escalatePaths)) {
     throw new RepoError(
-      `${file}: cannot verify escalate_paths for unknown repo ${repoName}`,
+      `${reposConfigPath(root)}: repo ${repoName} must declare escalate_paths as an array (use [] only when deliberately empty)`,
     );
   }
-  const escalate = entry.escalate_paths ?? entry.escalatePaths;
-  if (!Array.isArray(escalate)) {
-    throw new RepoError(
-      `${file}: repo ${repoName} must declare escalate_paths as an array (use [] only when deliberately empty)`,
-    );
-  }
-  if (
-    !escalate.every(
-      (item) => typeof item === "string" && item.trim().length > 0,
-    )
-  ) {
-    throw new RepoError(
-      `${file}: repo ${repoName} has invalid escalate_paths (every glob must be a non-empty string)`,
-    );
-  }
-  return [...new Set(escalate.map((item) => item.trim()))];
-}
-
-function loadRuntimePolicy(root = reposRoot(), snapshot = null) {
-  if (snapshot) return snapshot.policy;
-  const file = resolveConfigPath("policy", { root });
-  if (!existsSync(file)) return null;
-  try {
-    const parsed = Bun.YAML.parse(readFileSync(file, "utf8"));
-    return parsed && typeof parsed === "object" ? parsed : null;
-  } catch {
-    return null;
-  }
+  return [...new Set(repo.escalatePaths.map((item) => item.trim()))];
 }
 
 function defaultBudgetRefusal(root = reposRoot(), snapshot = null) {
@@ -1149,12 +1308,41 @@ function refusal(reason, evidence, decision = "noop", detail = null) {
  * The shared dispatch proof used at plan time and immediately before a chain
  * auto-approval. Its evidence captures every fact the latter needs to compare.
  */
+/**
+ * The tier-escalation continuation bindings, as a check map. Shared so the
+ * async wrapper can decide whether an escalation prefetch is worth a forge read
+ * using exactly the condition the gate itself will apply — an unauthorised
+ * continuation refuses before it ever looks at a pull request.
+ *
+ * @returns {Record<string, boolean>|null} null when there is no continuation.
+ */
+function escalationContinuationChecks(payload, escalatedContinuation) {
+  if (!escalatedContinuation) return null;
+  return {
+    ticket_escalation_failed_run_bound: Boolean(
+      escalatedContinuation.failedRunId,
+    ),
+    ticket_escalation_continuation_run_bound: Boolean(
+      escalatedContinuation.continuationRunId,
+    ),
+    ticket_escalation_root_run_bound: Boolean(escalatedContinuation.rootRunId),
+    ticket_escalation_projection_applied:
+      escalatedContinuation.projectionState === "applied",
+    ticket_escalation_repo_matches:
+      escalatedContinuation.repo === payload?.repo,
+    ticket_escalation_ticket_matches:
+      String(escalatedContinuation.ticket) === String(payload?.ticket),
+    ticket_escalation_model_tier_strong: payload?.modelTier === "strong",
+  };
+}
+
 export function worktreeDispatchAutoEligibility(
   payload,
   {
     fetchTicket = fetchTicketDefault,
     fetchViewer = fetchViewerDefault,
     fetchPullRequest = fetchPullRequestDefault,
+    findWorkspacePullRequest = findWorkspacePullRequestDefault,
     fetchInFlight = fetchInFlightDefault,
     countLeases = (repoName) => liveWorkerLeases(repoName).length,
     hasTicketLease = (repoName, ticket) =>
@@ -1184,9 +1372,21 @@ export function worktreeDispatchAutoEligibility(
   // Keep it in the proof so bypasses are auditable alongside every other
   // dispatch admission fact.
   evidence.checks.operator_authorized = operatorAuthorized === true;
+  let repos;
+  try {
+    repos = snapshotRepos(configSnapshot);
+  } catch (err) {
+    evidence.checks.repo_registry_valid = false;
+    return refusal(
+      `repo_registry_invalid: ${err.message}`,
+      evidence,
+      "human_needed",
+    );
+  }
+  evidence.checks.repo_registry_valid = true;
   let repo;
   try {
-    repo = getRepo(snapshotRepos(configSnapshot), payload?.repo);
+    repo = getRepo(repos, payload?.repo);
   } catch (err) {
     evidence.checks.repo_found = false;
     return refusal(`repo_unknown: ${err.message}`, evidence, "human_needed");
@@ -1198,6 +1398,7 @@ export function worktreeDispatchAutoEligibility(
   const live = countLeases(repo.name);
   evidence.repo = {
     name: repo.name,
+    github: repo.github ?? null,
     team: repo.team ?? null,
     project: repo.project ?? null,
     capLimit: cap,
@@ -1226,26 +1427,10 @@ export function worktreeDispatchAutoEligibility(
   }
   evidence.checks.ticket_identifier_parseable = true;
 
-  const escalationChecks = escalatedContinuation
-    ? {
-        ticket_escalation_failed_run_bound: Boolean(
-          escalatedContinuation.failedRunId,
-        ),
-        ticket_escalation_continuation_run_bound: Boolean(
-          escalatedContinuation.continuationRunId,
-        ),
-        ticket_escalation_root_run_bound: Boolean(
-          escalatedContinuation.rootRunId,
-        ),
-        ticket_escalation_projection_applied:
-          escalatedContinuation.projectionState === "applied",
-        ticket_escalation_repo_matches:
-          escalatedContinuation.repo === payload?.repo,
-        ticket_escalation_ticket_matches:
-          String(escalatedContinuation.ticket) === String(payload?.ticket),
-        ticket_escalation_model_tier_strong: payload?.modelTier === "strong",
-      }
-    : null;
+  const escalationChecks = escalationContinuationChecks(
+    payload,
+    escalatedContinuation,
+  );
   if (escalationChecks) Object.assign(evidence.checks, escalationChecks);
   const canResumeEscalation = Boolean(
     escalationChecks && Object.values(escalationChecks).every(Boolean),
@@ -1423,6 +1608,36 @@ export function worktreeDispatchAutoEligibility(
   } else {
     evidence.checks.ticket_agent_ready = true;
   }
+  // Resolve the checkout branch only after the tracker proves this continuation
+  // still owns the ticket. A foreign claim is a tracker refusal and must not be
+  // converted into a transient forge-read failure.
+  if (canResumeEscalation && escalatedContinuation?.workspacePath) {
+    let workspacePullRequest;
+    try {
+      workspacePullRequest = findWorkspacePullRequest({
+        github: repo.github,
+        workspacePath: escalatedContinuation.workspacePath,
+      });
+    } catch (err) {
+      return refusal(
+        "ticket_escalation_pr_read_failed",
+        evidence,
+        "noop",
+        err?.message ?? String(err),
+      );
+    }
+    evidence.escalatedWorkspacePullRequest = workspacePullRequest;
+    evidence.checks.ticket_escalation_workspace_pr_read = true;
+    if (workspacePullRequest && workspacePullRequest.isDraft !== true) {
+      evidence.checks.ticket_escalation_workspace_pr_ready = true;
+      if (HANDOFF_REASON_CODES.has(escalatedContinuation.failedRunReasonCode)) {
+        evidence.checks.ticket_escalation_workspace_pr_handoff_failed = true;
+        return refusal("ticket_pr_handoff_verification_failed", evidence);
+      }
+      return refusal("ticket_pr_already_open", evidence);
+    }
+    evidence.checks.ticket_escalation_workspace_pr_ready = false;
+  }
   if (
     evidence.ticket.labels.includes("ai:escalated") &&
     !evidence.checks.operator_authorized
@@ -1599,6 +1814,181 @@ export function worktreeDispatchAutoEligibility(
   return { ok: true, evidence };
 }
 
+/** Thrown by the local-refusal prepass the first time the gate wants a read. */
+const CONTROL_PLANE_READ_REQUIRED = Symbol("control_plane_read_required");
+
+/**
+ * Async counterpart for the serve-loop chain approval path. The historical
+ * synchronous gate remains in place for planner and execute-time consumers
+ * outside that loop; changing it would turn their established result contract
+ * into Promises. All control-plane readers used here yield.
+ *
+ * Shape of the pass, and why:
+ *
+ *  1. A *local-refusal prepass* runs the gate with readers that refuse to read.
+ *     Every zero-read refusal (`repo_registry_invalid`, `repo_unknown`,
+ *     `repo_report_only`, `no_worktree_scripts`, a malformed ticket id, the
+ *     budget refusal, `capacity_full`) is decided there, so a row that cannot
+ *     dispatch never spends a control-plane read. The prepass stops at the
+ *     gate's first read, well before `ownedPathsClosureDetails` walks the repo
+ *     for pin manifests, so it is cheap; the lease count it needs is memoised
+ *     and handed to the real pass.
+ *  2. The reads the gate will actually want are then resolved once, under the
+ *     gate's own conditions (viewer only for an assigned ticket, forge reads
+ *     only for an authorised escalation continuation).
+ *  3. The gate runs *once* more, with every reader resolved. The expensive tail
+ *     — owned-paths closure, pin-manifest freshness, escalate-path globs — is
+ *     therefore evaluated exactly one time per row, which is the whole point of
+ *     moving this pass off the synchronous path.
+ *
+ * A read that throws is not swallowed: it is replayed from the throwing reader
+ * inside the real pass, so the gate emits its own typed refusal with full
+ * evidence rather than the wrapper inventing one (or rejecting outright).
+ */
+export async function worktreeDispatchAutoEligibilityAsync(
+  payload,
+  options = {},
+) {
+  // Per-row deadline: a stalled row must not consume the next row's read time.
+  options.resetReadBudget?.();
+  const readBudget = options.readBudget ?? null;
+  const fetchTicket =
+    options.fetchTicket ??
+    ((ticket, repo) => fetchTicketAsync(ticket, repo, { readBudget }));
+  const fetchViewer =
+    options.fetchViewer ??
+    ((repo, snapshot) => fetchViewerAsync(repo, snapshot, { readBudget }));
+  const fetchInFlight =
+    options.fetchInFlight ??
+    ((repo) => fetchInFlightAsync(repo, { readBudget }));
+  const fetchPullRequest = options.fetchPullRequest ?? fetchPullRequestAsync;
+  const findWorkspacePullRequest =
+    options.findWorkspacePullRequest ?? findWorkspacePullRequestAsync;
+
+  // Worker leases are a filesystem scan. Memoise them across the two gate
+  // passes so the prepass costs nothing the real pass then repeats.
+  const baseCountLeases =
+    options.countLeases ?? ((repoName) => liveWorkerLeases(repoName).length);
+  const baseHasTicketLease =
+    options.hasTicketLease ??
+    ((repoName, ticket) =>
+      liveWorkerLeases(repoName).some(
+        (lease) => String(lease.ticket) === String(ticket),
+      ));
+  const leaseCounts = new Map();
+  const ticketLeases = new Map();
+  const countLeases = (repoName) => {
+    const key = String(repoName ?? "");
+    if (!leaseCounts.has(key)) leaseCounts.set(key, baseCountLeases(repoName));
+    return leaseCounts.get(key);
+  };
+  const hasTicketLease = (repoName, ticket) => {
+    const key = `${repoName ?? ""}\u0000${ticket ?? ""}`;
+    if (!ticketLeases.has(key))
+      ticketLeases.set(key, baseHasTicketLease(repoName, ticket));
+    return ticketLeases.get(key);
+  };
+  // Same reason: the budget refusal reads policy and the ledger. The prepass
+  // and the real pass are one row's evaluation, so they see one answer.
+  const baseBudgetRefusal = options.budgetRefusal ?? defaultBudgetRefusal;
+  let budgetRefusalMemo;
+  const budgetRefusal = (...args) => {
+    if (budgetRefusalMemo === undefined)
+      budgetRefusalMemo = baseBudgetRefusal(...args);
+    return budgetRefusalMemo;
+  };
+  const base = { ...options, countLeases, hasTicketLease, budgetRefusal };
+
+  const readRefused = () => {
+    throw CONTROL_PLANE_READ_REQUIRED;
+  };
+  let localRefusal = null;
+  try {
+    localRefusal = worktreeDispatchAutoEligibility(payload, {
+      ...base,
+      fetchTicket: readRefused,
+      fetchViewer: readRefused,
+      fetchInFlight: readRefused,
+      fetchPullRequest: readRefused,
+      findWorkspacePullRequest: readRefused,
+    });
+  } catch (err) {
+    if (err !== CONTROL_PLANE_READ_REQUIRED) throw err;
+  }
+  // A verdict without a read is final either way: the gate reads nothing after
+  // it has decided.
+  if (localRefusal) return localRefusal;
+
+  const ticket = await fetchTicket(payload?.ticket, payload?.repo);
+  const viewer = ticket?.assignee
+    ? await fetchViewer(payload?.repo, options.configSnapshot)
+    : null;
+  let repo = null;
+  try {
+    repo = getRepo(snapshotRepos(options.configSnapshot), payload?.repo);
+  } catch {
+    // Unreachable after the prepass, which owns the typed unknown-repo
+    // refusal; stay defensive rather than turning it into a rejection.
+  }
+  const escalation = options.escalatedContinuation ?? null;
+  const escalationChecks = escalationContinuationChecks(payload, escalation);
+  // Only an escalation the gate will actually honour is worth a forge read;
+  // an unauthorised continuation refuses `ticket_assigned` before it looks.
+  const canResumeEscalation = Boolean(
+    escalationChecks && Object.values(escalationChecks).every(Boolean),
+  );
+  let failedPullRequest = null;
+  let failedPullRequestError = null;
+  if (
+    canResumeEscalation &&
+    Number.isInteger(escalation?.failedRunArtifact?.prNumber)
+  ) {
+    try {
+      failedPullRequest = await fetchPullRequest({
+        github: repo?.github,
+        pr: escalation.failedRunArtifact.prNumber,
+      });
+    } catch (err) {
+      failedPullRequestError = err;
+    }
+  }
+  let workspacePullRequest = null;
+  let workspacePullRequestError = null;
+  if (canResumeEscalation && escalation?.workspacePath) {
+    try {
+      workspacePullRequest = await findWorkspacePullRequest({
+        github: repo?.github,
+        workspacePath: escalation.workspacePath,
+      });
+    } catch (err) {
+      workspacePullRequestError = err;
+    }
+  }
+  // The in-flight list is the gate's last read and sits behind every ticket,
+  // claim and owned-paths refusal — but the gate is synchronous, so resolving
+  // it lazily would cost a second full pass (and a second pin-manifest walk)
+  // for every healthy row. Resolve it here instead: the caller's dispatch bag
+  // memoises the query per repo for the pass (#1064) and per team+project for
+  // the cache TTL, so at most one query is issued for the whole pass however
+  // many rows reach this point.
+  const inFlight = await fetchInFlight(repo);
+
+  return worktreeDispatchAutoEligibility(payload, {
+    ...base,
+    fetchTicket: () => ticket,
+    fetchViewer: () => viewer,
+    fetchInFlight: () => inFlight,
+    fetchPullRequest: () => {
+      if (failedPullRequestError) throw failedPullRequestError;
+      return failedPullRequest;
+    },
+    findWorkspacePullRequest: () => {
+      if (workspacePullRequestError) throw workspacePullRequestError;
+      return workspacePullRequest;
+    },
+  });
+}
+
 /**
  * Plan-time dispatch refusal verdict. Existing callers retain the historical
  * null-or-refusal contract while auto-approval consumes the richer proof.
@@ -1630,6 +2020,9 @@ function ownedPathContains(ownerValue, candidateValue) {
   if (isMatchEverythingGlob(owner) || owner === candidate) return true;
 
   const candidateHasGlob = /[*?{]/.test(candidate);
+  // Merge-fix eligibility is evaluated from the ticket payload before a
+  // checkout is guaranteed to exist, so bare Owned Paths keep their broad
+  // any-depth semantics here; nothing on this path stats the filesystem.
   if (!candidateHasGlob) return globToRegExp(owner).test(candidate);
 
   // A directory (bare or /**) owns narrower globs rooted below it. Other
@@ -2005,7 +2398,103 @@ function coalesceWebhookMergeRequest(
   };
 }
 
-function humanNeeded(db, event, reason, at, ttlSeconds) {
+const HUMAN_NEEDED_BODY_HASH_MARKER = /\[dispatch_ticket_body_hash:([^\]]+)\]/;
+
+function proposalExpiredAt(proposal, at) {
+  return (
+    Date.parse(at) - Date.parse(proposal.created_at) >
+    Number(proposal.ttl_seconds) * 1000
+  );
+}
+
+function humanNeededReasonPrefix(reason) {
+  return String(reason).split(":", 1)[0];
+}
+
+function ticketHumanNeededContext(payload, evidence) {
+  const repo = payload?.repo;
+  const ticket = payload?.ticket;
+  const descriptionHash = evidence?.ticket?.descriptionHash;
+  // A missing ticket has no body to compare. Its synthetic empty-description
+  // hash must not make unrelated failed lookups suppress each other.
+  if (
+    evidence?.checks?.ticket_found !== true ||
+    typeof repo !== "string" ||
+    typeof ticket !== "string" ||
+    typeof descriptionHash !== "string"
+  ) {
+    return null;
+  }
+  return { repo, ticket, descriptionHash };
+}
+
+function humanNeeded(
+  db,
+  event,
+  reason,
+  at,
+  ttlSeconds,
+  ticketContext = null,
+  detail = null,
+) {
+  const outcomeReason = reason;
+  if (ticketContext) {
+    const reasonPrefix = humanNeededReasonPrefix(reason);
+    const matching = db
+      .query(
+        `SELECT p.*
+         FROM proposals p
+         JOIN events e
+           ON e.source = p.event_source AND e.event_id = p.event_id
+         WHERE p.decision = 'human_needed'
+           AND p.status = 'open'
+           AND json_extract(e.envelope_json, '$.payload.repo') = ?
+           AND json_extract(e.envelope_json, '$.payload.ticket') = ?
+           AND substr(p.reason, 1, ?) = ?
+         ORDER BY p.created_at, p.rowid`,
+      )
+      .all(
+        ticketContext.repo,
+        ticketContext.ticket,
+        reasonPrefix.length,
+        reasonPrefix,
+      );
+    const hashMarker = `[dispatch_ticket_body_hash:${ticketContext.descriptionHash}]`;
+    // Expiry is derived from created_at + ttl_seconds (nothing writes
+    // status='expired'), so an aged-out open row is not current: the unchanged
+    // ticket must be re-proposed once its earlier question has expired.
+    const current = matching.find(
+      (proposal) =>
+        !proposalExpiredAt(proposal, at) &&
+        String(proposal.reason ?? "").includes(hashMarker),
+    );
+    const stale = matching.filter((proposal) => proposal.id !== current?.id);
+    for (const proposal of stale) {
+      const previousMarker = String(proposal.reason ?? "").match(
+        HUMAN_NEEDED_BODY_HASH_MARKER,
+      );
+      const supersedeReason =
+        previousMarker && previousMarker[1] !== ticketContext.descriptionHash
+          ? "superseded_by_ticket_body_change"
+          : "superseded_by_replan";
+      db.query(
+        `UPDATE proposals
+         SET status = 'superseded', decided_at = ?, decided_by = ?,
+             reason = ?
+         WHERE id = ?`,
+      ).run(at, "planner", supersedeReason, proposal.id);
+    }
+    if (current) {
+      const noopReason = `human_needed_already_open:${current.id}`;
+      setEventStatus(db, event, "noop", noopReason);
+      return { decision: "noop", reason: noopReason };
+    }
+    // Proposals do not have an evidence column. Retain the body hash in the
+    // operator-facing reason detail so a later scan can compare the exact
+    // ticket body that produced this question without changing the schema.
+    reason = `${reason}\n${hashMarker}`;
+  }
+  if (detail) reason = `${reason}\n${detail}`;
   const proposal = insertProposal(db, {
     id: newProposalId(),
     event,
@@ -2016,7 +2505,7 @@ function humanNeeded(db, event, reason, at, ttlSeconds) {
     ttlSeconds,
   });
   setEventStatus(db, event, "human_needed");
-  return { decision: "human_needed", proposal, reason };
+  return { decision: "human_needed", proposal, reason: outcomeReason };
 }
 
 /** Idempotent path: the event was already planned — report what was decided. */
@@ -2040,6 +2529,23 @@ function existingOutcome(db, event) {
 }
 
 /**
+ * Historic event rows may have bypassed intake validation. A non-object
+ * (array or scalar) is rejected deliberately alongside unparsable JSON:
+ * planning reads `type`/`payload`/`source` off the envelope, so a valid-JSON
+ * `[]` or `"x"` is exactly as unplannable as a truncated row.
+ */
+function parseStoredEnvelope(json) {
+  try {
+    const value = JSON.parse(json);
+    if (value && typeof value === "object" && !Array.isArray(value))
+      return value;
+  } catch {
+    // The planner records a typed refusal below instead of poisoning its pass.
+  }
+  return null;
+}
+
+/**
  * Plan one admitted event: NOOP | HUMAN_NEEDED | RUN (§4). All writes for one
  * plan happen in one transaction; re-planning is idempotent.
  *
@@ -2055,7 +2561,9 @@ export function planEvent(
     adapterOverride,
     artifactStore = artifactsRoot(),
     dispatch = {},
+    toolchain = {},
     configSnapshot = null,
+    log = console.log,
   } = {},
 ) {
   // Dispatch gate for tier-2 worktree agents (WM-108), evaluated BEFORE the
@@ -2064,6 +2572,7 @@ export function planEvent(
   // transaction only when the event is still admitted there — a raced plan
   // simply discards it via the idempotent early return.
   let worktreeEligibility = null;
+  let toolchainEligibility = null;
   {
     const row = db
       .query(
@@ -2071,48 +2580,68 @@ export function planEvent(
       )
       .get(source, eventId);
     if (row?.status === "admitted") {
-      const preEnvelope = JSON.parse(row.envelope_json);
-      const preMapping = getEventType(registry, preEnvelope.type);
-      const preDef =
-        preMapping && preMapping.observe !== true
-          ? registry.agents.get(preMapping.agent)
-          : null;
-      // An event already outside the definition's repo scope (WM-64) skips
-      // the gate's Linear/lease reads entirely — the transaction below parks
-      // it repo_not_allowed before anything else happens.
-      if (
-        worktreeGateFor(preDef) === "dispatch" &&
-        typeof preEnvelope.payload?.repo === "string" &&
-        typeof preEnvelope.payload?.ticket === "string" &&
-        !repoNotAllowed(preDef, preEnvelope.payload)
-      ) {
-        try {
-          worktreeEligibility = worktreeDispatchAutoEligibility(
-            preEnvelope.payload,
-            {
-              ...dispatch,
-              operatorAuthorized: preEnvelope.source === "operator",
-              configSnapshot,
-            },
-          );
-        } catch (err) {
-          if (!isLinearRateLimited(err)) throw err;
-          worktreeEligibility = {
-            ok: false,
-            rateLimited: true,
-            resetAt: err.resetAt ?? null,
-            refusal: {
-              decision: "retry_later",
-              reason: "linear_rate_limited",
-              detail: err.message,
-            },
-          };
+      const preEnvelope = parseStoredEnvelope(row.envelope_json);
+      if (!preEnvelope) {
+        // The transaction below records the malformed row as human-needed.
+      } else {
+        const preMapping = getEventType(registry, preEnvelope.type);
+        const preDef =
+          preMapping && preMapping.observe !== true
+            ? registry.agents.get(preMapping.agent)
+            : null;
+        // An event already outside the definition's repo scope (WM-64) skips
+        // the gate's Linear/lease reads entirely — the transaction below parks
+        // it repo_not_allowed before anything else happens.
+        if (
+          worktreeGateFor(preDef) === "dispatch" &&
+          typeof preEnvelope.payload?.repo === "string" &&
+          typeof preEnvelope.payload?.ticket === "string" &&
+          !(
+            preEnvelope.type === "factory.dispatch.requested" &&
+            preEnvelope.source !== "operator" &&
+            policyDispatchPaused(undefined, configSnapshot)
+          ) &&
+          !repoNotAllowed(preDef, preEnvelope.payload)
+        ) {
+          if (preEnvelope.type === "factory.dispatch.requested") {
+            toolchainEligibility = dispatchToolchainEligibility(
+              preEnvelope.payload,
+              { configSnapshot, toolchain },
+            );
+          }
+          if (toolchainEligibility?.ready !== false) {
+            try {
+              worktreeEligibility = worktreeDispatchAutoEligibility(
+                preEnvelope.payload,
+                {
+                  ...dispatch,
+                  operatorAuthorized: preEnvelope.source === "operator",
+                  configSnapshot,
+                },
+              );
+            } catch (err) {
+              if (!isLinearReadDeferred(err)) throw err;
+              const reason = linearReadDeferredReason(err);
+              worktreeEligibility = {
+                ok: false,
+                linearReadDeferred: true,
+                reason,
+                resetAt: err.resetAt ?? null,
+                refusal: {
+                  decision: "retry_later",
+                  reason,
+                  detail: err.message,
+                },
+              };
+            }
+          }
         }
       }
     }
   }
-  if (worktreeEligibility?.rateLimited) {
-    const detail = worktreeEligibility.refusal?.detail ?? "linear_rate_limited";
+  if (worktreeEligibility?.linearReadDeferred) {
+    const reason = worktreeEligibility.reason;
+    const detail = worktreeEligibility.refusal?.detail ?? reason;
     try {
       db.query(
         `UPDATE events SET last_plan_error = ? WHERE source = ? AND event_id = ?`,
@@ -2122,19 +2651,28 @@ export function planEvent(
     }
     return {
       decision: "refused",
-      reason: "linear_rate_limited",
+      reason,
       resetAt: worktreeEligibility.resetAt ?? null,
     };
   }
-  return txImmediate(db, () => {
+  const missingArtifactRetirements = [];
+  const outcome = txImmediate(db, () => {
     const event = db
       .query(`SELECT * FROM events WHERE source = ? AND event_id = ?`)
       .get(source, eventId);
     if (!event) throw new Error(`no admitted event (${source}, ${eventId})`);
     if (event.status !== "admitted") return existingOutcome(db, event);
 
-    const envelope = JSON.parse(event.envelope_json);
     const at = new Date(now).toISOString();
+    const envelope = parseStoredEnvelope(event.envelope_json);
+    if (!envelope)
+      return humanNeeded(
+        db,
+        event,
+        "malformed_event_envelope",
+        at,
+        DEFAULT_PROPOSAL_TTL_SECONDS,
+      );
 
     const gitMapping = getEventType(registry, envelope.type);
     if (!gitMapping)
@@ -2191,6 +2729,45 @@ export function planEvent(
     const scopeRefusal = repoNotAllowed(def, envelope.payload);
     if (scopeRefusal)
       return humanNeeded(db, event, scopeRefusal, at, ttlSeconds);
+
+    // A pause is an operator-controlled brake on unattended admission. Keep
+    // operator dispatches available so the operator can still force specific
+    // work while draining, but record every other dispatch as a durable NOOP.
+    if (
+      envelope.type === "factory.dispatch.requested" &&
+      envelope.source !== "operator" &&
+      policyDispatchPaused(undefined, configSnapshot)
+    ) {
+      const proposal = insertProposal(db, {
+        id: newProposalId(),
+        event,
+        decision: "noop",
+        status: "resolved",
+        reason: "dispatch_paused",
+        at,
+        ttlSeconds,
+      });
+      setEventStatus(db, event, "noop", "dispatch_paused");
+      return { decision: "noop", proposal, reason: "dispatch_paused" };
+    }
+
+    if (
+      envelope.type === "factory.dispatch.requested" &&
+      toolchainEligibility?.ready === false
+    ) {
+      const executable =
+        toolchainEligibility.reasons?.find((reason) => reason?.executable)
+          ?.executable ?? "unknown";
+      return humanNeeded(
+        db,
+        event,
+        `toolchain_unsatisfied:${executable}`,
+        at,
+        ttlSeconds,
+        null,
+        JSON.stringify(toolchainEligibility.reasons ?? []),
+      );
+    }
 
     // A work scan reserves its repo as soon as its run is PROPOSED, before the
     // expensive model read can select a ticket. This is deliberately stronger
@@ -2359,7 +2936,17 @@ export function planEvent(
       worktreeEligibility?.ok === false ? worktreeEligibility.refusal : null;
     if (worktreeGateFor(def) === "dispatch" && worktreeRefusal) {
       if (worktreeRefusal.decision === "human_needed") {
-        return humanNeeded(db, event, worktreeRefusal.reason, at, ttlSeconds);
+        return humanNeeded(
+          db,
+          event,
+          worktreeRefusal.reason,
+          at,
+          ttlSeconds,
+          ticketHumanNeededContext(
+            envelope.payload,
+            worktreeEligibility.evidence,
+          ),
+        );
       }
       const proposal = insertProposal(db, {
         id: newProposalId(),
@@ -2459,6 +3046,8 @@ export function planEvent(
           descriptionHash:
             worktreeEligibility?.evidence?.ticket?.descriptionHash,
           headSha: payload.repoPin?.sha ?? null,
+          artifactStore,
+          onArtifactMissing: (memo) => missingArtifactRetirements.push(memo),
         });
       } catch (err) {
         return humanNeeded(
@@ -2587,7 +3176,6 @@ export function planEvent(
         runId,
         policyVersion,
         adapterOverride,
-        now,
         approvalPolicy,
         modelTierOverride,
         modelOverride: overlayModel,
@@ -2595,6 +3183,19 @@ export function planEvent(
       }),
       idempotencyKey,
     };
+    const modelMismatch = modelAdapterMismatch(
+      spec,
+      registry.modelTiers,
+      mapping.adapter,
+      {
+        explicitPin:
+          plannedDef(getAgent(registry, mapping.agent), {
+            modelOverride: overlayModel,
+          }).model !== undefined,
+      },
+    );
+    if (modelMismatch)
+      return humanNeeded(db, event, modelMismatch, at, ttlSeconds);
     const specJson = canonicalJson(spec);
     const specHash = hashJson(spec);
     try {
@@ -2644,6 +3245,23 @@ export function planEvent(
     setEventStatus(db, event, "planned");
     return { decision: "run", proposal, runId };
   });
+  // Emit only after the enclosing planning transaction commits. A later
+  // planning error rolls the retirement back and must not leave a false or
+  // duplicate line in serve.log.
+  for (const memo of missingArtifactRetirements) {
+    const subject = `${memo.subject.type}:${memo.subject.id}`;
+    const producer = memo.inboxItemId
+      ? `inbox_item_id=${memo.inboxItemId}`
+      : `run_id=${memo.runId ?? "null"}`;
+    try {
+      log(
+        `memo retired artifact_missing sha256=${memo.sha256} subject=${subject} ${producer}`,
+      );
+    } catch {
+      // Observability is best-effort after the durable decision is made.
+    }
+  }
+  return outcome;
 }
 
 /**
@@ -2727,18 +3345,53 @@ export function planAdmittedEvents(db, registry, opts = {}) {
       `SELECT source, event_id, type FROM events WHERE status = 'admitted' ORDER BY admitted_at, rowid`,
     )
     .all();
-  const cache = opts.linearReadCache ?? createLinearReadCache();
-  const dispatch = wrapLinearReads(opts.dispatch ?? {}, cache, opts.now);
   const configSnapshot = opts.configSnapshot ?? policySnapshot();
+  const cache = opts.linearReadCache ?? createLinearReadCache();
+  const createEventReadBudget = () =>
+    createLinearReadBudget({
+      now: opts.linearReadClock ?? Date.now,
+      timeoutMs: opts.linearReadTimeoutMs ?? LINEAR_READ_TIMEOUT_MS,
+    });
+  // Keep ticket/in-flight/rate-limit caches for the pass, but give every
+  // event its own deadline. A prior stalled event must not consume later
+  // candidates' read time and turn an otherwise healthy batch into a
+  // retry_later livelock.
+  const budget = opts.linearBudget ?? loadLinearBudget();
+  const limited = linearRateLimitState(budget, resolveNow(opts.now));
+  if (limited) {
+    cache.budgetRateLimit = new LinearRateLimitError(limited.resetAt);
+  } else {
+    cache.budgetRateLimit = null;
+  }
+  const dispatch = wrapLinearReads(
+    opts.dispatch ?? {},
+    cache,
+    opts.now,
+    configSnapshot,
+  );
   const planOpts = { ...opts, dispatch, configSnapshot };
   let planned = 0;
   let failed = 0;
   let deadLettered = 0;
   const log = opts.log ?? console.log;
+  if (limited) {
+    try {
+      log(
+        `planner: Linear rate-limited until ${limited.resetAt} — skipping Linear reads`,
+      );
+    } catch {
+      // Logging must not turn a bounded refusal into a retryable failure.
+    }
+  }
   for (const { source, event_id: eventId, type } of rows) {
+    cache.linearReadBudget = opts.linearReadBudget ?? createEventReadBudget();
     try {
       const outcome = planEvent(db, registry, { source, eventId }, planOpts);
-      if (outcome?.reason === "linear_rate_limited") continue;
+      if (
+        outcome?.reason === "linear_rate_limited" ||
+        outcome?.reason === "linear_read_budget_exhausted"
+      )
+        continue;
       if (
         type === "factory.dispatch.requested" &&
         outcome?.decision === "noop" &&
@@ -2802,11 +3455,21 @@ export function planAdmittedEvents(db, registry, opts = {}) {
   // candidate set, while every failed proof remains open with a typed reason.
   // This stays after planning so no approval happens inside a planner write
   // transaction or before the proposal has a persisted immutable RunSpec.
-  autoApproveChains(db, registry, {
-    now: opts.now ?? Date.now(),
-    policyVersion: opts.policyVersion ?? "unknown",
-    dispatchEligibility: worktreeDispatchAutoEligibility,
-    dispatch,
-  });
+  // Exactly one owner per process. `serve` runs this pass itself, on its own
+  // loop, with awaited readers and a per-row read deadline; letting the
+  // planner (inline here, or in its worker thread) run the same pass as well
+  // meant two concurrent passes over the same rows — the pass-serialising
+  // WeakMap in auto-approval is per-realm and does not cross the worker
+  // thread. Serve clears the flag for its process before starting the worker.
+  const chainApproval =
+    opts.autoApproveChains ??
+    process.env.FACTORY_PLANNER_AUTO_APPROVE_CHAINS !== "0";
+  if (chainApproval)
+    autoApproveChains(db, registry, {
+      now: opts.now ?? Date.now(),
+      policyVersion: opts.policyVersion ?? "unknown",
+      dispatchEligibility: worktreeDispatchAutoEligibility,
+      dispatch,
+    });
   return { planned, failed, deadLettered };
 }

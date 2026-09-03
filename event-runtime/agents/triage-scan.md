@@ -36,7 +36,7 @@ github`: GitHub Projects v2 owns the status, so enumerate the exact-titled
    board's items and their `Status` values instead. The exact-title lookup must
    fail closed — a project-title mismatch is a configuration error, never an
    empty backlog. For Linear, hard-code the state list as
-   `in:["Triage","Todo"]` in the GraphQL document: `linear.mjs raw` passes every
+   `in:["Triage","Todo"]` in the GraphQL document: `ticket.mjs raw` passes every
    `--var` value as a string, so passing a JSON-looking array through `--var`
    silently searches for one state with that literal name and can return a
    false zero. The response is usable only when it contains the expected item

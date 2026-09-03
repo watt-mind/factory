@@ -7,6 +7,8 @@ import { artifactsRoot } from "./config.mjs";
 import { usageSpend } from "./db.mjs";
 import { hookDecisionCounts } from "./hooks.mjs";
 import { inboxCounts } from "./inbox.mjs";
+import { githubIntakeView } from "./intake.mjs";
+import { policyDispatchPaused } from "./planner.mjs";
 import { ambiguousOpenProposalRuns, openProposals } from "./proposals.mjs";
 import { proposalsPilingUp, scheduleView } from "./schedules.mjs";
 import {
@@ -15,6 +17,12 @@ import {
   satisfiesPlacement,
   stalledWorkers,
 } from "./workers.mjs";
+
+const LINEAR_READ_BUDGET_STALLED_AFTER_MS = 5 * 60_000;
+// A whole-backlog stall would otherwise push one anomaly line per admitted
+// event and drown every other anomaly in the status view; the count line tells
+// the operator how many more are behind the cap.
+const LINEAR_READ_BUDGET_STALLED_LIMIT = 20;
 
 function eventCounts(db) {
   const counts = {
@@ -185,11 +193,14 @@ export function statusView(
     policyVersion,
     env,
     getStoreStats,
+    getTickStats,
     workerPolicy,
     workerRunDir,
+    dispatchPaused = policyDispatchPaused,
   } = {},
 ) {
   const open = openProposals(db, { now: nowMs });
+  const events = eventCounts(db);
   const expiredOpen = open.filter((p) => p.expired);
   const staleLeases = db
     .query(
@@ -217,6 +228,22 @@ export function statusView(
       eventId: row.event_id,
       lastError: row.last_plan_error,
     }));
+  // `events` carries no last-plan-attempt timestamp, so staleness is aged from
+  // admitted_at: the row is only reported once the event has been admitted (and
+  // therefore replanned every tick) for longer than the threshold.
+  const stalledLinearReadBudgetCutoff = new Date(
+    nowMs - LINEAR_READ_BUDGET_STALLED_AFTER_MS,
+  ).toISOString();
+  const stalledLinearReadBudgets = db
+    .query(
+      `SELECT source, event_id FROM events
+       WHERE status = 'admitted'
+         AND last_plan_error = 'linear_read_budget_exhausted'
+         AND admitted_at < ?
+       ORDER BY admitted_at, rowid
+       LIMIT ?`,
+    )
+    .all(stalledLinearReadBudgetCutoff, LINEAR_READ_BUDGET_STALLED_LIMIT + 1);
 
   const fleet = workerCapacityView(db, nowMs, {
     workerPolicy,
@@ -248,8 +275,17 @@ export function statusView(
     : storeStats(db, artifactsRoot(env?.home), { now: nowMs });
   const stalled = stalledWorkers(db, { now: nowMs });
   const runs = { ...runCounts(db), spend: usageSpend(db, { now: nowMs }) };
+  const policy = { dispatchPaused: dispatchPaused() };
 
   const configAnomalies = [];
+  const githubIntake = githubIntakeView(db, {
+    nowMs,
+    configured: Boolean(githubSecret),
+  });
+  const planner =
+    typeof getTickStats === "function"
+      ? (getTickStats()?.planner ?? null)
+      : null;
   if (!secret)
     configAnomalies.push(
       "FACTORY_EVENT_SECRET is unset (webhook intake disabled)",
@@ -259,15 +295,50 @@ export function statusView(
       "FACTORY_GITHUB_WEBHOOK_SECRET is unset (GitHub webhook intake disabled)",
     );
   }
+  if (githubIntake.stale) {
+    const age =
+      githubIntake.ageMs === null
+        ? "no GitHub delivery has been admitted"
+        : `last admission was ${githubIntake.ageMs}ms ago`;
+    configAnomalies.push(
+      `GitHub webhook intake is stale (${age}; threshold ${githubIntake.staleAfterMs}ms)`,
+    );
+  }
+  if (planner && !planner.alive) {
+    configAnomalies.push("Planner worker is dead");
+  } else if (planner?.stale && events.admitted > 0) {
+    const age =
+      planner.ageMs === null
+        ? "no event has been planned"
+        : `last planning activity was ${planner.ageMs}ms ago`;
+    configAnomalies.push(
+      `Planner worker is stale (${age}; threshold ${planner.staleAfterMs}ms)`,
+    );
+  }
   if (policyVersion === "unknown")
     configAnomalies.push("policyVersion is unknown");
   if (fleet.policyError) configAnomalies.push(fleet.policyError);
+  for (const row of stalledLinearReadBudgets.slice(
+    0,
+    LINEAR_READ_BUDGET_STALLED_LIMIT,
+  )) {
+    configAnomalies.push(
+      `Admitted event ${row.source}:${row.event_id} has been deferred for Linear read-budget exhaustion for over ${LINEAR_READ_BUDGET_STALLED_AFTER_MS / 60_000} minutes`,
+    );
+  }
+  if (stalledLinearReadBudgets.length > LINEAR_READ_BUDGET_STALLED_LIMIT)
+    configAnomalies.push(
+      `More admitted events beyond the first ${LINEAR_READ_BUDGET_STALLED_LIMIT} are deferred for Linear read-budget exhaustion`,
+    );
   // Registry-load anomalies that are deliberately not load errors — today
   // only artifact-view sidecars that do not fit their schema (WM-454).
   configAnomalies.push(...(registry?.anomalies ?? []));
 
   return {
-    events: eventCounts(db),
+    events,
+    githubIntake,
+    planner,
+    policy,
     proposals: { open: open.length, expired: expiredOpen.length },
     inbox: inboxCounts(db),
     runs,
@@ -282,6 +353,7 @@ export function statusView(
       bytes: store.bytes,
       orphans: store.orphans,
       orphanBytes: store.orphanBytes,
+      invalidResults: store.invalidResults ?? 0,
       ...(store.at ? { at: store.at } : {}),
     },
     // `approve.before` hook decisions in the trailing 24h, by hook id
@@ -329,6 +401,7 @@ export function handleStatusApiRoute({
   policyVersion,
   env,
   getStoreStats,
+  getTickStats,
   workerPolicy,
   workerRunDir,
 }) {
@@ -341,6 +414,7 @@ export function handleStatusApiRoute({
         policyVersion,
         env,
         getStoreStats,
+        getTickStats,
         workerPolicy,
         workerRunDir,
       }),

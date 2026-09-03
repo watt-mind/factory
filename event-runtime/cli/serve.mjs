@@ -27,13 +27,156 @@ import { notifyPending, sweepNotifyLog } from "../lib/notify.mjs";
 import { reconcileInbox } from "../lib/inbox.mjs";
 import { loadModelTierMap, loadRegistry } from "../lib/registry.mjs";
 import { applyModelTierCellOverrides } from "../lib/runtime-overrides.mjs";
-import { approveProposal } from "../lib/proposals.mjs";
+import {
+  approveProposal,
+  sweepOrphanedNonRunProposals,
+} from "../lib/proposals.mjs";
 import { startApi } from "../lib/api.mjs";
+import { codeStamp, REGISTRY_STAMP_PATHS } from "../lib/worker.mjs";
 import { reapExpiredLeases } from "../lib/reaper.mjs";
-import { startPlannerWorker } from "../lib/planner-worker.mjs";
+import {
+  MAIN_LOOP_HARD_STALL_FLOOR_MS,
+  MAIN_LOOP_HEARTBEAT_INTERVAL_MS,
+  startPlannerWorker,
+} from "../lib/planner-worker.mjs";
 import { CLI_PATH, fail, flagValue, log } from "./shared.mjs";
 
 export const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+/**
+ * Cap on the inbox step (#2147). Reconciliation reads live GitHub and Linear
+ * state, so an unbounded await lets one slow forge stall every other tick
+ * step. Past the deadline the tick continues and the sweep finishes in the
+ * background; its result lands on the next poll.
+ */
+export const INBOX_RECONCILE_DEADLINE_MS = 10_000;
+/**
+ * Shutdown budget (#1585). The supervisor (`await_daemon` in
+ * bin/worktree-common.sh) SIGKILLs a serve that has not exited 3 s after
+ * SIGTERM. Everything below must fit inside that window with margin, or the
+ * lock file and the listening port are torn down by the kernel instead of us:
+ * planner stop + connector stop share CONNECTOR_STOP_TIMEOUT_MS, the HTTP
+ * server gets CLOSE_CONNECTIONS_AFTER_MS to drain keep-alive clients, and
+ * HARD_EXIT_MS is the in-process backstop that always wins before the kill.
+ */
+export const CONNECTOR_STOP_TIMEOUT_MS = 1_500;
+export const CLOSE_CONNECTIONS_AFTER_MS = 500;
+export const HARD_EXIT_MS = 2_500;
+
+/**
+ * The hard main-loop watchdog is intentionally disabled unless an operator
+ * opts in. An invalid value is equivalent to disabled rather than turning a
+ * typo into an unexpected serve restart, and an enabled one is clamped up to
+ * a floor of several soft stall windows so ordinary tick slowness can never
+ * be enough to restart serve.
+ */
+export function mainLoopHardStallAfterMs(env = process.env) {
+  const value = Number(env.FACTORY_MAIN_LOOP_STALL_EXIT_AFTER_MS);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return Math.max(value, MAIN_LOOP_HARD_STALL_FLOOR_MS);
+}
+
+/**
+ * Mutable ownership seam for the validated registry.  Loading and validation
+ * happen before `validateAndSwap`; assigning `current` is the only mutation,
+ * so readers see either the complete old registry or the complete new one.
+ * The same method is intentionally callable without the file poller so a
+ * future definition API can use the exact fail-closed path.
+ */
+export function createRegistryRef({
+  initial,
+  load,
+  sourceStamp,
+  now = () => Date.now(),
+  log: logLine = log,
+  decorate = () => {},
+} = {}) {
+  if (
+    !initial ||
+    typeof load !== "function" ||
+    typeof sourceStamp !== "function"
+  )
+    throw new Error(
+      "createRegistryRef requires initial, load, and sourceStamp",
+    );
+
+  let current = initial;
+  let loadedAt = new Date(now()).toISOString();
+  let loadedStamp = sourceStamp();
+  let observedStamp = loadedStamp;
+  let lastReloadError = null;
+  const loggedErrors = new Set();
+
+  const reject = (err) => {
+    const message = err?.message ?? String(err);
+    lastReloadError = { at: new Date(now()).toISOString(), message };
+    if (!loggedErrors.has(message)) {
+      loggedErrors.add(message);
+      logLine(
+        `registry reload rejected — running last-good configuration: ${message}`,
+      );
+    }
+    return { swapped: false, ...ref.state() };
+  };
+
+  const ref = {
+    get current() {
+      return current;
+    },
+    state() {
+      return { loadedAt, stamp: loadedStamp, lastReloadError };
+    },
+    validateAndSwap(candidateOrLoader = load, { stamp = sourceStamp() } = {}) {
+      try {
+        // `loadRegistry` performs all schema, pin, edge, schedule and policy
+        // validation before returning. Accepting a candidate is useful to a
+        // future API which already built it off-thread; accepting a loader is
+        // the standalone fail-closed operation used by the poller.
+        const candidate =
+          typeof candidateOrLoader === "function"
+            ? candidateOrLoader()
+            : candidateOrLoader;
+        if (!candidate || typeof candidate !== "object")
+          throw new Error("registry candidate must be an object");
+        decorate(candidate);
+        current = candidate;
+        loadedAt = new Date(now()).toISOString();
+        loadedStamp = stamp;
+        observedStamp = stamp;
+        lastReloadError = null;
+        return { swapped: true, ...ref.state() };
+      } catch (err) {
+        return reject(err);
+      }
+    },
+    poll() {
+      const stamp = sourceStamp();
+      if (stamp === observedStamp) return { changed: false, ...ref.state() };
+      observedStamp = stamp;
+      const result = ref.validateAndSwap(load, { stamp });
+      if (result.swapped) {
+        logLine(`registry reloaded (${result.stamp})`);
+        return { changed: true, ...result };
+      }
+      return { changed: true, ...result };
+    },
+  };
+
+  // Long-lived connector clients receive this facade.  Every property read is
+  // forwarded to the current registry instead of retaining the startup map.
+  ref.proxy = new Proxy(
+    {},
+    {
+      get: (_target, property) => current[property],
+      has: (_target, property) => property in current,
+      ownKeys: () => Reflect.ownKeys(current),
+      getOwnPropertyDescriptor: (_target, property) => {
+        const descriptor = Object.getOwnPropertyDescriptor(current, property);
+        return descriptor ? { ...descriptor, configurable: true } : undefined;
+      },
+    },
+  );
+  return ref;
+}
 
 export const TICK_SUBSYSTEMS = [
   "tick emit",
@@ -42,6 +185,7 @@ export const TICK_SUBSYSTEMS = [
   "auto-approve-chains",
   "announce",
   "inbox",
+  "proposals",
   "notify",
   "reap",
   "worker",
@@ -50,6 +194,40 @@ export const TICK_SUBSYSTEMS = [
   "GC",
   "chains",
 ];
+
+/**
+ * Await `run()` for at most `timeoutMs`; a rejection or a timeout is logged
+ * under `label` and never propagates. Shutdown steps must be bounded — a step
+ * that never settles would otherwise hand the exit to the supervisor's
+ * SIGKILL.
+ */
+export async function stopBounded(label, run, timeoutMs) {
+  let timeout;
+  await Promise.race([
+    Promise.resolve()
+      .then(run)
+      .catch((err) => log(`${label}: ${err?.message ?? err}`)),
+    new Promise((resolve) => {
+      timeout = setTimeout(() => {
+        log(`${label}: timed out after ${timeoutMs}ms`);
+        resolve();
+      }, timeoutMs);
+    }),
+  ]);
+  clearTimeout(timeout);
+}
+
+/**
+ * Connector implementations are third-party, long-running integrations. A
+ * hung socket close must not prevent `serve` from releasing its HTTP server.
+ */
+function stopConnectorsBounded() {
+  return stopBounded(
+    "connector stop",
+    () => stopConnectors(),
+    CONNECTOR_STOP_TIMEOUT_MS,
+  );
+}
 
 /**
  * One serve-loop pass (OPS-412). Each named subsystem is caught on its own
@@ -77,17 +255,26 @@ export async function tick({
   announceTransitions = () => {},
   subsystems = {},
   skipPlan = false,
+  proposalSweepLimit,
+  reconcile = reconcileInbox,
+  inboxDeadlineMs = INBOX_RECONCILE_DEADLINE_MS,
+  onStep = () => {},
+  autoApproveChainsFn = autoApproveChains,
 } = {}) {
   const tickStart = Date.now();
   const stepMs = {};
+  let expiredScheduledProposals = 0;
+  let deadlineSkipped = 0;
   const runStep = async (name, fn) => {
     const start = Date.now();
+    onStep({ name, startedAt: start });
     try {
       await (subsystems[name] ?? fn)();
     } catch (err) {
       logLine(`tick ${name}: ${err.message}`);
     } finally {
       stepMs[name] = Date.now() - start;
+      onStep({ name: null, finishedAt: Date.now() });
     }
   };
 
@@ -121,24 +308,35 @@ export async function tick({
     });
     for (const a of auto.approved)
       logLine(`schedule approved ${a.loop} → run ${a.runId} (actor: schedule)`);
+    expiredScheduledProposals = auto.expired.length;
     for (const err of auto.errors) logLine(`schedule approval error: ${err}`);
   });
 
   await runStep("auto-approve-chains", async () => {
-    const { worktreeDispatchAutoEligibility } =
+    const { worktreeDispatchAutoEligibilityAsync, createAutoApprovalDispatch } =
       await import("../lib/planner.mjs");
-    const auto = await autoApproveChains(db, registry, {
+    // A real dispatch bag, not the raw DB handle: awaited readers memoised by
+    // `wrapLinearReads` (ticket/viewer/in-flight plus the rate-limit latch) and
+    // by `withPassInFlightCache` for the pass (#1064), each read bounded well
+    // under the tracker's own 15s request timeout.
+    const auto = await autoApproveChainsFn(db, registry, {
       now,
       policyVersion: pv,
-      dispatchEligibility: worktreeDispatchAutoEligibility,
-      dispatch: db ? db : null,
+      dispatchEligibility: worktreeDispatchAutoEligibilityAsync,
+      dispatch: createAutoApprovalDispatch(),
     });
+    deadlineSkipped = auto.deadlineSkipped ?? 0;
     for (const a of auto.approved)
       logLine(
         `chain proposal approved ${a.proposalId} → run ${a.runId} (actor: chain auto)`,
       );
     for (const e of auto.errors)
       logLine(`chain approval error: ${e.proposalId}:${e.reason}`);
+    if (auto.skipped > 0 || expiredScheduledProposals > 0) {
+      logLine(
+        `proposal staleness: skipped ${auto.skipped} pending chain row(s) (${auto.memoised ?? 0} memoised registry-stale; ${auto.deadlineSkipped ?? 0} deadline-truncated); expired ${expiredScheduledProposals} unreplannable scheduler row(s)`,
+      );
+    }
   });
 
   await runStep("announce", () => {
@@ -148,8 +346,36 @@ export async function tick({
 
   // Referent state is authoritative: acknowledged or untouched items both
   // resolve automatically once the proposal/event no longer needs a human.
-  await runStep("inbox", () => {
-    reconcileInbox(db, { now });
+  // Reconciliation now reads live GitHub/Linear state, so the step is capped:
+  // the tick moves on when the deadline passes and the in-flight sweep is left
+  // attributed, so a late failure logs instead of rejecting unhandled.
+  await runStep("inbox", async () => {
+    const sweep = Promise.resolve(reconcile(db, { now })).catch((err) => {
+      logLine(`tick inbox: ${err?.message ?? err}`);
+    });
+    if (!(inboxDeadlineMs > 0)) return sweep;
+    let timer;
+    const overran = new Promise((resolve) => {
+      timer = setTimeout(() => resolve("overran"), inboxDeadlineMs);
+      timer.unref?.();
+    });
+    const outcome = await Promise.race([sweep.then(() => "done"), overran]);
+    clearTimeout(timer);
+    if (outcome === "overran")
+      logLine(
+        `inbox reconcile overran ${inboxDeadlineMs}ms; continuing tick (sweep still running)`,
+      );
+  });
+
+  await runStep("proposals", () => {
+    const { expired, remaining } = sweepOrphanedNonRunProposals(db, {
+      now,
+      limit: proposalSweepLimit,
+    });
+    if (expired > 0)
+      logLine(
+        `proposals: expired ${expired} orphaned human_needed/noop row(s) (${remaining} remaining)`,
+      );
   });
 
   // Push channel for states awaiting a human (WM-65): human_needed parks and
@@ -220,6 +446,10 @@ export async function tick({
         logLine(
           `artifacts: pruned ${pruned.deleted} orphan(s), freed ${pruned.freedBytes}B`,
         );
+      if (pruned.invalidResults > 0)
+        logLine(
+          `artifacts: GC held — ${pruned.invalidResults} unparsable results row(s); ${pruned.remainingOrphans} orphan(s) retained`,
+        );
     });
     gcStep("notify", () => {
       const swept = sweepNotifyLog(db, { now });
@@ -238,6 +468,7 @@ export async function tick({
     lastPrune: nextPrune,
     durationMs: Date.now() - tickStart,
     stepMs,
+    deadlineSkipped,
   };
 }
 
@@ -376,15 +607,31 @@ export default async function serve(args) {
   // process, so operators get the promised explicit restart boundary.
   const trackedModelTiers = loadModelTierMap();
   const modelTiers = applyModelTierCellOverrides(db, trackedModelTiers);
-  const registry = loadRegistry({
+  const registryOptions = {
     packRoots: extensions.packRoots,
     panelRoots: extensions.panelRoots,
     harnessRoots: extensions.harnessRoots,
     modelTiers,
     trackedModelTiers,
-  });
+  };
+  const loadCurrentRegistry = () => loadRegistry(registryOptions);
+  const registry = loadCurrentRegistry();
   registry.anomalies.push(...extensions.anomalies);
-  const startedConnectors = await startConnectors({ db, registry, log });
+  let connectorAnomalies = [];
+  const registryRef = createRegistryRef({
+    initial: registry,
+    load: loadCurrentRegistry,
+    sourceStamp: () => codeStamp(undefined, REGISTRY_STAMP_PATHS),
+    decorate: (candidate) =>
+      candidate.anomalies.push(...extensions.anomalies, ...connectorAnomalies),
+    log,
+  });
+  const startedConnectors = await startConnectors({
+    db,
+    registry: registryRef.proxy,
+    log,
+  });
+  connectorAnomalies = startedConnectors.anomalies;
   registry.anomalies.push(...startedConnectors.anomalies);
   const pv = policyVersion();
   const owner = newWorkerId();
@@ -447,14 +694,41 @@ export default async function serve(args) {
   let lastPrune = Date.now();
   let busy = false;
   let tickOverruns = 0;
+  let lastDeadlineSkipped = 0;
   let lastTickMs = 0;
   let lastOverrunAt = null;
+  let lastTickAt = null;
+  let currentTickStep = null;
+  let tickStartedAt = null;
+  let plannerWorker = null;
+  let plannerHeartbeatTimer = null;
+  // Chain approval has exactly one owner in this process: the tick step below,
+  // which runs it with awaited, memoised, per-row-bounded control-plane reads.
+  // Without this the planner would run the same pass again — inline under
+  // `--no-planner`, and in the worker thread otherwise (the worker inherits
+  // this env at creation) — concurrently against the same rows.
+  process.env.FACTORY_PLANNER_AUTO_APPROVE_CHAINS = "0";
 
   function getTickStats() {
+    const queued =
+      db
+        .query(`SELECT 1 FROM events WHERE status = 'admitted' LIMIT 1`)
+        .get() != null;
     return {
+      // `lastMs`/`overruns` are the published /health names (orchestrator
+      // watchdog and the web dashboard read them) — keep exactly one spelling.
       lastMs: lastTickMs,
       overruns: tickOverruns,
+      deadlineSkipped: lastDeadlineSkipped,
+      lastTickAt,
+      currentStep: currentTickStep,
+      // How long the in-progress tick has been running. Non-zero here with a
+      // stale `lastTickAt` distinguishes "wedged inside <currentStep>" from
+      // "idle" without waiting for the after-the-fact overrun log.
+      stallMs:
+        busy && tickStartedAt ? Math.max(0, Date.now() - tickStartedAt) : 0,
       ...(lastOverrunAt ? { lastOverrunAt } : {}),
+      planner: plannerWorker?.state({ queued }) ?? null,
     };
   }
 
@@ -469,10 +743,13 @@ export default async function serve(args) {
     }
     busy = true;
     const start = Date.now();
+    tickStartedAt = start;
+    lastDeadlineSkipped = 0;
     try {
+      registryRef.poll();
       const result = await tick({
         db,
-        registry,
+        registry: registryRef.current,
         policyVersion: pv,
         adapterOverride,
         withWorker,
@@ -483,10 +760,15 @@ export default async function serve(args) {
         announceProposals,
         announceTransitions,
         skipPlan: !noPlanner,
+        onStep: ({ name }) => {
+          currentTickStep = name;
+        },
       });
       lastPrune = result.lastPrune;
+      lastDeadlineSkipped = result.deadlineSkipped;
       const duration = Date.now() - start;
       lastTickMs = duration;
+      lastTickAt = new Date().toISOString();
       if (duration > 1000) {
         tickOverruns++;
         lastOverrunAt = new Date().toISOString();
@@ -498,17 +780,36 @@ export default async function serve(args) {
       log(`tick error: ${err.message}`);
     } finally {
       busy = false;
+      currentTickStep = null;
+      tickStartedAt = null;
     }
   }
 
-  let plannerWorker = null;
   if (!noPlanner) {
+    const hardStallAfterMs = mainLoopHardStallAfterMs();
     plannerWorker = startPlannerWorker({
       eventHome: home,
       policyVersion: pv,
       adapterOverride,
+      mainLoopHardStallAfterMs: hardStallAfterMs,
       log,
     });
+    if (hardStallAfterMs != null) {
+      const raw = Number(process.env.FACTORY_MAIN_LOOP_STALL_EXIT_AFTER_MS);
+      log(
+        `planner: main-loop hard stall exit armed at ${hardStallAfterMs}ms` +
+          (raw !== hardStallAfterMs
+            ? ` (raised from ${raw}ms to the ${MAIN_LOOP_HARD_STALL_FLOOR_MS}ms floor)`
+            : ""),
+      );
+    }
+    // The worker owns the clock and can therefore observe a main event-loop
+    // wedge. Include the live step so its report says where the loop stopped.
+    plannerWorker.heartbeat(currentTickStep);
+    plannerHeartbeatTimer = setInterval(
+      () => plannerWorker?.heartbeat(currentTickStep),
+      MAIN_LOOP_HEARTBEAT_INTERVAL_MS,
+    );
   }
 
   const env = {
@@ -518,7 +819,7 @@ export default async function serve(args) {
   };
   const server = startApi({
     db,
-    registry,
+    registryRef,
     policyVersion: pv,
     port,
     env,
@@ -542,7 +843,12 @@ export default async function serve(args) {
     } else {
       log(`serve: control API failed to start: ${err?.message ?? err}`);
     }
-    process.exit(1);
+    // Connectors are started before the API binds. A bind failure must give
+    // them the same bounded cleanup as SIGTERM before the process exits.
+    stopConnectorsBounded().finally(() => {
+      releaseServeLock(home);
+      process.exit(1);
+    });
   });
   server.on("listening", () => {
     log(
@@ -578,11 +884,6 @@ export default async function serve(args) {
       log("planner: background worker thread (off HTTP event loop)");
     }
   });
-  server.on("error", (err) => {
-    releaseServeLock(home);
-    fail(`serve: ${err.message}`);
-  });
-
   // The watched loop starts ONLY once the API actually owns its port. A serve
   // that lost the bind race must die, not keep planning and working the same
   // database as the serve that won — that is a second unmanaged worker and a
@@ -602,21 +903,54 @@ export default async function serve(args) {
     stopping = true;
     log(`shutting down (${signal})`);
     if (timer) clearInterval(timer);
-    if (plannerWorker) {
-      try {
-        await plannerWorker.stop();
-      } catch {
-        /* best effort */
-      }
-    }
-    releaseServeLock(home);
-    const finish = () => {
-      server.close(() => process.exit(0));
-      setTimeout(() => process.exit(0), 1000).unref?.();
-    };
-    Promise.resolve(stopConnectors())
-      .catch((err) => log(`connector stop: ${err.message}`))
-      .finally(finish);
+    if (plannerHeartbeatTimer) clearInterval(plannerHeartbeatTimer);
+    // We stop heartbeating on purpose from here on, and the bounded stops
+    // below can legitimately take CONNECTOR_STOP_TIMEOUT_MS. Disarm before
+    // any of that so an orderly shutdown cannot be turned into a SIGKILL
+    // that skips releaseServeLock.
+    plannerWorker?.disarmHardStall();
+    // Arm this before any cleanup: a connector or the planner thread may
+    // never settle. It sits inside the supervisor's SIGKILL grace so the lock
+    // is released by us, not by a kernel kill; it is longer than the bounded
+    // stops below so `server.close` still gets a chance to release the port.
+    const hardExit = setTimeout(() => {
+      log(`serve: shutdown exceeded ${HARD_EXIT_MS}ms — exiting`);
+      releaseServeLock(home);
+      process.exit(0);
+    }, HARD_EXIT_MS);
+    // The planner thread and the connectors run concurrently under ONE
+    // budget: a hung planner terminate must not push connector cleanup past
+    // the hard exit.
+    await Promise.all([
+      plannerWorker
+        ? stopBounded(
+            "planner stop",
+            () => plannerWorker.stop(),
+            CONNECTOR_STOP_TIMEOUT_MS,
+          )
+        : Promise.resolve(),
+      stopConnectorsBounded(),
+    ]);
+    let closeConnections = null;
+    server.close((err) => {
+      clearTimeout(hardExit);
+      clearTimeout(closeConnections);
+      if (err) log(`serve: control API close failed: ${err.message}`);
+      // Keep the lock while the listening socket exists. The exit hook is a
+      // final safeguard should the hard-exit backstop win this race.
+      releaseServeLock(home);
+      process.exit(err ? 1 : 0);
+    });
+    // `server.close` only fires its callback once every connection is gone;
+    // an HTTP keep-alive client (curl loops, the web UI, a health poller)
+    // keeps its socket open for seconds and would otherwise carry us into the
+    // hard exit. Drop idle sockets now, and any still-active ones shortly
+    // after, so the close can complete.
+    server.closeIdleConnections?.();
+    closeConnections = setTimeout(
+      () => server.closeAllConnections?.(),
+      CLOSE_CONNECTIONS_AFTER_MS,
+    );
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));

@@ -23,6 +23,36 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 const LIVE_STACK = path.resolve(import.meta.dir, "live-stack.sh");
+const UP_PIDFILE_TRACKING_START = "# >>> up-pidfile-tracking";
+const UP_PIDFILE_TRACKING_END = "# <<< up-pidfile-tracking";
+
+function extractMarkedBlock(source, startMarker, endMarker) {
+  const start = source.indexOf(startMarker);
+  if (start === -1) {
+    throw new Error(`missing extraction marker: ${startMarker}`);
+  }
+  const contentStart = source.indexOf("\n", start);
+  if (contentStart === -1) {
+    throw new Error(`missing extraction marker line ending: ${startMarker}`);
+  }
+  const end = source.indexOf(endMarker, contentStart + 1);
+  if (end === -1) {
+    throw new Error(`missing extraction marker: ${endMarker}`);
+  }
+  const block = source.slice(contentStart + 1, end).trim();
+  if (!block) {
+    throw new Error(
+      `empty extraction block between ${startMarker} and ${endMarker}`,
+    );
+  }
+  return block;
+}
+
+const upPidfileTrackingBlock = extractMarkedBlock(
+  readFileSync(LIVE_STACK, "utf8"),
+  UP_PIDFILE_TRACKING_START,
+  UP_PIDFILE_TRACKING_END,
+);
 
 /**
  * worktree-common.sh replaced by recorders: no daemon is ever started.
@@ -35,13 +65,37 @@ const LIVE_STACK = path.resolve(import.meta.dir, "live-stack.sh");
  */
 const COMMON_STUB = `#!/usr/bin/env bash
 repo_root() { printf '%s' "$FAKE_REPO"; }
-info() { printf '==> %s\\n' "$*"; }
+info() {
+  printf '==> %s\\n' "$*"
+  # A command failing *inside* a helper body under set -e (not a non-zero
+  # return to the caller): the shell aborts here, and the ERR trap must still
+  # run cleanup. The line after the failure is never reached.
+  if [[ -n "\${FAKE_INFO_FAIL_ON:-}" && "$*" == "\${FAKE_INFO_FAIL_ON}"* ]]; then
+    false
+    printf 'unreachable under set -e\\n' >&2
+  fi
+}
 warn() { printf 'warn: %s\\n' "$*" >&2; }
 die() { printf 'error: %s\\n' "$*" >&2; exit 1; }
 pid_alive() {
   if [[ "\${FAKE_WEB_SUPERVISOR:-0}" == "1" ]]; then
     [[ "$(basename "$1")" == "serve.pid" ]]
     return
+  fi
+  if [[ "\${FAKE_SERVE_DIES:-0}" == "1" && "$(basename "$1")" == "serve.pid" && -f "$1" ]]; then
+    return 1
+  fi
+  if [[ "$(basename "$1")" == "serve.pid" && -f "$1" ]]; then
+    return 0
+  fi
+  if [[ "$(basename "$1")" == "worker.pid" || "$(basename "$1")" == "supervisor.pid" ]]; then
+    [[ -f "$1" ]] || return 1
+    [[ -f "$1.terminated" || -f "$1.exited" ]] && return 1
+    return 0
+  fi
+  if [[ "$(basename "$1")" == "gh-app-auth.pid" && -f "$1.fake" ]]; then
+    [[ -f "$1.terminated" || -f "$1.exited" ]] && return 1
+    return 0
   fi
   [[ "\${FAKE_ALIVE:-0}" == "1" ]] || return 1
   [[ -f "$1" ]] || return 1
@@ -54,10 +108,20 @@ spawn_daemon() { # <pidfile> <logfile> <workdir> <cmd...>
   printf 'SPAWN pid=%s workdir=%s cmd=%s\\n' "$(basename "$pidfile")" "$workdir" "$*" >>"$SPAWN_LOG"
   if [[ "$(basename "$pidfile")" == "\${FAKE_SPAWN_FAIL_PIDFILE:-}" ]]; then return 1; fi
   printf '1\\n' >"$pidfile"
-  if [[ "\${FAKE_POOL_CHILDREN:-0}" == "1" && "$*" == *"cli.mjs supervise"* ]]; then
+  if [[ "$(basename "$pidfile")" == "gh-app-auth.pid" ]]; then
+    touch "$pidfile.fake"
+    printf '1\\n' >"\${FACTORY_GH_APP_TOKEN_FILE}.lock"
+  fi
+  if [[ -n "\${FAKE_DAEMON_DIES_FOR:-}" && "$*" == *"\${FAKE_DAEMON_DIES_FOR}"* ]]; then
+    printf 'fake daemon exited 1\\n' >"$logfile"
+    touch "$pidfile.exited"
+  fi
+  if [[ "\${FAKE_SUPERVISOR_MISSING:-0}" != "1" && "$*" == *"cli.mjs supervise"* ]]; then
     printf '2\\n' >"$(dirname "$pidfile")/supervisor.pid"
-    printf '3\\n' >"$(dirname "$pidfile")/worker-1.pid"
-    printf 'worker_test\\n' >"$(dirname "$pidfile")/worker-1.id"
+    if [[ "\${FAKE_POOL_CHILDREN:-0}" == "1" ]]; then
+      printf '3\\n' >"$(dirname "$pidfile")/worker-1.pid"
+      printf 'worker_test\\n' >"$(dirname "$pidfile")/worker-1.id"
+    fi
   fi
 }
 term_daemon() {
@@ -151,14 +215,40 @@ function makeFixture({
   writeFileSync(
     curl,
     `#!/bin/sh
+if [ -n "\${FAKE_CURL_COUNT_FILE:-}" ]; then
+  calls=0
+  [ -f "$FAKE_CURL_COUNT_FILE" ] && calls=$(cat "$FAKE_CURL_COUNT_FILE")
+  calls=$((calls + 1))
+  printf '%s' "$calls" >"$FAKE_CURL_COUNT_FILE"
+  if [ "$calls" -le "\${FAKE_CURL_SUCCEED_AFTER:-0}" ]; then exit 1; fi
+fi
+if [ "\${FAKE_CURL_SIGNAL_PARENT:-0}" = "1" ] && [ ! -e "\${FAKE_CURL_SIGNAL_MARKER:-}" ]; then
+  case "$*" in
+    *":7381/health"*) : >"$FAKE_CURL_SIGNAL_MARKER"; kill -INT "$PPID" ;;
+  esac
+fi
 if [ -n "\${FAKE_CURL_FAIL_URL:-}" ]; then
   case "$*" in *"$FAKE_CURL_FAIL_URL"*) exit 1 ;; esac
+fi
+if [ -n "\${FAKE_CURL_STALL:-}" ]; then
+  case "$*" in *"/health"*) /bin/sleep "$FAKE_CURL_STALL"; exit 1 ;; esac
 fi
 exit "\${FAKE_CURL_STATUS:-0}"
 `,
     "utf8",
   );
   chmodSync(curl, 0o755);
+
+  const sleep = path.join(root, "stubs", "sleep");
+  writeFileSync(
+    sleep,
+    `#!/bin/sh
+if [ "\${FAKE_FAST_SLEEP:-0}" = "1" ]; then exit 0; fi
+exec /bin/sleep "$@"
+`,
+    "utf8",
+  );
+  chmodSync(sleep, 0o755);
 
   // Non-dev web builds are recorded and materialize the one artifact the
   // script checks. Other bun commands are only arguments to spawn_daemon.
@@ -189,18 +279,51 @@ exit 99
 }
 
 function runStack(fixture, args, extraEnv = {}) {
+  const noCurlBin = path.join(fixture.root, "no-curl-bin");
+  if (extraEnv.FAKE_PATH_WITHOUT_CURL === "1") {
+    mkdirSync(noCurlBin, { recursive: true });
+    for (const command of [
+      "bash",
+      "basename",
+      "cat",
+      "date",
+      "dirname",
+      "find",
+      "grep",
+      "mkdir",
+      "ps",
+      "rm",
+      "sort",
+      "tr",
+    ]) {
+      const source = Bun.spawnSync({
+        cmd: ["sh", "-c", `command -v ${command}`],
+      })
+        .stdout.toString()
+        .trim();
+      copyFileSync(source, path.join(noCurlBin, command));
+      chmodSync(path.join(noCurlBin, command), 0o755);
+    }
+  }
   const result = Bun.spawnSync({
     cmd: ["bash", path.join(fixture.root, "bin", "live-stack.sh"), ...args],
     stdout: "pipe",
     stderr: "pipe",
     env: {
       ...process.env,
-      PATH: `${path.join(fixture.root, "stubs")}:${process.env.PATH}`,
+      PATH:
+        extraEnv.FAKE_PATH_WITHOUT_CURL === "1"
+          ? noCurlBin
+          : `${path.join(fixture.root, "stubs")}:${process.env.PATH}`,
       FAKE_REPO: fixture.root,
       SPAWN_LOG: fixture.spawnLog,
       BUILD_LOG: fixture.buildLog,
       FACTORY_RUN_DIR: path.join(fixture.root, "run"),
       FACTORY_EVENT_HOME: path.join(fixture.root, "home"),
+      FACTORY_GH_APP_TOKEN_FILE: path.join(fixture.root, "gh-app-token.json"),
+      // Startup survival is covered by focused cases below. Keep unrelated
+      // command-wiring tests immediate instead of paying the production 5s.
+      FACTORY_WORKER_READY_TIMEOUT: "0",
       ...extraEnv,
     },
   });
@@ -220,6 +343,188 @@ function runStack(fixture, args, extraEnv = {}) {
 const spawnFor = (spawns, pidfile) =>
   spawns.find((line) => line.includes(`pid=${pidfile}`)) ?? "";
 
+async function startLockOwningGhAppProcess(
+  fixture,
+  daemonArgument = "--daemon",
+) {
+  const script = path.join(
+    fixture.root,
+    "lib",
+    "control-plane",
+    "gh-app-auth.mjs",
+  );
+  mkdirSync(path.dirname(script), { recursive: true });
+  writeFileSync(script, "setInterval(() => {}, 60_000);\n", "utf8");
+  const child = Bun.spawn({
+    cmd: [process.execPath, script, daemonArgument],
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const command = Bun.spawnSync({
+      cmd: ["ps", "-p", String(child.pid), "-o", "command="],
+      stdout: "pipe",
+      stderr: "ignore",
+    }).stdout.toString();
+    if (command.trim().endsWith(`${script} ${daemonArgument}`)) {
+      writeFileSync(
+        path.join(fixture.root, "gh-app-token.json.lock"),
+        `${child.pid}\n`,
+      );
+      return child;
+    }
+    await Bun.sleep(5);
+  }
+  child.kill();
+  await child.exited;
+  throw new Error(`fake gh-app-auth process ${child.pid} did not start`);
+}
+
+async function stopProcess(child) {
+  try {
+    child.kill();
+  } catch {
+    // Already exited.
+  }
+  await child.exited;
+}
+
+test("`up` adopts a lock-owning GitHub App daemon when its pidfile is missing", async () => {
+  const f = makeFixture();
+  const daemon = await startLockOwningGhAppProcess(f);
+  try {
+    const r = runStack(f, ["up"], {
+      FACTORY_GH_APP_ID: "test-app",
+      FACTORY_GH_APP_PRIVATE_KEY_PATH: "/tmp/test-key",
+      FACTORY_HOME: f.root,
+      FACTORY_ROOT: f.root,
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(
+      `GitHub App token daemon already running (adopted pid ${daemon.pid})`,
+    );
+    expect(readFileSync(path.join(f.runDir, "gh-app-auth.pid"), "utf8")).toBe(
+      `${daemon.pid}\n`,
+    );
+    expect(spawnFor(r.spawns, "gh-app-auth.pid")).toBe("");
+
+    const down = runStack(f, ["down"], { FAKE_ALIVE: "1" });
+    expect(down.status).toBe(0);
+    expect(down.spawns).toContain("TERM GitHub App token daemon");
+    expect(down.spawns).toContain("AWAIT GitHub App token daemon");
+  } finally {
+    await stopProcess(daemon);
+    f.cleanup();
+  }
+});
+
+test("`up` adopts a lock-owning --daemon-held GitHub App process", async () => {
+  const f = makeFixture();
+  const daemon = await startLockOwningGhAppProcess(f, "--daemon-held");
+  try {
+    const r = runStack(f, ["up"], {
+      FACTORY_GH_APP_ID: "test-app",
+      FACTORY_GH_APP_PRIVATE_KEY_PATH: "/tmp/test-key",
+      FACTORY_HOME: f.root,
+      FACTORY_ROOT: f.root,
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(
+      `GitHub App token daemon already running (adopted pid ${daemon.pid})`,
+    );
+    expect(readFileSync(path.join(f.runDir, "gh-app-auth.pid"), "utf8")).toBe(
+      `${daemon.pid}\n`,
+    );
+    expect(spawnFor(r.spawns, "gh-app-auth.pid")).toBe("");
+  } finally {
+    await stopProcess(daemon);
+    f.cleanup();
+  }
+});
+
+test("gh_app_daemon_command_matches accepts --daemon and --daemon-held", () => {
+  const repo = path.resolve(import.meta.dir, "..");
+  const script = `${repo}/lib/control-plane/gh-app-auth.mjs`;
+  const result = Bun.spawnSync({
+    cmd: [
+      "bash",
+      "-uc",
+      `REPO="$2"
+# Isolate the matcher + the release-root helper it calls.
+eval "$(sed -n '/^gh_app_release_root()/,/^}/p; /^gh_app_daemon_command_matches()/,/^}/p' "$1")"
+gh_app_daemon_command_matches "bun $3 --daemon"
+gh_app_daemon_command_matches "bun $3 --daemon-held"
+! gh_app_daemon_command_matches "bun $3 --daemon-other"
+! gh_app_daemon_command_matches "bun $3 --daemonize"
+`,
+      "bash",
+      LIVE_STACK,
+      repo,
+      script,
+    ],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(result.stderr.toString()).toBe("");
+  expect(result.exitCode).toBe(0);
+});
+
+test("untracking the only pidfile remains safe under nounset", () => {
+  const result = Bun.spawnSync({
+    cmd: [
+      "bash",
+      "-uc",
+      `source <(printf '%s\\n' "$3")
+UP_STARTED_PIDFILES=("$2")
+UP_STARTED_LABELS=("GitHub App token daemon")
+untrack_up_pidfile "$2"
+[[ \${#UP_STARTED_PIDFILES[@]} -eq 0 ]]
+[[ \${#UP_STARTED_LABELS[@]} -eq 0 ]]`,
+      "bash",
+      LIVE_STACK,
+      "/tmp/only.pid",
+      upPidfileTrackingBlock,
+    ],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(result.exitCode).toBe(0);
+  expect(result.stderr.toString()).toBe("");
+});
+
+test("pidfile tracking extraction rejects missing or empty markers", () => {
+  expect(() =>
+    extractMarkedBlock("# start\nbody\n", "# start", "# end"),
+  ).toThrow("missing extraction marker: # end");
+  expect(() =>
+    extractMarkedBlock("# start\n# end\n", "# start", "# end"),
+  ).toThrow("empty extraction block");
+});
+
+test("`up` keeps the existing live GitHub App daemon pidfile behavior", () => {
+  const f = makeFixture();
+  try {
+    mkdirSync(f.runDir, { recursive: true });
+    writeFileSync(path.join(f.runDir, "gh-app-auth.pid"), "31337\n");
+    const r = runStack(f, ["up"], {
+      FACTORY_GH_APP_ID: "test-app",
+      FACTORY_GH_APP_PRIVATE_KEY_PATH: "/tmp/test-key",
+      FAKE_ALIVE: "1",
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(
+      "GitHub App token daemon already running (pid 31337)",
+    );
+    expect(readFileSync(path.join(f.runDir, "gh-app-auth.pid"), "utf8")).toBe(
+      "31337\n",
+    );
+    expect(spawnFor(r.spawns, "gh-app-auth.pid")).toBe("");
+  } finally {
+    f.cleanup();
+  }
+});
+
 test("plain `up` spawns serve, worker, and the static web server — unchanged by --dev existing", () => {
   const f = makeFixture();
   try {
@@ -234,6 +539,7 @@ test("plain `up` spawns serve, worker, and the static web server — unchanged b
     expect(spawnFor(r.spawns, "worker.pid")).not.toContain(
       "__supervise-worker",
     );
+    expect(existsSync(path.join(f.runDir, "worker.pid"))).toBe(true);
 
     const web = spawnFor(r.spawns, "web.pid");
     expect(web).toContain("web/serve.mjs");
@@ -245,6 +551,29 @@ test("plain `up` spawns serve, worker, and the static web server — unchanged b
     f.cleanup();
   }
 });
+
+test.each([
+  ["work", ["up"], "cli.mjs work"],
+  ["supervise", ["up", "--workers", "1:1"], "cli.mjs supervise"],
+])(
+  "a worker daemon that exits during %s startup fails `up` and cleans up its pidfiles",
+  (_command, args, failingCommand) => {
+    const f = makeFixture();
+    try {
+      const r = runStack(f, args, { FAKE_DAEMON_DIES_FOR: failingCommand });
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toContain("worker exited during startup");
+      expect(r.stderr).toContain("worker.log");
+      expect(r.stderr).toContain("fake daemon exited 1");
+      expect(r.spawns).toContain("TERM worker");
+      expect(r.spawns).toContain("TERM event runtime");
+      for (const file of ["worker.pid", "serve.pid"])
+        expect(existsSync(path.join(f.runDir, file))).toBe(false);
+    } finally {
+      f.cleanup();
+    }
+  },
+);
 
 test("`up --dry-run` prints the resolved daemon plan without spawning", () => {
   const f = makeFixture();
@@ -284,6 +613,8 @@ test("failed runtime health cleans up only daemons spawned by this `up`", () => 
       FACTORY_GH_APP_ID: "test-app",
       FACTORY_GH_APP_PRIVATE_KEY_PATH: "/tmp/test-key",
       FAKE_CURL_STATUS: "1",
+      FAKE_FAST_SLEEP: "1",
+      FACTORY_API_READY_TIMEOUT: "1",
     });
     expect(r.status).not.toBe(0);
     expect(r.stderr).toContain("event runtime failed to start");
@@ -300,6 +631,216 @@ test("failed runtime health cleans up only daemons spawned by this `up`", () => 
   }
 }, 20_000);
 
+test("malformed timing knobs fail before `up` snapshots or starts daemons", () => {
+  for (const [env, message] of [
+    [
+      { FACTORY_API_READY_TIMEOUT: "abc" },
+      "FACTORY_API_READY_TIMEOUT must be a non-negative integer",
+    ],
+    [
+      { FACTORY_API_READY_TIMEOUT: "-1" },
+      "FACTORY_API_READY_TIMEOUT must be a non-negative integer",
+    ],
+    [
+      { FACTORY_WORKER_READY_TIMEOUT: "soon" },
+      "FACTORY_WORKER_READY_TIMEOUT must be a non-negative integer",
+    ],
+    [
+      { FACTORY_WEB_SUPERVISOR_INTERVAL: "0" },
+      "FACTORY_WEB_SUPERVISOR_INTERVAL must be a positive number",
+    ],
+    [
+      { FACTORY_WEB_SUPERVISOR_INTERVAL: "soon" },
+      "FACTORY_WEB_SUPERVISOR_INTERVAL must be a positive number",
+    ],
+  ]) {
+    const f = makeFixture();
+    try {
+      const r = runStack(f, ["up"], env);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain(message);
+      expect(r.spawns).toEqual([]);
+      expect(existsSync(f.runDir)).toBe(false);
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test("a pool without a supervisor pidfile fails worker readiness and cleans up", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, ["up", "--workers", "1:1"], {
+      FAKE_SUPERVISOR_MISSING: "1",
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain(
+      "worker pool supervisor did not start within 0s",
+    );
+    expect(r.stderr).toContain("worker.log");
+    expect(r.spawns).toContain("TERM worker");
+    expect(r.spawns).toContain("TERM event runtime");
+    for (const file of ["worker.pid", "serve.pid"])
+      expect(existsSync(path.join(f.runDir, file))).toBe(false);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("`up --help` prints usage even when a timing knob is malformed", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, ["up", "--help"], {
+      FACTORY_API_READY_TIMEOUT: "abc",
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("usage: factory up");
+    expect(r.stderr).not.toContain("FACTORY_API_READY_TIMEOUT");
+    expect(r.spawns).toEqual([]);
+    expect(existsSync(f.runDir)).toBe(false);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("FACTORY_API_READY_TIMEOUT=0 is an immediate deadline, not a rejection", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, ["up"], {
+      FAKE_CURL_STATUS: "1",
+      FAKE_FAST_SLEEP: "1",
+      FACTORY_API_READY_TIMEOUT: "0",
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).not.toContain("must be a");
+    expect(r.stderr).toContain("failed to start");
+    expect(r.stderr).toContain("within 0s");
+    expect(r.spawns).toContain("TERM event runtime");
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
+
+test("web supervisor interval accepts a positive decimal", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, ["up", "--dry-run"], {
+      FACTORY_WEB_SUPERVISOR_INTERVAL: "0.5",
+    });
+    expect(r.status).toBe(0);
+    expect(r.spawns).toEqual([]);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("runtime health allows a slow bind beyond the former 30-attempt budget", () => {
+  const f = makeFixture();
+  const calls = path.join(f.root, "curl-calls");
+  try {
+    const r = runStack(f, ["up"], {
+      FAKE_CURL_COUNT_FILE: calls,
+      FAKE_CURL_SUCCEED_AFTER: "31",
+      FAKE_FAST_SLEEP: "1",
+    });
+    expect(r.status).toBe(0);
+    expect(Number(readFileSync(calls, "utf8"))).toBeGreaterThan(31);
+    expect(r.stdout).toContain("ready — live factory stack");
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
+
+test("runtime health is a wall-clock deadline even when /health stalls per attempt", () => {
+  const f = makeFixture();
+  try {
+    // Every probe hangs for a second (a bound socket whose /health never
+    // answers). An attempt-counted loop would wait 600 x 1 s here; the deadline
+    // must cut it off at FACTORY_API_READY_TIMEOUT regardless.
+    const started = Date.now();
+    const r = runStack(f, ["up"], {
+      FAKE_CURL_STALL: "1",
+      FACTORY_API_READY_TIMEOUT: "2",
+    });
+    const elapsed = (Date.now() - started) / 1000;
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("event runtime failed to start");
+    expect(r.stderr).toContain("within 2s");
+    // $SECONDS ticks on wall-clock second boundaries, so a 2 s deadline may
+    // expire shortly after 1 s; the upper bound is what the nit is about.
+    expect(elapsed).toBeGreaterThanOrEqual(1);
+    expect(elapsed).toBeLessThan(8);
+    expect(r.spawns).toContain("TERM event runtime");
+    expect(existsSync(path.join(f.runDir, "serve.pid"))).toBe(false);
+  } finally {
+    f.cleanup();
+  }
+}, 20_000);
+
+test("a dead serve pid aborts readiness promptly with its own diagnostic", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, ["up"], {
+      FAKE_SERVE_DIES: "1",
+      FAKE_CURL_STATUS: "1",
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("event runtime exited before becoming healthy");
+    expect(r.spawns).toContain("TERM event runtime");
+    expect(existsSync(path.join(f.runDir, "serve.pid"))).toBe(false);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("SIGINT during `up` cleans up pidfiles owned by this invocation", () => {
+  const f = makeFixture();
+  const marker = path.join(f.root, "signal-sent");
+  try {
+    const r = runStack(f, ["up"], {
+      FAKE_CURL_SIGNAL_PARENT: "1",
+      FAKE_CURL_SIGNAL_MARKER: marker,
+    });
+    expect(r.status).toBe(130);
+    expect(existsSync(marker)).toBe(true);
+    expect(r.spawns).toContain("TERM event runtime");
+    expect(existsSync(path.join(f.runDir, "serve.pid"))).toBe(false);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a set -e abort inside a helper still runs the ERR-trap cleanup", () => {
+  const f = makeFixture();
+  try {
+    // The failure happens inside a function body. Without `set -E` the ERR trap
+    // is not inherited there, and the shell would exit leaving serve.pid behind.
+    const r = runStack(f, ["up"], { FAKE_INFO_FAIL_ON: "starting worker" });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).not.toContain("unreachable");
+    expect(r.spawns).toContainEqual(expect.stringContaining("pid=serve.pid"));
+    expect(r.spawns).not.toContainEqual(
+      expect.stringContaining("pid=worker.pid"),
+    );
+    expect(r.spawns).toContain("TERM event runtime");
+    expect(existsSync(path.join(f.runDir, "serve.pid"))).toBe(false);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("missing curl names the required tool before starting daemons", () => {
+  const f = makeFixture();
+  try {
+    const r = runStack(f, ["up"], { FAKE_PATH_WITHOUT_CURL: "1" });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("curl not found");
+    expect(r.spawns).toEqual([]);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test("failed `up` leaves an already-running daemon alone", () => {
   const f = makeFixture();
   try {
@@ -308,6 +849,8 @@ test("failed `up` leaves an already-running daemon alone", () => {
     const r = runStack(f, ["up"], {
       FAKE_ALIVE: "1",
       FAKE_CURL_STATUS: "1",
+      FAKE_FAST_SLEEP: "1",
+      FACTORY_API_READY_TIMEOUT: "1",
     });
     expect(r.status).not.toBe(0);
     expect(r.stdout).toContain("event runtime already running");
@@ -706,6 +1249,54 @@ test("`down` gives the pool a bounded wait, then says so instead of hanging", ()
     f.cleanup();
   }
 }, 20_000);
+
+test("malformed pool drain timeout leaves the running stack untouched", () => {
+  const f = makeFixture();
+  try {
+    mkdirSync(f.runDir, { recursive: true });
+    for (const [name, body] of [
+      ["supervisor.pid", "4242\n"],
+      ["worker.pid", "4242\n"],
+      ["serve.pid", "4243\n"],
+    ])
+      writeFileSync(path.join(f.runDir, name), body, "utf8");
+
+    const r = runStack(f, ["down"], {
+      FAKE_ALIVE: "1",
+      FACTORY_POOL_DRAIN_TIMEOUT: "10s",
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(
+      "FACTORY_POOL_DRAIN_TIMEOUT must be a non-negative integer",
+    );
+    expect(r.spawns).toEqual([]);
+    for (const name of ["supervisor.pid", "worker.pid", "serve.pid"])
+      expect(existsSync(path.join(f.runDir, name))).toBe(true);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("FACTORY_POOL_DRAIN_TIMEOUT=0 skips the drain wait without rejecting the knob", () => {
+  const f = makeFixture({ policy: "workers:\n  min: 1\n  max: 3\n" });
+  try {
+    mkdirSync(f.runDir, { recursive: true });
+    writeFileSync(path.join(f.runDir, "supervisor.pid"), "4242\n", "utf8");
+    writeFileSync(path.join(f.runDir, "worker.pid"), "4242\n", "utf8");
+
+    const r = runStack(f, ["down"], {
+      FAKE_ALIVE: "1",
+      FAKE_IGNORES_TERM: "1",
+      FACTORY_POOL_DRAIN_TIMEOUT: "0",
+    });
+    expect(r.status).toBe(0);
+    expect(r.stderr).not.toContain("must be a");
+    expect(r.stdout).toContain("draining worker pool (up to 0s");
+    expect(r.stderr).toContain("worker pool still draining after 0s");
+  } finally {
+    f.cleanup();
+  }
+});
 
 test("`down` without a supervisor pidfile is the pre-pool teardown, unchanged", () => {
   const f = makeFixture();

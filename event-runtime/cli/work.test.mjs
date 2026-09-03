@@ -11,6 +11,7 @@ import {
 import path from "node:path";
 import { policyVersion } from "../lib/config.mjs";
 import { openDb } from "../lib/db.mjs";
+import { listWorkers } from "../lib/workers.mjs";
 import {
   CLI,
   DEAD_PORT,
@@ -28,6 +29,7 @@ import {
   spawnTracked,
   spawnSupervisor,
   spawnWorker,
+  until,
   waitFor,
   registerCliTmpCleanup,
   registerTestProcessCleanup,
@@ -38,6 +40,71 @@ registerTestProcessCleanup(import.meta.url);
 
 const WORKER_POLICY_VERSION = policyVersion();
 const LIVE_STACK = path.resolve(import.meta.dir, "../../bin/live-stack.sh");
+
+/** Poll the registry until the worker row exists (registration is racy vs stdout). */
+async function registeredWorker(home, { timeoutMs = 5_000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const db = openDb(path.join(home, "runtime.db"));
+    const [worker] = listWorkers(db);
+    db.close();
+    if (worker) return worker;
+    if (Date.now() >= deadline) throw new Error("worker never registered");
+    await Bun.sleep(25);
+  }
+}
+
+async function seedSkippedRun(
+  home,
+  {
+    runId,
+    placement,
+    promptVersion = WORKER_POLICY_VERSION,
+    queuedReason,
+    queuedAt = Date.now(),
+  },
+) {
+  const { createRun, transition } = await import("../lib/lifecycle.mjs");
+  const { canonicalJson, hashJson } = await import("../lib/canonical.mjs");
+  const db = openDb(path.join(home, "runtime.db"));
+  const input = { repos: ["ok"] };
+  const spec = {
+    schemaVersion: "factory.run-spec/v1",
+    runId,
+    agent: "factory-status-report@1",
+    input,
+    inputHash: hashJson(input),
+    workspace: { type: "ephemeral", retainOnFailure: false },
+    adapter: "fake",
+    promptVersion,
+    policyVersion: promptVersion,
+    ...(placement ? { placement } : {}),
+    outputContract: "factory.status-report/v1",
+    capabilities: ["linear:read"],
+    timeoutSeconds: 5,
+    maxAttempts: 1,
+    idempotencyKey: `idem_${runId}`,
+  };
+  createRun(db, {
+    runId,
+    idempotencyKey: spec.idempotencyKey,
+    spec,
+    specJson: canonicalJson(spec),
+    specHash: hashJson(spec),
+    actor: "test",
+    policyVersion: "test",
+    now: queuedAt,
+  });
+  transition(db, { runId, to: "APPROVED", actor: "test", now: queuedAt });
+  transition(db, {
+    runId,
+    to: "QUEUED",
+    actor: "test",
+    ...(queuedReason ? { reason: queuedReason } : {}),
+    now: queuedAt,
+  });
+  db.close();
+}
 
 /** Capture the shell supervisor's restart events, not just its worker's logs. */
 function spawnReloadSupervisor(args, env) {
@@ -83,6 +150,217 @@ describe("work command", () => {
     expect(r.status).not.toBe(0);
     expect(r.all).toContain('work: unknown --adapter-override "nonexistent"');
   });
+
+  test(
+    "reports an unsatisfied queued placement once per skip-report interval",
+    async () => {
+      const home = tmpDir("evrt-work-placement-skip-");
+      await seedSkippedRun(home, {
+        runId: "run_placement_skip",
+        placement: { node: "gpu" },
+      });
+      const box = spawnWorker(
+        [
+          "--adapter-override",
+          "fake",
+          "--label",
+          "node=cpu",
+          "--poll-ms",
+          "25",
+          "--skip-report-ms",
+          "100",
+        ],
+        { FACTORY_EVENT_HOME: home },
+      );
+      try {
+        await waitFor(box, '"runId":"run_placement_skip"');
+        await until(
+          "the next placement skip-report interval",
+          () =>
+            (box.out.match(/"runId":"run_placement_skip"/g) ?? []).length >= 2,
+          { timeoutMs: 5_000, everyMs: 10 },
+        );
+        expect(box.out.match(/"runId":"run_placement_skip"/g)).toHaveLength(2);
+        expect(box.out).toContain('"definition":"factory-status-report@1"');
+        expect(box.out).toContain("placement_unsatisfied:node=gpu");
+      } finally {
+        box.child.kill("SIGTERM");
+        await exitOf(box.child);
+        rmSync(home, { recursive: true, force: true });
+      }
+    },
+    loadAdjustedTimeout(30_000),
+  );
+
+  test(
+    "folds a mismatched run still inside the deploy window into the skip report",
+    async () => {
+      const home = tmpDir("evrt-work-registry-skip-");
+      await seedSkippedRun(home, {
+        runId: "run_registry_skip",
+        promptVersion: "git:older-registry",
+      });
+      const box = spawnWorker(
+        [
+          "--adapter-override",
+          "fake",
+          "--poll-ms",
+          "25",
+          "--skip-report-ms",
+          "100",
+        ],
+        { FACTORY_EVENT_HOME: home },
+      );
+      try {
+        await waitFor(box, '"runId":"run_registry_skip"');
+        await until(
+          "the next registry skip-report interval",
+          () =>
+            (box.out.match(/"runId":"run_registry_skip"/g) ?? []).length >= 2,
+          { timeoutMs: 5_000, everyMs: 10 },
+        );
+        expect(box.out).toMatch(
+          /registry_stale:spec=git:older-registry\/git:older-registry:worker=git:[^:"]+:checkout=git:[^"}]+/,
+        );
+        expect(box.out).not.toContain("refused run_registry_skip");
+        expect(box.out).not.toContain("dead-lettered run_registry_skip");
+        const worker = await registeredWorker(home);
+        expect(worker.skipped).toEqual([
+          {
+            runId: "run_registry_skip",
+            definition: "factory-status-report@1",
+            reason: expect.stringMatching(/^registry_stale:/),
+          },
+        ]);
+        const db = openDb(path.join(home, "runtime.db"));
+        const state = db
+          .query(`SELECT state FROM runs WHERE run_id = ?`)
+          .get("run_registry_skip")?.state;
+        db.close();
+        expect(state).toBe("QUEUED");
+      } finally {
+        box.child.kill("SIGTERM");
+        await exitOf(box.child);
+        rmSync(home, { recursive: true, force: true });
+      }
+    },
+    loadAdjustedTimeout(30_000),
+  );
+
+  test(
+    "dead-letters a queued run that stayed stale past the deploy window",
+    async () => {
+      const home = tmpDir("evrt-work-registry-dead-letter-");
+      await seedSkippedRun(home, {
+        runId: "run_registry_stale",
+        promptVersion: "git:older-registry",
+        queuedAt: Date.now() - 60 * 60_000,
+      });
+      const box = spawnWorker(
+        [
+          "--adapter-override",
+          "fake",
+          "--poll-ms",
+          "25",
+          "--skip-report-ms",
+          "100",
+        ],
+        { FACTORY_EVENT_HOME: home },
+      );
+      try {
+        await until(
+          "the stale queued run to be terminalized",
+          () => {
+            const db = openDb(path.join(home, "runtime.db"));
+            const state = db
+              .query(`SELECT state FROM runs WHERE run_id = ?`)
+              .get("run_registry_stale")?.state;
+            db.close();
+            return state === "CANCELLED";
+          },
+          { timeoutMs: 5_000, everyMs: 10 },
+        );
+        await waitFor(box, "dead-lettered run_registry_stale");
+        expect(box.out).toContain("dead-lettered run_registry_stale");
+        expect(box.out).not.toContain("refused run_registry_stale");
+      } finally {
+        box.child.kill("SIGTERM");
+        await exitOf(box.child);
+        rmSync(home, { recursive: true, force: true });
+      }
+    },
+    loadAdjustedTimeout(30_000),
+  );
+
+  test(
+    "publishes cached skipped diagnostics to the registry and caps them",
+    async () => {
+      const home = tmpDir("evrt-work-registry-diagnostics-");
+      for (let index = 0; index < 51; index += 1) {
+        await seedSkippedRun(home, {
+          runId: `run_registry_${String(index).padStart(3, "0")}`,
+          promptVersion: "git:older-registry",
+        });
+      }
+      const box = spawnWorker(
+        [
+          "--adapter-override",
+          "fake",
+          "--poll-ms",
+          "25",
+          "--skip-report-ms",
+          "1000",
+        ],
+        { FACTORY_EVENT_HOME: home },
+      );
+      try {
+        await waitFor(box, '"runId":"run_registry_000"');
+        const worker = await registeredWorker(home);
+        expect(worker.skipped).toHaveLength(50);
+        expect(worker.skipped[0].runId).toBe("run_registry_000");
+        expect(worker.skipped.at(-1)).toEqual({
+          runId: "...",
+          reason: "and 2 more",
+        });
+      } finally {
+        box.child.kill("SIGTERM");
+        await exitOf(box.child);
+        rmSync(home, { recursive: true, force: true });
+      }
+    },
+    loadAdjustedTimeout(30_000),
+  );
+
+  test(
+    "reports a queued claim backoff with its retry time",
+    async () => {
+      const home = tmpDir("evrt-work-backoff-skip-");
+      await seedSkippedRun(home, {
+        runId: "run_backoff_skip",
+        queuedReason: "claim_lock_contention:1:backoff_10000ms",
+      });
+      const box = spawnWorker(
+        [
+          "--adapter-override",
+          "fake",
+          "--poll-ms",
+          "25",
+          "--skip-report-ms",
+          "1000",
+        ],
+        { FACTORY_EVENT_HOME: home },
+      );
+      try {
+        await waitFor(box, '"runId":"run_backoff_skip"');
+        expect(box.out).toMatch(/"reason":"backoff_until:\d{4}-\d{2}-\d{2}T/);
+      } finally {
+        box.child.kill("SIGTERM");
+        await exitOf(box.child);
+        rmSync(home, { recursive: true, force: true });
+      }
+    },
+    loadAdjustedTimeout(30_000),
+  );
 
   test("executeClaimed respects adapterOverride option", async () => {
     const { openDb } = await import("../lib/db.mjs");
@@ -699,7 +977,7 @@ describe("work --reload-on-change (WM-213)", () => {
         expect(box.out).toContain("reloading worker (exit 75)");
         // The log names both stamps so the developer can see what moved.
         expect(box.out).toMatch(
-          /code changed \(nogit:[0-9a-f]+ → nogit:[0-9a-f]+\)/,
+          /code changed \(files:[0-9a-f]+ → files:[0-9a-f]+\)/,
         );
         expect(box.out).toContain("worker stopped (code_reload)");
       } finally {
@@ -748,6 +1026,11 @@ describe("work --reload-on-change (WM-213)", () => {
   test(
     "a run in flight defers reload; its supervisor restarts only once it is idle",
     async () => {
+      // gh-1781 classification: this was a distinct synchronization defect,
+      // not an HTTP/base-URL failure. gh-1423 replaced wall-clock coordination
+      // with the fake adapter's hold marker/release file, and gh-1466 made the
+      // supervisor handoff observable; the 90s ceiling is only a process-safety
+      // budget scaled for loaded runners.
       const { openDb } = await import("../lib/db.mjs");
       const { createRun, transition } = await import("../lib/lifecycle.mjs");
       const { canonicalJson, hashJson } = await import("../lib/canonical.mjs");

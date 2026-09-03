@@ -12,6 +12,11 @@
     "runId": {
       "type": ["string", "integer"],
       "description": "GitHub Actions run id whose failed-job logs to capture (number, or numeric string as gh prints it)"
+    },
+    "runAttempt": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "GitHub Actions attempt from the failed workflow_run webhook; when absent, capture falls back to the run's current failed-job logs for compatibility"
     }
   }
 }

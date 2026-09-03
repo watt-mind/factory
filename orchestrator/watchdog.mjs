@@ -33,6 +33,10 @@ import { budgetExhausted } from "../lib/spend.mjs";
 import { loadForge } from "../lib/forge/index.mjs";
 import { resolveConfigPath } from "../event-runtime/lib/config.mjs";
 import { reposRoot } from "../event-runtime/lib/repos.mjs";
+import {
+  codeStamp,
+  REGISTRY_STAMP_PATHS,
+} from "../event-runtime/lib/worker.mjs";
 
 const c = {
   bold: (s) => `\x1b[1m${s}\x1b[0m`,
@@ -56,6 +60,7 @@ export const SANDBOX_REFUSAL_WINDOW_MS = 60 * 60 * 1000;
  */
 export const SCAN_LOOP_AGENTS = Object.freeze([
   "agy-smoke",
+  "celld-smoke",
   "ci-doctor",
   "ci-log-capture",
   "cursor-smoke",
@@ -91,6 +96,82 @@ export const SANDBOX_REFUSAL_MAX_RUNS = 50;
 export const SANDBOX_REFUSAL_DETAIL_CONCURRENCY = 4;
 export const SANDBOX_REFUSAL_BUDGET_MS = 5_000;
 export const CONTROL_API_TIMEOUT_MS = 3_000;
+export const FLEET_CHECK_TIMEOUT_MS = 10_000;
+export const PLANNER_STALE_MS = 5 * 60 * 1000;
+
+function timestampMs(value) {
+  if (typeof value === "number" && Number.isFinite(value))
+    return value < 1_000_000_000_000 ? value * 1000 : value;
+  const parsed = Date.parse(String(value ?? ""));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function admittedEventCount(status) {
+  const admitted = status?.events?.admitted;
+  if (Number.isFinite(admitted) && admitted >= 0) return admitted;
+  if (Number.isFinite(admitted?.count) && admitted.count >= 0)
+    return admitted.count;
+  return 0;
+}
+
+/**
+ * Decide whether a reachable serve is also running the current registry and,
+ * when it reports one, a planner able to drain admitted work.  Older serves
+ * did not expose `planner`, so its absence remains a compatible liveness
+ * result rather than a fabricated failure.
+ */
+export function assessServeHealth(
+  health,
+  {
+    expectedRegistryStamp = codeStamp(undefined, REGISTRY_STAMP_PATHS),
+    queuedEvents = 0,
+    now = Date.now(),
+    plannerStaleMs = PLANNER_STALE_MS,
+  } = {},
+) {
+  const issues = [];
+  const registry = health?.registry;
+  if (
+    registry?.stamp &&
+    expectedRegistryStamp &&
+    registry.stamp !== expectedRegistryStamp
+  ) {
+    issues.push({
+      severity: "CRITICAL",
+      code: "REGISTRY_STALE",
+      message: `Control API registry ${registry.stamp} differs from local ${expectedRegistryStamp}`,
+    });
+  }
+  if (registry?.lastReloadError?.message) {
+    issues.push({
+      severity: "WARNING",
+      code: "REGISTRY_RELOAD_ERROR",
+      message: `Control API registry reload failed: ${registry.lastReloadError.message}`,
+    });
+  }
+
+  if (health && Object.hasOwn(health, "planner") && queuedEvents > 0) {
+    const planner = health.planner;
+    // #1903 landed the canonical `lastPlannedAt` recency field on /health;
+    // the old guess chain over speculative field names is gone with it.
+    const lastAt = timestampMs(planner?.lastPlannedAt);
+    if (lastAt === null) {
+      issues.push({
+        severity: "WARNING",
+        code: "PLANNER_UNAVAILABLE",
+        message: `${queuedEvents} admitted event(s) are queued but planner recency is unavailable`,
+      });
+    } else if (now - lastAt > plannerStaleMs) {
+      issues.push({
+        severity: "CRITICAL",
+        code: "PLANNER_STALE",
+        message: `${queuedEvents} admitted event(s) are queued; planner last succeeded ${Math.round((now - lastAt) / 60000)}m ago`,
+      });
+    }
+  }
+
+  return { ok: issues.length === 0, issues };
+}
 
 /**
  * Read a control-API endpoint with the loopback bearer and a bounded timeout.
@@ -235,28 +316,99 @@ export async function fetchRecentSandboxRefusals({
   return refusals;
 }
 
+const IN_FLIGHT_STATES = Object.freeze(["LEASED", "RUNNING", "VERIFYING"]);
+const RUN_LIST_PAGE_SIZE = 200;
+const RUN_DETAIL_CONCURRENCY = 8;
+// Multiple of `stuckMinutes` past which a fresh lease no longer exempts a run.
+const WEDGED_CEILING_FACTOR = 3;
+
+/**
+ * Read every page for one active state. The status snapshot below is the
+ * authoritative in-flight count; this is only the per-run detail needed to
+ * identify a particular wedge, so it must not silently stop at the API's
+ * default 100-row page.
+ */
+async function allRunsInState(state, { host, port }) {
+  const runs = [];
+  let before = null;
+  const seenCursors = new Set();
+  do {
+    const params = new URLSearchParams({
+      state,
+      limit: String(RUN_LIST_PAGE_SIZE),
+    });
+    if (before) params.set("before", before);
+    const page = await controlApi(`/runs?${params}`, { host, port });
+    runs.push(...(page?.runs ?? []));
+    before = page?.nextBefore ?? null;
+  } while (before && !seenCursors.has(before) && seenCursors.add(before));
+  return runs;
+}
+
+async function inFlightRunDetails({ host, port }) {
+  const summaries = (
+    await Promise.all(
+      IN_FLIGHT_STATES.map((state) => allRunsInState(state, { host, port })),
+    )
+  ).flat();
+  const details = [];
+  for (let i = 0; i < summaries.length; i += RUN_DETAIL_CONCURRENCY) {
+    details.push(
+      ...(await Promise.all(
+        summaries
+          .slice(i, i + RUN_DETAIL_CONCURRENCY)
+          .map((run) => runLeaseDetail(run, { host, port })),
+      )),
+    );
+  }
+  return details;
+}
+
+/**
+ * One run's detail fetch failing (404 after a late transition, a timeout)
+ * must not drop the whole metrics block: report the summary with an unknown
+ * lease so the wedge rule falls back to `updated_at` alone.
+ */
+async function runLeaseDetail(run, { host, port }) {
+  try {
+    const detail = await controlApi(`/runs/${encodeURIComponent(run.runId)}`, {
+      host,
+      port,
+    });
+    const attempt = [...(detail?.attempts ?? [])].at(-1);
+    return { ...run, lease_expires_at: attempt?.lease_expires_at ?? null };
+  } catch {
+    return { ...run, lease_expires_at: null };
+  }
+}
+
 export async function runWatchdogCheck({
   host = "127.0.0.1",
   port = 7381,
   webPort = 7382,
   stuckMinutes = 45,
   checkShadowFleet = true,
+  forge = null,
 } = {}) {
   const issues = [];
   const metrics = {
     apiOk: false,
     webOk: false,
     workersCount: 0,
+    inFlightRuns: 0,
+    leasedRuns: 0,
     runningRuns: 0,
+    verifyingRuns: 0,
     wedgedRuns: 0,
     queuedRuns: 0,
     sandboxRefusals: [],
     anomalies: [],
   };
+  let health = null;
 
   // 1. Control API Health
   try {
-    const health = await controlApi("/health", { host, port });
+    health = await controlApi("/health", { host, port });
     metrics.apiOk = true;
     metrics.tick = health?.tick ?? null;
     if (health?.tick?.overruns > 0) {
@@ -307,13 +459,12 @@ export async function runWatchdogCheck({
 
   // 3. Workers & Runs Status from API
   try {
-    const [statusRes, workersRes, runningRes, sandboxRefusals] =
-      await Promise.all([
-        controlApi("/status", { host, port }),
-        controlApi("/workers", { host, port }),
-        controlApi("/runs?state=RUNNING", { host, port }),
-        fetchRecentSandboxRefusals({ host, port }),
-      ]);
+    const [statusRes, workersRes, runs, sandboxRefusals] = await Promise.all([
+      controlApi("/status", { host, port }),
+      controlApi("/workers", { host, port }),
+      inFlightRunDetails({ host, port }),
+      fetchRecentSandboxRefusals({ host, port }),
+    ]);
 
     const workers = workersRes?.workers ?? [];
     metrics.workersCount = workers.length;
@@ -325,15 +476,29 @@ export async function runWatchdogCheck({
       });
     }
 
-    const runs = runningRes?.runs ?? [];
-    metrics.runningRuns = runs.length;
+    // `/status` is one uncapped database snapshot. Do not derive fleet
+    // metrics from the paginated run summaries used below for diagnostics.
+    const byState = statusRes?.runs?.byState ?? {};
+    metrics.leasedRuns = byState.LEASED ?? 0;
+    metrics.runningRuns = byState.RUNNING ?? 0;
+    metrics.verifyingRuns = byState.VERIFYING ?? 0;
+    metrics.inFlightRuns =
+      metrics.leasedRuns + metrics.runningRuns + metrics.verifyingRuns;
     const now = Date.now();
     const wedged = runs.filter((r) => {
       const created = new Date(r.created_at || now).getTime();
       const updated = new Date(r.updated_at || r.created_at || now).getTime();
       const ageMin = (now - created) / 60000;
       const quietMin = (now - updated) / 60000;
-      return ageMin > stuckMinutes && quietMin > stuckMinutes / 2;
+      if (ageMin <= stuckMinutes || quietMin <= stuckMinutes / 2) return false;
+      // A lease renewed by the worker is a heartbeat even when a VERIFYING run
+      // is parked in shared CI and has no lifecycle transition to update the
+      // run row. Only VERIFYING earns that exemption: in LEASED/RUNNING a
+      // renewed lease proves worker liveness, not progress. Past the absolute
+      // ceiling the run is wedged regardless of lease.
+      const freshLease =
+        r.state === "VERIFYING" && Date.parse(r.lease_expires_at) > now;
+      return !freshLease || ageMin > stuckMinutes * WEDGED_CEILING_FACTOR;
     });
 
     metrics.wedgedRuns = wedged.length;
@@ -348,7 +513,11 @@ export async function runWatchdogCheck({
       });
     }
 
-    metrics.queuedRuns = statusRes?.runs?.byState?.QUEUED ?? 0;
+    metrics.queuedRuns = byState.QUEUED ?? 0;
+    const serveHealth = assessServeHealth(health, {
+      queuedEvents: admittedEventCount(statusRes),
+    });
+    issues.push(...serveHealth.issues);
     metrics.sandboxRefusals = sandboxRefusals;
     if (metrics.sandboxRefusals.length > 0) {
       const agents = [
@@ -364,7 +533,7 @@ export async function runWatchdogCheck({
     if (
       metrics.queuedRuns > 0 &&
       idleWorkers > 0 &&
-      metrics.runningRuns === 0
+      metrics.inFlightRuns === 0
     ) {
       issues.push({
         severity: "WARNING",
@@ -409,23 +578,29 @@ export async function runWatchdogCheck({
   // 4. CI Runner Fleet Check
   if (checkShadowFleet) {
     try {
-      const forge = loadForge();
-      const queuedCount = forge
+      // Resolve the forge lazily so a config error surfaces as
+      // FLEET_CHECK_ERROR instead of killing steps 1-3 (and the caller).
+      const f = forge ?? loadForge();
+      const queuedCount = f
         .runList("watt-mind/factory", {
           limit: 10,
           fields: ["status"],
           cwd: ROOT,
+          timeout: FLEET_CHECK_TIMEOUT_MS,
         })
         .filter((r) => r.status === "queued").length;
+      metrics.fleetQueued = queuedCount;
       if (queuedCount > 2) {
-        const onlineShadows =
-          parseInt(
-            forge.apiRaw("orgs/watt-mind/actions/runners", {
-              jq: '[.runners[] | select(.labels | map(.name) | index("shadow")) | select(.status=="online")] | length',
-              cwd: ROOT,
-            }),
-            10,
-          ) || 0;
+        const parsed = parseInt(
+          f.apiRaw("orgs/watt-mind/actions/runners", {
+            jq: '[.runners[] | select(.labels | map(.name) | index("shadow")) | select(.status=="online")] | length',
+            cwd: ROOT,
+            timeout: FLEET_CHECK_TIMEOUT_MS,
+          }),
+          10,
+        );
+        const onlineShadows = Number.isFinite(parsed) ? parsed : 0;
+        metrics.fleetOnlineShadows = onlineShadows;
         if (onlineShadows === 0) {
           issues.push({
             severity: "CRITICAL",
@@ -434,8 +609,14 @@ export async function runWatchdogCheck({
           });
         }
       }
-    } catch {
-      /* intentionally ignored */
+      metrics.fleetCheck = "ok";
+    } catch (err) {
+      metrics.fleetCheck = "error";
+      issues.push({
+        severity: "WARNING",
+        code: "FLEET_CHECK_ERROR",
+        message: `Shadow fleet check failed: ${err?.message ?? String(err)}`,
+      });
     }
   }
 
@@ -447,14 +628,21 @@ export async function runWatchdogCheck({
   };
 }
 
+function fleetReportLine(metrics) {
+  if (metrics.fleetQueued === undefined) return null;
+  return `  Fleet: queued ${metrics.fleetQueued} | online shadows ${metrics.fleetOnlineShadows ?? "n/a"}`;
+}
+
 export function formatWatchdogReport(result) {
   const lines = [];
   const ts = new Date().toUTCString();
+  const fleetLine = fleetReportLine(result.metrics);
   if (result.ok && result.issues.length === 0) {
     lines.push(`${c.green("✓")} ${c.bold("WATCHDOG OK")} — ${ts}`);
     lines.push(
-      `  Workers: ${result.metrics.workersCount} | Running: ${result.metrics.runningRuns} | Wedged: ${result.metrics.wedgedRuns}`,
+      `  Workers: ${result.metrics.workersCount} | In flight: ${result.metrics.inFlightRuns} (running ${result.metrics.runningRuns}, verifying ${result.metrics.verifyingRuns}, leased ${result.metrics.leasedRuns}) | Wedged: ${result.metrics.wedgedRuns}`,
     );
+    if (fleetLine) lines.push(fleetLine);
   } else {
     const badge = result.ok
       ? c.yellow("! WATCHDOG WARNING")
@@ -466,6 +654,7 @@ export function formatWatchdogReport(result) {
         `  ${col(`[${issue.severity}]`)} ${c.bold(issue.code)}: ${issue.message}`,
       );
     }
+    if (fleetLine) lines.push(fleetLine);
   }
   return lines.join("\n");
 }
@@ -523,6 +712,8 @@ export async function sendWatchdogNotification(issues) {
  * Run states that do not occupy the factory. Mirrors the singleton predicate
  * in event-runtime/lib/schedules.mjs — PROPOSED is deliberately *not* in
  * flight (an unapproved proposal is exactly the stall we are here to clear).
+ * This intentionally differs from ALL_TERMINAL_STATES because it includes
+ * PROPOSED; do not replace it with the lifecycle export.
  */
 export const IDLE_TERMINAL_RUN_STATES = new Set([
   "PROPOSED",
@@ -951,8 +1142,18 @@ export function liveIdleWatchdogDeps({
       // retry separates "wedged" from "was mid-tick when we asked".
       for (const attempt of [0, 1]) {
         try {
-          await api("/health", { timeoutMs: 15000 });
-          return true;
+          const health = await api("/health", { timeoutMs: 15000 });
+          let queuedEvents = 0;
+          // The planner block is new; do not add a status read for older
+          // serves that cannot report planner recency yet.
+          if (Object.hasOwn(health ?? {}, "planner")) {
+            queuedEvents = admittedEventCount(await api("/status"));
+          }
+          // Gate the idle loop on planner recency only: a reachable serve on
+          // last-good code (REGISTRY_STALE) can still plan and drain work, so
+          // the watchdog report surfaces it without halting injection here.
+          const { issues } = assessServeHealth(health, { queuedEvents });
+          return !issues.some((issue) => issue.code?.startsWith("PLANNER_"));
         } catch {
           if (attempt === 1) return false;
         }

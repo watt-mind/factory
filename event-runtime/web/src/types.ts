@@ -138,6 +138,10 @@ export interface ChainEvent {
   proposalStatus: string | null;
   proposalDecision: string | null;
   runId: string | null;
+  /** Complete persisted envelope, or null when a historic row is damaged. */
+  envelope?: Record<string, unknown> | null;
+  /** True when the stored historic envelope could not be parsed. */
+  envelopeMalformed?: boolean;
   repos: string[];
 }
 
@@ -280,7 +284,19 @@ export interface MetricsBreakdownView {
   by: string;
   metric: string;
   limit: number | null;
-  rows: Array<{ key: string; value: number }>;
+  rows: Array<{ key: string; value: number; at?: string }>;
+}
+
+/** Per-agent usage values joined from metrics breakdowns by the registry view. */
+export interface RegistryAgentUsage {
+  runs: number | null;
+  failures: number | null;
+  refusals: number | null;
+  timeouts: number | null;
+  p95_execution: number | null;
+  cost: number | null;
+  tokens: number | null;
+  last_run_at: string | null;
 }
 
 /** One append-only journal row (GET /journal) — the runtime's activity feed. */
@@ -598,6 +614,7 @@ export interface ArtifactView extends ArtifactViewBody {
 export interface AgentDef {
   ref: string;
   id: string;
+  pack?: string | null;
   version: number;
   outputContract: string;
   workspace: { type: string; retainOnFailure?: boolean };
@@ -745,6 +762,12 @@ export interface WorkerCapacity {
   classes: WorkerClassCapacity[];
 }
 
+/** One run a worker skipped, as reported in its heartbeat. */
+export interface WorkerSkippedRun {
+  runId: string;
+  reason: string;
+}
+
 /** One registered worker process (GET /workers) — the fleet, not the leases. */
 export interface Worker {
   workerId: string;
@@ -753,6 +776,12 @@ export interface Worker {
   /** Placement labels the worker declared, e.g. `{ node: "lab" }`. */
   labels: Record<string, string>;
   adapters: string[];
+  /**
+   * Runs this worker declined at its last heartbeat, with the reason for each.
+   * Always present on the wire (`[]` when none); optional here so fixtures
+   * predating schema v21 still type-check.
+   */
+  skipped?: WorkerSkippedRun[];
   state: WorkerState;
   currentRun: string | null;
   lastSeen: string;
@@ -780,6 +809,20 @@ export interface EnvIdentity {
   adapter: string | null;
 }
 
+export interface RegistryHealth {
+  loadedAt: string;
+  stamp: string | null;
+  lastReloadError: { at: string; message: string } | null;
+}
+
+export interface HealthView {
+  ok: boolean;
+  policyVersion: string;
+  env: EnvIdentity;
+  tick?: { lastMs: number; overruns: number };
+  registry: RegistryHealth | null;
+}
+
 /** A registered scheduler loop that has missed ticks or errored (§9). */
 export interface StoppedSchedule {
   loop: string;
@@ -805,6 +848,12 @@ export interface UnmatchedPlacementRun {
 export interface StatusView {
   env: EnvIdentity;
   events: Record<string, number>;
+  /** Operator-controlled pause for unattended dispatches. */
+  policy?: { dispatchPaused: boolean };
+  /** GitHub webhook intake health; absent on pre-#1632 control APIs. */
+  githubIntake?: GithubIntakeStatus;
+  /** Background planning worker freshness; null when serve disables planning. */
+  planner?: PlannerStatus | null;
   proposals: { open: number; expired: number };
   runs: { byState: Partial<Record<RunState, number>> };
   /** Fleet counts; `live` and `busy` exclude stale workers, as the API does. */
@@ -849,6 +898,25 @@ export interface StatusView {
     ambiguousOpenProposals: { runId: string; count: number }[];
     proposalsPilingUp?: ProposalPilingUp[];
   };
+}
+
+/** Durable GitHub admission freshness plus process-local rejected deliveries. */
+export interface GithubIntakeStatus {
+  configured: boolean;
+  lastAdmittedAt: string | null;
+  ageMs: number | null;
+  rejected: number;
+  stale: boolean;
+  staleAfterMs: number;
+}
+
+/** Planner worker liveness plus recency of its last non-empty planning pass. */
+export interface PlannerStatus {
+  lastPlannedAt: string | null;
+  ageMs: number | null;
+  stale: boolean;
+  staleAfterMs: number;
+  alive: boolean;
 }
 
 export interface ApproveOutcome {

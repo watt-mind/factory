@@ -13,7 +13,12 @@ import {
   TERMINAL_STATES,
 } from "./lifecycle.mjs";
 import { archiveDeadLetteredEvent, requeueEvent } from "./planner.mjs";
-import { approveProposal, rejectProposal } from "./proposals.mjs";
+import {
+  approveProposal,
+  isProposalExpired,
+  proposalExpiresAt,
+  rejectProposal,
+} from "./proposals.mjs";
 import { traceOf } from "./trace.mjs";
 import {
   attemptDeadline,
@@ -23,20 +28,29 @@ import {
   releaseStalledWorkerLease,
   retryRun,
 } from "./worker.mjs";
-import { proposalSubject } from "./proposal-subject.mjs";
+import { agentFamily, proposalSubject } from "./proposal-subject.mjs";
 import {
   ApiParameterError,
   parseListLimit,
   parseNonNegativeSince,
 } from "./api-params.mjs";
+import { createLruCache } from "./lru-cache.mjs";
 
 export const MAX_EXTENSION_SECONDS = 3600;
 export const OBSERVED_MODEL_CACHE_LIMIT = 512;
+export const TICKET_DETAIL_CACHE_LIMIT = 256;
+export const RUN_SUBJECT_CACHE_LIMIT = 512;
+export const RUN_STATE_GROUPS = Object.freeze({
+  ACTIVE: Object.freeze(["QUEUED", "LEASED", "RUNNING", "VERIFYING"]),
+  FAILED: Object.freeze(["FAILED", "TIMED_OUT", "REFUSED"]),
+});
 
 // Transcript artifacts are content-addressed, so a model observed for a hash
-// cannot change. Keep this module-local FIFO bounded because run detail views
+// cannot change. Keep this module-local cache bounded because run detail views
 // poll frequently and artifactHead performs synchronous I/O.
-const observedModelCache = new Map();
+const observedModelCache = createLruCache({
+  limit: OBSERVED_MODEL_CACHE_LIMIT,
+});
 
 export function clearObservedModelCache() {
   observedModelCache.clear();
@@ -126,14 +140,11 @@ function proposalHistory(
   const proposals = pageRows.flatMap((row) => {
     let decisionAt = row.decided_at ?? null;
     let effectiveStatus = row.status;
-    const expiresAt =
-      Date.parse(row.created_at) + Number(row.ttl_seconds) * 1000;
     const expired =
       row.status === "open" &&
-      Number.isFinite(expiresAt) &&
-      expiresAt < (filters.nowMs ?? Date.now());
+      isProposalExpired(row, filters.nowMs ?? Date.now());
     if (filteredDecision && expired) {
-      decisionAt = new Date(expiresAt).toISOString();
+      decisionAt = new Date(proposalExpiresAt(row)).toISOString();
       effectiveStatus = "expired";
     }
     if (filteredDecision) {
@@ -190,7 +201,13 @@ function eventsView(
   const hasNextPage = rows.length > page.limit;
   const pageRows = hasNextPage ? rows.slice(0, -1) : rows;
   const events = pageRows.map((row) => {
-    const envelope = JSON.parse(row.envelope_json);
+    // Stored envelopes are not guaranteed to be parseable JSON: rows written by
+    // older writers, hand-repaired databases, and the demo seed's deliberately
+    // damaged chain row all survive in `events`. A bare JSON.parse here threw a
+    // SyntaxError out of GET /events (only ListQueryError is handled), taking
+    // the whole list down for one bad row, so degrade to an empty envelope and
+    // keep listing the row instead.
+    const envelope = parseObject(row.envelope_json);
     return {
       source: row.source,
       eventId: row.event_id,
@@ -218,7 +235,16 @@ function eventsView(
   };
 }
 
-const TICKET_ID = /^[A-Z][A-Z0-9]{1,9}-\d+$/;
+const LINEAR_TICKET_ID = /^[A-Z][A-Z0-9]{1,9}-\d+$/;
+const GITHUB_TICKET_ID = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[1-9][0-9]{0,9}$/;
+
+function normalizeTicketId(value) {
+  const ticket = String(value ?? "").trim();
+  const linear = ticket.toUpperCase();
+  if (LINEAR_TICKET_ID.test(linear)) return linear;
+  if (GITHUB_TICKET_ID.test(ticket)) return ticket.toLowerCase();
+  return null;
+}
 
 function objectNamesTicket(value, ticket) {
   if (!value || typeof value !== "object") return false;
@@ -226,9 +252,9 @@ function objectNamesTicket(value, ticket) {
     return value.some((entry) => objectNamesTicket(entry, ticket));
   for (const [key, entry] of Object.entries(value)) {
     if (
-      /^(ticket|ticketId|issue|issueId|linearId)$/i.test(key) &&
+      /^(ticket|ticketId|issue|issueId|linearId|subject)$/i.test(key) &&
       typeof entry === "string" &&
-      entry.toUpperCase() === ticket
+      normalizeTicketId(entry) === ticket
     )
       return true;
     if (entry && typeof entry === "object" && objectNamesTicket(entry, ticket))
@@ -297,10 +323,8 @@ function namedString(values, names) {
  * event/proposal/run ids and PR references emitted by dispatch/merge results.
  */
 export function ticketJourneyView(db, rawTicket, options = {}) {
-  const ticket = String(rawTicket ?? "")
-    .trim()
-    .toUpperCase();
-  if (!TICKET_ID.test(ticket)) return null;
+  const ticket = normalizeTicketId(rawTicket);
+  if (!ticket) return null;
   const nowMs = options.nowMs ?? Date.now();
 
   const events = new Set();
@@ -311,7 +335,8 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
   // LIKE is deliberately a broad prefilter for legacy event/proposal/result
   // payloads and direct runs that named their ticket only in a nested input
   // field. Newer runs also carry a normalized, indexed subject.
-  const ticketLike = `%${ticket}%`;
+  const ticketQuery = ticket.toUpperCase();
+  const ticketLike = `%${ticketQuery}%`;
   const eventRows = new Map();
   const proposalRows = new Map();
   const runRows = new Map();
@@ -407,7 +432,7 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
         `SELECT *, rowid AS list_rowid FROM events
          WHERE UPPER(subject) = ? OR UPPER(correlation_id) = ? OR UPPER(envelope_json) LIKE ?`,
       )
-      .all(ticket, ticket, ticketLike),
+      .all(ticketQuery, ticketQuery, ticketLike),
     eventRows,
     eventKey,
   );
@@ -422,8 +447,10 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
   );
   addRows(
     db
-      .query(`SELECT * FROM runs WHERE subject = ? OR UPPER(spec_json) LIKE ?`)
-      .all(ticket, ticketLike),
+      .query(
+        `SELECT * FROM runs WHERE UPPER(subject) = ? OR UPPER(spec_json) LIKE ?`,
+      )
+      .all(ticketQuery, ticketLike),
     runRows,
     (row) => row.run_id,
   );
@@ -438,8 +465,8 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
   for (const row of eventRows.values()) {
     const envelope = parseObject(row.envelope_json);
     if (
-      String(row.subject ?? "").toUpperCase() === ticket ||
-      String(row.correlation_id ?? "").toUpperCase() === ticket ||
+      normalizeTicketId(row.subject) === ticket ||
+      normalizeTicketId(row.correlation_id) === ticket ||
       objectNamesTicket(envelope, ticket)
     )
       events.add(eventKey(row));
@@ -450,7 +477,7 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
   }
   for (const row of runRows.values()) {
     if (
-      String(row.subject ?? "").toUpperCase() === ticket ||
+      normalizeTicketId(row.subject) === ticket ||
       objectNamesTicket(parseObject(row.spec_json).input, ticket)
     )
       runs.add(row.run_id);
@@ -589,14 +616,9 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
         b.created_at.localeCompare(a.created_at) || b.list_rowid - a.list_rowid,
     )
     .map((row) => {
-      const expiresAt =
-        Date.parse(row.created_at) + Number(row.ttl_seconds) * 1000;
       return proposalView({
         ...row,
-        expired:
-          row.status === "open" &&
-          Number.isFinite(expiresAt) &&
-          expiresAt < nowMs,
+        expired: row.status === "open" && isProposalExpired(row, nowMs),
         spec: row.spec_json ? JSON.parse(row.spec_json) : null,
       });
     });
@@ -662,7 +684,10 @@ export function ticketJourneyView(db, rawTicket, options = {}) {
 
 /** Short TTL so Ticket Journey can poll without exhausting Linear. */
 export const TICKET_DETAIL_CACHE_TTL_MS = 30_000;
-const ticketDetailCache = new Map();
+const ticketDetailCache = createLruCache({
+  limit: TICKET_DETAIL_CACHE_LIMIT,
+  ttlMs: TICKET_DETAIL_CACHE_TTL_MS,
+});
 let injectedTicketDetailControlPlane = null;
 
 /** Test seam: inject a ControlPlane (typically `memoryControlPlane`) or clear. */
@@ -697,18 +722,14 @@ async function ticketDetailControlPlane(override) {
  * Linear request storm.
  */
 export async function ticketDetailView(rawTicket, options = {}) {
-  const ticket = String(rawTicket ?? "")
-    .trim()
-    .toUpperCase();
-  if (!TICKET_ID.test(ticket)) return { error: "invalid_ticket" };
+  const ticket = normalizeTicketId(rawTicket);
+  if (!ticket) return { error: "invalid_ticket" };
 
   const nowMs = options.nowMs ?? Date.now();
   const cacheKey = ticket;
   if (options.noCache !== true) {
-    const cached = ticketDetailCache.get(cacheKey);
-    if (cached && nowMs - cached.timestamp < TICKET_DETAIL_CACHE_TTL_MS) {
-      return { ...cached.data, cached: true };
-    }
+    const cached = ticketDetailCache.get(cacheKey, nowMs);
+    if (cached) return { ...cached, cached: true };
   }
 
   try {
@@ -750,7 +771,7 @@ export async function ticketDetailView(rawTicket, options = {}) {
       fetchedAt: new Date(nowMs).toISOString(),
       cached: false,
     };
-    ticketDetailCache.set(cacheKey, { timestamp: nowMs, data });
+    ticketDetailCache.set(cacheKey, data, nowMs);
     return data;
   } catch (err) {
     const message = err?.message ? String(err.message) : "tracker read failed";
@@ -776,6 +797,236 @@ const RUN_POPULATIONS = new Set([
 
 export const RUN_LIST_DEFAULT_LIMIT = 100;
 export const RUN_LIST_MAX_LIMIT = 200;
+export const RUN_SUBJECT_CACHE_TTL_MS = 30_000;
+// A cold cache can face up to RUN_LIST_MAX_LIMIT distinct unresolved tickets
+// in a single list request. Resolving all of them inline would fan out one
+// tracker read per row, every poll, from every open tab -- exactly the shape
+// that has caused two tracker rate-limit incidents. Cap the synchronous
+// resolution per request and let the rest fill in on later polls (misses are
+// not cached, so they stay eligible next time around).
+export const RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST = 8;
+const RUN_SUBJECT_RESOLVE_CONCURRENCY = 4;
+// One control-plane read that hangs (a GitHub Projects GraphQL stall was
+// measured at 15s on the live host) must not pin the background batch open
+// past the point where the next poll would have refreshed it anyway.
+export const RUN_SUBJECT_RESOLVE_TIMEOUT_MS = 5_000;
+let runSubjectResolveTimeoutMs = RUN_SUBJECT_RESOLVE_TIMEOUT_MS;
+
+/** Test seam: shrink the per-call bound so a timeout is cheap to exercise. */
+export function setRunSubjectResolveTimeoutMs(ms) {
+  runSubjectResolveTimeoutMs = ms ?? RUN_SUBJECT_RESOLVE_TIMEOUT_MS;
+}
+
+// At most one background resolution batch at a time. The Runs page polls every
+// few seconds; without this guard a cold cache would stack a fresh fan-out on
+// every poll while the previous one is still waiting on the tracker.
+let runSubjectResolutionInFlight = null;
+
+// GET /runs is polled frequently. Resolve each distinct ticket once per short
+// window (including misses) so duplicate rows and the detail view never turn a
+// browser poll into one tracker request per row.
+const runSubjectCache = createLruCache({
+  limit: RUN_SUBJECT_CACHE_LIMIT,
+  ttlMs: RUN_SUBJECT_CACHE_TTL_MS,
+});
+
+export function clearRunSubjectCache() {
+  runSubjectCache.clear();
+  runSubjectResolutionInFlight = null;
+}
+
+function runSubjectLabel(subject) {
+  const ticket = normalizeTicketId(subject);
+  if (!ticket)
+    return typeof subject === "string" && subject.trim()
+      ? subject.trim()
+      : null;
+  const github = ticket.match(/^([^/]+)\/([^#]+)#(\d+)$/);
+  return github ? `${github[2]}#${github[3]}` : ticket;
+}
+
+function runSubjectUrl(subject) {
+  const ticket = normalizeTicketId(subject);
+  if (!ticket) return null;
+  const github = ticket.match(/^([^/]+)\/([^#]+)#(\d+)$/);
+  if (github)
+    return `https://github.com/${github[1]}/${github[2]}/issues/${github[3]}`;
+  return `https://linear.app/watt-mind/issue/${encodeURIComponent(ticket)}`;
+}
+
+function runOriginLabel(type) {
+  if (typeof type !== "string" || !type.trim()) return null;
+  const parts = type.trim().split(".").filter(Boolean);
+  if (parts[0] === "factory") parts.shift();
+  if (["requested", "request", "tick"].includes(parts.at(-1))) parts.pop();
+  return parts.join(" ") || type.trim();
+}
+
+function embeddedRunSubjectTitle(spec) {
+  const candidates = [
+    spec?.approvalPolicy?.dispatchEvidence?.ticket?.title,
+    spec?.input?.ticketTitle,
+    spec?.input?.issueTitle,
+  ];
+  return (
+    candidates
+      .find((value) => typeof value === "string" && value.trim())
+      ?.trim() ?? null
+  );
+}
+
+function runIdentity(row, spec) {
+  return {
+    agentKind: agentFamily(spec.agent),
+    ticketSubject: row.subject ?? null,
+    subjectLabel: runSubjectLabel(row.subject),
+    subjectTitle: embeddedRunSubjectTitle(spec),
+    subjectUrl: runSubjectUrl(row.subject),
+    originType: row.event_type ?? null,
+    originLabel: runOriginLabel(row.event_type),
+  };
+}
+
+/**
+ * Fill run identities from the subject cache only. Pure and synchronous: the
+ * request path never awaits a tracker read (#2058), because a single stalled
+ * GitHub Projects GraphQL call used to hold GET /runs open for 15s+ and blow
+ * the web proxy's 10s budget (504 api_busy). A cache miss stays a bare
+ * subject with a null title; `scheduleRunSubjectResolution` fills it in
+ * out-of-band so the next poll renders the title.
+ *
+ * Returns the set of still-unresolved ticket ids, for the caller to schedule.
+ */
+function applyCachedRunSubjects(runs, nowMs) {
+  const unresolved = new Set();
+  for (const run of runs) {
+    const ticket = normalizeTicketId(run.ticketSubject);
+    if (!ticket || run.subjectTitle) continue;
+    const cached = runSubjectCache.get(ticket, nowMs);
+    if (cached) Object.assign(run, cached);
+    else unresolved.add(ticket);
+  }
+  return unresolved;
+}
+
+/**
+ * Bound one tracker read. A control plane that never answers (or answers in
+ * 15s) must not pin a background batch open, so every getTicket races a timer
+ * and the loser is treated as a miss. The timer is unref'd so a pending probe
+ * never holds the process open.
+ */
+async function getTicketWithTimeout(plane, ticket) {
+  const controller =
+    typeof AbortController === "function" ? new AbortController() : null;
+  let timer = null;
+  // Prefer the title-only verb where the plane has one. The full `getTicket`
+  // also pays a Projects v2 status read, an edit-history query and a ready-pin
+  // read -- measured at ~8s per ticket on the live host -- and none of that is
+  // rendered on the Runs page. Planes without it (linear, memory) fall back to
+  // `getTicket`, which is a single request for them anyway.
+  const read = (
+    typeof plane.getTicketTitle === "function"
+      ? plane.getTicketTitle
+      : plane.getTicket
+  ).bind(plane);
+  try {
+    return await Promise.race([
+      read(ticket, { signal: controller?.signal }),
+      new Promise((_resolve, reject) => {
+        timer = setTimeout(() => {
+          controller?.abort();
+          reject(new Error(`run subject resolution timed out for ${ticket}`));
+        }, runSubjectResolveTimeoutMs);
+        timer?.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function resolveRunSubjectBatch(tickets, { nowMs, controlPlane }) {
+  let plane;
+  try {
+    plane = await ticketDetailControlPlane(controlPlane);
+  } catch {
+    plane = null;
+  }
+
+  const toResolve = tickets.slice(0, RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST);
+
+  async function resolveOne(ticket) {
+    let data = { subjectTitle: null, subjectUrl: runSubjectUrl(ticket) };
+    try {
+      const issue = plane ? await getTicketWithTimeout(plane, ticket) : null;
+      data = {
+        subjectTitle:
+          typeof issue?.title === "string" && issue.title.trim()
+            ? issue.title.trim()
+            : null,
+        subjectUrl:
+          typeof issue?.url === "string" && issue.url.trim()
+            ? issue.url.trim()
+            : runSubjectUrl(ticket),
+      };
+    } catch {
+      // A tracker outage (or a read that blew the per-call timeout) degrades
+      // to the bare persisted subject. Cache the miss briefly as well,
+      // otherwise every 5s poll retries the outage.
+    }
+    // Stamped with the request's clock, not wall time: reads use the server
+    // clock, and a mixed pair would make every entry look instantly stale
+    // under a fixed test clock.
+    runSubjectCache.set(ticket, data, nowMs);
+  }
+
+  // Chunked loop: at most RUN_SUBJECT_RESOLVE_CONCURRENCY in flight at once,
+  // and never more than RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST tickets total for
+  // this batch. Anything left over is simply not resolved here -- it stays a
+  // bare subject until a later poll schedules the next batch.
+  for (let i = 0; i < toResolve.length; i += RUN_SUBJECT_RESOLVE_CONCURRENCY) {
+    const chunk = toResolve.slice(i, i + RUN_SUBJECT_RESOLVE_CONCURRENCY);
+    await Promise.all(chunk.map((ticket) => resolveOne(ticket)));
+  }
+}
+
+/**
+ * Fire-and-forget the capped/chunked resolver after the response is on the
+ * wire. Only one batch runs at a time: a Runs page polling every 5s with a
+ * cold cache must not stack a new fan-out on top of a batch that is still
+ * waiting on the tracker. Rejections are swallowed here so a background
+ * failure can never surface as an unhandled rejection.
+ */
+function scheduleRunSubjectResolution(
+  unresolved,
+  { nowMs, controlPlane } = {},
+) {
+  if (!unresolved || unresolved.size === 0) return null;
+  if (runSubjectResolutionInFlight) return runSubjectResolutionInFlight;
+  const batch = resolveRunSubjectBatch([...unresolved], { nowMs, controlPlane })
+    .catch(() => {})
+    .finally(() => {
+      if (runSubjectResolutionInFlight === batch)
+        runSubjectResolutionInFlight = null;
+    });
+  runSubjectResolutionInFlight = batch;
+  return batch;
+}
+
+/**
+ * Serve subject titles from cache and top the cache up in the background.
+ * Synchronous by construction -- see `applyCachedRunSubjects`.
+ */
+function resolveRunSubjects(runs, { nowMs = Date.now(), controlPlane } = {}) {
+  const unresolved = applyCachedRunSubjects(runs, nowMs);
+  scheduleRunSubjectResolution(unresolved, { nowMs, controlPlane });
+  return runs;
+}
+
+/** Test seam: the in-flight background batch, or null. */
+export function runSubjectResolutionSettled() {
+  return runSubjectResolutionInFlight ?? Promise.resolve();
+}
 
 class ListQueryError extends Error {
   constructor(error, details = {}) {
@@ -823,24 +1074,28 @@ function collectionPage(url) {
   }
 }
 
+const RELATIVE_SINCE_PATTERN =
+  /^(\d+)\s*(d|day|days|h|hour|hours|m|min|mins|minute|minutes|s|sec|secs|second|seconds|w|week|weeks)$/i;
+
 export function parseSinceDuration(since, nowMs = Date.now()) {
   if (since == null || since === "") {
-    return nowMs - 14 * 24 * 60 * 60 * 1000;
+    const durationMs = 14 * 24 * 60 * 60 * 1000;
+    return { sinceMs: nowMs - durationMs, kind: "relative", durationMs };
   }
   if (typeof since === "number") {
     if (!Number.isFinite(since) || since <= 0) {
       throw new ListQueryError("invalid_since", { since });
     }
-    if (since > 1e11) return since;
-    return nowMs - since;
+    if (since > 1e11) {
+      return { sinceMs: since, kind: "absolute", durationMs: null };
+    }
+    return { sinceMs: nowMs - since, kind: "relative", durationMs: since };
   }
   if (typeof since !== "string") {
     throw new ListQueryError("invalid_since", { since });
   }
   const trimmed = since.trim();
-  const match = trimmed.match(
-    /^(\d+)\s*(d|day|days|h|hour|hours|m|min|mins|minute|minutes|s|sec|secs|second|seconds|w|week|weeks)$/i,
-  );
+  const match = trimmed.match(RELATIVE_SINCE_PATTERN);
   if (match) {
     const count = Number(match[1]);
     if (!Number.isFinite(count) || count <= 0) {
@@ -853,11 +1108,11 @@ export function parseSinceDuration(since, nowMs = Date.now()) {
     else if (unit.startsWith("h")) ms = count * 60 * 60 * 1000;
     else if (unit.startsWith("m")) ms = count * 60 * 1000;
     else if (unit.startsWith("s")) ms = count * 1000;
-    return nowMs - ms;
+    return { sinceMs: nowMs - ms, kind: "relative", durationMs: ms };
   }
   const parsedDate = Date.parse(trimmed);
   if (Number.isFinite(parsedDate) && !/^\d+$/.test(trimmed)) {
-    return parsedDate;
+    return { sinceMs: parsedDate, kind: "absolute", durationMs: null };
   }
   throw new ListQueryError("invalid_since", { since });
 }
@@ -867,7 +1122,10 @@ function collectTicketIds(value, targetSet = new Set()) {
   if (typeof value === "string") {
     const matches = value.match(/\b([A-Z][A-Z0-9]{1,9}-\d+)\b/g);
     if (matches) {
-      for (const m of matches) targetSet.add(m.toUpperCase());
+      for (const match of matches) {
+        const ticket = normalizeTicketId(match);
+        if (ticket) targetSet.add(ticket);
+      }
     }
     return targetSet;
   }
@@ -878,11 +1136,11 @@ function collectTicketIds(value, targetSet = new Set()) {
   if (typeof value === "object") {
     for (const [key, entry] of Object.entries(value)) {
       if (
-        /^(ticket|ticketId|issue|issueId|linearId)$/i.test(key) &&
+        /^(ticket|ticketId|issue|issueId|linearId|subject)$/i.test(key) &&
         typeof entry === "string" &&
-        TICKET_ID.test(entry.trim().toUpperCase())
+        normalizeTicketId(entry)
       ) {
-        targetSet.add(entry.trim().toUpperCase());
+        targetSet.add(normalizeTicketId(entry));
       }
       collectTicketIds(entry, targetSet);
     }
@@ -892,9 +1150,26 @@ function collectTicketIds(value, targetSet = new Set()) {
 
 const TICKET_INDEX_CACHE_TTL_MS = 5000;
 const ticketIndexCache = new Map();
+let ticketIndexCacheDatabaseIds = new WeakMap();
+let nextTicketIndexCacheDatabaseId = 0;
 
 export function clearTicketIndexCache() {
   ticketIndexCache.clear();
+  ticketIndexCacheDatabaseIds = new WeakMap();
+  nextTicketIndexCacheDatabaseId = 0;
+}
+
+function ticketIndexCacheDatabaseId(db) {
+  let id = ticketIndexCacheDatabaseIds.get(db);
+  if (id == null) {
+    id = ++nextTicketIndexCacheDatabaseId;
+    ticketIndexCacheDatabaseIds.set(db, id);
+  }
+  return id;
+}
+
+function ticketIndexCacheSinceKey({ sinceMs, kind, durationMs }) {
+  return kind === "relative" ? `relative:${durationMs}` : `absolute:${sinceMs}`;
 }
 
 /**
@@ -903,7 +1178,8 @@ export function clearTicketIndexCache() {
  */
 export function ticketIndexView(db, options = {}) {
   const nowMs = options.nowMs ?? Date.now();
-  const sinceMs = parseSinceDuration(options.since, nowMs);
+  const parsedSince = parseSinceDuration(options.since, nowMs);
+  const { sinceMs } = parsedSince;
   const sinceIso = new Date(sinceMs).toISOString();
   const limit = options.limit
     ? Math.min(Math.max(1, Number(options.limit) || 50), 200)
@@ -913,7 +1189,12 @@ export function ticketIndexView(db, options = {}) {
       ? options.repo.trim().toLowerCase()
       : null;
 
-  const cacheKey = `${db.filename ?? "mem"}:${sinceMs}:${limit}:${repoFilter ?? ""}`;
+  const cacheKey = JSON.stringify([
+    ticketIndexCacheDatabaseId(db),
+    ticketIndexCacheSinceKey(parsedSince),
+    limit,
+    repoFilter,
+  ]);
   if (options.noCache !== true) {
     const cached = ticketIndexCache.get(cacheKey);
     if (cached && nowMs - cached.timestamp < TICKET_INDEX_CACHE_TTL_MS) {
@@ -921,35 +1202,125 @@ export function ticketIndexView(db, options = {}) {
     }
   }
 
+  // The activity window only decides WHICH tickets are candidates: a ticket is
+  // listed when any event, proposal, run, or lifecycle row touching it landed in
+  // the window. Every JSON-bearing read here is bounded by that window through
+  // the indexed `admitted_at` / `created_at` / `at` columns.
+  //
+  // Once the candidate set is known, each ticket is re-enriched with bounded,
+  // indexed lookups (runs by `subject`, proposals by `run_id` and event key,
+  // events/runs/results by primary key) so that title, repo, PR, merge state,
+  // attempts, and the last decision stay complete even when the ticket's
+  // history predates the window.
   const eventRows = db
-    .query(`SELECT * FROM events ORDER BY admitted_at, rowid`)
-    .all();
+    .query(
+      `SELECT * FROM events WHERE admitted_at >= ? ORDER BY admitted_at, rowid`,
+    )
+    .all(sinceIso);
   const proposalRows = db
-    .query(`SELECT * FROM proposals ORDER BY created_at, rowid`)
-    .all();
+    .query(
+      `SELECT * FROM proposals WHERE created_at >= ? ORDER BY created_at, rowid`,
+    )
+    .all(sinceIso);
   const runRows = db
-    .query(`SELECT * FROM runs ORDER BY created_at, rowid`)
-    .all();
-  const resultRows = db.query(`SELECT * FROM results ORDER BY rowid`).all();
-  const lifecycleRows = db
-    .query(`SELECT * FROM lifecycle_events ORDER BY rowid`)
-    .all();
+    .query(
+      `SELECT * FROM runs WHERE created_at >= ? ORDER BY created_at, rowid`,
+    )
+    .all(sinceIso);
+  const lifecycleRunIds = db
+    .query(
+      `SELECT DISTINCT run_id FROM lifecycle_events WHERE at >= ? ORDER BY run_id`,
+    )
+    .all(sinceIso)
+    .map((row) => row.run_id);
+  const chunked = (values, size = 400) => {
+    const chunks = [];
+    for (let i = 0; i < values.length; i += size)
+      chunks.push(values.slice(i, i + size));
+    return chunks;
+  };
+  const placeholders = (values) => values.map(() => "?").join(", ");
+  const eventKey = (row) => `${row.source}\0${row.event_id}`;
+  const runIds = new Set(runRows.map((row) => row.run_id));
+  const eventKeys = new Set(eventRows.map(eventKey));
+  const proposalIds = new Set(proposalRows.map((row) => row.id));
+  const addRuns = (rows) => {
+    for (const row of rows) {
+      if (runIds.has(row.run_id)) continue;
+      runIds.add(row.run_id);
+      runRows.push(row);
+    }
+  };
+  const addEvents = (rows) => {
+    for (const row of rows) {
+      const key = eventKey(row);
+      if (eventKeys.has(key)) continue;
+      eventKeys.add(key);
+      eventRows.push(row);
+    }
+  };
+  const addProposals = (rows) => {
+    for (const row of rows) {
+      if (proposalIds.has(row.id)) continue;
+      proposalIds.add(row.id);
+      proposalRows.push(row);
+    }
+  };
+  const fetchRunsById = (ids) => {
+    for (const chunk of chunked(ids.filter((id) => !runIds.has(id)))) {
+      addRuns(
+        db
+          .query(`SELECT * FROM runs WHERE run_id IN (${placeholders(chunk)})`)
+          .all(...chunk),
+      );
+    }
+  };
+  fetchRunsById(lifecycleRunIds);
 
-  const resultByRun = new Map();
-  for (const row of resultRows) {
-    const result = parseObject(row.result_json);
-    if (!resultByRun.has(row.run_id)) resultByRun.set(row.run_id, []);
-    resultByRun.get(row.run_id).push(result);
+  // Lifecycle rows are read only inside the window: they can surface a ticket
+  // (via reasons) and they carry recent activity, but older transitions never
+  // outrank in-window activity and add nothing to the enrichment below.
+  const lifecycleRows = [];
+  for (const chunk of chunked([...runIds])) {
+    lifecycleRows.push(
+      ...db
+        .query(
+          `SELECT * FROM lifecycle_events
+           WHERE at >= ? AND run_id IN (${placeholders(chunk)}) ORDER BY rowid`,
+        )
+        .all(sinceIso, ...chunk),
+    );
+  }
+  const lifecycleByRun = new Map();
+  for (const row of lifecycleRows) {
+    if (!lifecycleByRun.has(row.run_id)) lifecycleByRun.set(row.run_id, []);
+    lifecycleByRun.get(row.run_id).push(row);
   }
 
-  // Collect candidate ticket IDs across all entities
+  const resultByRun = new Map();
+  const fetchResults = () => {
+    const missing = [...runIds].filter((id) => !resultByRun.has(id));
+    for (const chunk of chunked(missing)) {
+      for (const row of db
+        .query(
+          `SELECT * FROM results WHERE run_id IN (${placeholders(chunk)}) ORDER BY rowid`,
+        )
+        .all(...chunk)) {
+        if (!resultByRun.has(row.run_id)) resultByRun.set(row.run_id, []);
+        resultByRun.get(row.run_id).push(parseObject(row.result_json));
+      }
+      for (const id of chunk) {
+        if (!resultByRun.has(id)) resultByRun.set(id, []);
+      }
+    }
+  };
+  fetchResults();
+
+  // Collect candidate ticket IDs across all in-window entities
   const allTicketIds = new Set();
   for (const row of eventRows) {
-    if (
-      row.subject &&
-      TICKET_ID.test(String(row.subject).trim().toUpperCase())
-    ) {
-      allTicketIds.add(String(row.subject).trim().toUpperCase());
+    if (normalizeTicketId(row.subject)) {
+      allTicketIds.add(normalizeTicketId(row.subject));
     }
     const env = parseObject(row.envelope_json);
     collectTicketIds(env, allTicketIds);
@@ -970,6 +1341,77 @@ export function ticketIndexView(db, options = {}) {
     collectTicketIds(row.reason, allTicketIds);
   }
 
+  // Enrichment: pull the full history of every candidate ticket through
+  // indexed lookups, independent of the window. Subjects are matched by their
+  // normalized id plus every raw spelling seen in-window (GitHub refs keep
+  // their original case in `runs.subject` / `events.subject`).
+  const subjectKeys = new Set(allTicketIds);
+  for (const row of [...runRows, ...eventRows]) {
+    if (
+      typeof row.subject === "string" &&
+      allTicketIds.has(normalizeTicketId(row.subject))
+    ) {
+      subjectKeys.add(row.subject);
+    }
+  }
+  for (const chunk of chunked([...subjectKeys])) {
+    addRuns(
+      db
+        .query(`SELECT * FROM runs WHERE subject IN (${placeholders(chunk)})`)
+        .all(...chunk),
+    );
+    addEvents(
+      db
+        .query(`SELECT * FROM events WHERE subject IN (${placeholders(chunk)})`)
+        .all(...chunk),
+    );
+  }
+  // Close the event ↔ proposal ↔ run graph: proposals by run_id and by event
+  // key, then the runs/events those proposals reference, until stable.
+  const proposalsByEvent = db.query(
+    `SELECT * FROM proposals WHERE event_source = ? AND event_id = ?`,
+  );
+  const eventsByKey = db.query(
+    `SELECT * FROM events WHERE source = ? AND event_id = ?`,
+  );
+  const seenRunLookups = new Set();
+  const seenEventLookups = new Set();
+  const seenEventFetches = new Set();
+  for (let pass = 0; pass < 8; pass += 1) {
+    const before = proposalIds.size + runIds.size + eventKeys.size;
+    const newRunIds = [...runIds].filter((id) => !seenRunLookups.has(id));
+    for (const chunk of chunked(newRunIds)) {
+      addProposals(
+        db
+          .query(
+            `SELECT * FROM proposals WHERE run_id IN (${placeholders(chunk)})`,
+          )
+          .all(...chunk),
+      );
+      for (const id of chunk) seenRunLookups.add(id);
+    }
+    for (const row of eventRows) {
+      const key = eventKey(row);
+      if (seenEventLookups.has(key)) continue;
+      seenEventLookups.add(key);
+      addProposals(proposalsByEvent.all(row.source, row.event_id));
+    }
+    fetchRunsById(
+      proposalRows.map((row) => row.run_id).filter((id) => id != null),
+    );
+    for (const row of proposalRows) {
+      const key = `${row.event_source}\0${row.event_id}`;
+      if (eventKeys.has(key) || seenEventFetches.has(key)) continue;
+      seenEventFetches.add(key);
+      addEvents(eventsByKey.all(row.event_source, row.event_id));
+    }
+    if (proposalIds.size + runIds.size + eventKeys.size === before) break;
+  }
+  fetchResults();
+  eventRows.sort((a, b) => a.admitted_at.localeCompare(b.admitted_at));
+  proposalRows.sort((a, b) => a.created_at.localeCompare(b.created_at));
+  runRows.sort((a, b) => a.created_at.localeCompare(b.created_at));
+
   const summaries = [];
 
   for (const ticket of allTicketIds) {
@@ -980,7 +1422,7 @@ export function ticketIndexView(db, options = {}) {
     for (const row of eventRows) {
       const envelope = parseObject(row.envelope_json);
       if (
-        String(row.subject ?? "").toUpperCase() === ticket ||
+        normalizeTicketId(row.subject) === ticket ||
         objectNamesTicket(envelope, ticket)
       ) {
         events.add(`${row.source}\0${row.event_id}`);
@@ -1189,22 +1631,33 @@ export function ticketIndexView(db, options = {}) {
     for (const r of matchedRunRows) {
       const results = resultByRun.get(r.run_id) ?? [];
       const spec = parseObject(r.spec_json);
+      // A run's activity kind is its strongest outcome (merge > pr > run);
+      // lifecycle transitions inherit it so a later state change never
+      // downgrades a merge/pr activity to a plain "run".
+      let runKind = spec.agent?.startsWith("merge-") ? "merge" : "run";
       for (const res of results) {
         const isMerge =
           res?.artifact?.outcome === "MERGED" ||
           spec.agent?.startsWith("merge-");
         const isPr =
           res?.artifact?.outcome === "PR_OPEN" || Boolean(res?.artifact?.prUrl);
+        const kind = isMerge ? "merge" : isPr ? "pr" : "run";
+        if (kind === "merge" || (kind === "pr" && runKind === "run")) {
+          runKind = kind;
+        }
         activities.push({
           at: res.accepted_at || r.updated_at || r.created_at,
-          kind: isMerge ? "merge" : isPr ? "pr" : "run",
+          kind,
         });
       }
       if (results.length === 0) {
         activities.push({
           at: r.updated_at || r.created_at,
-          kind: spec.agent?.startsWith("merge-") ? "merge" : "run",
+          kind: runKind,
         });
+      }
+      for (const lifecycle of lifecycleByRun.get(r.run_id) ?? []) {
+        activities.push({ at: lifecycle.at, kind: runKind });
       }
     }
 
@@ -1587,6 +2040,16 @@ function runPage(url) {
   return collectionPage(url);
 }
 
+function stateFilterValues(state) {
+  return RUN_STATE_GROUPS[state] ?? [state];
+}
+
+function stateFilterClause(column, state) {
+  return `${column} IN (${stateFilterValues(state)
+    .map(() => "?")
+    .join(", ")})`;
+}
+
 function runsView(db, filters = {}, page = {}) {
   const { state, agent, from, to, population } = filters;
   const clauses = [];
@@ -1597,8 +2060,8 @@ function runsView(db, filters = {}, page = {}) {
   }
   if (!population || population === "created") {
     if (state) {
-      clauses.push("r.state = ?");
-      params.push(state);
+      clauses.push(stateFilterClause("r.state", state));
+      params.push(...stateFilterValues(state));
     }
     if (population === "created") {
       clauses.push("r.created_at >= ? AND r.created_at < ?");
@@ -1611,10 +2074,10 @@ function runsView(db, filters = {}, page = {}) {
         WHERE metric_event.run_id = r.run_id
           AND metric_event.at >= ? AND metric_event.at < ?
           AND metric_event.to_state IN ('COMPLETED', 'FAILED', 'REFUSED', 'TIMED_OUT', 'CANCELLED')
-          ${state ? "AND metric_event.to_state = ?" : ""}
+          ${state ? `AND ${stateFilterClause("metric_event.to_state", state)}` : ""}
       )`,
     );
-    params.push(from, to, ...(state ? [state] : []));
+    params.push(from, to, ...(state ? stateFilterValues(state) : []));
   } else if (population === "started" || population === "leased") {
     clauses.push(
       `EXISTS (
@@ -1665,10 +2128,16 @@ function runsView(db, filters = {}, page = {}) {
   const rows = db
     .query(
       `SELECT r.*, r.rowid AS list_rowid, a.reason_code, a.terminal_state AS attempt_terminal,
-              a.started_at, a.lease_expires_at, p.event_id, p.event_source
+              a.started_at, a.lease_expires_at, p.event_id, p.event_source,
+              e.type AS event_type
        FROM runs r
        LEFT JOIN attempts a ON a.run_id = r.run_id AND a.attempt = r.attempts
-       LEFT JOIN proposals p ON p.run_id = r.run_id AND p.decision = 'run'
+       LEFT JOIN proposals p ON p.rowid = (
+         SELECT p2.rowid FROM proposals p2
+         WHERE p2.run_id = r.run_id AND p2.decision = 'run'
+         ORDER BY p2.created_at DESC, p2.rowid DESC LIMIT 1
+       )
+       LEFT JOIN events e ON e.source = p.event_source AND e.event_id = p.event_id
        ${where}
        ORDER BY r.created_at DESC, r.rowid DESC
        LIMIT ?`,
@@ -1690,6 +2159,7 @@ function runsView(db, filters = {}, page = {}) {
         modelTier: spec.modelTier ?? null,
         model: spec.model ?? null,
         idempotencyKey: row.idempotency_key,
+        ...runIdentity(row, spec),
       };
     }),
     nextBefore: hasNextPage ? encodeRunCursor(pageRows.at(-1)) : null,
@@ -1796,7 +2266,8 @@ function observedModelForRun({
   // Keyed by store root as well as hash: a test or a relocated store must not
   // serve an observation read from a different artifacts directory.
   const cacheKey = `${artifactsDir} ${sha256}`;
-  if (observedModelCache.has(cacheKey)) return observedModelCache.get(cacheKey);
+  const cachedModel = observedModelCache.get(cacheKey);
+  if (cachedModel !== undefined) return cachedModel;
 
   const observedModel = observedModelFromTranscript(
     readArtifactHead(artifactsDir, sha256),
@@ -1804,9 +2275,6 @@ function observedModelForRun({
   // A growing transcript may gain its model line later, but a terminal one
   // cannot. Cache null only for terminal runs while caching all model values.
   if (observedModel !== null || terminal) {
-    if (observedModelCache.size >= OBSERVED_MODEL_CACHE_LIMIT) {
-      observedModelCache.delete(observedModelCache.keys().next().value);
-    }
     observedModelCache.set(cacheKey, observedModel);
   }
   return observedModel;
@@ -1817,7 +2285,17 @@ function runView(
   runId,
   { artifactsDir, registry, readArtifactHead = artifactHead } = {},
 ) {
-  const row = db.query(`SELECT * FROM runs WHERE run_id = ?`).get(runId);
+  const row = db
+    .query(
+      `SELECT r.*,
+              (SELECT e.type
+               FROM proposals p
+               JOIN events e ON e.source = p.event_source AND e.event_id = p.event_id
+               WHERE p.run_id = r.run_id AND p.decision = 'run'
+               ORDER BY p.created_at DESC, p.rowid DESC LIMIT 1) AS event_type
+       FROM runs r WHERE r.run_id = ?`,
+    )
+    .get(runId);
   if (!row) return null;
   const attempts = db
     .query(`SELECT * FROM attempts WHERE run_id = ? ORDER BY attempt`)
@@ -1848,6 +2326,7 @@ function runView(
       spec,
     },
     subject: registry ? proposalSubject(registry, spec) : null,
+    identity: runIdentity(row, spec),
     lifecycle: lifecycleOf(db, runId),
     attempts,
     result,
@@ -1929,17 +2408,12 @@ export async function handleRunApiRoute({
     const id = decodeURIComponent(proposalDetail[1]);
     const row = db.query(`SELECT * FROM proposals WHERE id = ?`).get(id);
     if (!row) return send(404, { error: `unknown proposal ${id}` });
-    const expiresAt =
-      Date.parse(row.created_at) + Number(row.ttl_seconds) * 1000;
     return send(200, {
       proposal: proposalView(
         {
           ...row,
           spec: row.spec_json ? JSON.parse(row.spec_json) : null,
-          expired:
-            row.status === "open" &&
-            Number.isFinite(expiresAt) &&
-            expiresAt < nowMs,
+          expired: row.status === "open" && isProposalExpired(row, nowMs),
         },
         registry,
       ),
@@ -2063,6 +2537,14 @@ export async function handleRunApiRoute({
     } catch (err) {
       if (isBusyError(err))
         return send(503, { error: "db_busy", retryable: true });
+      // A corrupt stored row is a refusal, not a re-plan: the response must
+      // never look like the 200 `{ approved: false, replanned: true }` body.
+      if (err?.code === "malformed_stored_row")
+        return send(409, {
+          error: err.message,
+          reason: err.code,
+          kind: err.kind,
+        });
       const status = String(err.message).startsWith("unknown proposal")
         ? 404
         : 409;
@@ -2077,7 +2559,9 @@ export async function handleRunApiRoute({
       controlPlane,
     });
     if (result.error === "invalid_ticket") {
-      return send(422, { error: "ticket must look like WM-123" });
+      return send(422, {
+        error: "ticket must look like WM-123 or owner/repo#123",
+      });
     }
     if (result.error === "not_found") {
       return send(404, { error: result.message });
@@ -2128,7 +2612,10 @@ export async function handleRunApiRoute({
     const ticket = url.searchParams.get("ticket");
     if (ticket) {
       const journey = ticketJourneyView(db, ticket, { artifactsDir });
-      if (!journey) return send(422, { error: "ticket must look like WM-123" });
+      if (!journey)
+        return send(422, {
+          error: "ticket must look like WM-123 or owner/repo#123",
+        });
       return send(200, journey);
     }
     try {
@@ -2137,7 +2624,9 @@ export async function handleRunApiRoute({
         state: url.searchParams.get("state") ?? undefined,
         agent: url.searchParams.get("agent") ?? undefined,
       };
-      return send(200, runsView(db, filters, runPage(url)));
+      const view = runsView(db, filters, runPage(url));
+      resolveRunSubjects(view.runs, { nowMs });
+      return send(200, view);
     } catch (err) {
       if (err instanceof ListQueryError) return send(422, err.body);
       throw err;
@@ -2271,6 +2760,7 @@ export async function handleRunApiRoute({
       readArtifactHead,
     });
     if (!view) return send(404, { error: `unknown run ${runGet[1]}` });
+    resolveRunSubjects([view.identity], { nowMs });
     return send(200, view);
   }
 

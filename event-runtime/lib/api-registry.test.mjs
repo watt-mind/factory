@@ -4,6 +4,7 @@ import {
 } from "../test-support/tmp.mjs?file=event-runtime-lib-api-registry-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
+  CONTROL_TOKEN,
   GH_SECRET,
   PV,
   SECRET,
@@ -54,7 +55,7 @@ const makeServer = async (...args) => {
 describe("agent and repository registry surfacing (OPS-212)", () => {
   test("GET /agents exposes definitions, prompt text, schemas, pins, and routing", async () => {
     const { server, port } = await makeServer();
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       const { agents: defs, contracts } = await client.agents();
       const def = defs.find((d) => d.ref === "factory-status-report@1");
@@ -107,7 +108,7 @@ describe("agent and repository registry surfacing (OPS-212)", () => {
     const { server, port, close } = await makeServer({
       repos: () => loadRepos({ root }),
     });
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       const { repos: rows } = await client.repos();
       expect(rows.map((r) => r.name)).toEqual(["dispatchable", "watched"]);
@@ -148,6 +149,7 @@ describe("agent and repository registry surfacing (OPS-212)", () => {
         hasWorktreeDown: true,
         hasWorktreeWarm: false,
         verify: null,
+        toolchain: null,
       });
       expect(rows[1]).toMatchObject({
         reportOnly: true,
@@ -234,7 +236,7 @@ describe("agent and repository registry surfacing (OPS-212)", () => {
         };
       },
     });
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       const body = await client.janitor("dispatchable");
       expect(body.actor).toBe("operator");
@@ -274,7 +276,7 @@ describe("agent and repository registry surfacing (OPS-212)", () => {
         };
       },
     });
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       const body = await client.janitor("dispatchable", { apply: true });
       expect(body.apply).toBe(true);
@@ -778,6 +780,46 @@ describe("overlay promotion routes (gh-860)", () => {
     expect(res.status).toBe(200);
     expect(res.body.status).toBe("noop");
     db.close();
+  });
+
+  test("API dispatcher routes promotion preview and apply to the registry handler", async () => {
+    const db = openDb(":memory:");
+    seed(db);
+    const { server, request, close } = await makeServer({ db, repos: reposFn });
+    try {
+      const preview = await request("/promotion/preview");
+      expect(preview.status).toBe(200);
+      const { digest } = await preview.json();
+
+      const apply = await request("/promotion/apply", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ repo: "factory", digest, keys: [] }),
+      });
+      expect(apply.status).toBe(200);
+      expect(await apply.json()).toMatchObject({ status: "noop" });
+    } finally {
+      close();
+      server.close();
+    }
+  });
+
+  test("API dispatcher sends nested promotion paths to the registry handler", async () => {
+    const seen = [];
+    const { server, request, close } = await makeServer({
+      registryApi: ({ url, send }) => {
+        seen.push(url.pathname);
+        return send(204);
+      },
+    });
+    try {
+      const response = await request("/promotion/preview/extra");
+      expect(response.status).toBe(204);
+      expect(seen).toEqual(["/promotion/preview/extra"]);
+    } finally {
+      close();
+      server.close();
+    }
   });
 
   test("POST /promotion/apply drives injected seams and returns the PR", async () => {

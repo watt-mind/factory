@@ -4,6 +4,7 @@ import {
 } from "../test-support/tmp.mjs?file=event-runtime-lib-api-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
+  CONTROL_TOKEN,
   GH_SECRET,
   PV,
   SECRET,
@@ -37,6 +38,7 @@ import {
   writeFileSync,
 } from "./api-test-helpers.mjs";
 import { cpSync } from "node:fs";
+import { MAX_BODY_BYTES, PayloadTooLargeError, readBody } from "./api-http.mjs";
 import { emitDueTicks } from "./schedules.mjs";
 import { createInboxItem } from "./inbox.mjs";
 import { decisionRequestHash } from "./decision.mjs";
@@ -45,6 +47,7 @@ import {
   registerTestProcessCleanup,
   spawnTracked,
 } from "./test-helpers-process.mjs";
+import { until } from "./test-helpers-timing.mjs";
 
 registerTestProcessCleanup(import.meta.url);
 
@@ -371,6 +374,33 @@ describe("schedule trigger metadata (WM-259)", () => {
 });
 
 describe("artifact-view sidecar on GET /agents (WM-454)", () => {
+  test("each request reads the current registry reference", async () => {
+    let current = registry;
+    const loadedAt = "2026-08-28T10:00:00.000Z";
+    const { server, port } = await makeServer({
+      registryRef: {
+        get current() {
+          return current;
+        },
+        state: () => ({ loadedAt, stamp: "files:test", lastReloadError: null }),
+      },
+    });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
+    try {
+      const before = await client.agents();
+      const agents = new Map(registry.agents);
+      agents.delete("disk-diagnose@1");
+      current = { ...registry, agents };
+      const after = await client.agents();
+      expect(after.agents).toHaveLength(before.agents.length - 1);
+      expect(
+        after.agents.some((agent) => agent.ref === "disk-diagnose@1"),
+      ).toBe(false);
+    } finally {
+      server.close();
+    }
+  });
+
   test("every agent item carries outputView/outputViewFile; views are objects where a sidecar exists, null elsewhere", async () => {
     const { server, client } = await makeServer();
     try {
@@ -567,6 +597,21 @@ describe("environment identity (webui chip)", () => {
       server.close();
     }
   });
+
+  test("health exposes an active Linear rate-limit reset clock", async () => {
+    const nowMs = Date.parse("2026-08-30T12:00:00.000Z");
+    const resetAt = "2026-08-30T12:15:00.000Z";
+    const s = await makeServer({
+      now: () => nowMs,
+      getLinearBudget: () => ({ rateLimited: true, resetAt }),
+    });
+    try {
+      const health = await s.client.health();
+      expect(health.linear).toEqual({ rateLimited: true, resetAt });
+    } finally {
+      s.close();
+    }
+  });
 });
 
 describe("bearer-token auth on the control API (WM-1152)", () => {
@@ -682,7 +727,7 @@ describe("bearer-token auth on the control API (WM-1152)", () => {
     }
   });
 
-  test("POST /events rejects an oversized declared body before reading it", async () => {
+  test("POST /events rejects an oversized streamed body", async () => {
     const s = await makeServer({ autoAuthorize: false });
     try {
       const res = await new Promise((resolve, reject) => {
@@ -708,7 +753,9 @@ describe("bearer-token auth on the control API (WM-1152)", () => {
           );
         });
         req.on("error", reject);
-        req.end();
+        // Send the declared bytes too: Bun 1.3's node:http client rewrites an
+        // empty request's Content-Length, which otherwise bypasses this guard.
+        req.end(Buffer.alloc(1024 * 1024 + 1));
       });
       expect(res.status).toBe(413);
       expect(res.body).toEqual({
@@ -718,6 +765,34 @@ describe("bearer-token auth on the control API (WM-1152)", () => {
     } finally {
       s.close();
     }
+  });
+
+  test("readBody rejects an oversized declared body before reading it", async () => {
+    // Transport-agnostic: this request emits no data at all, so only the
+    // Content-Length pre-check can reject it. Deleting that pre-check makes
+    // this promise hang rather than reject, which is exactly the regression
+    // the over-the-wire streaming case above cannot distinguish.
+    let dataListeners = 0;
+    const req = {
+      headers: { "content-length": String(MAX_BODY_BYTES + 1) },
+      on(event) {
+        if (event === "data") dataListeners += 1;
+        return this;
+      },
+    };
+
+    const err = await readBody(req).then(
+      () => {
+        throw new Error("expected PayloadTooLargeError");
+      },
+      (e) => e,
+    );
+    expect(err).toBeInstanceOf(PayloadTooLargeError);
+    expect(err.status).toBe(413);
+    expect(err.code).toBe("payload_too_large");
+    expect(err.limitBytes).toBe(MAX_BODY_BYTES);
+    // The body was never consumed: rejection happened before any read.
+    expect(dataListeners).toBe(0);
   });
 
   test("token unset: every privileged mutation fails closed before side effects", async () => {
@@ -956,10 +1031,15 @@ describe("serve PID lock (OPS-458)", () => {
       out1 += b;
     });
 
-    const deadline = Date.now() + 8000;
-    while (Date.now() < deadline && !out1.includes("control API on")) {
-      await Bun.sleep(100);
-    }
+    await until(
+      "the first control API startup",
+      () => out1.includes("control API on"),
+      {
+        // `until` applies loadAdjustedTimeout to this ceiling.
+        timeoutMs: 8_000,
+        everyMs: 100,
+      },
+    );
     expect(out1).toContain("control API on");
 
     // Second serve targeting same home should fail immediately
@@ -997,11 +1077,12 @@ describe("serve PID lock (OPS-458)", () => {
       out3 += b;
     });
 
-    const deadline3 = Date.now() + 8000;
-    while (Date.now() < deadline3 && !out3.includes("control API on")) {
-      await Bun.sleep(100);
-    }
     try {
+      await until(
+        "the replacement control API startup",
+        () => out3.includes("control API on"),
+        { timeoutMs: 8_000, everyMs: 100 },
+      );
       expect(out3).toContain("control API on");
     } finally {
       serve3.kill("SIGTERM");

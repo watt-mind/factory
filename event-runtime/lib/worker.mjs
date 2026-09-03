@@ -18,12 +18,14 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import { localNotifyOutboxPath } from "../../lib/notify.mjs";
 import {
   LEASE_HEARTBEAT_MS,
   leaseDir,
@@ -48,6 +50,10 @@ import {
   workspaceOnlyHostFallback,
 } from "./adapters/sandboxed.mjs";
 import { isSandboxGuarded } from "./adapters/index.mjs";
+import {
+  CELL_CAPABILITY_ENV,
+  hasCellCapabilities,
+} from "./adapters/child-env.mjs";
 import { preflight as sandboxPreflight } from "./sandbox/gondolin.mjs";
 import { createRun, IllegalTransition, transition } from "./lifecycle.mjs";
 import {
@@ -65,8 +71,11 @@ import { traceRecorder } from "./trace.mjs";
 import {
   ContractViolation,
   composeHandoffVerification,
+  HANDOFF_DEPENDENCIES_MISSING,
   HANDOFF_REASON_CODES,
   HANDOFF_SANDBOX_UNAVAILABLE,
+  normalizeFailureOutput,
+  RECOVERED_RESULT_REASON,
   verifyResult,
 } from "./verify.mjs";
 import {
@@ -85,7 +94,9 @@ import {
 } from "./workspace.mjs";
 import { createInboxItem } from "./inbox.mjs";
 import { persistMergeReviewFromResult } from "./merge-reviews.mjs";
+import { registerMemos } from "./memos.mjs";
 import { templateFor } from "./decision-templates.mjs";
+import { proposalReasonPlain } from "./proposal-subject.mjs";
 import {
   DETACHED_SPAWN_OPTIONS,
   killProcessGroup,
@@ -96,6 +107,28 @@ const HARNESS_UNKNOWN_CODES = Object.freeze({
   commands: "harness_unknown_command",
   subagents: "harness_unknown_subagent",
 });
+
+function retireMissingPinnedMemo(db, input, error, now) {
+  const match = /^artifact ([a-f0-9]{64}) is not in the store$/.exec(
+    error?.message ?? "",
+  );
+  const sha256 = match?.[1];
+  if (
+    !sha256 ||
+    !input?.memoPin?.entries?.some((entry) => entry?.sha256 === sha256)
+  ) {
+    return false;
+  }
+  return (
+    db
+      .query(
+        `UPDATE memos
+         SET retired_at = ?, retired_reason = 'artifact_missing'
+         WHERE sha256 = ? AND retired_at IS NULL`,
+      )
+      .run(now, sha256).changes > 0
+  );
+}
 
 // schedule.yaml is deliberately absent. Unlike repos/policy — pure instance
 // state a delegated checkout needs verbatim — the schedule overlay layers on
@@ -379,6 +412,18 @@ export function materializeRunHarness({
   );
   if (declaredCount === 0) return [];
 
+  // `safeJoin` returns a realpath-canonical destination. Keep the root used
+  // for receipt-relative paths in that same namespace so a symlinked workspace
+  // parent does not turn an in-workspace harness file into an apparent escape.
+  let canonicalWorkspaceDir;
+  try {
+    canonicalWorkspaceDir = realpathSync(path.resolve(workspaceDir));
+  } catch (err) {
+    throw new HarnessMaterializeError(
+      "harness_unmaterializable",
+      `workspace root ${JSON.stringify(String(workspaceDir))} cannot be resolved: ${err?.message ?? String(err)}`,
+    );
+  }
   const layout = adapter?.HARNESS_LAYOUT;
   const roots = harnessCatalogRoots(registry, factoryRoot);
   const written = [];
@@ -418,7 +463,10 @@ export function materializeRunHarness({
       const src = path.join(factoryRoot, ...srcParts);
       let dest;
       try {
-        dest = safeJoin(workspaceDir, harnessRelDest(kindLayout, name));
+        dest = safeJoin(
+          canonicalWorkspaceDir,
+          harnessRelDest(kindLayout, name),
+        );
       } catch (err) {
         throw new HarnessMaterializeError(
           "harness_unmaterializable",
@@ -451,8 +499,8 @@ export function materializeRunHarness({
       written.push({
         kind,
         name,
-        dest: path.relative(workspaceDir, dest),
-        pins: harnessFilePins(dest, workspaceDir),
+        dest: path.relative(canonicalWorkspaceDir, dest),
+        pins: harnessFilePins(dest, canonicalWorkspaceDir),
       });
     }
   }
@@ -471,6 +519,14 @@ const RUNTIME_ARTIFACTS = [
 
 /** Grace added to the execution deadline before a lease is considered abandoned. */
 export const LEASE_GRACE_SECONDS = 120;
+
+/**
+ * How long a QUEUED run planned against a checkout nobody runs any more must
+ * sit before a worker dead-letters it (GH-2226). A deploy legitimately leaves
+ * freshly planned runs mismatched for the length of the rollout, so only a run
+ * still stale after this window is treated as unclaimable rather than early.
+ */
+export const STALE_DEAD_LETTER_MS = 15 * 60_000;
 
 /**
  * Adapters that honor AbortSignal, so the worker's durable DB-backed deadline
@@ -877,6 +933,100 @@ function workerSubprocessTimeoutMs() {
     : DEFAULT_WORKER_SUBPROCESS_TIMEOUT_MS;
 }
 
+/** Worktree vanished between agent finish and handoff verify (`realpath` ENOENT). */
+const HANDOFF_WORKTREE_MISSING = "handoff_worktree_missing";
+/** GitHub read exhausted its bounded rate-limit retry during handoff. */
+export const HANDOFF_FORGE_UNAVAILABLE = "handoff_forge_unavailable";
+/** Non-`ContractViolation` throw from `verifyResult` / `assertHandoffPullRequestBase`. */
+const VERIFICATION_INTERNAL_ERROR = "verification_internal_error";
+
+/**
+ * The repair turn only restates an envelope the agent already produced, so it
+ * gets its own small budget rather than a second full run's worth of wall
+ * clock. A wedged repair must not be able to consume the attempt deadline.
+ */
+const PI_RESULT_REPAIR_TIMEOUT_MS = 5 * 60 * 1000;
+
+/** Evidence copy of the rejected envelope, kept beside the workspace result. */
+const INVALID_RESULT_FILE = "result.invalid.json";
+
+/** Bound on the rejected bytes echoed into the repair prompt and the trace. */
+const INVALID_RESULT_PREVIEW_BYTES = 8000;
+
+const USAGE_SUM_FIELDS = [
+  "inputTokens",
+  "outputTokens",
+  "cacheCreationInputTokens",
+  "cacheReadInputTokens",
+  "costUSD",
+];
+
+/**
+ * The repair is a second billable adapter turn on the same attempt. Attempt
+ * usage is a total, not a last-writer-wins snapshot, so add its tokens and
+ * cost to what the primary execution already reported.
+ */
+function mergeAttemptUsage(base, extra, adapterKey) {
+  const merged = { adapter: adapterKey, ...(base ?? {}), ...(extra ?? {}) };
+  for (const field of USAGE_SUM_FIELDS) {
+    const snake = field.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+    const read = (usage) => {
+      const value = usage?.[field] ?? usage?.[snake];
+      return Number.isFinite(value) && value >= 0 ? value : 0;
+    };
+    const total = read(base) + read(extra);
+    if (total > 0) merged[field] = total;
+    delete merged[snake];
+  }
+  return merged;
+}
+
+/**
+ * Snapshot the rejected envelope before the repair turn overwrites
+ * `result.json`. The invalid payload is the primary evidence for why the run
+ * failed; a repair that fails again must not be the reason it disappeared.
+ */
+function snapshotInvalidResult({ workspaceDir, onTrace }) {
+  let raw;
+  const source = path.join(workspaceDir, "result.json");
+  const target = path.join(workspaceDir, INVALID_RESULT_FILE);
+  try {
+    raw = readFileSync(source);
+    writeFileSync(target, raw);
+  } catch (err) {
+    onTrace?.("lifecycle", {
+      event: "pi_result_repair_snapshot_failed",
+      source,
+      error: String(err?.message ?? err),
+    });
+    return null;
+  }
+  const text = raw.toString("utf8");
+  const snapshot = {
+    source,
+    path: target,
+    bytes: raw.length,
+    sha256: sha256Hex(raw),
+    preview: text.slice(0, INVALID_RESULT_PREVIEW_BYTES),
+  };
+  onTrace?.("lifecycle", { event: "pi_result_repair_snapshot", ...snapshot });
+  return snapshot;
+}
+
+/** A zero-exit Pi run gets one chance to correct its own invalid envelope. */
+function mayRepairPiResult({ adapterKey, outcome, error }) {
+  return (
+    adapterKey === "pi" &&
+    outcome?.exitCode === 0 &&
+    outcome?.timedOut !== true &&
+    error instanceof ContractViolation &&
+    error.reasonCode === "contract_violation" &&
+    !error.handoff &&
+    Array.isArray(error.violations) &&
+    error.violations.length > 0
+  );
+}
+
 const ENVIRONMENT_FAILURES = new Set([
   "adapter_error",
   "lease_expired",
@@ -886,11 +1036,24 @@ const ENVIRONMENT_FAILURES = new Set([
   // agent's work is implicated, so this must never burn an agent attempt or
   // draft the PR — it is the worker host that needs attention.
   HANDOFF_SANDBOX_UNAVAILABLE,
+  // The offline sandbox cannot restore packages; this is a host fault rather
+  // than evidence that the agent's branch is red.
+  HANDOFF_DEPENDENCIES_MISSING,
+  // Same family: the worktree is gone, so continuation/retry must not treat
+  // the throw as an agent red (#1663).
+  HANDOFF_WORKTREE_MISSING,
+  HANDOFF_FORGE_UNAVAILABLE,
 ]);
+const isAgentHandoffFailure = (reasonCode) =>
+  HANDOFF_REASON_CODES.has(reasonCode) &&
+  reasonCode !== HANDOFF_DEPENDENCIES_MISSING;
 // The handoff gate (WM-718) catching the agent's own red is an agent error:
 // bounded by maxAttempts like any contract violation, never an environment
 // retry and never fatal — the ticket is already back in Todo + agent-ready.
-const AGENT_FAILURES = new Set(["contract_violation", ...HANDOFF_REASON_CODES]);
+const AGENT_FAILURES = new Set([
+  "contract_violation",
+  ...[...HANDOFF_REASON_CODES].filter(isAgentHandoffFailure),
+]);
 const FATAL_FAILURES = new Set([
   "cli_not_found",
   "filesystem_confinement_unavailable",
@@ -899,6 +1062,7 @@ const FATAL_FAILURES = new Set([
   "unknown_adapter",
   "agent_definition_mismatch",
   "workspace_integrity_violation",
+  VERIFICATION_INTERNAL_ERROR,
 ]);
 
 /** Closed failure taxonomy: unknown reasons fail safe as fatal and never retry. */
@@ -920,6 +1084,35 @@ export function classifyFailureCause(reasonCode) {
   return "fatal";
 }
 
+/**
+ * Only an ENOENT whose target lies inside the run's own workspace (the
+ * delegated worktree or the workspace dir `verifyResult` realpaths) is the
+ * vanished-worktree environment failure. An ENOENT elsewhere — a missing
+ * verifier binary or config — is a harness defect and must not draw on the
+ * environment retry budget.
+ */
+function verificationInternalReasonCode(err, roots = []) {
+  if (err?.code !== "ENOENT") return VERIFICATION_INTERNAL_ERROR;
+  const target = err.path ?? err.dest ?? null;
+  if (typeof target !== "string" || !target) return VERIFICATION_INTERNAL_ERROR;
+  const resolved = path.resolve(target);
+  for (const root of roots) {
+    if (typeof root !== "string" || !root) continue;
+    const rel = path.relative(path.resolve(root), resolved);
+    if (rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))) {
+      return HANDOFF_WORKTREE_MISSING;
+    }
+  }
+  return VERIFICATION_INTERNAL_ERROR;
+}
+
+function verificationInternalErrorPayload(err) {
+  return {
+    code: err?.code ?? err?.name ?? null,
+    message: err?.message ?? String(err),
+  };
+}
+
 /** Closed eligibility predicate; a continuation can never escalate again. */
 export function tierEscalationEligibility(spec, reasonCode) {
   const rootRunId = spec?.rootRunId ?? spec?.runId ?? null;
@@ -928,7 +1121,7 @@ export function tierEscalationEligibility(spec, reasonCode) {
   // (verify.mjs HANDOFF_REASON_CODES). Match the emitted codes only — a
   // reason code no producer writes is dead weight that reads as coverage.
   const eligibleReason =
-    HANDOFF_REASON_CODES.has(reasonCode) ||
+    isAgentHandoffFailure(reasonCode) ||
     reasonCode === "contract_violation" ||
     String(reasonCode).startsWith("agent_exit_");
   const eligible = Boolean(
@@ -939,6 +1132,52 @@ export function tierEscalationEligibility(spec, reasonCode) {
     eligibleReason,
   );
   return { eligible, rootRunId };
+}
+
+/**
+ * Decide whether an otherwise eligible tier escalation still owns work to do.
+ *
+ * The failed agent can hand a ticket to review before its worker observes a
+ * failed handoff verification. Do not let that late failure create a stronger
+ * continuation which races the retained PR's review/fix lane.
+ */
+export function tierEscalationContinuationGuard(
+  spec,
+  reasonCode,
+  {
+    fetchTicket,
+    findPullRequest = defaultFindWorkspacePullRequest,
+    workspacePath,
+  } = {},
+) {
+  const eligibility = tierEscalationEligibility(spec, reasonCode);
+  if (!eligibility.eligible) return { ...eligibility, skip: false };
+
+  let ticket;
+  try {
+    ticket = fetchTicket?.(spec.input?.ticket, spec.input?.repo);
+  } catch {
+    // Preserve the existing continuation behavior when the tracker cannot be
+    // read. The continuation's claim-time gate still performs its own
+    // fail-closed tracker proof before it can execute.
+    ticket = null;
+  }
+  if (ticket?.state?.name === "In Review") {
+    return { ...eligibility, skip: true, reason: "ticket_in_review" };
+  }
+
+  let pullRequest;
+  try {
+    pullRequest = workspacePath ? findPullRequest?.({ workspacePath }) : null;
+  } catch {
+    // PR discovery is an additional ownership signal, not a reason to drop a
+    // recoverable continuation when the forge is temporarily unavailable.
+    pullRequest = null;
+  }
+  if (pullRequest?.isDraft === false) {
+    return { ...eligibility, skip: true, reason: "retained_pr_open" };
+  }
+  return { ...eligibility, skip: false };
 }
 
 /**
@@ -954,15 +1193,261 @@ export function dispatchIdentityEnv({
   runId = null,
   ticketId = null,
   repoName = null,
+  resultPath = null,
 }) {
   if (!String(spec?.agent ?? "").startsWith("dispatch@")) return env;
-  const identity = {};
+  // A dispatched agent must never inherit the worker's control bearer. It can
+  // retain a notification locally and the worker will submit it after exit.
+  const agentEnv = { ...env };
+  delete agentEnv.FACTORY_CONTROL_API_TOKEN;
+  const identity = { FACTORY_DISPATCH: "1" };
   if (runId != null && runId !== "") identity.FACTORY_RUN_ID = String(runId);
   if (ticketId != null && ticketId !== "")
     identity.FACTORY_TICKET = String(ticketId);
   if (repoName != null && repoName !== "")
     identity.FACTORY_REPO = String(repoName);
-  return { ...env, ...identity };
+  if (resultPath != null && resultPath !== "")
+    identity.FACTORY_RESULT_PATH = String(resultPath);
+  // A dispatched agent needs the location of its isolated runtime to retain
+  // notifications, but never the worker's control bearer. The caller supplies
+  // these two non-secret values explicitly rather than copying process.env.
+  for (const key of ["FACTORY_EVENT_HOME", "FACTORY_EVENT_PORT"]) {
+    const value = env[key];
+    if (value != null && value !== "") identity[key] = String(value);
+  }
+  return { ...agentEnv, ...identity };
+}
+
+export const DEFAULT_CELL_ENDPOINT = "http://127.0.0.1:9876";
+
+/**
+ * Layer celld credentials onto the adapter environment for definitions that
+ * declare `capabilities.cells`.
+ *
+ * `CELL_AUTH_TOKEN` is in no inherit list on purpose — the hardened celld
+ * ingress rejects an unauthenticated agent, and a definition without cell
+ * bindings must never see the bearer. The worker therefore passes it
+ * explicitly, alongside the endpoint the agent should talk to; the adapter
+ * child-environment builder re-asserts both after its strip loops.
+ * Definitions without cells get `env` unchanged.
+ */
+export function cellCapabilityEnv({ def, env = {}, processEnv = process.env }) {
+  if (!hasCellCapabilities(def)) return env;
+  const values = {
+    CELL_AUTH_TOKEN: processEnv.CELL_AUTH_TOKEN,
+    FACTORY_CELL_ENDPOINT:
+      processEnv.FACTORY_CELL_ENDPOINT || DEFAULT_CELL_ENDPOINT,
+  };
+  const agentEnv = { ...env };
+  for (const key of CELL_CAPABILITY_ENV) {
+    const value = values[key];
+    if (value != null && value !== "") agentEnv[key] = String(value);
+  }
+  return agentEnv;
+}
+
+const LOCAL_NOTIFY_OUTBOX_SCHEMA = "factory.local-notify-outbox/v1";
+const LOCAL_NOTIFY_ACTIVE_RUN_STATES = Object.freeze([
+  "QUEUED",
+  "LEASED",
+  "RUNNING",
+  "VERIFYING",
+]);
+/**
+ * How long a retained outbox file must sit untouched before the sweep may
+ * delete it. Long enough that no live drain can lose its recovery source,
+ * short enough that a crashed worker's leftovers do not accumulate.
+ */
+const LOCAL_NOTIFY_OUTBOX_GRACE_MS = 60 * 60 * 1000;
+
+function localNotifyPort(port) {
+  const value = typeof port === "string" ? port.trim() : String(port);
+  if (!/^[1-9]\d*$/.test(value)) return null;
+  const numeric = Number(value);
+  return Number.isSafeInteger(numeric) && numeric <= 65_535 ? numeric : null;
+}
+
+/**
+ * Remove retained local notification files for runs that can no longer be
+ * executed. This is deliberately separate from the per-run drain in
+ * executeClaimed's finally block: a crashed or unclaimed run never reaches
+ * that block. Queued runs remain protected because a retry can still drain
+ * their prior attempt's retained escalation.
+ *
+ * Active-state protection alone is not enough. A file is written by the agent
+ * before the run reaches any of those states in this worker's view (and a
+ * concurrent worker's run is invisible to a different event home's snapshot),
+ * so a run-state check on its own would delete the very file the drain treats
+ * as its recovery source. A file must therefore also be older than
+ * LOCAL_NOTIFY_OUTBOX_GRACE_MS before it is eligible.
+ */
+export function sweepOrphanedLocalNotifyOutbox({
+  db,
+  home = process.env.FACTORY_EVENT_HOME,
+  now = Date.now(),
+  graceMs = LOCAL_NOTIFY_OUTBOX_GRACE_MS,
+} = {}) {
+  if (!db || typeof home !== "string" || home.trim() === "") return [];
+  const outboxDir = path.join(home, "outbox");
+  if (!existsSync(outboxDir)) return [];
+
+  let entries;
+  try {
+    entries = readdirSync(outboxDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const activeRunIds = new Set(
+    db
+      .query(
+        `SELECT run_id FROM runs WHERE state IN (${LOCAL_NOTIFY_ACTIVE_RUN_STATES.map(() => "?").join(", ")})`,
+      )
+      .all(...LOCAL_NOTIFY_ACTIVE_RUN_STATES)
+      .map(({ run_id: runId }) => runId),
+  );
+  const swept = [];
+  for (const entry of entries) {
+    const match = /^([A-Za-z0-9._-]+)\.jsonl$/.exec(entry.name);
+    if (!match || activeRunIds.has(match[1])) continue;
+    const filePath = path.join(outboxDir, entry.name);
+    let mtimeMs;
+    try {
+      mtimeMs = statSync(filePath).mtimeMs;
+    } catch {
+      continue;
+    }
+    if (!(now - mtimeMs >= graceMs)) continue;
+    try {
+      unlinkSync(filePath);
+      swept.push(match[1]);
+    } catch {
+      // A concurrent writer or permissions change must not stop a worker from
+      // claiming the next run; the next startup will retry this hygiene pass.
+    }
+  }
+  return swept;
+}
+
+function localOutboxEntry(value, runId) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    value.schemaVersion !== LOCAL_NOTIFY_OUTBOX_SCHEMA ||
+    value.runId !== runId ||
+    value.source !== `agent:${runId}` ||
+    typeof value.kind !== "string" ||
+    value.kind.trim() === "" ||
+    typeof value.title !== "string" ||
+    value.title.trim() === "" ||
+    !value.refs ||
+    typeof value.refs !== "object" ||
+    Array.isArray(value.refs)
+  ) {
+    return null;
+  }
+  return value;
+}
+
+/**
+ * Submit agent-retained notifications with the worker's bearer. Failed lines
+ * stay in the append-only run outbox so the worker can report their exact text
+ * in the ticket handoff instead of silently losing an escalation.
+ */
+export async function drainLocalNotifyOutbox({
+  home = process.env.FACTORY_EVENT_HOME,
+  runId,
+  port = process.env.FACTORY_EVENT_PORT || "7381",
+  token = process.env.FACTORY_CONTROL_API_TOKEN,
+  fetchFn = fetch,
+}) {
+  let outboxPath;
+  try {
+    outboxPath = localNotifyOutboxPath({ home, runId });
+  } catch (error) {
+    return { delivered: [], undelivered: [], error: error.message };
+  }
+  if (!existsSync(outboxPath)) return { delivered: [], undelivered: [] };
+
+  const lines = readFileSync(outboxPath, "utf8").split("\n").filter(Boolean);
+
+  const validatedPort = localNotifyPort(port);
+  if (validatedPort === null) {
+    // Report one undelivered entry per retained line rather than a bare
+    // `error` field: the caller only reads `undelivered`, and a misconfigured
+    // port must surface as the same ticket comment as any other delivery
+    // failure instead of failing silently. The file stays put as the
+    // recovery source.
+    const error =
+      "FACTORY_EVENT_PORT must be a positive integer between 1 and 65535";
+    return {
+      delivered: [],
+      undelivered: lines.map((line) => {
+        let entry;
+        try {
+          entry = localOutboxEntry(JSON.parse(line), runId);
+        } catch {
+          entry = null;
+        }
+        return {
+          title: entry ? entry.title : "invalid local notification record",
+          error,
+        };
+      }),
+      error,
+    };
+  }
+
+  const retained = [];
+  const delivered = [];
+  const undelivered = [];
+  for (const line of lines) {
+    let entry;
+    try {
+      entry = localOutboxEntry(JSON.parse(line), runId);
+    } catch {
+      entry = null;
+    }
+    if (!entry) {
+      retained.push(line);
+      undelivered.push({
+        title: "invalid local notification record",
+        error: "invalid outbox entry",
+      });
+      continue;
+    }
+    try {
+      const response = await fetchFn(
+        `http://127.0.0.1:${validatedPort}/inbox`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            ...(token ? { authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({
+            kind: entry.kind,
+            title: entry.title,
+            refs: entry.refs,
+            source: entry.source,
+          }),
+        },
+      );
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      delivered.push(entry);
+    } catch (error) {
+      retained.push(line);
+      undelivered.push({
+        title: entry.title,
+        error: String(error?.message ?? error),
+      });
+    }
+  }
+  if (retained.length)
+    writeFileSync(outboxPath, `${retained.join("\n")}\n`, "utf8");
+  else unlinkSync(outboxPath);
+  return { delivered, undelivered };
 }
 
 function maxEnvironmentRetries(spec) {
@@ -1046,6 +1531,57 @@ function refusalInboxRefs(spec) {
   return refs;
 }
 
+function refusalText(value) {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  for (const key of ["message", "summary", "reason", "finding", "title"]) {
+    const text = refusalText(value[key]);
+    if (text) return text;
+  }
+  return null;
+}
+
+function refusalFindingLines(...values) {
+  return [
+    ...new Set(
+      values.flatMap((value) => {
+        const entries = Array.isArray(value) ? value : [value];
+        return entries.map(refusalText).filter(Boolean);
+      }),
+    ),
+  ];
+}
+
+function refusalEvidenceBody(result) {
+  const evidence = result?.evidence ?? {};
+  const lines = [];
+  const summary =
+    refusalText(evidence.summary) ??
+    refusalText(evidence.agentSummary) ??
+    refusalText(result?.summary);
+  if (summary) lines.push(`Agent summary: ${summary}`);
+
+  const reason = refusalText(evidence.reason);
+  if (reason)
+    lines.push(`Agent reason: ${proposalReasonPlain(reason) ?? reason}`);
+
+  const message = refusalText(evidence.message);
+  if (message) lines.push(`Agent message: ${message}`);
+
+  const findings = refusalFindingLines(
+    evidence.findings,
+    evidence.finding,
+    result?.findings,
+    result?.finding,
+  );
+  if (findings.length)
+    lines.push(
+      `Agent findings:\n${findings.map((item) => `- ${item}`).join("\n")}`,
+    );
+  return lines.join("\n\n");
+}
+
 function createRefusalInboxItem(db, spec, result, { now }) {
   if (result.reasonCode !== "needs_human") return null;
   const refs = refusalInboxRefs(spec);
@@ -1056,9 +1592,15 @@ function createRefusalInboxItem(db, spec, result, { now }) {
       refs,
     });
   const subject = refs.issue ?? refs.runId;
-  const body = result.decisionErrors?.length
-    ? `The agent's decision request was rejected:\n${result.decisionErrors.join("\n")}`
-    : null;
+  const body =
+    [
+      refusalEvidenceBody(result),
+      result.decisionErrors?.length
+        ? `The agent's decision request was rejected:\n${result.decisionErrors.join("\n")}`
+        : null,
+    ]
+      .filter(Boolean)
+      .join("\n\n") || null;
   return createInboxItem(
     db,
     {
@@ -1067,6 +1609,8 @@ function createRefusalInboxItem(db, spec, result, { now }) {
         result.decision?.question ??
         `ESCALATED ${subject}: ${result.reasonCode}`,
       body,
+      reasonCode: result.reasonCode,
+      ticketTitle: spec.approvalPolicy?.dispatchEvidence?.ticket?.title,
       refs,
       source: `agent:${spec.runId}`,
       decision,
@@ -1114,6 +1658,61 @@ export function repositoryStatus(
     },
   );
   return result.status === 0 ? result.stdout : null;
+}
+
+const WORKSPACE_INTEGRITY_STATUS_MAX_BYTES = 12 * 1024;
+
+/** Keep checkout dirt evidence useful without letting one run grow trace storage unbounded. */
+export function boundedWorkspaceIntegrityStatus(status) {
+  if (status === null) {
+    return { value: null, bytes: null, truncated: false };
+  }
+  const bytes = Buffer.byteLength(status, "utf8");
+  if (bytes <= WORKSPACE_INTEGRITY_STATUS_MAX_BYTES) {
+    return { value: status, bytes, truncated: false };
+  }
+  const suffix = `\n… truncated; ${bytes} bytes total\n`;
+  let previewBytes =
+    WORKSPACE_INTEGRITY_STATUS_MAX_BYTES - Buffer.byteLength(suffix);
+  const encoded = Buffer.from(status, "utf8");
+  // `Buffer#toString` replaces a partial UTF-8 sequence with U+FFFD. Walk
+  // back from the byte boundary to preserve only complete characters.
+  while (previewBytes > 0 && (encoded[previewBytes] & 0xc0) === 0x80)
+    previewBytes -= 1;
+  return {
+    value: `${encoded.subarray(0, previewBytes).toString("utf8")}${suffix}`,
+    bytes,
+    truncated: true,
+  };
+}
+
+export function writeWorkspaceIntegrityStatus(
+  workspaceDir,
+  { checkoutStatus, checkoutBaseline },
+) {
+  const status = boundedWorkspaceIntegrityStatus(checkoutStatus);
+  const baseline = boundedWorkspaceIntegrityStatus(checkoutBaseline);
+  const hash = (value) => (value === null ? null : hashBytes(value));
+  const text = [
+    "workspace integrity violation",
+    `checkoutStatusBytes: ${status.bytes ?? "null"}`,
+    `checkoutStatusTruncated: ${status.truncated}`,
+    `checkoutStatusSha256: ${hash(checkoutStatus) ?? "null"}`,
+    "checkoutStatus:",
+    status.value ?? "null",
+    `checkoutBaselineBytes: ${baseline.bytes ?? "null"}`,
+    `checkoutBaselineTruncated: ${baseline.truncated}`,
+    `checkoutBaselineSha256: ${hash(checkoutBaseline) ?? "null"}`,
+    "checkoutBaseline:",
+    baseline.value ?? "null",
+    "",
+  ].join("\n");
+  writeFileSync(
+    path.join(workspaceDir, "workspace-integrity-status.txt"),
+    text,
+    "utf8",
+  );
+  return { status, baseline };
 }
 
 /** Fail closed: a read-only repository workspace is acceptable only if clean. */
@@ -1212,6 +1811,20 @@ function resultArtifactForRun(db, runId) {
   }
 }
 
+function failureReasonCodeForRun(db, runId) {
+  return (
+    db
+      .query(
+        `SELECT reason_code AS reasonCode
+           FROM attempts
+          WHERE run_id = ? AND finished_at IS NOT NULL
+          ORDER BY attempt DESC
+          LIMIT 1`,
+      )
+      .get(runId)?.reasonCode ?? null
+  );
+}
+
 function tierEscalationForContinuation(db, runId) {
   const row = db
     .query(`SELECT * FROM tier_escalations WHERE continuation_run_id = ?`)
@@ -1227,6 +1840,7 @@ function tierEscalationForContinuation(db, runId) {
     sourceWorkspacePath: row.source_workspace_path,
     projectionState: row.projection_state,
     failedRunArtifact: resultArtifactForRun(db, row.failed_run_id),
+    failedRunReasonCode: failureReasonCodeForRun(db, row.failed_run_id),
   };
 }
 
@@ -1238,6 +1852,12 @@ function tierEscalationForContinuation(db, runId) {
  * `ContractViolation.message` is split back into its lines first.
  */
 export function continuationHandoffFailure(violations) {
+  if (
+    typeof violations === "string" &&
+    /^contract_violation: missing_result\b/.test(violations)
+  ) {
+    return violations;
+  }
   const lines = Array.isArray(violations)
     ? violations
     : typeof violations === "string"
@@ -1246,9 +1866,24 @@ export function continuationHandoffFailure(violations) {
   const failure = lines.find(
     (line) =>
       typeof line === "string" &&
-      /^(?:web_build_failed|ticket_verify_failed):/.test(line),
+      /^(?:(?:web_build_failed|ticket_verify_failed):|contract_violation: missing_result\b)/.test(
+        line,
+      ),
   );
   return failure ?? null;
+}
+
+/**
+ * Pick the continuation's handoff failure from a verification failure. The
+ * matcher anchors each violation at its start, so the composed
+ * `<reasonCode>: ...` failure reason (`handoff_verification_failed: web_build_failed: ...`)
+ * would defeat it; only the `missing_result` diagnostic lives in that string.
+ */
+export function escalationHandoffFailure(error, failureReason) {
+  const violations = Array.isArray(error?.violations) ? error.violations : [];
+  const missingResult =
+    violations.length === 1 && violations[0] === "missing_result";
+  return continuationHandoffFailure(missingResult ? failureReason : violations);
 }
 
 /** Add worker-observed handoff context without mutating the validated spec. */
@@ -1298,6 +1933,7 @@ export function scheduleTierEscalation(
     continuationRunId = newRunId(),
     reasonCode,
     handoffFailure = null,
+    continuationGuard = null,
   } = {},
 ) {
   const rootRunId = failedSpec.rootRunId ?? failedSpec.runId;
@@ -1306,6 +1942,7 @@ export function scheduleTierEscalation(
     .get(rootRunId);
   if (existing) return existing;
   if (!tierEscalationEligibility(failedSpec, reasonCode).eligible) return null;
+  if (continuationGuard?.skip) return null;
   if (!workspacePath || !sourceWorkspacePath)
     throw new Error("tier escalation requires the retained workspace paths");
 
@@ -1409,7 +2046,7 @@ export function scheduleTierEscalation(
 
 const TIER_ESCALATION_COMMENT_MARKER = "factory:tier-escalation:";
 
-function defaultFindWorkspacePullRequest({ workspacePath }) {
+export function defaultFindWorkspacePullRequest({ workspacePath, forge }) {
   if (!workspacePath) return null;
   const branch = execFileSync(
     "git",
@@ -1417,16 +2054,216 @@ function defaultFindWorkspacePullRequest({ workspacePath }) {
     { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
   ).trim();
   if (!branch) return null;
-  return (
-    loadForge()
-      .prList(null, {
-        cwd: workspacePath,
-        state: "open",
-        fields: ["number", "url", "headRefName"],
+  const pullRequest = (forge ?? loadForge())
+    .prList(null, {
+      cwd: workspacePath,
+      state: "open",
+      fields: ["number", "url", "headRefName", "isDraft"],
+      timeout: workerSubprocessTimeoutMs(),
+    })
+    .find((pr) => pr?.headRefName === branch && pr?.url);
+  if (pullRequest) return pullRequest;
+
+  // A local branch alone is not resumable evidence. Confirm that this exact
+  // head exists at origin before producing the BLOCKED recovery artifact.
+  // A hung or failing ls-remote must not wedge recovery: bound it like the
+  // prList call above and treat any failure as "no pushed branch".
+  let remote;
+  try {
+    remote = execFileSync(
+      "git",
+      [
+        "-C",
+        workspacePath,
+        "ls-remote",
+        "--heads",
+        "origin",
+        `refs/heads/${branch}`,
+      ],
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
         timeout: workerSubprocessTimeoutMs(),
-      })
-      .find((pr) => pr?.headRefName === branch && pr?.url) ?? null
+        killSignal: "SIGKILL",
+      },
+    ).trim();
+  } catch {
+    return null;
+  }
+  return remote ? { pushedBranch: branch } : null;
+}
+
+const MISSING_RESULT_OUTPUT_CHARS = 2 * 1024;
+
+function missingResultFailure(workspaceDir, error = null) {
+  const resultPath = path.resolve(workspaceDir, "result.json");
+  const fallbackPaths = error?.missingResultFallbacks ?? [];
+  const stalePaths = error?.missingResultPaths ?? [];
+  const output = [
+    ["stdout", ".transcript.json"],
+    ["stderr", ".stderr.txt"],
+    ["sandbox console", ".sandbox-console.log"],
+  ]
+    .flatMap(([label, file]) => {
+      try {
+        return [
+          `[${label}]`,
+          readFileSync(path.join(workspaceDir, file), "utf8"),
+        ];
+      } catch {
+        return [];
+      }
+    })
+    .join("\n");
+  const normalized = normalizeFailureOutput(output).join("\n");
+  const tail = normalized.slice(-MISSING_RESULT_OUTPUT_CHARS);
+  const fallbackDetail = fallbackPaths.length
+    ? `; probed fallbacks ${fallbackPaths.join(", ")}`
+    : "";
+  const staleDetail = stalePaths.length
+    ? `; stale result.json found at ${stalePaths.map(({ path: candidatePath, mtime }) => `${candidatePath} (mtime ${mtime}, before this attempt started)`).join(", ")}`
+    : "";
+  return `missing_result: expected ${resultPath}${fallbackDetail}${staleDetail}; agent stdout/stderr (last 2 KB): ${tail || "(no captured output)"}`;
+}
+
+/**
+ * Recover the one contract failure whose durable work may already be complete.
+ * The finder resolves the branch from the checkout; the PR read then proves
+ * the agent reached its final Handoff before the worker authors result.json.
+ * The artifact stays inside the registered `factory.dispatch-result/v1`
+ * schema (`additionalProperties: false`); the observed head SHA is carried as
+ * top-level evidence so the real definition verifies the synthesized result.
+ */
+export function recoverMissingDispatchResult({
+  error,
+  spec,
+  def,
+  workspaceDir,
+  worktreeRecord,
+  findPullRequest = defaultFindWorkspacePullRequest,
+  fetchPullRequest = defaultFetchHandoffPullRequest,
+}) {
+  if (
+    spec?.agent !== "dispatch@1" ||
+    !(error instanceof ContractViolation) ||
+    error.violations.length !== 1 ||
+    error.violations[0] !== "missing_result" ||
+    !worktreeRecord?.path
+  ) {
+    return null;
+  }
+
+  let listed;
+  try {
+    listed = findPullRequest({
+      workspacePath: worktreeRecord.path,
+      github: worktreeRecord.github,
+    });
+  } catch (err) {
+    if (err?.code === "forge_rate_limited") {
+      throw new ContractViolation(
+        ["handoff_forge_unavailable: GitHub rate limited recovery PR lookup"],
+        { reasonCode: HANDOFF_FORGE_UNAVAILABLE },
+      );
+    }
+    return null;
+  }
+  if (typeof listed?.pushedBranch === "string" && listed.pushedBranch) {
+    const base = worktreeRecord.base ?? "<configured-base>";
+    const resumeCommand = `gh pr create --base ${base} --title "..." --body "Fixes ${spec.input?.ticket}"`;
+    const candidate = {
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      reasonCode: "pushed_branch_no_pr",
+      artifact: {
+        outcome: "BLOCKED",
+        repo: spec.input?.repo,
+        ticket: spec.input?.ticket,
+        prUrl: null,
+        prNumber: null,
+        verification: { command: null, passed: false, output: "" },
+        summary: `Branch ${listed.pushedBranch} is pushed but has no PR; resume with ${resumeCommand}`,
+      },
+      evidence: {
+        branch: listed.pushedBranch,
+        resumeCommand,
+        commands: [
+          `git -C ${worktreeRecord.path} branch --show-current`,
+          `git -C ${worktreeRecord.path} ls-remote --heads origin refs/heads/${listed.pushedBranch}`,
+          "forge.prList(open, headRefName)",
+        ],
+      },
+    };
+    writeFileSync(
+      path.join(workspaceDir, "result.json"),
+      `${JSON.stringify(candidate, null, 2)}\n`,
+      "utf8",
+    );
+    return { candidate, retainWorkspace: true };
+  }
+  const prNumber = Number(listed?.number);
+  if (!Number.isInteger(prNumber) || prNumber < 1 || !listed?.url) return null;
+  if (listed?.state && String(listed.state).toUpperCase() !== "OPEN")
+    return null;
+
+  let pullRequest;
+  try {
+    pullRequest = fetchPullRequest({
+      github: worktreeRecord.github,
+      prNumber,
+    });
+  } catch (err) {
+    if (err?.code === "forge_rate_limited") {
+      throw new ContractViolation(
+        ["handoff_forge_unavailable: GitHub rate limited recovery PR read"],
+        { reasonCode: HANDOFF_FORGE_UNAVAILABLE },
+      );
+    }
+    return null;
+  }
+  const body = pullRequest?.body ?? listed?.body;
+  if (typeof body !== "string" || !/^## Handoff\s*$/m.test(body)) return null;
+
+  const headSha = pullRequest?.headRefOid ?? listed?.headRefOid ?? null;
+  if (!/^[0-9a-f]{40}$/.test(String(headSha))) return null;
+
+  const verificationCommand =
+    worktreeRecord.handoff?.verificationCommand ??
+    worktreeRecord.verify ??
+    null;
+  const candidate = {
+    schemaVersion: "factory.agent-result/v1",
+    terminalState: "completed",
+    reasonCode: RECOVERED_RESULT_REASON,
+    artifact: {
+      outcome: "PR_OPEN",
+      repo: spec.input?.repo,
+      ticket: spec.input?.ticket,
+      prUrl: listed.url,
+      prNumber,
+      verification: {
+        command: verificationCommand,
+        passed: true,
+        output: "worker recovery; normal handoff verification pending",
+      },
+      summary:
+        "Worker recovered an open PR after the agent omitted result.json",
+    },
+    evidence: {
+      headSha,
+      commands: [
+        `git -C ${worktreeRecord.path} branch --show-current`,
+        `forge.prList(open, headRefName)`,
+        `forge.prView(${prNumber})`,
+      ],
+    },
+  };
+  writeFileSync(
+    path.join(workspaceDir, "result.json"),
+    `${JSON.stringify(candidate, null, 2)}\n`,
+    "utf8",
   );
+  return { candidate };
 }
 
 export function defaultProjectTierEscalation({
@@ -1631,6 +2468,8 @@ export function claimNext(
     let row = null;
     let spec = null;
     let staleRefusal = null;
+    /** Runs terminalized in this transaction, so the caller can log each one. */
+    const deadLettered = [];
     let checkoutVersion;
     const resolveCheckoutVersion = () => {
       if (checkoutVersion !== undefined) return checkoutVersion;
@@ -1652,17 +2491,20 @@ export function claimNext(
         continue;
       const candidateSpec = JSON.parse(candidate.spec_json);
       if (!satisfiesPlacement(labels, candidateSpec.placement)) continue;
-      if (
-        adapters &&
-        !adapterOverride &&
-        !adapters.includes(candidateSpec.adapter)
-      )
-        continue;
-      // The worker snapshots the registry and policy at startup. A run planned
-      // against another checkout must stay QUEUED; leasing it would execute and
-      // validate with incompatible definitions. Compare the live checkout too
-      // so only an actually stale worker reloads — an older queued spec must not
-      // put a fresh supervisor into an endless exit-75 loop.
+      // An allow-list bounds what this worker may claim; --adapter-override
+      // lets it execute anything with the forced adapter, so the claim path
+      // ignores the list. The dead-letter path below does not: terminalizing a
+      // run is a decision about work this worker is actually responsible for.
+      const adapterAllowed =
+        !adapters || adapters.includes(candidateSpec.adapter);
+      if (adapters && !adapterOverride && !adapterAllowed) continue;
+      // The worker snapshots the registry and policy at startup. Leasing a run
+      // planned against another checkout would execute and validate with
+      // incompatible definitions. Compare the live checkout too: a run matching
+      // the current checkout asks this stale worker to reload, while a run that
+      // differs from the current checkout can never become claimable and — once
+      // it has outlived a deploy window — must not keep singleton schedules in
+      // flight forever.
       if (
         registryVersion &&
         (candidateSpec.promptVersion !== registryVersion ||
@@ -1685,13 +2527,44 @@ export function claimNext(
         };
         if (reloadRequired) return refusal;
         staleRefusal ??= refusal;
+        // Dead-letter only what is provably unclaimable. checkoutPolicyVersion()
+        // degrades to "unknown" on a transient `git rev-parse` failure, and a
+        // mismatch against a version we could not read is no evidence at all —
+        // one failed probe must not terminalize the whole queue.
+        const queuedAt = Date.parse(candidate.queued_at);
+        const aged =
+          Number.isFinite(queuedAt) &&
+          queuedAt + STALE_DEAD_LETTER_MS <= claimNow;
+        if (current && current !== "unknown" && adapterAllowed && aged) {
+          transition(db, {
+            runId: candidate.run_id,
+            to: "CANCELLED",
+            expectFrom: "QUEUED",
+            actor: owner,
+            reason: "registry_stale",
+            policyVersion,
+            now: claimNow,
+          });
+          deadLettered.push({
+            runId: candidate.run_id,
+            specVersion: `${candidateSpec.promptVersion}/${candidateSpec.policyVersion}`,
+            workerRegistryVersion: registryVersion,
+            checkoutRegistryVersion: current,
+          });
+        }
+        // Continue looking so one orphaned run cannot keep compatible queued
+        // work behind it from being leased in this claim transaction.
         continue;
       }
       row = candidate;
       spec = candidateSpec;
       break;
     }
-    if (!row) return staleRefusal;
+    if (!row) {
+      if (staleRefusal && deadLettered.length)
+        staleRefusal.deadLettered = deadLettered;
+      return staleRefusal;
+    }
     const attempt = row.attempts + 1;
     const fencingToken = nextCounter(db, "fencing");
     const leaseExpiresAt = iso(
@@ -1716,7 +2589,13 @@ export function claimNext(
       now: claimNow,
     });
 
-    return { runId: row.run_id, attempt, fencingToken, spec };
+    return {
+      runId: row.run_id,
+      attempt,
+      fencingToken,
+      spec,
+      ...(deadLettered.length ? { deadLettered } : {}),
+    };
   });
 }
 
@@ -1870,6 +2749,7 @@ function deferTransientDispatchGate(
     policyVersion,
     now,
     reasonCode,
+    expectFrom = "RUNNING",
     maxRequeues = DEFAULT_MAX_TRANSIENT_GATE_REQUEUES,
     random = Math.random,
   },
@@ -1898,10 +2778,26 @@ function deferTransientDispatchGate(
 
     const requeueNumber = prior + 1;
     const backoffMs = claimLockBackoffMs(requeueNumber, random);
+    // VERIFYING normally only reaches a terminal state. A transient forge
+    // read is different: preserve the legal lifecycle journal without
+    // finalizing (or charging) this attempt, then use the same QUEUED
+    // transient-gate record as the pre-execution path.
+    if (expectFrom === "VERIFYING") {
+      transition(db, {
+        runId,
+        to: "FAILED",
+        expectFrom,
+        actor: owner,
+        reason: `handoff_transient:${reasonCode}`,
+        attempt,
+        policyVersion,
+        now: currentNow,
+      });
+    }
     transition(db, {
       runId,
       to: "QUEUED",
-      expectFrom: "RUNNING",
+      expectFrom: expectFrom === "VERIFYING" ? "FAILED" : expectFrom,
       actor: owner,
       reason: `dispatch_gate_transient:${reasonCode}:${requeueNumber}:backoff_${backoffMs}ms`,
       attempt,
@@ -1955,6 +2851,104 @@ export function claimedRetryFor(db, runId, attempt) {
   return { runId, priorAttempt, reasonCode: "lease_expired" };
 }
 
+/**
+ * Verify the operator authorisation against the run input and live ticket
+ * bytes before an agent can see it. Decision effects mint descriptionHash with hashBytes(description)
+ * (UTF-8, no appended newline); keeping the inverse here removes the model's
+ * former freedom to choose a different byte recipe.
+ *
+ * The returned input is an execution-only copy. The durable RunSpec remains
+ * immutable, while input.json and the adapter receive verified: true.
+ */
+export function humanDecisionAuthorisationGate(
+  input,
+  { fetchTicket = defaultFetchTicket } = {},
+) {
+  const authorisation = input?.humanDecision?.authorisation;
+  if (!authorisation) return { ok: true, input };
+
+  // The authorisation is single-use and bound to one ticket: decision effects
+  // mint it with the inbox item's issue/repo refs. A copy carried into another
+  // run's input must never authorise that run.
+  if (
+    String(authorisation.ticket ?? "") !== String(input?.ticket ?? "") ||
+    String(authorisation.repo ?? "") !== String(input?.repo ?? "")
+  ) {
+    return {
+      ok: false,
+      refusal: {
+        decision: "noop",
+        reason: "authorisation_stale:ticket",
+        detail:
+          "humanDecision.authorisation.ticket/repo do not match the run input ticket/repo",
+      },
+      evidence: { descriptionHash: null, ownedPaths: [] },
+    };
+  }
+
+  const ticket = fetchTicket(input.ticket, input.repo);
+  const description = ticket?.description;
+  const descriptionHash =
+    typeof description === "string" ? hashBytes(description) : null;
+  const ownedPaths =
+    typeof description === "string" ? parseOwnedPaths(description) : [];
+  // Refusal evidence is a fingerprint, never the raw ticket JSON.
+  const evidence = { descriptionHash, ownedPaths };
+
+  if (
+    descriptionHash === null ||
+    authorisation.descriptionHash !== descriptionHash
+  ) {
+    return {
+      ok: false,
+      refusal: {
+        decision: "noop",
+        reason: "authorisation_stale:description",
+        detail:
+          "humanDecision.authorisation.descriptionHash does not match the canonical hashBytes of the current ticket description",
+      },
+      evidence,
+    };
+  }
+
+  // The operator may narrow the scope (decision-effects authorisedPaths keeps
+  // only the chosen paths), so `paths` must be a non-empty subset of the
+  // ticket's current Owned Paths — "authorisation.paths ∩ Owned Paths" in
+  // docs/event-runtime-inbox.md §3.1. Anything outside Owned Paths means the
+  // ticket's scope moved after approval; an empty set authorises nothing.
+  const authorisedPaths = Array.isArray(authorisation.paths)
+    ? authorisation.paths.filter((entry) => typeof entry === "string")
+    : [];
+  const ownedSet = new Set(ownedPaths);
+  const foreignPaths = authorisedPaths.filter((entry) => !ownedSet.has(entry));
+  if (authorisedPaths.length === 0 || foreignPaths.length > 0) {
+    return {
+      ok: false,
+      refusal: {
+        decision: "noop",
+        reason: "authorisation_stale:paths",
+        detail:
+          authorisedPaths.length === 0
+            ? "humanDecision.authorisation.paths is empty; nothing is authorised"
+            : `humanDecision.authorisation.paths is not a subset of the ticket's Owned Paths: ${foreignPaths.join(", ")}`,
+      },
+      evidence,
+    };
+  }
+
+  return {
+    ok: true,
+    input: {
+      ...input,
+      humanDecision: {
+        ...input.humanDecision,
+        authorisation: { ...authorisation, verified: true },
+      },
+    },
+    evidence: { ...evidence, ticket },
+  };
+}
+
 function contradictsPlanTimeOwnedPaths(spec, gateResult) {
   const planned = spec?.approvalPolicy?.dispatchEvidence?.ticket;
   const current = gateResult?.evidence?.ticket;
@@ -1992,8 +2986,35 @@ export function checkoutPolicyVersion(repoRoot = FACTORY_ROOT) {
   }
 }
 
-/** What "the worker's code" is: everything the claim loop actually executes. */
-export const CODE_STAMP_PATHS = ["event-runtime/lib", "event-runtime/cli.mjs"];
+/**
+ * Data that changes the meaning of a planned run.  Keep this separate from
+ * the executable paths so callers that add another code directory cannot
+ * accidentally drop the registry inputs from the worker stamp.
+ */
+export const REGISTRY_STAMP_PATHS = [
+  "event-runtime/agents",
+  "event-runtime/schemas",
+  "event-runtime/event-types.json",
+  "event-runtime/edges.json",
+  "event-runtime/schedules.json",
+];
+
+/** The effective local config, including the clean-checkout example fallback. */
+export function resolvedRegistryConfigPaths(repoRoot = codeStampRoot()) {
+  return ["policy", "schedule"].map((name) => {
+    const local = `config/${name}.yaml`;
+    return existsSync(path.join(repoRoot, local))
+      ? local
+      : `config/${name}.example.yaml`;
+  });
+}
+
+/** What "the worker's code" is: executable code plus resolved registry data. */
+export const CODE_STAMP_PATHS = [
+  "event-runtime/lib",
+  "event-runtime/cli.mjs",
+  ...REGISTRY_STAMP_PATHS,
+];
 
 /** Re-stamping cadence. The poll loop is faster (500ms) and must not re-hash twice a second. */
 export const RELOAD_CHECK_INTERVAL_MS = 1_000;
@@ -2028,7 +3049,14 @@ export function codeStampFiles(
   paths = CODE_STAMP_PATHS,
 ) {
   const files = [];
-  for (const rel of paths) {
+  // cli/work.mjs adds event-runtime/cli to the executable set.  Always union
+  // the registry inputs so that older/custom call sites cannot create a
+  // code-only watcher which would execute stale definitions.
+  for (const rel of new Set([
+    ...paths,
+    ...REGISTRY_STAMP_PATHS,
+    ...resolvedRegistryConfigPaths(repoRoot),
+  ])) {
     const abs = path.join(repoRoot, rel);
     let st;
     try {
@@ -2042,17 +3070,9 @@ export function codeStampFiles(
   return files.map((f) => path.relative(repoRoot, f)).sort();
 }
 
-function gitHead(repoRoot) {
-  const result = spawnSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], {
-    encoding: "utf8",
-    timeout: workerSubprocessTimeoutMs(),
-  });
-  return result.status === 0 ? result.stdout.trim().slice(0, 12) : "nogit";
-}
-
 /**
- * A short, stable identity for the code this worker is running: HEAD plus a
- * content hash of the stamp paths.
+ * A short, stable identity for the code and registry data this worker is
+ * running: a content hash of the stamp paths.
  *
  * Contents, not mtimes — a `git checkout` that rewrites a file back to what it
  * already was must NOT bounce the worker, and an uncommitted edit must, which
@@ -2074,7 +3094,9 @@ export function codeStamp(
     }
     hash.update("\0");
   }
-  return `${gitHead(repoRoot)}:${hash.digest("hex").slice(0, 12)}`;
+  // Do not include HEAD: committing an unrelated README must not bounce every
+  // worker when none of the bytes it executes or resolves changed.
+  return `files:${hash.digest("hex").slice(0, 12)}`;
 }
 
 /**
@@ -2133,18 +3155,25 @@ export function createReloadWatcher({
   };
 }
 
-const linearCli = () => path.join(FACTORY_ROOT, "tools", "linear.mjs");
+const linearCli = () => path.join(FACTORY_ROOT, "tools", "ticket.mjs");
 
 /**
- * Resolve Linear credentials the same way the CLI does: process env first,
- * then the operator's shared env file. The resolved value is copied into the
- * supplied env so every Linear CLI child inherits it; it is never logged.
+ * Resolve Linear credentials from the environment, optionally reading an
+ * explicitly configured env file. Tests and offline runs never read disk for
+ * a key; their children inherit the same offline guard through process.env.
  */
 export function resolveLinearApiKey({
   env = process.env,
-  envFile = path.join(homedir(), "Develop", "hdkiller", ".env"),
+  envFile = env.FACTORY_LINEAR_ENV_FILE,
 } = {}) {
   if (env.LINEAR_API_KEY) return env.LINEAR_API_KEY;
+  if (
+    env.FACTORY_LINEAR_OFFLINE === "1" ||
+    env.NODE_ENV === "test" ||
+    env.BUN_TEST
+  )
+    return null;
+  if (!envFile) return null;
   if (!existsSync(envFile)) return null;
 
   try {
@@ -2173,6 +3202,21 @@ export function runLinearCli(
   args,
   { command = "bun", timeoutMs = workerSubprocessTimeoutMs(), repo } = {},
 ) {
+  // Do not even spawn the tracker CLI in test/offline mode. Besides making the
+  // child inherit tools/ticket.mjs's fetch guard, this makes an omitted test
+  // seam observable before a real executable can escape the test process.
+  if (
+    process.env.FACTORY_LINEAR_ALLOW_NETWORK !== "1" &&
+    (process.env.FACTORY_LINEAR_OFFLINE === "1" ||
+      process.env.NODE_ENV === "test" ||
+      process.env.BUN_TEST)
+  ) {
+    const error = new Error(
+      "linear_offline_guard: tracker CLI spawn is disabled in test/offline mode",
+    );
+    error.code = "linear_offline_guard";
+    throw error;
+  }
   // --repo so ticket.mjs resolves the ticket's OWN control plane. Without it a
   // Linear-repo claim/read runs against the worker cwd's plane (github) and
   // silently no-ops — the claim read-back then reports ticket_claim_lost,
@@ -2233,14 +3277,17 @@ export function defaultUnclaimTicket({
       Array.isArray(cur.labels) ? cur.labels : (cur.labels?.nodes ?? [])
     ).map((l) => l.name);
     const { add, remove } = releaseLabels(currentNames, { to: "Todo" });
-    runCli([
-      "state",
-      ticket,
-      "Todo",
-      "--unassign",
-      ...add.flatMap((n) => ["--add", n]),
-      ...remove.flatMap((n) => ["--remove", n]),
-    ]);
+    runCli(
+      [
+        "state",
+        ticket,
+        "Todo",
+        "--unassign",
+        ...add.flatMap((n) => ["--add", n]),
+        ...remove.flatMap((n) => ["--remove", n]),
+      ],
+      { repo },
+    );
     const body = `Dispatch run failed, claim released back to Todo + ai:agent-ready.\n\n**Why:** ${why}${log ? `\n**Log:** \`${log.replace(homedir(), "~")}\`` : ""}`;
     runCli(["comment", ticket, body], { repo });
     return true;
@@ -2346,8 +3393,8 @@ export function defaultReturnHandoffTicket({
   try {
     const cur =
       typeof fetchTicket === "function"
-        ? fetchTicket(ticket)
-        : defaultFetchTicket(ticket);
+        ? fetchTicket(ticket, repo)
+        : defaultFetchTicket(ticket, repo);
     const state = cur?.state?.name;
     if (!cur || !["In Progress", "In Review"].includes(state)) return false;
     const args = [
@@ -2365,7 +3412,7 @@ export function defaultReturnHandoffTicket({
     let agentReadyRestored = true;
     let labelWarning = null;
     try {
-      runCli(args);
+      runCli(args, { repo });
     } catch {
       // `--add ai:agent-ready` can fail independently of the state move
       // (e.g. the Owned Paths closure check re-running on `--add`). Retry as
@@ -2375,6 +3422,7 @@ export function defaultReturnHandoffTicket({
       // dispatchable again.
       runCli(
         args.filter((a, i) => !(a === "--add" || args[i - 1] === "--add")),
+        { repo },
       );
       try {
         runCli(["labels", ticket, "--add", "ai:agent-ready"], { repo });
@@ -2464,10 +3512,18 @@ export function defaultReconcileVerifiedHandoffTicket({
   }
 }
 
-/** Convert an already-opened PR to draft and say why, so nobody merges a red handoff. */
-function defaultHoldPullRequest({ github, prNumber, body }) {
+/**
+ * Convert an already-opened PR to draft and say why, so nobody merges a red
+ * handoff (merge-apply skips drafts). `forge` is a test seam only.
+ */
+export function defaultHoldPullRequest({
+  github,
+  prNumber,
+  body,
+  forge = null,
+}) {
   if (!github || !Number.isInteger(prNumber)) return false;
-  const forge = loadForge();
+  forge ??= loadForge();
   const opts = { timeout: workerSubprocessTimeoutMs() };
   let held = false;
   try {
@@ -2491,7 +3547,7 @@ function defaultFetchHandoffPullRequest({ github, prNumber }) {
     throw new Error("handoff PR requires github and a numeric PR number");
   }
   return loadForge().prView(github, prNumber, {
-    fields: ["baseRefName", "body", "isDraft"],
+    fields: ["baseRefName", "body", "headRefOid", "isDraft"],
     timeout: workerSubprocessTimeoutMs(),
   });
 }
@@ -2507,16 +3563,20 @@ function escapeRegExp(value) {
 }
 
 /**
- * True when some body line is a `Fixes <ticket>` line (case-insensitive,
- * tolerant of surrounding whitespace and one trailing punctuation mark).
- * Accepts the full `owner/repo#n` form, the short `#n` form when the PR
- * lives in that repository, and Linear ids verbatim. Returns null when the
- * handoff carries no usable ticket, so the caller reports "unknown" rather
- * than probing the body for `Fixes null`.
+ * Finds a valid `Fixes <ticket>` first line (case-insensitive, tolerant of
+ * surrounding whitespace and one trailing punctuation mark). A body may open
+ * with blank lines, so "first" means the first non-empty line. When no such
+ * line is found the result distinguishes the two correctable shapes: a
+ * well-formed Fixes line that sits somewhere further down (`misplacedLine` —
+ * move it to the top) from a Fixes-like line that is malformed
+ * (`malformedLine` — rewrite it). Accepts the full `owner/repo#n` form, the
+ * short `#n` form when the PR lives in that repository, and Linear ids
+ * verbatim. Returns null when the handoff carries no usable ticket, so the
+ * caller reports "unknown" rather than probing the body for `Fixes null`.
  */
-function handoffFixesLinePresent({ lines, ticket, github }) {
+function handoffFixesLine({ lines, ticket, github }) {
   const ref = typeof ticket === "string" ? ticket.trim() : "";
-  if (!ref) return null;
+  if (!ref) return { present: null, malformedLine: null, misplacedLine: null };
   const alternatives = [escapeRegExp(ref)];
   const repoMatch = /^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#([0-9]+)$/.exec(ref);
   if (
@@ -2530,7 +3590,17 @@ function handoffFixesLinePresent({ lines, ticket, github }) {
     `^\\s*fixes\\s+(?:${alternatives.join("|")})\\s*[.,;:]?\\s*$`,
     "i",
   );
-  return lines.some((line) => pattern.test(line));
+  const firstLine = lines.find((line) => line.trim() !== "") ?? "";
+  if (pattern.test(firstLine))
+    return { present: true, malformedLine: null, misplacedLine: null };
+  const misplacedLine = lines.find((line) => pattern.test(line)) ?? null;
+  if (misplacedLine !== null)
+    return { present: false, malformedLine: null, misplacedLine };
+  return {
+    present: false,
+    malformedLine: lines.find((line) => /^\s*fixes\b/i.test(line)) ?? null,
+    misplacedLine: null,
+  };
 }
 
 /**
@@ -2557,6 +3627,14 @@ export function assertHandoffPullRequestBase({
   try {
     pr = fetchPullRequest({ github: handoff.github, prNumber });
   } catch (err) {
+    if (err?.code === "forge_rate_limited") {
+      throw new ContractViolation(
+        [
+          `handoff_forge_unavailable: GitHub rate limited PR #${prNumber} base read`,
+        ],
+        { reasonCode: HANDOFF_FORGE_UNAVAILABLE, handoff },
+      );
+    }
     throw new ContractViolation(
       [
         `pr_base_unreadable: could not read base for PR #${prNumber}: ${String(err?.message ?? err)}`,
@@ -2571,20 +3649,36 @@ export function assertHandoffPullRequestBase({
   const bodyLines = (typeof pr?.body === "string" ? pr.body : "").split(
     /\r?\n/,
   );
-  const hasFixesLine = handoffFixesLinePresent({
+  const fixesLine = handoffFixesLine({
     lines: bodyLines,
     ticket: handoff.ticket,
     github: handoff.github,
   });
+  const hasFixesLine = fixesLine.present;
   const hasRunTrailer =
     typeof handoff.runId === "string" && handoff.runId.trim()
       ? bodyLines.some((line) => line.trim() === `run:${handoff.runId.trim()}`)
       : null;
+  const hasUnexpandedRunTrailer =
+    typeof handoff.runId === "string" && handoff.runId.trim()
+      ? bodyLines.some((line) => {
+          const trailer = line.trim();
+          return (
+            trailer === "run:$FACTORY_RUN_ID" ||
+            trailer === "run:${FACTORY_RUN_ID}"
+          );
+        })
+      : null;
   handoff.pr = {
     number: prNumber,
     draft: pr?.isDraft === true,
+    headSha:
+      typeof pr?.headRefOid === "string" && pr.headRefOid.trim()
+        ? pr.headRefOid.trim()
+        : null,
     hasFixesLine,
     hasRunTrailer,
+    hasUnexpandedRunTrailer,
   };
   handoff.prDraft = handoff.pr.draft;
   if (!actual) {
@@ -2602,13 +3696,60 @@ export function assertHandoffPullRequestBase({
     );
   }
   if (hasFixesLine === false) {
+    let formDetail;
+    if (fixesLine.misplacedLine !== null) {
+      // The line is correct — only its position is wrong. Saying "malformed"
+      // here would quote the expectation back as the offence.
+      formDetail = ` has ${JSON.stringify(fixesLine.misplacedLine.trim())} but it must be the first line of the PR body`;
+    } else if (fixesLine.malformedLine) {
+      formDetail = ` has malformed Fixes line ${JSON.stringify(fixesLine.malformedLine)}; expected exactly Fixes ${handoff.ticket}`;
+    } else {
+      formDetail = ` has no Fixes line for ${handoff.ticket}`;
+    }
     throw new ContractViolation(
-      [
-        `handoff_pr_form_invalid: PR #${prNumber} is missing Fixes ${handoff.ticket}`,
-      ],
+      [`handoff_pr_form_invalid: PR #${prNumber}${formDetail}`],
       { reasonCode: "handoff_pr_form_invalid", handoff },
     );
   }
+  if (hasUnexpandedRunTrailer) {
+    throw new ContractViolation(
+      [
+        `run_trailer_unexpanded: PR #${prNumber} contains a literal run trailer; append the concrete run ID with printf 'run:%s\\n' "$FACTORY_RUN_ID"`,
+      ],
+      { reasonCode: "run_trailer_unexpanded", handoff },
+    );
+  }
+}
+
+/**
+ * Promote a successfully verified dispatch PR out of draft so GitHub routes
+ * its full CI lane. The handoff's state is updated only after `gh pr ready`
+ * succeeds, making the worker-authored handoff comment an observation of the
+ * final PR state rather than the draft state it had during local verification.
+ *
+ * Best effort, like the handoff comment itself: the run is already verified by
+ * the time this is called, so a transient forge error must not fail it, redraft
+ * anything, or bounce the ticket. On failure the handoff keeps `draft: true`,
+ * the comment truthfully records `draft: yes`, and this returns false.
+ */
+export function defaultMarkHandoffPullRequestReady({ handoff, forge = null }) {
+  if (handoff?.pr?.draft !== true) return false;
+  const prNumber = handoffPrNumber(handoff);
+  if (!handoff.github || !prNumber) return false;
+  try {
+    forge ??= loadForge();
+    forge.prSetDraft(handoff.github, prNumber, false, {
+      timeout: workerSubprocessTimeoutMs(),
+    });
+  } catch (err) {
+    console.error(
+      `[worker] could not mark PR #${prNumber} ready for review: ${String(err?.message ?? err)}`,
+    );
+    return false;
+  }
+  handoff.pr.draft = false;
+  handoff.prDraft = false;
+  return true;
 }
 
 const BASELINE_COMMENT_MARKER = "wm:baseline:red:";
@@ -2645,13 +3786,15 @@ function hasRecordedBaselineFailureComment(ticket, signature, repo) {
   }
 }
 
-function defaultBlockBaselineTicket({
+export function defaultBlockBaselineTicket({
   repo,
   ticket,
   why,
   log = null,
   baseline = null,
   fetchTicket,
+  runCli = runLinearCli,
+  hasRecordedBaselineFailure = hasRecordedBaselineFailureComment,
 }) {
   try {
     let cur = null;
@@ -2669,22 +3812,25 @@ function defaultBlockBaselineTicket({
       return false;
 
     const signature = baselineFailureSignature({ why, log, baseline });
-    runLinearCli([
-      "state",
-      ticket,
-      "Blocked",
-      "--unassign",
-      "--add",
-      "ai:blocked",
-      "--remove",
-      "ai:in-progress",
-    ]);
+    runCli(
+      [
+        "state",
+        ticket,
+        "Blocked",
+        "--unassign",
+        "--add",
+        "ai:blocked",
+        "--remove",
+        "ai:in-progress",
+      ],
+      { repo },
+    );
 
-    if (!hasRecordedBaselineFailureComment(ticket, signature, repo)) {
+    if (!hasRecordedBaselineFailure(ticket, signature, repo)) {
       const marker = `${BASELINE_COMMENT_MARKER}${signature}`;
       const body = `Dispatch run blocked due pre-existing baseline red.\n\n**Why:** ${why}${log ? `\n**Log:** \`${log.replace(homedir(), "~")}\`` : ""}\n\n
 <!-- ${marker} -->`;
-      runLinearCli(["comment", ticket, body], { repo });
+      runCli(["comment", ticket, body], { repo });
     }
     return true;
   } catch {
@@ -2717,6 +3863,10 @@ export async function executeClaimed(
     resolveLinearKey = resolveLinearApiKey,
     policyRoot = FACTORY_ROOT,
     sandboxAvailability,
+    materializeWorktree,
+    localNotifyFetch,
+    acquireClaimLock: acquireClaimLockFn = acquireClaimLock,
+    verifyResult: verifyResultFn = verifyResult,
   } = {},
 ) {
   const { runId, attempt, fencingToken, spec } = claim;
@@ -2747,6 +3897,8 @@ export async function executeClaimed(
     }
     destroyWorkspace(workspaceDir, {
       retain: retainWorkspace,
+      // Integrity evidence is persisted in the retained wrapper, so its
+      // repository checkout can always be released and deregistered.
       checkout: fenced ? null : checkoutPath,
       repoName,
     });
@@ -2799,6 +3951,8 @@ export async function executeClaimed(
       returnHandoffTicket: () => true,
       reconcileVerifiedHandoffTicket: () => false,
       holdPullRequest: () => false,
+      markHandoffPullRequestReady: () => false,
+      findWorkspacePullRequest: () => null,
     };
   } else if (dispatchStubSelected) {
     // A caller that supplies only some dispatch seams (locks, ticket reads,
@@ -2812,6 +3966,8 @@ export async function executeClaimed(
       returnHandoffTicket: () => true,
       reconcileVerifiedHandoffTicket: () => false,
       holdPullRequest: () => false,
+      markHandoffPullRequestReady: () => false,
+      findWorkspacePullRequest: () => null,
       ...dispatchOpts,
     };
   }
@@ -2861,9 +4017,13 @@ export async function executeClaimed(
     dispatchOpts?.holdPullRequest ?? defaultHoldPullRequest;
   const fetchHandoffPullRequestFn =
     dispatchOpts?.fetchHandoffPullRequest ?? defaultFetchHandoffPullRequest;
+  const markHandoffPullRequestReadyFn =
+    dispatchOpts?.markHandoffPullRequestReady ??
+    defaultMarkHandoffPullRequestReady;
   const projectTierEscalationFn =
     dispatchOpts?.projectTierEscalation ?? defaultProjectTierEscalation;
   let handoffContext = null;
+  let executionInput = spec.input;
 
   const nowFn = typeof now === "function" ? now : () => now ?? Date.now();
 
@@ -2871,6 +4031,27 @@ export async function executeClaimed(
     const eligibility = tierEscalationEligibility(spec, reasonCode);
     if (!eligibility.eligible) return false;
     return failureCount(db, runId, "agent_error") + 1 >= spec.maxAttempts;
+  };
+
+  // The guard performs live tracker and forge reads. Memoize per reason code:
+  // a terminal path consults it once for the claim-release decision and again
+  // inside the escalation write, and those two answers must be the same world.
+  let escalationGuardCache = null;
+  const resolveEscalationGuard = (reasonCode) => {
+    if (escalationGuardCache?.reasonCode === reasonCode) {
+      return escalationGuardCache.guard;
+    }
+    const guard = tierEscalationDue(reasonCode)
+      ? tierEscalationContinuationGuard(spec, reasonCode, {
+          fetchTicket: fetchTicketFn,
+          findPullRequest:
+            dispatchOpts?.findWorkspacePullRequest ??
+            defaultFindWorkspacePullRequest,
+          workspacePath: worktreePath ?? checkoutPath,
+        })
+      : null;
+    escalationGuardCache = { reasonCode, guard };
+    return guard;
   };
 
   const projectScheduledEscalation = (scheduled) =>
@@ -2883,26 +4064,50 @@ export async function executeClaimed(
         })
       : null;
 
-  const abortController = new AbortController();
-  ACTIVE_EXECUTIONS.set(runId, {
-    abort: (reason) => abortController.abort(reason),
-    controller: abortController,
-    runId,
-    attempt,
-  });
-  let cancelPoll = setInterval(() => {
+  const commentTierEscalationSkip = (reason) => {
+    if (!reason || !mayMutateClaimedTicket()) return;
+    const why =
+      reason === "ticket_in_review"
+        ? "ticket is already In Review"
+        : "the retained worktree already has an open non-draft PR";
     try {
-      const state = db
-        .query(`SELECT state FROM runs WHERE run_id = ?`)
-        .get(runId)?.state;
-      if (state === "CANCELLED" && !abortController.signal.aborted) {
-        abortController.abort("db_cancelled");
-      }
+      commentTicketFn({
+        repo: repoName,
+        ticket: ticketId,
+        body: `Tier escalation skipped: ${why}; failed run \`${runId}\` remains with the existing review handoff.`,
+      });
     } catch {
-      // ignore
+      /* The terminal run remains recorded even if tracker commentary fails. */
     }
-  }, 250);
-  cancelPoll?.unref?.();
+  };
+
+  const abortController = new AbortController();
+  let cancelPoll = null;
+  // Idempotent so a supervised follow-up adapter turn (the bounded Pi result
+  // repair) can re-arm cancellation after the primary execution stopped it.
+  const startCancellationMonitor = () => {
+    ACTIVE_EXECUTIONS.set(runId, {
+      abort: (reason) => abortController.abort(reason),
+      controller: abortController,
+      runId,
+      attempt,
+    });
+    if (cancelPoll) return;
+    cancelPoll = setInterval(() => {
+      try {
+        const state = db
+          .query(`SELECT state FROM runs WHERE run_id = ?`)
+          .get(runId)?.state;
+        if (state === "CANCELLED" && !abortController.signal.aborted) {
+          abortController.abort("db_cancelled");
+        }
+      } catch {
+        // ignore
+      }
+    }, 250);
+    cancelPoll?.unref?.();
+  };
+  startCancellationMonitor();
   const stopCancellationMonitor = () => {
     if (cancelPoll) clearInterval(cancelPoll);
     cancelPoll = null;
@@ -2910,8 +4115,9 @@ export async function executeClaimed(
   };
 
   /** Terminal failure-shaped write: classify, finalize, and budget any retry atomically. */
-  const failTerminal = (to, journalReason, reasonCode) =>
-    txImmediate(db, () => {
+  const failTerminal = (to, journalReason, reasonCode, beforeTerminal) => {
+    const escalationGuard = resolveEscalationGuard(reasonCode);
+    const result = txImmediate(db, () => {
       const currentNow = nowFn();
       if (!assertCurrentToken(db, runId, fencingToken)) {
         recordFencedAttempt(db, {
@@ -2923,6 +4129,7 @@ export async function executeClaimed(
         });
         return { fenced: true };
       }
+      beforeTerminal?.(currentNow);
       const expectFrom = db
         .query(`SELECT state FROM runs WHERE run_id = ?`)
         .get(runId)?.state;
@@ -2960,7 +4167,7 @@ export async function executeClaimed(
           policyVersion,
           now: nowFn(),
         });
-      } else if (tierEscalationEligibility(spec, reasonCode).eligible) {
+      } else if (escalationGuard?.eligible && !escalationGuard.skip) {
         escalation = scheduleTierEscalation(db, registry, spec, {
           workspacePath: worktreePath ?? checkoutPath,
           sourceWorkspacePath: workspaceDir,
@@ -2968,6 +4175,7 @@ export async function executeClaimed(
           policyVersion,
           now: currentNow,
           reasonCode,
+          continuationGuard: escalationGuard,
         });
       }
       return {
@@ -2975,8 +4183,15 @@ export async function executeClaimed(
         cause: decision.cause,
         requeued: decision.retry,
         escalation,
+        tierEscalationSkip:
+          !decision.retry && escalationGuard?.skip
+            ? escalationGuard.reason
+            : null,
       };
     });
+    commentTierEscalationSkip(result?.tierEscalationSkip);
+    return result;
+  };
 
   let def = null;
   try {
@@ -3123,6 +4338,85 @@ export async function executeClaimed(
       return { ok: true, receipt };
     });
 
+  /** Convert a non-ContractViolation verify throw into a terminal FAILED summary. */
+  const failVerificationInternal = (err) => {
+    const reasonCode = verificationInternalReasonCode(err, [
+      worktreePath,
+      workspaceDir,
+    ]);
+    const error = verificationInternalErrorPayload(err);
+    const journalReason = `${reasonCode}: ${error.message}`;
+    if (mayMutateClaimedTicket()) {
+      try {
+        unclaimTicketFn({
+          repo: repoName,
+          ticket: ticketId,
+          why: journalReason,
+          log: null,
+        });
+      } catch {
+        /* intentionally ignored */
+      }
+    }
+    const result = {
+      schemaVersion: "factory.run-result/v1",
+      runId,
+      attempt,
+      terminalState: "failed",
+      reasonCode,
+      outputContract: spec.outputContract,
+      error,
+      verification: {
+        status: "failed",
+        stage: "verification",
+        checks: [],
+      },
+      artifacts: [],
+    };
+    let res;
+    let terminalError;
+    try {
+      res = failTerminal("FAILED", journalReason, reasonCode, (currentNow) => {
+        const receipt = receiptWithDeadlineExtensions(db, runId, {
+          runId,
+          spec,
+          def,
+          artifactHash: null,
+          evidenceSetHash: null,
+          journalHead: latestJournalHash(db, runId),
+          verificationStatus: "failed",
+          extraReceipt: filesystemConfinementReceipt,
+          harnessPins: materializedHarnessPins,
+        });
+        db.query(
+          `INSERT INTO results (run_id, attempt, result_json, artifact_hash, evidence_set_hash, verification_json, receipt_json, accepted_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          runId,
+          attempt,
+          canonicalJson(result),
+          "none",
+          null,
+          canonicalJson(result.verification),
+          canonicalJson(receipt),
+          iso(currentNow),
+        );
+      });
+    } catch (failErr) {
+      terminalError = recordTerminalError("failTerminal", failErr);
+    }
+    cleanupWorkspace({ retainWorkspace: retain });
+    if (res?.fenced) return { fenced: true };
+    return {
+      runId,
+      attempt,
+      terminalState: "FAILED",
+      reasonCode,
+      error,
+      ...(terminalError ? { terminalError } : {}),
+    };
+  };
+
   try {
     const started = txImmediate(db, () => {
       const currentNow = nowFn();
@@ -3149,10 +4443,31 @@ export async function executeClaimed(
       db.query(
         `UPDATE attempts SET started_at = ? WHERE run_id = ? AND attempt = ?`,
       ).run(iso(currentNow), runId, attempt);
-      return { ok: true };
+      return { ok: true, startedAt: iso(currentNow) };
     });
     if (started?.fenced) {
       return { fenced: true };
+    }
+
+    // A registry reload can remove an agent after its proposal was approved.
+    // Refuse the already-queued run before any dispatch claim, workspace, or
+    // adapter side effect.  This is an expected data change, not a loader
+    // crash and not a retryable execution failure.
+    if (!def) {
+      const refusedRes = refuseTerminal(
+        "agent_unregistered_after_reload",
+        ["registry_reload"],
+        { causeTyped: true },
+      );
+      stopCancellationMonitor();
+      if (refusedRes?.fenced) return { fenced: true };
+      return {
+        runId,
+        attempt,
+        terminalState: "REFUSED",
+        reasonCode: "agent_unregistered_after_reload",
+        receipt: refusedRes?.receipt,
+      };
     }
 
     const adapterKey = adapterOverride ?? spec.adapter;
@@ -3256,56 +4571,40 @@ export async function executeClaimed(
         };
       }
 
-      const lockAcquired = acquireClaimLock(lockFile, {
-        pid: process.pid,
-        now: nowFn(),
-        isAlive: isAliveFn,
-      });
-      if (!lockAcquired) {
-        const deferred = deferClaimLockContention(db, {
-          runId,
-          attempt,
-          fencingToken,
-          owner,
-          policyVersion,
-          now: nowFn,
-          maxRequeues: Number.isInteger(
-            dispatchOpts?.maxClaimLockContentionRequeues,
-          )
-            ? Math.max(0, dispatchOpts.maxClaimLockContentionRequeues)
-            : DEFAULT_MAX_CLAIM_LOCK_REQUEUES,
-          random: dispatchOpts?.random ?? Math.random,
-        });
-        if (deferred?.fenced) {
-          stopCancellationMonitor();
-          return { fenced: true };
-        }
-        if (deferred?.requeued) {
-          stopCancellationMonitor();
-          return {
-            runId,
-            attempt,
-            terminalState: "QUEUED",
-            reasonCode: "claim_lock_contention",
-            requeueAfterMs: deferred.backoffMs,
-          };
-        }
-        const res = refuseTerminal("claim_lock_starvation", [
-          "dispatch_claim_lock",
-        ]);
-        stopCancellationMonitor();
+      // WM-469 de-hardcoded the merge-fix role from the kernel: the definition
+      // declares `dispatchGateExempt: true` (validated by the registry) instead
+      // of a `gate: "merge-fix"` literal the worker string-matched. Keep the
+      // planner and worker keyed off the SAME declarative field — a legacy
+      // `gate` value is still honoured so an older pinned spec cannot silently
+      // fall through to the dispatch claim gate and refuse with ticket_assigned.
+      const gate =
+        def?.dispatchGateExempt === true
+          ? "merge-fix"
+          : (def?.gate ?? "dispatch");
+      if (!["dispatch", "merge-fix"].includes(gate)) {
+        const reasonCode = "worktree_gate_unknown";
+        const res = refuseTerminal(reasonCode, ["worktree_gate"]);
         if (res?.fenced) return { fenced: true };
         return {
           runId,
           attempt,
           terminalState: "REFUSED",
-          reasonCode: "claim_lock_starvation",
+          reasonCode,
           receipt: res?.receipt,
         };
       }
 
-      const deferTransientGate = (reasonCode) => {
+      // Tracker reads must finish before a dispatch contender acquires this
+      // repo's claim lock. A tracker brown-out is much longer than the small
+      // mutation window that the lock protects, and serialising it starves
+      // every other claimant for this repository.
+      let claimLockHeld = false;
+      const releaseGateLock = () => {
+        if (!claimLockHeld) return;
         releaseClaimLock(lockFile);
+        claimLockHeld = false;
+      };
+      const deferTransientGate = (reasonCode) => {
         const deferred = deferTransientDispatchGate(db, {
           runId,
           attempt,
@@ -3343,30 +4642,10 @@ export async function executeClaimed(
         };
       };
 
-      // WM-469 de-hardcoded the merge-fix role from the kernel: the definition
-      // declares `dispatchGateExempt: true` (validated by the registry) instead
-      // of a `gate: "merge-fix"` literal the worker string-matched. Keep the
-      // planner and worker keyed off the SAME declarative field — a legacy
-      // `gate` value is still honoured so an older pinned spec cannot silently
-      // fall through to the dispatch claim gate and refuse with ticket_assigned.
-      const gate =
-        def?.dispatchGateExempt === true
-          ? "merge-fix"
-          : (def?.gate ?? "dispatch");
-      if (!["dispatch", "merge-fix"].includes(gate)) {
-        releaseClaimLock(lockFile);
-        const reasonCode = "worktree_gate_unknown";
-        const res = refuseTerminal(reasonCode, ["worktree_gate"]);
-        if (res?.fenced) return { fenced: true };
-        return {
-          runId,
-          attempt,
-          terminalState: "REFUSED",
-          reasonCode,
-          receipt: res?.receipt,
-        };
-      }
-
+      // Evaluate every read-dependent eligibility check before the claim-lock
+      // acquisition below. The eventual claim remains the concurrency
+      // authority: if the ticket moved after this snapshot, its read-back is a
+      // normal failed claim rather than a second owner.
       let gateResult;
       try {
         if (gate === "merge-fix") {
@@ -3405,38 +4684,50 @@ export async function executeClaimed(
           if (worktreeHandoff?.projectionState === "pending") {
             return deferTransientGate("tier_escalation_projection_pending");
           }
-          gateResult = worktreeDispatchAutoEligibility(spec.input, {
-            ...(dispatchOpts ?? {}),
-            claimedRetry: claimedRetryFor(db, runId, attempt),
-            escalatedContinuation: worktreeHandoff,
-            hasTicketLease:
-              dispatchOpts?.hasTicketLease ??
-              ((repo, ticket) =>
-                liveWorkerLeases(repo, { dir: leasesDir }).some(
-                  (lease) => String(lease.ticket) === String(ticket),
-                )),
-            // Match the planner's operator-only bypass from the immutable
-            // proposal that admitted this run. Never trust caller options here:
-            // chain and schedule runs must keep the security/escalation gate.
-            //
-            // A spec field alone can never carry this authorisation: chain and
-            // schedule runs inherit approvalPolicy (dispatchEvidence included,
-            // via stableChainApprovalPolicyForHash) from the dispatch they
-            // descend from, so trusting `dispatchEvidence.checks
-            // .operator_authorized` would hand every descendant of one operator
-            // dispatch a permanent ai:escalated/security bypass. The escalation
-            // claim is only believed when the durable tier_escalations row read
-            // for THIS run authenticates it as the continuation of the exact
-            // failed run the spec names.
-            operatorAuthorized:
-              originatingEvent(db, runId)?.source === "operator" ||
-              (worktreeHandoff?.projectionState === "applied" &&
-                spec.approvalPolicy?.escalation?.operatorAuthorized === true &&
-                spec.approvalPolicy.escalation.failedRunId ===
-                  worktreeHandoff.failedRunId &&
-                spec.approvalPolicy.escalation.rootRunId ===
-                  worktreeHandoff.rootRunId),
+          const authorisationGate = humanDecisionAuthorisationGate(spec.input, {
+            fetchTicket: fetchTicketFn,
           });
+          if (!authorisationGate.ok) {
+            gateResult = authorisationGate;
+          } else {
+            executionInput = authorisationGate.input;
+            gateResult = worktreeDispatchAutoEligibility(spec.input, {
+              ...(dispatchOpts ?? {}),
+              ...(authorisationGate.evidence?.ticket
+                ? { fetchTicket: () => authorisationGate.evidence.ticket }
+                : {}),
+              claimedRetry: claimedRetryFor(db, runId, attempt),
+              escalatedContinuation: worktreeHandoff,
+              hasTicketLease:
+                dispatchOpts?.hasTicketLease ??
+                ((repo, ticket) =>
+                  liveWorkerLeases(repo, { dir: leasesDir }).some(
+                    (lease) => String(lease.ticket) === String(ticket),
+                  )),
+              // Match the planner's operator-only bypass from the immutable
+              // proposal that admitted this run. Never trust caller options here:
+              // chain and schedule runs must keep the security/escalation gate.
+              //
+              // A spec field alone can never carry this authorisation: chain and
+              // schedule runs inherit approvalPolicy (dispatchEvidence included,
+              // via stableChainApprovalPolicyForHash) from the dispatch they
+              // descend from, so trusting `dispatchEvidence.checks
+              // .operator_authorized` would hand every descendant of one operator
+              // dispatch a permanent ai:escalated/security bypass. The escalation
+              // claim is only believed when the durable tier_escalations row read
+              // for THIS run authenticates it as the continuation of the exact
+              // failed run the spec names.
+              operatorAuthorized:
+                originatingEvent(db, runId)?.source === "operator" ||
+                (worktreeHandoff?.projectionState === "applied" &&
+                  spec.approvalPolicy?.escalation?.operatorAuthorized ===
+                    true &&
+                  spec.approvalPolicy.escalation.failedRunId ===
+                    worktreeHandoff.failedRunId &&
+                  spec.approvalPolicy.escalation.rootRunId ===
+                    worktreeHandoff.rootRunId),
+            });
+          }
         }
       } catch (err) {
         if (
@@ -3446,7 +4737,6 @@ export async function executeClaimed(
         ) {
           return deferTransientGate("linear_read_failed");
         }
-        releaseClaimLock(lockFile);
         throw err;
       }
 
@@ -3475,13 +4765,54 @@ export async function executeClaimed(
           }
           return deferred;
         }
-        releaseClaimLock(lockFile);
+        // The retained PR was rejected by the failed run's handoff gate and is
+        // still open as a ready (non-draft) PR. Route it to review rather than
+        // silently stranding it behind a refused continuation that cannot
+        // open a second PR — and hold the PR itself (draft + quoted reason)
+        // so the merge stage cannot land it without a fix round. This happens
+        // before dispatch claim-lock acquisition, so both are independent CLI
+        // subprocesses rather than work inside the claim-lock window.
+        if (
+          gate === "dispatch" &&
+          gateRefusal.reason === "ticket_pr_handoff_verification_failed" &&
+          worktreeHandoff &&
+          assertCurrentToken(db, runId, fencingToken)
+        ) {
+          const heldPr = gateResult.evidence?.escalatedWorkspacePullRequest;
+          const heldPrNumber = Number(heldPr?.number);
+          const failedReason = worktreeHandoff.failedRunReasonCode ?? null;
+          if (Number.isInteger(heldPrNumber) && heldPrNumber > 0) {
+            try {
+              holdPullRequestFn({
+                repo: repoName,
+                github: gateResult.evidence?.repo?.github ?? null,
+                prNumber: heldPrNumber,
+                prUrl: heldPr?.url ?? null,
+                body: `**Result:** run ${worktreeHandoff.failedRunId} FAILED \`${failedReason ?? "handoff_verification_failed"}\` — the tier-${spec.modelTier ?? "escalation"} continuation ${runId} was refused (\`${gateRefusal.reason}\`) because this PR was still open and ready.\n\nConverted to draft by the factory worker: the handoff did not verify. Address the recorded failure before marking it ready for review.`,
+              });
+            } catch {
+              /* intentionally ignored */
+            }
+          }
+          try {
+            reconcileVerifiedHandoffTicketFn({
+              repo: repoName,
+              ticket: ticketId,
+              reason: failedReason,
+              prNumber: Number.isInteger(heldPrNumber) ? heldPrNumber : null,
+            });
+          } catch {
+            /* The continuation refusal remains durable if projection fails. */
+          }
+        }
         if (
           gate === "dispatch" &&
           [
             "ticket_claimed_by_other",
             "ticket_escalation_pr_closed",
             "ticket_escalation_pr_read_failed",
+            "ticket_pr_already_open",
+            "ticket_pr_handoff_verification_failed",
           ].includes(gateRefusal.reason) &&
           worktreeHandoff
         ) {
@@ -3502,11 +4833,60 @@ export async function executeClaimed(
         };
       }
 
+      if (gate === "dispatch") {
+        claimLockHeld = acquireClaimLockFn(lockFile, {
+          pid: process.pid,
+          now: nowFn(),
+          isAlive: isAliveFn,
+        });
+        if (!claimLockHeld) {
+          const deferred = deferClaimLockContention(db, {
+            runId,
+            attempt,
+            fencingToken,
+            owner,
+            policyVersion,
+            now: nowFn,
+            maxRequeues: Number.isInteger(
+              dispatchOpts?.maxClaimLockContentionRequeues,
+            )
+              ? Math.max(0, dispatchOpts.maxClaimLockContentionRequeues)
+              : DEFAULT_MAX_CLAIM_LOCK_REQUEUES,
+            random: dispatchOpts?.random ?? Math.random,
+          });
+          if (deferred?.fenced) {
+            stopCancellationMonitor();
+            return { fenced: true };
+          }
+          if (deferred?.requeued) {
+            stopCancellationMonitor();
+            return {
+              runId,
+              attempt,
+              terminalState: "QUEUED",
+              reasonCode: "claim_lock_contention",
+              requeueAfterMs: deferred.backoffMs,
+            };
+          }
+          const res = refuseTerminal("claim_lock_starvation", [
+            "dispatch_claim_lock",
+          ]);
+          stopCancellationMonitor();
+          if (res?.fenced) return { fenced: true };
+          return {
+            runId,
+            attempt,
+            terminalState: "REFUSED",
+            reasonCode: "claim_lock_starvation",
+            receipt: res?.receipt,
+          };
+        }
+      }
+
       if (gate === "merge-fix") {
         // The ticket is already assigned and under review by definition. The
         // merge-fix gate proved those live facts; trying the dispatch claim
         // verb here would reject the valid run as ticket_assigned.
-        releaseClaimLock(lockFile);
       } else {
         // The retry gate has already re-read and authenticated the surviving
         // claim. Do not run the mutating claim command again: besides being
@@ -3524,7 +4904,7 @@ export async function executeClaimed(
               harness: spec.adapter ?? "claude",
             });
           } finally {
-            releaseClaimLock(lockFile);
+            releaseGateLock();
           }
 
           if (!claimRes?.ok) {
@@ -3540,7 +4920,7 @@ export async function executeClaimed(
             };
           }
         } else {
-          releaseClaimLock(lockFile);
+          releaseGateLock();
         }
 
         ticketClaimed = true;
@@ -3616,13 +4996,18 @@ export async function executeClaimed(
         root: workspacesRoot,
         runId,
         attempt,
-        input: spec.input,
+        input: executionInput,
         workspace: spec.workspace,
+        // Declared capabilities drive the capability-gated CELLS.md guide the
+        // workspace materializes (#2149); without this the injection is dead
+        // code.
+        capabilities: def?.capabilities ?? null,
         artifactStore,
         adapter: adapterKey,
         ticketLeaseOwner,
         workerLeasesDir: leasesDir,
         worktreeHandoff,
+        materializeWorktree,
       });
     } catch (err) {
       // Missing declared inputs are permanent: re-queuing cannot repopulate an
@@ -3808,9 +5193,15 @@ export async function executeClaimed(
       deadlineTimer = setTimeout(refreshDeadline, leftMs);
       deadlineTimer.unref?.();
     };
-    refreshDeadline();
-    deadlinePoll = setInterval(refreshDeadline, DEADLINE_POLL_MS);
-    deadlinePoll.unref?.();
+    // Idempotent for the same reason as `startCancellationMonitor`: the
+    // bounded Pi result repair re-arms the durable deadline for its own turn.
+    const startDeadlineMonitor = () => {
+      if (deadlinePoll) return;
+      refreshDeadline();
+      deadlinePoll = setInterval(refreshDeadline, DEADLINE_POLL_MS);
+      deadlinePoll.unref?.();
+    };
+    startDeadlineMonitor();
     const stopDeadlineMonitor = () => {
       if (deadlineTimer) clearTimeout(deadlineTimer);
       if (deadlinePoll) clearInterval(deadlinePoll);
@@ -3818,20 +5209,81 @@ export async function executeClaimed(
       deadlinePoll = null;
     };
 
+    const workerEventHome =
+      env.FACTORY_EVENT_HOME ?? process.env.FACTORY_EVENT_HOME;
+    const workerEventPort =
+      env.FACTORY_EVENT_PORT ?? process.env.FACTORY_EVENT_PORT;
+    const workerControlToken =
+      env.FACTORY_CONTROL_API_TOKEN ?? process.env.FACTORY_CONTROL_API_TOKEN;
+    // The agent may have retained a notification because it deliberately
+    // lacks the control bearer. Callers drain in `finally` so an adapter throw
+    // can never strand a retained escalation, and only after the adapter has
+    // fully stopped, so no writer races the read/truncate cycle. Neither the
+    // drain nor its ticket comment may throw: the agent's primary terminal
+    // outcome (or error) always wins.
+    const drainNotifyOutboxSafely = async () => {
+      try {
+        const notificationDrain = isWorktree
+          ? await drainLocalNotifyOutbox({
+              runId,
+              home: workerEventHome,
+              port: workerEventPort,
+              token: workerControlToken,
+              fetchFn: localNotifyFetch,
+            })
+          : { delivered: [], undelivered: [] };
+        if (notificationDrain.undelivered.length && mayMutateClaimedTicket()) {
+          try {
+            const messages = notificationDrain.undelivered
+              .slice(0, 10)
+              .map(
+                ({ title, error }) => `- ${JSON.stringify(title)} — ${error}`,
+              )
+              .join("\n");
+            commentTicketFn({
+              repo: repoName,
+              ticket: ticketId,
+              body:
+                `## Notification outbox\n` +
+                `Worker could not deliver ${notificationDrain.undelivered.length} retained notification(s); intended text:\n${messages}`,
+            });
+          } catch {
+            // The retained outbox remains the recovery source if the tracker
+            // is down.
+          }
+        }
+      } catch (err) {
+        recordTerminalError("drainLocalNotifyOutbox", err);
+      }
+    };
+
     let outcome;
+    let adapterEnv;
     try {
       // Dispatch identity comes from the immutable RunSpec, never the ambient
       // worker environment. The adapter's child-environment builder preserves
       // these values while continuing to strip credentials it does not need.
-      const adapterEnv = dispatchIdentityEnv({
-        spec,
-        env,
-        runId,
-        ticketId,
-        repoName,
+      const dispatchEnv = { ...env };
+      for (const key of ["FACTORY_EVENT_HOME", "FACTORY_EVENT_PORT"]) {
+        if (dispatchEnv[key] === undefined && process.env[key] !== undefined)
+          dispatchEnv[key] = process.env[key];
+      }
+      adapterEnv = cellCapabilityEnv({
+        def,
+        env: dispatchIdentityEnv({
+          spec,
+          env: dispatchEnv,
+          runId,
+          ticketId,
+          repoName,
+          resultPath: path.join(workspaceDir, "result.json"),
+        }),
       });
       outcome = await adapter.execute({
-        spec,
+        spec:
+          executionInput === spec.input
+            ? spec
+            : { ...spec, input: executionInput },
         def,
         workspaceDir,
         timeoutMs: adapterExecuteTimeoutMs({
@@ -3849,6 +5301,7 @@ export async function executeClaimed(
     } finally {
       stopDeadlineMonitor();
       stopCancellationMonitor();
+      await drainNotifyOutboxSafely();
     }
 
     if (outcome?.usage)
@@ -3924,18 +5377,26 @@ export async function executeClaimed(
       // worktree command verification until after the fenced VERIFYING
       // transition below. The normal verifier then runs again in full.
       try {
-        verifyResult({
+        verifyResultFn({
           spec,
           def,
           registry,
           workspaceDir,
           attempt,
+          attemptStartedAt: started.startedAt,
           extraArtifacts: RUNTIME_ARTIFACTS,
+          // The empty record keeps worktree command verification suppressed;
+          // the checkout path is handed over separately so the stray-result
+          // probe still looks beside the worktree on this branch.
           worktreeRecord: {},
+          checkoutPath: worktreeRecord?.path ?? null,
+          onTrace,
         });
         lateCompletion = true;
       } catch (err) {
-        if (!(err instanceof ContractViolation)) throw err;
+        if (!(err instanceof ContractViolation)) {
+          return failVerificationInternal(err);
+        }
       }
 
       if (!lateCompletion) {
@@ -3985,7 +5446,15 @@ export async function executeClaimed(
     if (!lateCompletion && exitCode !== 0) {
       const reasonCode = `agent_exit_${exitCode}`;
       const escalating = tierEscalationDue(reasonCode);
-      if (mayMutateClaimedTicket() && !escalating) {
+      // A skipped escalation writes no continuation, so the claim has no
+      // successor to inherit it: release it here or the ticket is stranded
+      // In Progress forever. `defaultUnclaimTicket` no-ops unless the ticket
+      // is still In Progress + ai:in-progress, so the `ticket_in_review` skip
+      // cannot drag a reviewed ticket back to Todo (#2006).
+      const escalationGuard = escalating
+        ? resolveEscalationGuard(reasonCode)
+        : null;
+      if (mayMutateClaimedTicket() && (!escalating || escalationGuard?.skip)) {
         try {
           unclaimTicketFn({
             repo: repoName,
@@ -4006,6 +5475,9 @@ export async function executeClaimed(
         attempt,
         terminalState: "FAILED",
         reasonCode,
+        ...(res?.tierEscalationSkip
+          ? { tierEscalationSkip: res.tierEscalationSkip }
+          : {}),
         ...(res?.escalation
           ? {
               escalatedRunId: res.escalation.continuation_run_id,
@@ -4018,14 +5490,28 @@ export async function executeClaimed(
     // The settings policy is preventative; this is the independent, durable
     // check before a repository-read run's output can be accepted or emitted.
     // Mutating worktree workspaces are exempt.
+    const mustCheckWorkspaceIntegrity =
+      !isWorktree && !def.mutating && checkoutPath;
+    const checkoutStatus = mustCheckWorkspaceIntegrity
+      ? repositoryStatus(checkoutPath)
+      : null;
     if (
-      !isWorktree &&
-      !def.mutating &&
-      checkoutPath &&
-      (checkoutBaseline === null ||
-        repositoryStatus(checkoutPath) !== checkoutBaseline)
+      mustCheckWorkspaceIntegrity &&
+      (checkoutBaseline === null || checkoutStatus !== checkoutBaseline)
     ) {
       const reasonCode = "workspace_integrity_violation";
+      const evidence = writeWorkspaceIntegrityStatus(workspaceDir, {
+        checkoutStatus,
+        checkoutBaseline,
+      });
+      recorder("lifecycle", {
+        note: reasonCode,
+        checkoutStatus: evidence.status.value,
+        checkoutStatusBytes: evidence.status.bytes,
+        checkoutStatusTruncated: evidence.status.truncated,
+        checkoutBaselineSha256:
+          checkoutBaseline === null ? null : hashBytes(checkoutBaseline),
+      });
       const res = failTerminal("FAILED", reasonCode, reasonCode);
       cleanupWorkspace({ retainWorkspace: true });
       if (res?.fenced) return { fenced: true };
@@ -4062,15 +5548,18 @@ export async function executeClaimed(
     }
 
     let verified;
-    try {
-      verified = verifyResult({
+    let recovery = null;
+    verificationAttempt: try {
+      verified = verifyResultFn({
         spec,
         def,
         registry,
         workspaceDir,
         attempt,
+        attemptStartedAt: started.startedAt,
         extraArtifacts: RUNTIME_ARTIFACTS,
         worktreeRecord,
+        onTrace,
       });
       // `prNumber` was optional on pre-WM-576 dispatch artifacts. Preserve
       // their accepted handoffs; current dispatch prompts require it, and all
@@ -4083,23 +5572,231 @@ export async function executeClaimed(
         });
       }
     } catch (err) {
-      if (!(err instanceof ContractViolation)) throw err;
+      if (!(err instanceof ContractViolation)) {
+        return failVerificationInternal(err);
+      }
+      let activeError = err;
+      let recovered;
+      try {
+        recovered = recoverMissingDispatchResult({
+          error: err,
+          spec,
+          def,
+          workspaceDir,
+          worktreeRecord,
+          findPullRequest:
+            dispatchOpts?.findWorkspacePullRequest ??
+            defaultFindWorkspacePullRequest,
+          fetchPullRequest: fetchHandoffPullRequestFn,
+        });
+      } catch (recoveryError) {
+        if (!(recoveryError instanceof ContractViolation)) {
+          return failVerificationInternal(recoveryError);
+        }
+        activeError = recoveryError;
+      }
+      if (recovered) {
+        recovery = recovered;
+        try {
+          verified = verifyResultFn({
+            spec,
+            def,
+            registry,
+            workspaceDir,
+            attempt,
+            attemptStartedAt: started.startedAt,
+            extraArtifacts: RUNTIME_ARTIFACTS,
+            worktreeRecord,
+            onTrace,
+          });
+          if (verified.handoff && handoffPrNumber(verified.handoff)) {
+            assertHandoffPullRequestBase({
+              handoff: verified.handoff,
+              base: worktreeRecord?.base,
+              fetchPullRequest: fetchHandoffPullRequestFn,
+            });
+          }
+          // A recovered candidate can name a more precise terminal outcome
+          // than ordinary missing-result recovery. In particular, a pushed
+          // branch with no PR must remain distinguishable so the ticket claim
+          // is released below instead of being completed as a normal recovery.
+          if (
+            !verified.result.reasonCode ||
+            verified.result.reasonCode === "ok"
+          ) {
+            verified.result.reasonCode = RECOVERED_RESULT_REASON;
+          }
+          break verificationAttempt;
+        } catch (recoveryError) {
+          if (!(recoveryError instanceof ContractViolation)) {
+            return failVerificationInternal(recoveryError);
+          }
+          activeError = recoveryError;
+        }
+      }
+      // Codex-tier Pi sessions have historically completed the ticket while
+      // writing an invented result shape. Give only that zero-exit, pre-handoff
+      // contract failure one bounded turn with the validator diagnostics; a
+      // handoff-gate failure must never be retried as an envelope repair.
+      if (mayRepairPiResult({ adapterKey, outcome, error: activeError })) {
+        const originalViolations = activeError.violations;
+        const invalidSnapshot = snapshotInvalidResult({
+          workspaceDir,
+          onTrace,
+        });
+        let repairOutcome = null;
+        let repairUsage = null;
+        // The repair is a live adapter turn like any other: it runs under the
+        // same durable deadline and cancellation supervision, and drains the
+        // notify outbox in `finally` so a throw can never strand a retained
+        // escalation.
+        startCancellationMonitor();
+        startDeadlineMonitor();
+        try {
+          repairOutcome = await adapter.execute({
+            spec:
+              executionInput === spec.input
+                ? spec
+                : { ...spec, input: executionInput },
+            def,
+            workspaceDir,
+            timeoutMs: PI_RESULT_REPAIR_TIMEOUT_MS,
+            env: adapterEnv,
+            onTrace,
+            onUsage: (usage) => {
+              repairUsage = usage ?? null;
+            },
+            resume: created.resume ?? null,
+            abortSignal: abortController.signal,
+            signal: abortController.signal,
+            resultRepair: {
+              violations: originalViolations,
+              priorResultPath: invalidSnapshot?.source ?? null,
+              priorResult: invalidSnapshot?.preview ?? null,
+            },
+          });
+        } catch (repairError) {
+          // The repair is best-effort commentary on an already-failed
+          // envelope. An adapter throw leaves the original violations
+          // standing rather than reclassifying the run.
+          onTrace("lifecycle", {
+            event: "pi_result_repair_failed",
+            error: String(repairError?.message ?? repairError),
+          });
+          repairOutcome = null;
+        } finally {
+          stopDeadlineMonitor();
+          stopCancellationMonitor();
+          await drainNotifyOutboxSafely();
+        }
+        if (repairOutcome?.usage) repairUsage = repairOutcome.usage;
+        if (repairUsage)
+          attemptUsage = mergeAttemptUsage(
+            attemptUsage,
+            repairUsage,
+            adapterKey,
+          );
+        if (
+          repairOutcome?.exitCode === 0 &&
+          !repairOutcome?.timedOut &&
+          !abortController.signal.aborted
+        ) {
+          try {
+            verified = verifyResultFn({
+              spec,
+              def,
+              registry,
+              workspaceDir,
+              attempt,
+              attemptStartedAt: started.startedAt,
+              extraArtifacts: RUNTIME_ARTIFACTS,
+              worktreeRecord,
+              onTrace,
+            });
+            if (verified.handoff && handoffPrNumber(verified.handoff)) {
+              assertHandoffPullRequestBase({
+                handoff: verified.handoff,
+                base: worktreeRecord?.base,
+                fetchPullRequest: fetchHandoffPullRequestFn,
+              });
+            }
+            break verificationAttempt;
+          } catch (repairError) {
+            if (!(repairError instanceof ContractViolation)) {
+              return failVerificationInternal(repairError);
+            }
+            // The rejected original is what a human has to read; the repair's
+            // own violations are appended detail, never a replacement.
+            activeError = new ContractViolation(
+              [
+                ...originalViolations,
+                ...(repairError.violations ?? []).map(
+                  (violation) => `after repair: ${violation}`,
+                ),
+                ...(invalidSnapshot
+                  ? [`rejected envelope retained at ${invalidSnapshot.path}`]
+                  : []),
+              ],
+              {
+                reasonCode: activeError.reasonCode,
+                handoff: repairError.handoff ?? activeError.handoff ?? null,
+              },
+            );
+          }
+        }
+      }
+      if (activeError.reasonCode === HANDOFF_FORGE_UNAVAILABLE) {
+        const deferred = deferTransientDispatchGate(db, {
+          runId,
+          attempt,
+          fencingToken,
+          owner,
+          policyVersion,
+          now: nowFn,
+          reasonCode: HANDOFF_FORGE_UNAVAILABLE,
+          expectFrom: "VERIFYING",
+          maxRequeues: Number.isInteger(dispatchOpts?.maxTransientGateRequeues)
+            ? Math.max(0, dispatchOpts.maxTransientGateRequeues)
+            : DEFAULT_MAX_TRANSIENT_GATE_REQUEUES,
+          random: dispatchOpts?.random ?? Math.random,
+        });
+        if (deferred?.fenced) return { fenced: true };
+        if (deferred?.requeued) {
+          return {
+            runId,
+            attempt,
+            terminalState: "QUEUED",
+            reasonCode: HANDOFF_FORGE_UNAVAILABLE,
+            requeueAfterMs: deferred.backoffMs,
+          };
+        }
+      }
       const reasonCode =
-        err.reasonCode === "baseline_red" ||
-        err.reasonCode === HANDOFF_SANDBOX_UNAVAILABLE ||
-        HANDOFF_REASON_CODES.has(err.reasonCode)
-          ? err.reasonCode
+        activeError.reasonCode === "baseline_red" ||
+        activeError.reasonCode === HANDOFF_SANDBOX_UNAVAILABLE ||
+        activeError.reasonCode === HANDOFF_DEPENDENCIES_MISSING ||
+        activeError.reasonCode === HANDOFF_FORGE_UNAVAILABLE ||
+        HANDOFF_REASON_CODES.has(activeError.reasonCode)
+          ? activeError.reasonCode
           : "contract_violation";
-      let failureReason = `${reasonCode}: ${err.violations.join(", ")}`;
-      const handoff = err.handoff ?? null;
+      let failureReason =
+        activeError.violations.length === 1 &&
+        activeError.violations[0] === "missing_result"
+          ? `${reasonCode}: ${missingResultFailure(workspaceDir, activeError)}`
+          : `${reasonCode}: ${activeError.violations.join(", ")}`;
+      const continuationFailure = escalationHandoffFailure(
+        activeError,
+        failureReason,
+      );
+      const handoff = activeError.handoff ?? null;
       const handoffBody = handoff
-        ? `${composeHandoffVerification(handoff)}\n\n**Result:** run ${runId} FAILED \`${reasonCode}\` — ${err.violations.join("; ")}`
+        ? `${composeHandoffVerification(handoff)}\n\n**Result:** run ${runId} FAILED \`${reasonCode}\` — ${activeError.violations.join("; ")}`
         : null;
       const escalating = tierEscalationDue(reasonCode);
       // WM-718: the PR is the agent's, already opened; the structural hold is
       // to draft it and quote the observed failure where the reviewer looks.
       if (
-        HANDOFF_REASON_CODES.has(reasonCode) &&
+        isAgentHandoffFailure(reasonCode) &&
         handoff?.prNumber &&
         mayMutateClaimedTicket()
       ) {
@@ -4115,8 +5812,32 @@ export async function executeClaimed(
           /* intentionally ignored */
         }
       }
-      if (mayMutateClaimedTicket() && !escalating) {
-        if (HANDOFF_REASON_CODES.has(reasonCode)) {
+      // Resolve the guard only AFTER the hold above: an ordinary handoff
+      // verification failure has just converted the agent's own PR to draft,
+      // and probing the forge before that would read the still-open PR as
+      // retained review ownership and suppress every escalation on the most
+      // common failure path (#2006).
+      const escalationGuard = escalating
+        ? resolveEscalationGuard(reasonCode)
+        : null;
+      if (mayMutateClaimedTicket() && (!escalating || escalationGuard?.skip)) {
+        if (escalationGuard?.skip) {
+          // No continuation was scheduled, so nothing inherits the claim.
+          // Release it through the plain unclaim, which no-ops unless the
+          // ticket is still In Progress + ai:in-progress — the
+          // `ticket_in_review` skip must never pull a reviewed ticket back to
+          // Todo the way the handoff return would.
+          try {
+            unclaimTicketFn({
+              repo: repoName,
+              ticket: ticketId,
+              why: failureReason,
+              log: null,
+            });
+          } catch {
+            /* intentionally ignored */
+          }
+        } else if (isAgentHandoffFailure(reasonCode)) {
           try {
             const returned = returnHandoffTicketFn({
               repo: repoName,
@@ -4209,7 +5930,7 @@ export async function executeClaimed(
             policyVersion,
             now: nowFn(),
           });
-        } else if (tierEscalationEligibility(spec, reasonCode).eligible) {
+        } else if (escalationGuard?.eligible && !escalationGuard.skip) {
           escalation = scheduleTierEscalation(db, registry, spec, {
             workspacePath: worktreePath ?? checkoutPath,
             sourceWorkspacePath: workspaceDir,
@@ -4217,12 +5938,21 @@ export async function executeClaimed(
             policyVersion,
             now: currentNow,
             reasonCode,
-            handoffFailure: continuationHandoffFailure(err.violations),
+            handoffFailure: continuationFailure,
+            continuationGuard: escalationGuard,
           });
         }
-        return { ok: true, escalation };
+        return {
+          ok: true,
+          escalation,
+          tierEscalationSkip:
+            !decision.retry && escalationGuard?.skip
+              ? escalationGuard.reason
+              : null,
+        };
       });
       const projection = projectScheduledEscalation(res?.escalation);
+      commentTierEscalationSkip(res?.tierEscalationSkip);
       if (!res?.escalation) cleanupWorkspace({ retainWorkspace: retain });
       if (res?.fenced) return { fenced: true };
       return {
@@ -4232,6 +5962,9 @@ export async function executeClaimed(
         reasonCode,
         detail: failureReason,
         ...(handoff ? { handoff } : {}),
+        ...(res?.tierEscalationSkip
+          ? { tierEscalationSkip: res.tierEscalationSkip }
+          : {}),
         ...(res?.escalation
           ? {
               escalatedRunId: res.escalation.continuation_run_id,
@@ -4380,6 +6113,35 @@ export async function executeClaimed(
       };
     }
 
+    // Recovery found a remote branch but no PR. It is a completed, durable
+    // diagnostic rather than an agent handoff failure, so it does not use the
+    // handoff-return path; it must still release the claim for the next
+    // dispatcher instead of stranding the ticket In Progress.
+    if (
+      recovery?.candidate?.reasonCode === "pushed_branch_no_pr" &&
+      verified.result.reasonCode === "pushed_branch_no_pr" &&
+      mayMutateClaimedTicket()
+    ) {
+      try {
+        unclaimTicketFn({
+          repo: repoName,
+          ticket: ticketId,
+          why: "pushed_branch_no_pr",
+          log: null,
+        });
+      } catch {
+        /* intentionally ignored */
+      }
+    }
+
+    // The run is accepted: neither failed nor refused. Only now may the PR
+    // leave draft — a refused handoff must not be promoted — and promoting it
+    // before the handoff comment is composed keeps that comment an observation
+    // of the PR's final state.
+    if (verified.handoff && handoffPrNumber(verified.handoff)) {
+      markHandoffPullRequestReadyFn({ handoff: verified.handoff });
+    }
+
     // WM-718: the Handoff's Verification line is worker-authored. Post what
     // was observed on the ticket; the agent's claim rides below it labelled
     // agent-reported. Best effort — a comment failure never fails a verified
@@ -4471,6 +6233,19 @@ export async function executeClaimed(
         canonicalJson(receipt),
         iso(currentNow),
       );
+      // The accepted result only carries `memos`/`usedMemos`; the pin lives on
+      // the spec, so pass it through or the NULL-verdict `memo_uses` rows for
+      // pinned-but-unmentioned memos (docs §8 trust signal) never land.
+      registerMemos(
+        db,
+        runId,
+        { ...result, memoPin: spec.input?.memoPin },
+        {
+          now: currentNow,
+          agent: spec.agent,
+          runState: "COMPLETED",
+        },
+      );
       persistMergeReviewFromResult(db, {
         spec,
         result,
@@ -4528,7 +6303,7 @@ export async function executeClaimed(
       cleanupWorkspace();
       return { fenced: true };
     }
-    cleanupWorkspace();
+    cleanupWorkspace({ retainWorkspace: recovery?.retainWorkspace === true });
     return {
       runId,
       attempt,
@@ -4600,7 +6375,15 @@ export async function executeClaimed(
     let res;
     let terminalError;
     try {
-      res = failTerminal("FAILED", journalReason, reasonCode);
+      res = failTerminal(
+        "FAILED",
+        journalReason,
+        reasonCode,
+        isInputArtifactMissing
+          ? (currentNow) =>
+              retireMissingPinnedMemo(db, spec.input, err, currentNow)
+          : undefined,
+      );
     } catch (err) {
       terminalError = recordTerminalError("failTerminal", err);
     }
@@ -4870,6 +6653,10 @@ export function reapExpiredLeases(
 
 /** Claim and execute one run, or return a typed refusal/null without execution. */
 export async function runOnce(db, registry, adapters, opts = {}) {
+  sweepOrphanedLocalNotifyOutbox({
+    db,
+    home: opts.env?.FACTORY_EVENT_HOME ?? opts.eventHome,
+  });
   // claimNext already reconciles pending escalation projections and logs a
   // failed one without abandoning the claim: a tracker outage on one
   // escalation must never stall claiming of every other queued run. Forward
@@ -4899,10 +6686,18 @@ export function cancelRun(
     reason = "operator_cancel",
     now = () => Date.now(),
     policyVersion,
+    unclaimTierEscalation = defaultUnclaimTicket,
+    cleanupTierEscalationWorkspace = ({ sourceWorkspacePath, repo }) =>
+      destroyWorkspace(sourceWorkspacePath, { repoName: repo }),
   } = {},
 ) {
   const currentNow = resolveNow(now);
-  return txImmediate(db, () => {
+  const outcome = txImmediate(db, () => {
+    // Read the executor registry inside the transaction: an execution can
+    // register or finish while the write waits on the lock, and the
+    // post-commit ownership handoff below must act on what was true when the
+    // cancellation actually committed.
+    const active = ACTIVE_EXECUTIONS.get(runId);
     const run = db
       .query(`SELECT state, attempts FROM runs WHERE run_id = ?`)
       .get(runId);
@@ -4942,12 +6737,72 @@ export function cancelRun(
       actor,
       now: currentNow,
     });
-    const active = ACTIVE_EXECUTIONS.get(runId);
+    const escalation = tierEscalationForContinuation(db, runId);
+    const escalationRefused = escalation
+      ? refuseTierEscalationClaim(db, escalation, reason)
+      : false;
     if (active) {
       active.abort(reason);
     }
-    return { ...result, proposalClose };
+    return {
+      ...result,
+      proposalClose,
+      escalation,
+      escalationRefused,
+      hadActiveExecution: Boolean(active),
+    };
   });
+  const {
+    escalation,
+    escalationRefused,
+    hadActiveExecution: active,
+    ...cancelledRun
+  } = outcome;
+
+  // An executing continuation owns its ticket/workspace cleanup and responds
+  // to the abort above. An APPROVED/QUEUED continuation has no executor to do
+  // that work, so cancellation must consume the durable ownership transfer.
+  // Keep tracker/filesystem effects outside the SQLite write transaction.
+  if (!escalation || active) return cancelledRun;
+
+  let claimReleased = false;
+  let claimReleaseError = null;
+  try {
+    claimReleased =
+      unclaimTierEscalation({
+        repo: escalation.repo,
+        ticket: escalation.ticket,
+        why: reason,
+        log: null,
+      }) === true;
+  } catch (err) {
+    claimReleaseError = err?.message ?? String(err);
+  }
+
+  let workspaceCleaned = false;
+  let workspaceCleanupError = null;
+  try {
+    workspaceCleaned =
+      cleanupTierEscalationWorkspace({
+        sourceWorkspacePath: escalation.sourceWorkspacePath,
+        workspacePath: escalation.workspacePath,
+        repo: escalation.repo,
+        ticket: escalation.ticket,
+      }) === true;
+  } catch (err) {
+    workspaceCleanupError = err?.message ?? String(err);
+  }
+
+  return {
+    ...cancelledRun,
+    escalationCancellation: {
+      projectionRefused: escalationRefused,
+      claimReleased,
+      workspaceCleaned,
+      ...(claimReleaseError ? { claimReleaseError } : {}),
+      ...(workspaceCleanupError ? { workspaceCleanupError } : {}),
+    },
+  };
 }
 
 /**

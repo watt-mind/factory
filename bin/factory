@@ -54,6 +54,64 @@ show_banner() {
 cmd="${1:-}"
 shift || true
 
+# Remote control-API targeting (#2188). --host/--remote are recognised only for
+# the subcommands that speak to the control API, and only *after* the
+# subcommand — `factory status --host …`, never `factory --host … status`,
+# because $1 is consumed as the subcommand above. Every other subcommand keeps
+# its own flags untouched, notably `factory handoff --host <ssh-alias>` (#2191).
+control_target=""
+control_target_kind=""
+case "$cmd" in
+  # Speaks to the control API and honours a remote target.
+  events|status|ps|inbox|approve|reject|inject|decide|memos) control_target_supported=1 ;;
+  # Not a control-API command: leave argv alone.
+  *) control_target_supported="" ;;
+esac
+
+if [[ -n "$control_target_supported" ]]; then
+  forwarded_args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --host|--remote)
+        if [[ $# -lt 2 || -z "${2:-}" || "$2" == --* ]]; then
+          echo "$1 requires a URL, host, or SSH alias" >&2
+          exit 2
+        fi
+        control_target="$2"
+        control_target_kind="${1#--}"
+        shift 2
+        ;;
+      --host=*|--remote=*)
+        control_target="${1#*=}"
+        control_target_kind="${1%%=*}"
+        control_target_kind="${control_target_kind#--}"
+        if [[ -z "$control_target" ]]; then
+          echo "--${control_target_kind} requires a URL, host, or SSH alias" >&2
+          exit 2
+        fi
+        shift
+        ;;
+      *)
+        forwarded_args+=("$1")
+        shift
+        ;;
+    esac
+  done
+  set -- ${forwarded_args[@]+"${forwarded_args[@]}"}
+fi
+
+if [[ -n "$control_target" ]]; then
+  # A bare --host value without a domain or port is an SSH alias. --remote is
+  # explicitly a URL, so it always remains a direct control-API destination.
+  if [[ "$control_target_kind" == "host" && "$control_target" != *://* && "$control_target" != *.* && "$control_target" != *:* && "$control_target" != */* && "$control_target" != "localhost" ]]; then
+    # Quote every word so remote argv survives the shell ssh runs it under, and
+    # so a value containing ;, $( ) or backticks cannot execute there.
+    exec ssh "$control_target" "$(printf '%q ' factory "$cmd" "$@")"
+  fi
+  # The library never reads argv; the flag reaches it as the documented env.
+  export FACTORY_EVENT_HOST="$control_target"
+fi
+
 run_bun() {
   exec bun "$ROOT/$1" "${@:2}"
 }
@@ -75,10 +133,19 @@ case "$cmd" in
   queue)        run_bun orchestrator/queue.mjs "$@" ;;
   next)         run_bun orchestrator/next.mjs "$@" ;;
   state)        run_bun orchestrator/state.mjs "$@" ;;
-  status)       run_bun orchestrator/status.mjs "$@" ;;
+  # With an explicit direct target these are control-API queries, rather than
+  # local process surveys. SSH aliases delegated above keep the remote factory
+  # command's normal behaviour.
+  status)
+    if [[ -n "$control_target" ]]; then run_bun event-runtime/cli.mjs status "$@"; fi
+    run_bun orchestrator/status.mjs "$@"
+    ;;
   pulse)        run_bun orchestrator/pulse.mjs "$@" ;;
   watchdog)     run_bun orchestrator/watchdog.mjs "$@" ;;
-  ps)           run_bun orchestrator/ps.mjs "$@" ;;
+  ps)
+    if [[ -n "$control_target" ]]; then run_bun event-runtime/cli.mjs ps "$@"; fi
+    run_bun orchestrator/ps.mjs "$@"
+    ;;
   workers)      run_bun orchestrator/workers.mjs "$@" ;;
   friction)     run_bun orchestrator/friction.mjs "$@" ;;
   economics)    run_bun orchestrator/economics.mjs "$@" ;;
@@ -102,6 +169,8 @@ case "$cmd" in
   approve)      run_bun event-runtime/cli.mjs approve "$@" ;;
   reject)       run_bun event-runtime/cli.mjs reject "$@" ;;
   inject)       run_bun event-runtime/cli.mjs inject "$@" ;;
+  decide)       run_bun event-runtime/cli.mjs decide "$@" ;;
+  memos)        run_bun event-runtime/cli.mjs memos "$@" ;;
   serve)
     _has_web=0
     for _a in "$@"; do
@@ -189,7 +258,11 @@ case "$cmd" in
     # serve-side push after a successful durable record (12) fall back to the
     # original direct transport so the human is reached on at least one leg
     # (WM-759). A successful durable+push does not fall through (no double-send).
-    # HTTP rejection (10) is still terminal.
+    # An agent never receives the worker's control bearer. During a dispatch
+    # without one, HTTP rejection (10) is retained in a run-scoped local
+    # outbox for the worker to submit with its own bearer after handoff
+    # (WM-1558). A configured bearer may be stale, so its explicit rejection
+    # gets a distinct status and preserves the normal direct fallback.
     _notify_stdin=0
     if [[ "${1:-}" == "-" ]]; then
       _notify_stdin=1
@@ -239,14 +312,30 @@ case "$cmd" in
               source: process.env.FACTORY_INBOX_SOURCE,
             }),
           });
-          const responseBody = await response.clone().json().catch(() => null);
+          const responseText = await response.clone().text().catch(() => "");
+          let responseBody = null;
+          try {
+            responseBody = JSON.parse(responseText);
+          } catch {}
           if (response.status === 401 || (response.status === 503 && responseBody?.error === "control_api_token_unset")) {
             console.error(token
               ? "notify: control API rejected FACTORY_CONTROL_API_TOKEN"
               : "notify: control API requires FACTORY_CONTROL_API_TOKEN; set it in ~/.factory/secrets.env");
+            // The shell needs to distinguish a bad supplied bearer (fall
+            // through to direct transport) from an absent bearer (queue it
+            // for the worker). Other HTTP errors remain terminal status 10.
+            process.exit(token ? 13 : 10);
+          }
+          if (!response.ok) {
+            const rawDetail = typeof responseBody?.error === "string" ? responseBody.error : responseText;
+            const detail = (token ? rawDetail.split(token).join("[redacted]") : rawDetail)
+              .trim()
+              .replace(/\s+/g, " ")
+              .slice(-200)
+              || "(empty response)";
+            console.error(`notify: control API POST /inbox failed: HTTP ${response.status} ${detail}`);
             process.exit(10);
           }
-          if (!response.ok) process.exit(10);
           const body = responseBody;
           // Durable record succeeded; the serve-side notify.py projection did
           // not. Exit 12 so the shell falls through to the CLI transport
@@ -267,7 +356,19 @@ case "$cmd" in
       _notify_status=$?
       set -e
       if [[ "$_notify_status" -eq 0 ]]; then exit 0; fi
-      if [[ "$_notify_status" -ne 11 && "$_notify_status" -ne 12 ]]; then exit "$_notify_status"; fi
+      # Only a terminal HTTP rejection (10) is queued. Status 11 means the
+      # runtime was unreachable, which WM-759 routes to the direct transport
+      # below so a human is paged now rather than after the worker drains.
+      if [[ "${FACTORY_DISPATCH:-}" == 1 && "$_notify_status" -eq 10 && -z "${FACTORY_CONTROL_API_TOKEN:-}" && -n "${FACTORY_RUN_ID:-}" && -n "${FACTORY_EVENT_HOME:-}" ]]; then
+        if bun "$ROOT/lib/notify.mjs" --queue-local >/dev/null; then
+          echo "notify: control API rejected request; queued_local for worker handoff" >&2
+          exit 0
+        fi
+        echo "notify: control API rejected request and local outbox could not be written" >&2
+      fi
+      if [[ "$_notify_status" -ne 11 && "$_notify_status" -ne 12 && "$_notify_status" -ne 13 ]]; then
+        exit "$_notify_status"
+      fi
     fi
 
     # Unreachable runtime (or an unstructured legacy message): preserve the
@@ -361,6 +462,12 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   notify        durable human inbox + notify.py projection (direct fallback when serve is offline or its push fails)
   security      lib/security-check.sh (gitleaks + semgrep + actionlint on cwd repo)
   emit          build/emit.mjs (--link --link-bin --link-repos when called bare)
+
+Remote targeting (#2188): events, status, ps, inbox, approve, reject, inject,
+decide, and memos accept --host/--remote after the subcommand. A bare --host
+alias is dispatched over ssh; a URL or host:port targets the control API
+directly. Plaintext http to a non-loopback host is refused (use https:// or
+FACTORY_CONTROL_API_ALLOW_INSECURE=1).
 
 Works from any cwd (worktrees included).
   factory notify "BLOCKED LAB-176: need approval"

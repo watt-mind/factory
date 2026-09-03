@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { fetchMetrics, fetchMetricsBreakdown } from "../api";
 import { pollingOptions } from "../hooks";
+import { PROPOSAL_STATUS_HUES } from "../components/ui";
 import {
   Band,
   ShareBars,
@@ -47,12 +48,6 @@ const OUTCOME_HUES: Record<string, string> = {
   CANCELLED: "var(--text-faint)",
 };
 const DECISIONS = ["approved", "rejected", "expired", "superseded"] as const;
-const DECISION_HUES: Record<string, string> = {
-  approved: "var(--hue-ok)",
-  rejected: "var(--hue-err)",
-  expired: "var(--hue-warn)",
-  superseded: "var(--hue-verify)",
-};
 const SERIES_HUES = [
   "var(--hue-info)",
   "var(--hue-verify)",
@@ -361,7 +356,7 @@ function decisionBars(data: MetricsView): StackedBarDatum[] {
         key: status,
         label: status,
         value,
-        hue: DECISION_HUES[status],
+        hue: PROPOSAL_STATUS_HUES[status],
         link:
           value > 0
             ? {
@@ -574,7 +569,7 @@ export function Metrics() {
     const decisions = DECISIONS.map((status) => ({
       label: status,
       value: sum(data.series["proposals.decisions"]?.[status]),
-      hue: DECISION_HUES[status],
+      hue: PROPOSAL_STATUS_HUES[status],
     }));
     const started = sum(data.series["runs.started"]?.total);
     const retries = sum(data.series["attempts.retries"]?.total);

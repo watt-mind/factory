@@ -20,6 +20,11 @@ export const RUNTIME_IDENTITY_ENV = [
   "FACTORY_EVENT_PORT",
   "FACTORY_EVENT_SECRET",
   "FACTORY_EVENT_ENV",
+  // The control bearer travels with runtime identity: a child that reconnects
+  // to this worker's control API needs it, while BASE_INHERITED_ENV must not
+  // expose it to adapters that do not inherit that identity. PUSH_CREDENTIAL_ENV
+  // remains reserved for explicitly mutating definitions and push transport.
+  "FACTORY_CONTROL_API_TOKEN",
 ];
 
 // These are assigned from a dispatch RunSpec by the worker, rather than
@@ -30,7 +35,22 @@ export const DISPATCH_IDENTITY_ENV = [
   "FACTORY_RUN_ID",
   "FACTORY_TICKET",
   "FACTORY_REPO",
+  "FACTORY_RESULT_PATH",
 ];
+
+// Cell credentials for definitions that declare `capabilities.cells`. Like
+// DISPATCH_IDENTITY_ENV these are supplied explicitly by the worker rather than
+// blanket-inherited from the worker process: an agent with no cell capability
+// must never see the celld bearer. FACTORY_CELL_ENDPOINT would also be removed
+// by a `stripPrefixes: ["FACTORY_"]` adapter, so both are re-asserted after the
+// strip loops.
+export const CELL_CAPABILITY_ENV = ["CELL_AUTH_TOKEN", "FACTORY_CELL_ENDPOINT"];
+
+/** True when a registry definition declares at least one cell binding. */
+export function hasCellCapabilities(def) {
+  const cells = def?.capabilities?.cells;
+  return Array.isArray(cells) && cells.length > 0;
+}
 
 export const PUSH_CREDENTIAL_ENV = [
   "SSH_AUTH_SOCK",
@@ -52,6 +72,47 @@ export const PROVIDER_CREDENTIAL_ENV = [
   "CLAUDECODE",
   "CLAUDE_CODE_ENTRYPOINT",
 ];
+
+/**
+ * Workspace-relative packaging of RunSpec.harness. This module deliberately
+ * remains independent of adapter initialization, so adapters can share the
+ * contract without introducing a registry cycle.
+ */
+export const HARNESS_LAYOUT = Object.freeze({
+  skills: Object.freeze({
+    source: (name) => ["plugins", "core", "skills", name],
+    dest: (name) => [".claude", "skills", name],
+    type: "dir",
+  }),
+  commands: Object.freeze({
+    source: (name) => ["plugins", "core", "commands", `${name}.md`],
+    dest: (name) => [".claude", "commands", `${name}.md`],
+    type: "file",
+  }),
+  subagents: Object.freeze({
+    source: (name) => ["plugins", "core", "agents", `${name}.md`],
+    dest: (name) => [".claude", "agents", `${name}.md`],
+    type: "file",
+  }),
+});
+
+export const KILL_GRACE_MS = 30_000;
+
+export const PROMPT_SUFFIX =
+  "\n\n---\nInput is at ./input.json. Write the factory.agent-result/v1 envelope to ./result.json (or $FACTORY_RESULT_PATH when set). Work only inside this directory.";
+
+/**
+ * Prompt bytes are verified by the registry before they reach an adapter.
+ * `promptPath` remains provenance only: re-reading it would bypass that pin.
+ */
+export function verifiedPrompt(def, adapter) {
+  if (typeof def?.promptText !== "string") {
+    throw new Error(
+      `${adapter}: definition ${def?.ref ?? "<unknown>"} has no verified promptText (registry-loaded definitions only)`,
+    );
+  }
+  return def.promptText + PROMPT_SUFFIX;
+}
 
 /**
  * Build an adapter child environment from the worker allowlist.
@@ -104,6 +165,16 @@ export function safeChildEnvironment(
   // `stripPrefixes: ["FACTORY_"]` adapter cannot silently remove it.
   for (const key of DISPATCH_IDENTITY_ENV) {
     if (env[key] !== undefined) childEnv[key] = env[key];
+  }
+  // Cell credentials follow the same explicit-from-the-worker rule, and are
+  // gated on the definition actually declaring `capabilities.cells`: a
+  // definition without cells never carries them, even if a caller put them in
+  // `env`.
+  const cellDef = typeof defOrOpts === "boolean" ? null : defOrOpts;
+  const cellCapable = hasCellCapabilities(cellDef);
+  for (const key of CELL_CAPABILITY_ENV) {
+    if (cellCapable && env[key] !== undefined) childEnv[key] = env[key];
+    else if (!cellCapable) delete childEnv[key];
   }
 
   return childEnv;

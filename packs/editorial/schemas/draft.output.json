@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "articleId",
+    "outcome",
+    "title",
+    "slug",
+    "revisionHash",
+    "revisionNumber",
+    "wordCount",
+    "cellVersion"
+  ],
+  "properties": {
+    "articleId": { "type": "string" },
+    "outcome": {
+      "type": "string",
+      "enum": ["DRAFTED"],
+      "description": "Chain recommendation; keys the edges.json edge to editorial.review.requested."
+    },
+    "title": { "type": "string" },
+    "slug": { "type": "string" },
+    "revisionHash": { "type": "string" },
+    "revisionNumber": { "type": "integer" },
+    "wordCount": { "type": "integer" },
+    "cellVersion": { "type": "integer" }
+  },
+  "additionalProperties": false
+}

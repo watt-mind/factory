@@ -41,6 +41,39 @@ describe("linkifyText", () => {
     ]);
   });
 
+  test("links GitHub issue identifiers without matching URLs or longer paths", () => {
+    expect(linkifyText("See watt-mind/factory#1573.")).toEqual([
+      { kind: "text", text: "See " },
+      {
+        kind: "link",
+        text: "watt-mind/factory#1573",
+        href: "https://github.com/watt-mind/factory/issues/1573",
+        title: "watt-mind/factory#1573",
+      },
+      { kind: "text", text: "." },
+    ]);
+    expect(linkifyText("https://example.com/watt-mind/factory#1573")).toEqual([
+      {
+        kind: "link",
+        text: "https://example.com/watt-mind/factory#1573",
+        href: "https://example.com/watt-mind/factory#1573",
+        title: "https://example.com/watt-mind/factory#1573",
+      },
+    ]);
+    expect(linkifyText("see docs/protocol.md#4")).toEqual([
+      { kind: "text", text: "see docs/protocol.md#4" },
+    ]);
+    expect(linkifyText("event-runtime/web.ts#3 and build/emit.mjs#2")).toEqual([
+      { kind: "text", text: "event-runtime/web.ts#3 and build/emit.mjs#2" },
+    ]);
+    expect(linkifyText("at example.com/factory#1573")).toEqual([
+      { kind: "text", text: "at example.com/factory#1573" },
+    ]);
+    expect(linkifyText("x/watt-mind/factory#1573")).toEqual([
+      { kind: "text", text: "x/watt-mind/factory#1573" },
+    ]);
+  });
+
   test("leaves text without matches unchanged", () => {
     expect(linkifyText("Nothing to link here.")).toEqual([
       { kind: "text", text: "Nothing to link here." },

@@ -13,17 +13,30 @@ import {
 } from "bun:test";
 import { memoryControlPlane } from "../../lib/control-plane/index.mjs";
 import {
+  TICKET_DETAIL_CACHE_LIMIT,
   TICKET_DETAIL_CACHE_TTL_MS,
+  RUN_LIST_MAX_LIMIT,
+  RUN_SUBJECT_CACHE_LIMIT,
+  RUN_SUBJECT_CACHE_TTL_MS,
+  RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST,
+  RUN_SUBJECT_RESOLVE_TIMEOUT_MS,
+  runSubjectResolutionSettled,
+  setRunSubjectResolveTimeoutMs,
   clearObservedModelCache,
+  clearRunSubjectCache,
   clearTicketDetailCache,
+  clearTicketIndexCache,
+  parseSinceDuration,
   mergeTicketSupply,
   scanTicketSupply,
   setTicketDetailControlPlane,
   ticketJourneyView,
   ticketIndexView,
   ticketSupplyView,
+  ticketDetailView,
 } from "./api-runs.mjs";
 import {
+  CONTROL_TOKEN,
   GH_SECRET,
   PV,
   SECRET,
@@ -56,6 +69,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "./api-test-helpers.mjs";
+import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
 
 const makeServer = async (...args) => {
   const result = await makeApiServer(...args);
@@ -326,6 +340,38 @@ describe("run list deadlines (WM-692)", () => {
     }
   });
 
+  test("GET /runs expands ACTIVE and FAILED status tab groups", async () => {
+    const s = await makeServer({ now: () => start });
+    try {
+      for (const state of [
+        "QUEUED",
+        "LEASED",
+        "RUNNING",
+        "VERIFYING",
+        "FAILED",
+        "TIMED_OUT",
+        "REFUSED",
+        "COMPLETED",
+      ]) {
+        insertRun(s.db, `run-tab-${state}`, state);
+      }
+
+      const active = await fetch(s.url("/runs?state=ACTIVE"));
+      expect(active.status).toBe(200);
+      expect((await active.json()).runs.map((run) => run.state).sort()).toEqual(
+        ["QUEUED", "LEASED", "RUNNING", "VERIFYING"].sort(),
+      );
+
+      const failed = await fetch(s.url("/runs?state=FAILED"));
+      expect(failed.status).toBe(200);
+      expect((await failed.json()).runs.map((run) => run.state).sort()).toEqual(
+        ["FAILED", "TIMED_OUT", "REFUSED"].sort(),
+      );
+    } finally {
+      s.close();
+    }
+  });
+
   test("GET /runs keyset-paginates tied timestamps and rejects bad bounds", async () => {
     const s = await makeServer({ now: () => start });
     try {
@@ -343,6 +389,36 @@ describe("run list deadlines (WM-692)", () => {
             new Date(start).toISOString(),
           );
       }
+      for (const [eventId, type] of [
+        ["evt-page-old", "factory.page.old"],
+        ["evt-page-latest", "factory.page.latest"],
+      ]) {
+        s.db
+          .query(
+            `INSERT INTO events
+             (source, event_id, type, occurred_at, received_at, envelope_json, payload_hash, admitted_at)
+             VALUES ('test', ?, ?, ?, ?, '{}', 'sha256:test', ?)`,
+          )
+          .run(
+            eventId,
+            type,
+            new Date(start).toISOString(),
+            new Date(start).toISOString(),
+            new Date(start).toISOString(),
+          );
+      }
+      for (const [id, eventId] of [
+        ["prop-page-old", "evt-page-old"],
+        ["prop-page-latest", "evt-page-latest"],
+      ]) {
+        s.db
+          .query(
+            `INSERT INTO proposals
+             (id, event_source, event_id, run_id, decision, created_at, ttl_seconds)
+             VALUES (?, 'test', ?, 'run-page-c', 'run', ?, 1800)`,
+          )
+          .run(id, eventId, new Date(start).toISOString());
+      }
       const first = await fetch(s.url("/runs?limit=2"));
       expect(first.status).toBe(200);
       const firstPage = await first.json();
@@ -350,17 +426,28 @@ describe("run list deadlines (WM-692)", () => {
         "run-page-c",
         "run-page-b",
       ]);
+      expect(firstPage.runs[0].originType).toBe("factory.page.latest");
+      expect(firstPage.runs[0].originType).toBe(
+        (await s.client.run("run-page-c")).identity.originType,
+      );
       expect(firstPage.runs[0]).toEqual({
         runId: "run-page-c",
         state: "COMPLETED",
         attempts: 1,
         agent: "page-agent",
+        agentKind: "page-agent",
         adapter: "fake",
         created_at: new Date(start).toISOString(),
         updated_at: new Date(start).toISOString(),
         modelTier: null,
         model: null,
         idempotencyKey: "idem-run-page-c",
+        ticketSubject: null,
+        subjectLabel: null,
+        subjectTitle: null,
+        subjectUrl: null,
+        originType: "factory.page.latest",
+        originLabel: "page latest",
       });
       expect(typeof firstPage.nextBefore).toBe("string");
 
@@ -381,6 +468,380 @@ describe("run list deadlines (WM-692)", () => {
     } finally {
       s.close();
     }
+  });
+});
+
+describe("run list human identity (#2025, #2058)", () => {
+  afterEach(() => {
+    setTicketDetailControlPlane(null);
+    setRunSubjectResolveTimeoutMs(null);
+    clearRunSubjectCache();
+  });
+
+  const insertRunInto = (db, runId, agent, subject, at) => {
+    db.query(
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at, subject)
+       VALUES (?, ?, ?, 'sha256:test', 'RUNNING', 1, ?, ?, ?)`,
+    ).run(
+      runId,
+      `idem-${runId}`,
+      JSON.stringify({ agent, adapter: "pi", input: {} }),
+      at,
+      at,
+      subject,
+    );
+  };
+
+  test("serves subjects from cache and fills titles from the background batch", async () => {
+    const calls = [];
+    setTicketDetailControlPlane({
+      async getTicket(ticket) {
+        calls.push(ticket);
+        if (ticket === "WM-999") throw new Error("tracker unavailable");
+        return {
+          identifier: ticket,
+          title: "Show useful run identities",
+          url: "https://github.com/watt-mind/factory/issues/2025",
+        };
+      },
+    });
+    let nowMs = Date.parse("2026-08-31T10:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    const at = new Date(nowMs).toISOString();
+    const insertRun = (runId, agent, subject) =>
+      insertRunInto(s.db, runId, agent, subject, at);
+    try {
+      insertRun("run_ticket_a", "dispatch@1", "watt-mind/factory#2025");
+      insertRun("run_ticket_b", "merge-review@1", "watt-mind/factory#2025");
+      insertRun("run_unresolved", "dispatch@1", "WM-999");
+      insertRun("run_sweep", "work-scan@1", null);
+      await s.client.replay(
+        envelope({
+          eventId: "evt-sweep",
+          type: "factory.sweep.requested",
+          subject: null,
+        }),
+      );
+      s.db
+        .query(
+          `INSERT INTO proposals (id, event_source, event_id, run_id, decision, created_at, ttl_seconds)
+           VALUES ('prop-sweep', 'test', 'evt-sweep', 'run_sweep', 'run', ?, 1800)`,
+        )
+        .run(at);
+
+      // #2058: the request path never awaits the tracker. A cold cache
+      // returns bare subjects rather than holding the response open.
+      const first = await s.client.runs();
+      const coldById = Object.fromEntries(
+        first.runs.map((run) => [run.runId, run]),
+      );
+      expect(coldById.run_ticket_a).toMatchObject({
+        ticketSubject: "watt-mind/factory#2025",
+        subjectLabel: "factory#2025",
+        subjectTitle: null,
+      });
+      expect(coldById.run_sweep).toMatchObject({
+        agentKind: "work-scan",
+        ticketSubject: null,
+        subjectLabel: null,
+        originType: "factory.sweep.requested",
+        originLabel: "sweep",
+      });
+
+      await runSubjectResolutionSettled();
+
+      const second = await s.client.runs();
+      const byId = Object.fromEntries(
+        second.runs.map((run) => [run.runId, run]),
+      );
+      expect(byId.run_ticket_a).toMatchObject({
+        agent: "dispatch@1",
+        agentKind: "dispatch",
+        ticketSubject: "watt-mind/factory#2025",
+        subjectLabel: "factory#2025",
+        subjectTitle: "Show useful run identities",
+        subjectUrl: "https://github.com/watt-mind/factory/issues/2025",
+      });
+      expect(byId.run_ticket_b.subjectTitle).toBe("Show useful run identities");
+      // A tracker failure degrades to the bare subject, and the miss is
+      // cached so the next poll does not retry the outage.
+      expect(byId.run_unresolved).toMatchObject({
+        subjectLabel: "WM-999",
+        subjectTitle: null,
+      });
+      // Each distinct ticket read exactly once, duplicates included.
+      expect(calls.sort()).toEqual(["WM-999", "watt-mind/factory#2025"]);
+
+      const detail = await s.client.run("run_ticket_a");
+      expect(detail.identity).toMatchObject({
+        agentKind: "dispatch",
+        subjectLabel: "factory#2025",
+        subjectTitle: "Show useful run identities",
+      });
+      await s.client.runs();
+      await runSubjectResolutionSettled();
+      expect(calls).toHaveLength(2);
+
+      nowMs += RUN_SUBJECT_CACHE_TTL_MS + 1;
+      await s.client.runs();
+      await runSubjectResolutionSettled();
+      expect(calls).toHaveLength(4);
+    } finally {
+      s.close();
+    }
+  });
+
+  test("evicts run subjects beyond the shared cache capacity", async () => {
+    const calls = [];
+    setTicketDetailControlPlane({
+      async getTicket(ticket) {
+        calls.push(ticket);
+        return {
+          identifier: ticket,
+          title: `Title for ${ticket}`,
+          url: `https://github.com/watt-mind/factory/issues/${ticket.split("#")[1]}`,
+        };
+      },
+    });
+    const nowMs = Date.parse("2026-08-31T10:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    const at = new Date(nowMs).toISOString();
+    try {
+      for (let index = 0; index <= RUN_SUBJECT_CACHE_LIMIT; index += 1)
+        insertRunInto(
+          s.db,
+          `run_cache_${index}`,
+          "dispatch@1",
+          `watt-mind/factory#${5000 + index}`,
+          at,
+        );
+
+      // Each GET /runs schedules a capped background batch. Walk the public
+      // cursor pages until every distinct subject has been resolved rather
+      // than reaching into the cache. The last page has the remainder.
+      let before = null;
+      let remaining = RUN_SUBJECT_CACHE_LIMIT + 1;
+      let hotPageBefore = null;
+      while (remaining > 0) {
+        const pageSize = Math.min(RUN_LIST_MAX_LIMIT, remaining);
+        const batches = Math.ceil(
+          pageSize / RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST,
+        );
+        const pageBefore = before;
+        if (remaining <= RUN_LIST_MAX_LIMIT) hotPageBefore = pageBefore;
+        let nextBefore = null;
+        for (let batch = 0; batch < batches; batch += 1) {
+          const page = await s.client.runs({
+            limit: RUN_LIST_MAX_LIMIT,
+            before: pageBefore,
+          });
+          if (batch === 0) nextBefore = page.nextBefore;
+          await runSubjectResolutionSettled();
+        }
+        before = nextBefore;
+        remaining -= pageSize;
+      }
+      expect(new Set(calls).size).toBe(RUN_SUBJECT_CACHE_LIMIT + 1);
+
+      const evicted = calls[0];
+      const hot = calls.at(-1);
+      const coldView = await s.client.runs();
+      const bySubject = Object.fromEntries(
+        coldView.runs.map((run) => [run.ticketSubject, run]),
+      );
+      // The first resolved entry was evicted when the limit overflowed, while
+      // a recently resolved entry still takes the within-TTL cached path.
+      expect(bySubject[evicted].subjectTitle).toBeNull();
+      const hotView = await s.client.runs({
+        limit: RUN_LIST_MAX_LIMIT,
+        before: hotPageBefore,
+      });
+      expect(
+        hotView.runs.find((run) => run.ticketSubject === hot).subjectTitle,
+      ).toBe(`Title for ${hot}`);
+
+      await runSubjectResolutionSettled();
+      expect(calls.filter((ticket) => ticket === evicted)).toHaveLength(2);
+      const refetched = await s.client.runs();
+      expect(
+        refetched.runs.find((run) => run.ticketSubject === evicted)
+          .subjectTitle,
+      ).toBe(`Title for ${evicted}`);
+    } finally {
+      s.close();
+    }
+  });
+
+  test("responds immediately, and without an unhandled rejection, when the plane never answers", async () => {
+    const rejections = [];
+    const onUnhandled = (err) => rejections.push(err);
+    process.on("unhandledRejection", onUnhandled);
+    setRunSubjectResolveTimeoutMs(40);
+    let started = 0;
+    setTicketDetailControlPlane({
+      getTicket() {
+        started += 1;
+        // Never settles: the live symptom was a GitHub Projects GraphQL read
+        // that hung for 15s and blew the web proxy's 10s budget.
+        return new Promise(() => {});
+      },
+    });
+    const nowMs = Date.parse("2026-08-31T10:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    const at = new Date(nowMs).toISOString();
+    try {
+      for (let i = 0; i < 5; i += 1)
+        insertRunInto(
+          s.db,
+          `run_stall_${i}`,
+          "dispatch@1",
+          `watt-mind/factory#${4000 + i}`,
+          at,
+        );
+
+      const startedAt = Date.now();
+      const view = await s.client.runs();
+      const elapsedMs = Date.now() - startedAt;
+      expect(elapsedMs).toBeLessThan(100);
+      expect(view.runs).toHaveLength(5);
+      for (const run of view.runs) {
+        expect(run.subjectTitle).toBeNull();
+        expect(run.subjectLabel).toMatch(/^factory#40\d\d$/);
+      }
+      expect(started).toBeGreaterThan(0);
+
+      // The per-call bound turns the stall into a cached miss instead of a
+      // batch that never finishes.
+      await runSubjectResolutionSettled();
+      const after = await s.client.runs();
+      expect(after.runs.every((run) => run.subjectTitle === null)).toBe(true);
+
+      await Bun.sleep(20);
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      s.close();
+    }
+  });
+
+  test("keeps one background batch in flight and caps it per batch", async () => {
+    const calls = [];
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    setTicketDetailControlPlane({
+      async getTicket(ticket) {
+        calls.push(ticket);
+        await gate;
+        return {
+          identifier: ticket,
+          title: `Title for ${ticket}`,
+          url: `https://github.com/watt-mind/factory/issues/${ticket.split("#")[1]}`,
+        };
+      },
+    });
+    const nowMs = Date.parse("2026-08-31T10:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    const at = new Date(nowMs).toISOString();
+    const ticketCount = 20;
+    try {
+      for (let i = 0; i < ticketCount; i += 1)
+        insertRunInto(
+          s.db,
+          `run_cap_${i}`,
+          "dispatch@1",
+          `watt-mind/factory#${3000 + i}`,
+          at,
+        );
+
+      // Cold cache: bare subjects, and one capped batch scheduled behind the
+      // response. An unbounded fan-out here is the shape that has caused two
+      // tracker rate-limit incidents.
+      const first = await s.client.runs();
+      expect(first.runs).toHaveLength(ticketCount);
+      expect(first.runs.every((run) => run.subjectTitle === null)).toBe(true);
+
+      // Further polls while that batch is still waiting on the tracker must
+      // not stack another fan-out on top of it.
+      const inFlight = runSubjectResolutionSettled();
+      await s.client.runs();
+      await s.client.runs();
+      expect(runSubjectResolutionSettled()).toBe(inFlight);
+      expect(calls.length).toBeLessThanOrEqual(
+        RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST,
+      );
+
+      release();
+      await inFlight;
+      // One batch is capped at the exported subject-resolution limit even though 20 rows are
+      // unresolved, and the extra polls above added nothing to it.
+      expect(calls).toHaveLength(RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST);
+      expect(new Set(calls).size).toBe(RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST);
+
+      const second = await s.client.runs();
+      const secondResolved = second.runs.filter(
+        (run) => run.subjectTitle,
+      ).length;
+      expect(secondResolved).toBeLessThanOrEqual(
+        RUN_SUBJECT_RESOLVE_MAX_PER_REQUEST,
+      );
+      expect(secondResolved).toBeGreaterThan(0);
+
+      // A later poll picks up the next batch, converging on full resolution
+      // across a few polls without ever exceeding the cap in one batch.
+      await runSubjectResolutionSettled();
+      const third = await s.client.runs();
+      expect(
+        third.runs.filter((run) => run.subjectTitle).length,
+      ).toBeGreaterThan(secondResolved);
+    } finally {
+      release?.();
+      s.close();
+    }
+  });
+
+  test("prefers the plane's title-only read over the expensive getTicket", async () => {
+    const cheap = [];
+    let expensive = 0;
+    setTicketDetailControlPlane({
+      async getTicketTitle(ticket) {
+        cheap.push(ticket);
+        return {
+          identifier: ticket,
+          title: "Cheap title",
+          url: "https://github.com/watt-mind/factory/issues/2058",
+        };
+      },
+      async getTicket() {
+        expensive += 1;
+        throw new Error("getTicket must not be used for display-only titles");
+      },
+    });
+    const nowMs = Date.parse("2026-08-31T10:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    const at = new Date(nowMs).toISOString();
+    try {
+      insertRunInto(
+        s.db,
+        "run_cheap",
+        "dispatch@1",
+        "watt-mind/factory#2058",
+        at,
+      );
+      await s.client.runs();
+      await runSubjectResolutionSettled();
+      const view = await s.client.runs();
+      expect(view.runs[0].subjectTitle).toBe("Cheap title");
+      expect(cheap).toEqual(["watt-mind/factory#2058"]);
+      expect(expensive).toBe(0);
+    } finally {
+      s.close();
+    }
+  });
+
+  test("bounds each background read well under the proxy budget", () => {
+    expect(RUN_SUBJECT_RESOLVE_TIMEOUT_MS).toBeLessThanOrEqual(5_000);
   });
 });
 
@@ -523,6 +984,39 @@ describe("list views carry repos[] (OPS-356)", () => {
     }
   });
 
+  test("GET /events survives a malformed stored envelope (#2301)", async () => {
+    const s = await makeServer();
+    try {
+      await s.client.replay(
+        envelope({ eventId: "envelope-ok", payload: { repos: ["ok"] } }),
+      );
+      await s.client.replay(
+        envelope({ eventId: "envelope-broken", payload: { repos: ["bad"] } }),
+      );
+      // Matches the demo seed's deliberately damaged chain envelope.
+      s.db
+        .query(`UPDATE events SET envelope_json = ? WHERE event_id = ?`)
+        .run(
+          "{demo seed intentionally malformed chain envelope",
+          "envelope-broken",
+        );
+
+      const res = await fetch(s.url("/events"));
+      expect(res.status).toBe(200);
+      const { events } = await res.json();
+      const broken = events.find((e) => e.eventId === "envelope-broken");
+      expect(broken).toBeDefined();
+      expect(broken.envelope).toEqual({});
+      expect(broken.repos).toEqual([]);
+      // The healthy row is still rendered normally.
+      expect(events.find((e) => e.eventId === "envelope-ok").repos).toEqual([
+        "ok",
+      ]);
+    } finally {
+      s.close();
+    }
+  });
+
   test("GET /events defaults to a cursor page and walks tied timestamps", async () => {
     const s = await makeServer({ now: () => 1_700_000_000_000 });
     try {
@@ -553,6 +1047,90 @@ describe("list views carry repos[] (OPS-356)", () => {
 });
 
 describe("ticket journey join (WM-595)", () => {
+  test("accepts canonical GitHub ticket IDs in journeys and the ticket index", async () => {
+    const nowMs = Date.parse("2026-08-18T12:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      await s.client.replay(
+        envelope({
+          eventId: "github-ticket",
+          subject: "dispatch",
+          occurredAt: "2026-08-18T10:00:00.000Z",
+          payload: {
+            repo: "factory",
+            ticket: "Watt-Mind/Factory#1572",
+            nested: { issue: "Watt-Mind/Other#1573" },
+            subject: "Watt-Mind/Third#1574",
+            note: "mentions Watt-Mind/Prose#1575 without naming it",
+          },
+        }),
+      );
+
+      const journey = await fetch(
+        s.url("/runs?ticket=WATT-MIND/FACTORY%231572"),
+      );
+      expect(journey.status).toBe(200);
+      expect(
+        (await journey.json()).events.map((event) => event.eventId),
+      ).toEqual(["github-ticket"]);
+
+      const tickets = ticketIndexView(s.db, { nowMs, since: "14d" }).map(
+        (ticket) => ticket.id,
+      );
+      expect(tickets).toEqual(
+        expect.arrayContaining([
+          "watt-mind/factory#1572",
+          "watt-mind/other#1573",
+          "watt-mind/third#1574",
+        ]),
+      );
+      expect(tickets).not.toContain("watt-mind/prose#1575");
+
+      const invalid = await fetch(s.url("/runs?ticket=not-a-ticket"));
+      expect(invalid.status).toBe(422);
+      expect((await invalid.json()).error).toBe(
+        "ticket must look like WM-123 or owner/repo#123",
+      );
+    } finally {
+      s.close();
+    }
+  });
+
+  test("lowercase hyphenated prose never becomes a ticket row", async () => {
+    const nowMs = Date.parse("2026-08-18T12:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      await s.client.replay(
+        envelope({
+          eventId: "prose-noise",
+          subject: "dispatch",
+          occurredAt: "2026-08-18T10:00:00.000Z",
+          payload: {
+            repo: "factory",
+            ticket: "WM-7",
+            nested: { issue: "watt-mind/factory#1572" },
+            note: "hashed with sha-256, encoded utf-8, dated iso-8601",
+          },
+        }),
+      );
+
+      const tickets = ticketIndexView(s.db, { nowMs, since: "14d" }).map(
+        (ticket) => ticket.id,
+      );
+      expect(tickets).toEqual(
+        expect.arrayContaining(["WM-7", "watt-mind/factory#1572"]),
+      );
+      for (const id of tickets) {
+        expect(id).not.toMatch(/^(sha-256|utf-8|iso-8601)$/i);
+      }
+      expect(tickets.filter((id) => /^[a-z]/.test(id))).toEqual([
+        "watt-mind/factory#1572",
+      ]);
+    } finally {
+      s.close();
+    }
+  });
+
   test("GET /runs?ticket= joins explicit ticket activity and PR-linked merge runs", async () => {
     const home = tmpDir("evrt-journey-home-");
     const s = await makeServer({ env: { name: "test", home } });
@@ -818,7 +1396,7 @@ describe("ticket journey join (WM-595)", () => {
     }
   });
 
-  test("journey proposals keep TTL expiry and null spec", async () => {
+  test("journey keeps parked human-needed proposals open past their TTL", async () => {
     const s = await makeServer();
     try {
       await s.client.replay(
@@ -858,20 +1436,97 @@ describe("ticket journey join (WM-595)", () => {
           "2026-01-01T10:00:00.000Z",
           3600,
         );
+      s.db
+        .query(
+          `INSERT INTO proposals (id, event_source, event_id, decision, spec_json, spec_hash, status, created_at, ttl_seconds)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "prop-run-expired",
+          "linear",
+          "ticket-expiry",
+          "run",
+          JSON.stringify({ input: { repo: "factory", ticket: "WM-1328" } }),
+          "sha256:prop-run-expired",
+          "open",
+          "2026-01-01T10:00:00.000Z",
+          60,
+        );
       const nowMs = Date.parse("2026-01-01T10:30:00.000Z");
       const journey = ticketJourneyView(s.db, "WM-1328", { nowMs });
       const byId = Object.fromEntries(
         journey.proposals.map((proposal) => [proposal.id, proposal]),
       );
-      expect(byId["prop-expired"].expired).toBe(true);
+      expect(byId["prop-expired"].expired).toBe(false);
       expect(byId["prop-expired"].status).toBe("open");
       expect(byId["prop-no-spec"].expired).toBe(false);
       expect(byId["prop-no-spec"].spec).toBeNull();
-      expect(
+      expect(byId["prop-run-expired"].expired).toBe(true);
+      expect(byId["prop-run-expired"].status).toBe("open");
+      const beforeTtl = Object.fromEntries(
         ticketJourneyView(s.db, "WM-1328", {
           nowMs: Date.parse("2026-01-01T10:00:30.000Z"),
-        }).proposals.find((proposal) => proposal.id === "prop-expired").expired,
-      ).toBe(false);
+        }).proposals.map((proposal) => [proposal.id, proposal.expired]),
+      );
+      expect(beforeTtl["prop-expired"]).toBe(false);
+      expect(beforeTtl["prop-run-expired"]).toBe(false);
+    } finally {
+      s.close();
+    }
+  });
+});
+
+describe("parked proposal expiry API projections (factory#1775)", () => {
+  const now = Date.parse("2026-08-19T12:00:00.000Z");
+
+  function insertParkedProposal(db, id) {
+    db.query(
+      `INSERT INTO proposals
+         (id, event_source, event_id, decision, status, created_at, ttl_seconds, spec_json)
+       VALUES (?, 'test', ?, 'human_needed', 'open', ?, 60, '{}')`,
+    ).run(id, `event-${id}`, new Date(now - 120_000).toISOString());
+  }
+
+  test("decision history excludes a parked proposal from virtual expiry", async () => {
+    const s = await makeServer({ now: () => now });
+    try {
+      insertParkedProposal(s.db, "parked-decision");
+      const from = "2026-08-19T10:00:00.000Z";
+      const to = "2026-08-19T13:00:00.000Z";
+      const expired = await fetch(
+        s.url(
+          `/proposals?status=all&population=decision&from=${from}&to=${to}&decisionStatus=expired`,
+        ),
+      );
+      expect(expired.status).toBe(200);
+      expect((await expired.json()).proposals).toEqual([]);
+
+      const open = await fetch(s.url("/proposals?status=open"));
+      expect((await open.json()).proposals).toContainEqual(
+        expect.objectContaining({
+          id: "parked-decision",
+          status: "open",
+          expired: false,
+          decided_at: null,
+        }),
+      );
+    } finally {
+      s.close();
+    }
+  });
+
+  test("proposal detail keeps a parked proposal open past its TTL", async () => {
+    const s = await makeServer({ now: () => now });
+    try {
+      insertParkedProposal(s.db, "parked-detail");
+      const response = await fetch(s.url("/proposals/parked-detail"));
+      expect(response.status).toBe(200);
+      expect((await response.json()).proposal).toMatchObject({
+        id: "parked-detail",
+        status: "open",
+        expired: false,
+        decided_at: null,
+      });
     } finally {
       s.close();
     }
@@ -1165,7 +1820,7 @@ describe("recent-ticket index (WM-821)", () => {
         expect(response.status).toBe(422);
         expect(await response.json()).toMatchObject({
           error: "invalid_limit",
-          message: "limit must be an integer between 1 and 200",
+          message: `limit must be an integer between 1 and ${RUN_LIST_MAX_LIMIT}`,
         });
       }
 
@@ -1197,6 +1852,346 @@ describe("recent-ticket index (WM-821)", () => {
       // Verify ticketIndexView exported function directly
       const direct = ticketIndexView(s.db, { since: "14d", nowMs });
       expect(direct.length).toBe(5);
+    } finally {
+      s.close();
+    }
+  });
+
+  test("normalizes equivalent absolute since values to one ticket-index cache entry", async () => {
+    const nowMs = Date.parse("2026-08-18T12:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      clearTicketIndexCache();
+      const utc = ticketIndexView(s.db, {
+        nowMs,
+        since: "2026-08-01T00:00:00Z",
+      });
+      const offset = ticketIndexView(s.db, {
+        nowMs,
+        since: "2026-08-01T00:00:00+00:00",
+      });
+      const milliseconds = ticketIndexView(s.db, {
+        nowMs,
+        since: "2026-08-01T00:00:00.000Z",
+      });
+
+      expect(offset).toBe(utc);
+      expect(milliseconds).toBe(utc);
+    } finally {
+      clearTicketIndexCache();
+      s.close();
+    }
+  });
+
+  test("normalizes equivalent duration cache entries and reanchors them after TTL expiry", async () => {
+    const nowMs = Date.parse("2026-08-18T12:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      clearTicketIndexCache();
+      const initial = ticketIndexView(s.db, { nowMs, since: "14d" });
+      expect(initial).toEqual([]);
+
+      const observedAt = new Date(nowMs - 1000).toISOString();
+      s.db
+        .query(
+          `INSERT INTO events
+           (source, event_id, type, subject, occurred_at, received_at, envelope_json, payload_hash, admitted_at)
+           VALUES ('test', 'ticket-index-cache', 'ticket.updated', 'WM-2158', ?, ?, '{}', 'sha256:test', ?)`,
+        )
+        .run(observedAt, observedAt, observedAt);
+
+      const cached = ticketIndexView(s.db, {
+        nowMs: nowMs + 10,
+        since: "336h",
+      });
+      expect(cached).toBe(initial);
+      expect(cached).toEqual([]);
+
+      const refreshed = ticketIndexView(s.db, {
+        nowMs: nowMs + 5001,
+        since: "2w",
+      });
+      expect(refreshed.map((ticket) => ticket.id)).toEqual(["WM-2158"]);
+    } finally {
+      clearTicketIndexCache();
+      s.close();
+    }
+  });
+
+  test("classifies since values and keeps relative and absolute cache entries separate", async () => {
+    const nowMs = Date.parse("2026-08-18T12:00:00.000Z");
+    const relativeDurationMs = 14 * 24 * 60 * 60 * 1000;
+    const absoluteSinceMs = nowMs - relativeDurationMs;
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      expect(parseSinceDuration("14d", nowMs)).toEqual({
+        sinceMs: absoluteSinceMs,
+        kind: "relative",
+        durationMs: relativeDurationMs,
+      });
+      expect(parseSinceDuration(relativeDurationMs, nowMs)).toEqual({
+        sinceMs: absoluteSinceMs,
+        kind: "relative",
+        durationMs: relativeDurationMs,
+      });
+      expect(parseSinceDuration(absoluteSinceMs, nowMs)).toEqual({
+        sinceMs: absoluteSinceMs,
+        kind: "absolute",
+        durationMs: null,
+      });
+
+      clearTicketIndexCache();
+      const relative = ticketIndexView(s.db, { nowMs, since: "14d" });
+      const numericRelative = ticketIndexView(s.db, {
+        nowMs,
+        since: relativeDurationMs,
+      });
+      const absolute = ticketIndexView(s.db, { nowMs, since: absoluteSinceMs });
+      const isoAbsolute = ticketIndexView(s.db, {
+        nowMs,
+        since: new Date(absoluteSinceMs).toISOString(),
+      });
+      expect(numericRelative).toBe(relative);
+      expect(absolute).not.toBe(relative);
+      expect(isoAbsolute).toBe(absolute);
+    } finally {
+      clearTicketIndexCache();
+      s.close();
+    }
+  });
+
+  test("bounds ticket index reads by since and retains recent lifecycle activity", async () => {
+    const nowMs = Date.parse("2026-08-18T12:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      const insertRun = s.db.query(
+        `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+         VALUES (?, ?, ?, 'sha256:test', 'COMPLETED', 1, ?, ?)`,
+      );
+      const insertLifecycle = s.db.query(
+        `INSERT INTO lifecycle_events (run_id, to_state, actor, at, record_hash)
+         VALUES (?, 'COMPLETED', 'test', ?, ?)`,
+      );
+      const insertEvent = s.db.query(
+        `INSERT INTO events
+         (source, event_id, type, subject, occurred_at, received_at, envelope_json, payload_hash, admitted_at)
+         VALUES ('test', ?, 'ticket.updated', ?, ?, ?, '{}', 'sha256:test', ?)`,
+      );
+      const at = (daysAgo) =>
+        new Date(nowMs - daysAgo * 86_400_000).toISOString();
+
+      insertRun.run(
+        "run-recent-lifecycle",
+        "recent-lifecycle",
+        spec({ repo: "factory", ticket: "WM-1765" }),
+        at(3),
+        at(3),
+      );
+      insertLifecycle.run(
+        "run-recent-lifecycle",
+        at(1),
+        "sha256:recent-lifecycle",
+      );
+      insertEvent.run(
+        "recent-event",
+        "WM-1766",
+        at(1 / 24),
+        at(1 / 24),
+        at(1 / 24),
+      );
+      insertEvent.run("stale-event", "WM-1767", at(30), at(30), at(30));
+
+      const eventPlan = s.db
+        .query(
+          `EXPLAIN QUERY PLAN SELECT * FROM events WHERE subject IN (?, ?)`,
+        )
+        .all("WM-1765", "WM-1766")
+        .map((row) => row.detail)
+        .join("\n");
+      expect(eventPlan).toMatch(/USING INDEX idx_events_subject/);
+      expect(eventPlan).not.toMatch(/SCAN events\b/);
+
+      const queries = [];
+      const observedDb = {
+        filename: s.db.filename,
+        query(sql) {
+          queries.push(sql);
+          return s.db.query(sql);
+        },
+      };
+      const tickets = ticketIndexView(observedDb, {
+        nowMs,
+        since: "2d",
+        noCache: true,
+      });
+
+      expect(tickets.map((ticket) => ticket.id)).toEqual([
+        "WM-1766",
+        "WM-1765",
+      ]);
+      expect(
+        queries.some((sql) => /events WHERE admitted_at >= \?/.test(sql)),
+      ).toBe(true);
+      expect(
+        queries.some((sql) => /lifecycle_events\s+WHERE at >= \?/.test(sql)),
+      ).toBe(true);
+      expect(
+        queries.some((sql) => /WHERE at >= \? AND run_id IN \(\?\)/.test(sql)),
+      ).toBe(true);
+      expect(queries.join("\n")).not.toContain(
+        "SELECT * FROM results ORDER BY",
+      );
+    } finally {
+      s.close();
+    }
+  });
+
+  test("re-enriches a ticket with history older than the window (gh-1764)", async () => {
+    const nowMs = Date.parse("2026-08-18T12:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      const at = (daysAgo) =>
+        new Date(nowMs - daysAgo * 86_400_000).toISOString();
+      // Old history: proposal -> merge run (subject-indexed) -> MERGED result,
+      // all 30 days ago, far outside the 2d window.
+      s.db
+        .query(
+          `INSERT INTO events
+           (source, event_id, type, subject, occurred_at, received_at, envelope_json, payload_hash, admitted_at)
+           VALUES ('test', 'old-dispatch', 'ticket.ready', 'WM-1764', ?, ?, ?, 'sha256:test', ?)`,
+        )
+        .run(
+          at(30),
+          at(30),
+          JSON.stringify({
+            payload: { ticket: "WM-1764", ticketTitle: "Old but merged" },
+          }),
+          at(30),
+        );
+      s.db
+        .query(
+          `INSERT INTO proposals (id, event_source, event_id, run_id, decision, spec_json, spec_hash, status, created_at, ttl_seconds, decided_at, decided_by)
+           VALUES ('prop-1764', 'test', 'old-dispatch', 'run-1764-merge', 'dispatch', ?, 'sha256:test', 'approved', ?, 3600, ?, 'operator')`,
+        )
+        .run(spec({ repo: "factory", ticket: "WM-1764" }), at(30), at(30));
+      s.db
+        .query(
+          `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at, subject)
+           VALUES ('run-1764-merge', 'key-1764-merge', ?, 'sha256:test', 'COMPLETED', 2, ?, ?, 'WM-1764')`,
+        )
+        .run(
+          spec({ repo: "factory", ticket: "WM-1764" }, "merge-apply@1"),
+          at(29),
+          at(29),
+        );
+      s.db
+        .query(
+          `INSERT INTO results
+           (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+           VALUES ('run-1764-merge', 1, ?, 'sha256:res', '{}', '{}', ?)`,
+        )
+        .run(
+          JSON.stringify({
+            terminalState: "completed",
+            artifact: {
+              outcome: "MERGED",
+              prUrl: "https://github.com/watt-mind/factory/pull/1771",
+            },
+          }),
+          at(29),
+        );
+      // Fresh activity: a bare event inside the window with no metadata.
+      s.db
+        .query(
+          `INSERT INTO events
+           (source, event_id, type, subject, occurred_at, received_at, envelope_json, payload_hash, admitted_at)
+           VALUES ('test', 'fresh-comment', 'ticket.commented', 'WM-1764', ?, ?, '{}', 'sha256:test', ?)`,
+        )
+        .run(at(0.5), at(0.5), at(0.5));
+
+      const [ticket] = ticketIndexView(s.db, {
+        nowMs,
+        since: "2d",
+        noCache: true,
+      });
+      expect(ticket.id).toBe("WM-1764");
+      expect(ticket.merged).toBe(true);
+      expect(ticket.state).toBe("Done");
+      expect(ticket.pr).toEqual({
+        number: 1771,
+        url: "https://github.com/watt-mind/factory/pull/1771",
+      });
+      expect(ticket.title).toBe("Old but merged");
+      expect(ticket.repo).toBe("factory");
+      expect(ticket.attempts).toBe(2);
+      expect(ticket.lastDecision).toBe("dispatch");
+      expect(ticket.lastActivityKind).toBe("event");
+      expect(ticket.lastActivityAt).toBe(at(0.5));
+    } finally {
+      s.close();
+    }
+  });
+
+  test("lifecycle transitions keep a run's merge/pr activity kind (gh-1764)", async () => {
+    const nowMs = Date.parse("2026-08-18T12:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      const at = (hoursAgo) =>
+        new Date(nowMs - hoursAgo * 3_600_000).toISOString();
+      const insertRun = s.db.query(
+        `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at, subject)
+         VALUES (?, ?, ?, 'sha256:test', 'COMPLETED', 1, ?, ?, ?)`,
+      );
+      const insertResult = s.db.query(
+        `INSERT INTO results
+         (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+         VALUES (?, 1, ?, 'sha256:res', '{}', '{}', ?)`,
+      );
+      const insertLifecycle = s.db.query(
+        `INSERT INTO lifecycle_events (run_id, to_state, actor, at, record_hash)
+         VALUES (?, 'COMPLETED', 'test', ?, 'sha256:lc')`,
+      );
+
+      insertRun.run(
+        "run-1768-merge",
+        "key-1768-merge",
+        spec({ repo: "factory", ticket: "WM-1768" }, "merge-apply@1"),
+        at(6),
+        at(2),
+        "WM-1768",
+      );
+      insertResult.run(
+        "run-1768-merge",
+        JSON.stringify({ artifact: { outcome: "MERGED", pr: 1768 } }),
+        at(3),
+      );
+      insertLifecycle.run("run-1768-merge", at(2));
+
+      insertRun.run(
+        "run-1769-pr",
+        "key-1769-pr",
+        spec({ repo: "factory", ticket: "WM-1769" }),
+        at(6),
+        at(2),
+        "WM-1769",
+      );
+      insertResult.run(
+        "run-1769-pr",
+        JSON.stringify({ artifact: { outcome: "PR_OPEN", pr: 1769 } }),
+        at(3),
+      );
+      insertLifecycle.run("run-1769-pr", at(2));
+
+      const tickets = ticketIndexView(s.db, {
+        nowMs,
+        since: "1d",
+        noCache: true,
+      });
+      const byId = Object.fromEntries(tickets.map((t) => [t.id, t]));
+      expect(byId["WM-1768"].lastActivityAt).toBe(at(2));
+      expect(byId["WM-1768"].lastActivityKind).toBe("merge");
+      expect(byId["WM-1769"].lastActivityAt).toBe(at(2));
+      expect(byId["WM-1769"].lastActivityKind).toBe("pr");
     } finally {
       s.close();
     }
@@ -1334,6 +2329,28 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
     expect(again.message).toContain("not open");
   });
 
+  // A corrupt stored row is a refusal, not the 200 `replanned: true` body:
+  // an operator client that reads `approved === false` as "re-planned" would
+  // otherwise chase a fresh proposal that was never created.
+  test("approve a proposal whose stored envelope is corrupt → 409, not a re-plan", async () => {
+    const prop = await planned("malformed-envelope-1");
+    s.db
+      .query(`UPDATE events SET envelope_json = ? WHERE event_id = ?`)
+      .run("{damaged stored envelope", "malformed-envelope-1");
+
+    const err = await rejection(s.client.approve(prop.id));
+
+    expect(err.status).toBe(409);
+    expect(err.body).toMatchObject({
+      reason: "malformed_stored_row",
+      kind: "malformed_event_envelope",
+    });
+    expect(err.message).toContain(prop.id);
+    expect((await s.client.run(prop.runId)).run.state).toBe("PROPOSED");
+    const { proposals } = await s.client.proposals();
+    expect(proposals.find((p) => p.id === prop.id)?.status).toBe("open");
+  });
+
   test("reject an open proposal → run CANCELLED", async () => {
     const prop = await planned("rej-1");
     const rejected = await s.client.reject(prop.id, "not today");
@@ -1359,7 +2376,7 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
     // The lock is held for 75 ms; a lower bound proves the approval actually
     // waited on it instead of racing past a lock that was never taken.
     expect(elapsedMs).toBeGreaterThanOrEqual(50);
-    expect(elapsedMs).toBeLessThan(2_000);
+    expect(elapsedMs).toBeLessThan(loadAdjustedTimeout(2_000));
     expect(await lock.exited).toBe(0);
     expect(await s.client.cancel(waiting.runId, "test cleanup")).toEqual({
       cancelled: true,
@@ -1383,33 +2400,57 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
     expect(await timeoutLock?.exited).toBe(0);
   });
 
-  test("contended approvals and rejections yield to /health and return typed db_busy", async () => {
-    const approvedProposal = await planned("approve-contention");
-    const approveLock = await holdWriteLock(s.db.filename, 400);
-    const approval = s.client.approve(approvedProposal.id);
-    await new Promise((resolve) => setImmediate(resolve));
-    const healthStartedAt = Date.now();
-    const health = await fetch(s.url("/health"));
-    expect(health.status).toBe(200);
-    expect(Date.now() - healthStartedAt).toBeLessThan(500);
-    expect(await approval).toEqual({
-      approved: true,
-      runId: approvedProposal.runId,
-    });
-    expect(await approveLock.exited).toBe(0);
-    expect(
-      await s.client.cancel(approvedProposal.runId, "test cleanup"),
-    ).toEqual({ cancelled: true });
+  test(
+    "contended approvals and rejections yield to /health and return typed db_busy",
+    async () => {
+      const approvedProposal = await planned("approve-contention");
+      const approveLock = await holdWriteLock(s.db.filename, 400);
+      const approval = s.client.approve(approvedProposal.id);
+      await new Promise((resolve) => setImmediate(resolve));
+      const healthStartedAt = Date.now();
+      const health = await fetch(s.url("/health"));
+      expect(health.status).toBe(200);
+      expect(Date.now() - healthStartedAt).toBeLessThan(
+        loadAdjustedTimeout(500),
+      );
+      expect(await approval).toEqual({
+        approved: true,
+        runId: approvedProposal.runId,
+      });
+      expect(await approveLock.exited).toBe(0);
+      expect(
+        await s.client.cancel(approvedProposal.runId, "test cleanup"),
+      ).toEqual({ cancelled: true });
 
-    const rejectedProposal = await planned("reject-contention");
-    const rejectLock = await holdWriteLock(s.db.filename, 6_000);
-    const startedAt = Date.now();
-    const err = await rejection(s.client.reject(rejectedProposal.id, "locked"));
-    expect(err.status).toBe(503);
-    expect(err.body).toEqual({ error: "db_busy", retryable: true });
-    expect(Date.now() - startedAt).toBeGreaterThan(4_000);
-    expect(await rejectLock.exited).toBe(0);
-  });
+      const rejectedProposal = await planned("reject-contention");
+      const rejectLock = await holdWriteLock(s.db.filename, 6_000);
+      // Snapshot liveness synchronously, before the probe is issued: the
+      // child's exit is observed through `exitCode`, which Bun updates without
+      // an event-loop turn, so this cannot lag behind the probe start.
+      const lockLiveAtProbeStart = rejectLock.exitCode === null;
+      const probeStartedAt = Date.now();
+      const err = await rejection(
+        s.client.reject(rejectedProposal.id, "locked"),
+      );
+      const probeFinishedAt = Date.now();
+      expect(await rejectLock.exited).toBe(0);
+
+      if (err.status === 409) {
+        // A contended runner can be descheduled long enough for the child lock
+        // to release before this probe starts. That is a stale-probe outcome,
+        // not evidence that the live-lock path failed to return `db_busy`.
+        expect(lockLiveAtProbeStart).toBe(false);
+        expect(err.message).toContain("not open");
+      } else {
+        expect(err.status).toBe(503);
+        expect(err.body).toEqual({ error: "db_busy", retryable: true });
+        // The lock outlives busy_timeout (5 s), so a live-lock probe must have
+        // spent the whole retry budget before giving up.
+        expect(probeFinishedAt - probeStartedAt).toBeGreaterThan(4_000);
+      }
+    },
+    loadAdjustedTimeout(20_000),
+  );
 
   test("cancel a QUEUED run → 200; cancel again → 409; unknown run → 404", async () => {
     const prop = await planned("can-1");
@@ -1521,7 +2562,7 @@ describe("watched flow and operator verbs (§12, §13, §15)", () => {
 describe("webui surface: proposal linkage, history, journal, outbox, requeue (OPS-212)", () => {
   test("proposals carry their originating event; history filter works; runs list is enriched", async () => {
     const { db, server, port } = await makeServer();
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       await client.replay(envelope({ eventId: "link-1" }));
       planAdmittedEvents(db, registry, {
@@ -1569,7 +2610,7 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
 
   test("journal feed pages by seq and outbox exposes delivery state", async () => {
     const { db, server, port } = await makeServer();
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       await client.replay(envelope({ eventId: "feed-1" }));
       planAdmittedEvents(db, registry, {
@@ -1697,7 +2738,7 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
 
   test("requeue recovers a dead-lettered event and refuses everything else", async () => {
     const { db, server, port, onEvents } = await makeServer();
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       await client.replay(envelope({ eventId: "dead-1" }));
       db.query(
@@ -1722,7 +2763,7 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
   test("archives dead-lettered events and releases stalled worker leases from status anomalies (WM-326)", async () => {
     const nowMs = 300_000;
     const { db, server, port } = await makeServer({ now: () => nowMs });
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       await client.replay(envelope({ eventId: "dead-archive" }));
       db.query(
@@ -1817,7 +2858,7 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
 
   test("requeueing a human_needed event supersedes its open proposal", async () => {
     const { db, server, port } = await makeServer();
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       await client.replay(
         envelope({ eventId: "hn-1", type: "unregistered.event.type" }),
@@ -1839,7 +2880,7 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
 describe("run trace surfacing (OPS-295)", () => {
   test("GET /runs/:id/trace pages incrementally; 404 unknown; empty for an untraced run (OPS-295)", async () => {
     const { db, server, port } = await makeServer();
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       await client.replay(
         envelope({ eventId: "trace-1", payload: { repos: ["ok"] } }),
@@ -2012,6 +3053,28 @@ describe("GET /tickets/:id/detail (WM-914)", () => {
     }
   });
 
+  test("evicts ticket details beyond the shared cache capacity", async () => {
+    const calls = [];
+    const controlPlane = {
+      async getTicket(ticket) {
+        calls.push(ticket);
+        return { identifier: ticket, title: ticket };
+      },
+      async listComments() {
+        return [];
+      },
+    };
+    const nowMs = Date.parse("2026-08-19T12:00:00.000Z");
+    for (let index = 1; index <= TICKET_DETAIL_CACHE_LIMIT + 1; index++) {
+      await ticketDetailView(`WM-${index}`, { controlPlane, nowMs });
+    }
+
+    expect(calls).toHaveLength(TICKET_DETAIL_CACHE_LIMIT + 1);
+    const firstAgain = await ticketDetailView("WM-1", { controlPlane, nowMs });
+    expect(firstAgain.cached).toBe(false);
+    expect(calls.filter((ticket) => ticket === "WM-1")).toHaveLength(2);
+  });
+
   test("rejects malformed ids, missing issues, and tracker failures", async () => {
     seedPlane();
     const s = await makeServer();
@@ -2019,7 +3082,7 @@ describe("GET /tickets/:id/detail (WM-914)", () => {
       const bad = await fetch(s.url("/tickets/not-a-ticket/detail"));
       expect(bad.status).toBe(422);
       expect(await bad.json()).toEqual({
-        error: "ticket must look like WM-123",
+        error: "ticket must look like WM-123 or owner/repo#123",
       });
 
       const missing = await fetch(s.url("/tickets/WM-999/detail"));

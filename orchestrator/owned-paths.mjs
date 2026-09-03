@@ -20,7 +20,7 @@
  * brace expressions are refused rather than being passed through to RegExp.
  */
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 
 /** Inputs whose changes alter the zero-pack merged registry digest. */
@@ -36,22 +36,58 @@ export const REGISTRY_DIGEST_BASELINE_PATH =
   "event-runtime/lib/registry.test.mjs";
 
 /**
+ * Split level 2–4 Markdown headings into their sections.
+ *
+ * Bodies are returned untrimmed (an indented Owned Paths code block must keep
+ * its leading whitespace); callers that gate on "has content" must trim.
+ *
+ * Duplicate headings are UNIONED, never first-match. `ticket detail` appends
+ * by default, so a respec through the CLI leaves two copies of a §5 section
+ * in the body; every §5 reader (dispatch, handoff verification, the template
+ * guard) reads all matching blocks in document order so the appended copy
+ * takes effect instead of being silently ignored. See {@link parseOwnedPaths}
+ * and {@link parseVerificationCommand}.
+ */
+export function ticketSections(description = "") {
+  return String(description ?? "")
+    .split(/^#{2,4}\s+/m)
+    .slice(1)
+    .map((section) => {
+      const nl = section.indexOf("\n");
+      return {
+        heading: (nl === -1 ? section : section.slice(0, nl)).trim(),
+        // Preserve leading indentation: an Owned Paths block may be an
+        // indented Markdown code block, which would stop parsing if trimmed.
+        body: nl === -1 ? "" : section.slice(nl + 1),
+      };
+    });
+}
+
+/** Every ticket section whose heading matches, in document order. */
+export function matchingTicketSections(description = "", matchesHeading) {
+  return ticketSections(description).filter((section) =>
+    matchesHeading(section.heading),
+  );
+}
+
+/**
  * Extract the Owned Paths bullet list (levels 2-4) from a Linear issue description.
+ *
+ * Duplicate `Owned Paths` headings are unioned: every matching block is read,
+ * the paths are deduplicated, and order is first occurrence in the body. A
+ * respec appended with `ticket detail` therefore widens scope to cover both
+ * the old and the new block — never silently narrower than either. With a
+ * single heading the result is byte-identical to reading that block alone.
  * Returns [] when the section is missing or fails to parse — for dispatch,
  * use `effectiveOwnedPaths`, which turns that into "collides with
  * everything" rather than "not dispatchable".
  */
 export function parseOwnedPaths(description = "") {
-  // `split` retains the pre-heading prose as index 0. It cannot be a section,
-  // even when it mentions "Owned Paths", so only inspect heading-led chunks.
-  const section = description
-    .split(/^#{2,4}\s+/m)
-    .slice(1)
-    .find((s) => {
-      const heading = s.split("\n")[0];
-      return /\bOwned Paths\b/i.test(heading);
-    });
-  if (!section) return [];
+  const sections = matchingTicketSections(description, (heading) =>
+    /\bOwned Paths\b/i.test(heading),
+  );
+  if (!sections.length) return [];
+  const body = sections.map((section) => section.body).join("\n");
 
   // Real tickets write this section three different ways — bullet lists, fenced
   // code blocks, and indented code — often mixing them with prose ("Plus, only
@@ -62,7 +98,7 @@ export function parseOwnedPaths(description = "") {
   const out = [];
   let inFence = false;
 
-  for (const raw of section.split("\n").slice(1)) {
+  for (const raw of body.split("\n")) {
     if (/^\s*```/.test(raw)) {
       inFence = !inFence;
       continue;
@@ -99,6 +135,9 @@ export function parseOwnedPaths(description = "") {
           !/\s/.test(s) &&
           (s.includes("/") || s.includes("*") || /\.[a-z0-9]+$/i.test(s)),
       )
+      // Union semantics: a path repeated across duplicate blocks counts once,
+      // keeping its first position.
+      .filter((s, i, all) => all.indexOf(s) === i)
   );
 }
 
@@ -133,17 +172,28 @@ export function effectiveOwnedPaths(description = "") {
  * Returns null when the section is missing or holds nothing runnable; the
  * worker's handoff gate then falls back to the repo's `verify:` command and,
  * absent both, refuses the handoff (fail-closed).
+ *
+ * Duplicate headings follow the same union rule as {@link parseOwnedPaths}:
+ * each block's command is read, duplicates are dropped, and the distinct
+ * commands are joined with ` && ` in document order — "all of these must
+ * pass". A single heading behaves exactly as before.
  */
 export function parseVerificationCommand(description = "") {
-  const section = String(description ?? "")
-    .split(/^#{2,4}\s+/m)
-    .find((s) => {
-      const heading = s.split("\n")[0];
-      return /^Verification(\s+Command)?\s*:?\s*$/i.test(heading.trim());
-    });
-  if (!section) return null;
+  const sections = matchingTicketSections(description, (heading) =>
+    /^Verification(\s+Command)?\s*:?\s*$/i.test(heading.trim()),
+  );
+  if (!sections.length) return null;
+  const commands = [];
+  for (const section of sections) {
+    const command = parseVerificationSection(section.body);
+    if (command && !commands.includes(command)) commands.push(command);
+  }
+  if (!commands.length) return null;
+  return commands.length === 1 ? commands[0] : commands.join(" && ");
+}
 
-  const body = section.split("\n").slice(1);
+function parseVerificationSection(sectionBody) {
+  const body = sectionBody.split("\n");
   const fenced = [];
   let inFence = false;
   let sawFence = false;
@@ -287,12 +337,49 @@ function compileGlob(glob, start = 0, delimiters = new Set()) {
  * Supports the subset that actually appears in Owned Paths: `**` (any depth,
  * including none), `*` (one segment), `?`, and `{a,b}` alternation. A trailing
  * `/` or a bare directory means "everything under it".
+ *
+ * The compilation is pure by default: no filesystem is consulted and the
+ * process CWD is never read, so the same glob always compiles to the same
+ * matcher. Pass an explicit `repoRoot` to opt into root-anchoring a bare
+ * filename that names a real file at that root (see below). Callers that
+ * cannot name a repository root — the escalate gate among them — must keep
+ * the pure behaviour: silently narrowing a matcher against whatever happens
+ * to sit in an ambient directory would drop escalations.
+ *
+ * @param {string} glob
+ * @param {{ repoRoot?: string }} [options] `repoRoot` is the absolute path of
+ *   the repository the glob is written against.
  */
-export function globToRegExp(glob) {
+export function globToRegExp(glob, { repoRoot } = {}) {
   if (typeof glob !== "string") {
     throw new OwnedPathsPatternError(glob, "pattern must be a string");
   }
   let g = glob.trim().replace(/^\.\//, "");
+  // A bare filename with an extension is ambiguous in an Owned Paths list:
+  // unlike a repo-relative path, it does not identify which directory holds
+  // the file. Treat it as a basename matcher so handoff verification does not
+  // report a false deviation merely because the ticket omitted that directory.
+  //
+  // When the caller names the repository root, that ambiguity can be resolved:
+  // if a file by that name really sits at the root, a legacy bare entry such
+  // as `package.json` means the root file and nothing nested. This resolution
+  // only ever narrows the matcher, so it is opt-in — never inferred from the
+  // process CWD, which the compiler does not read.
+  // Only an absolute root may narrow the matcher. A relative `repoRoot` would
+  // be joined against `process.cwd()`, letting whichever directory the caller
+  // happens to run from decide the semantics; that is exactly what this
+  // resolution must never do, so such a root is ignored rather than resolved.
+  const resolvesToRootFile =
+    typeof repoRoot === "string" &&
+    path.isAbsolute(repoRoot) &&
+    !g.includes("/") &&
+    statSync(path.join(repoRoot, g), { throwIfNoEntry: false })?.isFile() ===
+      true;
+  const matchBasenameAtAnyDepth =
+    !g.includes("/") &&
+    !/[*?{}]/.test(g) &&
+    /\.[a-z0-9]+$/i.test(g) &&
+    !resolvesToRootFile;
   // A path with no glob metacharacters and no extension is treated as a prefix:
   // `app/services` owns everything beneath it. It also names a real, concrete
   // path in its own right (`Dockerfile`, `Makefile` — extensionless files are
@@ -308,6 +395,7 @@ export function globToRegExp(glob) {
   // The "/**" appended above compiles to a trailing literal "/.*"; make the
   // "/" + anything optional so the bare path matches itself as well.
   if (matchSelf) re = re.replace(/\/\.\*$/, "(?:/.*)?");
+  if (matchBasenameAtAnyDepth) re = `(?:.*/)?${re}`;
   return new RegExp(`^${re}$`);
 }
 
@@ -321,11 +409,11 @@ export function globToRegExp(glob) {
  * pair of tickets; false negatives cost two agents editing one file. Bias to
  * the former, always.
  */
-export function globsOverlap(a, b) {
+export function globsOverlap(a, b, { repoRoot } = {}) {
   if (a === b) return true;
   try {
-    const ra = globToRegExp(a);
-    const rb = globToRegExp(b);
+    const ra = globToRegExp(a, { repoRoot });
+    const rb = globToRegExp(b, { repoRoot });
     const isConcrete = (g) => !/[*?{]/.test(g);
 
     // At least one side names an actual path: decide by matching, which is exact.

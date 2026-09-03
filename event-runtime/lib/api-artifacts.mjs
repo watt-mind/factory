@@ -1,4 +1,10 @@
-/** Artifact endpoints and bounded transcript reads. */
+/**
+ * Artifact endpoints and bounded transcript reads.
+ *
+ * Validation errors: GET /artifacts returns `invalid_limit`, `invalid_orphan`,
+ * or `invalid_before`; POST /artifacts/prune returns `invalid_body`,
+ * `invalid_dry_run`, `invalid_apply`, or `conflicting_flags`.
+ */
 import {
   closeSync,
   createReadStream,
@@ -6,6 +12,7 @@ import {
   readSync,
   rmSync,
 } from "node:fs";
+import { pipeline } from "node:stream/promises";
 import { findArtifact, hashFileAsync, pruneArtifacts } from "./artifacts.mjs";
 import { artifactsRoot } from "./config.mjs";
 import { ApiParameterError, parseListLimit } from "./api-params.mjs";
@@ -24,6 +31,30 @@ function looksLikeText(file) {
 }
 
 export const TRANSCRIPT_MODEL_SCAN_BYTES = 64 * 1024;
+
+function parseBeforeCursor(rawBefore) {
+  if (!rawBefore) return null;
+  try {
+    const before = JSON.parse(
+      Buffer.from(rawBefore, "base64url").toString("utf8"),
+    );
+    if (
+      !before ||
+      typeof before.mtime !== "string" ||
+      !Number.isFinite(Date.parse(before.mtime)) ||
+      new Date(before.mtime).toISOString() !== before.mtime ||
+      !/^[0-9a-f]{64}$/.test(before.sha256)
+    ) {
+      throw new Error("invalid cursor");
+    }
+    return before;
+  } catch {
+    throw new ApiParameterError(
+      "invalid_before",
+      "before must be a valid cursor",
+    );
+  }
+}
 
 /** Bounded head of a stored artifact; null when it is missing or unreadable. */
 export function artifactHead(
@@ -47,6 +78,30 @@ export function artifactHead(
   }
 }
 
+/** Stream an artifact while closing both ends when either side fails or aborts. */
+export async function streamArtifact(source, response) {
+  const responseAlreadyClosed = response.destroyed || response.closed;
+  try {
+    await pipeline(source, response);
+  } catch (err) {
+    const clientAborted =
+      [
+        "ERR_STREAM_PREMATURE_CLOSE",
+        "ECONNRESET",
+        "EPIPE",
+        "ERR_STREAM_DESTROYED",
+      ].includes(err?.code) ||
+      err?.message === "aborted" ||
+      responseAlreadyClosed;
+    if (clientAborted) {
+      console.debug("artifact download client aborted");
+    } else {
+      console.warn(`artifact download stream failed: ${err.message}`);
+    }
+    response.destroy();
+  }
+}
+
 export async function handleArtifactApiRoute({
   route,
   req,
@@ -63,39 +118,27 @@ export async function handleArtifactApiRoute({
   getArtifactPage,
 }) {
   if (route === "GET /artifacts") {
+    // The inventory is cached for 10 s, so blobs removed outside this API can
+    // remain visible until its next refresh.
     const orphanParam = url.searchParams.get("orphan");
-    if (
-      orphanParam !== null &&
-      orphanParam !== "true" &&
-      orphanParam !== "false"
-    ) {
-      return send(422, { error: "orphan must be true or false" });
-    }
     let limit;
+    let before;
     try {
+      if (
+        orphanParam !== null &&
+        orphanParam !== "true" &&
+        orphanParam !== "false"
+      ) {
+        throw new ApiParameterError(
+          "invalid_orphan",
+          "orphan must be true or false",
+        );
+      }
       limit = parseListLimit(url, { defaultLimit: 100, maxLimit: 500 });
+      before = parseBeforeCursor(url.searchParams.get("before"));
     } catch (err) {
       if (err instanceof ApiParameterError) return send(422, err.body);
       throw err;
-    }
-    const rawBefore = url.searchParams.get("before");
-    let before = null;
-    if (rawBefore) {
-      try {
-        before = JSON.parse(
-          Buffer.from(rawBefore, "base64url").toString("utf8"),
-        );
-        if (
-          !before ||
-          typeof before.mtime !== "string" ||
-          !Number.isFinite(Date.parse(before.mtime)) ||
-          !/^[0-9a-f]{64}$/.test(before.sha256)
-        ) {
-          throw new Error("invalid cursor");
-        }
-      } catch {
-        return send(422, { error: "invalid before cursor" });
-      }
     }
     const page = getArtifactPage(
       {
@@ -117,19 +160,40 @@ export async function handleArtifactApiRoute({
   if (route === "POST /artifacts/prune") {
     const raw = await readBody(req);
     const parsed = raw.length === 0 ? { value: {} } : parseJson(raw);
-    if (parsed.error) return send(422, { error: parsed.error });
-    const body = parsed.value ?? {};
+    if (parsed.error) {
+      return send(
+        422,
+        new ApiParameterError("invalid_body", parsed.error).body,
+      );
+    }
+    const body = parsed.value;
     if (!body || typeof body !== "object" || Array.isArray(body)) {
-      return send(422, { error: "body must be an object" });
+      return send(
+        422,
+        new ApiParameterError("invalid_body", "body must be an object").body,
+      );
     }
     if (body.dryRun !== undefined && typeof body.dryRun !== "boolean") {
-      return send(422, { error: "dryRun must be a boolean" });
+      return send(
+        422,
+        new ApiParameterError("invalid_dry_run", "dryRun must be a boolean")
+          .body,
+      );
     }
     if (body.apply !== undefined && typeof body.apply !== "boolean") {
-      return send(422, { error: "apply must be a boolean" });
+      return send(
+        422,
+        new ApiParameterError("invalid_apply", "apply must be a boolean").body,
+      );
     }
     if (body.apply === true && body.dryRun === true) {
-      return send(422, { error: "apply and dryRun cannot both be true" });
+      return send(
+        422,
+        new ApiParameterError(
+          "conflicting_flags",
+          "apply and dryRun cannot both be true",
+        ).body,
+      );
     }
     const apply = body.apply === true;
     const result = pruneArtifacts(db, artifactsRoot(env.home), {
@@ -149,6 +213,8 @@ export async function handleArtifactApiRoute({
     if (!found) return send(404, { error: `no artifact ${artifactGet[1]}` });
     if ((await hashFileAsync(found.file)) !== artifactGet[1]) {
       rmSync(found.file, { force: true });
+      clearStoreStats();
+      clearArtifactPage();
       return send(404, { error: `no artifact ${artifactGet[1]}` });
     }
     const rawName = url.searchParams.get("name");
@@ -166,7 +232,7 @@ export async function handleArtifactApiRoute({
           }
         : {}),
     });
-    createReadStream(found.file).pipe(res);
+    await streamArtifact(createReadStream(found.file), res);
     return;
   }
 

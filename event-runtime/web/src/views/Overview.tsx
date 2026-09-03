@@ -14,6 +14,7 @@ import { goPrefixActive } from "../goSequence";
 import { keyGuard, refetchIntervals, useNow, useRequeuePoll } from "../hooks";
 import type {
   JournalEntry,
+  AgentDef,
   EventFocus,
   Proposal,
   RunState,
@@ -22,14 +23,14 @@ import type {
 import type { OperatorContext } from "../context";
 import { scopedCount, scopedTally } from "../context";
 import { EMPTY, formatBytes, formatRelative } from "../format";
+import { headerFor, inputViewOf } from "../lib/artifactView";
 import type { WorkerHealthFilter } from "./Workers";
 import {
   Button,
-  Disclosure,
   Dialog,
+  Disclosure,
   EVENT_STATUS_HUES,
   STATE_HUES,
-  JsonBlock,
   JumpLink,
   StateBadge,
   StateIcon,
@@ -42,10 +43,10 @@ import { Button as PrimitiveButton } from "../components/ui";
 
 const FEED_CAP = 50;
 
+// Inbox stays its own chunk; Overview is a thin lazy consumer of the shared
+// Needs-you export rather than a second copy of the same body.
 const OverviewNeedsYou = lazy(() =>
-  import("./Inbox").then(({ OverviewNeedsYou }) => ({
-    default: OverviewNeedsYou,
-  })),
+  import("./Inbox").then((m) => ({ default: m.OverviewNeedsYou })),
 );
 // Lazy like Needs-you: the artifact-view renderer behind the panels is not
 // entry-chunk material, and a stock install without panels never draws it.
@@ -54,6 +55,43 @@ const PanelGrid = lazy(() =>
     default: PanelGrid,
   })),
 );
+const EventPanel = lazy(() =>
+  import("../components/ArtifactView").then((module) => ({
+    default: module.EventPanel,
+  })),
+);
+
+/**
+ * Keep the compact Outbox cue aligned with EventPanel's requested-event view.
+ * A completed event resolves its output view only after EventPanel fetches its
+ * artifact, so its legacy payload cue remains the available compact fallback.
+ */
+export function outboxSummary(
+  type: string,
+  payload: Record<string, unknown>,
+  agents: readonly AgentDef[],
+): string | null {
+  // Deliberately duplicate ArtifactView's private routeAgent to avoid loading
+  // EventPanel's lazy chunk just to render this compact outbox cue.
+  const requestedAgent = agents.find((agent) =>
+    agent.eventTypes.some((route) => route.type === type),
+  );
+  const view = inputViewOf(requestedAgent?.outputView);
+  const header = view
+    ? headerFor(view, payload, requestedAgent?.inputSchema)
+    : null;
+  return (
+    header?.status?.value ??
+    header?.summary ??
+    (typeof payload.outcome === "string"
+      ? payload.outcome
+      : typeof payload.recommendation === "string"
+        ? payload.recommendation
+        : typeof payload.verdict === "string"
+          ? payload.verdict
+          : null)
+  );
+}
 
 export function SectionTitle({
   title,
@@ -885,18 +923,22 @@ export function Overview({
     queryFn: api.status,
     ...refetchIntervals.primary,
   });
-  // Overview uses the ledger itself rather than a status summary so rows stay
-  // in the exact Inbox order and acknowledgement never needs an optimistic
-  // local rewrite.
+  // Ask for open rows directly: a mixed-status cursor can otherwise spend its
+  // first page on historical resolved items and hide an actionable row here.
   const inbox = useQuery({
-    queryKey: ["inbox", "all"],
-    queryFn: () => api.inbox("all"),
+    queryKey: ["inbox", "open"],
+    queryFn: () => api.inbox("open"),
     ...refetchIntervals.primary,
   });
   const outbox = useQuery({
     queryKey: ["outbox"],
     queryFn: () => api.outbox(15),
     ...refetchIntervals.fast,
+  });
+  const agentsQ = useQuery({
+    queryKey: ["agents"],
+    queryFn: api.agents,
+    ...refetchIntervals.secondary,
   });
   const proposalsForDeck = useQuery({
     queryKey: ["proposals"],
@@ -2199,14 +2241,11 @@ export function Overview({
                     string,
                     unknown
                   >;
-                  const summary =
-                    typeof payload.outcome === "string"
-                      ? payload.outcome
-                      : typeof payload.recommendation === "string"
-                        ? payload.recommendation
-                        : typeof payload.verdict === "string"
-                          ? payload.verdict
-                          : null;
+                  const summary = outboxSummary(
+                    type,
+                    payload,
+                    agentsQ.data?.agents ?? [],
+                  );
 
                   return (
                     <div
@@ -2250,8 +2289,30 @@ export function Overview({
                           </span>
                         )}
                       </div>
-                      <Disclosure label="event JSON">
-                        <JsonBlock value={o.event} />
+                      <Disclosure label="envelope" deferChildren>
+                        <Suspense
+                          fallback={
+                            <div className="text-(--text-faint)">
+                              Loading event view…
+                            </div>
+                          }
+                        >
+                          <EventPanel
+                            envelope={o.event}
+                            agents={agentsQ.data?.agents}
+                            now={now}
+                            onJumpRun={onJumpRun}
+                            onJumpChain={(correlationId) =>
+                              onJumpEvents({
+                                source: "chain",
+                                eventId: correlationId,
+                              })
+                            }
+                            onJumpArtifact={(sha256) => {
+                              window.location.hash = `#/artifact/${sha256}`;
+                            }}
+                          />
+                        </Suspense>
                       </Disclosure>
                     </div>
                   );

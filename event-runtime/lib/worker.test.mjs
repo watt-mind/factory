@@ -18,7 +18,21 @@ import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
  * state, so a real hang still fails, just not a slow host.
  */
 const EXECUTE_SPAWN_TIMEOUT_MS = loadAdjustedTimeout(5_000);
-import { composeHandoffVerification, insideHandoffSandbox } from "./verify.mjs";
+
+/**
+ * Ceiling for the isolated-process local-notify drain probe (GH-2011). It
+ * spawns a Bun child that loads the worker module graph, which is comfortably
+ * under a second on a quiet box and demonstrably slower on a contended one.
+ * Scaling it weakens no assertion: the probe's own asserts decide the verdict.
+ */
+const LOCAL_NOTIFY_PROBE_TIMEOUT_MS = loadAdjustedTimeout(20_000);
+import {
+  composeHandoffVerification,
+  ContractViolation,
+  HANDOFF_DEPENDENCIES_MISSING,
+  insideHandoffSandbox,
+  verifyResult,
+} from "./verify.mjs";
 import { createHash } from "node:crypto";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
@@ -34,6 +48,7 @@ import {
 } from "node:fs";
 import * as nodeFs from "node:fs";
 const realReadFileSync = nodeFs.readFileSync;
+import { createServer } from "node:net";
 import { homedir } from "node:os";
 import path from "node:path";
 import {
@@ -45,6 +60,7 @@ import { buildPiArgv, execute as executePi } from "./adapters/pi.mjs";
 import { createAdapterRegistry } from "./adapters/index.mjs";
 import { SandboxUnsupportedError } from "./adapters/sandboxed.mjs";
 import { pinRunArtifact } from "./artifacts.mjs";
+import { memoryForge } from "../../lib/forge/index.mjs";
 import { admitEvent } from "./intake.mjs";
 import { planEvent } from "./planner.mjs";
 import { canonicalJson, hashBytes, hashJson } from "./canonical.mjs";
@@ -58,13 +74,17 @@ import {
   IllegalTransition,
 } from "./lifecycle.mjs";
 import { computeDefHash } from "./receipts.mjs";
+import { listMemos, registerMemos } from "./memos.mjs";
 import { getAgent, loadRegistry } from "./registry.mjs";
 import { transcriptSessionId } from "./transcripts.mjs";
 import {
+  cellCapabilityEnv,
+  DEFAULT_CELL_ENDPOINT,
   dispatchIdentityEnv,
   acquireClaimLock,
   adapterExecuteTimeoutMs,
   assertHandoffPullRequestBase,
+  boundedWorkspaceIntegrityStatus,
   cancelRun,
   CLAIM_LOCK_BACKOFF_MAX_MS,
   claimNext,
@@ -75,13 +95,19 @@ import {
   codeStampRoot,
   continuationExecutionInput,
   continuationHandoffFailure,
+  escalationHandoffFailure,
   createReloadWatcher,
   DEFAULT_MAX_ENVIRONMENT_RETRIES,
+  defaultBlockBaselineTicket,
+  defaultFindWorkspacePullRequest,
   defaultLocksDir,
+  defaultMarkHandoffPullRequestReady,
   defaultReconcileVerifiedHandoffTicket,
+  defaultHoldPullRequest,
   defaultProjectTierEscalation,
   defaultReturnHandoffTicket,
   defaultUnclaimTicket,
+  drainLocalNotifyOutbox,
   dispatchLockPath,
   DYNAMIC_DEADLINE_ADAPTERS,
   executeClaimed,
@@ -89,6 +115,9 @@ import {
   expireRunDeadline,
   extendRunDeadline,
   forceFailRun,
+  HarnessMaterializeError,
+  HANDOFF_FORGE_UNAVAILABLE,
+  humanDecisionAuthorisationGate,
   LEASE_GRACE_SECONDS,
   policyMaxRunMinutes,
   policyWorkspaceOnlyFallback,
@@ -99,15 +128,20 @@ import {
   repositoryIsClean,
   repositoryStatus,
   provisionInstanceLocalConfigs,
+  recoverMissingDispatchResult,
   runClaimPathGitProbe,
   resolveLinearApiKey,
   reconcileTierEscalations,
   scheduleTierEscalation,
+  STALE_DEAD_LETTER_MS,
+  sweepOrphanedLocalNotifyOutbox,
+  tierEscalationContinuationGuard,
   tierEscalationEligibility,
   retryRun,
   runLinearCli,
   runOnce,
   ticketHandoffContext,
+  writeWorkspaceIntegrityStatus,
 } from "./worker.mjs";
 import {
   liveWorkerLeases,
@@ -125,6 +159,7 @@ import {
 import {
   EMPTY_POLICY_ROOT,
   adapters,
+  dispatchConfigSnapshot,
   freshRoot,
   insertStalledWorker,
   linkEvent,
@@ -140,9 +175,597 @@ registerTestProcessCleanup(import.meta.url);
 let seq = 0;
 
 describe("worker", () => {
-  test("materialized harness entries record hashes for every copied file", () => {
+  test("sweeps orphaned local notify outboxes while preserving active runs", () => {
+    const home = tmpDir("evrt-local-notify-sweep-");
+    const outboxDir = path.join(home, "outbox");
+    const db = openDb(":memory:");
+    const active = queueRun(db, makeSpec({ runId: "run_active_outbox" }));
+    claimNext(db, opts());
+    mkdirSync(outboxDir, { recursive: true });
+    writeFileSync(path.join(outboxDir, `${active.runId}.jsonl`), "active\n");
+    writeFileSync(path.join(outboxDir, "run_orphan_outbox.jsonl"), "orphan\n");
+
+    // Past the grace window: the inactive run's file is eligible, the active
+    // run's file is still protected by its state.
+    expect(
+      sweepOrphanedLocalNotifyOutbox({
+        db,
+        home,
+        now: Date.now() + 2 * 60 * 60 * 1000,
+      }),
+    ).toEqual(["run_orphan_outbox"]);
+    expect(existsSync(path.join(outboxDir, `${active.runId}.jsonl`))).toBe(
+      true,
+    );
+    expect(existsSync(path.join(outboxDir, "run_orphan_outbox.jsonl"))).toBe(
+      false,
+    );
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("leaves an outbox file inside the mtime grace window alone", () => {
+    // Without an age grace the sweep deletes the very file a live drain
+    // retains as its recovery source: the agent writes the outbox before the
+    // worker's run is visible in any active state to this sweep's snapshot.
+    const home = tmpDir("evrt-local-notify-grace-");
+    const outboxDir = path.join(home, "outbox");
+    const db = openDb(":memory:");
+    mkdirSync(outboxDir, { recursive: true });
+    const fresh = path.join(outboxDir, "run_fresh_outbox.jsonl");
+    writeFileSync(fresh, "fresh\n");
+
+    expect(sweepOrphanedLocalNotifyOutbox({ db, home })).toEqual([]);
+    expect(existsSync(fresh)).toBe(true);
+
+    // Only once the file has aged past the window does it become eligible.
+    expect(
+      sweepOrphanedLocalNotifyOutbox({
+        db,
+        home,
+        now: Date.now() + 61 * 60 * 1000,
+      }),
+    ).toEqual(["run_fresh_outbox"]);
+    expect(existsSync(fresh)).toBe(false);
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("drains an agent local notification outbox with the worker bearer", async () => {
+    const home = tmpDir("evrt-local-notify-outbox-");
+    const runId = "run_1558";
+    const outbox = path.join(home, "outbox", `${runId}.jsonl`);
+    mkdirSync(path.dirname(outbox), { recursive: true });
+    writeFileSync(
+      outbox,
+      `${JSON.stringify({
+        schemaVersion: "factory.local-notify-outbox/v1",
+        runId,
+        kind: "BLOCKED",
+        title: "BLOCKED watt-mind/factory#1558: token unavailable",
+        refs: { issue: "watt-mind/factory#1558", repo: "factory" },
+        source: `agent:${runId}`,
+      })}\n`,
+    );
+    const calls = [];
+    const result = await drainLocalNotifyOutbox({
+      home,
+      runId,
+      port: "7499",
+      token: "worker-only-token",
+      fetchFn: async (url, init) => {
+        calls.push({ url, init });
+        return new Response("{}", { status: 201 });
+      },
+    });
+
+    expect(result).toEqual({
+      delivered: [
+        expect.objectContaining({
+          title: "BLOCKED watt-mind/factory#1558: token unavailable",
+        }),
+      ],
+      undelivered: [],
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].init.headers.authorization).toBe(
+      "Bearer worker-only-token",
+    );
+    expect(existsSync(outbox)).toBe(false);
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("reports one undelivered entry per line for an invalid port", async () => {
+    // The caller only reads `undelivered`; an `error` field alone made a
+    // misconfigured port invisible and the retained lines were then swept.
+    const home = tmpDir("evrt-local-notify-invalid-port-");
+    const runId = "run_invalid_port";
+    const outbox = path.join(home, "outbox", `${runId}.jsonl`);
+    mkdirSync(path.dirname(outbox), { recursive: true });
+    const line = (title) =>
+      JSON.stringify({
+        schemaVersion: "factory.local-notify-outbox/v1",
+        runId,
+        kind: "BLOCKED",
+        title,
+        refs: {},
+        source: `agent:${runId}`,
+      });
+    writeFileSync(
+      outbox,
+      `${line("BLOCKED watt-mind/factory#1964: invalid port")}\n${line(
+        "BLOCKED watt-mind/factory#1964: second escalation",
+      )}\nnot-json\n`,
+    );
+    const expectedError =
+      "FACTORY_EVENT_PORT must be a positive integer between 1 and 65535";
+    let fetchCalls = 0;
+    const fetchFn = async () => {
+      fetchCalls += 1;
+      throw new Error("invalid ports must not attempt notification delivery");
+    };
+    try {
+      const result = await drainLocalNotifyOutbox({
+        home,
+        runId,
+        port: "not-a-port",
+        fetchFn,
+      });
+      expect(result.delivered).toEqual([]);
+      expect(result.undelivered).toEqual([
+        {
+          title: "BLOCKED watt-mind/factory#1964: invalid port",
+          error: expectedError,
+        },
+        {
+          title: "BLOCKED watt-mind/factory#1964: second escalation",
+          error: expectedError,
+        },
+        { title: "invalid local notification record", error: expectedError },
+      ]);
+      expect(fetchCalls).toBe(0);
+      // The outbox stays put as the recovery source.
+      expect(existsSync(outbox)).toBe(true);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("forbids global fetch spies in lib tests", () => {
+    // Worker code accepts injected fetchFn dependencies. Keeping spies local to
+    // that seam prevents a global patch from leaking into interleaved tests.
+    const libDir = import.meta.dir;
+    const testFiles = [];
+    const visit = (dir) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const file = path.join(dir, entry.name);
+        if (entry.isDirectory()) visit(file);
+        else if (entry.isFile() && entry.name.endsWith(".test.mjs")) {
+          testFiles.push(file);
+        }
+      }
+    };
+    visit(libDir);
+
+    const globalFetchSpy = /spyOn\s*\(\s*globalThis\s*,\s*["']fetch["']/;
+    const violations = testFiles.filter((file) =>
+      globalFetchSpy.test(readFileSync(file, "utf8")),
+    );
+    expect(violations).toEqual([]);
+  });
+
+  // The drain-on-throw behaviour is a whole-`executeClaimed` scenario, and in
+  // process it was load- and order-sensitive: four dispatch-worktree
+  // repo-verify gates failed on it in one morning (GH-2011) while every
+  // isolated re-run passed, because the surrounding suite mutates
+  // module-level fixtures this scenario reads through `executeClaimed`. The
+  // probe therefore runs as its own Bun process, which owns that state; every
+  // assertion lives there and each one names the invariant it guards. The
+  // inbox port is allocated ephemerally here (bind :0, read it back, close)
+  // and passed in, so nothing depends on a fixed local port being free.
+  test(
+    "drains a worktree adapter's local notifications and reports an undelivered one after the adapter throws (isolated process)",
+    async () => {
+      const port = await new Promise((resolve, reject) => {
+        const probe = createServer();
+        probe.once("error", reject);
+        probe.listen(0, "127.0.0.1", () => {
+          const assigned = probe.address().port;
+          probe.close(() => resolve(assigned));
+        });
+      });
+      const script = new URL(
+        "../test-support/local-notify-drain-probe.mjs",
+        import.meta.url,
+      ).pathname;
+
+      const proc = Bun.spawnSync({
+        cmd: ["bun", script, String(port)],
+        stdout: "pipe",
+        stderr: "pipe",
+        cwd: new URL("../..", import.meta.url).pathname,
+      });
+      const stdout = proc.stdout.toString();
+      const stderr = proc.stderr.toString();
+      if (proc.exitCode !== 0) {
+        throw new Error(
+          `local-notify drain probe failed (exit ${proc.exitCode}):\n${stderr}${stdout}`,
+        );
+      }
+      expect(stdout).toContain("PROBE_OK");
+    },
+    LOCAL_NOTIFY_PROBE_TIMEOUT_MS,
+  );
+
+  test("keeps exactly one local notify drain, reached only from a finally", () => {
+    // Two drain sites could race the same outbox read/truncate cycle and
+    // deliver a BLOCKED or escalation notification twice. Keep this structural
+    // guard alongside the behavioral drain tests so a future refactor cannot
+    // silently add another call site — and so every supervised adapter turn
+    // (the primary execution and the bounded Pi result repair) still drains
+    // from a `finally`, where an adapter throw cannot strand a retained
+    // escalation.
+    const source = readFileSync(
+      new URL("./worker.mjs", import.meta.url),
+      "utf8",
+    );
+    // Exactly one place actually touches the outbox...
+    expect(source.split("await drainLocalNotifyOutbox({")).toHaveLength(2);
+    const helper = source.indexOf(
+      "const drainNotifyOutboxSafely = async () => {",
+    );
+    expect(helper).toBeGreaterThan(-1);
+    expect(source.indexOf("await drainLocalNotifyOutbox({")).toBeGreaterThan(
+      helper,
+    );
+    // ...and every caller of it sits directly in a `finally`.
+    const callSites = [
+      ...source.matchAll(/await drainNotifyOutboxSafely\(\);/g),
+    ];
+    expect(callSites.length).toBeGreaterThanOrEqual(2);
+    for (const site of callSites) {
+      const preamble = source.slice(Math.max(0, site.index - 200), site.index);
+      expect(preamble).toContain("} finally {");
+      expect(preamble.slice(preamble.lastIndexOf("} finally {"))).not.toContain(
+        "try {",
+      );
+    }
+  });
+
+  test("retains an undelivered local notification for handoff recovery", async () => {
+    const home = tmpDir("evrt-local-notify-retained-");
+    const runId = "run_1558_retained";
+    const outbox = path.join(home, "outbox", `${runId}.jsonl`);
+    mkdirSync(path.dirname(outbox), { recursive: true });
+    writeFileSync(
+      outbox,
+      `${JSON.stringify({
+        schemaVersion: "factory.local-notify-outbox/v1",
+        runId,
+        kind: "ESCALATED",
+        title: "ESCALATED watt-mind/factory#1558: worker delivery failed",
+        refs: { issue: "watt-mind/factory#1558", repo: "factory" },
+        source: `agent:${runId}`,
+      })}\n`,
+    );
+    const result = await drainLocalNotifyOutbox({
+      home,
+      runId,
+      fetchFn: async () => {
+        throw new Error("runtime unavailable");
+      },
+    });
+
+    expect(result.delivered).toEqual([]);
+    expect(result.undelivered).toEqual([
+      {
+        title: "ESCALATED watt-mind/factory#1558: worker delivery failed",
+        error: "runtime unavailable",
+      },
+    ]);
+    expect(readFileSync(outbox, "utf8")).toContain("worker delivery failed");
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  test("canonical authorisation hash is verified before dispatch execution", () => {
+    const description =
+      "## Owned Paths\n- event-runtime/lib/worker.mjs\n- docs/event-runtime-inbox.md\n";
+    const input = {
+      repo: "factory",
+      ticket: "watt-mind/factory#1337",
+      humanDecision: {
+        inboxItemId: "inbox_authorised",
+        authorisation: {
+          ticket: "watt-mind/factory#1337",
+          repo: "factory",
+          descriptionHash: hashBytes(description),
+          paths: [
+            "event-runtime/lib/worker.mjs",
+            "docs/event-runtime-inbox.md",
+          ],
+        },
+      },
+    };
+
+    const result = humanDecisionAuthorisationGate(input, {
+      fetchTicket: () => ({ description }),
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      input: {
+        humanDecision: { authorisation: { verified: true } },
+      },
+    });
+    expect(input.humanDecision.authorisation.verified).toBeUndefined();
+  });
+
+  test("trailing-newline authorisation hash is refused before dispatch execution", () => {
+    const description = "## Owned Paths\n- event-runtime/lib/worker.mjs\n";
+    const result = humanDecisionAuthorisationGate(
+      {
+        repo: "factory",
+        ticket: "watt-mind/factory#1337",
+        humanDecision: {
+          authorisation: {
+            ticket: "watt-mind/factory#1337",
+            repo: "factory",
+            descriptionHash: hashBytes(`${description}\n`),
+            paths: ["event-runtime/lib/worker.mjs"],
+          },
+        },
+      },
+      { fetchTicket: () => ({ description }) },
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      refusal: { reason: "authorisation_stale:description" },
+    });
+  });
+
+  test("authorisation paths may narrow to a non-empty subset of Owned Paths", () => {
+    const description =
+      "## Owned Paths\n- event-runtime/lib/worker.mjs\n- docs/event-runtime-inbox.md\n";
+    const result = humanDecisionAuthorisationGate(
+      {
+        repo: "factory",
+        ticket: "watt-mind/factory#1337",
+        humanDecision: {
+          authorisation: {
+            ticket: "watt-mind/factory#1337",
+            repo: "factory",
+            descriptionHash: hashBytes(description),
+            paths: ["event-runtime/lib/worker.mjs"],
+          },
+        },
+      },
+      { fetchTicket: () => ({ description }) },
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      input: {
+        humanDecision: {
+          authorisation: {
+            verified: true,
+            paths: ["event-runtime/lib/worker.mjs"],
+          },
+        },
+      },
+    });
+  });
+
+  test("authorisation paths outside the ticket's Owned Paths are refused", () => {
+    const description = "## Owned Paths\n- event-runtime/lib/worker.mjs\n";
+    const result = humanDecisionAuthorisationGate(
+      {
+        repo: "factory",
+        ticket: "watt-mind/factory#1337",
+        humanDecision: {
+          authorisation: {
+            ticket: "watt-mind/factory#1337",
+            repo: "factory",
+            descriptionHash: hashBytes(description),
+            paths: [
+              "event-runtime/lib/worker.mjs",
+              "event-runtime/lib/planner.mjs",
+            ],
+          },
+        },
+      },
+      { fetchTicket: () => ({ description }) },
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      refusal: { reason: "authorisation_stale:paths" },
+    });
+    expect(result.refusal.detail).toContain("event-runtime/lib/planner.mjs");
+    expect(result.evidence).toEqual({
+      descriptionHash: hashBytes(description),
+      ownedPaths: ["event-runtime/lib/worker.mjs"],
+    });
+  });
+
+  test("an empty authorisation path set is refused", () => {
+    const description = "## Owned Paths\n- event-runtime/lib/worker.mjs\n";
+    for (const paths of [[], undefined]) {
+      const result = humanDecisionAuthorisationGate(
+        {
+          repo: "factory",
+          ticket: "watt-mind/factory#1337",
+          humanDecision: {
+            authorisation: {
+              ticket: "watt-mind/factory#1337",
+              repo: "factory",
+              descriptionHash: hashBytes(description),
+              ...(paths === undefined ? {} : { paths }),
+            },
+          },
+        },
+        { fetchTicket: () => ({ description }) },
+      );
+
+      expect(result).toMatchObject({
+        ok: false,
+        refusal: { reason: "authorisation_stale:paths" },
+        evidence: { ownedPaths: ["event-runtime/lib/worker.mjs"] },
+      });
+    }
+  });
+
+  test("an authorisation minted for another ticket or repo is refused", () => {
+    const description = "## Owned Paths\n- event-runtime/lib/worker.mjs\n";
+    let fetches = 0;
+    for (const binding of [
+      { ticket: "watt-mind/factory#1338", repo: "factory" },
+      { ticket: "watt-mind/factory#1337", repo: "other-repo" },
+      {},
+    ]) {
+      const result = humanDecisionAuthorisationGate(
+        {
+          repo: "factory",
+          ticket: "watt-mind/factory#1337",
+          humanDecision: {
+            authorisation: {
+              ...binding,
+              descriptionHash: hashBytes(description),
+              paths: ["event-runtime/lib/worker.mjs"],
+            },
+          },
+        },
+        {
+          fetchTicket: () => {
+            fetches += 1;
+            return { description };
+          },
+        },
+      );
+
+      expect(result).toMatchObject({
+        ok: false,
+        refusal: { reason: "authorisation_stale:ticket" },
+      });
+      expect(result.evidence).toEqual({
+        descriptionHash: null,
+        ownedPaths: [],
+      });
+    }
+    expect(fetches).toBe(0);
+  });
+
+  test("a stale description refusal carries a fingerprint, not the ticket", () => {
+    const description = "## Owned Paths\n- event-runtime/lib/worker.mjs\n";
+    const result = humanDecisionAuthorisationGate(
+      {
+        repo: "factory",
+        ticket: "watt-mind/factory#1337",
+        humanDecision: {
+          authorisation: {
+            ticket: "watt-mind/factory#1337",
+            repo: "factory",
+            descriptionHash: hashBytes("something else"),
+            paths: ["event-runtime/lib/worker.mjs"],
+          },
+        },
+      },
+      { fetchTicket: () => ({ description, title: "secret title" }) },
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      refusal: { reason: "authorisation_stale:description" },
+    });
+    expect(result.evidence).toEqual({
+      descriptionHash: hashBytes(description),
+      ownedPaths: ["event-runtime/lib/worker.mjs"],
+    });
+  });
+
+  test("dispatch without an authorisation does not add a ticket read", () => {
+    const input = { repo: "factory", ticket: "watt-mind/factory#1337" };
+    let fetches = 0;
+
+    expect(
+      humanDecisionAuthorisationGate(input, {
+        fetchTicket: () => (fetches += 1),
+      }),
+    ).toEqual({ ok: true, input });
+    expect(fetches).toBe(0);
+  });
+
+  const demoSkillFixture = () => {
     const factoryRoot = tmpDir("evrt-harness-source-");
+    const catalog = path.join(factoryRoot, "catalog");
+    const source = path.join(factoryRoot, "dist", "fake", "skills", "demo");
+    mkdirSync(path.join(catalog, "skills", "demo"), { recursive: true });
+    mkdirSync(source, { recursive: true });
+    writeFileSync(
+      path.join(catalog, "skills", "demo", "SKILL.md"),
+      "catalog\n",
+    );
+    writeFileSync(path.join(source, "SKILL.md"), "first\n");
+    writeFileSync(path.join(source, "notes.md"), "second\n");
+    return {
+      spec: { harness: { skills: ["demo"] } },
+      adapterKey: "fake",
+      adapter: {
+        HARNESS_LAYOUT: {
+          skills: {
+            source: (name) => ["dist", "fake", "skills", name],
+            dest: (name) => [".fake", "skills", name],
+            type: "dir",
+          },
+        },
+      },
+      registry: { harnessRoots: [{ skills: path.join(catalog, "skills") }] },
+      factoryRoot,
+    };
+  };
+
+  test("materialized harness entries record hashes for every copied file", () => {
     const workspaceDir = tmpDir("evrt-harness-workspace-");
+    const written = materializeRunHarness({
+      ...demoSkillFixture(),
+      workspaceDir,
+    });
+
+    expect(written).toEqual([
+      {
+        kind: "skills",
+        name: "demo",
+        dest: ".fake/skills/demo",
+        pins: {
+          ".fake/skills/demo/SKILL.md": hashBytes("first\n"),
+          ".fake/skills/demo/notes.md": hashBytes("second\n"),
+        },
+      },
+    ]);
+  });
+
+  test("materialize refuses a missing workspace root as harness_unmaterializable", () => {
+    const workspaceDir = path.join(
+      tmpDir("evrt-harness-workspace-missing-"),
+      "does-not-exist",
+    );
+    let caught;
+    try {
+      materializeRunHarness({ ...demoSkillFixture(), workspaceDir });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(HarnessMaterializeError);
+    expect(caught.code).toBe("harness_unmaterializable");
+    expect(caught.message).toContain("workspace root");
+  });
+
+  test("materialized harness entries remain workspace-relative through a symlinked parent", () => {
+    const factoryRoot = tmpDir("evrt-harness-source-");
+    const realWorkspaceParent = tmpDir("evrt-harness-workspace-real-");
+    const workspaceAliasBase = tmpDir("evrt-harness-workspace-alias-");
+    const workspaceAliasParent = path.join(workspaceAliasBase, "parent");
+    symlinkSync(realWorkspaceParent, workspaceAliasParent, "dir");
+    const workspaceDir = path.join(workspaceAliasParent, "workspace");
+    mkdirSync(workspaceDir);
     const catalog = path.join(factoryRoot, "catalog");
     const source = path.join(factoryRoot, "dist", "fake", "skills", "demo");
     mkdirSync(path.join(catalog, "skills", "demo"), { recursive: true });
@@ -523,6 +1146,117 @@ sh -c 'sleep 5 & wait'
     expect(repositoryStatus(repo)).not.toBe(baseline);
   });
 
+  test("workspace integrity failure records dirty checkout evidence and retains it", async () => {
+    const db = openDb(":memory:");
+    const o = opts();
+    const spec = queueRun(
+      db,
+      makeSpec({
+        adapter: "dirty-read-only-checkout",
+        input: {
+          repos: ["ok"],
+          repoPin: { repo: "factory", sha: "0".repeat(40) },
+        },
+        workspace: {
+          type: "repository",
+          checkoutDir: "repo",
+          retainOnFailure: false,
+        },
+      }),
+    );
+    const dirtyAdapter = {
+      async execute(args) {
+        writeFileSync(
+          path.join(args.workspaceDir, "repo", "agent-write.log"),
+          "dirty\n",
+        );
+        return fake.execute(args);
+      },
+    };
+
+    const summary = await runOnce(
+      db,
+      registry,
+      { "dirty-read-only-checkout": dirtyAdapter },
+      o,
+    );
+
+    expect(summary).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "workspace_integrity_violation",
+    });
+    const workspace = path.join(o.workspacesRoot, `${spec.runId}-a1`);
+    const evidenceFile = path.join(workspace, "workspace-integrity-status.txt");
+    expect(existsSync(evidenceFile)).toBe(true);
+    expect(readFileSync(evidenceFile, "utf8")).toContain("agent-write.log");
+    expect(readFileSync(evidenceFile, "utf8")).toContain(
+      "checkoutBaselineSha256: sha256:",
+    );
+    // The retained wrapper preserves the evidence file, not a live checkout
+    // registration in its mirror.
+    expect(existsSync(path.join(workspace, "repo"))).toBe(false);
+    const evidence = db
+      .query(
+        `SELECT payload_json FROM attempt_trace
+         WHERE run_id = ? AND kind = 'lifecycle' ORDER BY seq`,
+      )
+      .all(spec.runId)
+      .map((row) => JSON.parse(row.payload_json))
+      .find((payload) => payload.note === "workspace_integrity_violation");
+    expect(evidence).toEqual(
+      expect.objectContaining({
+        checkoutStatus: expect.stringContaining("agent-write.log"),
+      }),
+    );
+    db.close();
+  });
+
+  test("bounds workspace integrity status without splitting UTF-8 characters", () => {
+    const status = `${"x".repeat(12 * 1024 - 1)}é`;
+    const evidence = boundedWorkspaceIntegrityStatus(status);
+
+    expect(evidence.truncated).toBe(true);
+    expect(evidence.value).not.toContain("\uFFFD");
+    expect(Buffer.byteLength(evidence.value, "utf8")).toBeLessThanOrEqual(
+      12 * 1024,
+    );
+  });
+
+  test("preserves null workspace integrity status", () => {
+    expect(boundedWorkspaceIntegrityStatus(null)).toEqual({
+      value: null,
+      bytes: null,
+      truncated: false,
+    });
+  });
+
+  test("writes bounded status, baseline, and hashes to retained evidence", () => {
+    const workspace = tmpDir("evrt-integrity-evidence-");
+    writeWorkspaceIntegrityStatus(workspace, {
+      checkoutStatus: "?? agent-write.log\n",
+      checkoutBaseline: "!! generated/setup.log\n",
+    });
+
+    expect(
+      readFileSync(
+        path.join(workspace, "workspace-integrity-status.txt"),
+        "utf8",
+      ),
+    ).toContain("?? agent-write.log");
+    expect(
+      readFileSync(
+        path.join(workspace, "workspace-integrity-status.txt"),
+        "utf8",
+      ),
+    ).toContain("!! generated/setup.log");
+    expect(
+      readFileSync(
+        path.join(workspace, "workspace-integrity-status.txt"),
+        "utf8",
+      ),
+    ).toMatch(/checkout(?:Status|Baseline)Sha256: sha256:[a-f0-9]{64}/);
+  });
+
   test("repository status returns null when git exceeds its timeout", () => {
     const dir = tmpDir("evrt-hanging-git-");
     const hangingGit = path.join(dir, "git");
@@ -687,6 +1421,412 @@ sh -c 'sleep 5 & wait'
     expect(existsSync(path.join(o.workspacesRoot, `${spec.runId}-a1`))).toBe(
       false,
     );
+  });
+
+  test("materializes CELLS.md from the agent definition's declared cell capabilities", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    // The CELLS.md guide is gated on the *definition's* declared capabilities,
+    // so the worker has to hand them to createWorkspace. It did not (#2149),
+    // which left the injection unreachable in production; this test fails if
+    // that argument is dropped again.
+    const cellsRegistry = {
+      ...registry,
+      agents: new Map(registry.agents),
+    };
+    const baseDef = getAgent(registry, "factory-status-report@1");
+    cellsRegistry.agents.set("factory-status-report@1", {
+      ...baseDef,
+      capabilities: {
+        ...(baseDef.capabilities ?? {}),
+        cells: [
+          {
+            binding: "ARTICLE_CELL",
+            access: "data-only",
+            description: "Article sources and drafts",
+          },
+        ],
+      },
+    });
+
+    const spec = queueRun(
+      db,
+      makeSpec({
+        adapter: "cells-probe",
+        input: {
+          repos: ["ok"],
+          cellEndpoint: "http://127.0.0.1:8080",
+        },
+      }),
+      now,
+    );
+
+    let seenGuide = null;
+    const probeAdapter = {
+      async execute({ workspaceDir }) {
+        const guidePath = path.join(workspaceDir, "CELLS.md");
+        seenGuide = existsSync(guidePath)
+          ? readFileSync(guidePath, "utf8")
+          : null;
+        writeFileSync(
+          path.join(workspaceDir, "result.json"),
+          JSON.stringify({
+            schemaVersion: "factory.agent-result/v1",
+            terminalState: "completed",
+            artifact: {
+              repos: [
+                {
+                  name: "factory",
+                  triage: 0,
+                  agentReady: 0,
+                  inProgress: 0,
+                  blocked: 0,
+                },
+              ],
+              recommendedAction: "wait",
+            },
+          }),
+        );
+        return { exitCode: 0, timedOut: false };
+      },
+    };
+
+    const summary = await runOnce(
+      db,
+      cellsRegistry,
+      { "cells-probe": probeAdapter },
+      opts({ now: () => Date.now() }),
+    );
+
+    expect(summary.terminalState).toBe("COMPLETED");
+    expect(seenGuide).toBeTruthy();
+    expect(seenGuide).toContain("ARTICLE_CELL");
+    expect(seenGuide).toContain("data-only");
+    expect(seenGuide).toContain("http://127.0.0.1:8080");
+    expect(spec.runId).toBeTruthy();
+  });
+
+  test("omits CELLS.md when the agent definition declares no cells", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    queueRun(db, makeSpec({ adapter: "cells-probe" }), now);
+
+    let sawGuide = true;
+    const probeAdapter = {
+      async execute({ workspaceDir }) {
+        sawGuide = existsSync(path.join(workspaceDir, "CELLS.md"));
+        writeFileSync(
+          path.join(workspaceDir, "result.json"),
+          JSON.stringify({
+            schemaVersion: "factory.agent-result/v1",
+            terminalState: "completed",
+            artifact: {
+              repos: [
+                {
+                  name: "factory",
+                  triage: 0,
+                  agentReady: 0,
+                  inProgress: 0,
+                  blocked: 0,
+                },
+              ],
+              recommendedAction: "wait",
+            },
+          }),
+        );
+        return { exitCode: 0, timedOut: false };
+      },
+    };
+
+    const summary = await runOnce(
+      db,
+      registry,
+      { "cells-probe": probeAdapter },
+      opts({ now: () => Date.now() }),
+    );
+
+    expect(summary.terminalState).toBe("COMPLETED");
+    expect(sawGuide).toBe(false);
+  });
+
+  test("COMPLETED accepts register emitted memos and pinned memo verdicts", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const memoRegistry = {
+      ...registry,
+      agents: new Map(registry.agents),
+    };
+    memoRegistry.agents.set("factory-status-report@1", {
+      ...getAgent(registry, "factory-status-report@1"),
+      emits: { memos: ["repo-note"] },
+      outputSchema: {
+        ...getAgent(registry, "factory-status-report@1").outputSchema,
+        additionalProperties: true,
+      },
+    });
+    const pinnedBytes = JSON.stringify({
+      schemaVersion: "factory.memo/v1",
+      subject: { type: "repo", id: "factory" },
+      kind: "repo-note",
+      claim: { kind: "fact", text: "Pinned memo for the worker test." },
+      evidence: "worker test",
+      body: "Pinned memo for the worker test.",
+    });
+    const pinnedSha = createHash("sha256").update(pinnedBytes).digest("hex");
+    const artifactStore = freshRoot();
+    writeFileSync(path.join(artifactStore, pinnedSha), pinnedBytes);
+    const spec = queueRun(
+      db,
+      makeSpec({
+        adapter: "memo-emitting",
+        input: {
+          repos: ["factory"],
+          repo: "factory",
+          memoPin: { entries: [{ sha256: pinnedSha }] },
+        },
+      }),
+      now,
+    );
+    const memoAdapter = {
+      async execute({ workspaceDir }) {
+        writeFileSync(
+          path.join(workspaceDir, "result.json"),
+          JSON.stringify({
+            schemaVersion: "factory.agent-result/v1",
+            terminalState: "completed",
+            artifact: {
+              repos: [
+                {
+                  name: "factory",
+                  triage: 0,
+                  agentReady: 0,
+                  inProgress: 0,
+                  blocked: 0,
+                },
+              ],
+              recommendedAction: "wait",
+              learnings: [
+                {
+                  claim: {
+                    kind: "fact",
+                    text: "Accepted memo reaches the ledger.",
+                  },
+                  evidence: "worker test",
+                },
+              ],
+              usedMemos: [{ sha256: pinnedSha, verdict: "useful" }],
+            },
+          }),
+        );
+        return { exitCode: 0, timedOut: false };
+      },
+    };
+
+    const summary = await runOnce(
+      db,
+      memoRegistry,
+      { "memo-emitting": memoAdapter },
+      opts({ now: () => Date.now(), artifactStore }),
+    );
+
+    expect(summary.terminalState).toBe("COMPLETED");
+    const memos = db
+      .query(`SELECT * FROM memos WHERE run_id = ?`)
+      .all(spec.runId);
+    expect(memos).toHaveLength(1);
+    expect(listMemos(db, { type: "repo", id: "factory" })).toEqual([
+      expect.objectContaining({ sha256: memos[0].sha256, kind: "repo-note" }),
+    ]);
+    expect(
+      db
+        .query(
+          `SELECT sha256, run_id, verdict, run_state FROM memo_uses WHERE run_id = ?`,
+        )
+        .get(spec.runId),
+    ).toEqual({
+      sha256: pinnedSha,
+      run_id: spec.runId,
+      verdict: "useful",
+      run_state: "COMPLETED",
+    });
+
+    const accepted = JSON.parse(
+      db
+        .query(`SELECT result_json FROM results WHERE run_id = ?`)
+        .get(spec.runId).result_json,
+    );
+    registerMemos(db, spec.runId, accepted, {
+      now: Date.now(),
+      agent: spec.agent,
+      runState: "COMPLETED",
+    });
+    expect(
+      db.query(`SELECT * FROM memos WHERE run_id = ?`).all(spec.runId),
+    ).toHaveLength(1);
+    db.close();
+  });
+
+  test("COMPLETED records a NULL-verdict memo_uses row for a pinned memo the agent never mentions", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const pinnedBytes = JSON.stringify({
+      schemaVersion: "factory.memo/v1",
+      subject: { type: "repo", id: "factory" },
+      kind: "repo-note",
+      claim: { kind: "fact", text: "Pinned but unmentioned memo." },
+      evidence: "worker test",
+      body: "Pinned but unmentioned memo.",
+    });
+    const pinnedSha = createHash("sha256").update(pinnedBytes).digest("hex");
+    const artifactStore = freshRoot();
+    writeFileSync(path.join(artifactStore, pinnedSha), pinnedBytes);
+    const spec = queueRun(
+      db,
+      makeSpec({
+        adapter: "memo-silent",
+        input: {
+          repos: ["factory"],
+          repo: "factory",
+          memoPin: { entries: [{ sha256: pinnedSha }] },
+        },
+      }),
+      now,
+    );
+    const silentAdapter = {
+      async execute({ workspaceDir }) {
+        writeFileSync(
+          path.join(workspaceDir, "result.json"),
+          JSON.stringify({
+            schemaVersion: "factory.agent-result/v1",
+            terminalState: "completed",
+            artifact: {
+              repos: [
+                {
+                  name: "factory",
+                  triage: 0,
+                  agentReady: 0,
+                  inProgress: 0,
+                  blocked: 0,
+                },
+              ],
+              recommendedAction: "wait",
+            },
+          }),
+        );
+        return { exitCode: 0, timedOut: false };
+      },
+    };
+
+    const summary = await runOnce(
+      db,
+      registry,
+      { "memo-silent": silentAdapter },
+      opts({ now: () => Date.now(), artifactStore }),
+    );
+
+    expect(summary.terminalState).toBe("COMPLETED");
+    const accepted = JSON.parse(
+      db
+        .query(`SELECT result_json FROM results WHERE run_id = ?`)
+        .get(spec.runId).result_json,
+    );
+    expect(accepted.usedMemos ?? []).toEqual([]);
+    expect(
+      db
+        .query(
+          `SELECT sha256, run_id, verdict, run_state FROM memo_uses WHERE run_id = ?`,
+        )
+        .all(spec.runId),
+    ).toEqual([
+      {
+        sha256: pinnedSha,
+        run_id: spec.runId,
+        verdict: null,
+        run_state: "COMPLETED",
+      },
+    ]);
+    db.close();
+  });
+
+  test("memo registration failure rolls back the accepted result transaction", async () => {
+    const db = openDb(":memory:");
+    const now = Date.now();
+    const memoRegistry = {
+      ...registry,
+      agents: new Map(registry.agents),
+    };
+    memoRegistry.agents.set("factory-status-report@1", {
+      ...getAgent(registry, "factory-status-report@1"),
+      emits: { memos: ["repo-note"] },
+      outputSchema: {
+        ...getAgent(registry, "factory-status-report@1").outputSchema,
+        additionalProperties: true,
+      },
+    });
+    const spec = queueRun(
+      db,
+      makeSpec({
+        adapter: "memo-insert-fails",
+        input: { repos: ["factory"], repo: "factory" },
+      }),
+      now,
+    );
+    db.exec(`
+      CREATE TRIGGER reject_memo_insert
+      BEFORE INSERT ON memos
+      BEGIN
+        SELECT RAISE(ABORT, 'memo insert failed');
+      END;
+    `);
+    const failingMemoAdapter = {
+      async execute({ workspaceDir }) {
+        writeFileSync(
+          path.join(workspaceDir, "result.json"),
+          JSON.stringify({
+            schemaVersion: "factory.agent-result/v1",
+            terminalState: "completed",
+            artifact: {
+              repos: [
+                {
+                  name: "factory",
+                  triage: 0,
+                  agentReady: 0,
+                  inProgress: 0,
+                  blocked: 0,
+                },
+              ],
+              recommendedAction: "wait",
+              learnings: [
+                {
+                  claim: {
+                    kind: "fact",
+                    text: "A failing insert must roll back.",
+                  },
+                  evidence: "worker test",
+                },
+              ],
+            },
+          }),
+        );
+        return { exitCode: 0, timedOut: false };
+      },
+    };
+
+    const summary = await runOnce(
+      db,
+      memoRegistry,
+      { "memo-insert-fails": failingMemoAdapter },
+      opts({ now: () => Date.now() }),
+    );
+
+    expect(summary.terminalState).toBe("FAILED");
+    expect(
+      db
+        .query(`SELECT COUNT(*) AS n FROM results WHERE run_id = ?`)
+        .get(spec.runId).n,
+    ).toBe(0);
+    expect(db.query(`SELECT COUNT(*) AS n FROM memos`).get().n).toBe(0);
+    db.close();
   });
 
   test("persists usage returned by an adapter, including model and cache tokens", async () => {
@@ -867,6 +2007,14 @@ sh -c 'sleep 5 & wait'
     expect(inbox.kind).toBe("ESCALATED");
     expect(inbox.source).toBe(`agent:${spec.runId}`);
     expect(inbox.dedupe_key).toBe(`ESCALATED:${spec.runId}`);
+    expect(inbox.title).toBe(
+      `Escalated: run ${spec.runId} — stopped because an operator decision is required before it can proceed`,
+    );
+    expect(inbox.body).toContain(
+      `What happened: An item needs attention for run ${spec.runId} (escalated).`,
+    );
+    expect(inbox.body).toContain("Reason code: needs_human.");
+    expect(inbox.body).toContain("Option effects:");
     expect(JSON.parse(inbox.decision_json).schemaVersion).toBe(
       "factory.decision-request/v1",
     );
@@ -1055,6 +2203,11 @@ sh -c 'sleep 5 & wait'
             repo: "factory",
             pr: 42,
           },
+          approvalPolicy: {
+            dispatchEvidence: {
+              ticket: { title: "Choose a supported answer" },
+            },
+          },
         }),
       );
       const summary = await runOnce(
@@ -1076,14 +2229,67 @@ sh -c 'sleep 5 & wait'
       });
       expect(item.dedupe_key).toBe("ESCALATED:WM-390");
       if (valid) {
-        expect(item.title).toBe(authored.question);
+        expect(item.title).toBe(
+          'Escalated: WM-390 "Choose a supported answer" — stopped because an operator decision is required before it can proceed',
+        );
+        expect(item.body).toContain(
+          'What happened: An item needs attention for WM-390 "Choose a supported answer" (escalated).',
+        );
+        expect(item.body).toContain("Reason code: needs_human.");
+        expect(item.body).toContain(
+          "Question: Which answer should unblock WM-390?",
+        );
+        expect(item.body).toContain(
+          "Answer the agent — records the operator's reply for the agent.",
+        );
+        expect(item.body).toContain(
+          "Not now — keeps the item resolved without changing the referenced work.",
+        );
         expect(JSON.parse(item.decision_json)).toEqual(authored);
-        expect(item.body).toBeNull();
       } else {
         expect(JSON.parse(item.decision_json)).not.toEqual(invalid);
         expect(item.body).toContain("recommended");
       }
     }
+  });
+
+  test("needs_human surfaces agent evidence, summaries, and findings in the inbox", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(
+      db,
+      makeSpec({
+        adapter: "refuse-with-evidence",
+        input: { repos: ["evidence"], ticket: "WM-2118", repo: "factory" },
+      }),
+    );
+    const adapter = {
+      async execute({ workspaceDir }) {
+        writeFileSync(
+          path.join(workspaceDir, "result.json"),
+          JSON.stringify({
+            schemaVersion: "factory.agent-result/v1",
+            terminalState: "refused",
+            reasonCode: "needs_human",
+            evidence: {
+              summary: "The PR is already closed.",
+              reason: "auto_approval_ineligible:merge_barrier_unverified:pr-42",
+              message: "Confirm the merge barrier before retrying.",
+              findings: ["PR #42 was closed before review."],
+            },
+          }),
+        );
+        return { exitCode: 0, timedOut: false };
+      },
+    };
+
+    await runOnce(db, registry, { "refuse-with-evidence": adapter }, opts());
+    const body = db.query("SELECT body FROM inbox_items").get().body;
+    expect(body).toContain("Agent summary: The PR is already closed.");
+    expect(body).toContain("Agent reason: Merge barrier has not been verified");
+    expect(body).toContain(
+      "Agent message: Confirm the merge barrier before retrying.",
+    );
+    expect(body).toContain("PR #42 was closed before review.");
   });
 
   test("a failing refusal inbox write never rolls back the terminal REFUSED state", async () => {
@@ -1185,6 +2391,230 @@ sh -c 'sleep 5 & wait'
     );
   });
 
+  test("Pi retries each observed malformed result shape once with validator detail", async () => {
+    const goodResult = {
+      schemaVersion: "factory.agent-result/v1",
+      terminalState: "completed",
+      reasonCode: "ok",
+      artifact: {
+        repos: [
+          {
+            name: "factory",
+            triage: 0,
+            agentReady: 0,
+            inProgress: 0,
+            blocked: 0,
+          },
+        ],
+        recommendedAction: "wait",
+      },
+    };
+    const malformed = [
+      {
+        candidate: { status: "completed", summary: "done", verification: {} },
+        expected: [
+          '$: missing required property "schemaVersion"',
+          '$: missing required property "terminalState"',
+          '$: unknown property "status"',
+          '$: unknown property "verification"',
+        ],
+      },
+      {
+        candidate: {
+          ticket: "watt-mind/factory#1952",
+          repo: "factory",
+          outcome: "PR_OPEN",
+          summary: "real work completed",
+          prUrl: "https://github.com/watt-mind/factory/pull/1952",
+          branch: "feat/1952",
+          verification: {},
+        },
+        expected: [
+          '$: missing required property "schemaVersion"',
+          '$: missing required property "terminalState"',
+          '$: unknown property "outcome"',
+          '$: unknown property "prUrl"',
+        ],
+      },
+      {
+        candidate: {
+          ...goodResult,
+          terminalState: "completed",
+          verification: { ticketGate: "pass", repoGate: "pass" },
+          followUpIssue: "WM-2076",
+        },
+        expected: [
+          '$: unknown property "verification"',
+          '$: unknown property "followUpIssue"',
+        ],
+      },
+    ];
+
+    for (const { candidate, expected } of malformed) {
+      const db = openDb(":memory:");
+      const spec = queueRun(db, makeSpec({ adapter: "pi" }));
+      const o = opts();
+      const repairs = [];
+      const pi = {
+        async execute({ workspaceDir, resultRepair }) {
+          if (!resultRepair) {
+            writeFileSync(
+              path.join(workspaceDir, "result.json"),
+              JSON.stringify(candidate),
+            );
+          } else {
+            repairs.push({
+              ...resultRepair,
+              // The snapshot only survives while the workspace does; a
+              // COMPLETED run destroys it, so read it here.
+              retained: readFileSync(
+                path.join(workspaceDir, "result.invalid.json"),
+                "utf8",
+              ),
+            });
+            writeFileSync(
+              path.join(workspaceDir, "result.json"),
+              JSON.stringify(goodResult),
+            );
+          }
+          return { exitCode: 0, timedOut: false };
+        },
+      };
+
+      const summary = await runOnce(db, registry, { pi }, o);
+      expect(summary).toMatchObject({ terminalState: "COMPLETED" });
+      expect(repairs).toHaveLength(1);
+      // Shape-specific: the repair turn must be handed the validator's own
+      // complaints, not merely some non-empty string.
+      for (const violation of expected) {
+        expect(repairs[0].violations).toContain(violation);
+      }
+      // The rejected bytes travel with the repair request, and are kept on
+      // disk as the evidence of what the agent originally wrote.
+      expect(repairs[0].priorResult).toBe(JSON.stringify(candidate));
+      expect(repairs[0].retained).toBe(JSON.stringify(candidate));
+      expect(repairs[0].priorResultPath).toBe(
+        path.join(o.workspacesRoot, `${spec.runId}-a1`, "result.json"),
+      );
+      expect(runState(db, spec.runId)).toBe("COMPLETED");
+      db.close();
+    }
+  });
+
+  test("Pi repair that is still invalid FAILS with the ORIGINAL violations and retains the invalid envelope", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({ adapter: "pi" }));
+    const o = opts();
+    const invalid = { status: "completed", summary: "done" };
+    let calls = 0;
+    const pi = {
+      async execute({ workspaceDir }) {
+        calls += 1;
+        writeFileSync(
+          path.join(workspaceDir, "result.json"),
+          JSON.stringify(
+            calls === 1 ? invalid : { schemaVersion: "wrong/v0", oops: true },
+          ),
+        );
+        return { exitCode: 0, timedOut: false };
+      },
+    };
+
+    const summary = await runOnce(db, registry, { pi }, o);
+    expect(calls).toBe(2);
+    expect(summary).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "contract_violation",
+    });
+    const reason = lifecycleOf(db, spec.runId)
+      .map((event) => event.reason ?? "")
+      .join("\n");
+    // The original complaint is what a human has to read; the repair's own
+    // violations are appended detail, never a replacement.
+    expect(reason).toContain('$: missing required property "schemaVersion"');
+    expect(reason).toContain('$: unknown property "status"');
+    expect(reason).toContain("after repair:");
+    const workspaceDir = path.join(o.workspacesRoot, `${spec.runId}-a1`);
+    expect(
+      readFileSync(path.join(workspaceDir, "result.invalid.json"), "utf8"),
+    ).toBe(JSON.stringify(invalid));
+  });
+
+  test("Pi repair that exits nonzero leaves the original violations standing and is not retried", async () => {
+    for (const repairOutcome of [
+      { exitCode: 3, timedOut: false },
+      { exitCode: 0, timedOut: true },
+      "throw",
+    ]) {
+      const db = openDb(":memory:");
+      const spec = queueRun(db, makeSpec({ adapter: "pi" }));
+      let calls = 0;
+      const pi = {
+        async execute({ workspaceDir, resultRepair }) {
+          calls += 1;
+          if (!resultRepair) {
+            writeFileSync(
+              path.join(workspaceDir, "result.json"),
+              JSON.stringify({ status: "completed", summary: "done" }),
+            );
+            return { exitCode: 0, timedOut: false };
+          }
+          if (repairOutcome === "throw") throw new Error("pi crashed");
+          // A failed repair must not be able to smuggle a result through.
+          return repairOutcome;
+        },
+      };
+
+      const summary = await runOnce(db, registry, { pi }, opts());
+      expect(calls).toBe(2);
+      expect(summary).toMatchObject({
+        terminalState: "FAILED",
+        reasonCode: "contract_violation",
+      });
+      const reason = lifecycleOf(db, spec.runId)
+        .map((event) => event.reason ?? "")
+        .join("\n");
+      expect(reason).toContain('$: unknown property "status"');
+      expect(reason).not.toContain("after repair:");
+      expect(runState(db, spec.runId)).toBe("FAILED");
+      db.close();
+    }
+  });
+
+  test("a handoff-gate contract violation is never repaired as an envelope", async () => {
+    const db = openDb(":memory:");
+    queueRun(db, makeSpec({ adapter: "pi" }));
+    let calls = 0;
+    const pi = {
+      async execute({ workspaceDir }) {
+        calls += 1;
+        writeFileSync(
+          path.join(workspaceDir, "result.json"),
+          JSON.stringify({ status: "completed" }),
+        );
+        return { exitCode: 0, timedOut: false };
+      },
+    };
+    const verifyResultStub = () => {
+      throw new ContractViolation(["handoff verification did not pass"], {
+        reasonCode: "handoff_verification_failed",
+        handoff: { command: "bun test", passed: false, output: "red" },
+      });
+    };
+
+    const summary = await runOnce(
+      db,
+      registry,
+      { pi },
+      { ...opts(), verifyResult: verifyResultStub },
+    );
+    // The gate refused the WORK, not the envelope: re-prompting the agent to
+    // restate its result would launder a real verification failure.
+    expect(calls).toBe(1);
+    expect(summary).toMatchObject({ terminalState: "FAILED" });
+    expect(summary.reasonCode).toBe("handoff_verification_failed");
+  });
+
   test("escape: artifact outside the workspace is a contract violation", async () => {
     const db = openDb(":memory:");
     const spec = queueRun(db, makeSpec({ input: { repos: ["escape"] } }));
@@ -1192,6 +2622,160 @@ sh -c 'sleep 5 & wait'
     const summary = await runOnce(db, registry, adapters, opts());
     expect(summary.terminalState).toBe("FAILED");
     expect(summary.reasonCode).toBe("contract_violation");
+  });
+
+  test("verifyResult ENOENT on a vanished worktree is FAILED/handoff_worktree_missing, not a LEASED leftover (#1663)", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec());
+    const summary = await runOnce(
+      db,
+      registry,
+      adapters,
+      opts({
+        verifyResult: ({ workspaceDir }) => {
+          throw Object.assign(new Error("ENOENT"), {
+            code: "ENOENT",
+            syscall: "realpath",
+            path: path.join(workspaceDir, "worktree"),
+          });
+        },
+      }),
+    );
+    expect(summary).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "handoff_worktree_missing",
+    });
+    expect(summary.error).toEqual({ code: "ENOENT", message: "ENOENT" });
+    expect(runState(db, spec.runId)).not.toBe("LEASED");
+    const attemptRow = db
+      .query(
+        `SELECT terminal_state, reason_code, finished_at FROM attempts WHERE run_id = ? AND attempt = 1`,
+      )
+      .get(spec.runId);
+    expect(attemptRow.terminal_state).toBe("FAILED");
+    expect(attemptRow.reason_code).toBe("handoff_worktree_missing");
+    expect(attemptRow.finished_at).toBeTruthy();
+    const stored = JSON.parse(
+      db
+        .query(
+          `SELECT result_json, verification_json FROM results WHERE run_id = ?`,
+        )
+        .get(spec.runId).result_json,
+    );
+    expect(stored.error).toEqual({ code: "ENOENT", message: "ENOENT" });
+    expect(stored.verification).toMatchObject({
+      status: "failed",
+      stage: "verification",
+    });
+  });
+
+  test("verifyResult ENOENT outside the run workspace (missing verifier binary) is verification_internal_error, not the environment budget (#1663)", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec());
+    const missingBinary = path.join(
+      path.sep,
+      "nonexistent-gh-1663",
+      "bin",
+      "verifier",
+    );
+    const summary = await runOnce(
+      db,
+      registry,
+      adapters,
+      opts({
+        verifyResult: () => {
+          throw Object.assign(new Error(`ENOENT: ${missingBinary}`), {
+            code: "ENOENT",
+            syscall: "realpath",
+            path: missingBinary,
+          });
+        },
+      }),
+    );
+    expect(summary).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "verification_internal_error",
+    });
+    expect(summary.error.code).toBe("ENOENT");
+    expect(runState(db, spec.runId)).toBe("FAILED");
+    const attemptRow = db
+      .query(
+        `SELECT reason_code FROM attempts WHERE run_id = ? AND attempt = 1`,
+      )
+      .get(spec.runId);
+    expect(attemptRow.reason_code).toBe("verification_internal_error");
+  });
+
+  test("verifyResult ENOENT without a path is verification_internal_error (#1663)", async () => {
+    const db = openDb(":memory:");
+    queueRun(db, makeSpec());
+    const summary = await runOnce(
+      db,
+      registry,
+      adapters,
+      opts({
+        verifyResult: () => {
+          throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        },
+      }),
+    );
+    expect(summary).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "verification_internal_error",
+    });
+  });
+
+  test("verifyResult TypeError is FAILED/verification_internal_error with the message recorded (#1663)", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec());
+    const summary = await runOnce(
+      db,
+      registry,
+      adapters,
+      opts({
+        verifyResult: () => {
+          throw new TypeError("cannot read property of undefined");
+        },
+      }),
+    );
+    expect(summary).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "verification_internal_error",
+    });
+    expect(summary.error.message).toBe("cannot read property of undefined");
+    expect(runState(db, spec.runId)).toBe("FAILED");
+    const stored = JSON.parse(
+      db
+        .query(`SELECT result_json FROM results WHERE run_id = ?`)
+        .get(spec.runId).result_json,
+    );
+    expect(stored.reasonCode).toBe("verification_internal_error");
+    expect(stored.error).toEqual({
+      code: "TypeError",
+      message: "cannot read property of undefined",
+    });
+    expect(stored.verification.stage).toBe("verification");
+  });
+
+  test("verifyResult ContractViolation still follows the existing handoff-failure path (#1663)", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec());
+    const summary = await runOnce(
+      db,
+      registry,
+      adapters,
+      opts({
+        verifyResult: () => {
+          throw new ContractViolation(["missing_result"]);
+        },
+      }),
+    );
+    expect(summary.terminalState).toBe("FAILED");
+    expect(summary.reasonCode).toBe("contract_violation");
+    expect(runState(db, spec.runId)).toBe("FAILED");
+    expect(
+      db.query(`SELECT * FROM results WHERE run_id = ?`).get(spec.runId),
+    ).toBeNull();
   });
 
   test("a trace recorder that cannot be prepared degrades to a no-op instead of throwing out of executeClaimed (#1330)", async () => {
@@ -1219,13 +2803,174 @@ sh -c 'sleep 5 & wait'
     }
   });
 
-  test("no-result: FAILED/contract_violation", async () => {
+  test("no-result reports the expected absolute path and bounded agent output", async () => {
     const db = openDb(":memory:");
-    const spec = queueRun(db, makeSpec({ input: { repos: ["no-result"] } }));
+    const diagnosticAdapter = {
+      async execute({ workspaceDir }) {
+        writeFileSync(
+          path.join(workspaceDir, ".transcript.json"),
+          `${"discarded-prefix\n".repeat(300)}agent-final-diagnostic\n`,
+        );
+        return { exitCode: 0, timedOut: false };
+      },
+    };
+    const spec = queueRun(db, makeSpec({ adapter: "diagnostic-no-result" }));
+    const o = opts();
 
-    const summary = await runOnce(db, registry, adapters, opts());
+    const summary = await runOnce(
+      db,
+      registry,
+      { "diagnostic-no-result": diagnosticAdapter },
+      o,
+    );
     expect(summary.terminalState).toBe("FAILED");
     expect(summary.reasonCode).toBe("contract_violation");
+    expect(summary.detail).toContain(
+      path.resolve(o.workspacesRoot, `${spec.runId}-a1`, "result.json"),
+    );
+    expect(summary.detail).toContain("agent-final-diagnostic");
+    const outputTail = summary.detail.split(
+      "agent stdout/stderr (last 2 KB): ",
+    )[1];
+    expect(outputTail.length).toBeLessThanOrEqual(2 * 1024);
+  });
+
+  test("dispatch missing-result recovery is exact and requires an open PR Handoff", () => {
+    const workspaceDir = tmpDir("dispatch-result-recovery-");
+    const checkoutPath = tmpDir("dispatch-result-checkout-");
+    const def = getAgent(registry, "dispatch@1");
+    const spec = makeSpec({
+      agent: "dispatch@1",
+      input: { repo: "factory", ticket: "watt-mind/factory#1539" },
+      outputContract: "factory.dispatch-result/v1",
+    });
+    const worktreeRecord = {
+      path: checkoutPath,
+      github: "watt-mind/factory",
+      verify: "bun test event-runtime/lib/worker.test.mjs",
+      handoff: {
+        verificationCommand: "bun test event-runtime/lib/worker.test.mjs",
+      },
+    };
+    const missing = new ContractViolation(["missing_result"]);
+    const openPr = {
+      number: 1533,
+      url: "https://github.com/watt-mind/factory/pull/1533",
+      state: "OPEN",
+    };
+    const headSha = "a".repeat(40);
+
+    const recovered = recoverMissingDispatchResult({
+      error: missing,
+      spec,
+      def,
+      workspaceDir,
+      worktreeRecord,
+      findPullRequest: () => openPr,
+      fetchPullRequest: () => ({
+        body: "Fixes watt-mind/factory#1539\n\n## Handoff\ncomplete",
+        headRefOid: headSha,
+      }),
+    });
+    expect(recovered.candidate).toMatchObject({
+      reasonCode: "worker_recovered_missing_result",
+      artifact: { outcome: "PR_OPEN", prNumber: 1533 },
+      evidence: { headSha },
+    });
+    // The synthesized artifact must satisfy the registered dispatch-result
+    // schema (additionalProperties: false) — no cloned, widened definition.
+    expect(recovered.candidate.artifact).not.toHaveProperty("headSha");
+    expect(recovered).not.toHaveProperty("definition");
+    const verified = verifyResult({
+      spec,
+      def,
+      registry,
+      workspaceDir,
+      attempt: 1,
+      worktreeRecord: {},
+    });
+    expect(verified.kind).toBe("completed");
+    expect(verified.result.artifact.headSha).toBeUndefined();
+    expect(verified.result.evidence.headSha).toBe(headSha);
+
+    rmSync(path.join(workspaceDir, "result.json"), { force: true });
+    const pushedNoPr = recoverMissingDispatchResult({
+      error: missing,
+      spec,
+      def,
+      workspaceDir,
+      worktreeRecord: { ...worktreeRecord, base: "develop" },
+      findPullRequest: () => ({ pushedBranch: "feat/gh-1539" }),
+    });
+    expect(pushedNoPr).toMatchObject({ retainWorkspace: true });
+    expect(pushedNoPr.candidate).toMatchObject({
+      reasonCode: "pushed_branch_no_pr",
+      artifact: {
+        outcome: "BLOCKED",
+        prUrl: null,
+        prNumber: null,
+        verification: { command: null, passed: false },
+      },
+      evidence: {
+        branch: "feat/gh-1539",
+        resumeCommand: expect.stringContaining("gh pr create --base develop"),
+      },
+    });
+    expect(pushedNoPr.candidate.artifact.summary).toContain(
+      "gh pr create --base develop",
+    );
+
+    expect(() =>
+      recoverMissingDispatchResult({
+        error: missing,
+        spec,
+        def,
+        workspaceDir,
+        worktreeRecord,
+        findPullRequest: () => {
+          const rateLimit = new Error("rate limited");
+          rateLimit.code = "forge_rate_limited";
+          throw rateLimit;
+        },
+      }),
+    ).toThrow(
+      expect.objectContaining({ reasonCode: HANDOFF_FORGE_UNAVAILABLE }),
+    );
+
+    for (const { error, findPullRequest, body, recoveredHeadSha = headSha } of [
+      { error: missing, findPullRequest: () => null, body: "## Handoff" },
+      { error: missing, findPullRequest: () => openPr, body: "Fixes #1539" },
+      {
+        error: missing,
+        findPullRequest: () => openPr,
+        body: "## Handoff",
+        recoveredHeadSha: null,
+      },
+      {
+        error: new ContractViolation(["missing_result", "missing_artifact"]),
+        findPullRequest: () => openPr,
+        body: "## Handoff",
+      },
+      {
+        error: new ContractViolation(["missing_artifact"]),
+        findPullRequest: () => openPr,
+        body: "## Handoff",
+      },
+    ]) {
+      rmSync(path.join(workspaceDir, "result.json"), { force: true });
+      expect(
+        recoverMissingDispatchResult({
+          error,
+          spec,
+          def,
+          workspaceDir,
+          worktreeRecord,
+          findPullRequest,
+          fetchPullRequest: () => ({ body, headRefOid: recoveredHeadSha }),
+        }),
+      ).toBeNull();
+      expect(existsSync(path.join(workspaceDir, "result.json"))).toBe(false);
+    }
   });
 
   test("hang: TIMED_OUT with a tiny timeout", async () => {
@@ -2453,6 +4198,13 @@ sh -c 'sleep 5 & wait'
     expect(classifyFailureCause("lease_expired")).toBe("environment");
     expect(classifyFailureCause("linear_unconfigured")).toBe("environment");
     expect(classifyFailureCause("registry_stale")).toBe("environment");
+    expect(classifyFailureCause(HANDOFF_DEPENDENCIES_MISSING)).toBe(
+      "environment",
+    );
+    expect(classifyFailureCause("handoff_worktree_missing")).toBe(
+      "environment",
+    );
+    expect(classifyFailureCause(HANDOFF_FORGE_UNAVAILABLE)).toBe("environment");
     expect(classifyFailureCause("agent_exit_1")).toBe("agent_error");
     expect(classifyFailureCause("contract_violation")).toBe("agent_error");
     for (const reason of [
@@ -2464,6 +4216,7 @@ sh -c 'sleep 5 & wait'
       "agent_definition_mismatch",
       "policy_denied:Bash",
       "workspace_integrity_violation",
+      "verification_internal_error",
     ]) {
       expect(classifyFailureCause(reason)).toBe("fatal");
     }
@@ -2497,6 +4250,7 @@ sh -c 'sleep 5 & wait'
       "timeout",
       "lease_expired",
       "adapter_error",
+      HANDOFF_DEPENDENCIES_MISSING,
       "needs_human",
       "policy_denied:Bash",
       "cancelled",
@@ -2521,6 +4275,567 @@ sh -c 'sleep 5 & wait'
     ).toBe(false);
   });
 
+  test("tier escalation skips work already handed to review but keeps active claims eligible", () => {
+    const spec = makeSpec({
+      agent: "dispatch@1",
+      input: { repo: "factory", ticket: "watt-mind/factory#2006" },
+      workspace: { type: "worktree", checkoutDir: "repo" },
+      modelTier: "light",
+    });
+    const inReview = tierEscalationContinuationGuard(spec, "agent_exit_1", {
+      fetchTicket: () => ({ state: { name: "In Review" } }),
+    });
+    expect(inReview).toMatchObject({
+      eligible: true,
+      skip: true,
+      reason: "ticket_in_review",
+    });
+    const db = openDb(":memory:");
+    queueRun(db, spec);
+    linkEvent(db, spec.runId);
+    expect(
+      scheduleTierEscalation(db, registry, spec, {
+        workspacePath: "/retained/factory-2006",
+        sourceWorkspacePath: "/workspace/run-2006",
+        continuationRunId: "run_tier_in_review",
+        reasonCode: "agent_exit_1",
+        continuationGuard: inReview,
+      }),
+    ).toBeNull();
+    expect(
+      db.query(`SELECT * FROM runs WHERE run_id = 'run_tier_in_review'`).get(),
+    ).toBeNull();
+    db.close();
+    for (const state of ["Todo", "In Progress"]) {
+      expect(
+        tierEscalationContinuationGuard(spec, "agent_exit_1", {
+          fetchTicket: () => ({ state: { name: state } }),
+        }),
+      ).toMatchObject({ eligible: true, skip: false });
+    }
+    expect(
+      tierEscalationContinuationGuard(spec, "agent_exit_1", {
+        fetchTicket: () => ({ state: { name: "In Progress" } }),
+        workspacePath: "/retained/factory-2006",
+        findPullRequest: () => ({ isDraft: false }),
+      }),
+    ).toMatchObject({
+      eligible: true,
+      skip: true,
+      reason: "retained_pr_open",
+    });
+  });
+
+  test("failed dispatch skips an In Review continuation but schedules one for an active ticket", async () => {
+    const executeFailure = async (reviewed) => {
+      const db = openDb(":memory:");
+      let ticketState = "Todo";
+      const ticket = "watt-mind/factory#2006";
+      const comments = [];
+      const spec = queueRun(
+        db,
+        makeSpec({
+          runId: `run_tier_failed_${reviewed ? "reviewed" : "active"}`,
+          agent: "dispatch@1",
+          input: { repo: "factory", ticket },
+          workspace: {
+            type: "worktree",
+            checkoutDir: "repo",
+            retainOnFailure: true,
+          },
+          outputContract: "factory.dispatch-result/v1",
+          modelTier: "light",
+          maxAttempts: 1,
+        }),
+      );
+      linkEvent(db, spec.runId, { type: "factory.dispatch.requested" });
+      const o = opts({
+        dispatch: {
+          // Pin the registry's factory checkout to this tree: the example
+          // registry's ~/Develop/factory is absent under repo-verify (#2031).
+          configSnapshot: dispatchConfigSnapshot(),
+          locksDir: tmpDir("tier-skip-locks-"),
+          leasesDir: tmpDir("tier-skip-leases-"),
+          fetchTicket: () => ({
+            identifier: ticket,
+            state: { name: ticketState },
+            assignee: ticketState === "Todo" ? null : { name: "hdkiller" },
+            labels: {
+              nodes: [
+                {
+                  name:
+                    ticketState === "Todo"
+                      ? "ai:agent-ready"
+                      : "ai:in-progress",
+                },
+              ],
+            },
+            description:
+              "## Owned Paths\n- event-runtime/lib/worker.mjs\n\n## Verification Command\n`bun test event-runtime/lib/worker.test.mjs`\n",
+          }),
+          fetchInFlight: () => [],
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          claimTicket: () => ((ticketState = "In Progress"), { ok: true }),
+          commentTicket: (entry) => comments.push(entry),
+          projectTierEscalation: () => true,
+          findWorkspacePullRequest: () => null,
+        },
+        materializeWorktree: () => ({
+          path: tmpDir("tier-skip-checkout-"),
+        }),
+      });
+      const claim = claimNext(db, o);
+      const result = await executeClaimed(
+        db,
+        registry,
+        {
+          fake: {
+            async execute() {
+              if (reviewed) ticketState = "In Review";
+              return { exitCode: 1, timedOut: false };
+            },
+          },
+        },
+        claim,
+        o,
+      );
+      const continuations = db
+        .query(`SELECT * FROM tier_escalations ORDER BY created_at`)
+        .all();
+      db.close();
+      return { result, comments, continuations };
+    };
+
+    const reviewed = await executeFailure(true);
+    expect(reviewed.result).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "agent_exit_1",
+      tierEscalationSkip: "ticket_in_review",
+    });
+    expect(reviewed.continuations).toEqual([]);
+    expect(reviewed.comments).toContainEqual(
+      expect.objectContaining({
+        body: expect.stringContaining(
+          "Tier escalation skipped: ticket is already In Review",
+        ),
+      }),
+    );
+
+    const active = await executeFailure(false);
+    expect(active.result).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "agent_exit_1",
+      escalatedRunId: expect.any(String),
+    });
+    expect(active.result.tierEscalationSkip).toBeUndefined();
+    expect(active.continuations).toHaveLength(1);
+  });
+
+  test("a retained open PR skips the continuation and still releases the ticket claim", async () => {
+    const db = openDb(":memory:");
+    const ticket = "watt-mind/factory#2006";
+    let ticketState = "Todo";
+    const comments = [];
+    const unclaims = [];
+    const spec = queueRun(
+      db,
+      makeSpec({
+        runId: "run_tier_retained_pr",
+        agent: "dispatch@1",
+        input: { repo: "factory", ticket },
+        workspace: {
+          type: "worktree",
+          checkoutDir: "repo",
+          retainOnFailure: true,
+        },
+        outputContract: "factory.dispatch-result/v1",
+        modelTier: "light",
+        maxAttempts: 1,
+      }),
+    );
+    linkEvent(db, spec.runId, { type: "factory.dispatch.requested" });
+    const o = opts({
+      dispatch: {
+        configSnapshot: dispatchConfigSnapshot(),
+        locksDir: tmpDir("tier-retained-locks-"),
+        leasesDir: tmpDir("tier-retained-leases-"),
+        fetchTicket: () => ({
+          identifier: ticket,
+          state: { name: ticketState },
+          assignee: ticketState === "Todo" ? null : { name: "hdkiller" },
+          labels: {
+            nodes: [
+              {
+                name:
+                  ticketState === "Todo" ? "ai:agent-ready" : "ai:in-progress",
+              },
+            ],
+          },
+          description:
+            "## Owned Paths\n- event-runtime/lib/worker.mjs\n\n## Verification Command\n`bun test event-runtime/lib/worker.test.mjs`\n",
+        }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        budgetRefusal: () => null,
+        claimTicket: () => ((ticketState = "In Progress"), { ok: true }),
+        commentTicket: (entry) => comments.push(entry),
+        unclaimTicket: (entry) => (unclaims.push(entry), true),
+        projectTierEscalation: () => true,
+        // The agent opened a PR and left it out of draft; the ticket never
+        // reached In Review, so only the forge carries the ownership signal.
+        findWorkspacePullRequest: () => ({ number: 4242, isDraft: false }),
+      },
+      materializeWorktree: () => ({ path: tmpDir("tier-retained-checkout-") }),
+    });
+    const claim = claimNext(db, o);
+    const result = await executeClaimed(
+      db,
+      registry,
+      {
+        fake: {
+          async execute() {
+            return { exitCode: 1, timedOut: false };
+          },
+        },
+      },
+      claim,
+      o,
+    );
+
+    expect(result).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "agent_exit_1",
+      tierEscalationSkip: "retained_pr_open",
+    });
+    expect(db.query(`SELECT * FROM tier_escalations`).all()).toEqual([]);
+    // No continuation inherits the claim, so the run must hand the ticket back
+    // itself rather than strand it In Progress with nothing scheduled.
+    expect(unclaims).toEqual([
+      { repo: "factory", ticket, why: "agent_exit_1", log: null },
+    ]);
+    expect(comments).toContainEqual(
+      expect.objectContaining({
+        body: expect.stringContaining(
+          "the retained worktree already has an open non-draft PR",
+        ),
+      }),
+    );
+    db.close();
+  });
+
+  test("the PR the failed handoff just opened is drafted before the guard reads it, so escalation still happens", async () => {
+    const db = openDb(":memory:");
+    const ticket = "watt-mind/factory#2006";
+    let ticketState = "Todo";
+    // The agent's own PR: open and NOT draft at the moment the handoff
+    // verification fails. WM-718's hold converts it; the guard must observe
+    // the converted state, not the pre-hold one.
+    let prIsDraft = false;
+    const held = [];
+    const spec = queueRun(
+      db,
+      makeSpec({
+        runId: "run_tier_handoff_pr",
+        agent: "dispatch@1",
+        input: { repo: "factory", ticket },
+        workspace: {
+          type: "worktree",
+          checkoutDir: "repo",
+          retainOnFailure: true,
+        },
+        outputContract: "factory.dispatch-result/v1",
+        modelTier: "light",
+        maxAttempts: 1,
+      }),
+    );
+    linkEvent(db, spec.runId, { type: "factory.dispatch.requested" });
+    const o = opts({
+      verifyResult: () => {
+        throw new ContractViolation(["repo_verify_failed"], {
+          reasonCode: "handoff_verification_failed",
+          handoff: {
+            prNumber: 4242,
+            prUrl: "https://github.com/watt-mind/factory/pull/4242",
+            github: "watt-mind/factory",
+            verification: [],
+          },
+        });
+      },
+      dispatch: {
+        configSnapshot: dispatchConfigSnapshot(),
+        locksDir: tmpDir("tier-handoff-locks-"),
+        leasesDir: tmpDir("tier-handoff-leases-"),
+        fetchTicket: () => ({
+          identifier: ticket,
+          state: { name: ticketState },
+          assignee: ticketState === "Todo" ? null : { name: "hdkiller" },
+          labels: {
+            nodes: [
+              {
+                name:
+                  ticketState === "Todo" ? "ai:agent-ready" : "ai:in-progress",
+              },
+            ],
+          },
+          description:
+            "## Owned Paths\n- event-runtime/lib/worker.mjs\n\n## Verification Command\n`bun test event-runtime/lib/worker.test.mjs`\n",
+        }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        budgetRefusal: () => null,
+        claimTicket: () => ((ticketState = "In Progress"), { ok: true }),
+        commentTicket: () => {},
+        holdPullRequest: (entry) => (
+          held.push(entry),
+          (prIsDraft = true),
+          true
+        ),
+        returnHandoffTicket: () => ({ agentReadyRestored: true }),
+        unclaimTicket: () => true,
+        projectTierEscalation: () => true,
+        findWorkspacePullRequest: () => ({ number: 4242, isDraft: prIsDraft }),
+      },
+      materializeWorktree: () => ({ path: tmpDir("tier-handoff-checkout-") }),
+    });
+    const claim = claimNext(db, o);
+    const result = await executeClaimed(
+      db,
+      registry,
+      {
+        fake: {
+          async execute() {
+            return { exitCode: 0, timedOut: false };
+          },
+        },
+      },
+      claim,
+      o,
+    );
+
+    expect(result).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "handoff_verification_failed",
+      escalatedRunId: expect.any(String),
+    });
+    expect(result.tierEscalationSkip).toBeUndefined();
+    expect(held).toHaveLength(1);
+    expect(db.query(`SELECT * FROM tier_escalations`).all()).toHaveLength(1);
+    db.close();
+  });
+
+  test("an unexpanded run trailer drafts the PR and returns the ticket to the queue", async () => {
+    const db = openDb(":memory:");
+    const ticket = "watt-mind/factory#2164";
+    let ticketState = "Todo";
+    const held = [];
+    const returned = [];
+    const spec = queueRun(
+      db,
+      makeSpec({
+        runId: "run_unexpanded_trailer",
+        agent: "dispatch@1",
+        input: { repo: "factory", ticket },
+        workspace: {
+          type: "worktree",
+          checkoutDir: "repo",
+          retainOnFailure: true,
+        },
+        outputContract: "factory.dispatch-result/v1",
+      }),
+    );
+    const o = opts({
+      verifyResult: () => {
+        throw new ContractViolation(["run trailer is literal"], {
+          reasonCode: "run_trailer_unexpanded",
+          handoff: {
+            prNumber: 2164,
+            prUrl: "https://github.com/watt-mind/factory/pull/2164",
+            github: "watt-mind/factory",
+            verification: [],
+          },
+        });
+      },
+      dispatch: {
+        configSnapshot: dispatchConfigSnapshot(),
+        locksDir: tmpDir("unexpanded-trailer-locks-"),
+        leasesDir: tmpDir("unexpanded-trailer-leases-"),
+        fetchTicket: () => ({
+          identifier: ticket,
+          state: { name: ticketState },
+          assignee: ticketState === "Todo" ? null : { name: "hdkiller" },
+          labels: {
+            nodes: [
+              {
+                name:
+                  ticketState === "Todo" ? "ai:agent-ready" : "ai:in-progress",
+              },
+            ],
+          },
+          description:
+            "## Owned Paths\n- event-runtime/lib/worker.mjs\n\n## Verification Command\n`bun test event-runtime/lib/worker.test.mjs`\n",
+        }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        budgetRefusal: () => null,
+        claimTicket: () => ((ticketState = "In Progress"), { ok: true }),
+        commentTicket: () => {},
+        holdPullRequest: (entry) => (held.push(entry), true),
+        returnHandoffTicket: (entry) => (
+          returned.push(entry),
+          (ticketState = "Todo"),
+          { agentReadyRestored: true }
+        ),
+        unclaimTicket: () => true,
+        projectTierEscalation: () => true,
+      },
+      materializeWorktree: () => ({
+        path: tmpDir("unexpanded-trailer-checkout-"),
+      }),
+    });
+
+    const result = await executeClaimed(
+      db,
+      registry,
+      {
+        fake: {
+          async execute() {
+            return { exitCode: 0, timedOut: false };
+          },
+        },
+      },
+      claimNext(db, o),
+      o,
+    );
+
+    expect(result).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "run_trailer_unexpanded",
+    });
+    expect(held).toEqual([
+      expect.objectContaining({ prNumber: 2164, github: "watt-mind/factory" }),
+    ]);
+    expect(returned).toEqual([
+      expect.objectContaining({
+        ticket,
+        why: expect.stringContaining("run_trailer_unexpanded"),
+      }),
+    ]);
+    expect(ticketState).toBe("Todo");
+    db.close();
+  });
+
+  test("a recovered pushed branch without a PR keeps its reason and releases the claim", async () => {
+    const db = openDb(":memory:");
+    const ticket = "watt-mind/factory#2164";
+    let ticketState = "Todo";
+    const unclaims = [];
+    const checkoutPath = tmpDir("pushed-branch-no-pr-checkout-");
+    const spec = queueRun(
+      db,
+      makeSpec({
+        runId: "run_pushed_branch_no_pr",
+        agent: "dispatch@1",
+        input: { repo: "factory", ticket },
+        workspace: { type: "worktree", checkoutDir: "repo" },
+        outputContract: "factory.dispatch-result/v1",
+      }),
+    );
+    let verificationCalls = 0;
+    const o = opts({
+      artifactStore: freshRoot(),
+      verifyResult: ({ workspaceDir }) => {
+        verificationCalls += 1;
+        if (verificationCalls === 1) {
+          throw new ContractViolation(["missing_result"]);
+        }
+        const recovered = JSON.parse(
+          readFileSync(path.join(workspaceDir, "result.json"), "utf8"),
+        );
+        return {
+          kind: "completed",
+          result: {
+            ...recovered,
+            runId: spec.runId,
+            attempt: 1,
+            outputContract: spec.outputContract,
+            artifactHash: hashJson(recovered.artifact),
+            evidenceSetHash: null,
+            verification: { status: "passed", checks: [] },
+            artifacts: [],
+          },
+          receipt: {},
+        };
+      },
+      dispatch: {
+        configSnapshot: dispatchConfigSnapshot(),
+        locksDir: tmpDir("pushed-branch-no-pr-locks-"),
+        leasesDir: tmpDir("pushed-branch-no-pr-leases-"),
+        fetchTicket: () => ({
+          identifier: ticket,
+          state: { name: ticketState },
+          assignee: ticketState === "Todo" ? null : { name: "hdkiller" },
+          labels: {
+            nodes: [
+              {
+                name:
+                  ticketState === "Todo" ? "ai:agent-ready" : "ai:in-progress",
+              },
+            ],
+          },
+          description:
+            "## Owned Paths\n- event-runtime/lib/worker.mjs\n\n## Verification Command\n`bun test event-runtime/lib/worker.test.mjs`\n",
+        }),
+        fetchInFlight: () => [],
+        countLeases: () => 0,
+        budgetRefusal: () => null,
+        claimTicket: () => ((ticketState = "In Progress"), { ok: true }),
+        commentTicket: () => {},
+        unclaimTicket: (entry) => (
+          unclaims.push(entry),
+          (ticketState = "Todo"),
+          true
+        ),
+        projectTierEscalation: () => true,
+        findWorkspacePullRequest: () => ({ pushedBranch: "feat/gh-2164" }),
+      },
+      materializeWorktree: () => ({
+        path: checkoutPath,
+        github: "watt-mind/factory",
+        base: "develop",
+      }),
+    });
+
+    const result = await executeClaimed(
+      db,
+      registry,
+      {
+        fake: {
+          async execute() {
+            return { exitCode: 0, timedOut: false };
+          },
+        },
+      },
+      claimNext(db, o),
+      o,
+    );
+
+    expect(result).toMatchObject({ terminalState: "COMPLETED" });
+    expect(verificationCalls).toBe(2);
+    expect(
+      JSON.parse(
+        db
+          .query(`SELECT result_json FROM results WHERE run_id = ?`)
+          .get(spec.runId).result_json,
+      ),
+    ).toMatchObject({ reasonCode: "pushed_branch_no_pr" });
+    expect(unclaims).toEqual([
+      { repo: "factory", ticket, why: "pushed_branch_no_pr", log: null },
+    ]);
+    expect(ticketState).toBe("Todo");
+    db.close();
+  });
+
   test("continuation handoff failures are matched per violation, anchored at its start", () => {
     const quoted =
       "repo_verify_failed: (fail) x\nweb_build_failed: quoted inside output";
@@ -2540,6 +4855,48 @@ sh -c 'sleep 5 & wait'
     ).toBe("web_build_failed: error TS7053");
     expect(continuationHandoffFailure(undefined)).toBeNull();
     expect(continuationHandoffFailure([42, null])).toBeNull();
+    const missingResultReason =
+      "contract_violation: missing_result: expected /tmp/run/result.json; agent stdout/stderr (last 2 KB): text; ticket_verify_failed: quoted output";
+    expect(continuationHandoffFailure(missingResultReason)).toBe(
+      missingResultReason,
+    );
+    expect(
+      continuationExecutionInput(
+        { repo: "factory", ticket: "watt-mind/factory#1539" },
+        continuationHandoffFailure(missingResultReason),
+      ).handoffFailure,
+    ).toBe(missingResultReason);
+  });
+
+  test("a handoff_verification_failed run hands its web_build_failed line to the continuation", () => {
+    const violations = [
+      "owned_paths_violation: docs/x.md",
+      "web_build_failed: src/views/Ticket.tsx: error TS7053",
+    ];
+    const error = new ContractViolation(violations, {
+      reasonCode: "handoff_verification_failed",
+    });
+    const failureReason = `handoff_verification_failed: ${violations.join(", ")}`;
+    // The composed reason is prefixed, so the anchored matcher cannot see the
+    // diagnostic in it; the worker must hand over the raw violations instead.
+    expect(continuationHandoffFailure(failureReason)).toBeNull();
+    expect(escalationHandoffFailure(error, failureReason)).toBe(
+      "web_build_failed: src/views/Ticket.tsx: error TS7053",
+    );
+    const missingResultReason =
+      "contract_violation: missing_result: expected /tmp/run/result.json; agent stdout/stderr (last 2 KB): text";
+    expect(
+      escalationHandoffFailure(
+        new ContractViolation(["missing_result"]),
+        missingResultReason,
+      ),
+    ).toBe(missingResultReason);
+    expect(
+      escalationHandoffFailure(
+        new ContractViolation(["missing_artifact"]),
+        "contract_violation: missing_artifact",
+      ),
+    ).toBeNull();
   });
 
   test("tier continuation input carries the worker-observed handoff failure verbatim", () => {
@@ -2785,6 +5142,211 @@ sh -c 'sleep 5 & wait'
     db.close();
   });
 
+  test("tier escalation marks its projection refused when the checkout branch already has a ready PR", async () => {
+    const db = openDb(":memory:");
+    const failedRunId = "run_tier_open_pr_failed";
+    const continuationRunId = "run_tier_open_pr_continuation";
+    queueRun(
+      db,
+      makeSpec({
+        runId: continuationRunId,
+        agent: "dispatch@1",
+        input: {
+          repo: "factory",
+          ticket: "watt-mind/factory#1539",
+          modelTier: "strong",
+        },
+        workspace: { type: "worktree", checkoutDir: "repo" },
+        outputContract: "factory.dispatch-result/v1",
+        modelTier: "strong",
+      }),
+    );
+    db.query(
+      `INSERT INTO tier_escalations
+         (root_run_id, failed_run_id, continuation_run_id, repo, ticket,
+          workspace_path, source_workspace_path, projection_state, created_at)
+       VALUES (?, ?, ?, 'factory', 'watt-mind/factory#1539', '/tmp/checkout', '/tmp/wrapper', 'applied', ?)`,
+    ).run(
+      failedRunId,
+      failedRunId,
+      continuationRunId,
+      new Date(T0).toISOString(),
+    );
+
+    const locksDir = tmpDir("tier-open-pr-locks-");
+    const leasesDir = tmpDir("tier-open-pr-leases-");
+    let claims = 0;
+    const summary = await runOnce(
+      db,
+      registry,
+      adapters,
+      opts({
+        dispatch: {
+          locksDir,
+          leasesDir,
+          fetchTicket: () => ({
+            identifier: "watt-mind/factory#1539",
+            state: { name: "In Progress" },
+            assignee: { id: "factory-owner", name: "Factory" },
+            labels: {
+              nodes: [{ name: "ai:in-progress" }, { name: "tier:strong" }],
+            },
+            description: "## Owned Paths\n- event-runtime/lib/worker.mjs\n",
+          }),
+          fetchViewer: () => ({ id: "factory-owner", name: "Factory" }),
+          findWorkspacePullRequest: () => ({
+            number: 1533,
+            state: "OPEN",
+            isDraft: false,
+          }),
+          fetchInFlight: () => [],
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          claimTicket: () => ((claims += 1), { ok: true }),
+        },
+      }),
+    );
+
+    expect(summary).toMatchObject({
+      runId: continuationRunId,
+      terminalState: "REFUSED",
+      reasonCode: "ticket_pr_already_open",
+    });
+    expect(claims).toBe(0);
+    expect(
+      db
+        .query(
+          `SELECT projection_state, projection_error FROM tier_escalations WHERE continuation_run_id = ?`,
+        )
+        .get(continuationRunId),
+    ).toEqual({
+      projection_state: "refused",
+      projection_error: "ticket_pr_already_open",
+    });
+    db.close();
+  });
+
+  test("tier escalation routes a handoff-verification PR to merge review", async () => {
+    const db = openDb(":memory:");
+    const failedRunId = "run_tier_verify_failed";
+    const continuationRunId = "run_tier_verify_continuation";
+    queueRun(
+      db,
+      makeSpec({
+        runId: continuationRunId,
+        agent: "dispatch@1",
+        input: {
+          repo: "factory",
+          ticket: "watt-mind/factory#1539",
+          modelTier: "strong",
+        },
+        workspace: { type: "worktree", checkoutDir: "repo" },
+        outputContract: "factory.dispatch-result/v1",
+        modelTier: "strong",
+      }),
+    );
+    db.query(
+      `INSERT INTO attempts (run_id, attempt, fencing_token, finished_at, terminal_state, reason_code)
+       VALUES (?, 1, 1, ?, 'FAILED', 'handoff_verification_failed')`,
+    ).run(failedRunId, new Date(T0).toISOString());
+    db.query(
+      `INSERT INTO tier_escalations
+         (root_run_id, failed_run_id, continuation_run_id, repo, ticket,
+          workspace_path, source_workspace_path, projection_state, created_at)
+       VALUES (?, ?, ?, 'factory', 'watt-mind/factory#1539', '/tmp/checkout', '/tmp/wrapper', 'applied', ?)`,
+    ).run(
+      failedRunId,
+      failedRunId,
+      continuationRunId,
+      new Date(T0).toISOString(),
+    );
+
+    const routed = [];
+    // The PR-side effect is asserted through the DEFAULT hold helper against
+    // an in-memory forge (the dispatch stub would otherwise no-op it): the
+    // merge stage skips drafts, so drafting is what stops a refused handoff
+    // from landing without a fix round.
+    const forge = memoryForge({
+      repos: {
+        "watt-mind/factory": {
+          prs: [{ number: 1533, state: "OPEN", isDraft: false }],
+        },
+      },
+    });
+    const summary = await runOnce(
+      db,
+      registry,
+      adapters,
+      opts({
+        dispatch: {
+          holdPullRequest: (args) => defaultHoldPullRequest({ ...args, forge }),
+          locksDir: tmpDir("tier-verify-pr-locks-"),
+          leasesDir: tmpDir("tier-verify-pr-leases-"),
+          fetchTicket: () => ({
+            identifier: "watt-mind/factory#1539",
+            state: { name: "In Progress" },
+            assignee: { id: "factory-owner", name: "Factory" },
+            labels: {
+              nodes: [{ name: "ai:in-progress" }, { name: "tier:strong" }],
+            },
+            description: "## Owned Paths\n- event-runtime/lib/worker.mjs\n",
+          }),
+          fetchViewer: () => ({ id: "factory-owner", name: "Factory" }),
+          findWorkspacePullRequest: () => ({
+            number: 1533,
+            state: "OPEN",
+            isDraft: false,
+          }),
+          fetchInFlight: () => [],
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          reconcileVerifiedHandoffTicket: (args) => (routed.push(args), true),
+        },
+      }),
+    );
+
+    expect(summary).toMatchObject({
+      runId: continuationRunId,
+      terminalState: "REFUSED",
+      reasonCode: "ticket_pr_handoff_verification_failed",
+    });
+    expect(routed).toEqual([
+      expect.objectContaining({
+        repo: "factory",
+        ticket: "watt-mind/factory#1539",
+        reason: "handoff_verification_failed",
+        prNumber: 1533,
+      }),
+    ]);
+    expect(forge.calls).toEqual([
+      expect.objectContaining({
+        op: "prSetDraft",
+        repo: "watt-mind/factory",
+        number: 1533,
+        draft: true,
+      }),
+      expect.objectContaining({
+        op: "prComment",
+        repo: "watt-mind/factory",
+        number: 1533,
+        body: expect.stringContaining("handoff_verification_failed"),
+      }),
+    ]);
+    expect(forge.calls[1].body).toContain("Converted to draft");
+    expect(forge.seed.repos["watt-mind/factory"].prs[0].isDraft).toBe(true);
+    expect(
+      db
+        .query(
+          `SELECT projection_state, projection_error FROM tier_escalations WHERE continuation_run_id = ?`,
+        )
+        .get(continuationRunId),
+    ).toEqual({
+      projection_state: "refused",
+      projection_error: "ticket_pr_handoff_verification_failed",
+    });
+    db.close();
+  });
+
   test("tier escalation requeues a continuation when its failed run PR read fails transiently", async () => {
     const seedEscalation = (db, failedRunId, continuationRunId) => {
       queueRun(
@@ -2961,6 +5523,76 @@ sh -c 'sleep 5 & wait'
     expect(calls.at(-1)[2]).toContain(
       "https://github.com/watt-mind/factory/pull/1281",
     );
+  });
+
+  test("cancelRun releases an unstarted tier continuation claim and retained worktree ownership", () => {
+    const db = openDb(":memory:");
+    const failed = queueRun(
+      db,
+      makeSpec({
+        runId: "run_cancel_tier_failed",
+        agent: "dispatch@1",
+        input: { repo: "factory", ticket: "watt-mind/factory#2006" },
+        workspace: {
+          type: "worktree",
+          checkoutDir: "repo",
+          retainOnFailure: true,
+        },
+        modelTier: "light",
+        maxAttempts: 1,
+      }),
+    );
+    linkEvent(db, failed.runId);
+    const escalation = scheduleTierEscalation(db, registry, failed, {
+      workspacePath: "/retained/factory-2006",
+      sourceWorkspacePath: "/workspace/run-2006",
+      continuationRunId: "run_cancel_tier_continuation",
+      reasonCode: "agent_exit_1",
+    });
+    const unclaims = [];
+    const cleanups = [];
+
+    const result = cancelRun(db, escalation.continuation_run_id, {
+      actor: "operator",
+      policyVersion: "test",
+      now: T0,
+      unclaimTierEscalation: (entry) => (unclaims.push(entry), true),
+      cleanupTierEscalationWorkspace: (entry) => (cleanups.push(entry), true),
+    });
+
+    expect(runState(db, escalation.continuation_run_id)).toBe("CANCELLED");
+    expect(result.escalationCancellation).toEqual({
+      projectionRefused: true,
+      claimReleased: true,
+      workspaceCleaned: true,
+    });
+    expect(unclaims).toEqual([
+      {
+        repo: "factory",
+        ticket: "watt-mind/factory#2006",
+        why: "operator_cancel",
+        log: null,
+      },
+    ]);
+    expect(cleanups).toEqual([
+      {
+        sourceWorkspacePath: "/workspace/run-2006",
+        workspacePath: "/retained/factory-2006",
+        repo: "factory",
+        ticket: "watt-mind/factory#2006",
+      },
+    ]);
+    expect(
+      db
+        .query(
+          `SELECT projection_state, projection_error FROM tier_escalations WHERE continuation_run_id = ?`,
+        )
+        .get(escalation.continuation_run_id),
+    ).toEqual({
+      projection_state: "refused",
+      projection_error: "operator_cancel",
+    });
+    db.close();
   });
 
   test("adapter_error with maxAttempts 1 requeues and succeeds without consuming the agent budget", async () => {
@@ -3151,7 +5783,7 @@ sh -c 'sleep 5 & wait'
     );
   });
 
-  test("a missing declared input artifact is fatal and never reaches the adapter", async () => {
+  test("a missing pinned memo artifact retires its memo before terminal failure", async () => {
     const db = openDb(":memory:");
     const missingSha = "a".repeat(64);
     let executed = false;
@@ -3164,6 +5796,10 @@ sh -c 'sleep 5 & wait'
     const spec = queueRun(
       db,
       makeSpec({
+        input: {
+          repos: ["ok"],
+          memoPin: { entries: [{ sha256: missingSha }] },
+        },
         workspace: {
           type: "artifacts",
           inputs: [{ from: missingSha, as: "input.json" }],
@@ -3171,6 +5807,10 @@ sh -c 'sleep 5 & wait'
         maxEnvironmentRetries: 5,
       }),
     );
+    db.query(
+      `INSERT INTO memos (sha256, subject_type, subject_id, kind, created_at)
+       VALUES (?, 'repo', 'factory', 'repo-note', ?)`,
+    ).run(missingSha, T0);
 
     const summary = await runOnce(
       db,
@@ -3193,6 +5833,46 @@ sh -c 'sleep 5 & wait'
     expect(lifecycleOf(db, spec.runId).at(-1).reason).toContain(
       "failure:fatal:input_artifact_missing",
     );
+    expect(
+      db
+        .query(`SELECT retired_at, retired_reason FROM memos WHERE sha256 = ?`)
+        .get(missingSha),
+    ).toEqual({ retired_at: T0, retired_reason: "artifact_missing" });
+  });
+
+  test("a missing non-memo declared input stays fatal without retiring a memo", async () => {
+    const db = openDb(":memory:");
+    const missingSha = "b".repeat(64);
+    const spec = queueRun(
+      db,
+      makeSpec({
+        workspace: {
+          type: "artifacts",
+          inputs: [{ from: missingSha, as: "input.json" }],
+        },
+      }),
+    );
+    db.query(
+      `INSERT INTO memos (sha256, subject_type, subject_id, kind, created_at)
+       VALUES (?, 'repo', 'factory', 'repo-note', ?)`,
+    ).run(missingSha, T0);
+
+    const summary = await runOnce(
+      db,
+      registry,
+      { fake },
+      opts({ artifactStore: freshRoot() }),
+    );
+
+    expect(summary).toMatchObject({
+      terminalState: "FAILED",
+      reasonCode: "input_artifact_missing",
+    });
+    expect(
+      db
+        .query(`SELECT retired_at, retired_reason FROM memos WHERE sha256 = ?`)
+        .get(missingSha),
+    ).toEqual({ retired_at: null, retired_reason: null });
   });
 
   test("environment failures do not consume agent_exit retry attempts", async () => {
@@ -3763,6 +6443,185 @@ sh -c 'sleep 5 & wait'
     expect(await runOnce(db, registry, adapters, opts())).toBeNull();
   });
 
+  test("a merge-fix run never acquires the dispatch claim lock", async () => {
+    const db = openDb(":memory:");
+    const locksDir = tmpDir("merge-fix-claim-locks-");
+    const ticket = "watt-mind/factory#2221";
+    const spec = queueRun(
+      db,
+      makeSpec({
+        agent: "merge-fix@1",
+        input: {
+          repo: "factory",
+          github: "watt-mind/factory",
+          base: "develop",
+          pr: 2221,
+          headSha: "a".repeat(40),
+          baseSha: "b".repeat(40),
+          headRef: "fix/gh-2221",
+          ticket,
+          finding: "rebase_onto_base",
+          findingHash: "c".repeat(64),
+          round: 1,
+          mechanical: true,
+          withinOwnedPaths: true,
+          ownedPaths: ["event-runtime/lib/worker.mjs"],
+        },
+        workspace: { type: "worktree", retainOnFailure: true },
+      }),
+    );
+    const lockFile = dispatchLockPath("factory", locksDir);
+    let concurrentClaimantAcquired = false;
+    let acquireClaimLockCalls = 0;
+    const lockStates = [];
+    const observeLock = () => lockStates.push(existsSync(lockFile));
+    const summary = await executeClaimed(
+      db,
+      registry,
+      {
+        fake: {
+          async execute() {
+            observeLock();
+            return { exitCode: 1, timedOut: false };
+          },
+        },
+      },
+      claimNext(db, opts()),
+      opts({
+        acquireClaimLock: (...args) => {
+          acquireClaimLockCalls += 1;
+          return acquireClaimLock(...args);
+        },
+        dispatch: {
+          locksDir,
+          fetchTicket: () => {
+            observeLock();
+            return {
+              identifier: ticket,
+              state: { name: "In Review" },
+              labels: { nodes: [{ name: "ai:needs-review" }] },
+              description: "## Owned Paths\n- event-runtime/lib/worker.mjs\n",
+            };
+          },
+          fetchPullRequest: () => {
+            observeLock();
+            return { state: "OPEN", headRefOid: spec.input.headSha };
+          },
+        },
+        materializeWorktree: () => {
+          observeLock();
+          concurrentClaimantAcquired = acquireClaimLock(lockFile, {
+            pid: 2222,
+            isAlive: () => true,
+          });
+          if (concurrentClaimantAcquired) releaseClaimLock(lockFile);
+          return { path: tmpDir("merge-fix-claim-lock-checkout-") };
+        },
+      }),
+    );
+
+    expect(summary).toMatchObject({
+      runId: spec.runId,
+      terminalState: "FAILED",
+      reasonCode: "agent_exit_1",
+    });
+    observeLock();
+    expect(acquireClaimLockCalls).toBe(0);
+    expect(lockStates.length).toBeGreaterThan(0);
+    expect(lockStates.every((state) => state === false)).toBe(true);
+    expect(concurrentClaimantAcquired).toBe(true);
+    expect(existsSync(lockFile)).toBe(false);
+    db.close();
+  });
+
+  test("a stalled dispatch tracker read occurs before the claim lock", async () => {
+    const db = openDb(":memory:");
+    const locksDir = tmpDir("dispatch-ticket-read-locks-");
+    const ticket = "watt-mind/factory#2228";
+    const description =
+      "## Owned Paths\n- event-runtime/lib/worker.mjs\n\n## Verification Command\n`bun test event-runtime/lib/worker.test.mjs`\n";
+    const lockFile = dispatchLockPath("factory", locksDir);
+    const spec = queueRun(
+      db,
+      makeSpec({
+        agent: "dispatch@1",
+        input: {
+          repo: "factory",
+          ticket,
+          humanDecision: {
+            authorisation: {
+              repo: "factory",
+              ticket,
+              descriptionHash: hashBytes(description),
+              paths: ["event-runtime/lib/worker.mjs"],
+            },
+          },
+        },
+        workspace: { type: "worktree", retainOnFailure: true },
+        outputContract: "factory.dispatch-result/v1",
+      }),
+    );
+    const lockStatesDuringTrackerReads = [];
+    let acquireClaimLockCalls = 0;
+    let concurrentClaimantAcquired = false;
+    let claimHeldLock = false;
+    const summary = await runOnce(
+      db,
+      registry,
+      adapters,
+      opts({
+        acquireClaimLock: (...args) => {
+          acquireClaimLockCalls += 1;
+          return acquireClaimLock(...args);
+        },
+        dispatch: {
+          configSnapshot: dispatchConfigSnapshot(),
+          locksDir,
+          fetchTicket: () => {
+            // Model a stalled tracker request by attempting a concurrent claim
+            // before this reader returns. The contender must not wait on this
+            // read, regardless of how long the real tracker takes to answer.
+            lockStatesDuringTrackerReads.push(existsSync(lockFile));
+            concurrentClaimantAcquired = acquireClaimLock(lockFile, {
+              pid: 2223,
+              isAlive: () => true,
+            });
+            if (concurrentClaimantAcquired) releaseClaimLock(lockFile);
+            return {
+              identifier: ticket,
+              state: { name: "Todo" },
+              assignee: null,
+              labels: { nodes: [{ name: "ai:agent-ready" }] },
+              description,
+            };
+          },
+          fetchInFlight: () => {
+            lockStatesDuringTrackerReads.push(existsSync(lockFile));
+            return [];
+          },
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          claimTicket: () => {
+            claimHeldLock = existsSync(lockFile);
+            return { ok: false, reasonCode: "ticket_claim_lost" };
+          },
+        },
+      }),
+    );
+
+    expect(summary).toMatchObject({
+      runId: spec.runId,
+      terminalState: "REFUSED",
+      reasonCode: "ticket_claim_lost",
+    });
+    expect(acquireClaimLockCalls).toBeGreaterThan(0);
+    expect(lockStatesDuringTrackerReads).toEqual([false, false]);
+    expect(concurrentClaimantAcquired).toBe(true);
+    expect(claimHeldLock).toBe(true);
+    expect(existsSync(lockFile)).toBe(false);
+    db.close();
+  });
+
   test("accurate attempt timestamps: started_at < finished_at with clock function (OPS-430)", async () => {
     const db = openDb(":memory:");
     const spec = queueRun(db, makeSpec());
@@ -3832,7 +6691,7 @@ sh -c 'sleep 5 & wait'
     ).toHaveLength(0);
   });
 
-  test("claimNext does not restart-loop a fresh worker on an older queued spec (WM-613)", () => {
+  test("claimNext dead-letters an old queued spec so a singleton can schedule again (GH-2226)", async () => {
     const db = openDb(":memory:");
     const staleSpec = queueRun(
       db,
@@ -3844,6 +6703,7 @@ sh -c 'sleep 5 & wait'
 
     const refusal = claimNext(db, {
       ...opts(),
+      now: T0 + STALE_DEAD_LETTER_MS,
       policyVersion: "git:current",
       registryVersion: "git:current",
       currentRegistryVersion: "git:current",
@@ -3855,8 +6715,38 @@ sh -c 'sleep 5 & wait'
       retryable: true,
       reloadRequired: false,
       reasonCode: "registry_stale",
+      deadLettered: [
+        expect.objectContaining({
+          runId: staleSpec.runId,
+          specVersion: "git:old/git:old",
+          workerRegistryVersion: "git:current",
+          checkoutRegistryVersion: "git:current",
+        }),
+      ],
     });
-    expect(runState(db, staleSpec.runId)).toBe("QUEUED");
+    expect(runState(db, staleSpec.runId)).toBe("CANCELLED");
+    expect(lifecycleOf(db, staleSpec.runId).at(-1)).toMatchObject({
+      from_state: "QUEUED",
+      to_state: "CANCELLED",
+      reason: "registry_stale",
+    });
+
+    const { inFlightRunsForAgent } = await import("./in-flight-runs.mjs");
+    expect(inFlightRunsForAgent(db, staleSpec.agent)).toEqual([]);
+
+    // The next singleton schedule slot can now enqueue a replacement rather
+    // than being deduped against an impossible pre-redeploy run.
+    const freshSpec = queueRun(
+      db,
+      makeSpec({
+        promptVersion: "git:current",
+        policyVersion: "git:current",
+      }),
+      T0 + 1000,
+    );
+    expect(inFlightRunsForAgent(db, staleSpec.agent)).toEqual([
+      expect.objectContaining({ run_id: freshSpec.runId, state: "QUEUED" }),
+    ]);
   });
 
   test("claimNext skips an incompatible old spec and claims compatible queued work (WM-613)", () => {
@@ -3886,8 +6776,102 @@ sh -c 'sleep 5 & wait'
     });
 
     expect(claim.runId).toBe(compatibleSpec.runId);
+    // Still inside the deploy window: skipped, not terminalized.
     expect(runState(db, staleSpec.runId)).toBe("QUEUED");
+    expect(claim.deadLettered).toBeUndefined();
     expect(runState(db, compatibleSpec.runId)).toBe("LEASED");
+  });
+
+  test("claimNext leaves a freshly queued mismatched run QUEUED until it outlives the deploy window (GH-2226)", () => {
+    const db = openDb(":memory:");
+    const staleSpec = queueRun(
+      db,
+      makeSpec({ promptVersion: "git:old", policyVersion: "git:old" }),
+    );
+
+    const refusal = claimNext(db, {
+      ...opts(),
+      now: T0 + STALE_DEAD_LETTER_MS - 1,
+      policyVersion: "git:current",
+      registryVersion: "git:current",
+      currentRegistryVersion: "git:current",
+    });
+
+    expect(refusal).toMatchObject({
+      runId: staleSpec.runId,
+      refused: true,
+      reloadRequired: false,
+      reasonCode: "registry_stale",
+    });
+    expect(refusal.deadLettered).toBeUndefined();
+    expect(runState(db, staleSpec.runId)).toBe("QUEUED");
+  });
+
+  test("claimNext never dead-letters against an unreadable checkout version (GH-2226)", () => {
+    const db = openDb(":memory:");
+    const staleSpec = queueRun(
+      db,
+      makeSpec({ promptVersion: "git:old", policyVersion: "git:old" }),
+    );
+
+    // checkoutPolicyVersion() degrades to "unknown" when `git rev-parse` fails.
+    // A mismatch against a version we could not read is not evidence of a
+    // stale run, so one transient probe failure must terminalize nothing.
+    const refusal = claimNext(db, {
+      ...opts(),
+      now: T0 + STALE_DEAD_LETTER_MS * 10,
+      policyVersion: "git:current",
+      registryVersion: "git:current",
+      currentRegistryVersion: "unknown",
+    });
+
+    expect(refusal).toMatchObject({
+      runId: staleSpec.runId,
+      refused: true,
+      reloadRequired: false,
+      reasonCode: "registry_stale",
+      checkoutRegistryVersion: "unknown",
+    });
+    expect(refusal.deadLettered).toBeUndefined();
+    expect(runState(db, staleSpec.runId)).toBe("QUEUED");
+  });
+
+  test("claimNext dead-letters only adapters this worker serves, even under an override (GH-2226)", () => {
+    const db = openDb(":memory:");
+    const foreignSpec = queueRun(
+      db,
+      makeSpec({
+        adapter: "other_adapter",
+        promptVersion: "git:old",
+        policyVersion: "git:old",
+      }),
+    );
+    const ownSpec = queueRun(
+      db,
+      makeSpec({
+        adapter: "fake",
+        promptVersion: "git:old",
+        policyVersion: "git:old",
+      }),
+      T0 + 1,
+    );
+
+    const refusal = claimNext(db, {
+      ...opts(),
+      now: T0 + STALE_DEAD_LETTER_MS + 1000,
+      policyVersion: "git:current",
+      registryVersion: "git:current",
+      currentRegistryVersion: "git:current",
+      adapters: ["fake"],
+      adapterOverride: "fake",
+    });
+
+    expect(refusal.refused).toBe(true);
+    expect(runState(db, foreignSpec.runId)).toBe("QUEUED");
+    expect(runState(db, ownSpec.runId)).toBe("CANCELLED");
+    expect(refusal.deadLettered).toEqual([
+      expect.objectContaining({ runId: ownSpec.runId }),
+    ]);
   });
 
   test("claimNext unconstrained candidate query: 60 unsatisfiable placement runs do not starve matching run (OPS-454)", () => {
@@ -4188,20 +7172,31 @@ sh -c 'sleep 5 & wait'
   });
 
   test("dispatchIdentityEnv omits unset identity keys and gates on the dispatch@ prefix (#1497)", () => {
-    const env = { PATH: "/bin" };
+    const env = {
+      PATH: "/bin",
+      FACTORY_CONTROL_API_TOKEN: "worker-only-token",
+      FACTORY_EVENT_HOME: "/tmp/factory-events",
+      FACTORY_EVENT_PORT: "7381",
+    };
     const full = dispatchIdentityEnv({
       spec: { agent: "dispatch@2" },
       env,
       runId: "run-1",
       ticketId: 1497,
       repoName: "factory",
+      resultPath: "/workspace/result.json",
     });
     expect(full).toEqual({
       PATH: "/bin",
+      FACTORY_EVENT_HOME: "/tmp/factory-events",
+      FACTORY_EVENT_PORT: "7381",
+      FACTORY_DISPATCH: "1",
       FACTORY_RUN_ID: "run-1",
       FACTORY_TICKET: "1497",
       FACTORY_REPO: "factory",
+      FACTORY_RESULT_PATH: "/workspace/result.json",
     });
+    expect(full.FACTORY_CONTROL_API_TOKEN).toBeUndefined();
 
     const partial = dispatchIdentityEnv({
       spec: { agent: "dispatch@1" },
@@ -4210,7 +7205,14 @@ sh -c 'sleep 5 & wait'
       ticketId: null,
       repoName: undefined,
     });
-    expect(partial).toEqual({ PATH: "/bin", FACTORY_RUN_ID: "run-2" });
+    expect(partial).toEqual({
+      PATH: "/bin",
+      FACTORY_EVENT_HOME: "/tmp/factory-events",
+      FACTORY_EVENT_PORT: "7381",
+      FACTORY_DISPATCH: "1",
+      FACTORY_RUN_ID: "run-2",
+    });
+    expect(partial.FACTORY_CONTROL_API_TOKEN).toBeUndefined();
     expect("FACTORY_TICKET" in partial).toBe(false);
     expect("FACTORY_REPO" in partial).toBe(false);
 
@@ -4230,7 +7232,51 @@ sh -c 'sleep 5 & wait'
     }
   });
 
-  test("handoff PR form records draft and body markers, refusing only a missing Fixes line", () => {
+  test("cellCapabilityEnv passes celld credentials only to cell-capable defs (#2149)", () => {
+    const env = { FACTORY_RUN_ID: "run-1" };
+    const cellDef = {
+      capabilities: {
+        filesystem: "workspace-only",
+        cells: [{ binding: "GENERIC_CELL", access: "read-write" }],
+      },
+    };
+
+    const granted = cellCapabilityEnv({
+      def: cellDef,
+      env,
+      processEnv: { CELL_AUTH_TOKEN: "tok", FACTORY_CELL_ENDPOINT: "" },
+    });
+    expect(granted.CELL_AUTH_TOKEN).toBe("tok");
+    expect(granted.FACTORY_CELL_ENDPOINT).toBe(DEFAULT_CELL_ENDPOINT);
+    expect(granted.FACTORY_RUN_ID).toBe("run-1");
+    expect(env.CELL_AUTH_TOKEN).toBeUndefined();
+
+    const overridden = cellCapabilityEnv({
+      def: cellDef,
+      env,
+      processEnv: {
+        CELL_AUTH_TOKEN: "tok",
+        FACTORY_CELL_ENDPOINT: "http://cells.internal:8080",
+      },
+    });
+    expect(overridden.FACTORY_CELL_ENDPOINT).toBe("http://cells.internal:8080");
+
+    for (const def of [
+      null,
+      {},
+      { capabilities: { filesystem: "workspace-only" } },
+      { capabilities: { cells: [] } },
+    ]) {
+      const untouched = cellCapabilityEnv({
+        def,
+        env,
+        processEnv: { CELL_AUTH_TOKEN: "tok" },
+      });
+      expect(untouched).toBe(env);
+    }
+  });
+
+  test("handoff PR form records draft and body markers, refusing malformed markers", () => {
     const base = {
       github: "watt-mind/factory",
       prNumber: 77,
@@ -4238,21 +7284,33 @@ sh -c 'sleep 5 & wait'
       runId: "run-1504",
     };
     const valid = { ...base };
+    const headSha = "a".repeat(40);
     assertHandoffPullRequestBase({
       handoff: valid,
       base: "develop",
       fetchPullRequest: () => ({
         baseRefName: "develop",
         isDraft: false,
+        headRefOid: headSha,
         body: "Fixes watt-mind/factory#1504\n\nImplemented\n\nrun:run-1504",
       }),
     });
     expect(valid.pr).toEqual({
       number: 77,
       draft: false,
+      headSha,
       hasFixesLine: true,
       hasRunTrailer: true,
+      hasUnexpandedRunTrailer: false,
     });
+    expect(
+      composeHandoffVerification({
+        ...valid,
+        verification: null,
+        repoVerify: null,
+        webBuild: null,
+      }),
+    ).toContain("head SHA: aaaaaaaaaaaa");
 
     const warningOnly = { ...base };
     assertHandoffPullRequestBase({
@@ -4266,9 +7324,19 @@ sh -c 'sleep 5 & wait'
     });
     expect(warningOnly.pr).toMatchObject({
       draft: true,
+      headSha: null,
       hasFixesLine: true,
       hasRunTrailer: false,
+      hasUnexpandedRunTrailer: false,
     });
+    expect(
+      composeHandoffVerification({
+        ...warningOnly,
+        verification: null,
+        repoVerify: null,
+        webBuild: null,
+      }),
+    ).toContain("head SHA: unknown");
 
     const missingFixes = { ...base };
     expect(() =>
@@ -4281,11 +7349,276 @@ sh -c 'sleep 5 & wait'
           body: "run:run-1504",
         }),
       }),
-    ).toThrow("handoff_pr_form_invalid");
+    ).toThrow(
+      "handoff_pr_form_invalid: PR #77 has no Fixes line for watt-mind/factory#1504",
+    );
     expect(missingFixes.pr).toMatchObject({
       hasFixesLine: false,
       hasRunTrailer: true,
+      hasUnexpandedRunTrailer: false,
     });
+  });
+
+  test("verified draft handoffs are marked ready and record draft: no", () => {
+    const handoff = {
+      github: "watt-mind/factory",
+      prNumber: 77,
+      pr: { number: 77, draft: true },
+      prDraft: true,
+    };
+    const calls = [];
+    const forge = {
+      prSetDraft: (...args) => calls.push(args),
+    };
+
+    expect(defaultMarkHandoffPullRequestReady({ handoff, forge })).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual([
+      "watt-mind/factory",
+      77,
+      false,
+      expect.objectContaining({ timeout: expect.any(Number) }),
+    ]);
+    expect(handoff.pr.draft).toBe(false);
+    expect(handoff.prDraft).toBe(false);
+    expect(
+      composeHandoffVerification({
+        ...handoff,
+        verification: null,
+        repoVerify: null,
+        webBuild: null,
+      }),
+    ).toContain("- PR: #77 (draft: no)");
+
+    expect(defaultMarkHandoffPullRequestReady({ handoff, forge })).toBe(false);
+    expect(calls).toHaveLength(1);
+  });
+
+  test("a failed ready-for-review transition is best effort: the run keeps its verified handoff, recorded draft: yes", () => {
+    const handoff = {
+      github: "watt-mind/factory",
+      prNumber: 77,
+      pr: { number: 77, draft: true },
+      prDraft: true,
+    };
+    const forge = {
+      prSetDraft: () => {
+        throw new Error("GitHub rejected the transition");
+      },
+    };
+
+    const err = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // Promotion happens after the run is already verified; a transient forge
+      // error must never throw here, or a green run is failed and its PR is
+      // re-drafted by the failure path it lands in.
+      expect(defaultMarkHandoffPullRequestReady({ handoff, forge })).toBe(
+        false,
+      );
+      expect(
+        err.mock.calls.some((c) =>
+          String(c[0]).includes(
+            "could not mark PR #77 ready for review: GitHub rejected the transition",
+          ),
+        ),
+      ).toBe(true);
+    } finally {
+      err.mockRestore();
+    }
+    expect(handoff.pr.draft).toBe(true);
+    expect(handoff.prDraft).toBe(true);
+    // The comment stays truthful about the state the PR is actually left in.
+    expect(
+      composeHandoffVerification({
+        ...handoff,
+        verification: null,
+        repoVerify: null,
+        webBuild: null,
+      }),
+    ).toContain("- PR: #77 (draft: yes)");
+  });
+
+  test("a handoff with no usable PR coordinates is left alone rather than promoted", () => {
+    const forge = {
+      prSetDraft: () => {
+        throw new Error("prSetDraft must not be called");
+      },
+    };
+    for (const handoff of [
+      { github: "watt-mind/factory", prNumber: null, pr: { draft: true } },
+      { github: null, prNumber: 77, pr: { number: 77, draft: true } },
+      { github: "watt-mind/factory", prNumber: 77, pr: { draft: false } },
+      { github: "watt-mind/factory", prNumber: 77 },
+    ]) {
+      expect(defaultMarkHandoffPullRequestReady({ handoff, forge })).toBe(
+        false,
+      );
+    }
+  });
+
+  test("executeClaimed promotes a verified handoff PR, and never a refused one (#2005)", async () => {
+    const TICKET = "watt-mind/factory#2005";
+    // The gate reads the live PR; this is the form it must accept, and it is
+    // what makes the handoff record say `draft: true` before promotion.
+    const livePullRequest = {
+      baseRefName: "develop",
+      isDraft: true,
+      body: `Fixes ${TICKET}`,
+    };
+    const handoffFixture = () => ({
+      github: "watt-mind/factory",
+      ticket: TICKET,
+      prNumber: 77,
+      verification: null,
+      repoVerify: null,
+      webBuild: null,
+    });
+    const runResult = (spec, overrides = {}) => {
+      const artifact = { repos: [], recommendedAction: "wait" };
+      return {
+        schemaVersion: "factory.run-result/v1",
+        runId: spec.runId,
+        attempt: 1,
+        terminalState: "completed",
+        reasonCode: "ok",
+        outputContract: spec.outputContract,
+        artifact,
+        artifactHash: hashJson(artifact),
+        evidenceSetHash: null,
+        verification: { status: "passed", checks: [] },
+        artifacts: [],
+        ...overrides,
+      };
+    };
+    const dispatchSeams = (calls) => ({
+      configSnapshot: dispatchConfigSnapshot(),
+      locksDir: tmpDir("evrt-pr-ready-locks-"),
+      leasesDir: tmpDir("evrt-pr-ready-leases-"),
+      fetchTicket: () => ({
+        identifier: TICKET,
+        state: { name: "Todo" },
+        assignee: null,
+        labels: { nodes: [{ name: "ai:agent-ready" }] },
+        description: "## Owned Paths\n- event-runtime/lib/worker.mjs\n",
+      }),
+      fetchInFlight: () => [],
+      countLeases: () => 0,
+      budgetRefusal: () => null,
+      claimTicket: () => ({ ok: true }),
+      unclaimTicket: () => true,
+      commentTicket: (args) => (calls.comments.push(args), true),
+      fetchHandoffPullRequest: () => livePullRequest,
+      markHandoffPullRequestReady: ({ handoff }) => {
+        calls.promoted.push(handoff);
+        handoff.pr.draft = false;
+        handoff.prDraft = false;
+        return true;
+      },
+    });
+    const workerOpts = (calls, verified) =>
+      opts({
+        artifactStore: freshRoot(),
+        dispatch: dispatchSeams(calls),
+        materializeWorktree: () => ({
+          github: "watt-mind/factory",
+          base: "develop",
+        }),
+        verifyResult: verified,
+      });
+
+    const acceptedDb = openDb(":memory:");
+    const acceptedSpec = makeSpec({
+      input: { repo: "factory", ticket: TICKET },
+      workspace: { type: "worktree" },
+    });
+    queueRun(acceptedDb, acceptedSpec);
+    const acceptedCalls = { comments: [], promoted: [] };
+    const acceptedHandoff = handoffFixture();
+    const accepted = await executeClaimed(
+      acceptedDb,
+      registry,
+      adapters,
+      claimNext(acceptedDb, opts()),
+      workerOpts(acceptedCalls, () => ({
+        kind: "completed",
+        result: runResult(acceptedSpec),
+        receipt: {},
+        handoff: acceptedHandoff,
+      })),
+    );
+
+    expect(accepted).toMatchObject({ terminalState: "COMPLETED" });
+    expect(acceptedCalls.promoted).toEqual([acceptedHandoff]);
+    // Promotion runs before the handoff comment is composed, so the comment
+    // reports the state the PR is actually left in.
+    expect(acceptedCalls.comments).toEqual([
+      expect.objectContaining({
+        body: expect.stringContaining("- PR: #77 (draft: no)"),
+      }),
+    ]);
+    acceptedDb.close();
+
+    // A refused run must leave its PR in draft: the merge stage skips drafts,
+    // which is exactly what keeps an unaccepted handoff from landing.
+    const refusedDb = openDb(":memory:");
+    const refusedSpec = makeSpec({
+      input: { repo: "factory", ticket: TICKET },
+      workspace: { type: "worktree" },
+    });
+    queueRun(refusedDb, refusedSpec);
+    const refusedCalls = { comments: [], promoted: [] };
+    const refusedHandoff = handoffFixture();
+    const refused = await executeClaimed(
+      refusedDb,
+      registry,
+      adapters,
+      claimNext(refusedDb, opts()),
+      workerOpts(refusedCalls, () => ({
+        kind: "refused",
+        reasonCode: "ticket_not_ready",
+        result: runResult(refusedSpec, {
+          terminalState: "refused",
+          reasonCode: "ticket_not_ready",
+        }),
+        handoff: refusedHandoff,
+      })),
+    );
+
+    expect(refused).toMatchObject({
+      terminalState: "REFUSED",
+      reasonCode: "ticket_not_ready",
+    });
+    expect(refusedCalls.promoted).toEqual([]);
+    expect(refusedHandoff.pr.draft).toBe(true);
+    refusedDb.close();
+  });
+
+  test("handoff PR form rejects literal run trailers when a run ID is set", () => {
+    const base = {
+      github: "watt-mind/factory",
+      prNumber: 77,
+      ticket: "watt-mind/factory#1504",
+      runId: "run-1504",
+    };
+    for (const trailer of ["run:$FACTORY_RUN_ID", "run:${FACTORY_RUN_ID}"]) {
+      const handoff = { ...base };
+      expect(() =>
+        assertHandoffPullRequestBase({
+          handoff,
+          base: "develop",
+          fetchPullRequest: () => ({
+            baseRefName: "develop",
+            isDraft: false,
+            body: `Fixes watt-mind/factory#1504\n\n${trailer}`,
+          }),
+        }),
+      ).toThrow("run_trailer_unexpanded");
+      expect(handoff.pr).toMatchObject({
+        hasFixesLine: true,
+        hasRunTrailer: false,
+        hasUnexpandedRunTrailer: true,
+      });
+    }
   });
 
   test("handoff PR Fixes line tolerates the short #n form, case, and trailing punctuation", () => {
@@ -4313,6 +7646,7 @@ sh -c 'sleep 5 & wait'
       expect(handoff.pr).toMatchObject({
         hasFixesLine: true,
         hasRunTrailer: true,
+        hasUnexpandedRunTrailer: false,
       });
     }
 
@@ -4351,6 +7685,69 @@ sh -c 'sleep 5 & wait'
     expect(linear.pr.hasFixesLine).toBe(true);
   });
 
+  const assertHandoffFormThrows = (body, message) => {
+    const handoff = {
+      github: "watt-mind/factory",
+      prNumber: 77,
+      ticket: "watt-mind/factory#1504",
+      runId: "run-1504",
+    };
+    expect(() =>
+      assertHandoffPullRequestBase({
+        handoff,
+        base: "develop",
+        fetchPullRequest: () => ({
+          baseRefName: "develop",
+          isDraft: false,
+          body,
+        }),
+      }),
+    ).toThrow(message);
+  };
+
+  test("handoff PR form identifies malformed Fixes-like lines", () => {
+    for (const [body, offendingLine] of [
+      ["Fixes: #1504\n\nrun:run-1504", "Fixes: #1504"],
+      [
+        "Fixes watt-mind/factory#1504 (follow-up)\n\nrun:run-1504",
+        "Fixes watt-mind/factory#1504 (follow-up)",
+      ],
+    ]) {
+      assertHandoffFormThrows(
+        body,
+        `handoff_pr_form_invalid: PR #77 has malformed Fixes line ${JSON.stringify(offendingLine)}`,
+      );
+    }
+  });
+
+  test("handoff PR form reports a well-formed Fixes line that is not first", () => {
+    // The line itself is exactly right — quoting it as "malformed" against an
+    // identical expectation would leave the author nothing to act on.
+    assertHandoffFormThrows(
+      "Implementation details\n\nFixes watt-mind/factory#1504\n\nrun:run-1504",
+      'handoff_pr_form_invalid: PR #77 has "Fixes watt-mind/factory#1504" but it must be the first line of the PR body',
+    );
+  });
+
+  test("handoff PR form accepts a Fixes line after leading blank lines", () => {
+    const handoff = {
+      github: "watt-mind/factory",
+      prNumber: 77,
+      ticket: "watt-mind/factory#1504",
+      runId: "run-1504",
+    };
+    assertHandoffPullRequestBase({
+      handoff,
+      base: "develop",
+      fetchPullRequest: () => ({
+        baseRefName: "develop",
+        isDraft: false,
+        body: "\n  \nFixes watt-mind/factory#1504\n\nrun:run-1504",
+      }),
+    });
+    expect(handoff.pr.hasFixesLine).toBe(true);
+  });
+
   test("handoff PR form refuses a null body and reports unknown for a missing ticket or run id", () => {
     const base = {
       github: "watt-mind/factory",
@@ -4373,6 +7770,23 @@ sh -c 'sleep 5 & wait'
     expect(nullBody.pr).toMatchObject({
       hasFixesLine: false,
       hasRunTrailer: false,
+      hasUnexpandedRunTrailer: false,
+    });
+
+    const noRunId = { ...base, runId: undefined };
+    assertHandoffPullRequestBase({
+      handoff: noRunId,
+      base: "develop",
+      fetchPullRequest: () => ({
+        baseRefName: "develop",
+        isDraft: false,
+        body: "Fixes watt-mind/factory#1504\nrun:$FACTORY_RUN_ID",
+      }),
+    });
+    expect(noRunId.pr).toMatchObject({
+      hasFixesLine: true,
+      hasRunTrailer: null,
+      hasUnexpandedRunTrailer: null,
     });
 
     const noTicket = { ...base, ticket: null, runId: undefined };
@@ -4388,6 +7802,7 @@ sh -c 'sleep 5 & wait'
     expect(noTicket.pr).toMatchObject({
       hasFixesLine: null,
       hasRunTrailer: null,
+      hasUnexpandedRunTrailer: null,
     });
     expect(composeHandoffVerification(noTicket)).toContain(
       "Fixes: unknown · run trailer: unknown",
@@ -4510,6 +7925,108 @@ sh -c 'sleep 5 & wait'
     expect(capturedReadOnlyEnv.ANTHROPIC_API_KEY).toBeUndefined();
   });
 
+  describe("Linear-plane tracker state mutations (#2165)", () => {
+    const repo = "linear-plane-repo";
+
+    test("unclaim sends its state transition to the injected repo", () => {
+      const calls = [];
+      expect(
+        defaultUnclaimTicket({
+          repo,
+          ticket: "WM-2165",
+          why: "test",
+          fetchTicket: () => ({
+            state: { name: "In Progress" },
+            labels: [{ name: "ai:in-progress" }],
+          }),
+          runCli: (args, options) => calls.push({ args, options }),
+        }),
+      ).toBe(true);
+
+      expect(calls.find(({ args }) => args[0] === "state")?.options).toEqual({
+        repo,
+      });
+    });
+
+    test("handoff return passes repo to its ticket read and state transition", () => {
+      const calls = [];
+      const fetchCalls = [];
+      expect(
+        defaultReturnHandoffTicket({
+          repo,
+          ticket: "WM-2165",
+          body: "returning ticket",
+          fetchTicket: (...args) => {
+            fetchCalls.push(args);
+            return { state: { name: "In Review" } };
+          },
+          runCli: (args, options) => calls.push({ args, options }),
+        }),
+      ).toMatchObject({ ok: true, agentReadyRestored: true });
+
+      expect(fetchCalls).toEqual([["WM-2165", repo]]);
+      expect(calls.find(({ args }) => args[0] === "state")?.options).toEqual({
+        repo,
+      });
+    });
+
+    test("handoff return preserves repo through its split state retry", () => {
+      const calls = [];
+      expect(
+        defaultReturnHandoffTicket({
+          repo,
+          ticket: "WM-2165",
+          body: "returning ticket",
+          fetchTicket: () => ({ state: { name: "In Review" } }),
+          runCli: (args, options) => {
+            calls.push({ args, options });
+            if (calls.length === 1) throw new Error("combined label failure");
+          },
+        }),
+      ).toMatchObject({ ok: true, agentReadyRestored: true });
+
+      expect(calls.filter(({ args }) => args[0] === "state")).toHaveLength(2);
+      expect(
+        calls
+          .filter(({ args }) => args[0] === "state")
+          .map(({ options }) => options),
+      ).toEqual([{ repo }, { repo }]);
+    });
+
+    test("baseline block sends its state transition to the injected repo", () => {
+      const calls = [];
+      expect(
+        defaultBlockBaselineTicket({
+          repo,
+          ticket: "WM-2165",
+          why: "baseline failed",
+          fetchTicket: () => ({
+            state: { name: "In Progress" },
+            labels: [{ name: "ai:in-progress" }],
+          }),
+          hasRecordedBaselineFailure: () => true,
+          runCli: (args, options) => calls.push({ args, options }),
+        }),
+      ).toBe(true);
+
+      expect(calls).toEqual([
+        {
+          args: [
+            "state",
+            "WM-2165",
+            "Blocked",
+            "--unassign",
+            "--add",
+            "ai:blocked",
+            "--remove",
+            "ai:in-progress",
+          ],
+          options: { repo },
+        },
+      ]);
+    });
+  });
+
   describe("defaultReconcileVerifiedHandoffTicket (#1498)", () => {
     const STATE_ARGS = [
       "state",
@@ -4597,5 +8114,95 @@ sh -c 'sleep 5 & wait'
       expect(result).toBe(false);
       expect(calls).toHaveLength(0);
     });
+  });
+});
+
+describe("registry reload worker outcomes", () => {
+  test("a queued run whose agent was removed refuses with a typed outcome", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec());
+    const agents = new Map(registry.agents);
+    agents.delete(spec.agent);
+    const summary = await runOnce(
+      db,
+      { ...registry, agents },
+      adapters,
+      opts(),
+    );
+
+    expect(summary).toMatchObject({
+      terminalState: "REFUSED",
+      reasonCode: "agent_unregistered_after_reload",
+    });
+    expect(runState(db, spec.runId)).toBe("REFUSED");
+    expect(
+      lifecycleOf(db, spec.runId)
+        .slice(-2)
+        .map((event) => event.reason),
+    ).toEqual([
+      "failure:fatal:agent_unregistered_after_reload",
+      "failure:fatal:agent_unregistered_after_reload",
+    ]);
+  });
+});
+
+describe("defaultFindWorkspacePullRequest", () => {
+  const gitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: "t",
+    GIT_AUTHOR_EMAIL: "t@example.com",
+    GIT_COMMITTER_NAME: "t",
+    GIT_COMMITTER_EMAIL: "t@example.com",
+  };
+  const git = (cwd, ...args) =>
+    execFileSync("git", ["-C", cwd, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: gitEnv,
+    });
+
+  function seedWorkspace(branch) {
+    const workspacePath = tmpDir("evrt-find-pr-workspace-");
+    git(workspacePath, "init", "-q", "-b", "main");
+    writeFileSync(path.join(workspacePath, "seed.txt"), "seed\n");
+    git(workspacePath, "add", "seed.txt");
+    git(workspacePath, "commit", "-q", "-m", "seed");
+    git(workspacePath, "checkout", "-q", "-b", branch);
+    return workspacePath;
+  }
+
+  test("reports a branch that exists at origin as pushed", () => {
+    const branch = "feat/gh-1870-pushed";
+    const workspacePath = seedWorkspace(branch);
+    const origin = tmpDir("evrt-find-pr-origin-");
+    git(origin, "init", "-q", "--bare");
+    git(workspacePath, "remote", "add", "origin", origin);
+    git(workspacePath, "push", "-q", "origin", branch);
+
+    const found = defaultFindWorkspacePullRequest({
+      workspacePath,
+      forge: { prList: () => [] },
+    });
+    expect(found).toEqual({ pushedBranch: branch });
+  });
+
+  test("treats a failing ls-remote as no pushed branch (WM-1870 review)", () => {
+    const workspacePath = seedWorkspace("feat/gh-1870-unreachable");
+    // Unreachable origin: ls-remote exits non-zero. The finder must swallow
+    // the failure (bounded, SIGKILL on timeout) instead of throwing out of
+    // missing-result recovery.
+    git(
+      workspacePath,
+      "remote",
+      "add",
+      "origin",
+      path.join(workspacePath, "no-such-origin"),
+    );
+    expect(
+      defaultFindWorkspacePullRequest({
+        workspacePath,
+        forge: { prList: () => [] },
+      }),
+    ).toBeNull();
   });
 });
