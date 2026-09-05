@@ -1723,6 +1723,14 @@ const toastListeners = new Set<(toasts: ToastMessage[]) => void>();
 let activeToasts: ToastMessage[] = [];
 
 export function notify(message: string, type: "ok" | "err" | "info" = "ok") {
+  // A retrying mutation can report the same failure faster than an operator can
+  // act on it. Keep one visible, announced error rather than growing a stack.
+  if (
+    activeToasts.some(
+      (toast) => toast.message === message && toast.type === type,
+    )
+  )
+    return;
   const id = Math.random().toString(36).slice(2);
   activeToasts = [...activeToasts, { id, type, message }].slice(-5);
   toastListeners.forEach((l) => l(activeToasts));

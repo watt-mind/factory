@@ -570,6 +570,17 @@ describe("ToastContainer", () => {
       r.queryByRole("button", { name: /Operation succeeded/i }),
     ).toBeNull();
   });
+
+  test("deduplicates repeated identical error messages", () => {
+    const r = render(<ToastContainer />);
+    act(() => {
+      notify("Workspace release failed", "err");
+      notify("Workspace release failed", "err");
+    });
+    expect(
+      r.getAllByRole("button", { name: "Workspace release failed" }),
+    ).toHaveLength(1);
+  });
 });
 
 describe("Countdown", () => {

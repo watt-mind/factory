@@ -30,6 +30,7 @@ import type {
   TicketSummary,
   TraceView,
   Worker,
+  WorkerCapacity,
 } from "./types";
 
 // Same contract as lib/client.mjs: one function per endpoint, an Error with
@@ -529,9 +530,9 @@ export const api = {
     call<{ archived: boolean }>("POST", "/events/archive", { source, eventId }),
   // Requeue/fail the run held by a stale worker and retire its registry row.
   releaseWorker: (workerId: string, runId: string) =>
-    call<{ released: boolean; runId: string }>(
+    call<{ released: boolean; runId: string; terminated?: boolean }>(
       "POST",
-      `/workers/${encodeURIComponent(workerId)}/release`,
+      `/workers/${encodeURIComponent(workerId)}/release?terminate=true`,
       { runId },
     ),
   // The agent registry, fully readable: definitions, prompts, schemas, pins.
@@ -597,7 +598,8 @@ export const api = {
       apply,
     }),
   // The worker registry: which processes are alive, where, and what they run.
-  workers: () => call<{ workers: Worker[] }>("GET", "/workers"),
+  workers: () =>
+    call<{ workers: Worker[]; capacity?: WorkerCapacity }>("GET", "/workers"),
   // Human inbox ledger (WM-285): everything waiting on the operator, by status.
   inbox: (
     status: InboxStatus = "open",

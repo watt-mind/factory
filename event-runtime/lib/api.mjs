@@ -68,6 +68,7 @@ import { notifyCommand, sendNotification } from "./notify.mjs";
 import { loadRepos, reposRoot } from "./repos.mjs";
 import { scheduleView } from "./schedules.mjs";
 import { handleStatusApiRoute, workerCapacityView } from "./status-view.mjs";
+import { cancelRun } from "./worker.mjs";
 import { loadWorkerPolicy } from "./workers.mjs";
 import { loadLinearBudget } from "../../tools/ticket.mjs";
 
@@ -382,6 +383,52 @@ export function createApi({
       }
       if (route === "GET /status" || route === "GET /workers") {
         return handleStatusApiRoute({ ...common, getStoreStats });
+      }
+      // Keep the established stale-lease recovery request below in api-runs.
+      // A deliberate workspace termination opts in with `terminate: true`: it
+      // cancels the active run, which aborts its executor and lets normal run
+      // cleanup remove the worktree rather than merely expiring its lease.
+      const workspaceRelease = url.pathname.match(
+        /^\/workers\/([^/]+)\/release$/,
+      );
+      if (
+        req.method === "POST" &&
+        workspaceRelease &&
+        url.searchParams.get("terminate") === "true"
+      ) {
+        const parsed = parseJson(await readBody(req));
+        if (parsed.error) return send(400, { error: "invalid_json" });
+        const body = parsed.value ?? {};
+        if (typeof body.runId !== "string" || body.runId === "")
+          return send(422, { error: "runId required" });
+        const workerId = decodeURIComponent(workspaceRelease[1]);
+        const worker = db
+          .query(`SELECT state, current_run FROM workers WHERE worker_id = ?`)
+          .get(workerId);
+        if (!worker) return send(404, { error: `unknown worker ${workerId}` });
+        if (worker.state === "stopped" || worker.current_run !== body.runId) {
+          return send(409, {
+            error: `worker ${workerId} does not hold ${body.runId}`,
+          });
+        }
+        try {
+          cancelRun(db, body.runId, {
+            actor,
+            reason: "operator_workspace_terminate",
+            now: nowMs,
+            policyVersion,
+          });
+          return send(200, {
+            released: true,
+            runId: body.runId,
+            terminated: true,
+          });
+        } catch (err) {
+          const status = String(err.message).startsWith("unknown run")
+            ? 404
+            : 409;
+          return send(status, { error: err.message });
+        }
       }
       if (route === "GET /config") {
         return handleConfigApiRoute({
