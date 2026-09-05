@@ -3,8 +3,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { api, type RepoItem } from "../api";
-import { createRunListItemFixture } from "../test-render";
-import type { Worker } from "../types";
+import type { RunDetail, Worker } from "../types";
 import {
   WorkspaceDropdown,
   activeWorkspaces,
@@ -25,11 +24,13 @@ const worker: Worker = {
   startedAt: NOW,
   stoppedAt: null,
 };
-const run = createRunListItemFixture({
-  runId: "run_workspace_1",
-  repos: ["bj29"],
-  eventId: "CLNT-123",
-});
+const run = {
+  run: {
+    runId: "run_workspace_1",
+    spec: { input: { repo: "bj29", ticket: "CLNT-123" } },
+  },
+  subject: "CLNT-123",
+} as RunDetail;
 
 function renderDropdown() {
   const client = new QueryClient({
@@ -64,21 +65,21 @@ describe("active workspace dropdown", () => {
   test("renders mocked workers, shows the limit, and releases a confirmed workspace", async () => {
     const original = {
       workers: api.workers,
-      runs: api.runs,
       repos: api.repos,
-      releaseWorker: api.releaseWorker,
+      run: api.run,
+      terminateWorkspace: api.terminateWorkspace,
     };
     let releases = 0;
     api.workers = async () => ({ workers: [worker] });
-    api.runs = async () => ({ runs: [run] });
+    api.run = async () => run;
     api.repos = async () => ({
       repos: [{ name: "bj29", effective: { maxInFlight: 4 } } as RepoItem],
     });
-    api.releaseWorker = async (workerId, runId) => {
+    api.terminateWorkspace = async (workerId, runId) => {
       releases += 1;
       expect(workerId).toBe("worker_workspace_1");
       expect(runId).toBe("run_workspace_1");
-      return { released: true, runId };
+      return { released: true, runId, terminated: true as const };
     };
 
     try {
@@ -94,9 +95,9 @@ describe("active workspace dropdown", () => {
       await waitFor(() => expect(releases).toBe(1));
     } finally {
       api.workers = original.workers;
-      api.runs = original.runs;
       api.repos = original.repos;
-      api.releaseWorker = original.releaseWorker;
+      api.run = original.run;
+      api.terminateWorkspace = original.terminateWorkspace;
     }
   });
 });

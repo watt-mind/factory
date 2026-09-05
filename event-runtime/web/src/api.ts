@@ -530,7 +530,15 @@ export const api = {
     call<{ archived: boolean }>("POST", "/events/archive", { source, eventId }),
   // Requeue/fail the run held by a stale worker and retire its registry row.
   releaseWorker: (workerId: string, runId: string) =>
-    call<{ released: boolean; runId: string; terminated?: boolean }>(
+    call<{ released: boolean; runId: string }>(
+      "POST",
+      `/workers/${encodeURIComponent(workerId)}/release`,
+      { runId },
+    ),
+  // Deliberately cancel a live workspace. This is distinct from stale-lease
+  // recovery above: using that recovery route on a live worker would retry it.
+  terminateWorkspace: (workerId: string, runId: string) =>
+    call<{ released: boolean; runId: string; terminated: true }>(
       "POST",
       `/workers/${encodeURIComponent(workerId)}/release?terminate=true`,
       { runId },

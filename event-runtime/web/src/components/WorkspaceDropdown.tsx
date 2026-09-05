@@ -1,13 +1,18 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { api, type RepoItem } from "../api";
 import { refetchIntervals } from "../hooks";
-import type { RunListItem, Worker } from "../types";
+import type { RunDetail, Worker } from "../types";
 import { Button, notify, shortId } from "./ui";
 
 export type ActiveWorkspace = {
   worker: Worker;
-  run: RunListItem;
+  runId: string;
   repo: string;
   subject: string;
 };
@@ -19,19 +24,34 @@ export type ActiveWorkspace = {
  */
 export function activeWorkspaces(
   workers: Worker[],
-  runs: RunListItem[],
+  runDetails: RunDetail[],
 ): ActiveWorkspace[] {
-  const byId = new Map(runs.map((run) => [run.runId, run]));
+  const byId = new Map(runDetails.map((detail) => [detail.run.runId, detail]));
   return workers.flatMap((worker) => {
     if (worker.state === "stopped" || !worker.currentRun) return [];
-    const run = byId.get(worker.currentRun);
-    if (!run) return [];
+    const detail = byId.get(worker.currentRun);
+    if (!detail) return [];
+    const input = detail.run.spec.input as Record<string, unknown>;
+    const repo =
+      (typeof input.repo === "string" && input.repo) ||
+      (Array.isArray(input.repos) &&
+        input.repos.find(
+          (value): value is string => typeof value === "string",
+        )) ||
+      "Unassigned";
+    const subject =
+      (typeof input.ticket === "string" && input.ticket) ||
+      (typeof input.ticketId === "string" && input.ticketId) ||
+      (typeof input.issue === "string" && input.issue) ||
+      (typeof input.issueId === "string" && input.issueId) ||
+      detail.subject ||
+      worker.currentRun;
     return [
       {
         worker,
-        run,
-        repo: run.repos[0] ?? "Unassigned",
-        subject: run.eventId ?? run.runId,
+        runId: worker.currentRun,
+        repo,
+        subject,
       },
     ];
   });
@@ -75,23 +95,43 @@ export function WorkspaceDropdown() {
     queryFn: api.workers,
     ...refetchIntervals.primary,
   });
-  const runsQuery = useQuery({
-    queryKey: ["runs"],
-    queryFn: () => api.runs(),
-    ...refetchIntervals.secondary,
-  });
   const reposQuery = useQuery({
     queryKey: ["repos"],
     queryFn: api.repos,
     ...refetchIntervals.secondary,
   });
+  const activeWorkers = useMemo(
+    () =>
+      (workersQuery.data?.workers ?? []).filter(
+        (worker) => worker.state !== "stopped" && worker.currentRun,
+      ),
+    [workersQuery.data],
+  );
+  const runIds = useMemo(
+    () => activeWorkers.map((worker) => worker.currentRun!),
+    [activeWorkers],
+  );
+  // GET /runs is a bounded summary and intentionally omits repository and
+  // subject data. Resolve each direct worker reference through GET /runs/:id.
+  const runQueries = useQueries({
+    queries: runIds.map((runId) => ({
+      queryKey: ["run", runId],
+      queryFn: () => api.run(runId),
+      ...refetchIntervals.primary,
+      retry: 1,
+    })),
+  });
+  const runDetailKey = runQueries.map((query) => query.dataUpdatedAt).join(",");
   const workspaces = useMemo(
     () =>
       activeWorkspaces(
-        workersQuery.data?.workers ?? [],
-        runsQuery.data?.runs ?? [],
+        activeWorkers,
+        runQueries.flatMap((query) => (query.data ? [query.data] : [])),
       ),
-    [workersQuery.data, runsQuery.data],
+    // useQueries returns a new array every render; timestamps are its stable
+    // data dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeWorkers, runDetailKey],
   );
   const groups = useMemo(
     () => groupActiveWorkspaces(workspaces, reposQuery.data?.repos ?? []),
@@ -100,10 +140,10 @@ export function WorkspaceDropdown() {
 
   const release = useMutation({
     mutationFn: (workspace: ActiveWorkspace) =>
-      api.releaseWorker(workspace.worker.workerId, workspace.run.runId),
+      api.terminateWorkspace(workspace.worker.workerId, workspace.runId),
     onSuccess: (_, workspace) => {
       void queryClient.invalidateQueries({ queryKey: ["workers"] });
-      void queryClient.invalidateQueries({ queryKey: ["runs"] });
+      void queryClient.invalidateQueries({ queryKey: ["run"] });
       void queryClient.invalidateQueries({ queryKey: ["status"] });
       setConfirming(null);
       notify(`Terminated workspace ${workspace.subject}`, "ok");
@@ -116,7 +156,7 @@ export function WorkspaceDropdown() {
     },
   });
 
-  const total = workspaces.length;
+  const total = activeWorkers.length;
   return (
     <section className="relative mb-2" aria-label="Active workspaces">
       <Button
@@ -137,9 +177,13 @@ export function WorkspaceDropdown() {
           aria-label="Running workspaces"
           className="mt-1 max-h-80 overflow-y-auto rounded-md border border-(--border) bg-(--surface-1) p-2 shadow-lg"
         >
-          {groups.length === 0 ? (
+          {total === 0 ? (
             <p className="px-1 py-2 text-[12px] text-(--text-faint)">
               No running workspaces.
+            </p>
+          ) : groups.length === 0 ? (
+            <p className="px-1 py-2 text-[12px] text-(--text-faint)">
+              Loading running workspaces…
             </p>
           ) : (
             groups.map((group) => (
@@ -158,8 +202,7 @@ export function WorkspaceDropdown() {
                   </span>
                 </div>
                 {group.workspaces.map((workspace) => {
-                  const isConfirming =
-                    confirming?.run.runId === workspace.run.runId;
+                  const isConfirming = confirming?.runId === workspace.runId;
                   return (
                     <div
                       key={workspace.worker.workerId}
@@ -174,7 +217,7 @@ export function WorkspaceDropdown() {
                             {workspace.subject}
                           </div>
                           <div className="mono truncate text-[11px] text-(--text-faint)">
-                            {shortId(workspace.run.runId)} ·{" "}
+                            {shortId(workspace.runId)} ·{" "}
                             {workspace.worker.stale
                               ? "stale"
                               : workspace.worker.state}

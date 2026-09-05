@@ -363,6 +363,11 @@ export function createDefaultApiMocks(): Record<ApiKey, any> {
       released: true,
       runId,
     })),
+    terminateWorkspace: mock(async (_workerId: string, runId: string) => ({
+      released: true,
+      runId,
+      terminated: true as const,
+    })),
     agents: mock(async () => createAgentsFixture()),
     putEventTypeOverride: mock(
       async (_type: string, body: { adapter: string }) => ({

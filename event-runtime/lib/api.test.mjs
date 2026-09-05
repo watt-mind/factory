@@ -57,6 +57,68 @@ const makeServer = async (...args) => {
   return result;
 };
 
+describe("workspace termination API (GH-2310)", () => {
+  test("cancels only the active run held by the selected worker", async () => {
+    const nowMs = Date.parse("2026-09-05T19:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      s.db
+        .query(
+          `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+           VALUES ('run-workspace', 'workspace-key', '{}', 'sha256:workspace', 'RUNNING', 1, ?, ?)`,
+        )
+        .run(new Date(nowMs).toISOString(), new Date(nowMs).toISOString());
+      s.db
+        .query(
+          `INSERT INTO attempts (run_id, attempt, fencing_token, lease_owner)
+           VALUES ('run-workspace', 1, 1, 'worker-workspace')`,
+        )
+        .run();
+      registerWorker(s.db, { workerId: "worker-workspace", now: nowMs });
+      heartbeat(s.db, "worker-workspace", {
+        state: "busy",
+        runId: "run-workspace",
+        now: nowMs,
+      });
+
+      const terminated = await s.request(
+        "/workers/worker-workspace/release?terminate=true",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ runId: "run-workspace" }),
+        },
+      );
+      expect(terminated.status).toBe(200);
+      expect(await terminated.json()).toEqual({
+        released: true,
+        runId: "run-workspace",
+        terminated: true,
+      });
+      expect(
+        s.db
+          .query(`SELECT state FROM runs WHERE run_id = 'run-workspace'`)
+          .get().state,
+      ).toBe("CANCELLED");
+
+      const raced = await s.request(
+        "/workers/worker-workspace/release?terminate=true",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ runId: "other-run" }),
+        },
+      );
+      expect(raced.status).toBe(409);
+      expect((await raced.json()).error).toBe(
+        "worker worker-workspace does not hold other-run",
+      );
+    } finally {
+      s.close();
+    }
+  });
+});
+
 describe("inbox decision API (WM-390)", () => {
   const request = {
     schemaVersion: "factory.decision-request/v1",
