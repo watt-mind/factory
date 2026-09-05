@@ -69,6 +69,7 @@ import { loadRepos, reposRoot } from "./repos.mjs";
 import { scheduleView } from "./schedules.mjs";
 import { handleStatusApiRoute, workerCapacityView } from "./status-view.mjs";
 import { cancelRun } from "./worker.mjs";
+import { IllegalTransition } from "./lifecycle.mjs";
 import { loadWorkerPolicy } from "./workers.mjs";
 import { loadLinearBudget } from "../../tools/ticket.mjs";
 
@@ -424,10 +425,18 @@ export function createApi({
             terminated: true,
           });
         } catch (err) {
-          const status = String(err.message).startsWith("unknown run")
-            ? 404
-            : 409;
-          return send(status, { error: err.message });
+          if (String(err.message).startsWith("unknown run"))
+            return send(404, { error: err.message });
+          // A run that finished between the operator's click and this request
+          // refuses the transition. Answer in operator terms — what state the
+          // run reached and that there is nothing left to terminate — rather
+          // than leaking the state machine's own wording.
+          if (err instanceof IllegalTransition) {
+            return send(409, {
+              error: `run ${body.runId} already finished (${err.from ?? "unknown state"}); nothing to terminate`,
+            });
+          }
+          return send(409, { error: err.message });
         }
       }
       if (route === "GET /config") {

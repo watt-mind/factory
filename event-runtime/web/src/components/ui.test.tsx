@@ -581,6 +581,41 @@ describe("ToastContainer", () => {
       r.getAllByRole("button", { name: "Workspace release failed" }),
     ).toHaveLength(1);
   });
+
+  test("does not deduplicate repeated ok toasts", () => {
+    const r = render(<ToastContainer />);
+    act(() => {
+      notify("Saved", "ok");
+      notify("Saved", "ok");
+    });
+    expect(r.getAllByRole("button", { name: "Saved" })).toHaveLength(2);
+  });
+
+  test("re-arms the dismissal timer when an error repeats", () => {
+    const r = render(<ToastContainer />);
+    act(() => {
+      notify("Workspace release keeps failing", "err");
+    });
+    act(() => {
+      jest.advanceTimersByTime(2000);
+    });
+    act(() => {
+      notify("Workspace release keeps failing", "err");
+    });
+    act(() => {
+      jest.advanceTimersByTime(2000);
+    });
+    // 4s after the first notify: without the re-arm the toast is gone.
+    expect(
+      r.getByRole("button", { name: "Workspace release keeps failing" }),
+    ).toBeTruthy();
+    act(() => {
+      jest.advanceTimersByTime(1500);
+    });
+    expect(
+      r.queryByRole("button", { name: "Workspace release keeps failing" }),
+    ).toBeNull();
+  });
 });
 
 describe("Countdown", () => {

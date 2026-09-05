@@ -117,6 +117,40 @@ describe("workspace termination API (GH-2310)", () => {
       s.close();
     }
   });
+
+  test("answers an already-terminal run with an operator-legible 409", async () => {
+    const nowMs = Date.parse("2026-09-05T19:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      s.db
+        .query(
+          `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+           VALUES ('run-finished', 'finished-key', '{}', 'sha256:finished', 'COMPLETED', 1, ?, ?)`,
+        )
+        .run(new Date(nowMs).toISOString(), new Date(nowMs).toISOString());
+      registerWorker(s.db, { workerId: "worker-finished", now: nowMs });
+      heartbeat(s.db, "worker-finished", {
+        state: "busy",
+        runId: "run-finished",
+        now: nowMs,
+      });
+
+      const refused = await s.request(
+        "/workers/worker-finished/release?terminate=true",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ runId: "run-finished" }),
+        },
+      );
+      expect(refused.status).toBe(409);
+      expect((await refused.json()).error).toBe(
+        "run run-finished already finished (COMPLETED); nothing to terminate",
+      );
+    } finally {
+      s.close();
+    }
+  });
 });
 
 describe("inbox decision API (WM-390)", () => {

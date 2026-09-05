@@ -1721,23 +1721,43 @@ export interface ToastMessage {
 
 const toastListeners = new Set<(toasts: ToastMessage[]) => void>();
 let activeToasts: ToastMessage[] = [];
+const toastTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function armDismiss(id: string) {
+  const pending = toastTimers.get(id);
+  if (pending !== undefined) clearTimeout(pending);
+  toastTimers.set(
+    id,
+    setTimeout(() => dismissToast(id), 3000),
+  );
+}
 
 export function notify(message: string, type: "ok" | "err" | "info" = "ok") {
   // A retrying mutation can report the same failure faster than an operator can
-  // act on it. Keep one visible, announced error rather than growing a stack.
-  if (
-    activeToasts.some(
+  // act on it. Keep one visible, announced error rather than growing a stack —
+  // but re-arm its dismissal timer, so a still-recurring failure stays on
+  // screen instead of vanishing 3s after its first occurrence. Only errors
+  // dedupe: repeated ok/info toasts are distinct confirmations of distinct
+  // actions and each deserves its own announcement.
+  if (type === "err") {
+    const existing = activeToasts.find(
       (toast) => toast.message === message && toast.type === type,
-    )
-  )
-    return;
+    );
+    if (existing) {
+      armDismiss(existing.id);
+      return;
+    }
+  }
   const id = Math.random().toString(36).slice(2);
   activeToasts = [...activeToasts, { id, type, message }].slice(-5);
   toastListeners.forEach((l) => l(activeToasts));
-  setTimeout(() => dismissToast(id), 3000);
+  armDismiss(id);
 }
 
 function dismissToast(id: string) {
+  const pending = toastTimers.get(id);
+  if (pending !== undefined) clearTimeout(pending);
+  toastTimers.delete(id);
   const next = activeToasts.filter((t) => t.id !== id);
   if (next.length === activeToasts.length) return;
   activeToasts = next;
@@ -1745,6 +1765,8 @@ function dismissToast(id: string) {
 }
 
 export function clearToasts() {
+  toastTimers.forEach((timer) => clearTimeout(timer));
+  toastTimers.clear();
   activeToasts = [];
   toastListeners.forEach((l) => l(activeToasts));
 }

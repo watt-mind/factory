@@ -7,7 +7,7 @@ import {
 import { useMemo, useState } from "react";
 import { api, type RepoItem } from "../api";
 import { refetchIntervals } from "../hooks";
-import type { RunDetail, Worker } from "../types";
+import type { RunDetail, RunListItem, Worker } from "../types";
 import { Button, notify, shortId } from "./ui";
 
 export type ActiveWorkspace = {
@@ -111,37 +111,79 @@ export function WorkspaceDropdown() {
     () => activeWorkers.map((worker) => worker.currentRun!),
     [activeWorkers],
   );
-  // GET /runs is a bounded summary and intentionally omits repository and
-  // subject data. Resolve each direct worker reference through GET /runs/:id.
+  // Resolve run labels from the shared run list first (one request on the
+  // relaxed cadence, same cache key other views poll — Workers.tsx precedent).
+  // GET /runs is a bounded summary that has omitted `spec` since WM-976, so
+  // any id the list cannot label falls back to GET /runs/:id — and those
+  // detail requests only run while the menu is open.
+  const runsQuery = useQuery({
+    queryKey: ["runs"],
+    queryFn: () => api.runs(),
+    ...refetchIntervals.secondary,
+  });
+  const listDetails = useMemo(() => {
+    const rows = new Map<string, RunListItem>(
+      (runsQuery.data?.runs ?? []).map((row) => [row.runId, row]),
+    );
+    return new Map<string, RunDetail>(
+      runIds.flatMap((runId) => {
+        const row = rows.get(runId);
+        if (!row?.spec) return [];
+        return [[runId, { run: { runId, spec: row.spec } } as RunDetail]];
+      }),
+    );
+  }, [runsQuery.data, runIds]);
+  const missingRunIds = useMemo(
+    () => runIds.filter((runId) => !listDetails.has(runId)),
+    [runIds, listDetails],
+  );
   const runQueries = useQueries({
-    queries: runIds.map((runId) => ({
+    queries: missingRunIds.map((runId) => ({
       queryKey: ["run", runId],
       queryFn: () => api.run(runId),
       ...refetchIntervals.primary,
       retry: 1,
+      enabled: open,
     })),
   });
   const runDetailKey = runQueries.map((query) => query.dataUpdatedAt).join(",");
   const workspaces = useMemo(
     () =>
-      activeWorkspaces(
-        activeWorkers,
-        runQueries.flatMap((query) => (query.data ? [query.data] : [])),
-      ),
+      activeWorkspaces(activeWorkers, [
+        ...listDetails.values(),
+        ...runQueries.flatMap((query) => (query.data ? [query.data] : [])),
+      ]),
     // useQueries returns a new array every render; timestamps are its stable
     // data dependency.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [activeWorkers, runDetailKey],
+    [activeWorkers, listDetails, runDetailKey],
   );
+  const resolvedRunIds = useMemo(
+    () => new Set(workspaces.map((workspace) => workspace.runId)),
+    [workspaces],
+  );
+  const unresolvedWorkers = useMemo(
+    () =>
+      activeWorkers.filter((worker) => !resolvedRunIds.has(worker.currentRun!)),
+    [activeWorkers, resolvedRunIds],
+  );
+  const runQueryError =
+    runsQuery.isError || runQueries.some((query) => query.isError);
   const groups = useMemo(
     () => groupActiveWorkspaces(workspaces, reposQuery.data?.repos ?? []),
     [workspaces, reposQuery.data],
   );
 
+  const [terminatedRunIds, setTerminatedRunIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const release = useMutation({
     mutationFn: (workspace: ActiveWorkspace) =>
       api.terminateWorkspace(workspace.worker.workerId, workspace.runId),
     onSuccess: (_, workspace) => {
+      // The worker list catches up on its next poll; until then keep this
+      // row's Terminate inert so a double-click cannot race the cancel.
+      setTerminatedRunIds((prev) => new Set(prev).add(workspace.runId));
       void queryClient.invalidateQueries({ queryKey: ["workers"] });
       void queryClient.invalidateQueries({ queryKey: ["run"] });
       void queryClient.invalidateQueries({ queryKey: ["status"] });
@@ -181,87 +223,117 @@ export function WorkspaceDropdown() {
             <p className="px-1 py-2 text-[12px] text-(--text-faint)">
               No running workspaces.
             </p>
-          ) : groups.length === 0 ? (
-            <p className="px-1 py-2 text-[12px] text-(--text-faint)">
-              Loading running workspaces…
-            </p>
           ) : (
-            groups.map((group) => (
-              <div
-                key={group.repo}
-                className="py-1 not-last:border-b not-last:border-(--border)"
-              >
-                <div className="flex items-center justify-between gap-2 px-1 py-1 text-[11px] font-semibold text-(--text-dim)">
-                  <span className="truncate">{group.repo}</span>
-                  <span
-                    className="mono shrink-0"
-                    aria-label={`${group.workspaces.length}${group.limit === null ? " active workspaces" : ` of ${group.limit} workspace limit`}`}
-                  >
-                    {group.workspaces.length}
-                    {group.limit === null ? "" : ` / ${group.limit}`}
-                  </span>
-                </div>
-                {group.workspaces.map((workspace) => {
-                  const isConfirming = confirming?.runId === workspace.runId;
-                  return (
-                    <div
-                      key={workspace.worker.workerId}
-                      className="rounded px-1 py-1.5 hover:bg-(--surface-2)"
+            <>
+              {runQueryError && (
+                <p
+                  role="alert"
+                  className="px-1 py-1 text-[12px] text-(--hue-err)"
+                >
+                  Some workspace details failed to load.
+                </p>
+              )}
+              {groups.map((group) => (
+                <div
+                  key={group.repo}
+                  className="py-1 not-last:border-b not-last:border-(--border)"
+                >
+                  <div className="flex items-center justify-between gap-2 px-1 py-1 text-[11px] font-semibold text-(--text-dim)">
+                    <span className="truncate">{group.repo}</span>
+                    <span
+                      className="mono shrink-0"
+                      aria-label={`${group.workspaces.length}${group.limit === null ? " active workspaces" : ` of ${group.limit} workspace limit`}`}
                     >
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0 text-[12px]">
-                          <div
-                            className="truncate text-(--text)"
-                            title={workspace.subject}
-                          >
-                            {workspace.subject}
+                      {group.workspaces.length}
+                      {group.limit === null ? "" : ` / ${group.limit}`}
+                    </span>
+                  </div>
+                  {group.workspaces.map((workspace) => {
+                    const isConfirming = confirming?.runId === workspace.runId;
+                    return (
+                      <div
+                        key={workspace.worker.workerId}
+                        className="rounded px-1 py-1.5 hover:bg-(--surface-2)"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0 text-[12px]">
+                            <div
+                              className="truncate text-(--text)"
+                              title={workspace.subject}
+                            >
+                              {workspace.subject}
+                            </div>
+                            <div className="mono truncate text-[11px] text-(--text-faint)">
+                              {shortId(workspace.runId)} ·{" "}
+                              {workspace.worker.stale
+                                ? "stale"
+                                : workspace.worker.state}
+                            </div>
                           </div>
-                          <div className="mono truncate text-[11px] text-(--text-faint)">
-                            {shortId(workspace.runId)} ·{" "}
-                            {workspace.worker.stale
-                              ? "stale"
-                              : workspace.worker.state}
-                          </div>
+                          {!isConfirming && (
+                            <Button
+                              type="button"
+                              size="sm"
+                              disabled={
+                                release.isPending ||
+                                terminatedRunIds.has(workspace.runId)
+                              }
+                              aria-label={`Terminate workspace ${workspace.subject}`}
+                              onClick={() => setConfirming(workspace)}
+                            >
+                              Terminate
+                            </Button>
+                          )}
                         </div>
-                        {!isConfirming && (
-                          <Button
-                            type="button"
-                            size="sm"
-                            disabled={release.isPending}
-                            aria-label={`Terminate workspace ${workspace.subject}`}
-                            onClick={() => setConfirming(workspace)}
-                          >
-                            Terminate
-                          </Button>
+                        {isConfirming && (
+                          <div className="mt-2 flex items-center justify-between gap-2 rounded bg-(--surface-3) p-2 text-[11px] text-(--text-dim)">
+                            <span>Stop this workspace?</span>
+                            <span className="flex gap-1">
+                              <Button
+                                type="button"
+                                size="sm"
+                                onClick={() => setConfirming(null)}
+                              >
+                                Keep
+                              </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                disabled={
+                                  release.isPending ||
+                                  terminatedRunIds.has(workspace.runId)
+                                }
+                                onClick={() => release.mutate(workspace)}
+                              >
+                                Confirm terminate
+                              </Button>
+                            </span>
+                          </div>
                         )}
                       </div>
-                      {isConfirming && (
-                        <div className="mt-2 flex items-center justify-between gap-2 rounded bg-(--surface-3) p-2 text-[11px] text-(--text-dim)">
-                          <span>Stop this workspace?</span>
-                          <span className="flex gap-1">
-                            <Button
-                              type="button"
-                              size="sm"
-                              onClick={() => setConfirming(null)}
-                            >
-                              Keep
-                            </Button>
-                            <Button
-                              type="button"
-                              size="sm"
-                              disabled={release.isPending}
-                              onClick={() => release.mutate(workspace)}
-                            >
-                              Confirm terminate
-                            </Button>
-                          </span>
-                        </div>
-                      )}
+                    );
+                  })}
+                </div>
+              ))}
+              {unresolvedWorkers.map((worker) => (
+                <div
+                  key={worker.currentRun!}
+                  className="rounded px-1 py-1.5 hover:bg-(--surface-2)"
+                >
+                  <div className="min-w-0 text-[12px]">
+                    <div
+                      className="mono truncate text-(--text)"
+                      title={worker.currentRun!}
+                    >
+                      {shortId(worker.currentRun!)}
                     </div>
-                  );
-                })}
-              </div>
-            ))
+                    <div className="mono truncate text-[11px] text-(--text-faint)">
+                      {worker.stale ? "stale" : worker.state}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </>
           )}
         </div>
       )}
