@@ -124,6 +124,8 @@ import {
   materializeRunHarness,
   reapExpiredLeases,
   releaseStalledWorkerLease,
+  terminateLiveWorkerLease,
+  terminateWorkerLease,
   releaseClaimLock,
   repositoryIsClean,
   repositoryStatus,
@@ -143,6 +145,7 @@ import {
   ticketHandoffContext,
   writeWorkspaceIntegrityStatus,
 } from "./worker.mjs";
+import { heartbeat, registerWorker } from "./workers.mjs";
 import {
   liveWorkerLeases,
   writeWorkerLease,
@@ -6265,6 +6268,175 @@ sh -c 'sleep 5 & wait'
     expect(lifecycleOf(reapedDb, reapedSpec.runId).at(-1).reason).toBe(
       "retry:environment",
     );
+  });
+
+  test.each([
+    ["LEASED", "CANCELLED", "CANCELLED"],
+    ["RUNNING", "CANCELLED", "CANCELLED"],
+    ["VERIFYING", "FAILED", "FAILED"],
+  ])(
+    "operator termination settles a live %s workspace without retrying",
+    (initialState, finalState, attemptState) => {
+      const db = openDb(":memory:");
+      const spec = queueRun(db, makeSpec());
+      const claim = claimNext(db, opts({ owner: "w-live" }));
+      registerWorker(db, { workerId: "w-live", now: T0 });
+      heartbeat(db, "w-live", {
+        state: "busy",
+        runId: spec.runId,
+        now: T0,
+      });
+      if (initialState !== "LEASED") {
+        transition(db, {
+          runId: spec.runId,
+          to: "RUNNING",
+          actor: "w-live",
+          reason: "started",
+          attempt: claim.attempt,
+          now: T0,
+        });
+      }
+      if (initialState === "VERIFYING") {
+        transition(db, {
+          runId: spec.runId,
+          to: "VERIFYING",
+          actor: "w-live",
+          reason: "verifying",
+          attempt: claim.attempt,
+          now: T0,
+        });
+      }
+
+      expect(
+        terminateLiveWorkerLease(
+          db,
+          { workerId: "w-live", runId: spec.runId },
+          { now: T0, policyVersion: "test" },
+        ),
+      ).toEqual({ released: true, runId: spec.runId });
+      expect(runState(db, spec.runId)).toBe(finalState);
+      const terminatedAttempt = db
+        .query(
+          `SELECT terminal_state, reason_code, fencing_token, lease_owner
+           FROM attempts WHERE run_id = ? AND attempt = ?`,
+        )
+        .get(spec.runId, claim.attempt);
+      expect(terminatedAttempt).toEqual({
+        terminal_state: attemptState,
+        reason_code: "operator_terminated",
+        fencing_token: expect.any(Number),
+        lease_owner: null,
+      });
+      expect(terminatedAttempt.fencing_token).toBeGreaterThan(
+        claim.fencingToken,
+      );
+      expect(
+        db
+          .query(`SELECT state, current_run FROM workers WHERE worker_id = ?`)
+          .get("w-live"),
+      ).toEqual({ state: "stopped", current_run: null });
+      expect(claimedRetryFor(db, spec.runId, claim.attempt + 1)).toBeNull();
+    },
+  );
+
+  test("operator termination is a no-op for a worker still pointing at a terminal run", () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec());
+    const claim = claimNext(db, opts({ owner: "w-terminal" }));
+    transition(db, {
+      runId: spec.runId,
+      to: "RUNNING",
+      actor: "w-terminal",
+      reason: "started",
+      attempt: claim.attempt,
+      now: T0,
+    });
+    transition(db, {
+      runId: spec.runId,
+      to: "CANCELLED",
+      actor: "operator",
+      reason: "operator_cancel",
+      attempt: claim.attempt,
+      now: T0,
+    });
+    registerWorker(db, { workerId: "w-terminal", now: T0 });
+    heartbeat(db, "w-terminal", {
+      state: "busy",
+      runId: spec.runId,
+      now: T0,
+    });
+
+    expect(
+      terminateWorkerLease(
+        db,
+        { workerId: "w-terminal", runId: spec.runId },
+        { now: T0, policyVersion: "test" },
+      ),
+    ).toEqual({
+      released: false,
+      runId: spec.runId,
+      reason: "already_terminal",
+    });
+    expect(runState(db, spec.runId)).toBe("CANCELLED");
+  });
+
+  test("operator termination fences a completing workspace despite a concurrent heartbeat", async () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec({ adapter: "late" }));
+    const claim = claimNext(db, opts({ owner: "w-race" }));
+    registerWorker(db, { workerId: "w-race", now: T0 });
+    heartbeat(db, "w-race", { state: "busy", runId: spec.runId, now: T0 });
+    let started;
+    const executing = new Promise((resolve) => {
+      started = resolve;
+    });
+    let complete;
+    const completion = new Promise((resolve) => {
+      complete = resolve;
+    });
+    const execution = executeClaimed(
+      db,
+      registry,
+      {
+        late: {
+          async execute() {
+            started();
+            return completion;
+          },
+        },
+      },
+      claim,
+      opts({ owner: "w-race" }),
+    );
+    await executing;
+
+    expect(
+      terminateLiveWorkerLease(
+        db,
+        { workerId: "w-race", runId: spec.runId },
+        { now: T0, policyVersion: "test" },
+      ),
+    ).toEqual({ released: true, runId: spec.runId });
+    heartbeat(db, "w-race", { state: "busy", runId: spec.runId, now: T0 + 1 });
+    complete({ exitCode: 0, timedOut: false });
+
+    expect(await execution).toEqual(expect.objectContaining({ fenced: true }));
+    expect(runState(db, spec.runId)).toBe("CANCELLED");
+    expect(
+      db
+        .query(`SELECT COUNT(*) AS n FROM results WHERE run_id = ?`)
+        .get(spec.runId).n,
+    ).toBe(0);
+    expect(
+      db
+        .query(
+          `SELECT terminal_state, reason_code FROM attempts WHERE run_id = ?`,
+        )
+        .get(spec.runId),
+    ).toEqual({
+      terminal_state: "CANCELLED",
+      reason_code: "operator_terminated",
+    });
   });
 
   test("cancelRun on a RUNNING attempt aborts adapter immediately and records attempt (OPS-417)", async () => {

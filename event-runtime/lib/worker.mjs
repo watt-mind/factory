@@ -6541,6 +6541,157 @@ export function releaseStalledWorkerLease(
 }
 
 /**
+ * Terminate a live worker's current workspace at the operator's request.
+ *
+ * This is deliberately not a retry: a live workspace is cancelled/failed
+ * according to the closed lifecycle, its attempt is finalized, and its
+ * fencing token is advanced before the state transition commits. A late
+ * completion from the worker therefore observes a stale token and cannot
+ * publish a result after the operator has settled the attempt.
+ */
+export function terminateLiveWorkerLease(
+  db,
+  { workerId, runId },
+  {
+    now = () => Date.now(),
+    policyVersion = "unknown",
+    actor = "operator",
+  } = {},
+) {
+  const currentNow = resolveNow(now);
+  const outcome = txImmediate(db, () => {
+    const worker = db
+      .query(`SELECT current_run FROM workers WHERE worker_id = ?`)
+      .get(workerId);
+    if (!worker) throw new Error(`unknown worker ${workerId}`);
+    if (!worker.current_run)
+      throw new Error(`worker ${workerId} has no active run`);
+    if (runId && worker.current_run !== runId) {
+      throw new Error(
+        `worker ${workerId} holds ${worker.current_run}, not ${runId}`,
+      );
+    }
+
+    const heldRunId = worker.current_run;
+    const run = db
+      .query(`SELECT state, attempts FROM runs WHERE run_id = ?`)
+      .get(heldRunId);
+    if (!run)
+      throw new Error(`worker ${workerId} references unknown run ${heldRunId}`);
+    if (
+      ["COMPLETED", "REFUSED", "TIMED_OUT", "CANCELLED"].includes(run.state)
+    ) {
+      return { released: false, runId: heldRunId, reason: "already_terminal" };
+    }
+    if (!["LEASED", "RUNNING", "VERIFYING"].includes(run.state)) {
+      throw new Error(`run ${heldRunId} is ${run.state}, not actively leased`);
+    }
+
+    const attempt = db
+      .query(
+        `SELECT lease_owner FROM attempts WHERE run_id = ? AND attempt = ?`,
+      )
+      .get(heldRunId, run.attempts);
+    if (!attempt) throw new Error(`run ${heldRunId} has no current attempt`);
+    if (attempt.lease_owner && attempt.lease_owner !== workerId) {
+      throw new Error(
+        `run ${heldRunId} is leased by ${attempt.lease_owner}, not ${workerId}`,
+      );
+    }
+
+    // Revoking the current token fences a concurrent executor before it can
+    // write a result. Keep the same attempt number: this operation settles it
+    // rather than creating a retryable attempt.
+    const fencingToken = nextCounter(db, "fencing");
+    db.query(
+      `UPDATE attempts
+          SET fencing_token = ?, lease_owner = NULL, lease_expires_at = ?
+        WHERE run_id = ? AND attempt = ?`,
+    ).run(fencingToken, iso(currentNow), heldRunId, run.attempts);
+
+    if (run.state === "VERIFYING") {
+      transition(db, {
+        runId: heldRunId,
+        to: "FAILED",
+        actor,
+        reason: "operator_termination",
+        attempt: run.attempts,
+        policyVersion,
+        now: currentNow,
+      });
+      finishAttempt(
+        db,
+        heldRunId,
+        run.attempts,
+        "FAILED",
+        "operator_terminated",
+        currentNow,
+      );
+    } else {
+      transition(db, {
+        runId: heldRunId,
+        to: "CANCELLED",
+        actor,
+        reason: "operator_termination",
+        attempt: run.attempts,
+        policyVersion,
+        now: currentNow,
+      });
+      finishAttempt(
+        db,
+        heldRunId,
+        run.attempts,
+        "CANCELLED",
+        "operator_terminated",
+        currentNow,
+      );
+    }
+    db.query(
+      `UPDATE workers SET state = 'stopped', current_run = NULL, stopped_at = ? WHERE worker_id = ?`,
+    ).run(iso(currentNow), workerId);
+    return { released: true, runId: heldRunId };
+  });
+
+  if (outcome.released)
+    ACTIVE_EXECUTIONS.get(outcome.runId)?.abort("operator_termination");
+  return outcome;
+}
+
+/**
+ * Release a worker workspace while preserving the stale-worker recovery
+ * policy. Stalled workers retain lease-expiry retry semantics; live workers
+ * are explicitly terminated instead.
+ */
+export function terminateWorkerLease(db, { workerId, runId }, options = {}) {
+  const currentNow = resolveNow(options.now);
+  const worker = db
+    .query(`SELECT state, last_seen FROM workers WHERE worker_id = ?`)
+    .get(workerId);
+  if (!worker) throw new Error(`unknown worker ${workerId}`);
+  const stale =
+    worker.state !== "stopped" &&
+    currentNow - Date.parse(worker.last_seen) > HEARTBEAT_STALE_MS;
+  if (stale) {
+    return releaseStalledWorkerLease(
+      db,
+      { workerId, runId },
+      {
+        ...options,
+        now: currentNow,
+      },
+    );
+  }
+  return terminateLiveWorkerLease(
+    db,
+    { workerId, runId },
+    {
+      ...options,
+      now: currentNow,
+    },
+  );
+}
+
+/**
  * Re-queue LEASED/RUNNING/VERIFYING runs whose current attempt's lease expired.
  * The stale attempt keeps its (now lower) fencing token, so a late publish from
  * it is fenced out. Lease loss spends only the dedicated environment budget.
