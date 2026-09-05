@@ -125,7 +125,6 @@ import {
   reapExpiredLeases,
   releaseStalledWorkerLease,
   terminateLiveWorkerLease,
-  terminateWorkerLease,
   releaseClaimLock,
   repositoryIsClean,
   repositoryStatus,
@@ -6367,7 +6366,7 @@ sh -c 'sleep 5 & wait'
     });
 
     expect(
-      terminateWorkerLease(
+      terminateLiveWorkerLease(
         db,
         { workerId: "w-terminal", runId: spec.runId },
         { now: T0, policyVersion: "test" },
@@ -6376,8 +6375,47 @@ sh -c 'sleep 5 & wait'
       released: false,
       runId: spec.runId,
       reason: "already_terminal",
+      state: "CANCELLED",
     });
     expect(runState(db, spec.runId)).toBe("CANCELLED");
+  });
+
+  test("operator termination refuses a stopped worker still pointing at a run", () => {
+    const db = openDb(":memory:");
+    const spec = queueRun(db, makeSpec());
+    const claim = claimNext(db, opts({ owner: "w-stopped" }));
+    transition(db, {
+      runId: spec.runId,
+      to: "RUNNING",
+      actor: "w-stopped",
+      reason: "started",
+      attempt: claim.attempt,
+      now: T0,
+    });
+    registerWorker(db, { workerId: "w-stopped", now: T0 });
+    heartbeat(db, "w-stopped", { state: "busy", runId: spec.runId, now: T0 });
+    db.query(
+      `UPDATE workers SET state = 'stopped' WHERE worker_id = 'w-stopped'`,
+    ).run();
+
+    expect(
+      terminateLiveWorkerLease(
+        db,
+        { workerId: "w-stopped", runId: spec.runId },
+        { now: T0, policyVersion: "test" },
+      ),
+    ).toEqual({
+      released: false,
+      runId: spec.runId,
+      reason: "already_terminal",
+    });
+    // Nothing was settled on the stopped worker's behalf.
+    expect(runState(db, spec.runId)).toBe("RUNNING");
+    expect(
+      db
+        .query(`SELECT lease_owner FROM attempts WHERE run_id = ?`)
+        .get(spec.runId).lease_owner,
+    ).toBe("w-stopped");
   });
 
   test("operator termination fences a completing workspace despite a concurrent heartbeat", async () => {

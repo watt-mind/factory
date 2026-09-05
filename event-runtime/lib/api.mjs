@@ -68,7 +68,7 @@ import { notifyCommand, sendNotification } from "./notify.mjs";
 import { loadRepos, reposRoot } from "./repos.mjs";
 import { scheduleView } from "./schedules.mjs";
 import { handleStatusApiRoute, workerCapacityView } from "./status-view.mjs";
-import { cancelRun } from "./worker.mjs";
+import { terminateLiveWorkerLease } from "./worker.mjs";
 import { IllegalTransition } from "./lifecycle.mjs";
 import { loadWorkerPolicy } from "./workers.mjs";
 import { loadLinearBudget } from "../../tools/ticket.mjs";
@@ -413,24 +413,29 @@ export function createApi({
           });
         }
         try {
-          cancelRun(db, body.runId, {
-            actor,
-            reason: "operator_workspace_terminate",
-            now: nowMs,
-            policyVersion,
-          });
+          const outcome = terminateLiveWorkerLease(
+            db,
+            { workerId, runId: body.runId },
+            { actor, now: nowMs, policyVersion },
+          );
+          if (!outcome.released) {
+            // A run that finished between the operator's click and this
+            // request has nothing left to terminate. Answer in operator
+            // terms — what state the run reached — rather than leaking the
+            // state machine's own wording.
+            return send(409, {
+              error: `run ${body.runId} already finished (${outcome.state ?? "unknown state"}); nothing to terminate`,
+            });
+          }
           return send(200, {
             released: true,
-            runId: body.runId,
+            runId: outcome.runId,
             terminated: true,
           });
         } catch (err) {
           if (String(err.message).startsWith("unknown run"))
             return send(404, { error: err.message });
-          // A run that finished between the operator's click and this request
-          // refuses the transition. Answer in operator terms — what state the
-          // run reached and that there is nothing left to terminate — rather
-          // than leaking the state machine's own wording.
+          // A concurrent settlement can still race the delegated cancel.
           if (err instanceof IllegalTransition) {
             return send(409, {
               error: `run ${body.runId} already finished (${err.from ?? "unknown state"}); nothing to terminate`,

@@ -2856,7 +2856,7 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
     }
   });
 
-  test("releasing a live worker terminates its workspace instead of requiring a stale heartbeat", async () => {
+  test("releasing a live worker is refused; termination is a separate opt-in (GH-2311)", async () => {
     const nowMs = 300_000;
     const { db, server, port } = await makeServer({ now: () => nowMs });
     const client = apiClient({ port, token: CONTROL_TOKEN });
@@ -2880,24 +2880,25 @@ describe("webui surface: proposal linkage, history, journal, outbox, requeue (OP
         now: nowMs,
       });
 
-      expect(await client.releaseWorker("worker-live", "run-live")).toEqual({
-        released: true,
-        runId: "run-live",
-      });
+      const refused = await rejection(
+        client.releaseWorker("worker-live", "run-live"),
+      );
+      expect(refused.status).toBe(409);
+      expect(String(refused.message)).toContain("not stalled");
       expect(
         db.query(`SELECT state FROM runs WHERE run_id = 'run-live'`).get(),
       ).toEqual({
-        state: "CANCELLED",
+        state: "RUNNING",
       });
       expect(
         db
           .query(
-            `SELECT terminal_state, reason_code FROM attempts WHERE run_id = 'run-live'`,
+            `SELECT terminal_state, lease_owner FROM attempts WHERE run_id = 'run-live'`,
           )
           .get(),
       ).toEqual({
-        terminal_state: "CANCELLED",
-        reason_code: "operator_terminated",
+        terminal_state: null,
+        lease_owner: "worker-live",
       });
     } finally {
       server.close();

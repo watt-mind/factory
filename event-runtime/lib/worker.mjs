@@ -6543,10 +6543,12 @@ export function releaseStalledWorkerLease(
 /**
  * Terminate a live worker's current workspace at the operator's request.
  *
- * This is deliberately not a retry: a live workspace is cancelled/failed
- * according to the closed lifecycle, its attempt is finalized, and its
- * fencing token is advanced before the state transition commits. A late
- * completion from the worker therefore observes a stale token and cannot
+ * This is deliberately not a retry: the current attempt is fenced (its
+ * fencing token is advanced and the lease released) and the worker row is
+ * stopped in one transaction, then settlement and cleanup — the lifecycle
+ * transition, attempt finalization, open-proposal close, tier-escalation
+ * refusal/unclaim, and workspace destruction — are delegated to `cancelRun`.
+ * A late completion from the worker observes a stale token and cannot
  * publish a result after the operator has settled the attempt.
  */
 export function terminateLiveWorkerLease(
@@ -6559,11 +6561,20 @@ export function terminateLiveWorkerLease(
   } = {},
 ) {
   const currentNow = resolveNow(now);
-  const outcome = txImmediate(db, () => {
+  const fenced = txImmediate(db, () => {
     const worker = db
-      .query(`SELECT current_run FROM workers WHERE worker_id = ?`)
+      .query(`SELECT state, current_run FROM workers WHERE worker_id = ?`)
       .get(workerId);
     if (!worker) throw new Error(`unknown worker ${workerId}`);
+    if (worker.state === "stopped") {
+      // A stopped worker has nothing left to terminate, even when its row
+      // still points at a run: never settle that run on its behalf here.
+      return {
+        released: false,
+        runId: worker.current_run ?? runId ?? null,
+        reason: "already_terminal",
+      };
+    }
     if (!worker.current_run)
       throw new Error(`worker ${workerId} has no active run`);
     if (runId && worker.current_run !== runId) {
@@ -6578,13 +6589,13 @@ export function terminateLiveWorkerLease(
       .get(heldRunId);
     if (!run)
       throw new Error(`worker ${workerId} references unknown run ${heldRunId}`);
-    if (
-      ["COMPLETED", "REFUSED", "TIMED_OUT", "CANCELLED"].includes(run.state)
-    ) {
-      return { released: false, runId: heldRunId, reason: "already_terminal" };
-    }
     if (!["LEASED", "RUNNING", "VERIFYING"].includes(run.state)) {
-      throw new Error(`run ${heldRunId} is ${run.state}, not actively leased`);
+      return {
+        released: false,
+        runId: heldRunId,
+        reason: "already_terminal",
+        state: run.state,
+      };
     }
 
     const attempt = db
@@ -6608,87 +6619,21 @@ export function terminateLiveWorkerLease(
           SET fencing_token = ?, lease_owner = NULL, lease_expires_at = ?
         WHERE run_id = ? AND attempt = ?`,
     ).run(fencingToken, iso(currentNow), heldRunId, run.attempts);
-
-    if (run.state === "VERIFYING") {
-      transition(db, {
-        runId: heldRunId,
-        to: "FAILED",
-        actor,
-        reason: "operator_termination",
-        attempt: run.attempts,
-        policyVersion,
-        now: currentNow,
-      });
-      finishAttempt(
-        db,
-        heldRunId,
-        run.attempts,
-        "FAILED",
-        "operator_terminated",
-        currentNow,
-      );
-    } else {
-      transition(db, {
-        runId: heldRunId,
-        to: "CANCELLED",
-        actor,
-        reason: "operator_termination",
-        attempt: run.attempts,
-        policyVersion,
-        now: currentNow,
-      });
-      finishAttempt(
-        db,
-        heldRunId,
-        run.attempts,
-        "CANCELLED",
-        "operator_terminated",
-        currentNow,
-      );
-    }
     db.query(
       `UPDATE workers SET state = 'stopped', current_run = NULL, stopped_at = ? WHERE worker_id = ?`,
     ).run(iso(currentNow), workerId);
     return { released: true, runId: heldRunId };
   });
+  if (!fenced.released) return fenced;
 
-  if (outcome.released)
-    ACTIVE_EXECUTIONS.get(outcome.runId)?.abort("operator_termination");
-  return outcome;
-}
-
-/**
- * Release a worker workspace while preserving the stale-worker recovery
- * policy. Stalled workers retain lease-expiry retry semantics; live workers
- * are explicitly terminated instead.
- */
-export function terminateWorkerLease(db, { workerId, runId }, options = {}) {
-  const currentNow = resolveNow(options.now);
-  const worker = db
-    .query(`SELECT state, last_seen FROM workers WHERE worker_id = ?`)
-    .get(workerId);
-  if (!worker) throw new Error(`unknown worker ${workerId}`);
-  const stale =
-    worker.state !== "stopped" &&
-    currentNow - Date.parse(worker.last_seen) > HEARTBEAT_STALE_MS;
-  if (stale) {
-    return releaseStalledWorkerLease(
-      db,
-      { workerId, runId },
-      {
-        ...options,
-        now: currentNow,
-      },
-    );
-  }
-  return terminateLiveWorkerLease(
-    db,
-    { workerId, runId },
-    {
-      ...options,
-      now: currentNow,
-    },
-  );
+  cancelRun(db, fenced.runId, {
+    actor,
+    reason: "operator_terminated",
+    attemptReasonCode: "operator_terminated",
+    now: currentNow,
+    policyVersion,
+  });
+  return { released: true, runId: fenced.runId };
 }
 
 /**
@@ -6835,6 +6780,7 @@ export function cancelRun(
   {
     actor,
     reason = "operator_cancel",
+    attemptReasonCode = "cancelled",
     now = () => Date.now(),
     policyVersion,
     unclaimTierEscalation = defaultUnclaimTicket,
@@ -6863,7 +6809,14 @@ export function cancelRun(
         policyVersion,
         now: currentNow,
       });
-      finishAttempt(db, runId, run.attempts, "FAILED", "cancelled", currentNow);
+      finishAttempt(
+        db,
+        runId,
+        run.attempts,
+        "FAILED",
+        attemptReasonCode,
+        currentNow,
+      );
     } else {
       result = transition(db, {
         runId,
@@ -6879,7 +6832,7 @@ export function cancelRun(
           runId,
           run.attempts,
           "CANCELLED",
-          "cancelled",
+          attemptReasonCode,
           currentNow,
         );
       }

@@ -100,6 +100,24 @@ describe("workspace termination API (GH-2310)", () => {
           .query(`SELECT state FROM runs WHERE run_id = 'run-workspace'`)
           .get().state,
       ).toBe("CANCELLED");
+      expect(
+        s.db
+          .query(
+            `SELECT terminal_state, reason_code, lease_owner FROM attempts WHERE run_id = 'run-workspace'`,
+          )
+          .get(),
+      ).toEqual({
+        terminal_state: "CANCELLED",
+        reason_code: "operator_terminated",
+        lease_owner: null,
+      });
+      expect(
+        s.db
+          .query(
+            `SELECT state, current_run FROM workers WHERE worker_id = 'worker-workspace'`,
+          )
+          .get(),
+      ).toEqual({ state: "stopped", current_run: null });
 
       const raced = await s.request(
         "/workers/worker-workspace/release?terminate=true",

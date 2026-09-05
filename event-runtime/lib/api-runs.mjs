@@ -25,7 +25,7 @@ import {
   cancelRun,
   extendRunDeadline,
   policyMaxRunMinutes,
-  terminateWorkerLease,
+  releaseStalledWorkerLease,
   retryRun,
 } from "./worker.mjs";
 import { agentFamily, proposalSubject } from "./proposal-subject.mjs";
@@ -2485,7 +2485,7 @@ export async function handleRunApiRoute({
     try {
       return send(
         200,
-        terminateWorkerLease(
+        releaseStalledWorkerLease(
           db,
           { workerId, runId: body.runId },
           { actor, now: nowMs, policyVersion },

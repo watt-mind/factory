@@ -536,7 +536,8 @@ export const api = {
       { runId },
     ),
   // Deliberately cancel a live workspace. This is distinct from stale-lease
-  // recovery above: using that recovery route on a live worker would retry it.
+  // recovery above, which refuses a live (still heartbeating) worker with a
+  // 409 and only requeues/fails the run held by a stale one.
   terminateWorkspace: (workerId: string, runId: string) =>
     call<{ released: boolean; runId: string; terminated: true }>(
       "POST",
