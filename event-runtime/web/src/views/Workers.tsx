@@ -632,9 +632,7 @@ export function Workers({
 
   // GET /workers gained capacity without changing the legacy client method's
   // minimum response contract; older servers simply exercise the fallback.
-  const response = query.data as
-    { workers: Worker[]; capacity?: WorkerCapacity } | undefined;
-  const rawRows = response?.workers ?? [];
+  const rawRows = query.data?.workers ?? [];
   const missingRunIds = useMemo(
     () =>
       [...new Set(rawRows.flatMap((w) => w.currentRun ?? []))].filter(
@@ -687,7 +685,7 @@ export function Workers({
     () => rawRows.map((w) => enrichWorker(w, allRuns, loadingRunIds)),
     [rawRows, allRuns, loadingRunIds],
   );
-  const capacity = response?.capacity ?? capacityFromWorkers(rawRows);
+  const capacity = query.data?.capacity ?? capacityFromWorkers(rawRows);
 
   const parts = useMemo(() => partitionWorkers(rows), [rows]);
   const banner = useMemo(() => fleetBanner(rows), [rows]);

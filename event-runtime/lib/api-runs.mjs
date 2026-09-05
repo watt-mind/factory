@@ -27,6 +27,7 @@ import {
   policyMaxRunMinutes,
   releaseStalledWorkerLease,
   retryRun,
+  terminateLiveWorkerLease,
 } from "./worker.mjs";
 import { agentFamily, proposalSubject } from "./proposal-subject.mjs";
 import {
@@ -2480,7 +2481,76 @@ export async function handleRunApiRoute({
   const workerRelease = url.pathname.match(/^\/workers\/([^/]+)\/release$/);
   if (req.method === "POST" && workerRelease) {
     const workerId = decodeURIComponent(workerRelease[1]);
-    const body = parseJson(await readBody(req)).value ?? {};
+    const parsed = parseJson(await readBody(req));
+    // Workspace termination opts in with `terminate=true` and must win over
+    // stale-lease recovery for the same path: it cancels the active run so
+    // the executor aborts and normal cleanup removes the worktree.
+    if (url.searchParams.get("terminate") === "true") {
+      if (parsed.error) return send(400, { error: "invalid_json" });
+      const body = parsed.value ?? {};
+      if (typeof body.runId !== "string" || body.runId === "")
+        return send(422, { error: "runId required" });
+      const worker = db
+        .query(`SELECT state, current_run FROM workers WHERE worker_id = ?`)
+        .get(workerId);
+      if (!worker) return send(404, { error: `unknown worker ${workerId}` });
+      if (worker.state === "stopped" || worker.current_run !== body.runId) {
+        return send(409, {
+          error: `worker ${workerId} does not hold ${body.runId}`,
+        });
+      }
+      if (
+        !db.query(`SELECT run_id FROM runs WHERE run_id = ?`).get(body.runId)
+      ) {
+        return send(404, { error: `unknown run ${body.runId}` });
+      }
+      try {
+        const outcome = terminateLiveWorkerLease(
+          db,
+          { workerId, runId: body.runId },
+          { actor, now: nowMs, policyVersion },
+        );
+        if (!outcome.released) {
+          // A run that finished between the operator's click and this
+          // request has nothing left to terminate. Answer in operator
+          // terms — what state the run reached — rather than leaking the
+          // state machine's own wording.
+          return send(409, {
+            error: `run ${body.runId} already finished (${outcome.state ?? "unknown state"}); nothing to terminate`,
+          });
+        }
+        const payload = {
+          released: true,
+          runId: outcome.runId,
+          terminated: true,
+        };
+        // cancelRun already closed (or left) open proposals; 2+ remaining
+        // open rows is the same `proposalClose.ambiguous` signal cancel
+        // surfaces as `ambiguousOpenProposals`.
+        const openCount = db
+          .query(
+            `SELECT COUNT(*) AS n FROM proposals WHERE run_id = ? AND status = 'open'`,
+          )
+          .get(outcome.runId).n;
+        if (openCount > 1) {
+          payload.ambiguousOpenProposals = [
+            { runId: outcome.runId, count: openCount },
+          ];
+        }
+        return send(200, payload);
+      } catch (err) {
+        if (String(err.message).includes("unknown run"))
+          return send(404, { error: `unknown run ${body.runId}` });
+        if (err instanceof IllegalTransition) {
+          return send(409, {
+            error: `run ${body.runId} already finished (${err.from ?? "unknown state"}); nothing to terminate`,
+          });
+        }
+        return send(409, { error: err.message });
+      }
+    }
+
+    const body = parsed.value ?? {};
     if (!body.runId) return send(422, { error: "runId required" });
     try {
       return send(

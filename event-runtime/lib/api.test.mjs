@@ -58,37 +58,45 @@ const makeServer = async (...args) => {
 };
 
 describe("workspace termination API (GH-2310)", () => {
+  const nowMs = Date.parse("2026-09-05T19:00:00.000Z");
+  const at = new Date(nowMs).toISOString();
+
+  function insertLiveWorkspace(
+    db,
+    {
+      workerId = "worker-workspace",
+      runId = "run-workspace",
+      state = "RUNNING",
+    } = {},
+  ) {
+    db.query(
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+       VALUES (?, ?, '{}', ?, ?, 1, ?, ?)`,
+    ).run(runId, `${runId}-key`, `sha256:${runId}`, state, at, at);
+    db.query(
+      `INSERT INTO attempts (run_id, attempt, fencing_token, lease_owner)
+       VALUES (?, 1, 1, ?)`,
+    ).run(runId, workerId);
+    registerWorker(db, { workerId, now: nowMs });
+    heartbeat(db, workerId, { state: "busy", runId, now: nowMs });
+  }
+
+  async function terminate(s, workerId, body, { raw = false } = {}) {
+    return s.request(`/workers/${workerId}/release?terminate=true`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: raw ? body : JSON.stringify(body),
+    });
+  }
+
   test("cancels only the active run held by the selected worker", async () => {
-    const nowMs = Date.parse("2026-09-05T19:00:00.000Z");
     const s = await makeServer({ now: () => nowMs });
     try {
-      s.db
-        .query(
-          `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
-           VALUES ('run-workspace', 'workspace-key', '{}', 'sha256:workspace', 'RUNNING', 1, ?, ?)`,
-        )
-        .run(new Date(nowMs).toISOString(), new Date(nowMs).toISOString());
-      s.db
-        .query(
-          `INSERT INTO attempts (run_id, attempt, fencing_token, lease_owner)
-           VALUES ('run-workspace', 1, 1, 'worker-workspace')`,
-        )
-        .run();
-      registerWorker(s.db, { workerId: "worker-workspace", now: nowMs });
-      heartbeat(s.db, "worker-workspace", {
-        state: "busy",
-        runId: "run-workspace",
-        now: nowMs,
-      });
+      insertLiveWorkspace(s.db);
 
-      const terminated = await s.request(
-        "/workers/worker-workspace/release?terminate=true",
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ runId: "run-workspace" }),
-        },
-      );
+      const terminated = await terminate(s, "worker-workspace", {
+        runId: "run-workspace",
+      });
       expect(terminated.status).toBe(200);
       expect(await terminated.json()).toEqual({
         released: true,
@@ -119,14 +127,9 @@ describe("workspace termination API (GH-2310)", () => {
           .get(),
       ).toEqual({ state: "stopped", current_run: null });
 
-      const raced = await s.request(
-        "/workers/worker-workspace/release?terminate=true",
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ runId: "other-run" }),
-        },
-      );
+      const raced = await terminate(s, "worker-workspace", {
+        runId: "other-run",
+      });
       expect(raced.status).toBe(409);
       expect((await raced.json()).error).toBe(
         "worker worker-workspace does not hold other-run",
@@ -137,34 +140,136 @@ describe("workspace termination API (GH-2310)", () => {
   });
 
   test("answers an already-terminal run with an operator-legible 409", async () => {
-    const nowMs = Date.parse("2026-09-05T19:00:00.000Z");
     const s = await makeServer({ now: () => nowMs });
     try {
-      s.db
-        .query(
-          `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
-           VALUES ('run-finished', 'finished-key', '{}', 'sha256:finished', 'COMPLETED', 1, ?, ?)`,
-        )
-        .run(new Date(nowMs).toISOString(), new Date(nowMs).toISOString());
-      registerWorker(s.db, { workerId: "worker-finished", now: nowMs });
-      heartbeat(s.db, "worker-finished", {
-        state: "busy",
+      insertLiveWorkspace(s.db, {
+        workerId: "worker-finished",
         runId: "run-finished",
-        now: nowMs,
+        state: "COMPLETED",
       });
 
-      const refused = await s.request(
-        "/workers/worker-finished/release?terminate=true",
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ runId: "run-finished" }),
-        },
-      );
+      const refused = await terminate(s, "worker-finished", {
+        runId: "run-finished",
+      });
       expect(refused.status).toBe(409);
       expect((await refused.json()).error).toBe(
         "run run-finished already finished (COMPLETED); nothing to terminate",
       );
+    } finally {
+      s.close();
+    }
+  });
+
+  test("surfaces ambiguousOpenProposals when two open proposals target the run", async () => {
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      insertLiveWorkspace(s.db);
+      s.db
+        .query(
+          `INSERT INTO proposals (id, event_source, event_id, run_id, decision, created_at, ttl_seconds)
+           VALUES ('prop-a', 'test', 'e1', 'run-workspace', 'run', ?, 1800),
+                  ('prop-b', 'test', 'e2', 'run-workspace', 'run', ?, 1800)`,
+        )
+        .run(at, at);
+
+      const terminated = await terminate(s, "worker-workspace", {
+        runId: "run-workspace",
+      });
+      expect(terminated.status).toBe(200);
+      expect(await terminated.json()).toEqual({
+        released: true,
+        runId: "run-workspace",
+        terminated: true,
+        ambiguousOpenProposals: [{ runId: "run-workspace", count: 2 }],
+      });
+      expect(
+        s.db
+          .query(`SELECT status FROM proposals WHERE run_id = 'run-workspace'`)
+          .all()
+          .map((row) => row.status),
+      ).toEqual(["open", "open"]);
+    } finally {
+      s.close();
+    }
+  });
+
+  test("refuses an unknown worker with 404", async () => {
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      const refused = await terminate(s, "ghost-worker", {
+        runId: "run-workspace",
+      });
+      expect(refused.status).toBe(404);
+      expect((await refused.json()).error).toBe("unknown worker ghost-worker");
+    } finally {
+      s.close();
+    }
+  });
+
+  test("refuses an unknown run the worker still holds with 404", async () => {
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      registerWorker(s.db, { workerId: "worker-ghost-run", now: nowMs });
+      heartbeat(s.db, "worker-ghost-run", {
+        state: "busy",
+        runId: "ghost-run",
+        now: nowMs,
+      });
+
+      const refused = await terminate(s, "worker-ghost-run", {
+        runId: "ghost-run",
+      });
+      expect(refused.status).toBe(404);
+      expect((await refused.json()).error).toBe("unknown run ghost-run");
+    } finally {
+      s.close();
+    }
+  });
+
+  test("refuses a stopped worker with 409", async () => {
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      insertLiveWorkspace(s.db, {
+        workerId: "worker-stopped",
+        runId: "run-stopped",
+      });
+      s.db
+        .query(
+          `UPDATE workers SET state = 'stopped' WHERE worker_id = 'worker-stopped'`,
+        )
+        .run();
+
+      const refused = await terminate(s, "worker-stopped", {
+        runId: "run-stopped",
+      });
+      expect(refused.status).toBe(409);
+      expect((await refused.json()).error).toBe(
+        "worker worker-stopped does not hold run-stopped",
+      );
+    } finally {
+      s.close();
+    }
+  });
+
+  test("refuses invalid JSON with 400", async () => {
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      const refused = await terminate(s, "worker-workspace", "{", {
+        raw: true,
+      });
+      expect(refused.status).toBe(400);
+      expect((await refused.json()).error).toBe("invalid_json");
+    } finally {
+      s.close();
+    }
+  });
+
+  test("refuses a missing runId with 422", async () => {
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      const refused = await terminate(s, "worker-workspace", {});
+      expect(refused.status).toBe(422);
+      expect((await refused.json()).error).toBe("runId required");
     } finally {
       s.close();
     }
