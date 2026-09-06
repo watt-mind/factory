@@ -159,6 +159,7 @@ export type Formatted =
     }
   | { kind: "state"; state: string }
   | { kind: "link"; href: string; text: string }
+  | { kind: "links"; items: Array<{ text: string; href: string | null }> }
   | { kind: "json"; value: unknown };
 
 const asText = (v: unknown): string => (typeof v === "string" ? v : String(v));
@@ -168,6 +169,31 @@ const looksLikeIdentifier = (s: string): boolean => !/\s/.test(s);
 
 const isScalar = (v: unknown): boolean =>
   v === null || ["string", "number", "boolean"].includes(typeof v);
+
+const SHA256_ID = /^sha256:([a-f0-9]{64})$/;
+const SHA256_HEX = /^[a-f0-9]{64}$/;
+
+/** The durable identifiers the artifact collector returns in result evidence. */
+function storedArtifactDigest(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const named = SHA256_ID.exec(value);
+  if (named) return named[1];
+  try {
+    const uri = new URL(value);
+    if (uri.protocol !== "file:") return null;
+    const digest = uri.pathname.split("/").pop();
+    return digest && SHA256_HEX.test(digest) ? digest : null;
+  } catch {
+    return null;
+  }
+}
+
+function evidenceItem(value: unknown): { text: string; href: string | null } {
+  const text =
+    typeof value === "string" ? value : String(JSON.stringify(value) ?? value);
+  const digest = storedArtifactDigest(value);
+  return { text, href: digest ? `#/artifacts/${digest}` : null };
+}
 
 /**
  * `formatValue(value, format)` for the closed §2.2 format set. Unknown or
@@ -181,6 +207,10 @@ export function formatValue(
 ): Formatted {
   if (value === undefined || value === null || value === "")
     return { kind: "empty" };
+  if (format === "url" && Array.isArray(value)) {
+    if (value.length === 0) return { kind: "empty" };
+    return { kind: "links", items: value.map(evidenceItem) };
+  }
   if (!isScalar(value)) return { kind: "json", value };
   const text = asText(value);
   switch (format) {
@@ -340,7 +370,7 @@ export function groupRows(
   for (const row of rows) {
     const value = resolveRelative(row.raw, groupBy);
     if (value === undefined || value === null || value === "") {
-      missing ??= { key: " missing", label: "—", rows: [] };
+      missing ??= { key: "\0missing", label: "—", rows: [] };
       missing.rows.push(row);
       continue;
     }

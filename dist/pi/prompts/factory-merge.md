@@ -26,7 +26,7 @@ CI passing is not the bar. **Prefer spawning the `factory-merge-reviewer` agent 
 
 For user-facing PRs, open the Linear ticket's attached screenshots and judge the visual result too — layout, truncation, spacing, before/after coherence. A user-facing PR with no screenshots on its ticket is a (minor) protocol finding: note it, and if you fix the branch anyway, capture and attach them yourself.
 
-Then check CI with `gh pr checks <PR> --watch --fail-fast` — it returns the moment checks settle and exits non-zero on the first failure. **Never `sleep` and re-poll**: a fixed wait is dead wall clock if it is too long and a retry if it is too short. Also check whether the branch is behind or conflicting with the base.
+Then check CI for the reviewed head SHA: select only its CI workflow with `gh run list --workflow ci.yml --commit <sha> --json databaseId --limit 1`, wait with `gh run watch <run-id> --exit-status --interval 60`, and before merging assert every check run is complete and green with `gh api repos/<owner>/<repo>/commits/<sha>/check-runs`. The workflow run can lag the push, so retry the workflow-selected lookup for up to about two minutes when it is empty. **Never `sleep` and re-poll**: use only a bounded condition poll. Also check whether the branch is behind or conflicting with the base.
 
 ### 2. Classify
 

@@ -5,17 +5,8 @@
   "input_schema": "schemas/ci-log-capture.input.json",
   "output_schema": "schemas/ci-log-captured.output.json",
   "output_contract": "factory.ci-log/v1",
-  "command": [
-    "gh",
-    "run",
-    "view",
-    "{runId}",
-    "--repo",
-    "{repo}",
-    "--log-failed"
-  ],
-  "captureStdout": "failed.log",
-  "captureKind": "ci-log",
+  "command": ["bun", "{factoryRoot}/event-runtime/lib/ci-log-capture.mjs"],
+  "writesResult": true,
   "workspace": {
     "type": "ephemeral",
     "retainOnFailure": true
@@ -30,8 +21,8 @@
   },
   "mutating": false,
   "pins": {
-    "agents/ci-log-capture.md": "sha256:64e2d368336668dd308376e36cdfd65566171aff3c224282b6c06e6109a3d47a",
-    "schemas/ci-log-capture.input.json": "sha256:ed7be9a461a6a228c883cc86abdba47124c11cb643673830efc8c36650928aab",
+    "agents/ci-log-capture.md": "sha256:374503ad5d9165653e20b38bad4e5a4bf669189f23cb222a5a34363b0fb632d7",
+    "schemas/ci-log-capture.input.json": "sha256:dfc36e45e029ca657faed46b092b8ae8cb1e559bf3aba0895520f9a26060e82a",
     "schemas/ci-log-captured.output.json": "sha256:8aac0c5e79334909cbd2883ecdc5acab7ab5f7385fd74e251606ef66978b33b5"
   }
 }

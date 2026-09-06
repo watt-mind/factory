@@ -1,7 +1,9 @@
 import { test, expect } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { ALL_TERMINAL_STATES } from "../event-runtime/lib/lifecycle.mjs";
 import {
+  assessServeHealth,
   controlApiFailureCode,
   fetchRecentSandboxRefusals,
   formatWatchdogReport,
@@ -12,10 +14,69 @@ import {
   liveIdleWatchdogDeps,
   runIdleWatchdogTick,
   runWatchdogCheck,
+  FLEET_CHECK_TIMEOUT_MS,
+  IDLE_TERMINAL_RUN_STATES,
   SANDBOX_REFUSAL_MAX_PAGES,
   SANDBOX_REFUSAL_MAX_RUNS,
   SCAN_LOOP_AGENTS,
 } from "./watchdog.mjs";
+
+test("idle terminal states add only PROPOSED to lifecycle terminal states", () => {
+  expect([...IDLE_TERMINAL_RUN_STATES].sort()).toEqual(
+    [...ALL_TERMINAL_STATES, "PROPOSED"].sort(),
+  );
+});
+
+test("assessServeHealth flags a served stale registry and reload error", () => {
+  const result = assessServeHealth(
+    {
+      registry: {
+        stamp: "files:old",
+        loadedAt: "2026-08-30T12:00:00.000Z",
+        lastReloadError: {
+          at: "2026-08-30T12:01:00.000Z",
+          message: "invalid agent pin",
+        },
+      },
+    },
+    { expectedRegistryStamp: "files:current" },
+  );
+
+  expect(result.ok).toBe(false);
+  expect(result.issues.map((issue) => issue.code)).toEqual([
+    "REGISTRY_STALE",
+    "REGISTRY_RELOAD_ERROR",
+  ]);
+});
+
+test("assessServeHealth tolerates an absent planner block", () => {
+  const result = assessServeHealth(
+    { registry: { stamp: "files:current", lastReloadError: null } },
+    { expectedRegistryStamp: "files:current", queuedEvents: 4 },
+  );
+
+  expect(result.ok).toBe(true);
+  expect(result.issues).toEqual([]);
+});
+
+test("assessServeHealth rejects a stale planner while admitted events wait", () => {
+  const result = assessServeHealth(
+    {
+      registry: { stamp: "files:current", lastReloadError: null },
+      planner: { lastPlannedAt: "2026-08-30T11:45:00.000Z" },
+    },
+    {
+      expectedRegistryStamp: "files:current",
+      queuedEvents: 2,
+      now: Date.parse("2026-08-30T12:00:00.000Z"),
+    },
+  );
+
+  expect(result.ok).toBe(false);
+  expect(result.issues).toContainEqual(
+    expect.objectContaining({ code: "PLANNER_STALE" }),
+  );
+});
 
 test("formatWatchdogReport formats clean watchdog status", () => {
   const cleanResult = {
@@ -25,7 +86,10 @@ test("formatWatchdogReport formats clean watchdog status", () => {
       apiOk: true,
       webOk: true,
       workersCount: 3,
+      inFlightRuns: 1,
+      leasedRuns: 0,
       runningRuns: 1,
+      verifyingRuns: 0,
       wedgedRuns: 0,
       queuedRuns: 0,
       anomalies: [],
@@ -35,7 +99,9 @@ test("formatWatchdogReport formats clean watchdog status", () => {
   const formatted = formatWatchdogReport(cleanResult);
   expect(formatted).toContain("WATCHDOG OK");
   expect(formatted).toContain("Workers: 3");
-  expect(formatted).toContain("Running: 1");
+  expect(formatted).toContain(
+    "In flight: 1 (running 1, verifying 0, leased 0)",
+  );
 });
 
 test("formatWatchdogReport formats critical issues", () => {
@@ -57,7 +123,10 @@ test("formatWatchdogReport formats critical issues", () => {
       apiOk: true,
       webOk: false,
       workersCount: 2,
+      inFlightRuns: 1,
+      leasedRuns: 0,
       runningRuns: 1,
+      verifyingRuns: 0,
       wedgedRuns: 1,
       queuedRuns: 0,
       anomalies: [],
@@ -70,6 +139,35 @@ test("formatWatchdogReport formats critical issues", () => {
   expect(formatted).toContain("WEDGED_RUN");
   expect(formatted).toContain("[WARNING]");
   expect(formatted).toContain("WEB_DOWN");
+});
+
+test("formatWatchdogReport keeps the fleet metrics line on warning/critical", () => {
+  const formatted = formatWatchdogReport({
+    ok: false,
+    issues: [
+      {
+        severity: "CRITICAL",
+        code: "FLEET_OFFLINE",
+        message: "5 CI runs queued with 0 online shadow runners",
+      },
+    ],
+    metrics: {
+      apiOk: true,
+      webOk: true,
+      workersCount: 1,
+      inFlightRuns: 0,
+      leasedRuns: 0,
+      runningRuns: 0,
+      verifyingRuns: 0,
+      wedgedRuns: 0,
+      queuedRuns: 0,
+      anomalies: [],
+      fleetQueued: 5,
+      fleetOnlineShadows: 0,
+    },
+  });
+  expect(formatted).toContain("FLEET_OFFLINE");
+  expect(formatted).toContain("Fleet: queued 5 | online shadows 0");
 });
 
 test("SCAN_LOOP_AGENTS is exactly the set the confinement gate can refuse", () => {
@@ -285,6 +383,254 @@ test("runWatchdogCheck surfaces sandbox-unavailable scan refusals", async () => 
   }
 });
 
+async function runWatchdogWithInFlightRuns({
+  leased = [],
+  running = [],
+  verifying = [],
+  queued = 0,
+  failDetailFor = [],
+} = {}) {
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === "/" || url.pathname === "/health") {
+        return Response.json({ ok: true });
+      }
+      if (url.pathname === "/status") {
+        return Response.json({
+          runs: {
+            byState: {
+              QUEUED: queued,
+              LEASED: leased.length,
+              RUNNING: running.length,
+              VERIFYING: verifying.length,
+            },
+          },
+        });
+      }
+      if (url.pathname === "/workers") {
+        return Response.json({
+          workers: [{ workerId: "worker_1", state: "idle" }],
+        });
+      }
+      if (url.pathname === "/runs") {
+        const byState = {
+          LEASED: leased,
+          RUNNING: running,
+          VERIFYING: verifying,
+        };
+        return Response.json({
+          runs: byState[url.searchParams.get("state")] ?? [],
+        });
+      }
+      const runId = url.pathname.match(/^\/runs\/([^/]+)$/)?.[1];
+      if (runId) {
+        if (failDetailFor.includes(runId)) {
+          return new Response("gone", { status: 404 });
+        }
+        const run = [...leased, ...running, ...verifying].find(
+          (entry) => entry.runId === runId,
+        );
+        if (run) {
+          return Response.json({
+            attempts: [{ lease_expires_at: run.lease_expires_at ?? null }],
+          });
+        }
+      }
+      return new Response("not found", { status: 404 });
+    },
+  });
+
+  try {
+    return await runWatchdogCheck({
+      port: server.port,
+      webPort: server.port,
+      stuckMinutes: 45,
+      checkShadowFleet: false,
+    });
+  } finally {
+    server.stop(true);
+  }
+}
+
+test("runWatchdogCheck detects stale active runs", async () => {
+  const result = await runWatchdogWithInFlightRuns({
+    leased: [
+      {
+        runId: "run_leased",
+        agent: "dispatch@1",
+        state: "LEASED",
+        created_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+        updated_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      },
+    ],
+    running: [
+      {
+        runId: "run_running",
+        agent: "dispatch@1",
+        state: "RUNNING",
+        created_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+        updated_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      },
+    ],
+  });
+
+  expect(result.metrics).toMatchObject({
+    inFlightRuns: 2,
+    leasedRuns: 1,
+    runningRuns: 1,
+    verifyingRuns: 0,
+  });
+  expect(
+    result.issues.filter((issue) => issue.code === "WEDGED_RUN"),
+  ).toHaveLength(2);
+});
+
+test("runWatchdogCheck does not wedge an old VERIFYING run with a fresh lease", async () => {
+  const result = await runWatchdogWithInFlightRuns({
+    verifying: [
+      {
+        runId: "run_verifying_fresh_lease",
+        agent: "dispatch@1",
+        state: "VERIFYING",
+        created_at: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+        updated_at: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+        lease_expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      },
+    ],
+  });
+
+  expect(result.metrics).toMatchObject({
+    inFlightRuns: 1,
+    leasedRuns: 0,
+    runningRuns: 0,
+    verifyingRuns: 1,
+  });
+  expect(result.issues.some((issue) => issue.code === "WEDGED_RUN")).toBe(
+    false,
+  );
+});
+
+test("runWatchdogCheck wedges an old RUNNING run despite a fresh lease", async () => {
+  const result = await runWatchdogWithInFlightRuns({
+    running: [
+      {
+        runId: "run_running_fresh_lease",
+        agent: "dispatch@1",
+        state: "RUNNING",
+        created_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+        updated_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+        lease_expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      },
+    ],
+  });
+
+  expect(result.issues).toContainEqual(
+    expect.objectContaining({
+      code: "WEDGED_RUN",
+      message: expect.stringContaining("in RUNNING"),
+    }),
+  );
+});
+
+test("runWatchdogCheck wedges a VERIFYING run past the absolute ceiling even with a fresh lease", async () => {
+  const result = await runWatchdogWithInFlightRuns({
+    verifying: [
+      {
+        runId: "run_verifying_ceiling",
+        agent: "dispatch@1",
+        state: "VERIFYING",
+        created_at: new Date(Date.now() - 140 * 60 * 1000).toISOString(),
+        updated_at: new Date(Date.now() - 140 * 60 * 1000).toISOString(),
+        lease_expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      },
+    ],
+  });
+
+  expect(result.issues).toContainEqual(
+    expect.objectContaining({
+      code: "WEDGED_RUN",
+      message: expect.stringContaining("in VERIFYING"),
+    }),
+  );
+});
+
+test("runWatchdogCheck detects a stale VERIFYING run without a lease", async () => {
+  const result = await runWatchdogWithInFlightRuns({
+    verifying: [
+      {
+        runId: "run_verifying",
+        agent: "dispatch@1",
+        state: "VERIFYING",
+        created_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+        updated_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      },
+    ],
+  });
+
+  expect(result.metrics.verifyingRuns).toBe(1);
+  expect(result.issues).toContainEqual(
+    expect.objectContaining({
+      code: "WEDGED_RUN",
+      message: expect.stringContaining("in VERIFYING"),
+    }),
+  );
+});
+
+test("runWatchdogCheck keeps reporting when one run detail fetch fails", async () => {
+  const stale = (runId, state) => ({
+    runId,
+    agent: "dispatch@1",
+    state,
+    created_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+    updated_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+  });
+  const result = await runWatchdogWithInFlightRuns({
+    running: [stale("run_a", "RUNNING"), stale("run_b", "RUNNING")],
+    verifying: [
+      {
+        ...stale("run_c", "VERIFYING"),
+        lease_expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+      },
+    ],
+    failDetailFor: ["run_a"],
+  });
+
+  expect(result.metrics.inFlightRuns).toBe(3);
+  expect(result.metrics.wedgedRuns).toBe(2);
+  expect(
+    result.issues
+      .filter((issue) => issue.code === "WEDGED_RUN")
+      .map((i) => i.message),
+  ).toEqual([
+    expect.stringContaining("run_a"),
+    expect.stringContaining("run_b"),
+  ]);
+  expect(
+    result.issues.some((issue) => issue.code === "STATUS_FETCH_ERROR"),
+  ).toBe(false);
+});
+
+test("runWatchdogCheck does not report IDLE_STALL with a VERIFYING run", async () => {
+  const result = await runWatchdogWithInFlightRuns({
+    queued: 1,
+    verifying: [
+      {
+        runId: "run_verifying",
+        agent: "dispatch@1",
+        state: "VERIFYING",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    ],
+  });
+
+  expect(result.issues.some((issue) => issue.code === "IDLE_STALL")).toBe(
+    false,
+  );
+});
+
 test("runWatchdogCheck detects unreachable API as critical", async () => {
   // A hardcoded port assumes nothing else is listening on it, which a
   // stranger process (or a concurrent worktree) can invalidate (#876).
@@ -343,6 +689,144 @@ test("runWatchdogCheck reports control API 401 instead of an empty fleet", async
   } finally {
     if (previous === undefined) delete process.env.FACTORY_CONTROL_API_TOKEN;
     else process.env.FACTORY_CONTROL_API_TOKEN = previous;
+    server.stop(true);
+  }
+});
+
+function watchdogCheckServer() {
+  return Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === "/health") return Response.json({ ok: true });
+      if (url.pathname === "/status") {
+        return Response.json({ runs: { byState: {} }, anomalies: {} });
+      }
+      if (url.pathname === "/workers") {
+        return Response.json({
+          workers: [{ workerId: "worker_1", state: "idle" }],
+        });
+      }
+      if (url.pathname === "/runs") return Response.json({ runs: [] });
+      return new Response("ok");
+    },
+  });
+}
+
+test("runWatchdogCheck warns when the shadow fleet forge check fails", async () => {
+  const server = watchdogCheckServer();
+  const forge = {
+    runList(_repo, options) {
+      expect(options.timeout).toBe(FLEET_CHECK_TIMEOUT_MS);
+      throw new Error("gh: HTTP 401");
+    },
+  };
+
+  try {
+    const result = await runWatchdogCheck({
+      port: server.port,
+      webPort: server.port,
+      forge,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.metrics.fleetCheck).toBe("error");
+    expect(result.issues).toContainEqual({
+      severity: "WARNING",
+      code: "FLEET_CHECK_ERROR",
+      message: "Shadow fleet check failed: gh: HTTP 401",
+    });
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("runWatchdogCheck survives a throwing loadForge as FLEET_CHECK_ERROR", async () => {
+  // A forge that throws on construction (bad config, missing gh) must not
+  // kill the whole watchdog: steps 1-3 still report and the fleet check is
+  // a WARNING, not an uncaught exception.
+  const server = watchdogCheckServer();
+  const forge = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error("forge config: no host configured");
+      },
+    },
+  );
+
+  try {
+    const result = await runWatchdogCheck({
+      port: server.port,
+      webPort: server.port,
+      forge,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.metrics.apiOk).toBe(true);
+    expect(result.metrics.webOk).toBe(true);
+    expect(result.metrics.fleetCheck).toBe("error");
+    expect(result.issues).toContainEqual({
+      severity: "WARNING",
+      code: "FLEET_CHECK_ERROR",
+      message: "Shadow fleet check failed: forge config: no host configured",
+    });
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("runWatchdogCheck reports an offline shadow fleet with queued CI runs", async () => {
+  const server = watchdogCheckServer();
+  const forge = {
+    runList(_repo, options) {
+      expect(options.timeout).toBe(FLEET_CHECK_TIMEOUT_MS);
+      return [{ status: "queued" }, { status: "queued" }, { status: "queued" }];
+    },
+    apiRaw(_path, options) {
+      expect(options.timeout).toBe(FLEET_CHECK_TIMEOUT_MS);
+      return "0";
+    },
+  };
+
+  try {
+    const result = await runWatchdogCheck({
+      port: server.port,
+      webPort: server.port,
+      forge,
+    });
+    expect(result.metrics.fleetQueued).toBe(3);
+    expect(result.metrics.fleetOnlineShadows).toBe(0);
+    expect(result.issues).toContainEqual(
+      expect.objectContaining({ severity: "CRITICAL", code: "FLEET_OFFLINE" }),
+    );
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("runWatchdogCheck records online shadow runners without a fleet issue", async () => {
+  const server = watchdogCheckServer();
+  const forge = {
+    runList() {
+      return [{ status: "queued" }, { status: "queued" }, { status: "queued" }];
+    },
+    apiRaw() {
+      return "2";
+    },
+  };
+
+  try {
+    const result = await runWatchdogCheck({
+      port: server.port,
+      webPort: server.port,
+      forge,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.metrics.fleetQueued).toBe(3);
+    expect(result.metrics.fleetOnlineShadows).toBe(2);
+    expect(result.issues.some((issue) => issue.code === "FLEET_OFFLINE")).toBe(
+      false,
+    );
+  } finally {
     server.stop(true);
   }
 });
@@ -797,6 +1281,35 @@ test("live deps page open proposals newest-first and keep every page", async () 
     expect(rows.map((r) => r.id)).toEqual(["new", "old"]);
     expect(seen).toHaveLength(2);
     expect(seen[1]).toContain("before=cursor1");
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("live serveOk tolerates a stale registry but halts on a stale planner", async () => {
+  let plannerLastPlannedAt = new Date().toISOString();
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === "/health")
+        return Response.json({
+          registry: { stamp: "files:definitely-stale", lastReloadError: null },
+          planner: { lastPlannedAt: plannerLastPlannedAt },
+        });
+      if (url.pathname === "/status")
+        return Response.json({ events: { admitted: 3 } });
+      return new Response("{}");
+    },
+  });
+  try {
+    const { serveOk } = liveIdleWatchdogDeps({ port: server.port });
+    // REGISTRY_STALE alone must not stop idle-loop injection: a reachable
+    // serve on last-good code still plans and drains admitted work.
+    expect(await serveOk()).toBe(true);
+    // A planner that has not succeeded within the staleness window does.
+    plannerLastPlannedAt = "2020-01-01T00:00:00.000Z";
+    expect(await serveOk()).toBe(false);
   } finally {
     server.stop(true);
   }

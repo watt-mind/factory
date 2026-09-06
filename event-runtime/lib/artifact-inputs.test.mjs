@@ -255,23 +255,34 @@ describe("POC chain: capture a CI log, diagnose from the stored bytes (OPS-372)"
     // The chain passes the HASH, not the bytes.
     expect(resolveChains(db, registry).emitted).toBe(1);
     planAdmittedEvents(db, registry, opts);
-    const diagnose = openProposals(db, {}).find(
-      (p) => p.spec?.agent === "ci-doctor@2",
-    );
+    // Whether the diagnosis waits for a human or was approved unattended is
+    // the chain policy's call (GH-1727), not this test's: it is about the
+    // artifact plumbing, so accept the proposal in either state.
+    const diagnose = db
+      .query(`SELECT * FROM proposals ORDER BY created_at, rowid`)
+      .all()
+      .map((row) => ({ ...row, spec: JSON.parse(row.spec_json) }))
+      .find((p) => p.spec?.agent === "ci-doctor@2");
     expect(diagnose.spec.input.logArtifact).toBe(logEntry.sha256);
 
     // Node 2: the doctor reads ./failed.log, proving materialization happened.
-    const diagnoseRun = approveProposal(db, registry, diagnose.id, {
-      actor: "operator",
-      policyVersion: "git:test",
-    });
+    if (diagnose.status === "open") {
+      expect(
+        approveProposal(db, registry, diagnose.id, {
+          actor: "operator",
+          policyVersion: "git:test",
+        }).approved,
+      ).toBe(true);
+    } else {
+      expect(diagnose.status).toBe("approved");
+    }
     expect((await runOnce(db, registry, adapters, opts)).terminalState).toBe(
       "COMPLETED",
     );
     const diagnosis = JSON.parse(
       db
         .query(`SELECT result_json FROM results WHERE run_id = ?`)
-        .get(diagnoseRun.runId).result_json,
+        .get(diagnose.run_id).result_json,
     );
     expect(diagnosis.artifact.evidenceLines).toEqual(["socket hang up"]);
     expect(diagnosis.evidence.logBytes).toBeGreaterThan(0);

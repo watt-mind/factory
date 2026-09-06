@@ -27,6 +27,21 @@ export function chainKeyOf(event) {
   );
 }
 
+/**
+ * Chain rows must retain a safe, inspectable envelope even for historic rows
+ * whose stored JSON was damaged outside normal admission.
+ */
+function chainEnvelope(envelopeJson) {
+  try {
+    const envelope = JSON.parse(envelopeJson);
+    if (envelope && typeof envelope === "object" && !Array.isArray(envelope))
+      return { envelope, malformed: false };
+  } catch {
+    // Do not return unparsed database bytes to the control surface.
+  }
+  return { envelope: null, malformed: true };
+}
+
 export function chainView(db, correlationId) {
   const eventRows = db
     .query(
@@ -50,12 +65,10 @@ export function chainView(db, correlationId) {
   if (eventRows.length === 0) return null;
 
   const events = eventRows.map((row) => {
-    let payload = null;
-    try {
-      payload = JSON.parse(row.envelope_json)?.payload ?? null;
-    } catch {
-      /* malformed envelope: payload stays null from the initializer */
-    }
+    const { envelope, malformed: envelopeMalformed } = chainEnvelope(
+      row.envelope_json,
+    );
+    const payload = envelopeMalformed ? null : (envelope.payload ?? null);
     return {
       source: row.source,
       eventId: row.event_id,
@@ -71,6 +84,11 @@ export function chainView(db, correlationId) {
       proposalStatus: row.proposal_status ?? null,
       proposalDecision: row.proposal_decision ?? null,
       runId: row.run_id ?? null,
+      // Long chains re-transfer these complete envelopes on every primary poll.
+      // If they become common, consider an on-demand GET /event/:source/:id/envelope
+      // endpoint or including an envelope only for the selected row.
+      envelope,
+      envelopeMalformed,
       repos: repoNamesFromInput(payload),
     };
   });

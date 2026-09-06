@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-janitor-test-mjs";
+import { DEFAULT_PROPOSAL_TTL_SECONDS } from "./config.mjs";
 import { openDb } from "./db.mjs";
 import {
   DEFAULT_ARTIFACT_RETENTION_DAYS,
   DEFAULT_ROW_RETENTION_DAYS,
+  DEFAULT_WORKSPACE_RETENTION_DAYS,
   janitorArgv,
   JANITOR_MAX_BUFFER,
   JANITOR_TIMEOUT_MS,
@@ -118,6 +120,66 @@ describe("runtime retention", () => {
   test("retention defaults preserve the documented 30-day artifact window", () => {
     expect(DEFAULT_ARTIFACT_RETENTION_DAYS).toBe(30);
   });
+
+  test("retains recent integrity evidence workspaces and removes old ones", () => {
+    const root = tmpDir("evrt-integrity-workspace-retention-");
+    const store = path.join(root, "artifacts");
+    const workspaces = path.join(root, "workspaces");
+    const db = openDb(path.join(root, "runtime.db"));
+    const now = Date.parse("2026-08-20T12:00:00.000Z");
+    const old = new Date(now - 31 * 24 * 60 * 60 * 1000);
+    const recent = new Date(now - 24 * 60 * 60 * 1000);
+    const stale = path.join(workspaces, "run-stale-a1");
+    const kept = path.join(workspaces, "run-kept-a1");
+    const unrelated = path.join(workspaces, "run-unrelated-a1");
+    try {
+      mkdirSync(store);
+      for (const [dir, mtime, evidence] of [
+        [stale, old, true],
+        [kept, recent, true],
+        [unrelated, old, false],
+      ]) {
+        mkdirSync(dir, { recursive: true });
+        if (evidence)
+          writeFileSync(
+            path.join(dir, "workspace-integrity-status.txt"),
+            "checkoutBaselineSha256: sha256:test\n",
+          );
+        utimesSync(dir, mtime, mtime);
+      }
+
+      const dry = sweepRuntimeRetention(db, store, {
+        now,
+        workspaceRoot: workspaces,
+      });
+      expect(dry.workspaces).toEqual({
+        deleted: 1,
+        retained: 1,
+        dryRun: true,
+      });
+      expect(existsSync(stale)).toBe(true);
+
+      const applied = sweepRuntimeRetention(db, store, {
+        now,
+        workspaceRoot: workspaces,
+        apply: true,
+      });
+      expect(applied.workspaces).toEqual({
+        deleted: 1,
+        retained: 1,
+        dryRun: false,
+      });
+      expect(existsSync(stale)).toBe(false);
+      expect(existsSync(kept)).toBe(true);
+      expect(existsSync(unrelated)).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("workspace retention default follows the 30-day retention convention", () => {
+    expect(DEFAULT_WORKSPACE_RETENTION_DAYS).toBe(30);
+  });
 });
 
 describe("terminal row retention (#1065)", () => {
@@ -134,11 +196,19 @@ describe("terminal row retention (#1065)", () => {
     ).run(runId, `${runId}-key`, state, updatedAt, updatedAt);
   }
 
-  function insertProposal(db, id, status, createdAt, ttlSeconds) {
+  function insertProposal(
+    db,
+    id,
+    status,
+    createdAt,
+    ttlSeconds,
+    { runId = null, decision = "run" } = {},
+  ) {
     db.query(
-      `INSERT INTO proposals (id, event_source, event_id, decision, status, created_at, ttl_seconds)
-       VALUES (?, 'test', ?, 'run', ?, ?, ?)`,
-    ).run(id, `${id}-evt`, status, createdAt, ttlSeconds);
+      `INSERT INTO proposals
+         (id, event_source, event_id, run_id, decision, status, created_at, ttl_seconds)
+       VALUES (?, 'test', ?, ?, ?, ?, ?, ?)`,
+    ).run(id, `${id}-evt`, runId, decision, status, createdAt, ttlSeconds);
   }
 
   function insertEvent(db, eventId, admittedAt, archivedAt) {
@@ -289,6 +359,172 @@ describe("terminal row retention (#1065)", () => {
         .all()
         .map((r) => r.run_id);
       expect(remaining).toEqual(["run-at-cutoff"]);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("terminalizes PROPOSED runs when no live proposal remains", () => {
+    const root = tmpDir("evrt-proposed-rows-");
+    const store = path.join(root, "artifacts");
+    const db = openDb(path.join(root, "runtime.db"));
+    const expired = new Date(now - 2 * 60 * 60 * 1000).toISOString();
+    const fresh = new Date(now - 5 * 60 * 1000).toISOString();
+    const oldWithoutProposals = new Date(
+      now - DEFAULT_PROPOSAL_TTL_SECONDS * 1000 - 1,
+    ).toISOString();
+    try {
+      mkdirSync(store);
+      for (const runId of [
+        "run-expired",
+        "run-rejected",
+        "run-superseded",
+        "run-resolved-noop",
+        "run-expired-human-needed",
+        "run-approved",
+        "run-mixed",
+        "run-open",
+        "run-without-proposals-fresh",
+        "run-without-proposals-old",
+      ]) {
+        insertRun(
+          db,
+          runId,
+          "PROPOSED",
+          runId === "run-without-proposals-old" ? oldWithoutProposals : fresh,
+        );
+      }
+      insertProposal(db, "proposal-expired", "open", expired, 60, {
+        runId: "run-expired",
+      });
+      insertProposal(db, "proposal-rejected", "rejected", fresh, 3600, {
+        runId: "run-rejected",
+      });
+      insertProposal(db, "proposal-superseded", "superseded", fresh, 3600, {
+        runId: "run-superseded",
+      });
+      insertProposal(db, "proposal-resolved-noop", "resolved", fresh, 3600, {
+        runId: "run-resolved-noop",
+        decision: "noop",
+      });
+      insertProposal(
+        db,
+        "proposal-expired-human-needed",
+        "expired",
+        fresh,
+        3600,
+        {
+          runId: "run-expired-human-needed",
+          decision: "human_needed",
+        },
+      );
+      // This fixture must remain otherwise unreachable: approveRun transitions
+      // PROPOSED -> APPROVED -> QUEUED before it marks the proposal approved,
+      // and tier escalation transitions before inserting its approved proposal.
+      // If either ordering changes, the janitor correctly sweeps this run.
+      insertProposal(db, "proposal-approved", "approved", fresh, 3600, {
+        runId: "run-approved",
+      });
+      insertProposal(db, "proposal-mixed-expired", "open", expired, 60, {
+        runId: "run-mixed",
+      });
+      insertProposal(db, "proposal-mixed-open", "open", fresh, 3600, {
+        runId: "run-mixed",
+      });
+      insertProposal(db, "proposal-open", "open", fresh, 3600, {
+        runId: "run-open",
+      });
+
+      const dryLog = [];
+      const dry = sweepRuntimeRetention(db, store, {
+        now,
+        log: (message) => dryLog.push(message),
+      });
+      expect(dry.proposed).toEqual({ cancelled: 7, dryRun: true });
+      expect(dryLog).toEqual([
+        "retention: 0 trace rows and 0 artifacts (0 bytes), 7 proposed runs would be cancelled, 0 runs, 0 proposals, 0 events, 0 retained integrity workspaces would be deleted",
+      ]);
+      expect(
+        db.query(`SELECT COUNT(*) AS count FROM lifecycle_events`).get().count,
+      ).toBe(0);
+
+      const applyLog = [];
+      const applied = sweepRuntimeRetention(db, store, {
+        now,
+        apply: true,
+        log: (message) => applyLog.push(message),
+      });
+      expect(applied.proposed).toEqual({ cancelled: 7, dryRun: false });
+      expect(applyLog).toEqual([
+        "retention: 0 trace rows and 0 artifacts (0 bytes), 7 proposed runs cancelled, 0 runs, 0 proposals, 0 events, 0 retained integrity workspaces deleted (VACUUMed)",
+      ]);
+      expect(
+        db.query(`SELECT state FROM runs WHERE run_id = 'run-expired'`).get()
+          .state,
+      ).toBe("CANCELLED");
+      expect(
+        db.query(`SELECT state FROM runs WHERE run_id = 'run-rejected'`).get()
+          .state,
+      ).toBe("CANCELLED");
+      expect(
+        db.query(`SELECT state FROM runs WHERE run_id = 'run-superseded'`).get()
+          .state,
+      ).toBe("CANCELLED");
+      expect(
+        db
+          .query(`SELECT state FROM runs WHERE run_id = 'run-resolved-noop'`)
+          .get().state,
+      ).toBe("CANCELLED");
+      expect(
+        db
+          .query(
+            `SELECT state FROM runs WHERE run_id = 'run-expired-human-needed'`,
+          )
+          .get().state,
+      ).toBe("CANCELLED");
+      expect(
+        db.query(`SELECT state FROM runs WHERE run_id = 'run-approved'`).get()
+          .state,
+      ).toBe("CANCELLED");
+      expect(
+        db
+          .query(
+            `SELECT state FROM runs
+             WHERE run_id = 'run-without-proposals-fresh'`,
+          )
+          .get().state,
+      ).toBe("PROPOSED");
+      expect(
+        db
+          .query(
+            `SELECT state FROM runs
+             WHERE run_id = 'run-without-proposals-old'`,
+          )
+          .get().state,
+      ).toBe("CANCELLED");
+      expect(
+        db.query(`SELECT state FROM runs WHERE run_id = 'run-mixed'`).get()
+          .state,
+      ).toBe("PROPOSED");
+      expect(
+        db.query(`SELECT state FROM runs WHERE run_id = 'run-open'`).get()
+          .state,
+      ).toBe("PROPOSED");
+      expect(
+        db
+          .query(
+            `SELECT reason FROM lifecycle_events
+           WHERE run_id = 'run-expired' AND to_state = 'CANCELLED'`,
+          )
+          .get().reason,
+      ).toBe("proposal_expired");
+
+      expect(
+        sweepRuntimeRetention(db, store, { now, apply: true }).proposed,
+      ).toEqual({
+        cancelled: 0,
+        dryRun: false,
+      });
     } finally {
       db.close();
     }

@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import path from "node:path";
 import { PANEL_ENDPOINTS, panelsView } from "./api-panels.mjs";
 import {
+  CONTROL_TOKEN,
   apiClient,
   loadRegistry,
   makeServer as makeApiServer,
@@ -18,7 +19,10 @@ describe("GET /panels (WM-840)", () => {
   test("lists the accepted panels with their origin and file, plus the endpoint allow-list", async () => {
     const { server } = await makeServer();
     try {
-      const client = apiClient({ port: server.address().port });
+      const client = apiClient({
+        port: server.address().port,
+        token: CONTROL_TOKEN,
+      });
       const body = await client.panels();
       expect(body.endpoints).toEqual([...PANEL_ENDPOINTS]);
       expect(body.panels).toHaveLength(1);
@@ -68,7 +72,7 @@ describe("GET /panels (WM-840)", () => {
     const { server } = await makeServer({ registry });
     try {
       const port = server.address().port;
-      const client = apiClient({ port });
+      const client = apiClient({ port, token: CONTROL_TOKEN });
       const body = await client.panels();
       expect(body.panels.map((p) => [p.name, p.origin])).toEqual([
         ["inbox-open", "builtin"],

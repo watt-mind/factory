@@ -44,9 +44,13 @@ registerTestProcessCleanup(import.meta.url);
 
 function stampRepo() {
   const root = tmpDir("evrt-stamp-");
-  mkdirSync(path.join(root, "event-runtime", "lib", "adapters"), {
-    recursive: true,
-  });
+  for (const dir of [
+    path.join("event-runtime", "lib", "adapters"),
+    path.join("event-runtime", "agents"),
+    path.join("event-runtime", "schemas"),
+    "config",
+  ])
+    mkdirSync(path.join(root, dir), { recursive: true });
   writeFileSync(
     path.join(root, "event-runtime", "cli.mjs"),
     "// cli\n",
@@ -62,18 +66,35 @@ function stampRepo() {
     "// fake\n",
     "utf8",
   );
+  for (const [file, content] of [
+    ["event-runtime/agents/demo.json", "{}\n"],
+    ["event-runtime/schemas/demo.json", "{}\n"],
+    ["event-runtime/event-types.json", "{}\n"],
+    ["event-runtime/edges.json", "{}\n"],
+    ["event-runtime/schedules.json", "{}\n"],
+    ["config/policy.yaml", "workers: {}\n"],
+    ["config/schedule.yaml", "schedules: {}\n"],
+  ])
+    writeFileSync(path.join(root, file), content, "utf8");
   writeFileSync(path.join(root, "README.md"), "# outside the stamp\n", "utf8");
   return root;
 }
 
 describe("code stamp (WM-213)", () => {
-  test("covers event-runtime/lib/** and cli.mjs, and nothing else", () => {
+  test("covers code, registry data, and resolved policy, and nothing else", () => {
     const root = stampRepo();
     try {
       expect(codeStampFiles(root)).toEqual([
+        "config/policy.yaml",
+        "config/schedule.yaml",
+        "event-runtime/agents/demo.json",
         "event-runtime/cli.mjs",
+        "event-runtime/edges.json",
+        "event-runtime/event-types.json",
         "event-runtime/lib/adapters/fake.mjs",
         "event-runtime/lib/worker.mjs",
+        "event-runtime/schedules.json",
+        "event-runtime/schemas/demo.json",
       ]);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -110,10 +131,35 @@ describe("code stamp (WM-213)", () => {
     }
   });
 
-  test("a tree with no git still stamps (nogit), rather than throwing", () => {
+  test("every registry reload input changes the stamp; an unrelated file does not", () => {
     const root = stampRepo();
     try {
-      expect(codeStamp(root).startsWith("nogit:")).toBe(true);
+      let before = codeStamp(root);
+      for (const rel of [
+        "event-runtime/agents/demo.json",
+        "event-runtime/schemas/demo.json",
+        "event-runtime/event-types.json",
+        "event-runtime/edges.json",
+        "event-runtime/schedules.json",
+        "config/policy.yaml",
+        "config/schedule.yaml",
+      ]) {
+        writeFileSync(path.join(root, rel), `${rel}\n`, "utf8");
+        const after = codeStamp(root);
+        expect(after).not.toBe(before);
+        before = after;
+      }
+      writeFileSync(path.join(root, "README.md"), "still unrelated\n", "utf8");
+      expect(codeStamp(root)).toBe(before);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a tree with no git still stamps from file content", () => {
+    const root = stampRepo();
+    try {
+      expect(codeStamp(root).startsWith("files:")).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -40,7 +40,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { runInSandbox } from "../sandbox/gondolin.mjs";
 import { normalizePolicy } from "../sandbox/policy.mjs";
-import { MODEL_ADAPTERS } from "../registry.mjs";
+import { MODEL_ADAPTERS } from "../model-adapters.mjs";
 import { FACTORY_ROOT, workspacesRoot } from "../config.mjs";
 
 /**

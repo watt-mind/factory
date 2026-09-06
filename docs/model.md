@@ -16,7 +16,7 @@ Three systems hold state. The factory holds none of its own.
 
 | Authority | Holds                                         | In this repo                                                      |
 | :-------- | :-------------------------------------------- | :---------------------------------------------------------------- |
-| Linear    | Work: tickets, states, assignee, labels       | `tools/linear.mjs`; claim read-back is the only ticket lock       |
+| Linear    | Work: tickets, states, assignee, labels       | `tools/ticket.mjs`; claim read-back is the only ticket lock       |
 | GitHub    | Truth: branches, pull requests, review, merge | `lib/forge/` (`kind: github` in `config/policy.yaml`)             |
 | CI        | Reward: the change earned the next step       | Per-repo checks; nothing merges because an agent said it was done |
 
@@ -43,7 +43,7 @@ lock; the claim protocol writes it and reads it back. Lost races stop. They
 never steal and never queue behind the holder.
 
 The ticket body is the spec. Follow-up work discovered outside Owned Paths is
-a new `Triage` issue (`tools/linear.mjs file`), never a widening of the one
+a new `Triage` issue (`tools/ticket.mjs file`), never a widening of the one
 in flight.
 
 ---

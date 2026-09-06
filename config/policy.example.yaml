@@ -5,6 +5,10 @@
 packs: []
 extensions: []
 
+# Optional default SSH alias for remote ticket handoff. A repository's
+# `handoff_host` takes precedence over this value.
+# handoff_host: factory-runner
+
 # Workspace-only model runs fail closed when this host cannot provide the
 # Gondolin guest boundary. An operator may temporarily accept host execution
 # by naming, one by one, the agents they accept running unconfined. Nothing is
@@ -51,6 +55,7 @@ chain_auto_approval:
     - factory.triage.requested
     - factory.triage-apply.requested
     - factory.dispatch.requested
+    - factory.ci-diagnose.requested
     - factory.merge.requested
     - factory.merge-review.requested
     - factory.merge-fix.requested
@@ -83,6 +88,9 @@ commitMsg:
     - '\(#[0-9]+\)'
 
 dispatch:
+  # Temporarily stop unattended dispatch and chain approvals. Operator-sourced
+  # dispatches remain available so a human can explicitly force work.
+  paused: false
   owned_paths_collision: advisory
   owned_paths_conformance: advisory
   # Whether the work loop may dispatch `type:security` tickets (WM-1060).
@@ -133,6 +141,20 @@ models:
     strong: cursor-grok-4.6-high
     standard: cursor-grok-4.6-high
     light: cursor-grok-4.6-low-fast
+
+# Grader pin for `evals/run.mjs`. A real run refuses to start without this;
+# `--dry-run` still works so discovery stays testable. `grader.model` must
+# name a real model (`default` is refused) so a grader upgrade is reviewable.
+evals:
+  subject:
+    model: default
+  grader:
+    model: claude-sonnet-4-6
+  limits:
+    case_timeout_seconds: 300
+    case_budget_usd: 2.00
+    total_seconds: 3600
+    total_budget_usd: 20.00
 
 limits:
   max_run_minutes: 90

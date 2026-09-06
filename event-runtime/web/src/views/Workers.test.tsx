@@ -13,14 +13,21 @@ import {
   Workers,
   capacityFromWorkers,
   defaultWorkerTab,
+  enrichWorker,
   fleetBanner,
   isLive,
   partitionWorkers,
   workerDisplayState,
 } from "./Workers";
 import { api } from "../api";
-import { changeInput } from "../test-render";
+import { EMPTY } from "../format";
+import {
+  changeInput,
+  createRunDetailFixture,
+  createRunSpecFixture,
+} from "../test-render";
 import type {
+  RunDetail,
   RunListItem,
   Worker,
   WorkerCapacity,
@@ -719,6 +726,73 @@ describe("Active agent, target, and model columns in Workers view (WM-463)", () 
       expect(container.textContent).not.toContain("factory · WM-253");
       expect(container.textContent).not.toContain("undefined");
     });
+  });
+
+  test("fetches an active run absent from the bounded summary (factory#1857)", async () => {
+    const runId = "run_older_active_1857";
+    const workerBusy: Worker = {
+      ...stubWorker("w_busy_active", "busy"),
+      currentRun: runId,
+    };
+    const detail = createRunDetailFixture({
+      run: {
+        runId,
+        state: "RUNNING",
+        attempts: 1,
+        spec: createRunSpecFixture(runId, {
+          agent: "dispatch@1",
+          adapter: "pi",
+          model: "openai-codex/gpt-5.6-sol",
+          input: { repo: "factory", ticket: "WM-253" },
+        }),
+      } as RunDetail["run"],
+    });
+    const origRun = api.run;
+    const requested: string[] = [];
+    api.run = async (id) => {
+      requested.push(id);
+      return detail;
+    };
+
+    try {
+      await withRunsAndWorkers([workerBusy], [], async () => {
+        const view = renderWithClient(
+          <Workers
+            context={{ kind: "all" }}
+            focusWorkerId="w_busy_active"
+            onSelectWorker={noop}
+          />,
+        );
+
+        await waitFor(() => {
+          expect(view.getAllByText("dispatch@1").length).toBeGreaterThan(0);
+          expect(view.container.textContent).toContain("factory · WM-253");
+          expect(
+            view.getAllByText("openai-codex/gpt-5.6-sol").length,
+          ).toBeGreaterThan(0);
+        });
+        expect(requested).toEqual([runId]);
+      });
+    } finally {
+      api.run = origRun;
+    }
+  });
+
+  test("shows the Loading placeholder for agent, target, and model while the missing-run fetch is pending (factory#1857)", () => {
+    const w: Worker = {
+      ...stubWorker("w_busy_pending", "busy"),
+      currentRun: "run_pending_1857",
+    };
+
+    const pending = enrichWorker(w, new Map(), new Set(["run_pending_1857"]));
+    expect(pending.activeAgent).toBe("Loading…");
+    expect(pending.activeTarget).toBe("Loading…");
+    expect(pending.activeModel).toBe("Loading…");
+
+    const settledMissing = enrichWorker(w, new Map(), new Set());
+    expect(settledMissing.activeAgent).toBe(EMPTY);
+    expect(settledMissing.activeTarget).toBe(EMPTY);
+    expect(settledMissing.activeModel).toBe(EMPTY);
   });
 
   test("uses the compact default column set and renders optional adapters as a titled count", async () => {

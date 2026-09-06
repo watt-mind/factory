@@ -13,7 +13,15 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useQueries, useQuery } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { api, ApiError } from "../api";
 import { keyGuard, refetchIntervals, useNow } from "../hooks";
 import { hashSearch } from "../hash";
@@ -59,6 +67,12 @@ import {
   shortId,
 } from "../components/ui";
 import type { RunDetail } from "../types";
+
+const EventPanel = lazy(() =>
+  import("../components/ArtifactView").then((module) => ({
+    default: module.EventPanel,
+  })),
+);
 
 // React Flow treats a unitless number as a ratio; the ticket's 24 means px.
 const FIT_PADDING = "24px" as const;
@@ -260,6 +274,12 @@ export function Chain({
     ...refetchIntervals.primary,
     retry: (count, err) =>
       !(err instanceof ApiError && err.status === 404) && count < 2,
+  });
+  const agentsQ = useQuery({
+    queryKey: ["agents"],
+    queryFn: api.agents,
+    enabled: Boolean(focusNodeId),
+    ...refetchIntervals.secondary,
   });
   const now = useNow();
   const notFound =
@@ -503,6 +523,11 @@ export function Chain({
   const selected: ChainNode | undefined = graph?.nodes.find(
     (n) => n.id === focusNodeId,
   );
+  const selectedEnvelope = useMemo(() => {
+    if (selected?.kind !== "chainEvent") return null;
+    if (selected.event.envelopeMalformed) return null;
+    return selected.event.envelope ?? null;
+  }, [selected]);
 
   const timelineListRef = useRef<HTMLOListElement | null>(null);
   const revealSelected = () => {
@@ -1034,6 +1059,38 @@ export function Chain({
                 />
                 {selected.event.repos.length > 0 && (
                   <KV k="repos" v={selected.event.repos.join(", ")} />
+                )}
+              </Section>
+              <Section id="chain-envelope" title="Envelope">
+                {selectedEnvelope ? (
+                  <Suspense
+                    fallback={
+                      <div className="text-(--text-faint)">
+                        Loading event view…
+                      </div>
+                    }
+                  >
+                    <EventPanel
+                      envelope={selectedEnvelope}
+                      agents={agentsQ.data?.agents}
+                      runId={selected.event.runId}
+                      now={now}
+                      onJumpRun={onJumpRun}
+                      onJumpChain={(id) => {
+                        window.location.hash = `#/chain/${id}`;
+                      }}
+                      onJumpArtifact={(sha256) => {
+                        window.location.hash = `#/artifact/${sha256}`;
+                      }}
+                    />
+                  </Suspense>
+                ) : (
+                  <div
+                    className="text-[12px] text-(--text-faint)"
+                    role="status"
+                  >
+                    Complete envelope unavailable in this chain response.
+                  </div>
                 )}
               </Section>
             </>

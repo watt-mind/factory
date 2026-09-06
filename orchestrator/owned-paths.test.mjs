@@ -71,6 +71,57 @@ Something is broken.
   ]);
 });
 
+test("duplicate §5 headings are unioned: Owned Paths deduped in first-occurrence order, Verification Commands joined", () => {
+  const desc = `## Owned Paths
+
+- \`orchestrator/owned-paths.mjs\`
+- \`docs/protocol.md\`
+
+## Verification Command
+
+\`bun test first.mjs\`
+
+## Owned Paths
+
+- \`docs/protocol.md\`
+- \`tools/ticket.mjs\`
+
+## Verification Command
+
+\`bun test appended.mjs\``;
+
+  expectEqual(parseOwnedPaths(desc), [
+    "orchestrator/owned-paths.mjs",
+    "docs/protocol.md",
+    "tools/ticket.mjs",
+  ]);
+  expectEqual(
+    parseVerificationCommand(desc),
+    "bun test first.mjs && bun test appended.mjs",
+  );
+});
+
+test("an identical appended Verification Command does not repeat itself", () => {
+  const desc = `## Verification Command
+
+\`bun test a.mjs\`
+
+## Verification Command
+
+\`bun test a.mjs\``;
+  expectEqual(parseVerificationCommand(desc), "bun test a.mjs");
+});
+
+test("an empty Verification Command section is not a command", () => {
+  expectEqual(parseVerificationCommand("## Verification Command\n\n"), null);
+  expectEqual(
+    parseVerificationCommand(
+      "## Verification Command\n\n## Verification Command\n\n`bun test a.mjs`",
+    ),
+    "bun test a.mjs",
+  );
+});
+
 test("missing section yields no paths (caller decides what that means)", () => {
   expectEqual(parseOwnedPaths("## Problem\n\nno paths here"), []);
 });
@@ -129,6 +180,153 @@ test("extensionless concrete files (Dockerfile, Makefile) match themselves", () 
   expectTrue(globsOverlap("app/services", "app/services/api.ts"));
   // but a sibling file sharing the prefix is a different filesystem entity
   expectTrue(!globsOverlap("app/src/auth", "app/src/auth.ts"));
+});
+
+test("bare filenames with extensions match that basename at any repository depth", () => {
+  const matcher = globToRegExp("acp.test.mjs");
+  expectTrue(matcher.test("acp.test.mjs"));
+  expectTrue(matcher.test("event-runtime/lib/adapters/acp.test.mjs"));
+  expectTrue(!matcher.test("event-runtime/lib/adapters/acp.mjs"));
+});
+
+test("compiling a glob never consults the process CWD", () => {
+  // `globToRegExp` is shared with the escalate gate, which compiles globs with
+  // no repository in hand. If compilation consulted an ambient directory, a
+  // stray root file would silently narrow an escalate_paths matcher and drop
+  // escalations. Prove it by compiling the same glob from two working
+  // directories — one that does hold a root `package.json`, one that does not
+  // — in a child process, and requiring identical results.
+  const withFile = mkdtempSync(path.join(tmpdir(), "owned-paths-cwd-with-"));
+  const withoutFile = mkdtempSync(path.join(tmpdir(), "owned-paths-cwd-out-"));
+  try {
+    writeFileSync(path.join(withFile, "package.json"), "{}\n");
+    const script = [
+      `const { globToRegExp } = await import(${JSON.stringify(
+        path.resolve(import.meta.dir, "owned-paths.mjs"),
+      )});`,
+      `const m = globToRegExp("package.json");`,
+      `console.log(JSON.stringify([m.source, m.test("package.json"), m.test("fixtures/nested/package.json")]));`,
+    ].join("\n");
+    const run = (cwd) =>
+      Bun.spawnSync({
+        cmd: [process.execPath, "-e", script],
+        cwd,
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+        .stdout.toString()
+        .trim();
+    const inWith = run(withFile);
+    expectTrue(inWith.length > 0, "child process produced no output");
+    expectEqual(JSON.parse(inWith).slice(1), [true, true]);
+    expectEqual(run(withoutFile), inWith);
+    // Explicitly passing no root, and passing an empty options bag, agree.
+    expectTrue(globToRegExp("package.json", {}).test("nested/package.json"));
+  } finally {
+    rmSync(withFile, { recursive: true, force: true });
+    rmSync(withoutFile, { recursive: true, force: true });
+  }
+});
+
+test("a relative repoRoot is ignored rather than resolved against the CWD", () => {
+  // A relative root would be joined onto `process.cwd()`, reintroducing exactly
+  // the ambient dependency the option exists to avoid. Such a root must leave
+  // the matcher at its broad any-depth default.
+  for (const repoRoot of ["", ".", "orchestrator", "./orchestrator"]) {
+    const matcher = globToRegExp("package.json", { repoRoot });
+    expectTrue(matcher.test("package.json"), repoRoot);
+    expectTrue(matcher.test("fixtures/nested/package.json"), repoRoot);
+  }
+});
+
+test("globsOverlap threads repoRoot through to both sides", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "owned-paths-overlap-"));
+  try {
+    writeFileSync(path.join(root, "package.json"), "{}\n");
+    // Root-free (the default everywhere but the handoff deviation gate): the
+    // bare name is an any-depth basename and overlaps the nested file.
+    expectTrue(globsOverlap("package.json", "fixtures/nested/package.json"));
+    expectTrue(globsOverlap("fixtures/nested/package.json", "package.json"));
+    // With the root named and a real file there, the bare entry means that one
+    // file, so the nested path no longer overlaps -- in either argument order.
+    expectTrue(
+      !globsOverlap("package.json", "fixtures/nested/package.json", {
+        repoRoot: root,
+      }),
+    );
+    expectTrue(
+      !globsOverlap("fixtures/nested/package.json", "package.json", {
+        repoRoot: root,
+      }),
+    );
+    // The root file itself still overlaps, and a wildcarded counterpart is
+    // still compiled with the same root.
+    expectTrue(
+      globsOverlap("package.json", "package.json", { repoRoot: root }),
+    );
+    expectTrue(globsOverlap("*.json", "package.json", { repoRoot: root }));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("globsOverlap with an unresolvable repoRoot keeps any-depth overlap", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "owned-paths-overlap-none-"));
+  try {
+    expectTrue(
+      globsOverlap("package.json", "fixtures/nested/package.json", {
+        repoRoot: root,
+      }),
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an explicit repoRoot anchors a bare filename that resolves to a root file", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "owned-paths-root-"));
+  try {
+    writeFileSync(path.join(root, "package.json"), "{}\n");
+    const matcher = globToRegExp("package.json", { repoRoot: root });
+    expectTrue(matcher.test("package.json"));
+    expectTrue(!matcher.test("fixtures/nested/package.json"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a repoRoot leaves an unresolvable bare filename matching at any depth", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "owned-paths-root-"));
+  try {
+    // Nothing named acp.test.mjs at the root, and a same-named directory must
+    // not count as a resolution either — only a real file anchors.
+    mkdirSync(path.join(root, "acp.test.mjs"));
+    const matcher = globToRegExp("acp.test.mjs", { repoRoot: root });
+    expectTrue(matcher.test("acp.test.mjs"));
+    expectTrue(matcher.test("event-runtime/lib/adapters/acp.test.mjs"));
+    expectTrue(!matcher.test("event-runtime/lib/adapters/acp.mjs"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("extensionless bare names stay prefix matchers in both modes", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "owned-paths-root-"));
+  try {
+    writeFileSync(path.join(root, "Dockerfile"), "FROM scratch\n");
+    for (const matcher of [
+      globToRegExp("Dockerfile"),
+      globToRegExp("Dockerfile", { repoRoot: root }),
+    ]) {
+      expectTrue(matcher.test("Dockerfile"));
+      expectTrue(matcher.test("Dockerfile/nested"));
+      // Prefix matching is anchored at the root: a nested Dockerfile is a
+      // different file and neither mode claims it.
+      expectTrue(!matcher.test("services/api/Dockerfile"));
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("the case keyword matching gets wrong", () => {

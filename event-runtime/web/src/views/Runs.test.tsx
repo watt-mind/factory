@@ -9,6 +9,8 @@ import {
 } from "bun:test";
 import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { useState } from "react";
+import { ApiError } from "../api";
+import { useContextActions } from "../palette";
 import {
   Runs,
   countRunsByTab,
@@ -47,6 +49,15 @@ afterEach(() => {
 const noop = () => {};
 const FAILURE_REASON = 'contract_violation: $: unknown property "captured"';
 const NOW = new Date().toISOString();
+
+function PaletteProbe() {
+  const actions = useContextActions();
+  return (
+    <div data-testid="palette-probe">
+      {actions.map((action) => action.label).join(" | ")}
+    </div>
+  );
+}
 
 test("reads a complete metrics drill-down contract from the hash", () => {
   expect(
@@ -152,20 +163,26 @@ function transition(
   return createLifecycleEventFixture(seq, runId, from, to, reason, NOW);
 }
 
-function renderRuns(props: Partial<Parameters<typeof Runs>[0]> = {}) {
+function renderRuns(
+  props: Partial<Parameters<typeof Runs>[0]> = {},
+  withPaletteProbe = false,
+) {
   return renderWithClient(
-    <Runs
-      connected={true}
-      context={{ kind: "all" }}
-      focusRunId={null}
-      onSelectRun={noop}
-      onOpenFull={noop}
-      focusState={null}
-      onFocusStateConsumed={noop}
-      onJumpAgent={noop}
-      onJumpEvent={noop}
-      {...props}
-    />,
+    <>
+      <Runs
+        connected={true}
+        context={{ kind: "all" }}
+        focusRunId={null}
+        onSelectRun={noop}
+        onOpenFull={noop}
+        focusState={null}
+        onFocusStateConsumed={noop}
+        onJumpAgent={noop}
+        onJumpEvent={noop}
+        {...props}
+      />
+      {withPaletteProbe && <PaletteProbe />}
+    </>,
   );
 }
 
@@ -200,6 +217,172 @@ describe("Runs API pagination (WM-976)", () => {
       },
     );
   });
+
+  test("resets the cursor when switching status tabs", async () => {
+    const newest = stubListItem("run-page-new", "COMPLETED", {
+      maxAttempts: undefined,
+      spec: undefined,
+    });
+    const older = stubListItem("run-page-old", "FAILED", {
+      maxAttempts: undefined,
+      spec: undefined,
+    });
+    const runs = mock(async (_state?: string, filters?: { before?: string }) =>
+      filters?.before
+        ? { runs: [older], nextBefore: null }
+        : { runs: [newest], nextBefore: "older-page" },
+    );
+    await withApi(
+      { runs, status: async () => createStatusFixture() },
+      async () => {
+        const r = renderRuns();
+        await r.findByTitle("run-page-new");
+
+        fireEvent.click(r.getByRole("button", { name: "Older" }));
+        await r.findByTitle("run-page-old");
+        fireEvent.click(r.getByRole("tab", { name: /^Completed/i }));
+
+        await waitFor(() =>
+          expect(runs).toHaveBeenLastCalledWith("COMPLETED", {
+            before: undefined,
+          }),
+        );
+      },
+    );
+  });
+
+  test("requests the selected state so failed rows are not limited by the newest all-runs page", async () => {
+    const newestCompleted = stubListItem("run-newest-completed", "COMPLETED");
+    const olderFailed = stubListItem("run-older-failed", "FAILED");
+    const runs = mock(async (state?: string) => ({
+      runs: state === "FAILED" ? [olderFailed] : [newestCompleted],
+    }));
+
+    await withApi(
+      {
+        runs,
+        status: async () =>
+          createStatusFixture({
+            runs: { byState: { COMPLETED: 1, FAILED: 1 } },
+          }),
+      },
+      async () => {
+        const r = renderRuns();
+        await r.findByTitle("run-newest-completed");
+
+        fireEvent.click(r.getByRole("tab", { name: /^Failed/i }));
+
+        await r.findByTitle("run-older-failed");
+        expect(r.queryByTitle("run-newest-completed")).toBeNull();
+        expect(runs).toHaveBeenLastCalledWith("FAILED", {
+          before: undefined,
+        });
+        expect(r.getByRole("tab", { name: /^Failed 1$/i })).toBeTruthy();
+      },
+    );
+  });
+
+  test("keeps a wide table's empty-state copy inside the visible viewport", async () => {
+    const newestCompleted = stubListItem("run-newest-completed", "COMPLETED");
+    const runs = mock(async (state?: string) => ({
+      runs: state === "ACTIVE" ? [] : [newestCompleted],
+    }));
+
+    await withApi(
+      { runs, status: async () => createStatusFixture() },
+      async () => {
+        const r = renderRuns();
+        await r.findByTitle("run-newest-completed");
+
+        fireEvent.click(r.getByRole("tab", { name: /^Active/i }));
+
+        await r.findByText("No active runs.");
+        const table = r.getByRole("grid", { name: "Runs" });
+        expect(table.className).toContain("[&_tbody>tr>td>div]:sticky");
+        expect(table.className).toContain("[&_tbody>tr>td>div]:w-screen");
+      },
+    );
+  });
+
+  test("resets the cursor when switching repository contexts", async () => {
+    const newest = stubListItem("run-page-new", "COMPLETED", {
+      maxAttempts: undefined,
+      spec: undefined,
+      repos: ["repo-a", "repo-b"],
+    });
+    const older = stubListItem("run-page-old", "FAILED", {
+      maxAttempts: undefined,
+      spec: undefined,
+      repos: ["repo-a"],
+    });
+    const runs = mock(async (_state?: string, filters?: { before?: string }) =>
+      filters?.before
+        ? { runs: [older], nextBefore: null }
+        : { runs: [newest], nextBefore: "older-page" },
+    );
+    await withApi(
+      { runs, status: async () => createStatusFixture() },
+      async () => {
+        const r = renderRuns({ context: { kind: "repo", name: "repo-a" } });
+        await r.findByTitle("run-page-new");
+
+        fireEvent.click(r.getByRole("button", { name: "Older" }));
+        await r.findByTitle("run-page-old");
+        r.rerender(
+          <Runs
+            connected={true}
+            context={{ kind: "repo", name: "repo-b" }}
+            focusRunId={null}
+            onSelectRun={noop}
+            onOpenFull={noop}
+            focusState={null}
+            onFocusStateConsumed={noop}
+            onJumpAgent={noop}
+            onJumpEvent={noop}
+          />,
+        );
+
+        await waitFor(() =>
+          expect(runs).toHaveBeenLastCalledWith(undefined, {
+            before: undefined,
+          }),
+        );
+      },
+    );
+  });
+
+  test("returns to the newest page from the pager", async () => {
+    const newest = stubListItem("run-page-new", "COMPLETED", {
+      maxAttempts: undefined,
+      spec: undefined,
+    });
+    const older = stubListItem("run-page-old", "FAILED", {
+      maxAttempts: undefined,
+      spec: undefined,
+    });
+    const runs = mock(async (_state?: string, filters?: { before?: string }) =>
+      filters?.before
+        ? { runs: [older], nextBefore: null }
+        : { runs: [newest], nextBefore: "older-page" },
+    );
+    await withApi(
+      { runs, status: async () => createStatusFixture() },
+      async () => {
+        const r = renderRuns();
+        await r.findByTitle("run-page-new");
+
+        fireEvent.click(r.getByRole("button", { name: "Older" }));
+        await r.findByTitle("run-page-old");
+        fireEvent.click(r.getByRole("button", { name: "Newest" }));
+
+        await waitFor(() =>
+          expect(runs).toHaveBeenLastCalledWith(undefined, {
+            before: undefined,
+          }),
+        );
+      },
+    );
+  });
 });
 
 function ticketSchemaRegistry(): AgentsView {
@@ -220,6 +403,69 @@ function ticketSchemaRegistry(): AgentsView {
 }
 
 describe("Runs sortable columns (OPS-492)", () => {
+  test("shows agent kinds and enriched subjects with an origin fallback", async () => {
+    const ticketRun = Object.assign(
+      stubListItem("run_ticket_identity", "RUNNING", {
+        agent: "dispatch@1",
+      }),
+      {
+        agentKind: "dispatch",
+        ticketSubject: "watt-mind/factory#2025",
+        subjectLabel: "factory#2025",
+        subjectTitle: "Show useful run identities",
+        subjectUrl: "https://github.com/watt-mind/factory/issues/2025",
+      },
+    );
+    const sweepRun = Object.assign(
+      stubListItem("run_sweep_identity", "COMPLETED", {
+        agent: "work-scan@1",
+      }),
+      {
+        agentKind: "work-scan",
+        ticketSubject: null,
+        subjectLabel: null,
+        subjectTitle: null,
+        subjectUrl: null,
+        originType: "factory.sweep.requested",
+        originLabel: "sweep",
+      },
+    );
+
+    await withApi(
+      {
+        runs: async () => ({ runs: [ticketRun, sweepRun] }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const view = renderRuns();
+        await waitFor(() =>
+          expect(
+            view.getByRole("columnheader", { name: /Subject/ }),
+          ).toBeTruthy(),
+        );
+        expect(view.getAllByText("dispatch").length).toBeGreaterThan(0);
+        expect(view.getAllByText("work-scan").length).toBeGreaterThan(0);
+        expect(
+          [...view.container.querySelectorAll("thead th")]
+            .map((header) => header.textContent?.replace(/[↕↑↓×]/g, "").trim())
+            .slice(0, 4),
+        ).toEqual(["Run", "Agent", "Subject", "State"]);
+        const ticket = view.getByRole("link", {
+          name: "factory#2025 — Show useful run identities",
+        });
+        expect(ticket.getAttribute("href")).toBe(
+          "https://github.com/watt-mind/factory/issues/2025",
+        );
+        expect(ticket.getAttribute("title")).toBe(
+          "factory#2025 — Show useful run identities · Open watt-mind/factory#2025",
+        );
+        expect(
+          view.getByText("sweep").parentElement?.getAttribute("title"),
+        ).toBe("factory.sweep.requested");
+      },
+    );
+  });
+
   test("renders an x-ui ticket input column from its run agent schema", async () => {
     localStorage.setItem(
       "evrt-display-runs",
@@ -456,7 +702,7 @@ describe("Runs Duration column (WM-871)", () => {
           headers.indexOf("Remaining") + 1,
         );
         expect(r.container.querySelector("table")?.style.minWidth).toBe(
-          `${(headers.length - 1) * 112 + 176}px`,
+          `${(headers.length - 2) * 112 + 176 + 320}px`,
         );
         expect(cellFor(r, "run_completed", "Duration").textContent).toBe(
           "2m 30s",
@@ -591,6 +837,106 @@ describe("Runs detail failure banner (WM-93)", () => {
 });
 
 describe("Runs component harness: selection & filter retention", () => {
+  test("fetches and renders an off-page run selected by a direct link", async () => {
+    const runId = "run_outside_summary";
+    const run = mock(async (id: string) => {
+      expect(id).toBe(runId);
+      return stubDetail(runId, "RUNNING", []);
+    });
+
+    await withApi(
+      {
+        runs: async () => ({ runs: [stubListItem("run_newest", "COMPLETED")] }),
+        run,
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderRuns({ focusRunId: runId });
+        await r.findByText("idempotencyKey");
+        expect(run).toHaveBeenCalledTimes(1);
+      },
+    );
+  });
+
+  test("enables direct-link keyboard verbs, palette actions, and compact columns", async () => {
+    const runId = "run_off_page_actions";
+    const onOpenFull = mock(() => {});
+    await withApi(
+      {
+        runs: async () => ({ runs: [stubListItem("run_newest", "COMPLETED")] }),
+        run: async () => stubDetail(runId, "RUNNING", []),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderRuns({ focusRunId: runId, onOpenFull }, true);
+        await r.findByText("idempotencyKey");
+
+        // The detail pane, not presence in the bounded list page, controls
+        // the comparison rail.
+        expect(r.getByRole("columnheader", { name: /^Run/ })).toBeTruthy();
+        expect(r.getByRole("columnheader", { name: /^Agent/ })).toBeTruthy();
+        expect(r.getByRole("columnheader", { name: /^Subject/ })).toBeTruthy();
+        expect(r.getByRole("columnheader", { name: /^State/ })).toBeTruthy();
+        expect(
+          r.queryByRole("columnheader", { name: /^Remaining/ }),
+        ).toBeNull();
+
+        const actions = r.getByTestId("palette-probe").textContent ?? "";
+        for (const label of [
+          "Open in tab",
+          "Open full view",
+          "Copy run id",
+          "Copy CLI inspect command",
+          "Copy link",
+          "Cancel run…",
+        ]) {
+          expect(actions).toContain(label);
+        }
+
+        fireEvent.keyDown(document.body, { key: "o" });
+        expect(onOpenFull).toHaveBeenCalledWith(runId);
+        fireEvent.keyDown(document.body, { key: "x" });
+        expect(
+          await r.findByRole("dialog", { name: `Cancel ${runId}?` }),
+        ).toBeTruthy();
+      },
+    );
+  });
+
+  test("shows a not-found state for a direct link to a pruned run", async () => {
+    const runId = "run_pruned";
+    await withApi(
+      {
+        runs: async () => ({ runs: [] }),
+        run: async () => {
+          throw new ApiError("not_found", 404);
+        },
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderRuns({ focusRunId: runId });
+        expect(await r.findByText(`Run ${runId} was not found.`)).toBeTruthy();
+      },
+    );
+  });
+
+  test("uses one detail fetch for an on-page selected run", async () => {
+    const runId = "run_in_summary";
+    const run = mock(async () => stubDetail(runId, "RUNNING", []));
+    await withApi(
+      {
+        runs: async () => ({ runs: [stubListItem(runId, "RUNNING")] }),
+        run,
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderRuns({ focusRunId: runId });
+        await r.findByText("idempotencyKey");
+        expect(run).toHaveBeenCalledTimes(1);
+      },
+    );
+  });
+
   test("p toggles the selected run in the context strip and the detail action shows its hint", async () => {
     const runId = "run_pin_shortcut";
     sessionStorage.clear();
@@ -1417,9 +1763,13 @@ describe("Runs copy chords and hints (WM-233)", () => {
         expect(cls).not.toContain("overflow-hidden");
         // The fixed table layout must reserve room for the badge and link.
         expect(cls).toMatch(/\bmin-w-/);
-        expect(
-          cell!.closest("table")?.querySelectorAll("col")[1]?.className,
-        ).toContain("w-44");
+        const table = cell!.closest("table")!;
+        const stateIndex = [...table.querySelectorAll("thead th")].findIndex(
+          (header) => header.textContent?.startsWith("State"),
+        );
+        expect(table.querySelectorAll("col")[stateIndex]?.className).toContain(
+          "w-44",
+        );
         // The row must still not wrap — that is the point of this PR.
         expect(cls).toContain("whitespace-nowrap");
 

@@ -67,6 +67,7 @@ export const REASONS: Record<string, string> = {
   dispatch_ineligible: "Dispatch ineligible",
   dispatch_recheck_failed: "Dispatch re-check failed",
   dispatch_recheck_unavailable: "Dispatch re-check unavailable",
+  dispatch_paused: "Dispatch paused by operator",
   evidence_changed_since_plan: "evidence changed since plan",
   event_human_approval_only: "Event requires human approval",
   merge_barrier_unverified: "Merge barrier unverified",

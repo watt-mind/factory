@@ -1,11 +1,21 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-planner-test-mjs";
 import { describe, expect, spyOn, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import * as nodeFs from "node:fs";
 import path from "node:path";
 import { canonicalJson, hashBytes, hashJson } from "./canonical.mjs";
-import { DEAD_LETTER_AFTER, DEFAULT_MAX_IN_FLIGHT } from "./config.mjs";
+import {
+  artifactsRoot,
+  DEAD_LETTER_AFTER,
+  DEFAULT_MAX_IN_FLIGHT,
+} from "./config.mjs";
 import { openDb } from "./db.mjs";
 import { admitEvent } from "./intake.mjs";
 import { createRun, lifecycleOf, runState, transition } from "./lifecycle.mjs";
@@ -13,15 +23,20 @@ import {
   buildEscalatedContinuationSpec,
   buildRunSpec,
   createLinearReadCache,
+  modelAdapterMismatch,
   DEFAULT_MAX_IN_FLIGHT as PLANNER_DEFAULT_MAX_IN_FLIGHT,
   idempotencyKeyFor,
+  LINEAR_READ_TIMEOUT_MS,
   pinMemos,
   planAdmittedEvents,
   planEvent,
+  policyDispatchPaused,
   policyMaxConcurrentMerges,
   policyMergeBatchSize,
+  createAutoApprovalDispatch,
   wrapLinearReads,
   worktreeDispatchAutoEligibility,
+  worktreeDispatchAutoEligibilityAsync,
   worktreeDispatchGate,
   worktreeMergeFixEligibility,
 } from "./planner.mjs";
@@ -154,6 +169,77 @@ describe("merge concurrency policy", () => {
 });
 
 describe("planEvent", () => {
+  test("parks a malformed stored envelope while planning an unrelated event", () => {
+    const db = openDb(":memory:");
+    const malformed = admit(db, {
+      eventId: "malformed-stored-envelope",
+      correlationId: "malformed-stored-envelope",
+    });
+    const healthy = admit(db, {
+      eventId: "healthy-after-malformed-envelope",
+      correlationId: "healthy-after-malformed-envelope",
+    });
+    db.query(
+      `UPDATE events SET envelope_json = ? WHERE source = ? AND event_id = ?`,
+    ).run("{damaged stored envelope", malformed.source, malformed.eventId);
+
+    expect(
+      planAdmittedEvents(db, registry, { now: NOW, policyVersion: "git:test" }),
+    ).toEqual({ planned: 2, failed: 0, deadLettered: 0 });
+    expect(
+      db
+        .query(`SELECT status, plan_failures FROM events WHERE event_id = ?`)
+        .get(malformed.eventId),
+    ).toEqual({ status: "human_needed", plan_failures: 0 });
+    expect(
+      db
+        .query(`SELECT reason FROM proposals WHERE event_id = ?`)
+        .get(malformed.eventId).reason,
+    ).toBe("malformed_event_envelope");
+    expect(
+      db
+        .query(`SELECT status FROM events WHERE event_id = ?`)
+        .get(healthy.eventId).status,
+    ).toBe("planned");
+  });
+
+  // The dispatch-eligibility pre-pass parses the stored envelope outside the
+  // transaction to decide whether to make Linear/worktree reads. A corrupt row
+  // must fall through to the in-transaction refusal instead of throwing there.
+  test("parks a malformed dispatch envelope from the pre-transaction eligibility pass", () => {
+    const db = openDb(":memory:");
+    const ref = admit(db, {
+      eventId: "dispatch-malformed-stored-envelope",
+      type: "factory.dispatch.requested",
+      source: "operator",
+      correlationId: "dispatch-malformed-stored-envelope",
+      payload: { repo: "factory", ticket: "WM-480" },
+    });
+    db.query(
+      `UPDATE events SET envelope_json = ? WHERE source = ? AND event_id = ?`,
+    ).run("{damaged dispatch envelope", ref.source, ref.eventId);
+
+    expect(
+      planEvent(db, registry, ref, {
+        now: NOW,
+        policyVersion: "git:test",
+        dispatch: {
+          // Reaching this would mean the guard failed to short-circuit.
+          fetchTicket: () => {
+            throw new Error("eligibility must not run on a malformed row");
+          },
+        },
+      }),
+    ).toMatchObject({
+      decision: "human_needed",
+      reason: "malformed_event_envelope",
+    });
+    expect(
+      db.query(`SELECT status FROM events WHERE event_id = ?`).get(ref.eventId)
+        .status,
+    ).toBe("human_needed");
+  });
+
   test("pins workspace-only intent into the RunSpec for the execute-time admission backstop (#962)", () => {
     const db = openDb(":memory:");
     const ref = admit(db, {
@@ -1154,6 +1240,263 @@ describe("planEvent worktree gate (WM-108)", () => {
     fetchInFlight: () => [],
   });
 
+  async function withReposRootAsync(yaml, fn, policy = null) {
+    const root = tmpDir("evrt-plan-wt-");
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    writeFileSync(path.join(root, "config", "repos.yaml"), yaml);
+    if (policy) writeFileSync(path.join(root, "config", "policy.yaml"), policy);
+    const previous = process.env.FACTORY_REPOS_ROOT;
+    process.env.FACTORY_REPOS_ROOT = root;
+    try {
+      return await fn(root);
+    } finally {
+      if (previous === undefined) delete process.env.FACTORY_REPOS_ROOT;
+      else process.env.FACTORY_REPOS_ROOT = previous;
+    }
+  }
+
+  const resumableEscalation = (overrides = {}) => ({
+    failedRunId: "run_failed",
+    continuationRunId: "run_continuation",
+    rootRunId: "run_root",
+    projectionState: "applied",
+    repo: "tiered",
+    ticket: "WM-694",
+    failedRunArtifact: { prNumber: 7 },
+    ...overrides,
+  });
+
+  test("a zero-read refusal costs no control-plane read at all (#2123)", async () => {
+    let ticketReads = 0;
+    const result = await worktreeDispatchAutoEligibilityAsync(
+      { repo: "not-configured", ticket: "WM-2123" },
+      {
+        fetchTicket: async () => {
+          ticketReads += 1;
+          return tierTicket();
+        },
+      },
+    );
+    // The refusal is decidable from local config alone, so the ticket read is
+    // never issued — the read is gated behind the prepass, not before it.
+    expect(ticketReads).toBe(0);
+    expect(result.refusal?.reason).toMatch(/^repo_unknown: /);
+  });
+
+  test("async dispatch eligibility awaits its readers and evaluates the gate once per row (#2123)", async () => {
+    await withReposRootAsync(tierRepo, async () => {
+      let ticketReads = 0;
+      let inFlightReads = 0;
+      let budgetChecks = 0;
+      const result = await worktreeDispatchAutoEligibilityAsync(
+        { repo: "tiered", ticket: "WM-694" },
+        {
+          countLeases: () => 0,
+          budgetRefusal: () => {
+            budgetChecks += 1;
+            return null;
+          },
+          fetchTicket: async () => {
+            ticketReads += 1;
+            return tierTicket();
+          },
+          fetchInFlight: async () => {
+            inFlightReads += 1;
+            return [];
+          },
+        },
+      );
+
+      expect(result.ok).toBe(true);
+      expect(ticketReads).toBe(1);
+      expect(inFlightReads).toBe(1);
+      // One evaluation of the row's local facts. The earlier shape ran the
+      // whole synchronous gate twice per row (once with an empty in-flight
+      // list), repeating the repo snapshot, the lease scan, the budget read
+      // and — worse — the owned-paths closure and its unbounded pin-manifest
+      // walk, which is the very per-row cost this pass exists to remove.
+      expect(budgetChecks).toBe(1);
+    });
+  });
+
+  test("an escalation forge read failure is the gate's typed refusal, not a rejected call (#2123)", async () => {
+    await withReposRootAsync(tierRepo, async () => {
+      const result = await worktreeDispatchAutoEligibilityAsync(
+        { repo: "tiered", ticket: "WM-694", modelTier: "strong" },
+        {
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          fetchTicket: async () => tierTicket(),
+          fetchInFlight: async () => [],
+          escalatedContinuation: resumableEscalation(),
+          fetchPullRequest: async () => {
+            throw new Error("github_read_failed: gh api timed out");
+          },
+        },
+      );
+
+      expect(result.ok).toBeFalsy();
+      expect(result.refusal?.reason).toBe("ticket_escalation_pr_read_failed");
+      expect(result.refusal?.decision).toBe("noop");
+    });
+  });
+
+  test("an unauthorised escalation continuation spends no forge read (#2123)", async () => {
+    await withReposRootAsync(tierRepo, async () => {
+      let pullRequestReads = 0;
+      const result = await worktreeDispatchAutoEligibilityAsync(
+        { repo: "tiered", ticket: "WM-694", modelTier: "strong" },
+        {
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          fetchTicket: async () => tierTicket(),
+          fetchInFlight: async () => [],
+          // Projection not applied: the gate refuses before it would ever look
+          // at the failed run's pull request.
+          escalatedContinuation: resumableEscalation({
+            projectionState: "pending",
+            workspacePath: "/tmp/nowhere",
+          }),
+          fetchPullRequest: async () => {
+            pullRequestReads += 1;
+            return { state: "OPEN" };
+          },
+          findWorkspacePullRequest: async () => {
+            pullRequestReads += 1;
+            return null;
+          },
+        },
+      );
+
+      expect(pullRequestReads).toBe(0);
+      expect(result.refusal?.reason).toBe("ticket_assigned");
+    });
+  });
+
+  test("ticket-scoped human-needed refusals deduplicate unchanged bodies and supersede changed ones", () => {
+    const closureRepo =
+      `repos:\n  - name: closure\n    path: /tmp/nowhere\n    base: develop\n` +
+      `    team: WM\n    project: Factory\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+      `    worktree_root: /tmp/worktrees\n    escalate_paths: []\n` +
+      `    owned_paths_policy:\n      direct:\n        - source: generated/input.mjs\n          requires:\n            - generated/pin.json\n`;
+    withReposRoot(closureRepo, () => {
+      const db = openDb(":memory:");
+      const ticket = {
+        ...tierTicket(),
+        description: "## Owned Paths\n- generated/input.mjs\n",
+      };
+      const dispatch = {
+        ...tierDispatch(),
+        fetchTicket: () => ticket,
+      };
+      const plan = (eventId) => {
+        const ref = admit(db, {
+          type: "test.worktree.requested",
+          eventId,
+          correlationId: eventId,
+          payload: { repo: "closure", ticket: "WM-694" },
+        });
+        return planEvent(db, syntheticRegistry(), ref, {
+          now: NOW,
+          dispatch,
+        });
+      };
+
+      const first = plan("closure-first");
+      expect(first).toMatchObject({
+        decision: "human_needed",
+        reason: "owned_paths_not_closed",
+      });
+      expect(first.proposal.reason).toContain("[dispatch_ticket_body_hash:");
+
+      const unchanged = plan("closure-unchanged");
+      expect(unchanged).toEqual({
+        decision: "noop",
+        reason: `human_needed_already_open:${first.proposal.id}`,
+      });
+      expect(db.query(`SELECT COUNT(*) AS n FROM proposals`).get().n).toBe(1);
+
+      ticket.description =
+        "## Owned Paths\n- generated/input.mjs\n\nChanged ticket body.\n";
+      const changed = plan("closure-changed");
+      expect(changed).toMatchObject({
+        decision: "human_needed",
+        reason: "owned_paths_not_closed",
+      });
+      expect(changed.proposal.id).not.toBe(first.proposal.id);
+      expect(
+        db
+          .query(`SELECT status, reason FROM proposals WHERE id = ?`)
+          .get(first.proposal.id),
+      ).toEqual({
+        status: "superseded",
+        reason: "superseded_by_ticket_body_change",
+      });
+    });
+  });
+
+  test("the human-needed guard covers other ticket refusals and reopens after resolution", () => {
+    const unconfiguredRepo =
+      `repos:\n  - name: unconfigured\n    path: /tmp/nowhere\n    base: develop\n` +
+      `    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+      `    worktree_root: /tmp/worktrees\n    escalate_paths: []\n`;
+    withReposRoot(unconfiguredRepo, () => {
+      const db = openDb(":memory:");
+      const dispatch = tierDispatch();
+      const plan = (eventId, now = NOW) => {
+        const ref = admit(db, {
+          type: "test.worktree.requested",
+          eventId,
+          correlationId: eventId,
+          payload: { repo: "unconfigured", ticket: "WM-694" },
+        });
+        return planEvent(db, syntheticRegistry(), ref, {
+          now,
+          dispatch,
+        });
+      };
+
+      const first = plan("unconfigured-first");
+      expect(first).toMatchObject({
+        decision: "human_needed",
+        reason:
+          "repo_unconfigured: team/project missing for the in-flight query",
+      });
+      expect(plan("unconfigured-unchanged")).toEqual({
+        decision: "noop",
+        reason: `human_needed_already_open:${first.proposal.id}`,
+      });
+
+      let active = first.proposal;
+      for (const status of ["approved", "rejected"]) {
+        db.query(`UPDATE proposals SET status = ? WHERE id = ?`).run(
+          status,
+          active.id,
+        );
+        const fresh = plan(`unconfigured-${status}`);
+        expect(fresh.decision).toBe("human_needed");
+        active = fresh.proposal;
+      }
+
+      // Nothing writes status='expired': expiry is derived from
+      // created_at + ttl_seconds. An open row that aged out must not
+      // suppress the unchanged ticket's next question.
+      const ttlMs = Number(active.ttl_seconds) * 1000;
+      expect(plan("unconfigured-within-ttl", NOW + ttlMs)).toEqual({
+        decision: "noop",
+        reason: `human_needed_already_open:${active.id}`,
+      });
+      const afterExpiry = plan("unconfigured-expired", NOW + ttlMs + 1000);
+      expect(afterExpiry.decision).toBe("human_needed");
+      expect(afterExpiry.proposal.id).not.toBe(active.id);
+      expect(
+        db
+          .query(`SELECT status, reason FROM proposals WHERE id = ?`)
+          .get(active.id),
+      ).toEqual({ status: "superseded", reason: "superseded_by_replan" });
+    });
+  });
+
   test("dispatch model tier precedence is payload > ticket label > definition and records its source (WM-694)", () => {
     withReposRoot(tierRepo, () => {
       const cases = [
@@ -1212,6 +1555,51 @@ describe("planEvent worktree gate (WM-108)", () => {
         expect(spec.model).toBe(item.model);
       }
     });
+  });
+
+  test("escalated continuation resolves the strong model for the failed spec's own adapter (gh-1704 AC3)", () => {
+    const base = {
+      schemaVersion: "factory.run-spec/v1",
+      runId: "run_light_failed_pi",
+      agent: "dispatch@1",
+      input: { repo: "tiered", ticket: "WM-694", modelTier: "light" },
+      inputHash: hashJson({
+        repo: "tiered",
+        ticket: "WM-694",
+        modelTier: "light",
+      }),
+      workspace: { type: "worktree", checkoutDir: "repo" },
+      adapter: "pi",
+      promptVersion: "git:test",
+      policyVersion: "git:test",
+      outputContract: "factory.dispatch-result/v1",
+      capabilities: ["tracker:write", "repo:write", "github:write"],
+      modelTier: "light",
+      model: "openai-codex/gpt-5.6-luna",
+      timeoutSeconds: 5400,
+      maxAttempts: 1,
+      idempotencyKey: "dispatch-light-pi",
+    };
+    for (const [adapter, strong] of [
+      ["pi", "openai-codex/gpt-5.6-sol"],
+      ["cursor", "cursor-grok-4.6-high"],
+    ]) {
+      const continuation = buildEscalatedContinuationSpec(
+        registry,
+        { ...base, adapter },
+        { runId: `run_strong_${adapter}` },
+      );
+      expect(continuation).toMatchObject({
+        adapter,
+        modelTier: "strong",
+        model: strong,
+      });
+      expect(
+        modelAdapterMismatch(continuation, registry.modelTiers, adapter, {
+          explicitPin: false,
+        }),
+      ).toBeNull();
+    }
   });
 
   test("escalated continuation pins a fresh strong-tier spec and authenticated claim proof", () => {
@@ -1302,6 +1690,39 @@ describe("planEvent worktree gate (WM-108)", () => {
         ticket_claim_escalation: true,
       });
       expect(viewerRepos).toEqual(["tiered"]);
+
+      const workspaceEscalation = {
+        failedRunId: base.runId,
+        continuationRunId: continuation.runId,
+        rootRunId: base.runId,
+        repo: "tiered",
+        ticket: "WM-694",
+        workspacePath: "/tmp/tiered-checkout",
+        projectionState: "applied",
+      };
+      expect(
+        worktreeDispatchGate(continuation.input, {
+          ...dispatch,
+          escalatedContinuation: workspaceEscalation,
+          findWorkspacePullRequest: () => ({
+            number: 1533,
+            state: "OPEN",
+            isDraft: false,
+          }),
+        }),
+      ).toEqual({ decision: "noop", reason: "ticket_pr_already_open" });
+      for (const pullRequest of [
+        { number: 1533, state: "OPEN", isDraft: true },
+        null,
+      ]) {
+        expect(
+          worktreeDispatchAutoEligibility(continuation.input, {
+            ...dispatch,
+            escalatedContinuation: workspaceEscalation,
+            findWorkspacePullRequest: () => pullRequest,
+          }).ok,
+        ).toBe(true);
+      }
 
       const closedEscalation = {
         failedRunId: base.runId,
@@ -1505,6 +1926,61 @@ describe("planEvent worktree gate (WM-108)", () => {
         ).toMatchObject({ decision: "noop", reason: "ticket_security" });
       }
     });
+  });
+
+  test("dispatch.paused noops unattended dispatches but keeps operator dispatch available", () => {
+    const pausedPolicy = "dispatch:\n  paused: true\n";
+    withReposRoot(
+      tierRepo,
+      () => {
+        expect(policyDispatchPaused()).toBe(true);
+        const db = openDb(":memory:");
+        let ticketReads = 0;
+        const dispatch = {
+          ...tierDispatch(),
+          fetchTicket: () => {
+            ticketReads += 1;
+            return tierTicket();
+          },
+        };
+
+        for (const source of ["schedule", "chain"]) {
+          const ref = admit(db, {
+            type: "factory.dispatch.requested",
+            source,
+            eventId: `${source}-paused-dispatch`,
+            correlationId: `${source}-paused-dispatch`,
+            causationId: source === "chain" ? "run-parent" : null,
+            payload: { repo: "tiered", ticket: "WM-694" },
+          });
+          expect(
+            planEvent(db, registry, ref, {
+              now: NOW,
+              policyVersion: "git:test",
+              dispatch,
+            }),
+          ).toMatchObject({ decision: "noop", reason: "dispatch_paused" });
+        }
+        expect(ticketReads).toBe(0);
+
+        const operator = admit(db, {
+          type: "factory.dispatch.requested",
+          source: "operator",
+          eventId: "operator-paused-dispatch",
+          correlationId: "operator-paused-dispatch",
+          payload: { repo: "tiered", ticket: "WM-694" },
+        });
+        expect(
+          planEvent(db, registry, operator, {
+            now: NOW,
+            policyVersion: "git:test",
+            dispatch,
+          }).decision,
+        ).toBe("run");
+        expect(ticketReads).toBe(1);
+      },
+      pausedPolicy,
+    );
   });
 
   test("eligible handoff dispatch pins auto-approval evidence without operator authorization", () => {
@@ -2019,6 +2495,115 @@ describe("planEvent worktree gate (WM-108)", () => {
     );
   });
 
+  test("factory dispatch refuses a missing toolchain before ticket reads and memoizes the typed proposal", () => {
+    const toolchainRepo = tierRepo + `    toolchain:\n      uv: ">=0.5"\n`;
+    withReposRoot(toolchainRepo, () => {
+      const db = openDb(":memory:");
+      const calls = [];
+      const toolchain = {
+        cache: new Map(),
+        which: (executable) => {
+          calls.push(executable);
+          return null;
+        },
+      };
+      const plan = (eventId) => {
+        const ref = admit(db, {
+          type: "factory.dispatch.requested",
+          eventId,
+          correlationId: eventId,
+          payload: { repo: "tiered", ticket: "WM-694" },
+        });
+        return planEvent(db, registry, ref, { now: NOW, toolchain });
+      };
+
+      const first = plan("toolchain-missing-first");
+      const second = plan("toolchain-missing-second");
+      expect(first).toMatchObject({
+        decision: "human_needed",
+        reason: "toolchain_unsatisfied:uv",
+      });
+      expect(second).toMatchObject({
+        decision: "human_needed",
+        reason: "toolchain_unsatisfied:uv",
+      });
+      expect(calls).toEqual(["uv"]);
+      expect(first.proposal.reason).toContain("repo_toolchain_missing");
+      expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(0);
+    });
+  });
+
+  test("factory dispatch probes a satisfied declared toolchain and plans normally", () => {
+    const toolchainRepo = tierRepo + `    toolchain:\n      bun: ">=1.3 <2"\n`;
+    withReposRoot(toolchainRepo, () => {
+      const db = openDb(":memory:");
+      const ref = admit(db, {
+        type: "factory.dispatch.requested",
+        eventId: "toolchain-satisfied",
+        correlationId: "toolchain-satisfied",
+        payload: { repo: "tiered", ticket: "WM-694" },
+      });
+      const outcome = planEvent(db, registry, ref, {
+        now: NOW,
+        dispatch: tierDispatch(),
+        toolchain: {
+          cache: new Map(),
+          which: () => "/opt/bin/bun",
+          spawn: () => ({ exitCode: 0, stdout: "1.3.14\n", stderr: "" }),
+        },
+      });
+      expect(outcome.decision).toBe("run");
+    });
+  });
+
+  test("factory dispatch skips probing when the repo declares no toolchain", () => {
+    withReposRoot(tierRepo, () => {
+      const db = openDb(":memory:");
+      const ref = admit(db, {
+        type: "factory.dispatch.requested",
+        eventId: "toolchain-undeclared",
+        correlationId: "toolchain-undeclared",
+        payload: { repo: "tiered", ticket: "WM-694" },
+      });
+      const outcome = planEvent(db, registry, ref, {
+        now: NOW,
+        dispatch: tierDispatch(),
+        toolchain: {
+          cache: new Map(),
+          which: () => {
+            throw new Error("undeclared toolchain must not probe");
+          },
+        },
+      });
+      expect(outcome.decision).toBe("run");
+    });
+  });
+
+  test("factory dispatch for a repo missing from config/repos.yaml → human_needed repo_unknown", () => {
+    withReposRoot(tierRepo, () => {
+      const db = openDb(":memory:");
+      const ref = admit(db, {
+        type: "factory.dispatch.requested",
+        eventId: "toolchain-repo-unknown",
+        correlationId: "toolchain-repo-unknown",
+        payload: { repo: "ghost", ticket: "WM-694" },
+      });
+      const outcome = planEvent(db, registry, ref, {
+        now: NOW,
+        dispatch: tierDispatch(),
+        toolchain: {
+          cache: new Map(),
+          which: () => {
+            throw new Error("unknown repo must not probe");
+          },
+        },
+      });
+      expect(outcome.decision).toBe("human_needed");
+      expect(outcome.reason).toMatch(/^repo_unknown: /);
+      expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(0);
+    });
+  });
+
   test("a repo missing from config/repos.yaml → human_needed repo_unknown", () => {
     withReposRoot(
       `repos:\n  - name: real\n    path: /tmp/nowhere\n    base: develop\n`,
@@ -2035,6 +2620,63 @@ describe("planEvent worktree gate (WM-108)", () => {
         expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(0);
       },
     );
+  });
+
+  test("an invalid unrelated registry stanza blocks dispatch from a partial config", () => {
+    const healthyRepo =
+      `repos:\n  - name: healthy\n    path: /tmp/healthy\n    base: develop\n` +
+      `    team: WM\n    project: Factory\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+      `    worktree_root: /tmp/worktrees\n    escalate_paths: []\n` +
+      `  - name: malformed\n    path: /tmp/malformed\n    max_in_flight: many\n`;
+    withReposRoot(healthyRepo, () => {
+      const result = worktreeDispatchAutoEligibility(
+        { repo: "healthy", ticket: "WM-694" },
+        tierDispatch(),
+      );
+      // The registry is host-wide policy. Do not dispatch from a partial
+      // parse, even though the malformed entry is not the target repo.
+      expect(result.refusal).toMatchObject({
+        decision: "human_needed",
+      });
+      expect(result.refusal.reason).toMatch(/^repo_registry_invalid: /);
+      expect(result.refusal.reason).toContain(
+        "repo malformed max_in_flight must be a positive number",
+      );
+      expect(result.evidence.checks).toMatchObject({
+        repo_registry_valid: false,
+      });
+      expect(result.evidence.checks.repo_found).toBeUndefined();
+    });
+  });
+
+  test("a declared repo with an invalid unrelated registry stanza → human_needed repo_registry_invalid", () => {
+    const healthyRepo =
+      `repos:\n  - name: healthy\n    path: /tmp/healthy\n    base: develop\n` +
+      `    team: WM\n    project: Factory\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+      `    worktree_root: /tmp/worktrees\n    escalate_paths: []\n` +
+      `  - name: malformed\n    path: /tmp/malformed\n    max_in_flight: many\n`;
+    withReposRoot(healthyRepo, () => {
+      const db = openDb(":memory:");
+      const ref = admit(db, {
+        type: "factory.dispatch.requested",
+        eventId: "registry-invalid",
+        correlationId: "registry-invalid",
+        payload: { repo: "healthy", ticket: "WM-694" },
+      });
+      const outcome = planEvent(db, registry, ref, {
+        now: NOW,
+        dispatch: tierDispatch(),
+        toolchain: {
+          cache: new Map(),
+          which: () => {
+            throw new Error("invalid registry must not probe toolchain");
+          },
+        },
+      });
+      expect(outcome.decision).toBe("human_needed");
+      expect(outcome.reason).toMatch(/^repo_registry_invalid: /);
+      expect(db.query(`SELECT COUNT(*) AS n FROM runs`).get().n).toBe(0);
+    });
   });
 
   test("whole-repo Owned Paths refuses distinctly before wildcard escalation", () => {
@@ -2336,6 +2978,43 @@ describe("planEvent worktree gate (WM-108)", () => {
     );
   });
 
+  test("a direct dispatch enforces an in-repo-only escalate_paths overlay", () => {
+    const checkout = tmpDir("evrt-escalate-overlay-");
+    writeFileSync(
+      path.join(checkout, ".factory.yaml"),
+      "schemaVersion: factory.repo/v1\nescalate_paths:\n  - src/auth/**\n",
+    );
+    withReposRoot(
+      `repos:\n  - name: overlaid\n    path: ${checkout}\n    base: develop\n` +
+        `    team: WM\n    project: Factory\n    worktree_up: bin/up\n    worktree_down: bin/down\n` +
+        `    worktree_root: /tmp/worktrees\n    escalate_paths: []\n`,
+      () => {
+        const result = worktreeDispatchAutoEligibility(
+          { repo: "overlaid", ticket: "WM-1797" },
+          {
+            countLeases: () => 0,
+            budgetRefusal: () => null,
+            fetchTicket: () => ({
+              identifier: "WM-1797",
+              state: { name: "Todo" },
+              assignee: null,
+              labels: { nodes: [{ name: "ai:agent-ready" }] },
+              description: "## Owned Paths\n- src/auth/session.ts\n",
+            }),
+            fetchInFlight: () => [],
+          },
+        );
+        expect(result.refusal).toMatchObject({
+          decision: "noop",
+          reason: "escalate_paths_intersect",
+        });
+        expect(result.evidence.escalatePathIntersections).toEqual([
+          "src/auth/**",
+        ]);
+      },
+    );
+  });
+
   test("dispatch also defers when merge-fix already owns the ticket worktree", () => {
     withReposRoot(
       `repos:\n  - name: fixture\n    path: /tmp/fixture\n    base: develop\n    team: WM\n    project: Factory\n    worktree_up: /tmp/worktree-up\n    worktree_down: /tmp/worktree-down\n    worktree_root: /tmp/worktrees\n    escalate_paths: []\n`,
@@ -2616,6 +3295,133 @@ describe("planEvent model pinning (WM-135)", () => {
     expect(spec.modelTier).toBe("standard");
   });
 
+  test("an agent overlay model pin outside the tier map is an explicit pin — planned verbatim, not parked (gh-1704)", () => {
+    const db = openDb(":memory:");
+    putOverride(db, {
+      kind: KIND_AGENT,
+      key: "test-tiered@1",
+      patch: { model: "claude-opus-4-1" },
+    });
+    const ref = admit(db, tieredEnvelope());
+    const outcome = planEvent(
+      db,
+      tieredRegistry({ modelTier: "standard" }),
+      ref,
+      { now: NOW, policyVersion: "git:test" },
+    );
+    expect(outcome.decision).toBe("run");
+    const spec = JSON.parse(outcome.proposal.spec_json);
+    expect(spec).toMatchObject({
+      adapter: "claude",
+      modelTier: "standard",
+      model: "claude-opus-4-1",
+    });
+  });
+
+  test("a tier-resolved model follows an adapter overlay flip and is consistent with that adapter's map (gh-1704)", () => {
+    const db = openDb(":memory:");
+    const modelTiers = {
+      claude: { strong: "default", standard: "sonnet", light: "haiku" },
+      pi: {
+        strong: "openai-codex/gpt-5.6-sol",
+        standard: "openai-codex/gpt-5.6-terra",
+        light: "openai-codex/gpt-5.6-luna",
+      },
+    };
+    putOverride(db, {
+      kind: KIND_EVENT_TYPE,
+      key: "test.tiered.requested",
+      patch: { adapter: "pi" },
+    });
+    const ref = admit(db, tieredEnvelope());
+    const outcome = planEvent(
+      db,
+      tieredRegistry({ modelTier: "standard", modelTiers }),
+      ref,
+      { now: NOW, policyVersion: "git:test" },
+    );
+    expect(outcome.decision).toBe("run");
+    const spec = JSON.parse(outcome.proposal.spec_json);
+    expect(spec).toMatchObject({
+      adapter: "pi",
+      modelTier: "standard",
+      model: "openai-codex/gpt-5.6-terra",
+    });
+    expect(modelAdapterMismatch(spec, modelTiers, spec.adapter)).toBeNull();
+    expect(
+      modelAdapterMismatch(spec, modelTiers, spec.adapter, {
+        explicitPin: false,
+      }),
+    ).toBeNull();
+  });
+
+  describe("modelAdapterMismatch (gh-1704)", () => {
+    const modelTiers = {
+      claude: { strong: "default", standard: "sonnet", light: "haiku" },
+      pi: { standard: "openai-codex/gpt-5.6-terra" },
+    };
+
+    test("a tier-resolved model outside its adapter's map is a mismatch", () => {
+      expect(
+        modelAdapterMismatch(
+          { model: "openai-codex/gpt-5.6-terra" },
+          modelTiers,
+          "claude",
+          { explicitPin: false },
+        ),
+      ).toStartWith("model_adapter_mismatch:");
+    });
+
+    test("an explicit pin is accepted as-is whatever the map says", () => {
+      expect(
+        modelAdapterMismatch(
+          { model: "openai-codex/gpt-5.6-terra" },
+          modelTiers,
+          "claude",
+          { explicitPin: true },
+        ),
+      ).toBeNull();
+    });
+
+    test("unknown provenance: another adapter's tier value is a mismatch, any other value is a pin", () => {
+      expect(
+        modelAdapterMismatch(
+          { model: "openai-codex/gpt-5.6-terra" },
+          modelTiers,
+          "claude",
+        ),
+      ).toStartWith("model_adapter_mismatch:");
+      expect(
+        modelAdapterMismatch(
+          { model: "claude-opus-4-1" },
+          modelTiers,
+          "claude",
+        ),
+      ).toBeNull();
+      expect(
+        modelAdapterMismatch({ model: "sonnet" }, modelTiers, "claude"),
+      ).toBeNull();
+    });
+
+    test("an adapter that takes no model never mismatches one", () => {
+      expect(
+        modelAdapterMismatch(
+          { model: "openai-codex/gpt-5.6-terra" },
+          modelTiers,
+          "fake",
+          { explicitPin: false },
+        ),
+      ).toBeNull();
+    });
+
+    test("a spec without a model is never a mismatch", () => {
+      expect(modelAdapterMismatch({}, modelTiers, "claude")).toBeNull();
+      expect(
+        modelAdapterMismatch({ model: null }, modelTiers, "pi"),
+      ).toBeNull();
+    });
+  });
+
   test("a definition declaring nothing produces a spec without model fields — today's behavior (regression)", () => {
     const db = openDb(":memory:");
     const ref = admit(db, tieredEnvelope());
@@ -2687,10 +3493,11 @@ describe("buildRunSpec", () => {
     const spec = buildRunSpec(registry, dispatch, mapping, {
       runId: "run_baseline",
       policyVersion: "git:test",
-      now: 0,
     });
+    // Regenerated (#2170): dispatch's absolute result-path contract changes
+    // the pinned definition hash carried by planned specs.
     expect(canonicalJson(spec)).toBe(
-      '{"adapter":"cursor","agent":"dispatch@1","capabilities":["tracker:write","repo:write","github:write"],"defHash":"sha256:440db0b0151fee722647bc17ea2808976c65558e50d36fec0a02cdd754843c88","idempotencyKey":"dispatch@1:factory.dispatch-result/v1:sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59:dispatch-baseline","input":{"repo":"factory","ticket":"WM-694"},"inputHash":"sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59","maxAttempts":1,"model":"cursor-grok-4.6-high","modelTier":"strong","outputContract":"factory.dispatch-result/v1","policyVersion":"git:test","promptVersion":"git:test","runId":"run_baseline","schemaVersion":"factory.run-spec/v1","timeoutSeconds":5400,"workspace":{"checkoutDir":"repo","retainOnFailure":true,"type":"worktree"}}',
+      '{"adapter":"cursor","agent":"dispatch@1","capabilities":["tracker:write","repo:write","github:write"],"defHash":"sha256:8e8b4b99c6cd953977ed193d22b682b93bf7efd921ea514ae866d729d7442ab9","idempotencyKey":"dispatch@1:factory.dispatch-result/v1:sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59:dispatch-baseline","input":{"repo":"factory","ticket":"WM-694"},"inputHash":"sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59","maxAttempts":1,"model":"cursor-grok-4.6-high","modelTier":"strong","outputContract":"factory.dispatch-result/v1","policyVersion":"git:test","promptVersion":"git:test","runId":"run_baseline","schemaVersion":"factory.run-spec/v1","timeoutSeconds":5400,"workspace":{"checkoutDir":"repo","retainOnFailure":true,"type":"worktree"}}',
     );
   });
 
@@ -2700,7 +3507,6 @@ describe("buildRunSpec", () => {
     const spec = buildRunSpec(registry, envelope(), mapping, {
       runId: "run_defhash",
       policyVersion: "git:test",
-      now: NOW,
     });
     // Present and computed with the canonical helper the worker's
     // claim-time verifyDefHash consumes.
@@ -2710,7 +3516,6 @@ describe("buildRunSpec", () => {
     const again = buildRunSpec(registry, envelope(), mapping, {
       runId: "run_defhash_2",
       policyVersion: "git:test",
-      now: NOW,
     });
     expect(again.defHash).toBe(spec.defHash);
     // Changes when attested definition content changes.
@@ -2723,7 +3528,7 @@ describe("buildRunSpec", () => {
       synthetic,
       envelope(),
       synthetic.eventTypes["factory.status-report.requested"],
-      { runId: "run_defhash_3", policyVersion: "git:test", now: NOW },
+      { runId: "run_defhash_3", policyVersion: "git:test" },
     );
     expect(mutated.defHash).not.toBe(spec.defHash);
     // Per-ticket model/model-tier overrides must NOT redefine the attested
@@ -2731,16 +3536,15 @@ describe("buildRunSpec", () => {
     const overridden = buildRunSpec(registry, envelope(), mapping, {
       runId: "run_defhash_4",
       policyVersion: "git:test",
-      now: NOW,
       modelTierOverride: "strong",
       modelOverride: "openai-codex/gpt-5.6-terra",
     });
     expect(overridden.defHash).toBe(spec.defHash);
   });
 
-  test("is pure and honors adapterOverride", () => {
+  test("is clock-independent and honors adapterOverride", () => {
     const mapping = registry.eventTypes["factory.status-report.requested"];
-    const opts = { runId: "run_x", policyVersion: "git:abc", now: NOW };
+    const opts = { runId: "run_x", policyVersion: "git:abc" };
     const a = buildRunSpec(registry, envelope(), mapping, opts);
     const b = buildRunSpec(registry, envelope(), mapping, opts);
     expect(hashJson(a)).toBe(hashJson(b));
@@ -2766,7 +3570,6 @@ describe("buildRunSpec", () => {
     const spec = buildRunSpec(synthetic, envelope(), mapping, {
       runId: "run_harness_pins",
       policyVersion: "git:test",
-      now: NOW,
     });
 
     expect(spec.harness).toEqual({ commands: ["factory-ticket"] });
@@ -3318,6 +4121,9 @@ function memoDoc(overrides = {}) {
 
 function acceptMemo(document) {
   const sha256 = memoDigest(document);
+  const store = artifactsRoot();
+  mkdirSync(store, { recursive: true });
+  writeFileSync(path.join(store, sha256), canonicalJson(document));
   return {
     sha256,
     result: { memos: [{ sha256, document }] },
@@ -3614,6 +4420,161 @@ describe("planEvent memoPin (WM-810)", () => {
     });
   });
 
+  test("missing memo artifacts retire once and leave the surviving fold stable", () => {
+    withMemoConfig(() => {
+      const db = openDb(":memory:");
+      const missing = memoDoc({
+        subject: { type: "repo", id: "factory" },
+        kind: "decision",
+        precedentOnly: true,
+        body: "The missing decision.",
+        refs: { inboxItemId: "inbox_missing" },
+        provenance: {
+          runId: null,
+          agent: "runtime:inbox",
+          createdAt: "2026-08-18T14:02:11.000Z",
+        },
+      });
+      const surviving = memoDoc({
+        subject: { type: "repo", id: "factory" },
+        kind: "decision",
+        precedentOnly: true,
+        body: "The surviving decision.",
+        refs: { inboxItemId: "inbox_surviving" },
+        provenance: {
+          runId: null,
+          agent: "runtime:inbox",
+          createdAt: "2026-08-18T14:02:12.000Z",
+        },
+      });
+      const missingAccepted = acceptMemo(missing);
+      const survivingAccepted = acceptMemo(surviving);
+      registerMemos(db, null, missingAccepted.result, { now: NOW });
+      registerMemos(db, null, survivingAccepted.result, { now: NOW });
+      unlinkSync(path.join(artifactsRoot(), missingAccepted.sha256));
+
+      const retired = [];
+      const def = {
+        memos: [
+          {
+            subject: { type: "repo", id: "$.input.repo" },
+            kinds: ["decision"],
+            max: 10,
+          },
+        ],
+      };
+      const first = pinMemos(
+        db,
+        def,
+        { repo: "factory" },
+        { now: NOW, onArtifactMissing: (memo) => retired.push(memo) },
+      );
+      expect(first.memoPin.entries.map((entry) => entry.sha256)).toEqual([
+        survivingAccepted.sha256,
+      ]);
+      expect(retired).toEqual([
+        expect.objectContaining({
+          sha256: missingAccepted.sha256,
+          inboxItemId: "inbox_missing",
+          retiredReason: "artifact_missing",
+          subject: { type: "repo", id: "factory" },
+        }),
+      ]);
+      expect(
+        db
+          .query(
+            `SELECT retired_at, retired_reason FROM memos WHERE sha256 = ?`,
+          )
+          .get(missingAccepted.sha256),
+      ).toEqual({ retired_at: NOW, retired_reason: "artifact_missing" });
+
+      const second = pinMemos(db, def, first, {
+        now: NOW + 1000,
+        onArtifactMissing: (memo) => retired.push(memo),
+      });
+      expect(second.memoPin).toEqual(first.memoPin);
+      expect(retired).toHaveLength(1);
+      db.close();
+    });
+  });
+
+  test("artifact-missing logging waits for the planner transaction to commit", () => {
+    withMemoConfig(() => {
+      const db = openDb(":memory:");
+      const document = memoDoc({
+        subject: { type: "repo", id: "factory" },
+        kind: "decision",
+        precedentOnly: true,
+        body: "Retire only after commit.",
+        refs: { inboxItemId: "inbox_commit" },
+        provenance: {
+          runId: null,
+          agent: "runtime:inbox",
+          createdAt: "2026-08-18T14:02:13.000Z",
+        },
+      });
+      const accepted = acceptMemo(document);
+      registerMemos(db, null, accepted.result, { now: NOW });
+      unlinkSync(path.join(artifactsRoot(), accepted.sha256));
+
+      const memoRegistry = memoReaderRegistry();
+      const def = memoRegistry.agents.get("memo-reader@1");
+      memoRegistry.agents.set("memo-reader@1", {
+        ...def,
+        memos: [
+          {
+            subject: { type: "repo", id: "$.input.repo" },
+            kinds: ["decision"],
+            max: 10,
+          },
+        ],
+      });
+      memoRegistry.eventTypes["test.memo.requested"] = {
+        ...memoRegistry.eventTypes["test.memo.requested"],
+        idempotencyScope: ["invalid-after-memo-fold"],
+      };
+      const ref = admitMemo(db, memoRegistry, {
+        eventId: "memo-rollback-log",
+        correlationId: "memo-rollback-log",
+      });
+      const logs = [];
+      expect(() =>
+        planEvent(db, memoRegistry, ref, {
+          now: NOW,
+          policyVersion: "git:test",
+          log: (line) => logs.push(line),
+        }),
+      ).toThrow(/unknown idempotency scope/);
+      expect(logs).toEqual([]);
+      expect(
+        db
+          .query(`SELECT retired_at FROM memos WHERE sha256 = ?`)
+          .get(accepted.sha256).retired_at,
+      ).toBeNull();
+
+      memoRegistry.eventTypes["test.memo.requested"] = {
+        ...memoRegistry.eventTypes["test.memo.requested"],
+        idempotencyScope: ["inputHash"],
+      };
+      expect(
+        planEvent(db, memoRegistry, ref, {
+          now: NOW + 1,
+          policyVersion: "git:test",
+          log: (line) => logs.push(line),
+        }).decision,
+      ).toBe("run");
+      expect(logs).toEqual([
+        `memo retired artifact_missing sha256=${accepted.sha256} subject=repo:factory inbox_item_id=inbox_commit`,
+      ]);
+      expect(
+        db
+          .query(`SELECT retired_reason FROM memos WHERE sha256 = ?`)
+          .get(accepted.sha256).retired_reason,
+      ).toBe("artifact_missing");
+      db.close();
+    });
+  });
+
   test("a new memo on a later event is a new run by inputHash", () => {
     withMemoConfig(() => {
       const db = openDb(":memory:");
@@ -3672,6 +4633,183 @@ describe("Linear rate limit (WM-878)", () => {
     description: "## Owned Paths\n- event-runtime/lib/planner.mjs\n",
   });
 
+  function withLinearCli(source, fn) {
+    const root = tmpDir("evrt-plan-linear-cli-");
+    const cli = path.join(root, "linear.mjs");
+    writeFileSync(cli, source);
+    const previous = process.env.FACTORY_LINEAR_CLI;
+    process.env.FACTORY_LINEAR_CLI = cli;
+    try {
+      return fn();
+    } finally {
+      if (previous === undefined) delete process.env.FACTORY_LINEAR_CLI;
+      else process.env.FACTORY_LINEAR_CLI = previous;
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  function deadlineBudget() {
+    let reads = 0;
+    return {
+      deadline: 10_000,
+      now: () => (reads++ < 2 ? 0 : 10_000),
+    };
+  }
+
+  test("binds the read budget without replacing an omitted viewer config snapshot", () => {
+    withLinearCli(
+      'console.log(JSON.stringify({ viewer: { id: "viewer-1" } }));',
+      () => {
+        const cache = createLinearReadCache();
+        cache.linearReadBudget = { deadline: 10_000, now: () => 0 };
+        const reads = wrapLinearReads({}, cache, NOW, {
+          repos: new Map([
+            ["gated", { name: "gated", controlPlane: "linear" }],
+          ]),
+        });
+
+        expect(reads.fetchViewer("gated")).toEqual({ id: "viewer-1" });
+      },
+    );
+  });
+
+  test("a deadline-boundary CLI 429 retains its resetAt", () => {
+    withLinearCli(
+      [
+        'console.error(JSON.stringify({ resetAt: "2026-08-19T13:00:00.000Z" }));',
+        "process.exit(3);",
+      ].join("\n"),
+      () => {
+        const cache = createLinearReadCache();
+        cache.linearReadBudget = deadlineBudget();
+        const reads = wrapLinearReads({}, cache, NOW, {
+          repos: new Map([
+            ["gated", { name: "gated", controlPlane: "linear" }],
+          ]),
+        });
+
+        let error;
+        try {
+          reads.fetchTicket("WM-429", "gated");
+        } catch (caught) {
+          error = caught;
+        }
+        expect(error).toBeInstanceOf(LinearRateLimitError);
+        expect(error.resetAt).toBe("2026-08-19T13:00:00.000Z");
+        expect(cache.rateLimitedUntil).toBe(
+          Date.parse("2026-08-19T13:00:00.000Z"),
+        );
+      },
+    );
+  });
+
+  test("a deadline-boundary missing ticket still returns null", () => {
+    withLinearCli('console.error("no such issue"); process.exit(1);', () => {
+      const cache = createLinearReadCache();
+      cache.linearReadBudget = deadlineBudget();
+      const reads = wrapLinearReads({}, cache, NOW, {
+        repos: new Map([["gated", { name: "gated", controlPlane: "linear" }]]),
+      });
+
+      expect(reads.fetchTicket("WM-missing", "gated")).toBeNull();
+    });
+  });
+
+  test("an exhausted budget defers every default read on a github plane (#1890)", () => {
+    // wrapLinearReads skips its own pre-check for a github control plane, so
+    // the budget throw surfaces from *inside* each default fetcher's try. It
+    // must stay deferrable rather than being rewrapped as linear_read_failed.
+    withLinearCli("throw new Error('the CLI must never be spawned');", () => {
+      const configSnapshot = {
+        repos: new Map([["gh", { name: "gh", controlPlane: "github" }]]),
+      };
+      for (const read of [
+        (reads) => reads.fetchTicket("watt-mind/factory#534", "gh"),
+        (reads) => reads.fetchViewer("gh"),
+        (reads) =>
+          reads.fetchInFlight({
+            name: "gh",
+            team: "WM",
+            project: "Factory",
+            controlPlane: "github",
+          }),
+      ]) {
+        const cache = createLinearReadCache();
+        cache.linearReadBudget = { deadline: 0, now: () => 5000 };
+        let error;
+        try {
+          read(wrapLinearReads({}, cache, NOW, configSnapshot));
+        } catch (caught) {
+          error = caught;
+        }
+        expect(error?.name).toBe("LinearReadBudgetExceededError");
+        expect(error?.message).toBe("linear_read_budget_exhausted");
+      }
+    });
+  });
+
+  test("a child killed by the read timeout at the deadline defers", () => {
+    // The genuine linearReadTimedOut path: the budget still had room when the
+    // child was spawned, the child was SIGTERMed by that timeout, and the
+    // deadline has passed by the time the failure is classified.
+    withLinearCli("Bun.sleepSync(2000);", () => {
+      const cache = createLinearReadCache();
+      let clockReads = 0;
+      cache.linearReadBudget = {
+        deadline: 100,
+        now: () => (clockReads++ < 2 ? 0 : 100),
+      };
+      const reads = wrapLinearReads({}, cache, NOW, {
+        repos: new Map([["gated", { name: "gated", controlPlane: "linear" }]]),
+      });
+
+      let error;
+      try {
+        reads.fetchTicket("WM-slow", "gated");
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error?.name).toBe("LinearReadBudgetExceededError");
+      expect(error?.message).toBe("linear_read_budget_exhausted");
+    });
+  });
+
+  test("an awaited read killed by its own deadline defers instead of failing hard (#2123)", async () => {
+    // Regression: the async reader must reproduce the killed-child error shape
+    // `linearReadTimedOut` recognises (code ETIMEDOUT / SIGTERM with a null
+    // status). Without it the timeout surfaced as `linear_read_failed`, which
+    // chain approval memoises as a hard refusal instead of retrying next tick.
+    const root = tmpDir("evrt-plan-async-cli-");
+    const cli = path.join(root, "linear.mjs");
+    writeFileSync(cli, "Bun.sleepSync(5000);");
+    const previousCli = process.env.FACTORY_LINEAR_CLI;
+    process.env.FACTORY_LINEAR_CLI = cli;
+    try {
+      const dispatch = createAutoApprovalDispatch({
+        readTimeoutMs: 50,
+        configSnapshot: {
+          root,
+          repos: new Map([
+            ["gated", { name: "gated", controlPlane: "linear" }],
+          ]),
+        },
+      });
+
+      let error;
+      try {
+        await dispatch.fetchTicket("WM-slow", "gated");
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error?.name).toBe("LinearReadBudgetExceededError");
+      expect(error?.message).toBe("linear_read_budget_exhausted");
+    } finally {
+      if (previousCli === undefined) delete process.env.FACTORY_LINEAR_CLI;
+      else process.env.FACTORY_LINEAR_CLI = previousCli;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("a simulated Linear 400 rate-limit refuses linear_rate_limited, leaves the event admitted, and does not dead-letter", () => {
     withReposRoot(gatedYaml, () => {
       const db = openDb(":memory:");
@@ -3723,6 +4861,133 @@ describe("Linear rate limit (WM-878)", () => {
       });
     });
   });
+
+  test("an active cached Linear budget skips planner reads and logs its reset clock once", () => {
+    withReposRoot(gatedYaml, () => {
+      const db = openDb(":memory:");
+      const ref = admit(db, {
+        type: "factory.dispatch.requested",
+        eventId: "cached-rate-limit-1",
+        correlationId: "cached-rate-limit-1",
+        payload: { repo: "gated", ticket: "WM-1835" },
+      });
+      const resetAt = "2026-08-19T13:00:00.000Z";
+      const logs = [];
+      let ticketReads = 0;
+
+      const counts = planAdmittedEvents(db, registry, {
+        now: NOW,
+        policyVersion: "git:test",
+        linearBudget: { rateLimited: true, resetAt },
+        log: (line) => logs.push(line),
+        dispatch: {
+          countLeases: () => 0,
+          budgetRefusal: () => null,
+          fetchTicket: () => {
+            ticketReads += 1;
+            return readyTicket("WM-1835");
+          },
+        },
+      });
+
+      expect(counts).toEqual({ planned: 0, failed: 0, deadLettered: 0 });
+      expect(ticketReads).toBe(0);
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toMatch(/rate-limited/);
+      expect(logs[0]).toContain(resetAt);
+      const escapedResetAt = resetAt.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const event = db
+        .query(`SELECT status, last_plan_error FROM events WHERE event_id = ?`)
+        .get(ref.eventId);
+      expect(event).toMatchObject({
+        status: "admitted",
+        last_plan_error: expect.stringMatching(
+          new RegExp(`^linear_rate_limited:.*${escapedResetAt}`),
+        ),
+      });
+    });
+  });
+
+  test("a stalled event cannot exhaust the next event's Linear read budget", () => {
+    const checkout = tmpDir("evrt-plan-budget-repo-");
+    execFileSync("git", ["init", "-q", "-b", "develop", checkout]);
+    writeFileSync(path.join(checkout, "README.md"), "fixture\n");
+    execFileSync("git", ["-C", checkout, "add", "README.md"]);
+    execFileSync("git", [
+      "-C",
+      checkout,
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.com",
+      "commit",
+      "-qm",
+      "fixture",
+    ]);
+    withReposRoot(gatedYaml.replace("/tmp/nowhere", checkout), () => {
+      const db = openDb(":memory:");
+      for (const ticket of ["WM-18661", "WM-18662"]) {
+        admit(db, {
+          type: "factory.dispatch.requested",
+          eventId: `pass-budget-${ticket}`,
+          correlationId: `pass-budget-${ticket}`,
+          payload: { repo: "gated", ticket },
+        });
+      }
+      let elapsed = 0;
+      const ticketReads = [];
+
+      expect(
+        planAdmittedEvents(db, registry, {
+          now: NOW,
+          policyVersion: "git:test",
+          linearReadClock: () => elapsed,
+          linearReadTimeoutMs: 50,
+          dispatch: {
+            countLeases: () => 0,
+            budgetRefusal: () => null,
+            fetchTicket: (ticket) => {
+              ticketReads.push(ticket);
+              // Model the first stalled read consuming the pass budget.
+              elapsed = 50;
+              return readyTicket(ticket);
+            },
+            fetchInFlight: () => [],
+          },
+        }),
+      ).toEqual({ planned: 1, failed: 0, deadLettered: 0 });
+
+      expect(ticketReads).toEqual(["WM-18661", "WM-18662"]);
+      expect(
+        db
+          .query(
+            `SELECT status, plan_failures, last_plan_error FROM events WHERE event_id = ?`,
+          )
+          .get("pass-budget-WM-18661"),
+      ).toMatchObject({
+        status: "admitted",
+        plan_failures: 0,
+        last_plan_error: "linear_read_budget_exhausted",
+      });
+      expect(
+        db
+          .query(
+            `SELECT status, last_plan_error FROM events WHERE event_id = ?`,
+          )
+          .get("pass-budget-WM-18662"),
+      ).toEqual({ status: "planned", last_plan_error: null });
+    });
+  });
+
+  // The default is what production runs on: no deployment sets
+  // FACTORY_LINEAR_READ_TIMEOUT_MS, so a silent change to this number changes
+  // how long a stalled Linear read can hold a planner pass.
+  test.skipIf(process.env.FACTORY_LINEAR_READ_TIMEOUT_MS != null)(
+    "the Linear read budget defaults to 25s when FACTORY_LINEAR_READ_TIMEOUT_MS is unset",
+    () => {
+      expect(LINEAR_READ_TIMEOUT_MS).toBe(25_000);
+    },
+  );
 
   test("one planning pass over 10 candidates makes at most 3 in-flight queries", () => {
     withReposRoot(gatedYaml, () => {
@@ -3884,6 +5149,44 @@ describe("GitHub dispatch candidate parsing (GH-974)", () => {
       expect(logs).toContain(
         "planned noop (ticket_identifier_unresolvable: not a GitHub issue identifier: WM-621 (want owner/repo#N)) — operator-webhook:github-candidate-legacy",
       );
+    });
+  });
+
+  test("an exhausted read budget defers a github candidate rather than failing the plan (#1890)", () => {
+    withGithubRepo(() => {
+      const db = openDb(":memory:");
+      admit(db, {
+        type: "factory.dispatch.requested",
+        eventId: "github-budget-exhausted",
+        correlationId: "github-budget-exhausted",
+        payload: {
+          repo: "github-candidates",
+          ticket: "watt-mind/factory#534",
+        },
+      });
+
+      // Default fetchers, budget already spent: the throw comes from inside
+      // the fetcher's own try, which used to exit as a hard linear_read_failed.
+      expect(
+        planAdmittedEvents(db, registry, {
+          now: NOW,
+          policyVersion: "git:test",
+          linearReadBudget: { deadline: 0, now: () => 5000 },
+          dispatch: { countLeases: () => 0, budgetRefusal: () => null },
+        }),
+      ).toEqual({ planned: 0, failed: 0, deadLettered: 0 });
+
+      expect(
+        db
+          .query(
+            `SELECT status, plan_failures, last_plan_error FROM events WHERE event_id = ?`,
+          )
+          .get("github-budget-exhausted"),
+      ).toMatchObject({
+        status: "admitted",
+        plan_failures: 0,
+        last_plan_error: "linear_read_budget_exhausted",
+      });
     });
   });
 });

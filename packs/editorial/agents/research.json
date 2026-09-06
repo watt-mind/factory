@@ -1,0 +1,24 @@
+{
+  "id": "research",
+  "version": 1,
+  "prompt": "agents/research.md",
+  "input_schema": "schemas/research.input.json",
+  "output_schema": "schemas/research.output.json",
+  "output_contract": "factory.editorial-research/v1",
+  "model_tier": "strong",
+  "effort": "high",
+  "workspace": { "type": "ephemeral", "retainOnFailure": true },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": [],
+    "cells": [
+      {
+        "binding": "ARTICLE_CELL",
+        "access": "read-write",
+        "description": "Article sources and verified claims"
+      }
+    ]
+  },
+  "limits": { "timeout_seconds": 180, "attempts": 1 },
+  "mutating": false
+}

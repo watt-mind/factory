@@ -176,6 +176,22 @@ registry runs the same check at load and refuses a view that does not fit
 
 ### 2.4 Rendering
 
+#### Events use the same view contract
+
+Event surfaces retain a fixed envelope glance — type, source, subject,
+occurred time, and correlation/causation links — then offer an explicit
+**View / Raw** choice. Raw is always the complete event envelope, never just
+its payload. For `*.requested` events, the routed agent's existing
+`outputView.input` body renders the payload; do not add parallel
+`*.input.view.json` sidecars. For completed events that name a run and a
+valid content hash, the result artifact uses that run agent's output view.
+Missing, pruned, or non-JSON artifacts show a named unavailable state while
+Raw and the envelope's own payload fields remain visible; a resolved artifact
+whose run names no output view falls back to its JSON rather than being
+discarded. Hashes are requested only when they are a strict lowercase
+SHA-256 digest (optionally prefixed by `sha256:`), and responses are cached by
+that digest so a later selection cannot paint an earlier event's result.
+
 `web/src/components/ArtifactView.tsx` takes `{ artifact, schema, view }` and
 renders §2.2. It replaces the `JsonBlock` at the artifact position in run
 detail (`RunDetailBlocks.tsx`) and in `views/Artifacts.tsx` when a view exists

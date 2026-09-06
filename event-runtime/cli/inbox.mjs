@@ -3,12 +3,10 @@ import { unauthorizedMessage } from "../lib/client.mjs";
 
 export async function inbox(client) {
   const token = client.token ?? process.env.FACTORY_CONTROL_API_TOKEN ?? null;
-  const res = await fetch(
-    `http://${client.host}:${client.port}/inbox?status=open`,
-    {
-      headers: token ? { authorization: `Bearer ${token}` } : {},
-    },
-  );
+  const inboxUrl = new URL("inbox?status=open", `${client.baseUrl}/`);
+  const res = await fetch(inboxUrl, {
+    headers: token ? { authorization: `Bearer ${token}` } : {},
+  });
   const body = await res.json();
   if (!res.ok) {
     const err = new Error(

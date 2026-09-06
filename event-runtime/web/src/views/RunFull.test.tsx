@@ -81,6 +81,67 @@ describe("RunFull layout (WM-194)", () => {
 });
 
 describe("RunFull header (WM-193)", () => {
+  test("leads with the same linked agent, ticket, and title identity as the list", async () => {
+    const runId = "run_human_identity";
+    const identity = {
+      agentKind: "dispatch",
+      ticketSubject: "watt-mind/factory#2025",
+      subjectLabel: "factory#2025",
+      subjectTitle: "Show useful run identities",
+      subjectUrl: "https://github.com/watt-mind/factory/issues/2025",
+      originType: "factory.dispatch.requested",
+      originLabel: "dispatch",
+    };
+    const detail = Object.assign(
+      createRunDetailFixture({
+        run: {
+          runId,
+          state: "RUNNING",
+          spec: { agent: "dispatch@1" },
+        } as RunDetail["run"],
+      }),
+      { identity },
+    );
+    const listRun = Object.assign(
+      createRunListItemFixture({
+        runId,
+        state: "RUNNING",
+        agent: "dispatch@1",
+      }),
+      identity,
+    );
+
+    await withApi(
+      {
+        run: async () => detail,
+        runs: async () => ({ runs: [listRun] }),
+      },
+      async () => {
+        const view = renderRunFull(runId);
+        const human = await view.findByLabelText("Run identity");
+        expect(human.textContent).toBe(
+          "dispatchfactory#2025 — Show useful run identities",
+        );
+        const ticket = within(human).getByRole("link", {
+          name: "factory#2025 — Show useful run identities",
+        });
+        expect(ticket.getAttribute("href")).toBe(
+          "https://github.com/watt-mind/factory/issues/2025",
+        );
+        expect(ticket.getAttribute("title")).toBe(
+          "factory#2025 — Show useful run identities · Open watt-mind/factory#2025",
+        );
+        expect(human.firstElementChild?.classList.contains("flex-wrap")).toBe(
+          true,
+        );
+        const header = view.container.querySelector("header")!;
+        expect(header.textContent?.indexOf("dispatch")).toBeLessThan(
+          header.textContent?.indexOf("RUNNING") ?? 0,
+        );
+      },
+    );
+  });
+
   test("shows elapsed time, lease remaining, and a fresh worker heartbeat for an in-flight run", async () => {
     const runId = "run_inflight_fresh";
     const detail = createRunDetailFixture({
@@ -235,6 +296,7 @@ describe("RunFull header (WM-193)", () => {
         expect(header?.textContent).toContain("← Runs");
         expect(header?.textContent).toContain(shortId(runId));
         expect(header?.textContent).toContain("RUNNING");
+        expect(header?.textContent).toContain("header-agent");
         expect(header?.textContent).not.toContain("copy:");
         expect(header?.querySelector(`[title="${runId}"]`)?.textContent).toBe(
           shortId(runId),

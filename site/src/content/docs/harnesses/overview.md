@@ -3,7 +3,7 @@ title: Supported Harnesses
 description: Overview of supported coding agents and adapters
 ---
 
-Factory connects to multiple coding-agent CLIs without hard-wiring its workflow to one provider. Availability varies by execution path: the classic ticket runner supports all listed harnesses, while the event runtime exposes its installed adapter registry with `factory events adapters`.
+Factory connects to multiple coding-agent CLIs without hard-wiring its workflow to one provider. Availability varies by execution path: the classic ticket runner supports Claude Code, Codex, Gemini / Antigravity, Cursor, and Pi, while the event runtime exposes its installed adapter registry — including Hermes Agent via ACP — with `factory events adapters`.
 
 <iframe
   class="diagram-embed"
@@ -19,6 +19,7 @@ Factory connects to multiple coding-agent CLIs without hard-wiring its workflow 
 - **OpenAI Codex** (`--harness codex`) — OpenAI coding harness.
 - **Cursor** (`--harness cursor`) — Cursor CLI and agent environment.
 - **Pi** (`--harness pi`) — A lightweight, extensible coding-agent CLI.
+- **Hermes Agent** (`hermes`) — An ACP v1 coding-agent adapter using the `hermes-agent-acp` binary. It is registered and conformance-tested, but has no production event route yet.
 - **Fake adapter** (`--harness fake`) — Deterministic simulator for tests and the offline demo.
 
 ```bash

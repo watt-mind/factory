@@ -3,6 +3,21 @@ import { openDb } from "./db.mjs";
 import { statusView } from "./status-view.mjs";
 
 describe("statusView outbox counts", () => {
+  test("publishes whether an operator has paused unattended dispatch", () => {
+    const db = openDb(":memory:");
+
+    expect(
+      statusView(db, { schedules: [] }, Date.now(), {
+        dispatchPaused: () => true,
+      }).policy,
+    ).toEqual({ dispatchPaused: true });
+    expect(
+      statusView(db, { schedules: [] }, Date.now(), {
+        dispatchPaused: () => false,
+      }).policy,
+    ).toEqual({ dispatchPaused: false });
+  });
+
   test("reports parked rows separately from unpublished rows", () => {
     const db = openDb(":memory:");
     const now = Date.now();
@@ -20,4 +35,106 @@ describe("statusView outbox counts", () => {
       parkedOutbox: 1,
     });
   });
+
+  test("counts only expired run proposals as anomalies", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-30T08:00:00.000Z");
+    const createdAt = new Date(now - 61_000).toISOString();
+    const insert = db.query(
+      `INSERT INTO proposals (id, event_source, event_id, decision, status, created_at, ttl_seconds)
+       VALUES (?, 'test', ?, ?, 'open', ?, 60)`,
+    );
+    insert.run("run-expired", "run-event", "run", createdAt);
+    insert.run("parked-past-ttl", "parked-event", "human_needed", createdAt);
+
+    const view = statusView(db, { schedules: [] }, now);
+    expect(view.proposals).toEqual({ open: 2, expired: 1 });
+    expect(view.anomalies.expiredOpenProposals).toEqual(["run-expired"]);
+  });
+
+  test("reports an unconfigured GitHub intake separately from a stale configured intake", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-30T08:00:00.000Z");
+
+    const unconfigured = statusView(db, { schedules: [] }, now, {
+      githubSecret: null,
+    });
+    expect(unconfigured.anomalies.configuration).toContain(
+      "FACTORY_GITHUB_WEBHOOK_SECRET is unset (GitHub webhook intake disabled)",
+    );
+
+    // A configured intake with no prior admission is a fresh runtime, not an
+    // outage: no staleness anomaly until a delivery has actually been admitted.
+    const fresh = statusView(db, { schedules: [] }, now, {
+      githubSecret: "configured",
+    });
+    expect(
+      fresh.anomalies.configuration.filter((a) =>
+        a.startsWith("GitHub webhook intake is stale"),
+      ),
+    ).toEqual([]);
+
+    seedGithubEvent(db, "2026-08-29T08:00:00.000Z");
+    const configured = statusView(db, { schedules: [] }, now, {
+      githubSecret: "configured",
+    });
+    expect(configured.anomalies.configuration).toContain(
+      "GitHub webhook intake is stale (last admission was 86400000ms ago; threshold 43200000ms)",
+    );
+  });
+
+  test("reports a dead or stale planner when admitted work is waiting", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-30T08:00:00.000Z");
+    seedGithubEvent(db, "2026-08-30T07:59:00.000Z");
+    const planner = {
+      lastPlannedAt: "2026-08-30T07:54:00.000Z",
+      ageMs: 300_000,
+      stale: true,
+      staleAfterMs: 300_000,
+      alive: true,
+    };
+
+    const stale = statusView(db, { schedules: [] }, now, {
+      getTickStats: () => ({ planner }),
+    });
+    expect(stale.planner).toEqual(planner);
+    expect(stale.anomalies.configuration).toContain(
+      "Planner worker is stale (last planning activity was 300000ms ago; threshold 300000ms)",
+    );
+
+    const dead = statusView(db, { schedules: [] }, now, {
+      getTickStats: () => ({ planner: { ...planner, alive: false } }),
+    });
+    expect(dead.anomalies.configuration).toContain("Planner worker is dead");
+  });
+
+  test("exposes unparsable result counts with artifact statistics", () => {
+    const db = openDb(":memory:");
+    const view = statusView(db, { schedules: [] }, Date.now(), {
+      getStoreStats: () => ({
+        files: 1,
+        bytes: 1024,
+        orphans: 1,
+        orphanBytes: 1024,
+        invalidResults: 2,
+      }),
+    });
+
+    expect(view.artifacts).toMatchObject({
+      orphans: 1,
+      orphanBytes: 1024,
+      invalidResults: 2,
+    });
+    db.close();
+  });
 });
+
+function seedGithubEvent(db, admittedAt) {
+  db.query(
+    `INSERT INTO events (source, event_id, type, subject, occurred_at, received_at,
+       correlation_id, causation_id, envelope_json, payload_hash, admitted_at)
+     VALUES ('github', 'old-delivery', 'github.issues.labeled', 'watt-mind/factory',
+       ?1, ?1, 'old-delivery', NULL, '{}', 'hash', ?1)`,
+  ).run(admittedAt);
+}

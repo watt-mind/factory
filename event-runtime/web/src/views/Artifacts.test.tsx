@@ -87,6 +87,7 @@ function renderArtifacts(
     agents?: unknown[];
     nextBefore?: string | null;
     formatContent?: typeof formattedContent;
+    content?: { sha256: string; text: string };
   } = {},
   onOpenFull: ((sha256: string, backHash?: string) => void) | null = mock(
     () => {},
@@ -105,8 +106,13 @@ function renderArtifacts(
       initialFilters.search,
     ],
     {
-      artifacts: seed.items ?? ITEMS,
-      nextBefore: seed.nextBefore,
+      pages: [
+        {
+          artifacts: seed.items ?? ITEMS,
+          nextBefore: seed.nextBefore,
+        },
+      ],
+      pageParams: [undefined],
     },
   );
   if (seed.agents)
@@ -116,6 +122,11 @@ function renderArtifacts(
       eventTypes: [],
       contracts: {},
     });
+  if (seed.content !== undefined)
+    client.setQueryData(
+      ["artifact-content", seed.content.sha256],
+      seed.content.text,
+    );
   client.setQueryData(["events", "all-for-artifacts"], {
     events: [
       {
@@ -239,20 +250,24 @@ describe("Artifacts inventory (WM-207)", () => {
   });
 
   test("filters by kind and orphan status facets", async () => {
+    globalThis.fetch = mock(
+      async () =>
+        new Response(JSON.stringify({ artifacts: ITEMS }), { status: 200 }),
+    ) as unknown as typeof fetch;
     const view = renderArtifacts();
     await waitFor(() => expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy());
 
     fireEvent.change(view.getByRole("combobox", { name: "Artifact kind" }), {
       target: { value: "report" },
     });
-    expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy();
+    await waitFor(() => expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy());
     expect(view.queryByText("bbbbbbbbbbbb")).toBeNull();
 
     fireEvent.change(view.getByRole("combobox", { name: "Artifact kind" }), {
       target: { value: "" },
     });
     fireEvent.click(view.getByRole("tab", { name: "Orphans 28" }));
-    expect(view.getByText("cccccccccccc")).toBeTruthy();
+    await waitFor(() => expect(view.getByText("cccccccccccc")).toBeTruthy());
     expect(view.queryByText("aaaaaaaaaaaa")).toBeNull();
   });
 
@@ -381,28 +396,64 @@ describe("Artifacts inventory (WM-207)", () => {
     expect(view.queryByText(/run_trace/)).toBeNull();
   });
 
-  test("warns when the server has more artifacts than this page", async () => {
+  test("reports metadata query failures instead of claiming the artifact was pruned", async () => {
+    window.location.hash = `#/artifacts/${"a".repeat(64)}`;
+    globalThis.fetch = mock(
+      async () => new Response("unavailable", { status: 503 }),
+    ) as unknown as typeof fetch;
+
+    const view = renderArtifacts(undefined, undefined, { items: [] });
+
+    await view.findByText(/could not load artifact metadata/i);
+    expect(view.getByText(/cannot reach the control api/i)).toBeTruthy();
+    expect(view.getByRole("button", { name: "Retry" })).toBeTruthy();
+    expect(view.queryByText(/may have been pruned/i)).toBeNull();
+  });
+
+  test("appends an older artifact page and resets to the first page for a new filter", async () => {
+    const older = {
+      ...ITEMS[2],
+      sha256: "d".repeat(64),
+      references: [
+        {
+          runId: "run_older",
+          kind: "report",
+          agent: "reporter@1",
+          state: "COMPLETED",
+          createdAt: "2026-01-01T03:04:05.000Z",
+        },
+      ],
+    };
+    const requests: string[] = [];
+    globalThis.fetch = mock(async (input: string | URL | Request) => {
+      const url = String(input);
+      requests.push(url);
+      const params = new URL(url, "http://localhost").searchParams;
+      const artifacts = params.get("before") ? [older] : ITEMS;
+      return new Response(
+        JSON.stringify({
+          artifacts,
+          nextBefore: params.get("before") ? null : "older-artifacts",
+        }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+
     const view = renderArtifacts(undefined, undefined, {
       nextBefore: "older-artifacts",
     });
-    await waitFor(() => expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy());
+    await view.findByText("aaaaaaaaaaaa");
+    fireEvent.click(view.getByRole("button", { name: "Load older artifacts" }));
+    await view.findByText("dddddddddddd");
+    expect(requests).toContain("/api/artifacts?before=older-artifacts");
 
-    expect(view.getByRole("status").textContent).toMatch(
-      /showing 3 artifacts.*more.*narrow the filter/i,
+    fireEvent.change(view.getByRole("combobox", { name: "Artifact kind" }), {
+      target: { value: "report" },
+    });
+    await waitFor(() =>
+      expect(requests).toContain("/api/artifacts?kind=report"),
     );
-  });
-
-  test("the more-available notice counts the visible rows", async () => {
-    const view = renderArtifacts(
-      undefined,
-      { kind: "report", orphan: null, search: "" },
-      { nextBefore: "older-artifacts" },
-    );
-    await waitFor(() => expect(view.getByText("aaaaaaaaaaaa")).toBeTruthy());
-
-    expect(view.getByRole("status").textContent).toMatch(
-      /showing 1 artifacts?.*more/i,
-    );
+    expect(view.queryByText("dddddddddddd")).toBeNull();
   });
 
   test("opens a deep-linked inspector with formatted preview, actions, search, and bidirectional references", async () => {
@@ -455,7 +506,7 @@ describe("Artifacts inventory (WM-207)", () => {
     expect(writeText).toHaveBeenNthCalledWith(2, "a".repeat(64));
   });
 
-  test("formats a large artifact once across a useNow tick", async () => {
+  test("formats a large artifact once across a useNow tick", () => {
     const raw = JSON.stringify({
       entries: Array.from({ length: 10_000 }, (_, index) => ({
         index,
@@ -464,15 +515,32 @@ describe("Artifacts inventory (WM-207)", () => {
     });
     jest.useFakeTimers();
     jest.setSystemTime(new Date("2026-08-30T00:00:00.000Z"));
-    const formatContent = mock(formattedContent);
+    // GH-2281. Two hosted-lane hazards are designed out here:
+    //
+    //  * This is a memoization test, not a 10,000-line DOM benchmark. The
+    //    expensive input is kept, but the formatter returns a compact preview
+    //    so the render cost does not scale with it.
+    //  * Nothing is awaited while fake timers are installed. A `findByRole`
+    //    under fake timers polls by advancing a clock that never really moves,
+    //    so a missing element does not time out — it hangs the whole test
+    //    process, which is exactly how this case took a hosted job to its
+    //    45-minute limit. Seeding the content cache makes the inspector render
+    //    synchronously, so a plain `getByRole` either passes or fails at once.
+    const formatContent = mock(() => "formatted artifact");
+    // Pin `fetch` rather than inheriting whichever mock the previously executed
+    // case happened to leave behind: any background refetch must resolve to the
+    // same body the cache was seeded with, on every lane.
     globalThis.fetch = mock(
       async () => new Response(raw, { status: 200 }),
     ) as unknown as typeof fetch;
     window.location.hash = `#/artifacts/${"a".repeat(64)}`;
 
     try {
-      const view = renderArtifacts(undefined, undefined, { formatContent });
-      await view.findByRole("region", { name: "Artifact content" });
+      const view = renderArtifacts(undefined, undefined, {
+        formatContent,
+        content: { sha256: "a".repeat(64), text: raw },
+      });
+      view.getByRole("region", { name: "Artifact content" });
       expect(formatContent).toHaveBeenCalledTimes(1);
 
       act(() => jest.advanceTimersByTime(1_000));

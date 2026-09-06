@@ -335,6 +335,23 @@ workspace; it does not hide extra home-dir content the CLI may still load.
 
 ## 3. Stage 2 — workers on other nodes
 
+### Remote node checkout source
+
+Remote nodes are configured in `config/nodes.yaml`. A node may set `repo_url`
+to the clone URL the remote bootstrap uses, for example:
+
+```yaml
+nodes:
+  build-node:
+    host: build-node.example
+    factory_root: ~/Develop/factory
+    repo_url: ssh://git@example.com/engineering/factory.git
+```
+
+When omitted, `repo_url` defaults to
+`https://github.com/watt-mind/factory.git`. This permits forks, enterprise
+GitHub hosts, and SSH remotes without changing the worker deployment code.
+
 A `work` process on another machine talks to the authenticated `/worker/v1`
 control surface over HTTPS on the tailnet. It never opens SQLite or Postgres.
 Webhook intake, approval, and the web/operator routes do not move or become

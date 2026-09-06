@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "articleId",
+    "revisionHash",
+    "verdict",
+    "score",
+    "findings",
+    "cellVersion"
+  ],
+  "properties": {
+    "articleId": { "type": "string" },
+    "revisionHash": { "type": "string" },
+    "verdict": {
+      "type": "string",
+      "enum": ["APPROVE", "REVISE", "NEEDS_HUMAN"]
+    },
+    "score": { "type": "number" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["category", "severity", "description"],
+        "properties": {
+          "category": { "type": "string" },
+          "severity": {
+            "type": "string",
+            "enum": ["INFO", "WARNING", "BLOCKER"]
+          },
+          "description": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "instructions": { "type": "string" },
+    "cellVersion": { "type": "integer" }
+  },
+  "additionalProperties": false
+}

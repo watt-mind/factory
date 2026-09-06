@@ -36,7 +36,9 @@ Today an extension can contribute:
   allow-listed loopback API endpoint (§Panels below);
 - **harness** — floor markdown, slash commands, skills and subagents that
   `build/emit.mjs` packages for Claude Code, Codex, Gemini, Cursor and Pi
-  (§Harness below). `shared/` is the built-in `factory/core` pack.
+  (§Harness below). Hermes Agent is an event-runtime ACP adapter with its own
+  `.hermes/commands` and `.hermes/agents` targets. `shared/` is the built-in
+  `factory/core` pack.
 
 The manifest also **reserves** `views` for the ticket that lands it. A
 manifest that carries a reserved key loads its packs, adapters, connectors
@@ -811,8 +813,10 @@ root; the built-in pack is `shared/factory-extension.json`._
 
 Harness content is markdown the emit pipeline packages for every coding
 agent the factory supports — the AGENTS.md floor, `/factory-*` slash
-commands, skills, and custom subagents. It is **data**, not in-process
-code: loading a harness contribution executes nothing. Enabling it is
+commands, skills, and custom subagents. Hermes Agent is supported by the
+event runtime's ACP adapter; its command and subagent content is materialized
+under `.hermes/`, while skills are not yet supported. It is **data**, not
+in-process code: loading a harness contribution executes nothing. Enabling it is
 the same allow-list as every other contribution (`policy.yaml
 extensions:`); `shared/` is the exception, the built-in `factory/core`
 pack that emit always includes first so `plugins/core/**` and `dist/**` stay

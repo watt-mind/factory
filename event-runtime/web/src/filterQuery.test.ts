@@ -390,6 +390,16 @@ describe("matchesFilterQuery", () => {
     expect(matchProposal("agent:ci-doctor decision:run status:open")).toBe(
       true,
     );
+    const expired = parseFilterQuery("status:expired", PROPOSAL_FACETS);
+    expect(expired.tokens[0]).toMatchObject({
+      kind: "field",
+      key: "status",
+      value: "expired",
+      supported: true,
+    });
+    expect(
+      matchProposal("status:expired", proposal({ status: "expired" })),
+    ).toBe(true);
     expect(matchProposal("decision:human_needed")).toBe(false);
     expect(matchProposal("source:keephq event:evt_7719")).toBe(true);
     expect(matchProposal("proposal:prop_8f12")).toBe(true);
@@ -611,6 +621,9 @@ describe("getFilterSuggestions", () => {
       "human_needed",
       "noop",
     ]);
+
+    const proposalStatusSugs = getFilterSuggestions("status:", PROPOSAL_FACETS);
+    expect(proposalStatusSugs.map((s) => s.label)).toContain("expired");
 
     const eventStatusSugs = getFilterSuggestions("status:", EVENT_FACETS);
     expect(eventStatusSugs.map((s) => s.label)).toEqual([

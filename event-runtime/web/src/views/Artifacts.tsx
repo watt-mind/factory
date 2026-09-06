@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import {
   useCallback,
   useEffect,
@@ -287,18 +287,21 @@ export function Artifacts({
   formatContent?: typeof formattedContent;
 }) {
   const now = useNow();
-  const artifactsQ = useQuery({
+  const artifactsQ = useInfiniteQuery({
     queryKey: ["artifacts", filters.kind, filters.orphan, filters.search],
-    queryFn: () =>
+    queryFn: ({ pageParam }) =>
       fetchArtifacts({
         kind: filters.kind ?? undefined,
         orphan: filters.orphan ?? undefined,
         search: filters.search.trim() || undefined,
+        before: pageParam,
       }),
-    placeholderData: (previousData) => previousData,
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (lastPage) => lastPage.nextBefore ?? undefined,
     ...refetchIntervals.primary,
   });
-  const artifacts = artifactsQ.data?.artifacts ?? [];
+  const artifacts =
+    artifactsQ.data?.pages.flatMap((page) => page.artifacts) ?? [];
   const [selectedSha, setSelectedSha] = useState(() => artifactShaFromHash());
   const [contentSearch, setContentSearch] = useState("");
 
@@ -333,6 +336,7 @@ export function Artifacts({
   const metadataPending =
     artifactsQ.isPending ||
     (fallbackQ.isPending && fallbackQ.fetchStatus !== "idle");
+  const metadataError = artifactsQ.isError || fallbackQ.isError;
   const contentQ = useQuery({
     queryKey: ["artifact-content", selectedSha],
     queryFn: async () => {
@@ -660,12 +664,6 @@ export function Artifacts({
                 </>
               }
             />
-            {artifactsQ.data?.nextBefore && (
-              <p role="status" className="mt-2 text-[12px] text-(--text-dim)">
-                Showing {visible.length.toLocaleString()} artifacts; more are
-                available. Narrow the filter to see a smaller result set.
-              </p>
-            )}
           </>
         }
       >
@@ -869,6 +867,20 @@ export function Artifacts({
                 }
               />
             )}
+            {artifactsQ.hasNextPage && (
+              <tr>
+                <td colSpan={columns.length} className="px-3 py-3 text-center">
+                  <Button
+                    onClick={() => void artifactsQ.fetchNextPage()}
+                    disabled={artifactsQ.isFetchingNextPage}
+                  >
+                    {artifactsQ.isFetchingNextPage
+                      ? "Loading older artifacts…"
+                      : "Load older artifacts"}
+                  </Button>
+                </td>
+              </tr>
+            )}
           </tbody>
         </Table>
       </ListPane>
@@ -942,7 +954,23 @@ export function Artifacts({
               Loading artifact metadata…
             </div>
           )}
-          {!selected && !metadataPending && (
+          {!selected && metadataError && (
+            <div className="mb-4 rounded-md border border-(--border) p-3 text-(--text-faint)">
+              <p>
+                Cannot reach the control API — could not load artifact metadata.
+              </p>
+              <Button
+                className="mt-3"
+                onClick={() => {
+                  void artifactsQ.refetch();
+                  if (fallbackQ.isError) void fallbackQ.refetch();
+                }}
+              >
+                Retry
+              </Button>
+            </div>
+          )}
+          {!selected && !metadataPending && !metadataError && (
             <div className="mb-4 rounded-md border border-(--border) p-3 text-(--text-faint)">
               Artifact metadata is unavailable. The content may have been
               pruned.

@@ -165,6 +165,7 @@ function installMergeCommandFakes(fixture) {
       '  *"pr view"*"@tsv"*) printf \'MERGED\\t%s\\n\' "$FAKE_MERGE_SHA" ;;',
       '  *"pr view"*"--jq .state"*) printf \'MERGED\\n\' ;;',
       '  *"pr view"*"--jq .mergeCommit.oid"*) printf \'%s\\n\' "$FAKE_MERGE_SHA" ;;',
+      '  *"api repos/watt-mind/factory/pulls/"*) printf \'{"merged":true,"merge_commit_sha":"%s"}\\n\' "$FAKE_MERGE_SHA" ;;',
       '  *"pr checks"*"--json name,bucket,state,workflow"*) printf \'[{"name":"Shadow runner fleet available","bucket":"pass","state":"SUCCESS","workflow":"CI"},{"name":"Verify","bucket":"pass","state":"SUCCESS","workflow":"CI"}]\\n\' ;;',
       '  *"run list"*"--workflow CI"*"--event pull_request"*)',
       '    printf \'[{"databaseId":81,"status":"completed","conclusion":"success","headSha":"%s","workflowName":"CI"}]\\n\' "$FAKE_HEAD_SHA" ;;',
@@ -690,6 +691,29 @@ describe("format and lint mechanical merge fixes (WM-769)", () => {
     );
   });
 
+  test("formatted fix comments retain machine markers across multiline HTML bodies", () => {
+    expect(fixPrompt).toContain(
+      "### 🛠️ Factory Merge Auto-Fix (Round <round> of <max_fix_rounds>)",
+    );
+    expect(fixPrompt).toContain("**Finding:** <finding description>");
+    expect(fixPrompt).toContain("**Changes:** <summary of changes made>");
+    expect(fixPrompt).toContain(
+      "**Commit:** `<oldSha first 7>` → `<newSha first 7>`",
+    );
+    expect(fixPrompt).toContain(
+      "<!-- factory-merge-fix round=<round> finding=<findingHash> old=<oldSha> new=<newSha> -->",
+    );
+    expect(fixPrompt).toContain(
+      "<!-- factory-merge-fix mechanical=format_and_lint finding=<findingHash> old=<oldSha> new=<newSha> -->",
+    );
+    expect(scanPrompt).toMatch(/every complete PR comment body/);
+    expect(scanPrompt).toMatch(
+      /arbitrary multiline Markdown or an HTML comment/,
+    );
+    expect(scanPrompt).toMatch(/legacy bare single-line\s+form/);
+    expect(scanPrompt).toMatch(/do not count it as\s+a round/);
+  });
+
   test("the reviewer emits the distinct mechanical tag for prettier/eslint-only findings", () => {
     expect(reviewerSource).toMatch(
       /verdict `FIX`, canonical\s+finding `format_and_lint`, and tag the finding `mechanical`/,
@@ -1062,7 +1086,7 @@ describe("executable merge command safety (WM-412)", () => {
     db.close();
   });
 
-  test("merge-verify compares state and exact SHA separately and executes the configured CI workflow jobs", () => {
+  test("merge-verify proves the exact merge SHA through REST and executes configured CI workflow jobs", () => {
     const fixture = commandFixture("merge-verify-success-");
     installMergeCommandFakes(fixture);
     installBunGateFake(fixture);
@@ -1090,8 +1114,8 @@ describe("executable merge command safety (WM-412)", () => {
     );
     expect(result.status, result.stderr).toBe(0);
     const log = readFileSync(fixture.log, "utf8");
-    expect(log).toContain("--jq .state");
-    expect(log).toContain("--jq .mergeCommit.oid");
+    expect(log).toContain("api repos/watt-mind/factory/pulls/42");
+    expect(log).not.toContain("pr view 42");
     expect(log).toContain("run list");
     expect(log).toContain("run view 91");
     expect(log).not.toContain("git/refs/heads/feat/WM-500");

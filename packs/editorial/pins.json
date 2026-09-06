@@ -1,0 +1,14 @@
+{
+  "agents/draft.md": "sha256:089c77fc8fb332fe25bc711ad591e29fab3ce82e5c022c040912fea7f364555f",
+  "schemas/draft.input.json": "sha256:b1bb319c307469ed183cffeb7304db993a540ae293a7c1c6886e523df722ebc0",
+  "schemas/draft.output.json": "sha256:063784f1f4cb402dc239d1da0e7f87403fd78ba5e9f253936714667f8e7ee8d9",
+  "agents/research.md": "sha256:39ff26317e638f90d028adce08f2cee2cc54b4d8149e208772de7fe764db3e6a",
+  "schemas/research.input.json": "sha256:681c812737f0fb5eb7d197b0f77468ca49b41102c348558ea9a17fa99e4bf8dd",
+  "schemas/research.output.json": "sha256:0aceb4935cbc2cb5e6a9336f6431af73a8eda7cfcb5bdfb6fd27edf63ae74aad",
+  "agents/review.md": "sha256:0ea26317d19adf4c48fddfeb7764044a77989011d572ed805ddeea1069923200",
+  "schemas/review.input.json": "sha256:3a15c07b0c268470d3e94c67bd7f8b332f58a8a4383248adab9bb584a951044e",
+  "schemas/review.output.json": "sha256:147f259f03816286d70ddbf2a8b572ef1958f3e438a064cb3ea2c5d2e2dd728d",
+  "agents/topic-scan.md": "sha256:266b47600d4e2a489009ed006cdc93d5e6192b5b31e416da0b5251eae53146a9",
+  "schemas/topic-scan.input.json": "sha256:4439977e3c3ae89f1424ca3417ef2e3cb6d4d31087d911c655be7e0cb45dc6f2",
+  "schemas/topic-scan.output.json": "sha256:9e58e880bf857271c2b425b4d48ef510be414a2198e77fe3858f93af93e0f395"
+}

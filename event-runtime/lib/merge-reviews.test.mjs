@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 import path from "node:path";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { Database } from "bun:sqlite";
@@ -10,8 +10,13 @@ import {
   defaultProveCi,
   enumerateMergePlan,
   enumerateMergeScan,
+  latestMergeFixTerminalAttempt,
   lookupMergeReview,
+  mergeFixDurableRefusalCooldownMs,
+  mergeFixRefusalCooldownMs,
   persistMergeReviewFromResult,
+  rebaseSkipFreshCiMinutes,
+  resetInvalidMinuteConfigWarnings,
   runScanCli,
   upsertMergeReview,
 } from "./merge-reviews.mjs";
@@ -35,6 +40,93 @@ const repos = new Map([
     },
   ],
 ]);
+
+beforeEach(() => {
+  resetInvalidMinuteConfigWarnings();
+});
+
+describe("merge-fix refusal cooldown configuration", () => {
+  test.each([
+    [
+      "rebase fresh-CI",
+      rebaseSkipFreshCiMinutes,
+      "FACTORY_MERGE_REBASE_SKIP_FRESH_CI_MINUTES",
+      60,
+      60,
+    ],
+    [
+      "transient",
+      mergeFixRefusalCooldownMs,
+      "FACTORY_MERGE_FIX_REFUSAL_COOLDOWN_MINUTES",
+      15 * 60_000,
+      15,
+    ],
+    [
+      "durable",
+      mergeFixDurableRefusalCooldownMs,
+      "FACTORY_MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MINUTES",
+      6 * 60 * 60_000,
+      6 * 60,
+    ],
+  ])(
+    "warns once and uses the %s default for invalid values",
+    (_name, accessor, key, defaultValue, defaultMinutes) => {
+      const warnings = [];
+      const warn = console.warn;
+      console.warn = (message) => warnings.push(message);
+      try {
+        expect(accessor({ [key]: "not-a-number" })).toBe(defaultValue);
+        expect(accessor({ [key]: "0" })).toBe(defaultValue);
+        expect(accessor({ [key]: "1.5" })).toBe(defaultValue);
+      } finally {
+        console.warn = warn;
+      }
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(key);
+      expect(warnings[0]).toContain("not-a-number");
+      expect(warnings[0]).toContain(`${defaultMinutes} minutes`);
+    },
+  );
+
+  test.each([
+    [
+      "rebase fresh-CI",
+      rebaseSkipFreshCiMinutes,
+      "FACTORY_MERGE_REBASE_SKIP_FRESH_CI_MINUTES",
+      60,
+      42,
+    ],
+    [
+      "transient",
+      mergeFixRefusalCooldownMs,
+      "FACTORY_MERGE_FIX_REFUSAL_COOLDOWN_MINUTES",
+      15 * 60_000,
+      42 * 60_000,
+    ],
+    [
+      "durable",
+      mergeFixDurableRefusalCooldownMs,
+      "FACTORY_MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MINUTES",
+      6 * 60 * 60_000,
+      42 * 60_000,
+    ],
+  ])(
+    "is silent when the %s value is unset, empty, or valid",
+    (_name, accessor, key, defaultValue, validValue) => {
+      const warnings = [];
+      const warn = console.warn;
+      console.warn = (message) => warnings.push(message);
+      try {
+        expect(accessor({})).toBe(defaultValue);
+        expect(accessor({ [key]: "" })).toBe(defaultValue);
+        expect(accessor({ [key]: "42" })).toBe(validValue);
+      } finally {
+        console.warn = warn;
+      }
+      expect(warnings).toEqual([]);
+    },
+  );
+});
 
 function pr({
   number,
@@ -101,6 +193,33 @@ function insertRun(db, { runId, agent, pr, headSha, state, github = GITHUB }) {
   ).run(runId, `idem-${runId}`, spec, state, now, now);
 }
 
+function insertRefusedMergeFix(
+  db,
+  {
+    runId,
+    pr,
+    headSha = HEAD,
+    findingHash = REBASE_HASH,
+    reasonCode,
+    finishedAt = "2026-08-19T16:45:00.000Z",
+    createdAt = finishedAt,
+    terminalState = "REFUSED",
+  },
+) {
+  const spec = JSON.stringify({
+    agent: "merge-fix@1",
+    input: { github: GITHUB, pr, headSha, baseSha: BASE, findingHash },
+  });
+  db.query(
+    `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+     VALUES (?, ?, ?, 'sha256:test', ?, 1, ?, ?)`,
+  ).run(runId, `idem-${runId}`, spec, terminalState, createdAt, finishedAt);
+  db.query(
+    `INSERT INTO attempts (run_id, attempt, fencing_token, finished_at, terminal_state, reason_code)
+     VALUES (?, 1, 1, ?, ?, ?)`,
+  ).run(runId, finishedAt, terminalState, reasonCode);
+}
+
 function insertOpenProposal(db, { id, agent, pr, headSha, github = GITHUB }) {
   const now = "2026-08-19T16:45:00.000Z";
   const runId = `run-${id}`;
@@ -120,13 +239,21 @@ function insertOpenProposal(db, { id, agent, pr, headSha, github = GITHUB }) {
   ).run(id, `evt-${id}`, runId, spec, `idem-${id}`, now);
 }
 
-function forgeWith(prs, { baseSha = BASE } = {}) {
+function forgeWith(prs, { baseSha = BASE, api = {} } = {}) {
   return memoryForge({
     repos: { [GITHUB]: { prs } },
     api: {
       [`repos/${GITHUB}/git/ref/heads/develop`]: baseSha,
+      ...api,
     },
   });
+}
+
+function checkRunsFor(headSha, checkRuns) {
+  return {
+    [`repos/${GITHUB}/commits/${headSha}/check-runs?per_page=100`]:
+      JSON.stringify({ check_runs: checkRuns }),
+  };
 }
 
 function planItem(prNumber = 12) {
@@ -397,7 +524,7 @@ describe("merge_reviews ledger keying (WM-907 / WM-936)", () => {
 });
 
 describe("merge-scan enumerator (WM-907)", () => {
-  test("canonicalizes GitHub ref slugs and falls back to a Fixes body reference", () => {
+  test("canonicalizes GitHub ref slugs and derives only uppercase ref tickets", () => {
     const result = enumerateMergeScan({
       input: { repo: "factory" },
       db: openDb(":memory:"),
@@ -408,9 +535,20 @@ describe("merge-scan enumerator (WM-907)", () => {
         pr({
           number: 880,
           headRefName: "feat/no-ticket",
-          body: "Fixes watt-mind/factory#880",
+          body: "Fixes watt-mind/factory#881",
         }),
         pr({ number: 123, headRefName: "feat/WM-123" }),
+        pr({
+          number: 7,
+          headRefName: "dependabot/github_actions/develop/actions/setup-node-7",
+          title: "Bump actions/setup-node-7",
+        }),
+        pr({
+          number: 2261,
+          headRefName: "feat/no-ticket",
+          title: "No ticket",
+          body: "Fixes watt-mind/factory#2261",
+        }),
       ]),
       repos,
     });
@@ -419,8 +557,10 @@ describe("merge-scan enumerator (WM-907)", () => {
       "watt-mind/factory#877",
       "watt-mind/factory#878",
       "watt-mind/factory#879",
-      "watt-mind/factory#880",
+      "watt-mind/factory#881",
       "WM-123",
+      undefined,
+      undefined,
     ]);
   });
 
@@ -600,13 +740,16 @@ describe("merge-scan enumerator (WM-936)", () => {
     const result = enumerateMergeScan({
       input: { repo: "factory" },
       db,
-      forge: forgeWith([
-        pr({
-          number: 877,
-          headRefName: "feat/gh-877",
-          mergeStateStatus: "BEHIND",
-        }),
-      ]),
+      forge: forgeWith(
+        [
+          pr({
+            number: 877,
+            headRefName: "feat/gh-877",
+            mergeStateStatus: "BEHIND",
+          }),
+        ],
+        { api: checkRunsFor(HEAD, []) },
+      ),
       repos,
     });
 
@@ -639,7 +782,7 @@ describe("merge-scan enumerator (WM-936)", () => {
           pr({ number: 8, headRefName: "feat/WM-8" }),
           pr({ number: 20, headRefName: "feat/WM-20" }),
         ],
-        { baseSha: BASE2 },
+        { baseSha: BASE2, api: checkRunsFor(HEAD, []) },
       ),
       repos,
     });
@@ -697,14 +840,17 @@ describe("merge-scan enumerator (WM-936)", () => {
     const result = enumerateMergeScan({
       input: { repo: "factory" },
       db,
-      forge: forgeWith([
-        pr({
-          number: 9,
-          headRefName: "feat/WM-9",
-          mergeable: "MERGEABLE",
-          mergeStateStatus: "BEHIND",
-        }),
-      ]),
+      forge: forgeWith(
+        [
+          pr({
+            number: 9,
+            headRefName: "feat/WM-9",
+            mergeable: "MERGEABLE",
+            mergeStateStatus: "BEHIND",
+          }),
+        ],
+        { api: checkRunsFor(HEAD, []) },
+      ),
       repos,
     });
     expect(result.artifact.reviews).toEqual([]);
@@ -715,7 +861,235 @@ describe("merge-scan enumerator (WM-936)", () => {
     expect(result.artifact.recommendation).toBe("FIX");
   });
 
+  test("behind-base hit skips rebase while Full verification is running", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    const result = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith(
+        [
+          pr({
+            number: 9,
+            headRefName: "feat/WM-9",
+            mergeStateStatus: "BEHIND",
+          }),
+        ],
+        {
+          api: checkRunsFor(HEAD, [
+            { name: "Full verification", status: "in_progress" },
+          ]),
+        },
+      ),
+      repos,
+    });
+    expect(result.artifact.fix).toEqual([]);
+    expect(result.artifact.summary).toContain("rebase_skipped:ci_in_flight #9");
+  });
+
+  test("behind-base hit skips rebase when check runs cannot be read", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    // No check-runs API seeded: reading the check-run state throws, and the
+    // scan must conservatively treat CI as possibly in flight.
+    const result = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith([
+        pr({
+          number: 9,
+          headRefName: "feat/WM-9",
+          mergeStateStatus: "BEHIND",
+        }),
+      ]),
+      repos,
+    });
+    expect(result.artifact.fix).toEqual([]);
+    expect(result.artifact.summary).toContain("rebase_skipped:ci_in_flight #9");
+  });
+
+  test("behind-base hit skips rebase after a fresh successful Full verification", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-30T12:00:00Z");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    const result = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith(
+        [
+          pr({
+            number: 9,
+            headRefName: "feat/WM-9",
+            mergeStateStatus: "BEHIND",
+          }),
+        ],
+        {
+          api: checkRunsFor(HEAD, [
+            {
+              name: "Full verification",
+              status: "completed",
+              conclusion: "success",
+              completed_at: "2026-08-30T11:30:00Z",
+            },
+          ]),
+        },
+      ),
+      repos,
+      now,
+    });
+    expect(result.artifact.fix).toEqual([]);
+    expect(result.artifact.summary).toContain("rebase_skipped:ci_fresh #9");
+  });
+
+  test("behind-base hit rebases after stale Full verification", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-30T12:00:00Z");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    const result = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith(
+        [
+          pr({
+            number: 9,
+            headRefName: "feat/WM-9",
+            mergeStateStatus: "BEHIND",
+          }),
+        ],
+        {
+          api: checkRunsFor(HEAD, [
+            {
+              name: "Full verification",
+              status: "completed",
+              conclusion: "success",
+              completed_at: "2026-08-30T10:59:00Z",
+            },
+          ]),
+        },
+      ),
+      repos,
+      now,
+    });
+    expect(result.artifact.fix).toEqual([rebaseItem(9)]);
+  });
+
+  test("fresh-CI window accepts a positive environment override", () => {
+    const db = openDb(":memory:");
+    const now = Date.parse("2026-08-30T12:00:00Z");
+    const previous = process.env.FACTORY_MERGE_REBASE_SKIP_FRESH_CI_MINUTES;
+    process.env.FACTORY_MERGE_REBASE_SKIP_FRESH_CI_MINUTES = "120";
+    try {
+      upsertMergeReview(db, {
+        github: GITHUB,
+        pr: 9,
+        headSha: HEAD,
+        baseSha: BASE,
+        verdict: "MERGE",
+        plan: planItem(9),
+      });
+      const result = enumerateMergeScan({
+        input: { repo: "factory" },
+        db,
+        forge: forgeWith(
+          [
+            pr({
+              number: 9,
+              headRefName: "feat/WM-9",
+              mergeStateStatus: "BEHIND",
+            }),
+          ],
+          {
+            api: checkRunsFor(HEAD, [
+              {
+                name: "Full verification",
+                status: "completed",
+                conclusion: "success",
+                completed_at: "2026-08-30T10:30:00Z",
+              },
+            ]),
+          },
+        ),
+        repos,
+        now,
+      });
+      expect(result.artifact.fix).toEqual([]);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.FACTORY_MERGE_REBASE_SKIP_FRESH_CI_MINUTES;
+      } else {
+        process.env.FACTORY_MERGE_REBASE_SKIP_FRESH_CI_MINUTES = previous;
+      }
+    }
+  });
+
   test("CONFLICTING hit emits rebase without a review", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "FIX",
+      fix: rebaseItem(9, { round: 2 }),
+    });
+    const result = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith(
+        [
+          pr({
+            number: 9,
+            headRefName: "feat/WM-9",
+            mergeable: "CONFLICTING",
+            mergeStateStatus: "DIRTY",
+          }),
+        ],
+        {
+          api: checkRunsFor(HEAD, [
+            { name: "Full verification", status: "in_progress" },
+          ]),
+        },
+      ),
+      repos,
+    });
+    expect(result.artifact.reviews).toEqual([]);
+    expect(result.artifact.fix[0]).toMatchObject({
+      finding: "rebase_onto_base",
+      round: 2,
+      mechanical: true,
+      withinOwnedPaths: true,
+    });
+  });
+
+  test("CONFLICTING hit still emits rebase while Full verification runs", () => {
     const db = openDb(":memory:");
     upsertMergeReview(db, {
       github: GITHUB,
@@ -738,13 +1112,65 @@ describe("merge-scan enumerator (WM-936)", () => {
       ]),
       repos,
     });
-    expect(result.artifact.reviews).toEqual([]);
-    expect(result.artifact.fix[0]).toMatchObject({
-      finding: "rebase_onto_base",
-      round: 2,
-      mechanical: true,
-      withinOwnedPaths: true,
+    expect(result.artifact.fix).toHaveLength(1);
+  });
+
+  test("ticketless dependabot rebase records the skipped mechanical fix", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "FIX",
+      fix: rebaseItem(9),
     });
+    const result = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith([
+        pr({
+          number: 9,
+          headRefName: "dependabot/github_actions/develop/actions/checkout-7",
+          title: "Bump actions/checkout from 6 to 7",
+          mergeable: "CONFLICTING",
+          mergeStateStatus: "DIRTY",
+        }),
+      ]),
+      repos,
+    });
+
+    expect(result.artifact.fix).toEqual([]);
+    expect(result.artifact.summary).toContain(
+      "rebase_skipped:ticket_missing #9",
+    );
+  });
+
+  test("ai:landing PR never emits a rebase item", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    const result = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith([
+        pr({
+          number: 9,
+          headRefName: "feat/WM-9",
+          mergeStateStatus: "BEHIND",
+          labels: [{ name: "ai:landing" }],
+        }),
+      ]),
+      repos,
+    });
+    expect(result.artifact.fix).toEqual([]);
+    expect(result.artifact.summary).toContain("rebase_skipped:ai_landing #9");
   });
 
   test("in-flight merge-review at the same head emits no duplicate item", () => {
@@ -832,13 +1258,490 @@ describe("merge-scan enumerator (WM-936)", () => {
     const result = enumerateMergeScan({
       input: { repo: "factory" },
       db,
-      forge: forgeWith([pr({ number: 9, headRefName: "feat/WM-9" })], {
-        baseSha: BASE2,
-      }),
+      forge: forgeWith(
+        [
+          pr({
+            number: 9,
+            headRefName: "feat/WM-9",
+            mergeable: "CONFLICTING",
+          }),
+        ],
+        {
+          baseSha: BASE2,
+        },
+      ),
       repos,
     });
     expect(result.artifact.fix).toEqual([]);
     expect(result.artifact.reviews).toEqual([]);
+  });
+
+  function conflictingScan(db, { now } = {}) {
+    return enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith(
+        [
+          pr({
+            number: 9,
+            headRefName: "feat/WM-9",
+            mergeable: "CONFLICTING",
+          }),
+        ],
+        {
+          baseSha: BASE2,
+        },
+      ),
+      repos,
+      ...(now === undefined ? {} : { now }),
+    });
+  }
+
+  const REFUSED_AT = Date.parse("2026-08-19T16:45:00.000Z");
+
+  test("the terminal-attempt lookup excludes a matching refusal outside the durable horizon", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    insertRefusedMergeFix(db, {
+      runId: "run_fix_expired",
+      pr: 9,
+      reasonCode: "merge_fix_ticket_escalated",
+    });
+
+    expect(
+      latestMergeFixTerminalAttempt(
+        db,
+        { pr: 9, headSha: HEAD, findingHash: REBASE_HASH },
+        {
+          github: GITHUB,
+          now: REFUSED_AT + 6 * 60 * 60_000 + 1,
+        },
+      ),
+    ).toBeNull();
+    expect(
+      conflictingScan(db, {
+        now: REFUSED_AT + 6 * 60 * 60_000 + 1,
+      }).artifact.fix,
+    ).toHaveLength(1);
+  });
+
+  test("the run-created prefilter keeps a long-lived run whose attempt finished inside the horizon", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    // Created 20h before it finished: well outside the 6h cooldown horizon, but
+    // inside the 24h lifetime slack the prefilter allows, so the attempt-side
+    // bound stays the deciding term.
+    insertRefusedMergeFix(db, {
+      runId: "run_fix_long_lived",
+      pr: 9,
+      reasonCode: "merge_fix_ticket_escalated",
+      createdAt: new Date(REFUSED_AT - 20 * 60 * 60_000).toISOString(),
+    });
+
+    expect(
+      latestMergeFixTerminalAttempt(
+        db,
+        { pr: 9, headSha: HEAD, findingHash: REBASE_HASH },
+        { github: GITHUB, now: REFUSED_AT + 60_000 },
+      )?.reasonCode,
+    ).toBe("merge_fix_ticket_escalated");
+    // Smoke check that the scan honours the same suppression; the falsifiable
+    // regression pin is the direct latestMergeFixTerminalAttempt assertion above.
+    expect(
+      conflictingScan(db, { now: REFUSED_AT + 60_000 }).artifact.fix,
+    ).toEqual([]);
+  });
+
+  test("the run-created prefilter drops a run created and finished outside the horizon", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    insertRefusedMergeFix(db, {
+      runId: "run_fix_ancient",
+      pr: 9,
+      reasonCode: "merge_fix_ticket_escalated",
+    });
+
+    // now is 31h after the run was created and finished: past both the 6h
+    // cooldown and the 30h prefilter cutoff.
+    const now = REFUSED_AT + 31 * 60 * 60_000;
+    expect(
+      latestMergeFixTerminalAttempt(
+        db,
+        { pr: 9, headSha: HEAD, findingHash: REBASE_HASH },
+        { github: GITHUB, now },
+      ),
+    ).toBeNull();
+    // Smoke check that the scan is unsuppressed; the falsifiable regression pin
+    // is the direct latestMergeFixTerminalAttempt assertion above.
+    expect(conflictingScan(db, { now }).artifact.fix).toHaveLength(1);
+  });
+
+  test("a refused escalated merge-fix does not re-emit the identical finding", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    insertRefusedMergeFix(db, {
+      runId: "run_fix_escalated",
+      pr: 9,
+      reasonCode: "merge_fix_ticket_escalated",
+    });
+
+    const result = conflictingScan(db, { now: REFUSED_AT + 60_000 });
+
+    expect(result.artifact.fix).toEqual([]);
+  });
+
+  test.each(["COMPLETED", "FAILED"])(
+    "a newer %s merge-fix clears a prior refusal's suppression",
+    (terminalState) => {
+      const db = openDb(":memory:");
+      upsertMergeReview(db, {
+        github: GITHUB,
+        pr: 9,
+        headSha: HEAD,
+        baseSha: BASE,
+        verdict: "MERGE",
+        plan: planItem(9),
+      });
+      insertRefusedMergeFix(db, {
+        runId: "run_fix_refused_first",
+        pr: 9,
+        reasonCode: "merge_fix_ticket_escalated",
+      });
+      insertRefusedMergeFix(db, {
+        runId: `run_fix_${terminalState.toLowerCase()}_latest`,
+        pr: 9,
+        terminalState,
+        finishedAt: "2026-08-19T16:45:01.000Z",
+      });
+
+      const result = conflictingScan(db, { now: REFUSED_AT + 60_000 });
+
+      expect(result.artifact.fix).toHaveLength(1);
+    },
+  );
+
+  test.each(["COMPLETED", "FAILED"])(
+    "a newer refusal suppresses an older %s merge-fix",
+    (terminalState) => {
+      const db = openDb(":memory:");
+      upsertMergeReview(db, {
+        github: GITHUB,
+        pr: 9,
+        headSha: HEAD,
+        baseSha: BASE,
+        verdict: "MERGE",
+        plan: planItem(9),
+      });
+      insertRefusedMergeFix(db, {
+        runId: `run_fix_${terminalState.toLowerCase()}_first`,
+        pr: 9,
+        terminalState,
+      });
+      insertRefusedMergeFix(db, {
+        runId: "run_fix_refused_latest",
+        pr: 9,
+        reasonCode: "merge_fix_ticket_escalated",
+        finishedAt: "2026-08-19T16:45:01.000Z",
+      });
+
+      expect(
+        conflictingScan(db, { now: REFUSED_AT + 60_000 }).artifact.fix,
+      ).toEqual([]);
+    },
+  );
+
+  test.each([
+    ["a refusal inserted after a completed attempt", "COMPLETED", "REFUSED", 0],
+    ["a completed attempt inserted after a refusal", "REFUSED", "COMPLETED", 1],
+  ])(
+    "equal finished_at uses rowid when %s",
+    (_name, firstState, secondState, expectedFixes) => {
+      const db = openDb(":memory:");
+      upsertMergeReview(db, {
+        github: GITHUB,
+        pr: 9,
+        headSha: HEAD,
+        baseSha: BASE,
+        verdict: "MERGE",
+        plan: planItem(9),
+      });
+      insertRefusedMergeFix(db, {
+        runId: "run_fix_first_at_tie",
+        pr: 9,
+        terminalState: firstState,
+        reasonCode: "merge_fix_ticket_escalated",
+      });
+      insertRefusedMergeFix(db, {
+        runId: "run_fix_second_at_tie",
+        pr: 9,
+        terminalState: secondState,
+        reasonCode: "merge_fix_ticket_escalated",
+      });
+
+      expect(
+        conflictingScan(db, { now: REFUSED_AT + 60_000 }).artifact.fix,
+      ).toHaveLength(expectedFixes);
+    },
+  );
+
+  test("a durable refusal is retried once its long cooldown expires", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    insertRefusedMergeFix(db, {
+      runId: "run_fix_security",
+      pr: 9,
+      reasonCode: "merge_fix_ticket_security",
+    });
+
+    const withinWindow = conflictingScan(db, {
+      now: REFUSED_AT + 5 * 60 * 60_000,
+    });
+    const afterWindow = conflictingScan(db, {
+      now: REFUSED_AT + 6 * 60 * 60_000 + 60_000,
+    });
+
+    expect(withinWindow.artifact.fix).toEqual([]);
+    expect(afterWindow.artifact.fix).toHaveLength(1);
+  });
+
+  test("an unrecognised refusal code still earns the transient cooldown", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    insertRefusedMergeFix(db, {
+      runId: "run_fix_unknown",
+      pr: 9,
+      reasonCode: "merge_fix_run_check_failed",
+    });
+
+    const beforeCooldown = conflictingScan(db, { now: REFUSED_AT + 60_000 });
+    const afterCooldown = conflictingScan(db, {
+      now: REFUSED_AT + 16 * 60_000,
+    });
+
+    expect(beforeCooldown.artifact.fix).toEqual([]);
+    expect(afterCooldown.artifact.fix).toHaveLength(1);
+  });
+
+  test("a suppressed rebase fix is reported in the scan summary", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    insertRefusedMergeFix(db, {
+      runId: "run_fix_reported",
+      pr: 9,
+      reasonCode: "merge_fix_ticket_escalated",
+    });
+
+    const result = conflictingScan(db, { now: REFUSED_AT + 60_000 });
+
+    expect(result.artifact.fix).toEqual([]);
+    expect(result.artifact.summary).toContain(
+      "rebase_skipped:refused_merge_fix_ticket_escalated #9",
+    );
+  });
+
+  test("a refused ticket-read merge-fix retries only after its cooldown", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    const refusedAt = Date.parse("2026-08-19T16:45:00.000Z");
+    insertRefusedMergeFix(db, {
+      runId: "run_fix_read_failed",
+      pr: 9,
+      reasonCode: "merge_fix_ticket_read_failed",
+    });
+
+    const beforeCooldown = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith(
+        [
+          pr({
+            number: 9,
+            headRefName: "feat/WM-9",
+            mergeable: "CONFLICTING",
+          }),
+        ],
+        {
+          baseSha: BASE2,
+        },
+      ),
+      repos,
+      now: refusedAt + 60_000,
+    });
+    const afterCooldown = enumerateMergeScan({
+      input: { repo: "factory" },
+      db,
+      forge: forgeWith(
+        [
+          pr({
+            number: 9,
+            headRefName: "feat/WM-9",
+            mergeable: "CONFLICTING",
+          }),
+        ],
+        {
+          baseSha: BASE2,
+        },
+      ),
+      repos,
+      now: refusedAt + 16 * 60_000,
+    });
+
+    expect(beforeCooldown.artifact.fix).toEqual([]);
+    expect(afterCooldown.artifact.fix).toHaveLength(1);
+  });
+
+  function withEnv(key, value, fn) {
+    const previous = process.env[key];
+    process.env[key] = value;
+    try {
+      return fn();
+    } finally {
+      if (previous === undefined) delete process.env[key];
+      else process.env[key] = previous;
+    }
+  }
+
+  test("a durable cooldown configured below the transient one still suppresses a transient refusal", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    insertRefusedMergeFix(db, {
+      runId: "run_fix_narrow_durable",
+      pr: 9,
+      reasonCode: "merge_fix_ticket_read_failed",
+    });
+
+    // The durable window is narrower than the transient one, so a query bound
+    // derived from the durable cooldown alone would drop this refusal five
+    // minutes in and re-dispatch it every scan for the next ten.
+    withEnv("FACTORY_MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MINUTES", "1", () => {
+      const now = REFUSED_AT + 5 * 60_000;
+      expect(
+        latestMergeFixTerminalAttempt(
+          db,
+          { pr: 9, headSha: HEAD, findingHash: REBASE_HASH },
+          { github: GITHUB, now },
+        )?.reasonCode,
+      ).toBe("merge_fix_ticket_read_failed");
+      expect(conflictingScan(db, { now }).artifact.fix).toEqual([]);
+    });
+  });
+
+  test("the transient cooldown boundary follows its environment override", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    insertRefusedMergeFix(db, {
+      runId: "run_fix_transient_override",
+      pr: 9,
+      reasonCode: "merge_fix_ticket_read_failed",
+    });
+
+    // 29 minutes in is past the 15-minute default but inside the override.
+    withEnv("FACTORY_MERGE_FIX_REFUSAL_COOLDOWN_MINUTES", "30", () => {
+      expect(
+        conflictingScan(db, { now: REFUSED_AT + 29 * 60_000 }).artifact.fix,
+      ).toEqual([]);
+      expect(
+        conflictingScan(db, { now: REFUSED_AT + 31 * 60_000 }).artifact.fix,
+      ).toHaveLength(1);
+    });
+  });
+
+  test("the durable cooldown boundary follows its environment override", () => {
+    const db = openDb(":memory:");
+    upsertMergeReview(db, {
+      github: GITHUB,
+      pr: 9,
+      headSha: HEAD,
+      baseSha: BASE,
+      verdict: "MERGE",
+      plan: planItem(9),
+    });
+    insertRefusedMergeFix(db, {
+      runId: "run_fix_durable_override",
+      pr: 9,
+      reasonCode: "merge_fix_ticket_escalated",
+    });
+
+    // 7h in is past the 6h default but inside the 10h override.
+    withEnv("FACTORY_MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MINUTES", "600", () => {
+      expect(
+        conflictingScan(db, { now: REFUSED_AT + 7 * 60 * 60_000 }).artifact.fix,
+      ).toEqual([]);
+      expect(
+        conflictingScan(db, { now: REFUSED_AT + 11 * 60 * 60_000 }).artifact
+          .fix,
+      ).toHaveLength(1);
+    });
   });
 });
 

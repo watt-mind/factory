@@ -67,9 +67,9 @@
     }
   },
   "ci-log-capture@1": {
-    "recommendationField": "exitCode",
+    "recommendationField": "captured",
     "edges": {
-      "0": {
+      "failed.log": {
         "eventType": "factory.ci-diagnose.requested",
         "input": {
           "repo": "$.input.repo",

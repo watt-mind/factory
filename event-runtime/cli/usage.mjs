@@ -40,7 +40,15 @@ usage: bun event-runtime/cli.mjs <command>
   doctor                         system health check: anomaly report (exits non-zero on anomalies)
   events [status]                admitted events, optionally filtered by status
   ps [state]                     running event processes/runs (default: RUNNING or LEASED)
-  runs [state]                   runs (optionally filtered by state)
+  runs [state] [--agent ID] [--exclude-agent ID] [--dispatch-only]
+       [--count] [--limit N]     runs; --agent is forwarded to the API, --exclude-agent
+                                 (repeatable) filters client-side, --dispatch-only keeps
+                                 only dispatch agents (id dispatch/worker/dispatch-*, or
+                                 output contract factory.dispatch-result/v1) and drops
+                                 merge-*/ci-*/*-scan and unregistered agents, --count
+                                 prints the integer only; pages of 200 are followed until
+                                 exhausted, --limit N, or 50 pages, then
+                                 "... N more rows (truncated)" goes to stderr
   proposals                      open proposals with TTL age
   inbox                          open items waiting on the human
   agents                         registered agent definitions and event routing
@@ -58,7 +66,10 @@ usage: bun event-runtime/cli.mjs <command>
   reject <proposal-id> <reason>  reject an open proposal
   inject <envelope.json|->       replay an event envelope (same intake as the webhook)
   requeue <source> <event-id>    re-plan a dead-lettered or human_needed event
-  cancel <run-id> [reason]       cancel a run before it is RUNNING
+  cancel <run-id>... [--reason TEXT]
+                                 cancel runs before they are RUNNING
+  cancel --state STATE [--agent ID] [--reason TEXT] [--yes] [--dry-run]
+                                 select exact state/agent targets before cancelling
   retry <run-id> [--force]       re-queue a FAILED run (--force past maxAttempts)
   extend <run-id> --seconds N [--override]
                                  extend a RUNNING/VERIFYING deadline (max 3600s per call)

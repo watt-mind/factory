@@ -41,6 +41,35 @@ isolated worktree for the ticket. This is not a general implementation run.
      expectedRemoteSha=$(git rev-parse "origin/<headRef>")
      ```
 
+     Before either rebase, query check runs on that exact
+     `expectedRemoteSha` (not a branch-name lookup). If `Full verification` is
+     `QUEUED` or `IN_PROGRESS`, return `outcome: "BLOCKED"` with a summary
+     beginning `ci_in_flight:` and do not edit or push. Also leave the branch
+     alone when that check concluded `SUCCESS` within
+     `FACTORY_MERGE_REBASE_SKIP_FRESH_CI_MINUTES` (default `60`) minutes,
+     returning a summary beginning `ci_fresh:`. For example, inspect the
+     exact head with:
+
+     ```sh
+     gh api "repos/<github>/commits/${expectedRemoteSha}/check-runs?per_page=100"
+     ```
+
+     Refused merge-fix findings are retried after
+     `FACTORY_MERGE_FIX_REFUSAL_COOLDOWN_MINUTES` (default `15` minutes).
+     Refusals with reason `merge_fix_ticket_escalated` or
+     `merge_fix_ticket_security` use the longer
+     `FACTORY_MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MINUTES` (default `360`
+     minutes) because they need a human to clear a blocker. The refusal lookup
+     is bounded by the larger of these two cooldowns, so raising either one
+     widens the scan window for both kinds of refusal.
+
+     A `CONFLICTING` PR still needs a rebase even when CI is running or fresh.
+     Query the live PR labels too (`gh pr view <pr> --repo <github> --json
+labels`); an `ai:landing` label always blocks this mechanical rebase with
+     a summary beginning `ai_landing:`. Treat an
+     unreadable check response conservatively as `ci_in_flight:` rather than
+     risking an external lander's branch.
+
      Compare `expectedRemoteSha` with the pinned `input.json` `headSha`. Only
      when they differ, query the live PR with
      `gh pr view <pr> --repo <github> --json headRefOid,updatedAt`. Refuse with
@@ -96,13 +125,40 @@ isolated worktree for the ticket. This is not a general implementation run.
    update a falsifiable regression test where the finding is a code change (a
    pure rebase adds none), and run the ticket's exact Verification Command.
    Never weaken or skip it.
-4. Commit with the ticket ID and push the same head branch. For ordinary
-   findings, add a PR comment exactly
-   `factory-merge-fix round=<round> finding=<findingHash> old=<oldSha>
-new=<newSha>`. For `format_and_lint`, use the non-round marker exactly
-   `factory-merge-fix mechanical=format_and_lint finding=<findingHash>
-old=<oldSha> new=<newSha>`. Do not merge, approve, mark Done, or delete
-   anything.
+4. Commit with the ticket ID and push the same head branch. Post a
+   human-readable Markdown PR comment with the actual finding and a concise
+   summary of the correction. For ordinary findings, render this shape (the
+   short SHAs are the first seven characters of the full SHAs):
+
+   ```md
+   ### 🛠️ Factory Merge Auto-Fix (Round <round> of <max_fix_rounds>)
+
+   **Finding:** <finding description>
+   **Changes:** <summary of changes made>
+   **Commit:** `<oldSha first 7>` → `<newSha first 7>`
+
+   <!-- factory-merge-fix round=<round> finding=<findingHash> old=<oldSha> new=<newSha> -->
+   ```
+
+   `<max_fix_rounds>` is the configured `merge.max_fix_rounds` cap (the same
+   value merge-review enforces; default 2), never a hardcoded number. The
+   embedded HTML comment is the machine-readable tracking marker: preserve
+   its complete, exact field order and substitute the real full values. For
+   `format_and_lint`, retain its non-round marker inside an otherwise
+   human-readable comment (finding, changes, and short commit SHAs):
+
+   ```md
+   ### 🛠️ Factory Merge Auto-Fix (Formatting & Lint)
+
+   **Finding:** <finding description>
+   **Changes:** <summary of changes made>
+   **Commit:** `<oldSha first 7>` → `<newSha first 7>`
+
+   <!-- factory-merge-fix mechanical=format_and_lint finding=<findingHash> old=<oldSha> new=<newSha> -->
+   ```
+
+   Do not merge, approve, mark Done, or delete anything.
+
 5. Return UPDATED with the new 40-hex head SHA. Completion chains to a wholly
    new merge-scan run. You are forbidden to declare your own update mergeable.
 

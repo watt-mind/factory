@@ -31,10 +31,14 @@ import { FACTORY_ROOT, transcriptMaxBytes } from "../config.mjs";
 import { DEFAULT_MODEL } from "../registry.mjs";
 import {
   BASE_INHERITED_ENV,
+  HARNESS_LAYOUT,
+  KILL_GRACE_MS,
   PROVIDER_CREDENTIAL_ENV,
+  PROMPT_SUFFIX,
   PUSH_CREDENTIAL_ENV,
   RUNTIME_IDENTITY_ENV,
   safeChildEnvironment,
+  verifiedPrompt,
 } from "./child-env.mjs";
 import {
   boundedTranscriptStream,
@@ -43,10 +47,14 @@ import {
 } from "./child-process.mjs";
 export {
   BASE_INHERITED_ENV,
+  HARNESS_LAYOUT,
+  KILL_GRACE_MS,
   PROVIDER_CREDENTIAL_ENV,
+  PROMPT_SUFFIX,
   PUSH_CREDENTIAL_ENV,
   RUNTIME_IDENTITY_ENV,
   safeChildEnvironment,
+  verifiedPrompt,
 };
 import { refuseSandbox } from "./sandboxed.mjs";
 
@@ -77,52 +85,11 @@ export const SANDBOX_DEFERRAL_REASON =
 /** This adapter refuses sandboxed definitions (fail closed) until the deferral above is resolved. */
 export const SANDBOX_SUPPORT = "unsupported";
 
-/**
- * Workspace-relative packaging of RunSpec.harness (WM-851). Sources are emit
- * output under FACTORY_ROOT (`plugins/core`) so the bytes match the Claude
- * plugin; dest is the project `.claude/` tree the CLI reads from cwd.
- */
-export const HARNESS_LAYOUT = Object.freeze({
-  skills: Object.freeze({
-    source: (name) => ["plugins", "core", "skills", name],
-    dest: (name) => [".claude", "skills", name],
-    type: "dir",
-  }),
-  commands: Object.freeze({
-    source: (name) => ["plugins", "core", "commands", `${name}.md`],
-    dest: (name) => [".claude", "commands", `${name}.md`],
-    type: "file",
-  }),
-  subagents: Object.freeze({
-    source: (name) => ["plugins", "core", "agents", `${name}.md`],
-    dest: (name) => [".claude", "agents", `${name}.md`],
-    type: "file",
-  }),
-});
-
-export const KILL_GRACE_MS = 30_000;
-
 /** Terminate a detached CLI and every subprocess it started (WM-263). */
 export { killProcessGroup };
 
 /** Trace events preview text; the recorder's byte bound is the real limit. */
 const TEXT_PREVIEW_CHARS = 4000;
-
-export const PROMPT_SUFFIX =
-  "\n\n---\nInput is at ./input.json. Write ./result.json per the factory.agent-result/v1 contract. Work only inside this directory.";
-
-/**
- * Prompt bytes are verified by the registry before they reach an adapter.
- * `promptPath` remains provenance only: re-reading it would bypass that pin.
- */
-export function verifiedPrompt(def, adapter) {
-  if (typeof def?.promptText !== "string") {
-    throw new Error(
-      `${adapter}: definition ${def?.ref ?? "<unknown>"} has no verified promptText (registry-loaded definitions only)`,
-    );
-  }
-  return def.promptText + PROMPT_SUFFIX;
-}
 
 // `mutating: false` means no durable mutation beyond the run's declared
 // workspace output; it does not mean a model cannot use the shell to inspect

@@ -72,7 +72,7 @@
     "merge": "bun orchestrator/run.mjs --only merge --once --apply --repo",
     "janitor": "bun orchestrator/run.mjs --only janitor --once --apply --repo",
     "emit": "bun build/emit.mjs",
-    "check": "bun build/emit.mjs --check && bun run check:web",
+    "check": "bun build/emit.mjs --check && bun run check:web && bun run format:check",
     "check:web": "cd event-runtime/web && if [ -d node_modules ]; then bun run typecheck; else echo \"check:web: skipped (run 'bun install' in event-runtime/web to enable the TypeScript check)\"; fi",
     "link": "bun build/emit.mjs --link",
     "link-bin": "bun build/emit.mjs --link-bin",
@@ -83,9 +83,12 @@
     "format:check": "prettier --check .",
     "format": "prettier --write .",
     "test": "bun test",
+    "cells:test": "bun test event-runtime/lib/editorial-cells-unit.test.mjs",
+    "cells:deploy": "celld deploy cells --bucket ${CELLD_BUCKET:-s3://factory-cells} --endpoint ${S3_ENDPOINT:-https://cd4a8238b8fc54de39e31da1fb0ee657.r2.cloudflarestorage.com} --region auto",
     "docs:dev": "cd site && bun run dev",
     "docs:build": "cd site && bun run build",
-    "lint": "eslint .",
+    "lint": "bun run lint:cycles && eslint .",
+    "lint:cycles": "bun tools/check-import-cycles.mjs && bun tools/check-import-cycles.mjs --self-test",
     "lint:fix": "eslint . --fix"
   },
   "engines": {

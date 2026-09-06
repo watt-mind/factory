@@ -7,6 +7,12 @@ The updater that refreshes the count lives on a sibling ticket
 (WM-958). This snippet is the static launch version, pinned to the
 window in `docs/oss/launch-post.md`.
 
+The rolling updater recognizes factory PRs from a closing reference in
+the PR body. Legacy Linear references such as `Fixes WM-958` remain
+valid, as do GitHub forms such as `Fixes #1570`, `Closes
+watt-mind/factory#1570`, and `Resolves
+https://github.com/watt-mind/factory/issues/1570`.
+
 ## README / social preview
 
 ```markdown

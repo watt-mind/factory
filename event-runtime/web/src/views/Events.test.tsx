@@ -93,6 +93,36 @@ function ticketSchemaRegistry(eventType: string): AgentsView {
   });
 }
 
+/**
+ * Two agents declare the same event type. The top-level route names the
+ * agent with no input view; the other agent ships one. The fallback must
+ * not steal the type.
+ */
+function twoAgentsOneEventTypeRegistry(): AgentsView {
+  return createAgentsFixture({
+    agents: [
+      {
+        ref: "routed-agent@1",
+        eventTypes: [{ type: "shared.event" }],
+      },
+      {
+        ref: "other-agent@1",
+        eventTypes: [{ type: "shared.event" }],
+        outputView: {
+          schemaVersion: "factory.artifact-view/v1",
+          title: "Wrong agent output",
+          input: {
+            title: "Stolen input view",
+            summary: "/repo",
+            sections: [],
+          },
+        },
+      },
+    ] as unknown as AgentsView["agents"],
+    eventTypes: [{ type: "shared.event", agent: "routed-agent@1" }],
+  });
+}
+
 describe("Events component harness: selection & detail view", () => {
   test("successful detail replay is one-shot until a different event is selected", async () => {
     const replay = mock(async (_envelope: unknown) => ({
@@ -277,6 +307,69 @@ describe("Events component harness: selection & detail view", () => {
           expect(
             r.getByRole("link", { name: "FOO-12" }).getAttribute("href"),
           ).toBe("#/tickets/FOO-12"),
+        );
+      },
+    );
+  });
+
+  test("does not attach another agent's input view to a type already claimed by a top-level route", async () => {
+    const event = stubEvent("evt_claimed_type", "admitted", {
+      type: "shared.event",
+      envelope: {
+        schemaVersion: "factory.event/v1",
+        eventId: "evt_claimed_type",
+        type: "shared.event",
+        source: "github",
+        payload: { repo: "watt-mind/factory" },
+      },
+    });
+
+    await withApi(
+      {
+        events: async () => ({ events: [event] }),
+        status: async () => createStatusFixture(),
+        agents: async () => twoAgentsOneEventTypeRegistry(),
+      },
+      async () => {
+        const r = renderEvents({
+          focusEvent: { source: "github", eventId: event.eventId },
+        });
+        await waitFor(() =>
+          expect(
+            r
+              .getByRole("link", { name: "watt-mind/factory" })
+              .getAttribute("href"),
+          ).toBe("https://github.com/watt-mind/factory"),
+        );
+        expect(r.queryByText("Stolen input view")).toBeNull();
+      },
+    );
+  });
+
+  test("renders the selected envelope with semantic workflow links", async () => {
+    const event = stubEvent("evt_workflow_failure", "admitted", {
+      type: "github.workflow-run.failed",
+      envelope: {
+        schemaVersion: "factory.event/v1",
+        eventId: "evt_workflow_failure",
+        type: "github.workflow-run.failed",
+        source: "github",
+        payload: { repo: "watt-mind/factory", runId: 42 },
+      },
+    });
+    await withApi(
+      {
+        events: async () => ({ events: [event] }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const r = renderEvents({
+          focusEvent: { source: "github", eventId: event.eventId },
+        });
+        await waitFor(() =>
+          expect(
+            r.getByRole("link", { name: "run #42" }).getAttribute("href"),
+          ).toBe("https://github.com/watt-mind/factory/actions/runs/42"),
         );
       },
     );
@@ -1101,6 +1194,104 @@ describe("Events component harness: facet chips synchronization with FilterInput
 });
 
 describe("Events repo scope caption (WM-142)", () => {
+  test("repo dead-lettered tab requests and renders its server-scoped page", async () => {
+    const newest = stubEvent("evt_repo_newest", "admitted", {
+      repos: ["factory"],
+    });
+    const olderDeadLetter = stubEvent(
+      "evt_repo_older_dead_letter",
+      "dead_lettered",
+      {
+        repos: ["factory"],
+      },
+    );
+    const requests: Array<string | undefined> = [];
+
+    await withApi(
+      {
+        events: async (status) => {
+          requests.push(status);
+          return {
+            events: status === "dead_lettered" ? [olderDeadLetter] : [newest],
+          };
+        },
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { container, getByRole } = renderEvents({
+          context: { kind: "repo", name: "factory" },
+        });
+
+        await waitFor(() =>
+          expect(
+            container.querySelector('td[title="evt_repo_newest"]'),
+          ).toBeTruthy(),
+        );
+        fireEvent.click(getByRole("tab", { name: /^Dead lettered/i }));
+
+        await waitFor(() =>
+          expect(
+            container.querySelector('td[title="evt_repo_older_dead_letter"]'),
+          ).toBeTruthy(),
+        );
+        expect(requests).toContain("dead_lettered");
+        expect(
+          container.querySelector('td[title="evt_repo_newest"]'),
+        ).toBeNull();
+      },
+    );
+  });
+
+  test("repo context badges only the active status tab — non-active tabs carry no false count (gh-1894)", async () => {
+    const admitted = stubEvent("evt_repo_admitted", "admitted", {
+      repos: ["factory"],
+    });
+    const dead = stubEvent("evt_repo_dead", "dead_lettered", {
+      repos: ["factory"],
+    });
+
+    await withApi(
+      {
+        events: async (status) => ({
+          events: status === "dead_lettered" ? [dead] : [admitted, dead],
+        }),
+        status: async () => createStatusFixture(),
+      },
+      async () => {
+        const { container, getByRole } = renderEvents({
+          context: { kind: "repo", name: "factory" },
+        });
+
+        await waitFor(() =>
+          expect(
+            container.querySelector('td[title="evt_repo_admitted"]'),
+          ).toBeTruthy(),
+        );
+        fireEvent.click(getByRole("tab", { name: /^Dead lettered/i }));
+
+        // Active tab shows the loaded-row count for its server-scoped page.
+        await waitFor(() =>
+          expect(
+            getByRole("tab", { name: /^Dead lettered/i }).querySelector(
+              ".tabular-nums",
+            )?.textContent,
+          ).toBe("1"),
+        );
+        // Non-active tabs render no badge at all: the loaded page holds only
+        // the active status, so any number here (a stale page length on
+        // "All", or an implied 0 on "Admitted") would be false.
+        expect(
+          getByRole("tab", { name: /^All/i }).querySelector(".tabular-nums"),
+        ).toBeNull();
+        expect(
+          getByRole("tab", { name: /^Admitted/i }).querySelector(
+            ".tabular-nums",
+          ),
+        ).toBeNull();
+      },
+    );
+  });
+
   test("repo context renders scope caption while rows are filtered", async () => {
     const matching = stubEvent("evt_repo_match", "admitted", {
       repos: ["factory"],

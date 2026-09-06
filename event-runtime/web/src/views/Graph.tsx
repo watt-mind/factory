@@ -419,6 +419,15 @@ export function Graph({
   const [completedLayoutEpoch, setCompletedLayoutEpoch] = useState(-1);
   const flowRef = useRef<FlowViewport | null>(null);
   const [flowReady, setFlowReady] = useState(0);
+  const [selectedPack, setSelectedPack] = useState<string>("all");
+
+  const availablePacks = useMemo(() => {
+    const packs = new Set<string>();
+    for (const a of registry.data?.agents ?? []) {
+      if (a.pack) packs.add(a.pack);
+    }
+    return Array.from(packs).sort();
+  }, [registry.data?.agents]);
 
   const { graph: liveGraph, mappingError } = useMemo(() => {
     if (!registry.data) return { graph: null, mappingError: false };
@@ -438,11 +447,38 @@ export function Graph({
     }
   }, [registry.data, runsQ.data, eventsQ.data, proposalsQ.data, statusQ.data]);
 
+  const filteredLiveGraph = useMemo(() => {
+    if (!liveGraph || selectedPack === "all") return liveGraph;
+    const targetNodes = new Set<string>();
+
+    for (const node of liveGraph.nodes) {
+      if (node.kind === "agent") {
+        if (selectedPack === "core" && !node.pack) targetNodes.add(node.id);
+        else if (node.pack === selectedPack) targetNodes.add(node.id);
+      }
+    }
+
+    for (const edge of liveGraph.edges) {
+      if (targetNodes.has(edge.target)) targetNodes.add(edge.source);
+      if (targetNodes.has(edge.source)) targetNodes.add(edge.target);
+    }
+
+    const nodes = liveGraph.nodes.filter((n) => targetNodes.has(n.id));
+    const edges = liveGraph.edges.filter(
+      (e) => targetNodes.has(e.source) && targetNodes.has(e.target),
+    );
+    return { nodes, edges };
+  }, [liveGraph, selectedPack]);
+
   const graph = useMemo(() => {
-    if (!liveGraph || display.overlay === "live" || !historicalQ.data)
-      return liveGraph;
-    return applyHistoricalOverlay(liveGraph, display.overlay, historicalQ.data);
-  }, [display.overlay, historicalQ.data, liveGraph]);
+    if (!filteredLiveGraph || display.overlay === "live" || !historicalQ.data)
+      return filteredLiveGraph;
+    return applyHistoricalOverlay(
+      filteredLiveGraph,
+      display.overlay,
+      historicalQ.data,
+    );
+  }, [display.overlay, historicalQ.data, filteredLiveGraph]);
 
   useEffect(() => {
     if (!graph) return;
@@ -727,6 +763,23 @@ export function Graph({
                 {GRAPH_WINDOWS.map((windowValue) => (
                   <option key={windowValue} value={windowValue}>
                     {windowValue}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-1 text-[11px] text-(--text-faint)">
+              Pack
+              <select
+                aria-label="Filter graph by pack"
+                value={selectedPack}
+                onChange={(event) => setSelectedPack(event.target.value)}
+                className="rounded-md border border-(--border) bg-(--surface-1) px-2 py-1 text-[12px] text-(--text) outline-none focus:border-(--accent)"
+              >
+                <option value="all">All</option>
+                <option value="core">Core</option>
+                {availablePacks.map((pack) => (
+                  <option key={pack} value={pack}>
+                    {pack}
                   </option>
                 ))}
               </select>

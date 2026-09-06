@@ -31,6 +31,7 @@ import {
 import { computeDefHash } from "./receipts.mjs";
 import { updateHarnessPins } from "./pins.mjs";
 import { validate } from "./schema.mjs";
+import { DISPATCH_CLASS_AGENT_IDS } from "./proposal-subject.mjs";
 
 /** Copy the real registry into a temp root so tests can corrupt it safely. */
 function tempRegistry(root = tmpDir("event-registry-")) {
@@ -123,6 +124,12 @@ const PI_TIERS = {
 };
 
 describe("registry", () => {
+  test("every dispatch-class agent id resolves to a loaded registry definition", () => {
+    const registry = loadRegistry();
+    const ids = new Set([...registry.agents.values()].map((def) => def.id));
+    for (const id of DISPATCH_CLASS_AGENT_IDS) expect(ids).toContain(id);
+  });
+
   test("loads the committed registry (pins verified)", () => {
     const registry = loadRegistry();
     const def = getAgent(registry, "factory-status-report@1");
@@ -197,6 +204,24 @@ describe("registry", () => {
     );
   });
 
+  test("merge-review requires reviewable visual evidence or an explicit exception", () => {
+    const prompt = readFileSync(
+      path.join(RUNTIME_ROOT, "agents", "merge-review.md"),
+      "utf8",
+    );
+    const flat = prompt.replace(/\s+/g, " ");
+    expect(flat).toContain("one representative, reviewable visual artifact");
+    expect(flat).toContain(
+      "A workspace path, a bare `sha256:` identifier, an unreachable URL, or prose that says a screenshot was taken is not reviewable evidence.",
+    );
+    expect(flat).toContain(
+      "emit the blocking protocol finding `visual_evidence_missing` and return FIX",
+    );
+    expect(flat).toContain(
+      "Prefer a bounded, mobile-viewport or element-scoped screenshot",
+    );
+  });
+
   test("merge-agent documented result envelopes validate their registered artifact schemas", () => {
     const expectedCompletedExamples = new Map([
       ["merge-fix@1", 2],
@@ -227,6 +252,45 @@ describe("registry", () => {
         });
       }
     }
+  });
+
+  test("dispatch documented result envelope validates its registered output schema", () => {
+    const registry = loadRegistry();
+    const def = getAgent(registry, "dispatch@1");
+    const examples = [
+      ...readFileSync(def.promptPath, "utf8").matchAll(
+        /```json\n([\s\S]*?)\n```/g,
+      ),
+    ]
+      .map(([, source]) => JSON.parse(source))
+      .filter(
+        (example) => example.terminalState === "completed" && example.artifact,
+      );
+
+    expect(examples).toHaveLength(1);
+    expect(validate(registry.schemas.agentResult, examples[0])).toEqual({
+      valid: true,
+      errors: [],
+    });
+    expect(validate(def.outputSchema, examples[0].artifact)).toEqual({
+      valid: true,
+      errors: [],
+    });
+  });
+
+  test("dispatch prompt gives UX critics the authenticated worktree Runs fixture", () => {
+    const prompt = getAgent(loadRegistry(), "dispatch@1").promptText;
+    expect(prompt).toContain(".factory/run/ports");
+    expect(prompt).toContain("do not start a server or a second proxy");
+    expect(prompt).toContain("/#/runs");
+    expect(prompt).toContain("GET /api/runs");
+    expect(prompt).toContain("HTTP 200");
+    expect(prompt).toContain("auth-fixture failure");
+    expect(prompt).toContain("HTTP 401/403");
+    expect(prompt).toContain("genuinely unassessable");
+    expect(prompt).toContain(
+      "blocked — worktree web UI unavailable (baseline web build failed)",
+    );
   });
 
   test("zero-pack merged-view digest matches the develop baseline", () => {
@@ -358,8 +422,58 @@ describe("registry", () => {
     // is filed with `ticket.mjs file --dedupe-key <source issue id>`;
     // triage-apply.json is re-pinned. Prompt text and its pin only — no
     // schema, contract, route, capability, or model tier changed.
+    // Regenerated (#1539): dispatch orders result.json before the final
+    // Handoff comment; prompt pin only.
+    // Regenerated (#1500): dispatch.md files out-of-scope follow-ups with
+    // `tools/ticket.mjs file --from <TICKET>`; dispatch.json is re-pinned.
+    // Regenerated (#1581): dispatch.md and ship-apply.md move CI waiting to
+    // REST (`gh run list --workflow ci.yml --commit` + `gh run watch`) and
+    // ship-apply's merge_rc_pr asserts every check-run is green before
+    // merging; prompt pins and one argv template only.
+    // Regenerated (#1337): the worker, not the dispatch model, verifies the
+    // canonical authorisation description hash and path scope before execution;
+    // dispatch.md trusts the worker-authenticated verified flag.
+    // Regenerated (#1700): merge-fix comments now pair human-readable Markdown
+    // with embedded machine markers, and merge-review scans formatted multiline
+    // and HTML comment bodies; both prompt definitions are registry inputs.
+    // Re-pinned (#1700 post-review): merge-fix templates the round cap as
+    // `<max_fix_rounds>` instead of hardcoding 2.
+    // Regenerated (#1829): dispatch emits a concrete run trailer and rejects
+    // the literal environment-variable form during handoff verification.
+    // Regenerated (#1843): merge-scan skips rebase churn for ai:landing and
+    // in-flight/fresh Full verification; merge-fix re-checks that CI guard.
+    // Regenerated (#1925): dispatch spells out the exact first-line Fixes
+    // grammar and its prompt pin changes; the registry digest follows it.
+    // Regenerated (#2023): dispatch declares UX screenshots as durable
+    // result artifacts and cites their content-addressed identifiers.
+    // Regenerated (#2057): dispatch gives UX critics the worktree's
+    // authenticated Runs fixture and distinguishes an auth-fixture 401/403
+    // from a genuinely unassessable flow; dispatch.json is re-pinned.
+    // Regenerated (#2035): triage-scan names ticket.mjs as the active ticket
+    // CLI and re-pins its definition; the prompt pin is a registry input.
+    // Regenerated (#2013): dispatch documents draft PR readiness and refreshes
+    // its prompt pin; the registry digest follows it.
+    // Regenerated (#2071): unavailable worktree web UIs are blocked before a
+    // UX critic can misclassify a connection failure as an auth-fixture issue.
+    // Regenerated (#2076): ci-log-capture pins the failed workflow attempt via
+    // an auditable script, records expected missing logs as a completed
+    // no-artifact outcome, and only chains a diagnosis when a ci-log artifact
+    // was captured.
+    // Regenerated (#2144): added celld-smoke agent definition (re-pinned after
+    // prettier formatting of the agent prose/schema).
+    // Regenerated (#2170): dispatch writes to FACTORY_RESULT_PATH and the
+    // pinned prompt/definition digest changes with that recovery contract.
+    // Regenerated (#2149): factory.celld-smoke.requested routes to
+    // celld-smoke@1 on the claude adapter, so the merged view gains a mapping.
+    // Regenerated (#2208): celld-smoke's documented interaction details are
+    // optional artifact fields, and the definition was re-pinned.
+    // Regenerated (#2254): merge-fix and merge-scan document their refusal
+    // cooldown tunables and are re-pinned.
+    // Regenerated (#2219): merge-review requires one reviewable visual
+    // artifact or a concrete exception for user-facing visual PRs, and the
+    // prompt was re-pinned.
     const expected =
-      "sha256:847555a80cb0dc6df59d012c1885ab673ad8fef65a8e39af5d04498550d3aa77";
+      "sha256:dfbde9727dbe25d189af86936a1db647c843427f96a8423e8896ef188e49a9eb";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -480,6 +594,10 @@ describe("registry", () => {
     );
     expect(flat).toContain("`summary` beginning `branch_in_flight:`");
     expect(flat).toContain("`summary` beginning `branch_moved:`");
+    expect(flat).toContain("Full verification");
+    expect(flat).toContain("`ci_in_flight:`");
+    expect(flat).toContain("`ci_fresh:`");
+    expect(flat).toContain("`ai:landing`");
     expect(flat).toContain("make no retry push");
   });
 
@@ -638,8 +756,28 @@ describe("registry", () => {
     // Regenerated (CLNT-123): dispatch prompt pin moved for the web typecheck
     // and bounded handoff-failure continuation instructions; `pack` remains
     // non-enumerable.
+    // Regenerated (#1539): dispatch orders result.json before the final
+    // Handoff comment; `pack` remains non-enumerable.
+    // Regenerated (#1500): dispatch.md instructs `file --from <TICKET>` for
+    // out-of-scope follow-ups; prompt pin only.
+    // Regenerated (#1581): dispatch.md selects the CI run by workflow and
+    // waits via REST; prompt pin only, `pack` remains non-enumerable.
+    // Regenerated (#1337): dispatch trusts the worker-verified authorisation;
+    // prompt pin only, `pack` remains non-enumerable.
+    // Regenerated (#1829): dispatch emits the concrete run trailer with printf,
+    // so quoted PR-body files cannot leave the environment variable literal.
+    // Regenerated (#1925): dispatch specifies the exact Fixes-line grammar;
+    // its prompt pin legitimately changes while `pack` remains non-enumerable.
+    // #2023 adds durable UX screenshot artifact declarations to that prompt.
+    // Regenerated (#2057): dispatch names the authenticated worktree Runs
+    // fixture and the explicit auth-fixture NOT-ASSESSED classification;
+    // prompt pin only, `pack` remains non-enumerable.
+    // Regenerated (#2013): dispatch documents draft PR readiness; prompt pin
+    // only, `pack` remains non-enumerable.
+    // Regenerated (#2170): dispatch writes result envelopes through the
+    // worker-supplied absolute result path.
     expect(computeDefHash(def)).toBe(
-      "sha256:440db0b0151fee722647bc17ea2808976c65558e50d36fec0a02cdd754843c88",
+      "sha256:8e8b4b99c6cd953977ed193d22b682b93bf7efd921ea514ae866d729d7442ab9",
     );
   });
 
@@ -1502,6 +1640,10 @@ describe("registry", () => {
       "/verification",
       "/uxCritique",
     ]);
+    expect(
+      dispatch.view.sections.find((s) => s.path === "/uxCritique").formats
+        .evidence,
+    ).toBe("url");
     const reconcile = getArtifactView(registry, "reconcile@1");
     expect(reconcile.source).toBe("contract");
     expect(reconcile.file).toBe(

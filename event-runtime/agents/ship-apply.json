@@ -26,7 +26,7 @@
       "argv": [
         "sh",
         "-c",
-        "set -eu\ndeploy_actual=\"$(gh api \"repos/$1/branches/$2\" --jq .commit.sha)\"\nif [ \"$deploy_actual\" != \"$3\" ]; then\n  echo \"refusing merge_rc_pr: deploy branch $2 head is $deploy_actual, not the scanned $3 — the deploy branch moved since the scan; re-scan, never merge blind\" >&2\n  exit 1\nfi\npr=\"$(gh pr list --repo \"$1\" --base \"$2\" --head \"$4\" --state open --json number --jq \".[0].number // empty\")\"\nif [ -z \"$pr\" ]; then\n  echo \"refusing merge_rc_pr: no open release PR $4 -> $2 on $1\" >&2\n  exit 1\nfi\npr_head=\"$(gh pr view \"$pr\" --repo \"$1\" --json headRefOid --jq .headRefOid)\"\nif [ \"$pr_head\" != \"$5\" ]; then\n  echo \"refusing release PR #$pr: head $pr_head is not the scanned $5 — a moved head needs a fresh ship scan, not a merge\" >&2\n  exit 1\nfi\ngh pr checks \"$pr\" --repo \"$1\" --watch --fail-fast\nexec gh pr merge \"$pr\" --repo \"$1\" --merge",
+        "set -eu\ndeploy_actual=\"$(gh api \"repos/$1/branches/$2\" --jq .commit.sha)\"\nif [ \"$deploy_actual\" != \"$3\" ]; then\n  echo \"refusing merge_rc_pr: deploy branch $2 head is $deploy_actual, not the scanned $3 — the deploy branch moved since the scan; re-scan, never merge blind\" >&2\n  exit 1\nfi\npr=\"$(gh pr list --repo \"$1\" --base \"$2\" --head \"$4\" --state open --json number --jq \".[0].number // empty\")\"\nif [ -z \"$pr\" ]; then\n  echo \"refusing merge_rc_pr: no open release PR $4 -> $2 on $1\" >&2\n  exit 1\nfi\npr_head=\"$(gh pr view \"$pr\" --repo \"$1\" --json headRefOid --jq .headRefOid)\"\nif [ \"$pr_head\" != \"$5\" ]; then\n  echo \"refusing release PR #$pr: head $pr_head is not the scanned $5 — a moved head needs a fresh ship scan, not a merge\" >&2\n  exit 1\nfi\nrun_id=\"\"\nfor i in $(seq 8); do\n  run_id=\"$(gh run list --repo \"$1\" --workflow ci.yml --commit \"$5\" --json databaseId --limit 1 --jq '.[0].databaseId // empty')\"\n  [ -n \"$run_id\" ] && break\n  sleep 15\ndone\nif [ -z \"$run_id\" ]; then\n  echo \"refusing merge_rc_pr: no CI workflow run found for release commit $5\" >&2\n  exit 1\nfi\ngh run watch \"$run_id\" --repo \"$1\" --exit-status --interval 60\nnot_green=\"$(gh api \"repos/$1/commits/$5/check-runs?per_page=100\" --jq '[.check_runs[] | select(.status != \"completed\" or (.conclusion | IN(\"success\",\"neutral\",\"skipped\") | not)) | \"\\(.name)=\\(.status)/\\(.conclusion)\"] | join(\", \")')\"\nif [ -n \"$not_green\" ]; then\n  echo \"refusing merge_rc_pr: not every check-run on release commit $5 is green: $not_green\" >&2\n  exit 1\nfi\nexec gh pr merge \"$pr\" --repo \"$1\" --merge",
         "merge_rc_pr",
         "{github}",
         "{deployBranch}",
@@ -51,21 +51,15 @@
       ]
     }
   },
-  "workspace": {
-    "type": "ephemeral",
-    "retainOnFailure": true
-  },
+  "workspace": { "type": "ephemeral", "retainOnFailure": true },
   "capabilities": {
     "filesystem": "workspace-only",
     "services": ["gh:write", "notify:telegram"]
   },
-  "limits": {
-    "timeout_seconds": 3600,
-    "attempts": 1
-  },
+  "limits": { "timeout_seconds": 3600, "attempts": 1 },
   "mutating": true,
   "pins": {
-    "agents/ship-apply.md": "sha256:a33250cf1c1b42252193be5e97c38fb022d83267e664c5e5e3862be2341e6516",
+    "agents/ship-apply.md": "sha256:80953360abac8c17367b7d09a86153877f8c4c27a3ef9300944a6768f17d3e71",
     "schemas/ship-apply.input.json": "sha256:3be41273b50d505eae8ffde87b205738ff4fd1b6c9e8ed9f9aa1809965763686",
     "schemas/ship-applied.output.json": "sha256:e73f513f50197b344ff320f2f881464028991c6dfb7689790fe3039456ce821b"
   }

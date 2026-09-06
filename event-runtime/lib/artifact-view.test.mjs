@@ -583,6 +583,7 @@ describe("input view + subject (WM-897)", () => {
     expect(view.sections.find((s) => s.path === "/uxCritique")).toMatchObject({
       as: "keyvalue",
       keys: ["status", "verdict", "rounds", "prReady", "evidence"],
+      formats: { evidence: "url" },
     });
     const def = JSON.parse(
       readFileSync(path.join(RUNTIME_ROOT, "agents", "dispatch.json"), "utf8"),

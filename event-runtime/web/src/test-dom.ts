@@ -15,3 +15,19 @@
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
 GlobalRegistrator.register();
+
+// happy-dom supplies a real fetch and defaults its document origin to
+// http://localhost/. An api method that a component test forgot to stub would
+// therefore escape to port 80. Fail closed before the network stack sees it;
+// tests that intentionally exercise fetch replace globalThis.fetch explicitly.
+globalThis.fetch = (async (
+  input: Parameters<typeof fetch>[0],
+  init?: Parameters<typeof fetch>[1],
+) => {
+  const request = input instanceof Request ? input : null;
+  const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
+  const rawUrl = request?.url ?? String(input);
+  const url = new URL(rawUrl, document.location.href);
+  const path = `${url.pathname}${url.search}`.replace(/^\/api(?=\/)/, "");
+  throw new Error(`unmocked api call: ${method} ${path}`);
+}) as unknown as typeof fetch;

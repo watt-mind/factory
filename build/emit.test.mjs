@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -22,6 +23,21 @@ import {
 const ROOT = path.resolve(import.meta.dir, "..");
 const hadLocalReposConfig = existsSync(path.join(ROOT, "config", "repos.yaml"));
 
+function markdownFiles(dir) {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const file = path.join(dir, entry.name);
+    if (entry.isDirectory()) return markdownFiles(file);
+    return entry.isFile() && entry.name.endsWith(".md") ? [file] : [];
+  });
+}
+
+test("shared prompts use REST CI watchers instead of watched PR checks", () => {
+  for (const file of markdownFiles(path.join(ROOT, "shared"))) {
+    const text = readFileSync(file, "utf8");
+    expect(text).not.toMatch(/gh pr checks[\s\S]{0,100}--watch/);
+  }
+});
+
 test("delivered floor documents valid Owned Paths bullets", () => {
   const floor = readFileSync(
     path.join(ROOT, "dist", "AGENTS.floor.md"),
@@ -36,6 +52,17 @@ test("delivered floor documents valid Owned Paths bullets", () => {
   expect(floor).toContain(
     "agents/*.json|*.view.json ⇒ event-runtime/lib/registry.test.mjs",
   );
+});
+
+test("delivered floor documents explicit browser tab routing and reload re-read rules", () => {
+  const floor = readFileSync(
+    path.join(ROOT, "dist", "AGENTS.floor.md"),
+    "utf8",
+  );
+  expect(floor).toContain("Pass `tabId` explicitly on every browser call");
+  expect(floor).toContain("Own a tab from `tabs_create`");
+  expect(floor).toContain("Assert origin before trusting a read");
+  expect(floor).toContain("Re-read after reload");
 });
 
 test.each([
@@ -306,6 +333,37 @@ test("floor check uses the running checkout when its configured path is missing"
   } finally {
     rmSync(fixture, { recursive: true, force: true });
     rmSync(staleSibling, { recursive: true, force: true });
+  }
+});
+
+test("floor check fails when the running checkout's floor is stale", () => {
+  const fixture = makeEmitFixture();
+  const staleAgents =
+    "<!-- FACTORY:FLOOR:BEGIN -->\nstale floor\n<!-- FACTORY:FLOOR:END -->\n";
+
+  try {
+    writeFileSync(path.join(fixture, "AGENTS.md"), staleAgents);
+    writeFileSync(path.join(fixture, "config", "repos.yaml"), "repos: []\n");
+
+    const result = Bun.spawnSync({
+      cmd: ["bun", "build/emit.mjs", "--check"],
+      cwd: fixture,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).toContain(
+      "Current checkout floor is stale: AGENTS.md",
+    );
+    expect(result.stderr.toString()).toContain(
+      "bun build/emit.mjs --sync-floor",
+    );
+    expect(result.stdout.toString()).toContain(
+      "floor delivery: no configured repo checked out here — not verified",
+    );
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
   }
 });
 
