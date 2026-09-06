@@ -6069,13 +6069,14 @@ sh -c 'sleep 5 & wait'
     expect(
       db
         .query(
-          `SELECT terminal_state, reason_code, finished_at FROM attempts WHERE run_id = ? AND attempt = ?`,
+          `SELECT terminal_state, reason_code, finished_at, lease_expires_at FROM attempts WHERE run_id = ? AND attempt = ?`,
         )
         .get(spec.runId, claim.attempt),
     ).toEqual({
       terminal_state: "FAILED",
       reason_code: "lease_expired",
       finished_at: new Date(T0).toISOString(),
+      lease_expires_at: new Date(T0 - 1).toISOString(),
     });
     expect(claimedRetryFor(db, spec.runId, claim.attempt + 1)).toEqual({
       runId: spec.runId,
@@ -6316,7 +6317,7 @@ sh -c 'sleep 5 & wait'
       expect(runState(db, spec.runId)).toBe(finalState);
       const terminatedAttempt = db
         .query(
-          `SELECT terminal_state, reason_code, fencing_token, lease_owner
+          `SELECT terminal_state, reason_code, fencing_token, lease_owner, lease_expires_at
            FROM attempts WHERE run_id = ? AND attempt = ?`,
         )
         .get(spec.runId, claim.attempt);
@@ -6325,6 +6326,7 @@ sh -c 'sleep 5 & wait'
         reason_code: "operator_terminated",
         fencing_token: expect.any(Number),
         lease_owner: null,
+        lease_expires_at: new Date(T0 - 1).toISOString(),
       });
       expect(terminatedAttempt.fencing_token).toBeGreaterThan(
         claim.fencingToken,
@@ -6480,6 +6482,8 @@ sh -c 'sleep 5 & wait'
   test("cancelRun on a RUNNING attempt aborts adapter immediately and records attempt (OPS-417)", async () => {
     const db = openDb(":memory:");
     let aborted = false;
+    let transactionCommitted = false;
+    let abortObservedAfterCommit = false;
     const longRunningAdapter = {
       execute: ({ abortSignal }) => {
         return new Promise((resolve) => {
@@ -6490,6 +6494,7 @@ sh -c 'sleep 5 & wait'
           abortSignal?.addEventListener("abort", () => {
             clearTimeout(timer);
             aborted = true;
+            abortObservedAfterCommit = transactionCommitted;
             resolve({
               exitCode: null,
               timedOut: false,
@@ -6515,7 +6520,25 @@ sh -c 'sleep 5 & wait'
 
     // Cancel while RUNNING
     expect(runState(db, spec.runId)).toBe("RUNNING");
-    cancelRun(db, spec.runId, {
+    const commitTrackingDb = new Proxy(db, {
+      get(target, property) {
+        if (property === "transaction") {
+          return (fn) => {
+            const transaction = target.transaction(fn);
+            return {
+              immediate() {
+                const result = transaction.immediate();
+                transactionCommitted = true;
+                return result;
+              },
+            };
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    cancelRun(commitTrackingDb, spec.runId, {
       actor: "operator",
       policyVersion: "test",
       now: T0,
@@ -6524,6 +6547,7 @@ sh -c 'sleep 5 & wait'
     const summary = await execPromise;
     expect(summary.cancelled).toBe(true);
     expect(aborted).toBe(true);
+    expect(abortObservedAfterCommit).toBe(true);
     expect(runState(db, spec.runId)).toBe("CANCELLED");
 
     const attempt = db
