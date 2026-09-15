@@ -213,7 +213,10 @@ post-removal reporting are not covered by anything but review.
 
 Treat the first real `--yes` as operator-watched: run the dry run, read the
 plan, keep the log file open, and expect to compare what the journal tail
-prints against what the publisher does next. `sweep-evicted-pods` has at least
-been run live as a dry run against the dev cluster (that is where the
-`spawnSync` buffer ceiling came from); no verb here has an act-path production
-run behind it yet.
+prints against what the publisher does next.
+
+All three verbs have been dry-run live against the runner, which is how the
+`spawnSync` buffer ceiling was found; `discard-unprepared-transaction`'s probe
+was additionally pointed at a completed `history/` transaction to exercise the
+refusals against real data. None of the three has an act-path production run
+behind it.
