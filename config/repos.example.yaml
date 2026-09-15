@@ -86,6 +86,19 @@ repos:
       required_checks:
         - Shadow runner fleet available
         - Verify
+    # Jobs that are red by design or by policy and must never raise an alarm
+    # (WM-1103). `factory ci-health` ignores them when it looks for the same job
+    # failing on consecutive pushes to `base`, and the ship pre-flight reads the
+    # same list for its "every non-advisory job is green" check. Names are the
+    # job names GitHub reports — for a job inside a called workflow that is
+    # "<calling job name> / <job name>". Matched exactly; omit for none.
+    # advisory_jobs:
+    #   - Security Scan (advisory)
+    # By default ci-health watches the same workflow merge_ci names (else "CI").
+    # Set this only when the trunk's verdict lives in a different workflow than
+    # the merge gate's.
+    # ci_health:
+    #   workflow: CI
     escalate_paths: [] # Paths that require human escalation; empty means none.
     security: # Optional allow-listed settings for the security audit.
       python_version: "3.12" # Optional Python version for the security audit.

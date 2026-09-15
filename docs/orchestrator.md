@@ -210,7 +210,49 @@ The factory automatically merges PRs targeting `develop` once all gates pass.
 3. **Fail-Closed Stance**:
    - If the API (`:7381`) is unreachable or returns 500s, treat the worker pool as **FULL** and hold dispatch until recovery.
 
-4. **Keep the Main Checkout Pullable — a Dirty Tree Is Yours to Clear**:
+4. **Base-Branch CI Health — `factory ci-health` (WM-1103)**:
+
+   The standing loop that watches the _trunk_, not a PR. Nothing else does:
+   `factory ci` measures CI as fourteen-day friction (medians, flake counts) and
+   is a retro input; the merge stage only ever reads one PR's checks. So a job
+   that fails on every push is invisible until a human happens to read a merge
+   report — which is exactly how legalease `develop` stayed red in one gate for
+   ten hours and six consecutive pushes on 2026-09-15 while deploy and smoke
+   were green, stranding every image publication and the master receipt gate.
+
+   ```bash
+   factory ci-health --repo legalease            # dry: what it would say
+   factory ci-health --repo legalease --apply    # send + remember (the loop)
+   factory ci-health --report                    # remembered alarms, no GitHub calls
+   bun run ci-health legalease                   # the supervisor form, one pass
+   ```
+
+   Per repo it reads the last three completed runs of the repo's CI workflow on
+   `base`, collapses reruns to one verdict per head SHA, drops `cancelled` runs
+   (a superseded run is not evidence either way), ignores jobs listed in the
+   repo's `advisory_jobs:`, and when the **same job** is red on two consecutive
+   distinct SHAs sends exactly one
+
+   ```
+   CI RED <repo>/<base>: <job> red on <n> consecutive pushes since <sha> (<age>); latest <run url>
+   ```
+
+   The alarm is remembered in `~/.factory/state/ci-health.json` and is not
+   repeated, however many more red pushes land; when the job is seen green again
+   it sends one `CI GREEN <repo>/<base>: <job> recovered at <sha>` and clears.
+   Silence never clears an alarm — a job that vanished from the workflow, a
+   forge that would not answer, and a run still in progress are all unknown, and
+   unknown holds. Without `--apply` nothing is sent **and** nothing is written,
+   because a preview that consumed the alarm would silence the real alert.
+   `--window N` widens the three-push lookback when you want the message to
+   quote the true length of a long outage (each extra push costs one jobs call).
+
+   Enable it on a 15-minute cadence by copying the `ci-health` job out of
+   `config/schedule.example.yaml` into `config/schedule.yaml`. Acting on a red
+   base — pausing dispatch, filing the ticket, rerunning — is still the
+   operator's call; this loop only makes sure the operator knows.
+
+5. **Keep the Main Checkout Pullable — a Dirty Tree Is Yours to Clear**:
 
    The live stack pins `policyVersion` at startup and loads agent definitions
    once, so **the factory keeps running whatever was on disk when it booted**.
@@ -374,6 +416,9 @@ factory ticket detail WM-123 "..."       # Append criteria / verification block
 factory ticket file --team WM --title "..." --body "..." --type bug # File new issue
 
 # --- CI & GitHub Checks ---
+# Is any base branch stuck red in the same job across pushes? (read-only)
+factory ci-health --report
+factory ci-health --repo <repo>
 # One-shot reads — fine inline:
 gh pr view <PR> --json headRefOid,mergeable,mergeStateStatus
 gh api repos/<owner>/<repo>/commits/<sha>/check-runs --jq '.check_runs[] | "\(.name)=\(.conclusion // .status)"'
