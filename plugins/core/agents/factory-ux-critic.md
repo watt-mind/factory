@@ -1,6 +1,5 @@
 ---
 name: factory-ux-critic
-model: sonnet
 disallowedTools: Write, Edit, NotebookEdit
 description: End-user perspective critic for materially changed user journeys. Spawn after verification passes and before opening the PR when a change introduces or materially changes a user-completable flow, interaction, state transition, error/recovery path, responsive layout, authentication, payment, onboarding, or destructive action — mobile (simulator via argent), web (browser tools), or Electron (argent chromium). Requires the caller to pass `worktree: <absolute path>` and how to launch the app. It uses the running app the way a real user would and returns ranked findings plus a ship/fix-first/not-assessed/blocked verdict. It never edits code.
 ---

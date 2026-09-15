@@ -1,6 +1,5 @@
 ---
 name: factory-ux-critic
-model: sonnet
 disallowedTools: Write, Edit, NotebookEdit
 pi-tools: read, grep, find, ls, bash, chrome_devtools_load, chrome_devtools_list_pages, chrome_devtools_select_page, chrome_devtools_navigate, chrome_devtools_evaluate, chrome_devtools_screenshot
 pi-extensions: npm:@narumitw/pi-chrome-devtools
