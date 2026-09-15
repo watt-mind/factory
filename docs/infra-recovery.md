@@ -13,9 +13,11 @@ be suspicious: the shape an agent had to type was `ssh … sudo rm -rf …`,
 `gh variable set … --body <digest>` — three of the most dangerous strings in
 the fleet, with the safety entirely in the operator's head.
 
-Wrapping them moves the safety into code and the permission surface into one
-reviewable rule. The verb refuses on the preconditions the runbook describes,
-so allowing `factory infra` is allowing _those three recoveries_, not a shell.
+Wrapping them moves the safety out of the operator's head and into code: the
+verb refuses on the preconditions the runbook describes, prints the plan before
+it does anything, and leaves an audit log either way. It does not follow that
+`--yes` should be allowed without a prompt — see
+[Allow-rule for Claude Code](#allow-rule-for-claude-code).
 
 | Verb                             | Incident  | What went wrong without it                                                                                                                                                                               |
 | -------------------------------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -66,6 +68,14 @@ When they agree it prints before/after per repo and, with `--yes`, runs
 <digest>`. A repo already holding the digest is skipped, and an unset variable
 reads as `(unset)` rather than blank.
 
+`--repos` is an allow-list, not a free-form slug: only `legalease`
+(`watt-mind/legalease`) and `lawz` (`watt-mind/lawz`) — either spelling —
+are accepted, and anything else is exit 3 before the host is touched
+(`DRIVER_DIGEST_REPOS` in `orchestrator/infra.mjs`). Adding a repo is a code
+change that goes through review. If a `gh variable set` fails part-way through
+the list, the error names the repos already rotated, so a half-rotated pair is
+visible rather than implied by a count.
+
 ## `factory infra discard-unprepared-transaction`
 
 ```
@@ -75,6 +85,11 @@ factory infra discard-unprepared-transaction --role research-runner|case-agent [
 Everything on the host runs under `flock -w 30 -x` on
 `/var/lib/legal-dev-runtime-promotion/legal-dev-runtime-promotion.lock` — the
 same lock the publishers take, so the probe cannot race a live transaction.
+
+**The dry run is not free on the host.** Read-only as it is, the probe takes
+that lock: a publisher starting while the probe holds it waits (briefly — the
+probe is one `python3` stat pass), and the probe itself gives up after 30 s if
+a publisher holds it first. Do not loop it against a busy promotion.
 
 It **refuses** (exit 2) when:
 
@@ -103,8 +118,19 @@ With `--yes` it then, under the lock:
 4. prints the last 4 events from `/var/lib/legalease/dev-qualification/journal/`.
 
 The lock is released between probe and act (two ssh sessions), so the act
-script re-asserts both state-file preconditions in shell and exits 9 if either
-appeared; the verb reports that as REFUSED, not as success.
+script re-asserts **all three** preconditions under the re-taken lock before
+anything is removed: both state files, and one `kubectl get` comparing the live
+`resourceVersion` against the one the patch tested. A state file that appeared
+or a deployment that moved exits 9 and the verb reports REFUSED, not success; a
+re-check that could not be made at all exits 10 and reports CANNOT EVALUATE.
+The `resourceVersion` is the precondition that can change without leaving a
+file behind, so checking it only in the probe left a window the size of an ssh
+round-trip.
+
+Once `rm -rf active/<role>` has succeeded the script stops failing: a failing
+`fsync` or journal tail is printed as a `WARNING` on stdout and the script
+still exits 0. Reporting "CANNOT EVALUATE — 0 actions" after a completed
+removal sends the operator looking for a directory that is already gone.
 
 **Candidate filename.** The exchange file is named for the _publisher_ role,
 which is spelled with underscores (`publisher-research_runner-candidate.json`).
@@ -146,18 +172,48 @@ rest.
 
 ## Allow-rule for Claude Code
 
-The point of the verbs is that one rule can replace three classifier
-round-trips. Add to `~/.claude/settings.json`:
+**Do not add `Bash(factory infra *)` as a blanket rule.** Claude Code's `Bash`
+rules are prefix rules: they cannot see flags, so that one pattern matches
+`factory infra sweep-evicted-pods` and
+`factory infra discard-unprepared-transaction --yes` exactly alike. Pasting it
+would allow the mutations, not just the reads, and would do it in the one place
+nobody re-reads.
 
-```json
-{
-  "permissions": {
-    "allow": ["Bash(factory infra *)"]
-  }
-}
-```
+What these verbs are worth is not skipping the prompt. It is that the
+preconditions are code instead of a human's memory, that the plan is printed
+before anything happens (`DELETE office-abc/husk (Evicted; owner rs-1 has a
+Running replica)` rather than a bare `kubectl delete`), and that every
+invocation leaves `~/.factory/logs/infra/<verb>-<stamp>.log` behind. Those hold
+whether or not a permission rule exists.
 
-This file is the operator's and lives outside this repo, so it is not edited by
-the factory — paste the rule yourself, or run `/update-config`. Allowing the
-verbs is not allowing a shell: without `--yes` every one of them is read-only,
-and with it each is confined to the preconditions above.
+So:
+
+- **Allow the dry runs** if your permission layer can match a flag-free
+  invocation — for example an exact-match rule per verb,
+  `Bash(factory infra sweep-evicted-pods)`. Without `--yes` the verbs mutate
+  nothing (the discard probe does take the publishers' lock for up to 30 s, so
+  it is read-only, not effect-free).
+- **Keep the prompt on `--yes`.** One prompt per real mutation, answered with
+  the dry run's plan already on screen, is a much better question than the
+  three blind `ssh … sudo rm -rf` prompts this replaced. That is the win —
+  approving something legible, not approving less often.
+- If your layer can only match prefixes and you are not willing to split the
+  rule, the honest configuration is **no allow-rule at all**.
+
+`~/.claude/settings.json` is the operator's and lives outside this repo, so the
+factory does not edit it — add rules yourself, or run `/update-config`.
+
+### Not yet exercised against a real incident
+
+`discard-unprepared-transaction`'s **act path has never run against a real
+stranded transaction.** CLNT-3170 was cleared by hand before this verb existed,
+and everything since has been unit tests over fake adapter output. Its refusals
+and its dry run are covered; the removal, the `--recover` call and the
+post-removal reporting are not covered by anything but review.
+
+Treat the first real `--yes` as operator-watched: run the dry run, read the
+plan, keep the log file open, and expect to compare what the journal tail
+prints against what the publisher does next. `sweep-evicted-pods` has at least
+been run live as a dry run against the dev cluster (that is where the
+`spawnSync` buffer ceiling came from); no verb here has an act-path production
+run behind it yet.

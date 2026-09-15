@@ -11,9 +11,12 @@
  * permission classifier during the 2026-09-15 release because the shape an
  * agent had to type was `ssh … sudo rm -rf …` / `kubectl delete pods …` /
  * `gh variable set …`. Every block cost a round-trip to the human for a
- * decision they had already made. Wrapping them turns the permission surface
- * into one reviewable rule — `Bash(factory infra *)` — where the preconditions
- * are code rather than a human's memory of the runbook.
+ * decision they had already made. Wrapping them puts the preconditions in code
+ * rather than in a human's memory of the runbook, and gives the operator one
+ * plan to read before approving. It does not make `--yes` safe to allow
+ * blanket: a prefix rule cannot tell `sweep-evicted-pods` from
+ * `sweep-evicted-pods --yes`, so the prompt on a mutating run stays. See
+ * docs/infra-recovery.md.
  *
  * The incidents, one per verb: OPS-694 (a rotated driver left the repo
  * variables stale), CLNT-3170 (a failed lawz publish stranded an unprepared
@@ -67,6 +70,64 @@ export const JOURNAL_DIR = "/var/lib/legalease/dev-qualification/journal";
 export const ROLES = ["research-runner", "case-agent"];
 
 export const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+
+/**
+ * Repositories whose `DEV_QUALIFICATION_DRIVER_SHA256` this verb may rotate.
+ *
+ * An allow-list rather than `--repos <anything>` over an owner default: the
+ * value lands in `gh variable set -R <slug>`, and the point of the verb is that
+ * running it is running *these two rotations*. Adding a repo is a code change
+ * that goes through review — the same bar the runbook has.
+ */
+export const DRIVER_DIGEST_REPOS = [
+  { name: "legalease", slug: "watt-mind/legalease" },
+  { name: "lawz", slug: "watt-mind/lawz" },
+];
+
+/** The slug for one `--repos` entry, or null when it is not on the list. */
+export function resolveDriverDigestRepo(repo) {
+  const value = String(repo ?? "").trim();
+  const entry = DRIVER_DIGEST_REPOS.find(
+    (r) => r.name === value || r.slug === value,
+  );
+  return entry ? entry.slug : null;
+}
+
+/*
+ * Shapes for every value that reaches the runner's shell or ssh's argv.
+ *
+ * Quoting alone is one missed interpolation away from `; touch /tmp/PWNED #` —
+ * which is exactly what the cold review of WM-1105 proved through
+ * `--candidate-role`. So each value is checked against a shape *before* any
+ * string is built, and quoted as well. Host-read values are checked too: the
+ * runner's own files are a lower-trust input than the operator's flags, not a
+ * higher one.
+ */
+
+/**
+ * ssh destination: `host` or `user@host`.
+ *
+ * The first character is deliberately narrower than the rest. `-oProxyCommand`
+ * is a plausible-looking hostname to a character-class regex, and ssh reads a
+ * leading dash as an option rather than a destination.
+ */
+export const HOST_RE = /^[A-Za-z0-9._][A-Za-z0-9._-]*(@[A-Za-z0-9.:_-]+)?$/;
+
+/** Publisher role inside the exchange candidate filename (`research_runner`). */
+export const CANDIDATE_ROLE_RE = /^[a-z0-9_]+$/;
+
+/** `qualification-stage.binding`, in the shape the driver writes it. */
+export const BINDING_RE = /^sha256:[0-9a-f]{64}$/;
+
+/** A Kubernetes namespace or object name (RFC 1123), read off the host. */
+export const K8S_NAME_RE = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/;
+
+/**
+ * A `metadata.resourceVersion`, which Kubernetes defines as opaque: never
+ * parsed here, only compared and quoted, so this is a charset floor rather than
+ * a claim about its meaning.
+ */
+export const RESOURCE_VERSION_RE = /^[A-Za-z0-9._-]+$/;
 
 /** An ownerless evicted pod is only swept once it is this old. */
 export const ORPHAN_MIN_AGE_MS = 24 * 60 * 60 * 1000;
@@ -254,6 +315,13 @@ export function evaluateDiscard({ role, probe }) {
     };
   }
   const expected = patchResourceVersionPrecondition(probe.patch);
+  if (expected !== null && !RESOURCE_VERSION_RE.test(expected)) {
+    return {
+      ok: false,
+      exitCode: EXIT.CANNOT_EVALUATE,
+      reason: `active/${role}/deployment-patch.json tests resourceVersion ${JSON.stringify(expected)}, which is not a value this verb will put in a shell comparison`,
+    };
+  }
   if (expected === null) {
     return {
       ok: false,
@@ -283,6 +351,15 @@ export function evaluateDiscard({ role, probe }) {
       ok: false,
       exitCode: EXIT.CANNOT_EVALUATE,
       reason: `active/${role}/qualification-stage.binding is missing or empty — the driver has no binding to --recover`,
+    };
+  }
+  if (!BINDING_RE.test(String(probe.binding))) {
+    return {
+      ok: false,
+      exitCode: EXIT.CANNOT_EVALUATE,
+      reason:
+        `active/${role}/qualification-stage.binding is ${JSON.stringify(String(probe.binding))}, not the sha256:<64hex> the driver emits. ` +
+        "That value would become an argument to sudo on the runner — refusing to pass it on.",
     };
   }
   return {
@@ -329,6 +406,18 @@ export function selectEvictedPods(
     if (!namespaceMatches(namespace, patterns ?? [])) continue;
     const phase = pod?.status?.phase;
     if (phase !== "Failed") continue;
+    // The pair becomes two arguments in a shell command on the runner. The API
+    // server will not mint a name outside RFC 1123, so anything else means the
+    // snapshot is not what this verb thinks it is — keep, never delete.
+    if (!K8S_NAME_RE.test(namespace) || !K8S_NAME_RE.test(name)) {
+      skipped.push({
+        namespace,
+        name,
+        reason: pod?.status?.reason ?? null,
+        why: "namespace or name is not an RFC 1123 Kubernetes name",
+      });
+      continue;
+    }
     const reason = pod?.status?.reason ?? null;
     if (!SWEEPABLE_REASONS.includes(reason)) {
       skipped.push({
@@ -423,6 +512,16 @@ export function adapterFailure(result) {
 }
 
 export function defaultSsh(host, script, { timeoutMs = 120_000 } = {}) {
+  // The chokepoint every verb goes through, so the destination is checked here
+  // as well as at the flag: a bad host reads as a failed adapter (exit 3),
+  // never as an argv entry ssh gets to interpret.
+  if (!HOST_RE.test(String(host ?? ""))) {
+    return {
+      status: 1,
+      stdout: "",
+      stderr: `refusing to ssh to ${JSON.stringify(host ?? null)}: not a plain [user@]host`,
+    };
+  }
   return spawnSync(
     "ssh",
     ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "bash -s"],
@@ -463,7 +562,8 @@ export function makeLogger(
   const file = path.join(logDir, `${verb}-${logStamp(nowMs)}.log`);
   let usable = true;
   try {
-    mkdirSync(logDir, { recursive: true });
+    // 0700: the log records which host was touched and what was removed.
+    mkdirSync(logDir, { recursive: true, mode: 0o700 });
   } catch {
     usable = false;
   }
@@ -511,7 +611,7 @@ export function parseDigestProbe(stdout) {
 }
 
 export function rotateDriverDigest(
-  { digest, repos, host = DEFAULT_HOST, yes = false, owner = "watt-mind" },
+  { digest, repos, host = DEFAULT_HOST, yes = false },
   {
     ssh = defaultSsh,
     gh = defaultGh,
@@ -522,6 +622,18 @@ export function rotateDriverDigest(
   if (!repos?.length) {
     err("CANNOT EVALUATE — --repos is required (e.g. --repos legalease,lawz)");
     return { exitCode: EXIT.CANNOT_EVALUATE, actions: 0 };
+  }
+  const slugs = [];
+  for (const repo of repos) {
+    const slug = resolveDriverDigestRepo(repo);
+    if (!slug) {
+      err(
+        `CANNOT EVALUATE — ${JSON.stringify(String(repo))} is not a repository this verb rotates ` +
+          `(allowed: ${DRIVER_DIGEST_REPOS.map((r) => `${r.name} (${r.slug})`).join(", ")})`,
+      );
+      return { exitCode: EXIT.CANNOT_EVALUATE, actions: 0 };
+    }
+    slugs.push(slug);
   }
   const probe = ssh(host, DIGEST_PROBE);
   if (probe?.status !== 0) {
@@ -549,9 +661,8 @@ export function rotateDriverDigest(
   out(`  ${DRIVER_PATH} sha256sum      ✓`);
   out(`  ${DRIVER_CONFIG} driver_sha256 ✓`);
 
-  let actions = 0;
-  for (const repo of repos) {
-    const slug = repo.includes("/") ? repo : `${owner}/${repo}`;
+  const rotated = [];
+  for (const slug of slugs) {
     const read = gh([
       "variable",
       "get",
@@ -582,7 +693,15 @@ export function rotateDriverDigest(
       err(
         `CANNOT EVALUATE — gh variable set failed for ${slug}: ${adapterFailure(write)}`,
       );
-      return { exitCode: EXIT.CANNOT_EVALUATE, actions };
+      // Which repos are already on the new digest is the first thing the
+      // operator needs: a half-rotated pair is a split qualify gate, and
+      // "actions: 1" without names does not say which half.
+      err(
+        rotated.length
+          ? `already rotated to ${digest}: ${rotated.join(", ")}. ${slug} and any repo after it are unchanged — re-run to finish.`
+          : "no repository variable was changed.",
+      );
+      return { exitCode: EXIT.CANNOT_EVALUATE, actions: rotated.length };
     }
     const after = gh([
       "variable",
@@ -594,9 +713,9 @@ export function rotateDriverDigest(
     const now =
       after?.status === 0 ? String(after.stdout ?? "").trim() : "(unreadable)";
     out(`${slug}: ${before} -> ${now}`);
-    actions += 1;
+    rotated.push(slug);
   }
-  return { exitCode: EXIT.OK, actions, digest };
+  return { exitCode: EXIT.OK, actions: rotated.length, digest };
 }
 
 // ---------------------------------------------------------------------------
@@ -614,7 +733,7 @@ export function discardProbeScript(role) {
   return `set -euo pipefail
 exec 9>${PROMOTION_LOCK}
 flock -w 30 -x 9 || { echo "lock-timeout" >&2; exit 75; }
-DIR=${PROMOTION_ROOT}/active/${role}
+DIR='${PROMOTION_ROOT}/active/${role}'
 python3 - "$DIR" <<'PY'
 import json, os, sys
 d = sys.argv[1]
@@ -649,33 +768,84 @@ PY
 }
 
 /**
- * Discard the directory, under the lock, re-asserting the preconditions.
+ * The line the act script crosses from "nothing has happened" to "the
+ * transaction is gone". Everything after it is durability and reporting.
+ */
+export const DISCARD_POINT_OF_NO_RETURN =
+  "# --- point of no return: the transaction directory is gone ---";
+
+/**
+ * Discard the directory, under the lock, re-asserting every precondition.
  *
  * The lock is released between the probe and this script (two ssh sessions),
  * so the preconditions are re-checked here in shell before anything is
- * removed. Exit 9 means the world changed under us and the caller reports a
- * refusal rather than a success.
+ * removed — including the live `resourceVersion`, which is the one that can
+ * change without leaving a file behind. Exit 9 means the world changed under
+ * us and the caller reports a refusal rather than a success; exit 10 means the
+ * re-check itself could not be made, which is not a pass either.
+ *
+ * Errexit is deliberately never enabled. Before the point of no return every
+ * step carries its own `|| exit`; after it, a failing fsync or journal tail is
+ * a warning on stdout, because a caller told "CANNOT EVALUATE — actions: 0"
+ * about a removal that already happened goes looking for a directory that no
+ * longer exists (cold review of WM-1105).
  */
-export function discardActScript(role, { binding, candidateRole }) {
+export function discardActScript(
+  role,
+  { binding, candidateRole, target, resourceVersion },
+) {
+  // These are assertions, not validation: every caller has already refused on
+  // these shapes. Reaching here with a bad one means a new call path skipped
+  // the check, and building the script anyway is how the injection lands.
+  const assertShape = (label, value, re) => {
+    if (!re.test(String(value ?? ""))) {
+      throw new Error(
+        `refusing to build a discard script: ${label} ${JSON.stringify(value ?? null)} does not match ${re}`,
+      );
+    }
+  };
+  if (!ROLES.includes(role)) {
+    throw new Error(
+      `refusing to build a discard script for role ${JSON.stringify(role ?? null)}`,
+    );
+  }
+  assertShape("binding", binding, BINDING_RE);
+  assertShape("candidate role", candidateRole, CANDIDATE_ROLE_RE);
+  assertShape("target namespace", target?.namespace, K8S_NAME_RE);
+  assertShape("target name", target?.name, K8S_NAME_RE);
+  assertShape("resourceVersion", resourceVersion, RESOURCE_VERSION_RE);
+
+  const dir = `${PROMOTION_ROOT}/active/${role}`;
+  const candidateFile = `${EXCHANGE_DIR}/publisher-${candidateRole}-candidate.json`;
+  const ref = `${target.namespace}/${target.name}`;
   return `set -uo pipefail
 exec 9>${PROMOTION_LOCK}
 flock -w 30 -x 9 || { echo "lock-timeout" >&2; exit 75; }
-DIR=${PROMOTION_ROOT}/active/${role}
+DIR='${dir}'
 [ -d "$DIR" ] || { echo "transaction directory vanished" >&2; exit 9; }
 [ -e "$DIR/promotion.state" ] && { echo "promotion.state appeared" >&2; exit 9; }
 [ -e "$DIR/coordinator.phase" ] && { echo "coordinator.phase appeared" >&2; exit 9; }
+LIVE=$(kubectl -n '${target.namespace}' get deployment '${target.name}' -o jsonpath='{.metadata.resourceVersion}') || { echo "could not re-read the resourceVersion of ${ref} under the lock" >&2; exit 10; }
+[ "$LIVE" = '${resourceVersion}' ] || { echo "deployment ${ref} moved to $LIVE, patch tested ${resourceVersion}" >&2; exit 9; }
+echo "== ${ref} still at resourceVersion ${resourceVersion}"
 echo "== driver --recover ${binding}"
-set +e
-sudo -n ${DRIVER_PATH} --recover ${binding}
+sudo -n ${DRIVER_PATH} --recover '${binding}'
 RECOVER_STATUS=$?
-set -e
 echo "== driver --recover exit $RECOVER_STATUS"
-rm -f ${EXCHANGE_DIR}/publisher-${candidateRole}-candidate.json
-rm -rf "$DIR"
-python3 -c 'import os,sys; fd=os.open(sys.argv[1], os.O_RDONLY); os.fsync(fd); os.close(fd)' ${PROMOTION_ROOT}/active
+rm -f '${candidateFile}' || { echo "could not remove ${candidateFile}" >&2; exit 1; }
+rm -rf "$DIR" || { echo "could not remove $DIR" >&2; exit 1; }
+${DISCARD_POINT_OF_NO_RETURN}
+if python3 -c 'import os,sys; fd=os.open(sys.argv[1], os.O_RDONLY); os.fsync(fd); os.close(fd)' '${PROMOTION_ROOT}/active'; then
+  echo "== removed ${dir} (fsynced)"
+else
+  echo "== removed ${dir}; WARNING: fsync of ${PROMOTION_ROOT}/active failed (exit $?)"
+fi
 echo "== journal tail"
-sudo -n sh -c 'ls ${JOURNAL_DIR}/*.json 2>/dev/null | sort | tail -4 | xargs -r cat'
-echo
+if sudo -n sh -c 'ls ${JOURNAL_DIR}/*.json 2>/dev/null | sort | tail -4 | xargs -r cat'; then
+  echo
+else
+  echo "== WARNING: journal tail failed (exit $?); the discard itself completed"
+fi
 exit 0
 `;
 }
@@ -688,7 +858,7 @@ export function defaultDeploymentResourceVersion(
 ) {
   const run = ssh(
     host,
-    `kubectl -n ${namespace} get deployment ${name} -o jsonpath='{.metadata.resourceVersion}'\n`,
+    `kubectl -n '${namespace}' get deployment '${name}' -o jsonpath='{.metadata.resourceVersion}'\n`,
   );
   return run?.status === 0 ? String(run.stdout ?? "").trim() || null : null;
 }
@@ -708,6 +878,16 @@ export function discardUnpreparedTransaction(
     err(`CANNOT EVALUATE — ${verdict.reason}`);
     return { exitCode: EXIT.CANNOT_EVALUATE, actions: 0 };
   }
+  // The publisher spells its roles with underscores, so the default is derived
+  // from --role; either way the value becomes a path inside a script that runs
+  // as root on the runner, and it is checked before the host is touched at all.
+  const candidate = candidateRole ?? role.replace(/-/g, "_");
+  if (!CANDIDATE_ROLE_RE.test(String(candidate))) {
+    err(
+      `CANNOT EVALUATE — --candidate-role must be lower-case letters, digits and underscores, got ${JSON.stringify(candidateRole ?? null)}`,
+    );
+    return { exitCode: EXIT.CANNOT_EVALUATE, actions: 0 };
+  }
   const probeRun = ssh(host, discardProbeScript(role));
   if (probeRun?.status !== 0) {
     err(
@@ -723,14 +903,28 @@ export function discardUnpreparedTransaction(
     return { exitCode: EXIT.CANNOT_EVALUATE, actions: 0 };
   }
 
+  let targetRef = null;
   if (probe.dirExists) {
     out(`active/${role} contains: ${probe.entries.join(", ") || "(empty)"}`);
     const target = probe.target;
     if (target?.namespace && target?.name) {
-      probe.liveResourceVersion = deploymentResourceVersion(host, target, {
+      if (
+        !K8S_NAME_RE.test(String(target.namespace)) ||
+        !K8S_NAME_RE.test(String(target.name))
+      ) {
+        err(
+          `CANNOT EVALUATE — active/${role}/live-deployment.json names ${JSON.stringify(`${target.namespace}/${target.name}`)}, which is not a namespace/name pair this verb will put in a kubectl command`,
+        );
+        return { exitCode: EXIT.CANNOT_EVALUATE, actions: 0 };
+      }
+      targetRef = {
+        namespace: String(target.namespace),
+        name: String(target.name),
+      };
+      probe.liveResourceVersion = deploymentResourceVersion(host, targetRef, {
         ssh,
       });
-      probe.target = `${target.namespace}/${target.name}`;
+      probe.target = `${targetRef.namespace}/${targetRef.name}`;
     } else {
       probe.target = null;
     }
@@ -751,7 +945,6 @@ export function discardUnpreparedTransaction(
     return { exitCode: EXIT.OK, actions: 0 };
   }
 
-  const candidate = candidateRole ?? role.replace(/-/g, "_");
   out(
     `unprepared: no promotion.state / coordinator.phase, and ${verdict.target} is still at resourceVersion ${verdict.resourceVersion}`,
   );
@@ -774,6 +967,8 @@ export function discardUnpreparedTransaction(
     discardActScript(role, {
       binding: verdict.binding,
       candidateRole: candidate,
+      target: targetRef,
+      resourceVersion: verdict.resourceVersion,
     }),
     {
       timeoutMs: 20 * 60_000,
@@ -849,7 +1044,7 @@ export function sweepEvictedPods(
   for (const pod of selected) {
     const del = ssh(
       host,
-      `kubectl delete pod -n ${pod.namespace} ${pod.name}\n`,
+      `kubectl delete pod -n '${pod.namespace}' '${pod.name}'\n`,
       { timeoutMs: 120_000 },
     );
     if (del?.status !== 0) {
@@ -858,6 +1053,15 @@ export function sweepEvictedPods(
     }
     out(`  deleted ${pod.namespace}/${pod.name}`);
     actions += 1;
+  }
+  if (actions === 0) {
+    // Every delete failed. Exit 0 here would read as "the sweep ran and the
+    // husks are gone", and the qualify gate this verb exists to unblock would
+    // still be red with nobody looking (cold review of WM-1105).
+    err(
+      `CANNOT EVALUATE — all ${selected.length} delete(s) failed; nothing was swept`,
+    );
+    return { exitCode: EXIT.CANNOT_EVALUATE, actions: 0 };
   }
   return { exitCode: EXIT.OK, actions };
 }
@@ -869,6 +1073,7 @@ export function sweepEvictedPods(
 export const USAGE = `usage: factory infra <verb> [flags]
 
   rotate-driver-digest --digest sha256:<64hex> --repos legalease,lawz [--host user@host]
+      (--repos accepts only legalease and lawz)
       Verify the digest against the driver installed on the runner (binary
       sha256sum AND config.json driver_sha256), then set
       DEV_QUALIFICATION_DRIVER_SHA256 in each repo. (OPS-694)
@@ -884,7 +1089,7 @@ export const USAGE = `usage: factory infra <verb> [flags]
 
 Common flags:
   --yes            actually do it; without it every verb is a dry run
-  --dry-run        explicit spelling of the default
+  --dry-run        explicit spelling of the default; refuses with --yes
   --ticket <ID>    post a one-line result comment on that ticket
   --ticket-repo <name>  route the comment through a specific configured repo
   --help           this text
@@ -932,6 +1137,39 @@ export function runCli(argv, deps = {}) {
     return EXIT.OK;
   }
 
+  // Flag validation runs before the logger and before any adapter: an
+  // invocation this CLI will not carry out should leave no log file behind and
+  // must never reach the runner. Each of these values ends up in ssh's argv or
+  // in a script that runs as root on the other side.
+  const yes = flags.yes === true || flags.yes === "true";
+  const dryRun = flags["dry-run"] === true || flags["dry-run"] === "true";
+  if (yes && dryRun) {
+    err(
+      "CANNOT EVALUATE — contradictory flags: --yes says apply, --dry-run says do not. Pass exactly one.",
+    );
+    return EXIT.CANNOT_EVALUATE;
+  }
+  if (
+    flags.host !== undefined &&
+    (typeof flags.host !== "string" || !HOST_RE.test(flags.host))
+  ) {
+    err(
+      `CANNOT EVALUATE — --host must be a plain [user@]host, got ${JSON.stringify(flags.host)}. It becomes ssh's destination argument, where a leading dash is read as an option.`,
+    );
+    return EXIT.CANNOT_EVALUATE;
+  }
+  if (
+    flags["candidate-role"] !== undefined &&
+    (typeof flags["candidate-role"] !== "string" ||
+      !CANDIDATE_ROLE_RE.test(flags["candidate-role"]))
+  ) {
+    err(
+      `CANNOT EVALUATE — --candidate-role must be lower-case letters, digits and underscores, got ${JSON.stringify(flags["candidate-role"])}. It is interpolated into a path inside a script that runs on the runner.`,
+    );
+    return EXIT.CANNOT_EVALUATE;
+  }
+  const host = typeof flags.host === "string" ? flags.host : DEFAULT_HOST;
+
   const nowMs = deps.now ? deps.now() : Date.now();
   const logger =
     deps.logger ?? makeLogger(verb, { nowMs, logDir: deps.logDir });
@@ -943,9 +1181,6 @@ export function runCli(argv, deps = {}) {
       logger.write(line);
     };
   const verbDeps = { ...deps, out: tee(out), err: tee(err) };
-
-  const host = typeof flags.host === "string" ? flags.host : DEFAULT_HOST;
-  const yes = flags.yes === true || flags.yes === "true";
 
   let result;
   if (verb === "rotate-driver-digest") {
