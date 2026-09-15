@@ -4,6 +4,7 @@
  *
  *   bun orchestrator/ship.mjs preflight --repo legalease [--json] [--no-fetch]
  *   bun orchestrator/ship.mjs chain --repo legalease --until pin [--apply]
+ *   bun orchestrator/ship.mjs chain --repo legalease --until post-release
  *
  * Shipping legalease on 2026-09-15 took ~2.5h of an agent re-deriving, from
  * `ci.yml` and memory, a sequence that is entirely mechanical: a fully green
@@ -13,8 +14,10 @@
  * that is a question about state a machine can read. This module reads it.
  *
  * `preflight` answers one question: is the base tip shippable right now? It
- * never writes. Each check prints PASS / FAIL / SKIP and, on FAIL, the exact
- * command that fixes it; the process exits 0 only when nothing failed.
+ * never writes. Each check prints PASS / FAIL / SKIP / WARN and, on FAIL, the
+ * exact command that fixes it; the process exits 0 only when nothing failed.
+ * Every check fails closed: an empty job list, an empty check-run list and an
+ * unreadable adapter are all red, never "nothing to object to".
  *
  * `chain` drives the loop the operator ran by hand. It is a dry run unless
  * `--apply` is passed: without it the chain prints the plan and makes no
@@ -22,9 +25,10 @@
  *
  * House shape (docs/event-runtime-conventions.md): the decisions are pure
  * functions over plain data, the effects arrive in a trailing options object
- * (`forge`, `git`, `shell`, `readManifest`, `now`, `sleep`), and nothing here
- * spawns `gh` — reads and writes both go through the Forge connector, so the
- * tests run on fixtures with no network, no clock and no checkout.
+ * (`forge`, `git`, `shell`, `readManifest`, `now`, `sleep`, `notify`), and
+ * nothing here spawns `gh` — reads and writes both go through the Forge
+ * connector, so the tests run on fixtures with no network, no clock, no
+ * checkout and no notification.
  */
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -52,10 +56,26 @@ const PR_FIELDS = [
   "url",
   "author",
   "labels",
+  "isDraft",
   "baseRefName",
   "headRefName",
   "headRefOid",
 ];
+
+/**
+ * How long to wait for a dispatched workflow run to *appear*. The dispatch API
+ * returns no run id, so the run is found by polling; a run that has not shown
+ * up in ten minutes was never accepted, and waiting the full publisher timeout
+ * for it only hides that.
+ */
+const DISPATCH_APPEAR_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * GitHub stamps `created_at` to the second and the dispatcher's clock is not
+ * GitHub's. A run is "ours" when it is one we had not seen before *and* it is
+ * not older than the dispatch by more than this skew.
+ */
+const DISPATCH_CLOCK_SKEW_MS = 2 * 60_000;
 
 /** Thrown when the repo's ship configuration cannot be used as written. */
 export class ShipConfigError extends Error {
@@ -110,15 +130,28 @@ export function loadShipConfig(name, { root = ROOT, config } = {}) {
       throw new ShipConfigError(`${where} needs a manifest path`);
     if (!role.publisher_workflow)
       throw new ShipConfigError(`${where} needs a publisher_workflow`);
+    const paths = asList(role.paths, `${where}.paths`);
+    // A role built in another repository (legalease pins lawz's research
+    // runner) has no commit this checkout can reason about. Say so rather
+    // than answering an ancestry question about a foreign history.
+    const sourceRepo = role.source_repo ?? null;
+    // Without `paths` there is no definition of stale for a role built here,
+    // and a check that cannot fail is worse than no check: a misspelled key
+    // (`path:`) used to read as a quiet SKIP on every release. Fail at load.
+    if (!sourceRepo && !paths.length)
+      throw new ShipConfigError(
+        `${where} needs a non-empty paths list mirroring ${role.publisher_workflow}'s on.push.paths — without it the pin's freshness cannot be proven (set source_repo if the role is built in another repository)`,
+      );
     return {
       role: role.role,
       manifest: role.manifest,
       publisherWorkflow: role.publisher_workflow,
-      paths: asList(role.paths, `${where}.paths`),
-      // A role built in another repository (legalease pins lawz's research
-      // runner) has no commit this checkout can reason about. Say so rather
-      // than answering an ancestry question about a foreign history.
-      sourceRepo: role.source_repo ?? null,
+      paths,
+      sourceRepo,
+      // Optional, and separate from `source_repo`: the repository whose
+      // publisher runs this checkout may read. Opt-in because it costs an API
+      // call against a repo the operator may not have read access to.
+      foreignRepo: role.foreign_repo ?? null,
     };
   });
 
@@ -164,13 +197,35 @@ export function isPinPr(pr, pinPr = DEFAULT_PIN_PR) {
   );
 }
 
-export function isEscalatedPr(pr, base) {
-  return (
-    pr?.baseRefName === base &&
-    (pr?.labels ?? []).some(
-      (label) => String(label?.name ?? label).toLowerCase() === ESCALATED_LABEL,
-    )
+export function hasEscalatedLabel(pr) {
+  return (pr?.labels ?? []).some(
+    (label) => String(label?.name ?? label).toLowerCase() === ESCALATED_LABEL,
   );
+}
+
+export function isEscalatedPr(pr, base) {
+  return pr?.baseRefName === base && hasEscalatedLabel(pr);
+}
+
+/**
+ * Why this release PR must not be merged, or `null` when it may be.
+ *
+ * `checkNoEscalatedPr` only inspects PRs targeting the *base*, so the release
+ * PR itself — which targets the deploy branch — was never looked at: an
+ * `escalated` label or a draft on it went straight past the gate, and a PR
+ * reused from `prList` could be some other branch's PR onto master entirely.
+ */
+export function releasePrRefusal(cfg, pr) {
+  if (!pr) return "the release PR could not be read back after it was opened";
+  const at = `#${pr.number ?? "?"}`;
+  if (pr.headRefName !== cfg.base)
+    return `${at} head is ${pr.headRefName ?? "(unknown)"}, not ${cfg.base}`;
+  if (pr.baseRefName !== cfg.deployBranch)
+    return `${at} targets ${pr.baseRefName ?? "(unknown)"}, not ${cfg.deployBranch}`;
+  if (pr.isDraft === true) return `${at} is a draft`;
+  if (hasEscalatedLabel(pr))
+    return `${at} is labelled ${ESCALATED_LABEL} — a human decides this one`;
+  return null;
 }
 
 /**
@@ -237,10 +292,17 @@ export function classifyJobs(jobs, { advisoryJobs = [] } = {}) {
  * Whether a commit's check runs permit a merge. This — not a `gh run watch`
  * exit status — is the merge gate: a watched workflow can exit 0 while another
  * check run on the same head is red, which is how a red PR got merged once.
+ *
+ * An *empty* list is not green. `[].every(green)` is `true`, so a commit whose
+ * checks have not been created yet — a fresh push, a workflow that failed to
+ * start, a 404 read — used to satisfy the gate instantly. At least one
+ * completed check run that actually succeeded is required; `skipped` alone is
+ * not evidence that anything ran.
  */
 export function checkRunsGreen(checkRuns) {
   const pending = [];
   const failing = [];
+  const succeeded = [];
   for (const run of Array.isArray(checkRuns) ? checkRuns : []) {
     const name = run?.name ?? "(unnamed check)";
     const conclusion = String(run?.conclusion ?? "").toLowerCase();
@@ -248,9 +310,20 @@ export function checkRunsGreen(checkRuns) {
       pending.push(name);
     } else if (!NON_BLOCKING_CONCLUSIONS.has(conclusion)) {
       failing.push(`${name} (${conclusion || "no conclusion"})`);
+    } else if (conclusion !== "skipped") {
+      succeeded.push(name);
     }
   }
-  return { ok: !pending.length && !failing.length, pending, failing };
+  const missing = succeeded.length
+    ? []
+    : ["no completed check run reported success on this commit"];
+  return {
+    ok: !pending.length && !failing.length && !missing.length,
+    pending,
+    failing,
+    missing,
+    succeeded,
+  };
 }
 
 /**
@@ -299,6 +372,11 @@ export function defaultDeps({ cwd } = {}) {
       JSON.parse(readFileSync(path.join(cwd, file), "utf8")),
     now: () => Date.now(),
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    // A red post-release check is a live outage, and the only channel the
+    // operator reads in real time is `factory notify`. The message is passed
+    // as a single argument, never as a flag.
+    notify: (message) =>
+      runCommand(path.join(ROOT, "bin", "factory"), ["notify", message]),
   };
 }
 
@@ -316,12 +394,41 @@ const checkRunsForSha = (forge, repo, sha) =>
   json(forge, `repos/${repo}/commits/${sha}/check-runs?per_page=100`)
     ?.check_runs ?? [];
 
-const activeRuns = (forge, repo) => [
-  ...(json(forge, `repos/${repo}/actions/runs?status=in_progress&per_page=100`)
-    ?.workflow_runs ?? []),
-  ...(json(forge, `repos/${repo}/actions/runs?status=queued&per_page=100`)
-    ?.workflow_runs ?? []),
-];
+/**
+ * A workflow's own runs, newest first.
+ *
+ * Filtering the repo-wide run list by `status=in_progress` and `status=queued`
+ * missed `waiting` (an environment approval), `requested` and `pending`, so a
+ * publisher held at a gate read as idle and the release went ahead while its
+ * pins were about to move. Asking the workflow for its runs and treating
+ * anything that is not `completed` as active has no such list to keep in sync
+ * with GitHub's status vocabulary.
+ */
+const workflowRuns = (forge, repo, workflow, { perPage = 30 } = {}) =>
+  json(
+    forge,
+    `repos/${repo}/actions/workflows/${encodeURIComponent(workflow)}/runs?per_page=${perPage}`,
+  )?.workflow_runs ?? [];
+
+const isActiveRun = (run) =>
+  String(run?.status ?? "").toLowerCase() !== "completed";
+
+const activePublisherRuns = (forge, repo, workflows) =>
+  [...workflows].flatMap((workflow) =>
+    workflowRuns(forge, repo, workflow).filter(isActiveRun),
+  );
+
+/** The newest successful run of a workflow, in any repository. Read-only. */
+const newestSuccessfulRun = (forge, repo, workflow) =>
+  json(
+    forge,
+    `repos/${repo}/actions/workflows/${encodeURIComponent(workflow)}/runs?status=success&per_page=1`,
+  )?.workflow_runs?.[0] ?? null;
+
+const runStartedAtLeast = (run, at) => {
+  const created = Date.parse(run?.created_at ?? run?.run_started_at ?? "");
+  return !Number.isFinite(created) || created >= at - DISPATCH_CLOCK_SKEW_MS;
+};
 
 const openPrs = (forge, repo) =>
   forge.prList(repo, { state: "open", limit: 100, fields: PR_FIELDS });
@@ -359,6 +466,14 @@ const fail = (id, title, detail, next = null) => ({
   next,
 });
 const skip = (id, title, detail) => ({ id, title, status: "skip", detail });
+/** Not blocking, but the operator should look before shipping. */
+const warn = (id, title, detail, next = null) => ({
+  id,
+  title,
+  status: "warn",
+  detail,
+  next,
+});
 
 /** Run one check, turning any adapter failure into a FAIL rather than a crash. */
 function guarded(id, title, next, body) {
@@ -391,6 +506,19 @@ export function checkBaseGreen(cfg, tip, { forge }) {
         `run ${run.id} is ${run.status} — wait for it`,
         `gh run watch ${run.id} --repo ${cfg.github} --exit-status --interval 60`,
       );
+    // The run's own verdict, before its jobs. A `startup_failure` — a bad
+    // workflow file, an invalid `${{ runner.temp }}` in a job env — produces a
+    // completed run with *zero* jobs, and a job list that is empty passes
+    // every per-job test. That is the documented zero-job red run; read the
+    // conclusion GitHub already computed.
+    const conclusion = String(run.conclusion ?? "").toLowerCase();
+    if (conclusion !== "success")
+      return fail(
+        id,
+        title,
+        `run ${run.id} concluded ${conclusion || "(no conclusion)"} — the tip is not green`,
+        `gh run view ${run.id} --repo ${cfg.github} --log-failed`,
+      );
     const jobs = classifyJobs(jobsForRun(forge, cfg.github, run.id), cfg);
     const summary = `run ${run.id}: ${jobs.passed.length} success, ${jobs.skipped.length} skipped, ${jobs.advisory.length} advisory`;
     if (jobs.failing.length || jobs.pending.length)
@@ -400,21 +528,65 @@ export function checkBaseGreen(cfg, tip, { forge }) {
         `${summary}; blocking: ${[...jobs.failing, ...jobs.pending.map((j) => `${j} (incomplete)`)].join(", ")}`,
         `gh run view ${run.id} --repo ${cfg.github} --log-failed`,
       );
+    if (!jobs.passed.length)
+      return fail(
+        id,
+        title,
+        `${summary}; no non-advisory job succeeded — a run that reports no work done is not a green tip`,
+        `gh run view ${run.id} --repo ${cfg.github}`,
+      );
     return pass(id, title, summary);
   });
 }
 
-export function checkRuntimeRole(cfg, tip, role, { git, readManifest }) {
+/**
+ * The verdict for a role built in another repository. Ancestry is unanswerable
+ * here, so this never PASSes — but it always prints the pinned commit, and,
+ * when the operator has configured `foreign_repo`, compares it with that
+ * repo's newest successful publisher run and WARNs when they differ.
+ */
+function foreignRoleVerdict(cfg, role, pinned, { forge, id, title }) {
+  const pin = `pinned ${pinned.slice(0, 8)} (source ${role.sourceRepo})`;
+  const tail = `freshness is ${role.sourceRepo}'s publisher to prove`;
+  if (!role.foreignRepo) return skip(id, title, `${pin}; ${tail}`);
+  const look = `gh run list -R ${role.foreignRepo} --workflow ${role.publisherWorkflow} --status success --limit 1`;
+  let newest;
+  try {
+    newest = newestSuccessfulRun(
+      forge,
+      role.foreignRepo,
+      role.publisherWorkflow,
+    );
+  } catch (err) {
+    return warn(id, title, `${pin}; could not read ${look}: ${err.message}`);
+  }
+  const head = String(newest?.head_sha ?? "").toLowerCase();
+  if (!head)
+    return warn(
+      id,
+      title,
+      `${pin}; ${role.foreignRepo} has no successful ${role.publisherWorkflow} run to compare against`,
+      look,
+    );
+  if (head !== pinned)
+    return warn(
+      id,
+      title,
+      `${pin}; ${role.foreignRepo}'s newest successful ${role.publisherWorkflow} run is at ${head.slice(0, 8)} — the pin is behind it`,
+      look,
+    );
+  return skip(
+    id,
+    title,
+    `${pin}; matches ${role.foreignRepo}'s newest successful ${role.publisherWorkflow} run — ${tail}`,
+  );
+}
+
+export function checkRuntimeRole(cfg, tip, role, { forge, git, readManifest }) {
   const id = `runtime-pin:${role.role}`;
   const title = `runtime pin ${role.role} fresh`;
   const next = `gh workflow run ${role.publisherWorkflow} --repo ${cfg.github} --ref ${cfg.base} -f commit_sha=${tip}`;
   return guarded(id, title, next, () => {
-    if (role.sourceRepo && role.sourceRepo !== cfg.github)
-      return skip(
-        id,
-        title,
-        `built from ${role.sourceRepo}; its pinned commit is not in this history, so freshness is that repo's publisher to prove`,
-      );
     const manifest = readManifest(role.manifest);
     const pinned = pinnedCommit(manifest?.[role.role]);
     if (!pinned)
@@ -424,6 +596,11 @@ export function checkRuntimeRole(cfg, tip, role, { git, readManifest }) {
         `${role.manifest} has no commit for role ${role.role} (looked at provenance.commit_sha, reviewed_commit, tag)`,
         next,
       );
+    // A role built elsewhere cannot be answered by ancestry here — but a SKIP
+    // that prints nothing is indistinguishable from a check that did not run.
+    // Say what is pinned, and where the operator would look to judge it.
+    if (role.sourceRepo && role.sourceRepo !== cfg.github)
+      return foreignRoleVerdict(cfg, role, pinned, { forge, id, title });
     if (git(["merge-base", "--is-ancestor", pinned, tip]).status !== 0)
       return fail(
         id,
@@ -431,11 +608,15 @@ export function checkRuntimeRole(cfg, tip, role, { git, readManifest }) {
         `pinned ${pinned.slice(0, 8)} is not an ancestor of ${tip.slice(0, 8)} — the pin points off this branch`,
         next,
       );
+    // `loadShipConfig` refuses this shape, so reaching it means a config was
+    // built by hand. It is still a FAIL, never a SKIP: an unprovable pin must
+    // not read as one more harmless yellow line on a release gate.
     if (!role.paths.length)
-      return skip(
+      return fail(
         id,
         title,
-        `pinned ${pinned.slice(0, 8)} is an ancestor; no paths configured, so staleness is unproven`,
+        `pinned ${pinned.slice(0, 8)} is an ancestor, but the role has no paths — staleness cannot be proven, so this is not a pass`,
+        `add runtime_roles[${role.role}].paths mirroring ${role.publisherWorkflow}'s on.push.paths`,
       );
     const diff = git([
       "diff",
@@ -479,9 +660,7 @@ export function checkPublishersIdle(cfg, { forge }) {
       cfg.runtimeRoles.map((role) => role.publisherWorkflow),
     );
     if (!workflows.size) return skip(id, title, "no publishers configured");
-    const busy = activeRuns(forge, cfg.github).filter((run) =>
-      [...workflows].some((wf) => String(run?.path ?? "").endsWith(`/${wf}`)),
-    );
+    const busy = activePublisherRuns(forge, cfg.github, workflows);
     if (busy.length)
       return fail(
         id,
@@ -609,7 +788,35 @@ export async function waitFor(
   }
 }
 
-const UNTIL = ["preflight", "pin", "release"];
+const UNTIL = ["preflight", "pin", "release", "post-release"];
+
+/**
+ * Run the repo's `post_release_checks` and say which went red.
+ *
+ * These are the operator's own read-only verification commands against a
+ * deploy that has already happened, so a red one is not "the plan would have
+ * failed" — it is a live outage, and `factory notify` is the only channel the
+ * operator reads in real time.
+ */
+async function runPostReleaseChecks(cfg, deps, { record, sha, notify }) {
+  const results = [];
+  for (const command of cfg.postReleaseChecks) {
+    const r = deps.shell(command);
+    const ok = r.status === 0;
+    record("post-release-check", `${command} → exit ${r.status}`, true);
+    results.push({
+      command,
+      ok,
+      output: (r.stdout || r.stderr).trim().slice(-400),
+    });
+    if (!ok && notify && typeof deps.notify === "function") {
+      await deps.notify(
+        `SMOKE RED ${cfg.name}: ${command} failed after release ${sha ?? "(unknown sha)"}`,
+      );
+    }
+  }
+  return results;
+}
 
 /**
  * Drive preflight → publish → reconcile → pin → (release).
@@ -631,14 +838,49 @@ export async function shipChain(
     );
   const { forge, now, sleep } = deps;
   const wait = { now, sleep, ...waitOpts };
+  const appearWait = {
+    ...wait,
+    timeoutMs: waitOpts.appearTimeoutMs ?? DISPATCH_APPEAR_TIMEOUT_MS,
+  };
   const plan = [];
-  const record = (action, detail) => {
-    plan.push({ action, detail, applied: apply });
+  const record = (action, detail, applied = apply) => {
+    plan.push({ action, detail, applied });
     return plan[plan.length - 1];
   };
 
+  // `--until post-release` is the other half of step 6 of /factory-ship: the
+  // release is already merged, so there is no pre-flight to run and nothing to
+  // dry-run — the repo's own read-only checks are the whole command.
+  if (until === "post-release") {
+    if (!cfg.postReleaseChecks.length)
+      throw new ShipConfigError(
+        `repo ${cfg.name} has no post_release_checks to run`,
+      );
+    // Best effort: the sha only names the release in the notification, and a
+    // checkout this command cannot read must not stop it verifying the deploy.
+    let sha;
+    try {
+      sha = resolveTip(cfg, { git: deps.git, fetch: false }).sha;
+    } catch {
+      sha = null;
+    }
+    const postRelease = await runPostReleaseChecks(cfg, deps, {
+      record,
+      sha,
+      notify: apply,
+    });
+    return {
+      ok: postRelease.every((result) => result.ok),
+      repo: cfg.name,
+      report: null,
+      plan,
+      postRelease,
+    };
+  }
+
   let report = preflight(cfg, deps);
-  if (until === "preflight") return { ok: report.ok, report, plan };
+  if (until === "preflight")
+    return { ok: report.ok, repo: cfg.name, report, plan };
 
   for (let round = 1; !report.ok && round <= rounds; round++) {
     const failed = (predicate) =>
@@ -686,18 +928,56 @@ export async function shipChain(
         `${role.publisherWorkflow} --ref ${cfg.base} -f commit_sha=${report.tip}`,
       );
       if (!apply) continue;
+      // The dispatch API hands back no run id, and the run does not exist the
+      // instant it returns. Waiting for "no active run of this workflow" was
+      // therefore satisfied *before the run started* — the chain then waited
+      // for a pin PR that the publisher had not begun to earn. Find the run
+      // first, then wait for it, then read its conclusion.
+      const seen = new Set(
+        workflowRuns(forge, cfg.github, role.publisherWorkflow).map(
+          (run) => run.id,
+        ),
+      );
+      const dispatchedAt = now();
       forge.workflowDispatch(cfg.github, role.publisherWorkflow, {
         ref: cfg.base,
         inputs: { commit_sha: report.tip },
       });
-      await waitFor(
-        () => {
-          const busy = activeRuns(forge, cfg.github).some((run) =>
-            String(run?.path ?? "").endsWith(`/${role.publisherWorkflow}`),
-          );
-          return busy ? null : true;
+      const started = await waitFor(
+        () =>
+          workflowRuns(forge, cfg.github, role.publisherWorkflow).find(
+            (run) => !seen.has(run.id) && runStartedAtLeast(run, dispatchedAt),
+          ) ?? null,
+        {
+          label: `the dispatched ${role.publisherWorkflow} run to appear`,
+          ...appearWait,
         },
-        { label: `${role.publisherWorkflow} to finish`, ...wait },
+      );
+      const finished = await waitFor(
+        () => {
+          const fresh = workflowRuns(
+            forge,
+            cfg.github,
+            role.publisherWorkflow,
+          ).find((run) => run.id === started.id);
+          return fresh && !isActiveRun(fresh) ? fresh : null;
+        },
+        {
+          label: `${role.publisherWorkflow} run ${started.id} to finish`,
+          ...wait,
+        },
+      );
+      const conclusion = String(finished.conclusion ?? "").toLowerCase();
+      if (conclusion !== "success")
+        throw new ShipChainError(
+          `publisher ${role.publisherWorkflow} run ${finished.id} concluded ${conclusion || "(no conclusion)"} — the pin it would have produced does not exist`,
+          {
+            next: `gh run view ${finished.id} --repo ${cfg.github} --log-failed`,
+          },
+        );
+      record(
+        "publisher-succeeded",
+        `${role.publisherWorkflow} run ${finished.id}`,
       );
       const pinPr = await waitFor(
         () =>
@@ -713,7 +993,8 @@ export async function shipChain(
   }
 
   if (!report.ok && apply) report = preflight(cfg, deps);
-  if (until === "pin" || !report.ok) return { ok: report.ok, report, plan };
+  if (until === "pin" || !report.ok)
+    return { ok: report.ok, repo: cfg.name, report, plan };
 
   // ------------------------------------------------------------- release
   record(
@@ -727,7 +1008,7 @@ export async function shipChain(
     );
     for (const command of cfg.postReleaseChecks)
       record("post-release-check", command);
-    return { ok: report.ok, report, plan };
+    return { ok: report.ok, repo: cfg.name, report, plan };
   }
 
   const existing = openPrs(forge, cfg.github).find(
@@ -747,36 +1028,83 @@ export async function shipChain(
         (pr) => Number(pr.number) === number,
       );
     })();
-  record("merge-release-pr", `#${releasePr.number} --merge`);
-  await mergeWhenGreen(cfg, releasePr, deps, wait);
 
-  const results = [];
-  for (const command of cfg.postReleaseChecks) {
-    const r = deps.shell(command);
-    record("post-release-check", `${command} → exit ${r.status}`);
-    results.push({
-      command,
-      ok: r.status === 0,
-      output: (r.stdout || r.stderr).trim().slice(-400),
+  // The release PR is the one PR `checkNoEscalatedPr` structurally cannot see:
+  // it targets the deploy branch, not the base. Look at it directly.
+  const refusal = releasePrRefusal(cfg, releasePr);
+  if (refusal)
+    throw new ShipChainError(`refusing to merge the release PR: ${refusal}`, {
+      next: releasePr?.number
+        ? `gh pr view ${releasePr.number} --repo ${cfg.github}`
+        : null,
     });
+
+  // Everything above was decided against a pre-flight that may be minutes old.
+  // Re-run it against the world as it is now: a merge to the base since then
+  // moved the tip, and merging the release PR would ship a commit nothing has
+  // verified.
+  const fresh = preflight(cfg, deps);
+  if (!fresh.ok) {
+    const blocker = fresh.checks.find((check) => check.status === "fail");
+    throw new ShipChainError(
+      `pre-flight went red between the plan and the release merge: ${blocker.title}: ${blocker.detail}`,
+      { next: blocker.next },
+    );
   }
+  if (fresh.tip !== report.tip)
+    record(
+      "tip-moved",
+      `${report.tip.slice(0, 8)} → ${fresh.tip.slice(0, 8)} before the merge`,
+    );
+  report = fresh;
+
+  record("merge-release-pr", `#${releasePr.number} --merge`);
+  await mergeWhenGreen(cfg, releasePr, deps, wait, { requireHead: report.tip });
+
+  const postRelease = await runPostReleaseChecks(cfg, deps, {
+    record,
+    sha: report.tip,
+    notify: apply,
+  });
   return {
-    ok: report.ok && results.every((result) => result.ok),
+    ok: report.ok && postRelease.every((result) => result.ok),
+    repo: cfg.name,
     report,
     plan,
-    postRelease: results,
+    postRelease,
   };
 }
 
 /**
  * Merge a PR once its head commit's check runs are all success or skipped.
  * The gate is the check-run summary, never a watched run's exit status.
+ *
+ * Everything after the wait exists because the wait takes time. The head can
+ * move while we poll, so the PR is re-read and the merge is pinned to the SHA
+ * whose checks were actually seen — in this process (`headRefOid` re-read) and
+ * on GitHub's side (`--match-head-commit`), because only the second one closes
+ * the gap between the last read and the merge itself.
+ *
+ * `requireHead` additionally demands that the SHA be the one pre-flight
+ * cleared, which is what makes the release merge ship a verified commit rather
+ * than whatever `develop` happens to point at.
  */
-export async function mergeWhenGreen(cfg, pr, deps, wait) {
+export async function mergeWhenGreen(
+  cfg,
+  pr,
+  deps,
+  wait,
+  { requireHead = null } = {},
+) {
   const { forge } = deps;
   const sha = pr.headRefOid;
   if (!sha)
     throw new ShipChainError(`PR #${pr.number} has no head SHA to check`);
+  if (requireHead && sha !== requireHead)
+    throw new ShipChainError(
+      `PR #${pr.number} head ${sha.slice(0, 8)} is not the pre-flighted tip ${requireHead.slice(0, 8)} — refusing to merge an unverified commit`,
+      { next: `gh pr view ${pr.number} --repo ${cfg.github}` },
+    );
   await waitFor(
     () => {
       const summary = checkRunsGreen(checkRunsForSha(forge, cfg.github, sha));
@@ -789,12 +1117,54 @@ export async function mergeWhenGreen(cfg, pr, deps, wait) {
     },
     { label: `check runs on #${pr.number}`, ...wait },
   );
-  forge.prMerge(cfg.github, pr.number, { method: "merge" });
+
+  const current = openPrs(forge, cfg.github).find(
+    (candidate) => Number(candidate.number) === Number(pr.number),
+  );
+  if (!current)
+    throw new ShipChainError(
+      `PR #${pr.number} is no longer open — it was merged or closed while its check runs were being waited on`,
+    );
+  if (current.headRefOid !== sha)
+    throw new ShipChainError(
+      `PR #${pr.number} head moved from ${sha.slice(0, 8)} to ${String(current.headRefOid ?? "(none)").slice(0, 8)} while waiting for its check runs — refusing to merge a commit nothing verified`,
+      { next: `gh pr checks ${pr.number} --repo ${cfg.github}` },
+    );
+  if (requireHead && current.headRefOid !== requireHead)
+    throw new ShipChainError(
+      `PR #${pr.number} head ${String(current.headRefOid).slice(0, 8)} is no longer the pre-flighted tip ${requireHead.slice(0, 8)} — refusing to merge`,
+      { next: `gh pr view ${pr.number} --repo ${cfg.github}` },
+    );
+
+  // "Every check run is green" is only as strong as the set of check runs that
+  // exists, so prove the configured CI workflow itself ran for this head and
+  // concluded success. Matching check-run *names* against `ciWorkflow` would
+  // be a guess — GitHub names a check run after the job, not the workflow — so
+  // the evidence comes from the Actions runs API for the same commit.
+  const ciRun = selectRun(runsForSha(forge, cfg.github, sha), {
+    workflow: cfg.ciWorkflow,
+  });
+  if (
+    !ciRun ||
+    String(ciRun.status).toLowerCase() !== "completed" ||
+    String(ciRun.conclusion ?? "").toLowerCase() !== "success"
+  )
+    throw new ShipChainError(
+      `PR #${pr.number}: no successful ${cfg.ciWorkflow} run for head ${sha.slice(0, 8)} (${ciRun ? `run ${ciRun.id} is ${ciRun.status}/${ciRun.conclusion ?? "no conclusion"}` : "the workflow never ran"}) — refusing to merge on check runs alone`,
+      {
+        next: `gh run list --workflow ${cfg.ciWorkflow} --commit ${sha} --repo ${cfg.github}`,
+      },
+    );
+
+  forge.prMerge(cfg.github, pr.number, {
+    method: "merge",
+    matchHeadCommit: sha,
+  });
 }
 
 // ------------------------------------------------------------------ output
 
-const ICON = { pass: "PASS", fail: "FAIL", skip: "SKIP" };
+const ICON = { pass: "PASS", fail: "FAIL", skip: "SKIP", warn: "WARN" };
 
 export function formatPreflight(report, { color = false } = {}) {
   const c = color
@@ -812,7 +1182,12 @@ export function formatPreflight(report, { color = false } = {}) {
         green: (s) => s,
         yellow: (s) => s,
       };
-  const paint = { pass: c.green, fail: c.red, skip: c.yellow };
+  const paint = {
+    pass: c.green,
+    fail: c.red,
+    skip: c.yellow,
+    warn: c.yellow,
+  };
   const lines = [
     "",
     c.bold(
@@ -849,9 +1224,10 @@ export function formatPreflight(report, { color = false } = {}) {
 }
 
 export function formatChain(result, { apply }) {
+  const repo = result.repo ?? result.report?.repo ?? "(unknown repo)";
   const lines = [
     "",
-    `ship chain: ${result.report.repo} (${apply ? "APPLY" : "dry run — nothing was changed"})`,
+    `ship chain: ${repo} (${apply ? "APPLY" : "dry run — nothing was changed"})`,
     "",
   ];
   if (!result.plan.length)
@@ -860,11 +1236,24 @@ export function formatChain(result, { apply }) {
     lines.push(
       `  ${step.applied ? "did " : "would"}  ${step.action}: ${step.detail}`,
     );
+  const red = (result.postRelease ?? []).filter((check) => !check.ok);
   for (const check of result.postRelease ?? [])
-    lines.push(`  ${check.ok ? "ok  " : "RED "}  ${check.command}`);
+    if (check.ok) lines.push(`  ok    ${check.command}`);
+    // Not "the chain would have failed": the release is already on the deploy
+    // branch, so this is a live deploy that does not answer.
+    else
+      lines.push(
+        `  POST-RELEASE CHECK FAILED: ${check.command}`,
+        `        the release is merged — this is a live deploy problem, not a plan that stopped`,
+        ...(check.output ? [`        ${check.output.split("\n").pop()}`] : []),
+      );
   lines.push(
     "",
-    result.ok ? "chain complete" : "chain stopped — see the pre-flight above",
+    red.length
+      ? `RELEASE MERGED, ${red.length} POST-RELEASE CHECK(S) RED — treat as an outage: revert or fix, and notify`
+      : result.ok
+        ? "chain complete"
+        : "chain stopped — see the pre-flight above",
     "",
   );
   return lines.join("\n");
@@ -926,8 +1315,9 @@ if (import.meta.main) {
     console.log(
       asJson
         ? JSON.stringify(result, null, 2)
-        : formatPreflight(result.report, { color: process.stdout.isTTY }) +
-            formatChain(result, { apply }),
+        : (result.report
+            ? formatPreflight(result.report, { color: process.stdout.isTTY })
+            : "") + formatChain(result, { apply }),
     );
     process.exit(result.ok ? 0 : 1);
   } catch (err) {

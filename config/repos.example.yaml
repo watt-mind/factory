@@ -124,7 +124,9 @@ repos:
   #     # `paths` mirrors the publisher workflow's own `on.push.paths`: if one
   #     # of them moved since the pinned commit, the pin is stale by the
   #     # publisher's own definition, and the release would ship source the
-  #     # runtime image does not contain.
+  #     # runtime image does not contain. It is REQUIRED for a role built in
+  #     # this repo — without it the check has no definition of stale and so
+  #     # can never fail, and a misspelled key would silently disable it.
   #     - role: case_agent
   #       manifest: config/runtime-images.json
   #       publisher_workflow: case-agent-image.yml
@@ -133,10 +135,14 @@ repos:
   #         - .github/workflows/case-agent-image.yml
   #     # A role built in another repository: its pinned commit is not in this
   #     # history, so freshness is reported SKIP rather than answered wrongly.
+  #     # The SKIP still prints the pinned commit; add the optional
+  #     # `foreign_repo` (read-only) to also compare it with that repo's newest
+  #     # successful publisher run and WARN when the pin is behind.
   #     - role: research_runner
   #       manifest: config/runtime-images.json
   #       publisher_workflow: research-runner-image.yml
   #       source_repo: your-org/other-repo
+  #       foreign_repo: your-org/other-repo
 
   # Add product repositories only to your ignored config/repos.yaml. Start in
   # report-only mode until their isolated worktree lifecycle is proven.

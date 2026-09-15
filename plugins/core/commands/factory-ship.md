@@ -66,7 +66,7 @@ The deploy branch usually auto-deploys, so the merge is not the finish line:
 
 - Watch the post-merge run on master to completion (`gh run watch <run> --exit-status`).
 - Where the repo has a prod smoke check or `smoke_url`, confirm it's green/responding after the deploy settles.
-- Run the repo's `post_release_checks` from `config/repos.yaml` — they are the verification trio an operator would otherwise remember by hand (health endpoint, deployment inventory, sidecar verify). `factory ship-chain --repo <name> --until release --apply` runs them and prints the one-screen summary.
+- Run the repo's `post_release_checks` from `config/repos.yaml` — they are the verification trio an operator would otherwise remember by hand (health endpoint, deployment inventory, sidecar verify). `factory ship-chain --repo <name> --until post-release` runs exactly those against the live deploy and nothing else (no pre-flight, no PR, no merge), exits non-zero on the first red one, and with `--apply` also pushes a `SMOKE RED` notification. Use it here whether the merge was done by hand or by `--until release --apply`, which runs the same checks at the end of the chain.
 - **Red master CI or red smoke = live outage**: revert the release merge (`git revert -m 1 <merge-sha>` on master, push), notify immediately (`SMOKE RED` / `CI RED` via `factory notify`), and file the cause to Linear. Don't leave a broken deploy standing while investigating.
 
 ## 7. Report

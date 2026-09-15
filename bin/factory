@@ -440,7 +440,8 @@ factory — control plane (FACTORY_ROOT=$ROOT)
                 the exact SHA, runtime pins fresh, publishers idle, no bot pin or
                 escalated PR, promotion journal clean; --repo <name> --json)
   ship-chain    orchestrator/ship.mjs (publish -> reconcile -> pin -> release;
-                --repo <name> --until preflight|pin|release, dry run without --apply)
+                --repo <name> --until preflight|pin|release|post-release, dry run
+                without --apply; post-release runs only post_release_checks)
   reaper        orchestrator/reaper.mjs
   janitor       orchestrator/janitor.mjs
   warm          orchestrator/warm.mjs
