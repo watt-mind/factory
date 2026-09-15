@@ -52,8 +52,8 @@ jobs: []
 #   - name: ci-health
 #     every: 15m
 #     enabled: false
-#     dry_command: bun orchestrator/ci-health.mjs --repo {{repo}} --dry-run
-#     command: bun orchestrator/ci-health.mjs --repo {{repo}} --apply
+#     dry_command: bun orchestrator/ci-health.mjs --repo {{repo}} --window 6 --dry-run
+#     command: bun orchestrator/ci-health.mjs --repo {{repo}} --window 6 --apply
 #
 # `enabled: false` keeps it out of launchd (see deploy/gen.mjs) while leaving it
 # runnable by name: `bun run ci-health <repo>`, or

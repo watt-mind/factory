@@ -95,6 +95,8 @@ repos:
     # advisory_jobs:
     #   - Security Scan (advisory)
     # By default ci-health watches the same workflow merge_ci names (else "CI").
+    # Give the workflow's `name:` (as shown by `gh run list`), not its filename:
+    # ci-health matches run.workflowName, so `ci.yml` here would never match.
     # Set this only when the trunk's verdict lives in a different workflow than
     # the merge gate's.
     # ci_health:

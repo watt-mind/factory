@@ -479,12 +479,26 @@ export async function runCiHealthTick({
         log(`would notify: ${alert.message}`);
         continue;
       }
-      const ok = await notify(alert.message);
-      sent.push({ ...alert, delivered: ok !== false });
+      // A notify that fails (transport down, `factory` missing, non-zero
+      // exit, or a thrown spawn) must not be remembered as a delivered
+      // alarm: forgetting the job makes the next tick send it again. One
+      // duplicate push is the cheap failure mode; a silent outage is not.
+      let ok;
+      try {
+        ok = await notify(alert.message);
+      } catch (error) {
+        ok = false;
+        log(`notify threw: ${error?.message ?? error}`);
+      }
+      const delivered = ok !== false;
+      sent.push({ ...alert, delivered });
+      if (!delivered && alert.kind === "red") {
+        delete decision.jobs[alert.job];
+      }
       log(
-        ok === false
-          ? `notify FAILED: ${alert.message}`
-          : `notified: ${alert.message}`,
+        delivered
+          ? `notified: ${alert.message}`
+          : `notify FAILED (will retry next tick): ${alert.message}`,
       );
     }
 
@@ -566,10 +580,12 @@ export function liveCiHealthDeps({
         branch,
         limit,
         fields: [...CI_HEALTH_RUN_FIELDS],
+        retryOnRateLimit: true,
       }),
     listJobs: (repo, run) => {
       const body = forge.apiRaw(
         `repos/${repo.github}/actions/runs/${run.databaseId}/jobs?per_page=100`,
+        { retryOnRateLimit: true },
       );
       const parsed = JSON.parse(body);
       return (parsed?.jobs ?? []).map((job) => ({

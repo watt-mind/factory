@@ -585,3 +585,81 @@ test("formatSpan and shortSha render the notification's variable parts", () => {
   expect(shortSha("9f2c1ab7d508")).toBe("9f2c1ab");
   expect(shortSha(null)).toBe("?");
 });
+
+test("a failed notify is not remembered as delivered: the next tick re-sends", async () => {
+  const now = Date.parse("2026-09-15T07:50:00Z");
+  const repos = [
+    {
+      name: "legalease",
+      github: "watt-mind/legalease",
+      base: "develop",
+      merge_ci: { workflow: "CI" },
+    },
+  ];
+  const attempts = [];
+  // Tick 1: the transport is down (factory notify exits non-zero).
+  const first = await runCiHealthTick({
+    repos,
+    listRuns: () => LEGALEASE_RUNS,
+    listJobs: (_repo, r) => legaleaseJobs(r.headSha),
+    notify: (message) => {
+      attempts.push(message);
+      return false;
+    },
+    now,
+    apply: true,
+    window: 6,
+  });
+  expect(attempts).toHaveLength(1);
+  expect(first.results[0].sent[0].delivered).toBe(false);
+  // The alarm must NOT be persisted, or the outage goes silent for its whole duration.
+  expect(
+    first.state.repos["legalease/develop"].jobs[LEGALEASE_QUALIFY],
+  ).toBeUndefined();
+
+  // Tick 2, transport back: the same red is sent again exactly once.
+  const second = await runCiHealthTick({
+    repos,
+    state: first.state,
+    listRuns: () => LEGALEASE_RUNS,
+    listJobs: (_repo, r) => legaleaseJobs(r.headSha),
+    notify: (message) => {
+      attempts.push(message);
+      return true;
+    },
+    now: now + 15 * 60_000,
+    apply: true,
+    window: 6,
+  });
+  expect(attempts).toHaveLength(2);
+  expect(attempts[1]).toBe(attempts[0]);
+  expect(
+    second.state.repos["legalease/develop"].jobs[LEGALEASE_QUALIFY].since,
+  ).toBe("9f2c1ab7d508");
+});
+
+test("a notify that throws neither crashes the tick nor consumes the alarm", async () => {
+  const now = Date.parse("2026-09-15T07:50:00Z");
+  const { results, state } = await runCiHealthTick({
+    repos: [
+      {
+        name: "legalease",
+        github: "watt-mind/legalease",
+        base: "develop",
+        merge_ci: { workflow: "CI" },
+      },
+    ],
+    listRuns: () => LEGALEASE_RUNS,
+    listJobs: (_repo, r) => legaleaseJobs(r.headSha),
+    notify: () => {
+      throw new Error("spawn EAGAIN");
+    },
+    now,
+    apply: true,
+    window: 6,
+  });
+  expect(results[0].sent[0].delivered).toBe(false);
+  expect(
+    state.repos["legalease/develop"].jobs[LEGALEASE_QUALIFY],
+  ).toBeUndefined();
+});
