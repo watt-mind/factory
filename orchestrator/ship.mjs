@@ -190,11 +190,28 @@ export function normalizeAuthor(author) {
     .replace(/\[bot\]$/, "");
 }
 
-export function isPinPr(pr, pinPr = DEFAULT_PIN_PR) {
+export function isPinPr(pr, pinPr = DEFAULT_PIN_PR, base = null) {
   return (
     normalizeAuthor(pr?.author) === normalizeAuthor(pinPr.author) &&
-    String(pr?.title ?? "").startsWith(pinPr.titlePrefix)
+    String(pr?.title ?? "").startsWith(pinPr.titlePrefix) &&
+    // A bot pin PR onto any other branch (the deploy branch included) is not
+    // ours to merge from the develop chain.
+    (base === null || pr?.baseRefName === base)
   );
+}
+
+/**
+ * Why a pin PR must not be merged even though it matched `isPinPr`. Mirrors
+ * `releasePrRefusal`: the operator's abort switch is the `escalated` label,
+ * and a draft is by definition not ready.
+ */
+export function pinPrRefusal(pr) {
+  if (!pr) return "the pin PR could not be read back";
+  const at = `#${pr.number ?? "?"}`;
+  if (pr.isDraft === true) return `${at} is a draft`;
+  if (hasEscalatedLabel(pr))
+    return `${at} is labelled ${ESCALATED_LABEL} — a human decides this one`;
+  return null;
 }
 
 export function hasEscalatedLabel(pr) {
@@ -677,7 +694,7 @@ export function checkPublishersIdle(cfg, { forge }) {
 export function checkNoPinPr(cfg, prs) {
   const id = "pin-pr";
   const title = "no open bot pin PR";
-  const open = (prs ?? []).filter((pr) => isPinPr(pr, cfg.pinPr));
+  const open = (prs ?? []).filter((pr) => isPinPr(pr, cfg.pinPr, cfg.base));
   if (open.length)
     return fail(
       id,
@@ -904,7 +921,7 @@ export async function shipChain(
     // since merging it moves the tip and re-dates every pin answer.
     if (pinPrOpen.length) {
       for (const pr of openPrs(forge, cfg.github).filter((candidate) =>
-        isPinPr(candidate, cfg.pinPr),
+        isPinPr(candidate, cfg.pinPr, cfg.base),
       )) {
         record("merge-pin-pr", `#${pr.number} ${pr.title}`);
         if (apply) await mergeWhenGreen(cfg, pr, deps, wait);
@@ -981,8 +998,9 @@ export async function shipChain(
       );
       const pinPr = await waitFor(
         () =>
-          openPrs(forge, cfg.github).find((pr) => isPinPr(pr, cfg.pinPr)) ??
-          null,
+          openPrs(forge, cfg.github).find((pr) =>
+            isPinPr(pr, cfg.pinPr, cfg.base),
+          ) ?? null,
         { label: "the reconcile pin PR", ...wait },
       );
       record("merge-pin-pr", `#${pinPr.number} ${pinPr.title}`);
@@ -1133,6 +1151,18 @@ export async function mergeWhenGreen(
   if (requireHead && current.headRefOid !== requireHead)
     throw new ShipChainError(
       `PR #${pr.number} head ${String(current.headRefOid).slice(0, 8)} is no longer the pre-flighted tip ${requireHead.slice(0, 8)} — refusing to merge`,
+      { next: `gh pr view ${pr.number} --repo ${cfg.github}` },
+    );
+
+  // The refusal gates are re-taken against the fresh read, not the PR as it
+  // looked before the (up to 45 min) check wait: a human who labels the PR
+  // `escalated` or flips it to draft while the chain waits must win.
+  const refusal = requireHead
+    ? releasePrRefusal(cfg, current)
+    : pinPrRefusal(current);
+  if (refusal)
+    throw new ShipChainError(
+      `refusing to merge ${requireHead ? "the release PR" : "the pin PR"}: ${refusal}`,
       { next: `gh pr view ${pr.number} --repo ${cfg.github}` },
     );
 

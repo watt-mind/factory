@@ -369,6 +369,13 @@ describe("pure decisions", () => {
     expect(isPinPr(pr)).toBe(true);
     expect(isPinPr({ ...pr, title: "fix(x): something" })).toBe(false);
     expect(isPinPr({ ...pr, author: { login: "hdkiller" } })).toBe(false);
+    // A bot pin PR onto the deploy branch is not the develop chain's to merge.
+    expect(
+      isPinPr({ ...pr, baseRefName: "master" }, undefined, "develop"),
+    ).toBe(false);
+    expect(
+      isPinPr({ ...pr, baseRefName: "develop" }, undefined, "develop"),
+    ).toBe(true);
   });
 
   test("isEscalatedPr only counts PRs targeting the base", () => {
@@ -1186,6 +1193,49 @@ describe("shipChain --until release --apply", () => {
     await expect(
       shipChain(cfg(), { until: "release", apply: true }, deps({ forge, git })),
     ).rejects.toThrow(/is not the pre-flighted tip/);
+    expect(forge.calls.some((call) => call.op === "prMerge")).toBe(false);
+  });
+
+  test("an escalated label applied while the check runs are waited on refuses the release merge", async () => {
+    const forge = releaseForge();
+    const originalList = forge.prList;
+    let lists = 0;
+    forge.prList = (...args) => {
+      lists += 1;
+      const prs = originalList(...args);
+      // The re-read inside mergeWhenGreen sees the operator's abort switch.
+      return lists >= 4
+        ? prs.map((pr) =>
+            Number(pr.number) === 77
+              ? { ...pr, labels: [...(pr.labels ?? []), { name: "escalated" }] }
+              : pr,
+          )
+        : prs;
+    };
+    await expect(
+      shipChain(cfg(), { until: "release", apply: true }, deps({ forge })),
+    ).rejects.toThrow(
+      /refusing to merge the release PR: #77 is labelled escalated/,
+    );
+    expect(forge.calls.some((call) => call.op === "prMerge")).toBe(false);
+  });
+
+  test("a draft flip during the wait refuses the release merge", async () => {
+    const forge = releaseForge();
+    const originalList = forge.prList;
+    let lists = 0;
+    forge.prList = (...args) => {
+      lists += 1;
+      const prs = originalList(...args);
+      return lists >= 4
+        ? prs.map((pr) =>
+            Number(pr.number) === 77 ? { ...pr, isDraft: true } : pr,
+          )
+        : prs;
+    };
+    await expect(
+      shipChain(cfg(), { until: "release", apply: true }, deps({ forge })),
+    ).rejects.toThrow(/is a draft/);
     expect(forge.calls.some((call) => call.op === "prMerge")).toBe(false);
   });
 
