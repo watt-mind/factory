@@ -90,8 +90,9 @@ describe("ship-scan registration (WM-111)", () => {
  * `factory` (and the real `bun` for the smoke helper): the probe → act flow
  * executes exactly the registered templates, but nothing reaches GitHub or
  * Telegram. Branch reads answer from $FAKE_BASE_HEAD / $FAKE_DEPLOY_HEAD, PR
- * reads from $FAKE_OPEN_PRS / $FAKE_PR_HEAD; every mutating call is appended
- * to $SHIM_LOG.
+ * reads from $FAKE_OPEN_PRS / $FAKE_PR_HEAD, the CI run lookup answers a fixed
+ * run id and the check-runs assertion answers $FAKE_NOT_GREEN (empty = all
+ * green); every mutating or waiting call is appended to $SHIM_LOG.
  */
 async function runApply(plan, env = {}) {
   const shims = tmpDir("evrt-ship-shims-");
@@ -103,8 +104,12 @@ if [ "$1" = "api" ]; then
   case "$2" in
     */branches/develop) echo "$FAKE_BASE_HEAD" ;;
     */branches/master) echo "$FAKE_DEPLOY_HEAD" ;;
+    */check-runs*) echo "gh $*" >> "$SHIM_LOG"; printf '%s' "\${FAKE_NOT_GREEN:-}" ;;
     *) echo "unexpected gh api $2" >&2; exit 1 ;;
   esac
+elif [ "$1 $2" = "run list" ]; then
+  echo "gh $*" >> "$SHIM_LOG"
+  echo "4242"
 elif [ "$1 $2" = "pr list" ]; then
   case "$*" in
     *"--jq length"*) echo "\${FAKE_OPEN_PRS:-0}" ;;
@@ -282,18 +287,47 @@ describe("ship-apply is closed by construction (WM-111)", () => {
     ).toContain("refusing open_rc_pr");
   });
 
-  test("merge_rc_pr waits on the PR's checks, then merges with a merge commit", async () => {
+  test("merge_rc_pr waits on the head commit's CI run via REST, asserts every check-run is green, then merges with a merge commit", async () => {
     const { outcome, log } = await runApply([{ action: "merge_rc_pr" }], {
       FAKE_OPEN_PRS: "1",
     });
     expect(outcome).toEqual({ exitCode: 0, timedOut: false });
     const shimLog = readFileSync(log, "utf8");
+    // The run is selected by workflow and commit — never the newest run of
+    // any workflow on the branch, whose verdict is not CI's.
     expect(shimLog).toContain(
-      "gh pr checks 7 --repo watt-mind/bj29 --watch --fail-fast",
+      `gh run list --repo watt-mind/bj29 --workflow ci.yml --commit ${BASE_SHA} --json databaseId --limit 1`,
     );
+    expect(shimLog).toContain(
+      "gh run watch 4242 --repo watt-mind/bj29 --exit-status --interval 60",
+    );
+    expect(shimLog).toContain(
+      `gh api repos/watt-mind/bj29/commits/${BASE_SHA}/check-runs?per_page=100`,
+    );
+    expect(shimLog).not.toContain("gh pr checks");
     expect(shimLog).toContain("gh pr merge 7 --repo watt-mind/bj29 --merge");
     expect(shimLog).not.toContain("--squash");
     expect(shimLog).not.toContain("--delete-branch");
+    expect(
+      shimLog.indexOf("gh api repos/watt-mind/bj29/commits/"),
+    ).toBeLessThan(shimLog.indexOf("gh pr merge 7"));
+  });
+
+  test("merge_rc_pr refuses when any check-run on the head commit is not green, even after the CI run watch passed", async () => {
+    const { outcome, workspaceDir, log } = await runApply(
+      [{ action: "merge_rc_pr" }],
+      {
+        FAKE_OPEN_PRS: "1",
+        FAKE_NOT_GREEN: "Browser E2E=in_progress/null",
+      },
+    );
+    expect(outcome.exitCode).toBe(1);
+    const shimLog = readFileSync(log, "utf8");
+    expect(shimLog).toContain("gh run watch 4242");
+    expect(shimLog).not.toContain("gh pr merge");
+    expect(
+      readFileSync(path.join(workspaceDir, ".actions.log"), "utf8"),
+    ).toContain("not every check-run on release commit");
   });
 
   test("a deploy branch that moved since the scan refuses the merge — someone committed to it directly", async () => {

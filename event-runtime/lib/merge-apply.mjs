@@ -215,7 +215,14 @@ function recheckAndMerge(item, input) {
   if (base !== "develop") return { skip: "only develop is auto-mergeable" };
   if (githubHeld(view.labels)) return { skip: "GitHub escalation hold" };
 
-  const linearRaw = sh("factory", ["linear", "get", ticket, "--json"]);
+  const linearRaw = sh("factory", [
+    "linear",
+    "get",
+    ticket,
+    "--json",
+    "--repo",
+    repo,
+  ]);
   if (linearRaw.status !== 0) return { skip: "Linear lookup failed" };
   let linear;
   try {

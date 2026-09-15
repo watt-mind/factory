@@ -7,7 +7,7 @@ sidebar:
 
 **factory** is a runtime for self-improving agentic loops. Code is the first product line.
 
-You already have a coding agent that can write a patch (Claude Code, Gemini / Antigravity, OpenAI Codex, Cursor, Pi). What you probably do not have is the process around it:
+You already have a coding agent that can write a patch (Claude Code, Gemini / Antigravity, OpenAI Codex, Cursor, Pi, or Hermes Agent via ACP). What you probably do not have is the process around it:
 
 - Something that decides which work is actually ready,
 - Hands one agent one ticket in one isolated worktree,

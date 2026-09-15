@@ -369,4 +369,30 @@ describe("reaper (OPS-416)", () => {
     const remaining = listWorkers(db, { now: T0 });
     expect(remaining.map((w) => w.workerId).sort()).toEqual(["w2", "w3", "w5"]);
   });
+
+  test("returns reaped leases when worker pruning fails", () => {
+    const db = openDb(":memory:");
+    const healthy = makeSpec({ maxAttempts: 2 });
+    setupVerifyingRun(db, healthy, { now: T0, expired: true });
+    const logged = [];
+    const pruneError = new Error("worker table busy");
+
+    const result = reapExpiredLeases(db, {
+      now: T0,
+      policyVersion: "test",
+      log: (line) => logged.push(line),
+      pruneWorkers: () => {
+        throw pruneError;
+      },
+    });
+
+    expect(result.reaped).toBe(1);
+    expect(result.errors).toEqual([
+      { runId: null, stage: "prune_workers", error: pruneError },
+    ]);
+    expect(logged).toEqual([
+      "[reaper] worker prune skipped: worker table busy",
+    ]);
+    expect(runState(db, healthy.runId)).toBe("QUEUED");
+  });
 });

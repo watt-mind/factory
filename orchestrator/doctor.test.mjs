@@ -13,11 +13,15 @@
 import { test, expect, describe } from "bun:test";
 import {
   mkdtempSync,
+  mkdirSync,
+  readdirSync,
   writeFileSync,
   chmodSync,
   existsSync,
   readFileSync,
   rmSync,
+  symlinkSync,
+  unlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -28,11 +32,20 @@ import {
   CHROME_HEADLESS_WRAPPER,
 } from "./doctor-browser.mjs";
 import {
+  BASE_BRANCH_CI_AGGREGATE_TIMEOUT_MS,
+  BASE_BRANCH_CI_RUN_LIMIT,
+  BASE_BRANCH_CI_TIMEOUT_MS,
+  baseBranchCiDiagnostics,
   compareCliVersions,
+  chainAutoApprovalPolicyDiagnostic,
+  defaultControlApiProbe,
   MIN_BUN_VERSION,
   MIN_GIT_VERSION,
   ossOnboardingDiagnostics,
   parseCliVersion,
+  repoToolchainDiagnostics,
+  stackDaemonDiagnostics,
+  factoryCommandLinkDiagnostic,
 } from "./doctor.mjs";
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -47,6 +60,279 @@ const fakeChrome = (dir, body) => {
   chmodSync(p, 0o755);
   return p;
 };
+
+test("imports exported helpers without materialized instance config", () => {
+  const root = scratch();
+  mkdirSync(path.join(root, "tools"), { recursive: true });
+  // `doctor.mjs` calls `factoryRoot()`, which recognizes FACTORY_ROOT only
+  // when its `tools/ticket.mjs` marker resolves. This empty marker lets the
+  // import use this deliberately config-less root; no Linear exports execute
+  // while importing doctor, so fixture content is unnecessary.
+  writeFileSync(path.join(root, "tools", "ticket.mjs"), "");
+
+  const result = Bun.spawnSync({
+    cmd: [
+      process.execPath,
+      "--eval",
+      `import(${JSON.stringify(new URL("./doctor.mjs", import.meta.url).href)})`,
+    ],
+    cwd: root,
+    env: { ...process.env, FACTORY_ROOT: root },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  expect(result.exitCode).toBe(0);
+  expect(new TextDecoder().decode(result.stderr)).not.toContain(
+    "instance_config_missing",
+  );
+});
+
+describe("base branch CI diagnostics (#1928)", () => {
+  const repo = {
+    name: "factory",
+    github: "watt-mind/factory",
+    base: "develop",
+  };
+
+  test("reports a successful latest completed run with the bounded shared reader", () => {
+    const calls = [];
+    const rows = baseBranchCiDiagnostics({
+      repos: [repo],
+      runList: (name, options) => {
+        calls.push({ name, options });
+        return [
+          { status: "queued" },
+          {
+            status: "completed",
+            conclusion: "success",
+            databaseId: 42,
+            workflowName: "CI",
+            url: "https://github.com/watt-mind/factory/actions/runs/42",
+          },
+        ];
+      },
+    });
+
+    expect(calls).toEqual([
+      {
+        name: "watt-mind/factory",
+        options: {
+          branch: "develop",
+          limit: BASE_BRANCH_CI_RUN_LIMIT,
+          timeout: BASE_BRANCH_CI_TIMEOUT_MS,
+        },
+      },
+    ]);
+    expect(rows).toEqual([
+      expect.objectContaining({
+        ok: true,
+        label: "base branch CI",
+        detail: expect.stringContaining("CI succeeded"),
+      }),
+    ]);
+  });
+
+  test("warns with workflow and run URL when the latest completed run is red", () => {
+    const rows = baseBranchCiDiagnostics({
+      repos: [repo],
+      runList: () => [
+        {
+          status: "completed",
+          conclusion: "failure",
+          workflowName: "CI",
+          url: "https://github.com/watt-mind/factory/actions/runs/99",
+        },
+      ],
+    });
+
+    expect(rows[0]).toMatchObject({ ok: "warn", label: "base branch CI" });
+    expect(rows[0].detail).toContain("CI failure");
+    expect(rows[0].detail).toContain("actions/runs/99");
+  });
+
+  test.each(["skipped", "neutral"])(
+    "reports a %s latest completed run as informational",
+    (conclusion) => {
+      const rows = baseBranchCiDiagnostics({
+        repos: [repo],
+        runList: () => [
+          {
+            status: "completed",
+            conclusion,
+            workflowName: "CI",
+            databaseId: 99,
+          },
+        ],
+      });
+
+      expect(rows).toEqual([
+        expect.objectContaining({
+          ok: "info",
+          detail: expect.stringContaining(`CI ${conclusion}`),
+          fix: null,
+        }),
+      ]);
+    },
+  );
+
+  test("does not start a read after the shared aggregate deadline", () => {
+    const calls = [];
+    const rows = baseBranchCiDiagnostics({
+      repos: [repo],
+      deadlineMs: 1_000,
+      now: () => 1_000,
+      runList: (...args) => calls.push(args),
+    });
+
+    expect(calls).toEqual([]);
+    expect(rows).toEqual([
+      expect.objectContaining({
+        ok: "info",
+        detail: expect.stringContaining("aggregate GitHub Actions deadline"),
+      }),
+    ]);
+  });
+
+  test("gives a later repository a CI signal after a slow earlier read", () => {
+    const laterRepo = {
+      name: "later",
+      github: "watt-mind/later",
+      base: "main",
+    };
+    let elapsedMs = 0;
+    const calls = [];
+    const rows = baseBranchCiDiagnostics({
+      repos: [repo, laterRepo],
+      deadlineMs: BASE_BRANCH_CI_AGGREGATE_TIMEOUT_MS,
+      now: () => elapsedMs,
+      runList: (name, options) => {
+        calls.push({ name, options });
+        if (name === repo.github) {
+          elapsedMs += BASE_BRANCH_CI_TIMEOUT_MS;
+          return [];
+        }
+        return [
+          {
+            status: "completed",
+            conclusion: "success",
+            workflowName: "CI",
+            databaseId: 42,
+          },
+        ];
+      },
+    });
+
+    expect(calls).toEqual([
+      expect.objectContaining({ name: repo.github }),
+      expect.objectContaining({
+        name: laterRepo.github,
+        options: expect.objectContaining({
+          timeout: BASE_BRANCH_CI_TIMEOUT_MS,
+        }),
+      }),
+    ]);
+    expect(rows[1]).toEqual(
+      expect.objectContaining({
+        ok: true,
+        detail: expect.stringContaining("CI succeeded"),
+      }),
+    );
+  });
+
+  test("keeps the aggregate budget above the per-repository cap", () => {
+    expect(BASE_BRANCH_CI_AGGREGATE_TIMEOUT_MS).toBeGreaterThan(
+      BASE_BRANCH_CI_TIMEOUT_MS,
+    );
+  });
+
+  test("skips without failing when Actions has no completed history", () => {
+    const rows = baseBranchCiDiagnostics({ repos: [repo], runList: () => [] });
+
+    expect(rows).toEqual([
+      expect.objectContaining({
+        ok: "info",
+        detail: "develop — skipped, no completed Actions history",
+      }),
+    ]);
+  });
+});
+
+describe("factory command link diagnostic (#1950)", () => {
+  const expectedCommands = () =>
+    readdirSync(path.join(HERE, "..", "shared", "commands"))
+      .filter((file) => file.endsWith(".md"))
+      .map((file) => path.basename(file, ".md"));
+
+  const setupLinkedCommands = (dir, names) => {
+    const commandsDir = path.join(dir, ".claude", "commands");
+    mkdirSync(commandsDir, { recursive: true });
+    for (const name of names) {
+      symlinkSync(
+        path.join(HERE, "..", "shared", "commands", `${name}.md`),
+        path.join(commandsDir, `${name}.md`),
+      );
+    }
+    return commandsDir;
+  };
+
+  test("passes when every expected command is linked", () => {
+    const dir = scratch();
+    const names = expectedCommands();
+    const commandsDir = setupLinkedCommands(dir, names);
+
+    expect(
+      factoryCommandLinkDiagnostic({ commandsDir, expectedCommands: names }),
+    ).toEqual({
+      ok: true,
+      label: "/factory-* commands linked",
+      detail: `${names.length} commands`,
+      fix: null,
+    });
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("warns with the existing emit hint when a command link is missing", () => {
+    const dir = scratch();
+    const names = expectedCommands();
+    const commandsDir = setupLinkedCommands(dir, names);
+    const missing = names[0];
+    unlinkSync(path.join(commandsDir, `${missing}.md`));
+
+    expect(
+      factoryCommandLinkDiagnostic({ commandsDir, expectedCommands: names }),
+    ).toEqual({
+      ok: "warn",
+      label: "/factory-* commands linked",
+      detail: `1/${names.length} missing or broken: ${missing}`,
+      fix: "factory emit",
+    });
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("warns with the existing emit hint when a command link is dangling", () => {
+    const dir = scratch();
+    const names = expectedCommands();
+    const commandsDir = setupLinkedCommands(dir, names);
+    const broken = names[0];
+    const target = path.join(commandsDir, `${broken}.md`);
+    unlinkSync(target);
+    symlinkSync(path.join(dir, "missing-target.md"), target);
+
+    expect(
+      factoryCommandLinkDiagnostic({ commandsDir, expectedCommands: names }),
+    ).toEqual({
+      ok: "warn",
+      label: "/factory-* commands linked",
+      detail: `1/${names.length} missing or broken: ${broken}`,
+      fix: "factory emit",
+    });
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
 
 describe("OSS onboarding diagnostics (WM-957)", () => {
   test("parses and compares ordinary CLI versions", () => {
@@ -124,6 +410,493 @@ describe("OSS onboarding diagnostics (WM-957)", () => {
     expect(diagnostics.find((d) => d.label === "worktree isolation")?.ok).toBe(
       "warn",
     );
+  });
+});
+
+describe("repo toolchain diagnostics (#1097)", () => {
+  test("declared-and-passing: map-form toolchain prints constraint and observed version", async () => {
+    let probes = 0;
+    const rows = await repoToolchainDiagnostics({
+      repos: [{ name: "demo", toolchain: { bun: ">=1.3 <2", git: ">=2.40" } }],
+      which: async (executable) => {
+        probes += 1;
+        return { bun: "/opt/bun", git: "/usr/bin/git" }[executable] ?? null;
+      },
+      spawn: async ([resolved]) => {
+        probes += 1;
+        return {
+          exitCode: 0,
+          stdout:
+            {
+              "/opt/bun": "1.3.14\n",
+              "/usr/bin/git": "git version 2.45.1\n",
+            }[resolved] ?? "",
+          stderr: "",
+        };
+      },
+    });
+    expect(probes).toBeGreaterThan(0);
+    expect(rows).toEqual([
+      {
+        ok: true,
+        label: "toolchain bun",
+        detail: ">=1.3 <2  observed 1.3.14",
+        fix: null,
+      },
+      {
+        ok: true,
+        label: "toolchain git",
+        detail: ">=2.40  observed 2.45.1",
+        fix: null,
+      },
+    ]);
+  });
+
+  test("declared-and-mismatched: missing and out-of-range are doctor problems with the reason's action", async () => {
+    const rows = await repoToolchainDiagnostics({
+      repos: [{ name: "demo", toolchain: { bun: ">=1.3 <2", uv: ">=0.5" } }],
+      which: async (executable) => (executable === "bun" ? "/opt/bun" : null),
+      spawn: async () => ({ exitCode: 0, stdout: "1.1.45\n", stderr: "" }),
+    });
+    expect(rows).toHaveLength(2);
+    const bun = rows.find((r) => r.label === "toolchain bun");
+    const uv = rows.find((r) => r.label === "toolchain uv");
+    expect(bun).toMatchObject({
+      ok: false,
+      detail: ">=1.3 <2  observed 1.1.45",
+    });
+    expect(bun.fix).toContain("make bun >=1.3 <2");
+    expect(uv).toMatchObject({
+      ok: false,
+      label: "toolchain uv",
+      detail: ">=0.5  missing",
+    });
+    expect(uv.fix).toContain("install uv >=0.5");
+  });
+
+  test("a throwing version probe yields a red row and later tools are still diagnosed", async () => {
+    const rows = await repoToolchainDiagnostics({
+      repos: [{ name: "demo", toolchain: { broken: ">=1", bun: ">=1.3 <2" } }],
+      which: async (executable) => `/opt/${executable}`,
+      spawn: async ([resolved]) => {
+        if (resolved === "/opt/broken") throw new Error("permission denied");
+        return { exitCode: 0, stdout: "1.3.14\n", stderr: "" };
+      },
+    });
+
+    expect(rows).toEqual([
+      expect.objectContaining({
+        ok: false,
+        label: "toolchain broken",
+        detail: ">=1  observed permission denied",
+      }),
+      expect.objectContaining({
+        ok: true,
+        label: "toolchain bun",
+      }),
+    ]);
+  });
+
+  test("not-declared: no new rows and no probe is spawned", async () => {
+    let probes = 0;
+    const counted = {
+      which: async () => {
+        probes += 1;
+        return "/opt/bun";
+      },
+      spawn: async () => {
+        probes += 1;
+        return { exitCode: 0, stdout: "1.3.14\n", stderr: "" };
+      },
+    };
+    const absent = await repoToolchainDiagnostics({
+      repos: [{ name: "bare", path: "/tmp/bare" }],
+      ...counted,
+    });
+    const emptyBlock = await repoToolchainDiagnostics({
+      repos: [{ name: "empty", toolchain: {} }],
+      ...counted,
+    });
+    expect(absent).toEqual([]);
+    expect(emptyBlock).toEqual([]);
+    expect(probes).toBe(0);
+  });
+
+  test("malformed block: yields a red toolchain check instead of throwing", async () => {
+    let probes = 0;
+    const rows = await repoToolchainDiagnostics({
+      repos: [
+        { name: "broken", toolchain: "bun>=1.3" },
+        { name: "fine", toolchain: { bun: ">=1.0" } },
+      ],
+      which: async () => "/opt/bun",
+      spawn: async () => {
+        probes += 1;
+        return { exitCode: 0, stdout: "1.3.14\n", stderr: "" };
+      },
+    });
+    expect(rows[0]).toMatchObject({ ok: false, label: "toolchain" });
+    expect(rows[0].detail).toContain("repo broken toolchain must be a map");
+    expect(rows[0].fix).toContain("broken");
+    // Doctor keeps going: the next repo is still probed.
+    expect(rows[1]).toMatchObject({ ok: true, label: "toolchain bun" });
+    expect(probes).toBe(1);
+  });
+});
+
+describe("stack daemon diagnostics (#1868)", () => {
+  const root = "/factory/stack";
+  const appEnv = {
+    FACTORY_GH_APP_ID: "123",
+    FACTORY_GH_APP_INSTALLATION_ID: "456",
+    FACTORY_GH_APP_PRIVATE_KEY_PATH: "/tmp/app.pem",
+  };
+  const absentPidFile = () => {
+    const error = new Error("not found");
+    error.code = "ENOENT";
+    throw error;
+  };
+  const pidFileFor = (pid) => (file) =>
+    file.endsWith("gh-app-auth.pid") ? `${pid}\n` : absentPidFile();
+
+  test("fails when configured App auth has no daemon", () => {
+    const rows = stackDaemonDiagnostics({
+      root,
+      env: appEnv,
+      listProcesses: () => [],
+      readPidFile: absentPidFile,
+    });
+    expect(rows).toContainEqual({
+      ok: false,
+      label: "gh-app-auth daemon",
+      detail: "GitHub App auth is configured but no daemon is running",
+      fix: "run `factory up` to start gh-app-auth.mjs --daemon",
+    });
+    expect(
+      rows.find((row) => row.label === "serve.pid identity"),
+    ).toMatchObject({
+      ok: "warn",
+      detail: expect.stringContaining("not applicable"),
+    });
+  });
+
+  test("ignores a foreign daemon when this stack's pidfile owns a healthy daemon", () => {
+    const rows = stackDaemonDiagnostics({
+      root,
+      env: appEnv,
+      listProcesses: () => [
+        {
+          pid: 41,
+          command:
+            "bun /factory/stack/lib/control-plane/gh-app-auth.mjs --daemon",
+        },
+        {
+          pid: 42,
+          command:
+            "bun /factory/other/lib/control-plane/gh-app-auth.mjs --daemon",
+        },
+      ],
+      readPidFile: pidFileFor(41),
+      probeProcess: (pid) => ({
+        alive: true,
+        command: `bun ${pid === 41 ? root : "/factory/other"}/lib/control-plane/gh-app-auth.mjs --daemon`,
+      }),
+    });
+    expect(rows.find((row) => row.label === "gh-app-auth daemon")).toEqual({
+      ok: true,
+      label: "gh-app-auth daemon",
+      detail: "one daemon running (pid 41)",
+      fix: null,
+    });
+  });
+
+  test("fails when a foreign daemon exists but this stack's daemon is missing", () => {
+    const rows = stackDaemonDiagnostics({
+      root,
+      env: appEnv,
+      listProcesses: () => [
+        {
+          pid: 41,
+          command:
+            "bun /factory/other/lib/control-plane/gh-app-auth.mjs --daemon",
+        },
+      ],
+      readPidFile: absentPidFile,
+    });
+    expect(rows.find((row) => row.label === "gh-app-auth daemon")).toEqual({
+      ok: false,
+      label: "gh-app-auth daemon",
+      detail: "GitHub App auth is configured but no daemon is running",
+      fix: "run `factory up` to start gh-app-auth.mjs --daemon",
+    });
+  });
+
+  test("fails when this stack's daemon pidfile points at another process", () => {
+    const rows = stackDaemonDiagnostics({
+      root,
+      env: appEnv,
+      listProcesses: () => [],
+      readPidFile: pidFileFor(41),
+      probeProcess: () => ({
+        alive: true,
+        command: "bun unrelated-worker.mjs",
+      }),
+    });
+    expect(
+      rows.find((row) => row.label === "gh-app-auth daemon"),
+    ).toMatchObject({
+      ok: false,
+      detail:
+        "recycled gh-app-auth.pid — PID 41 belongs to bun unrelated-worker.mjs",
+    });
+  });
+
+  test("fails on duplicate gh-app-auth daemons serving this stack", () => {
+    const rows = stackDaemonDiagnostics({
+      root,
+      env: appEnv,
+      listProcesses: () => [
+        {
+          pid: 41,
+          command:
+            "bun /factory/stack/lib/control-plane/gh-app-auth.mjs --daemon",
+        },
+        {
+          pid: 42,
+          command:
+            "bun /factory/stack/lib/control-plane/gh-app-auth.mjs --daemon",
+        },
+      ],
+      readPidFile: pidFileFor(41),
+      probeProcess: () => ({
+        alive: true,
+        command:
+          "bun /factory/stack/lib/control-plane/gh-app-auth.mjs --daemon",
+      }),
+    });
+    expect(
+      rows.find((row) => row.label === "gh-app-auth daemon"),
+    ).toMatchObject({
+      ok: false,
+      detail: "duplicate daemons — found 2 (41, 42)",
+    });
+  });
+
+  test("reports a live recycled PID separately from a stopped serve", () => {
+    const rows = stackDaemonDiagnostics({
+      env: {},
+      listProcesses: () => [],
+      readPidFile: () => "8080\n",
+      probeProcess: () => ({
+        alive: true,
+        command: "bun unrelated-worker.mjs",
+      }),
+    });
+    expect(
+      rows.find((row) => row.label === "serve.pid identity"),
+    ).toMatchObject({
+      ok: false,
+      detail:
+        "recycled serve.pid — PID 8080 belongs to bun unrelated-worker.mjs",
+    });
+  });
+
+  test("reports a stale PID as not running", () => {
+    const rows = stackDaemonDiagnostics({
+      env: {},
+      listProcesses: () => [],
+      readPidFile: () => "8080\n",
+      probeProcess: () => ({ alive: false }),
+    });
+    expect(
+      rows.find((row) => row.label === "serve.pid identity"),
+    ).toMatchObject({
+      ok: false,
+      detail: "stale serve.pid — PID 8080 is not running",
+    });
+  });
+
+  test("accepts a live PID only when it owns the serve entrypoint", () => {
+    const rows = stackDaemonDiagnostics({
+      env: {},
+      listProcesses: () => [],
+      readPidFile: () => "8080\n",
+      probeProcess: () => ({
+        alive: true,
+        command: "bun /repo/event-runtime/cli.mjs serve --port 7381",
+      }),
+    });
+    expect(rows.find((row) => row.label === "serve.pid identity")).toEqual({
+      ok: true,
+      label: "serve.pid identity",
+      detail: "PID 8080 is event-runtime/cli.mjs serve",
+      fix: null,
+    });
+  });
+
+  test("reports stale registry and planner health from the live control API", () => {
+    const rows = stackDaemonDiagnostics({
+      root,
+      env: {},
+      listProcesses: () => [],
+      readPidFile: () => "8080\n",
+      probeProcess: () => ({
+        alive: true,
+        command: "bun /factory/stack/event-runtime/cli.mjs serve --port 7381",
+      }),
+      controlApiProbe: (pathname) => {
+        if (pathname === "/status")
+          return { ok: true, body: { events: { admitted: 1 } } };
+        return {
+          ok: true,
+          body: {
+            registry: {
+              stamp: "files:stale",
+              loadedAt: "2026-08-30T12:00:00.000Z",
+              lastReloadError: { message: "bad schema" },
+            },
+            planner: { lastPlannedAt: "2026-08-30T11:00:00.000Z" },
+          },
+        };
+      },
+      registryStamp: () => "files:current",
+      now: () => Date.parse("2026-08-30T12:00:00.000Z"),
+    });
+
+    expect(rows).toContainEqual(
+      expect.objectContaining({ label: "registry health", ok: false }),
+    );
+    expect(rows).toContainEqual(
+      expect.objectContaining({ label: "registry reload", ok: "warn" }),
+    );
+    expect(rows).toContainEqual(
+      expect.objectContaining({ label: "planner health", ok: false }),
+    );
+  });
+
+  test("control API probe keeps the bearer token out of curl argv", () => {
+    const token = "secret-bearer-token";
+    const spawned = [];
+    const spawn = (cmd, args, opts) => {
+      spawned.push({ cmd, args, opts });
+      return { status: 0, stdout: "{}", stderr: "" };
+    };
+
+    defaultControlApiProbe("/status", { port: 7381, token, spawn });
+    expect(spawned).toHaveLength(1);
+    const { args, opts } = spawned[0];
+    expect(args.join(" ")).not.toContain(token);
+    expect(args).toContain("--config");
+    expect(args).toContain("-");
+    expect(opts.input).toBe(`header = "Authorization: Bearer ${token}"\n`);
+
+    // /health stays bearer-free: no config stanza, no stdin payload.
+    defaultControlApiProbe("/health", { port: 7381, token, spawn });
+    expect(spawned[1].args).not.toContain("--config");
+    expect(spawned[1].opts.input).toBeUndefined();
+    expect(JSON.stringify(spawned[1])).not.toContain(token);
+  });
+});
+
+describe("chain auto-approval policy diagnostic (#1779)", () => {
+  const writePolicy = (root, policy) => {
+    mkdirSync(path.join(root, "config"));
+    writeFileSync(path.join(root, "config", "policy.yaml"), policy);
+  };
+
+  test("reports the four loader outcomes from a temporary instance root", () => {
+    const valid = scratch();
+    writePolicy(
+      valid,
+      `chain_auto_approval:
+  allowed_event_types:
+    - factory.merge.requested
+merge:
+  max_fix_rounds: 2
+  batch_size: 3
+escalation:
+  auto_merge_base: [develop]
+  auto_merge_owners: [watt-mind]
+`,
+    );
+    expect(chainAutoApprovalPolicyDiagnostic({ root: valid })).toEqual({
+      ok: true,
+      label: "chain auto-approval policy",
+      detail:
+        "ok (1 allowed event type: factory.merge.requested; merge max_fix_rounds=2, batch_size=3; escalation auto_merge_base=develop, auto_merge_owners=watt-mind)",
+      fix: null,
+    });
+
+    const missing = scratch();
+    expect(chainAutoApprovalPolicyDiagnostic({ root: missing })).toEqual({
+      ok: "warn",
+      label: "chain auto-approval policy",
+      detail: "policy_missing — every chain proposal is watched",
+      fix: "add config/policy.yaml chain_auto_approval.allowed_event_types to opt into safe chain approvals",
+    });
+
+    const invalid = scratch();
+    writePolicy(invalid, "chain_auto_approval:\n  allowed_event_types: nope\n");
+    expect(chainAutoApprovalPolicyDiagnostic({ root: invalid })).toEqual({
+      ok: false,
+      label: "chain auto-approval policy",
+      detail:
+        "policy_invalid — chain_auto_approval.allowed_event_types must be an array of strings",
+      fix: "compare config/policy.yaml chain_auto_approval.allowed_event_types with CHAIN_AUTO_APPROVAL_EVENT_TYPES",
+    });
+
+    const forbidden = scratch();
+    writePolicy(
+      forbidden,
+      "chain_auto_approval:\n  allowed_event_types: [factory.work.requested, factory.ship-apply.requested]\nescalation:\n  auto_merge_base: []\n  auto_merge_owners: []\n",
+    );
+    expect(chainAutoApprovalPolicyDiagnostic({ root: forbidden })).toEqual({
+      ok: false,
+      label: "chain auto-approval policy",
+      detail:
+        "policy_contains_forbidden_event — offending entries: factory.ship-apply.requested",
+      fix: "compare config/policy.yaml chain_auto_approval.allowed_event_types with CHAIN_AUTO_APPROVAL_EVENT_TYPES",
+    });
+
+    const mergeInvalid = scratch();
+    writePolicy(
+      mergeInvalid,
+      "chain_auto_approval:\n  allowed_event_types: [factory.merge.requested]\nmerge:\n  max_fix_rounds: -1\nescalation:\n  auto_merge_base: [develop]\n  auto_merge_owners: [watt-mind]\n",
+    );
+    expect(chainAutoApprovalPolicyDiagnostic({ root: mergeInvalid })).toEqual({
+      ok: false,
+      label: "chain auto-approval policy",
+      detail:
+        "merge_policy_invalid — merge.max_fix_rounds and escalation.auto_merge_base/auto_merge_owners must be valid when merge events are allowed",
+      fix: "repair merge.max_fix_rounds and escalation.auto_merge_base/auto_merge_owners in config/policy.yaml",
+    });
+
+    for (const root of [valid, missing, invalid, forbidden, mergeInvalid]) {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("defaults to the runtime's reposRoot() so FACTORY_REPOS_ROOT wins over the checkout", () => {
+    const reposRootDir = scratch();
+    writePolicy(
+      reposRootDir,
+      "chain_auto_approval:\n  allowed_event_types: [factory.triage.requested]\n",
+    );
+    const previous = process.env.FACTORY_REPOS_ROOT;
+    process.env.FACTORY_REPOS_ROOT = reposRootDir;
+    try {
+      expect(chainAutoApprovalPolicyDiagnostic()).toEqual({
+        ok: true,
+        label: "chain auto-approval policy",
+        detail:
+          "ok (1 allowed event type: factory.triage.requested; merge max_fix_rounds=0, batch_size=4; escalation auto_merge_base=none, auto_merge_owners=none)",
+        fix: null,
+      });
+    } finally {
+      if (previous === undefined) delete process.env.FACTORY_REPOS_ROOT;
+      else process.env.FACTORY_REPOS_ROOT = previous;
+      rmSync(reposRootDir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -456,7 +1229,7 @@ describe("Linear budget line (WM-878)", () => {
       linearBudgetStatus,
       parseRateLimitHeaders,
       LINEAR_BUDGET_WARN_REMAINING,
-    } = await import("../tools/linear.mjs");
+    } = await import("../tools/ticket.mjs");
     expect(formatLinearBudgetLine(null)).toBe(
       "Linear budget: unknown (no recent API call)",
     );

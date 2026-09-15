@@ -53,6 +53,9 @@
       "as": "keyvalue",
       "label": "UX critique",
       "keys": ["status", "verdict", "rounds", "prReady", "evidence"],
+      "formats": {
+        "evidence": "url"
+      },
       "tone": {
         "status": {
           "required": "neutral",

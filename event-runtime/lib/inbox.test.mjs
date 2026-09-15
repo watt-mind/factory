@@ -15,15 +15,20 @@ import {
   inboxCounts,
   listInboxItems,
   markInboxDelivered,
+  MAX_PARKED_INBOX_AGE_MS,
   reconcileInbox,
+  normalizePullRequestState,
+  defaultFetchPullRequest,
   retryInboxDecision,
   resolveInboxItem,
   fetchLinearInboxIssues,
   linearGql,
+  synthesizeInboxItem,
 } from "./inbox.mjs";
 import { decisionRequestHash } from "./decision.mjs";
 import { templateFor } from "./decision-templates.mjs";
 import { listMemos, MEMO_SCHEMA_VERSION, memoDigest } from "./memos.mjs";
+import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
 
 const inboxDocPath = path.resolve(
   import.meta.dir,
@@ -117,6 +122,128 @@ test("the documented decision API errors match decide and retry", () => {
 });
 
 describe("human inbox ledger (WM-285)", () => {
+  test("synthesizes an operator-readable inbox message and explains decision effects", () => {
+    const request = {
+      schemaVersion: "factory.decision-request/v1",
+      question: "How should the factory proceed with watt-mind/factory#1158?",
+      context: "The dispatch run stopped before opening a pull request.",
+      options: [
+        {
+          id: "triage",
+          label: "Send back to Triage",
+          effect: "send_to_triage",
+        },
+        { id: "answer", label: "Answer the agent", effect: "answer" },
+      ],
+    };
+    const item = synthesizeInboxItem({
+      kind: "BLOCKED",
+      title:
+        "BLOCKED factory.dispatch.requested run_123-watt-mind/factory#1158: owned_paths_not_closed",
+      reasonCode: "owned_paths_not_closed",
+      refs: {
+        repo: "factory",
+        issue: "watt-mind/factory#1158",
+        runId: "run_123",
+        pr: "42",
+      },
+      decision: request,
+    });
+
+    expect(item.title).toBe(
+      "Blocked: factory#1158 — its allowed paths do not cover every required file",
+    );
+    expect(item.body).toContain("What happened: An item needs attention");
+    expect(item.body).toContain("Why it matters: The ticket's allowed paths");
+    expect(item.body).toContain("Ticket: watt-mind/factory#1158");
+    expect(item.body).toContain("Run: run_123");
+    expect(item.body).toContain("PR: 42");
+    expect(item.body).toContain("Send back to Triage — removes ai:agent-ready");
+    expect(item.body).toContain(
+      "Answer the agent — records the operator's reply",
+    );
+  });
+
+  test("synthesizes titles and bodies for every inbox kind, including unknown reasons", () => {
+    for (const kind of INBOX_KINDS) {
+      const reason =
+        kind === "proposal_expired" ? "proposal_expired" : "novel_reason";
+      const item = synthesizeInboxItem({
+        kind,
+        title: `machine ${kind}: ${reason}`,
+        reasonCode: reason,
+        refs: { issue: "watt-mind/factory#1158", runId: "run_1", pr: "42" },
+      });
+      expect(item.title).toMatch(/^[A-Z]|^Blocked:|^Escalated:|^CI failed:/);
+      expect(item.body).toContain("What happened:");
+      expect(item.body).toContain("Why it matters:");
+      expect(item.body).toContain(`Reason code: ${reason}.`);
+      expect(item.body).toContain("Ticket: watt-mind/factory#1158");
+      expect(item.body).toContain("Run: run_1");
+      expect(item.body).toContain("PR: 42");
+    }
+  });
+
+  test("never invents a reason code out of a producer's free-text title", () => {
+    const item = synthesizeInboxItem({
+      kind: "BLOCKED",
+      // Reads like a reason code, but nothing structured says it is one.
+      title: "BLOCKED factory#1158: owned_paths_not_closed",
+      refs: { issue: "watt-mind/factory#1158" },
+    });
+    expect(item.title).toBe("Blocked: factory#1158");
+    expect(item.body).not.toContain("Reason code:");
+    expect(item.body).not.toContain("allowed paths");
+  });
+
+  test('names the event a parked notice refers to instead of "this item"', () => {
+    const item = synthesizeInboxItem({
+      kind: "BLOCKED",
+      title: "BLOCKED linear.ticket.agent_ready evt-park: repo_report_only",
+      reasonCode: "repo_report_only",
+      eventType: "linear.ticket.agent_ready",
+      refs: { eventSource: "linear", eventId: "evt-park" },
+    });
+    expect(item.body).toContain(
+      "What happened: An item needs attention for linear.ticket.agent_ready evt-park (blocked).",
+    );
+    expect(item.body).toContain("Reason code: repo_report_only.");
+    expect(
+      synthesizeInboxItem({
+        kind: "BLOCKED",
+        title: "BLOCKED evt-park",
+        refs: { eventSource: "linear", eventId: "evt-park", repo: "factory" },
+      }).body,
+    ).toContain("for event evt-park (factory) (blocked).");
+  });
+
+  test("uses cached ticket titles and proposal subjects in human titles", () => {
+    const ticket = synthesizeInboxItem({
+      kind: "BLOCKED",
+      title: "BLOCKED factory#1158: owned_paths_not_closed",
+      reasonCode: "owned_paths_not_closed",
+      ticketTitle: "select Opus only for Claude parent runs",
+      refs: { issue: "watt-mind/factory#1158" },
+    });
+    expect(ticket.title).toBe(
+      'Blocked: factory#1158 "select Opus only for Claude parent runs" — its allowed paths do not cover every required file',
+    );
+
+    const proposal = synthesizeInboxItem({
+      kind: "decision_needed",
+      title: "Reaper",
+      refs: { proposalId: "proposal-1" },
+      decision: {
+        question: "Run reaper@1 for hourly sweep?",
+        options: [{ label: "Approve", effect: "approve_proposal" }],
+      },
+    });
+    expect(proposal.title).toBe("Approve reaper run (hourly sweep)?");
+    expect(proposal.body).toContain(
+      "Approve — approves the proposal and allows its run to proceed.",
+    );
+  });
+
   test("decision requests are validated and exposed with decision metadata", () => {
     const db = openDb(":memory:");
     expect(() =>
@@ -145,6 +272,55 @@ describe("human inbox ledger (WM-285)", () => {
       decidedAt: null,
       decidedBy: null,
       dedupeKey: "BLOCKED:evt",
+    });
+  });
+
+  test("synthesizes agent-source presentation inside createInboxItem", () => {
+    const db = openDb(":memory:");
+    const input = {
+      kind: "ESCALATED",
+      title: "ESCALATED WM-2047: needs_human",
+      body: "The agent needs an operator decision.",
+      reasonCode: "needs_human",
+      ticketTitle: "consolidate presentation synthesis",
+      refs: { issue: "WM-2047", repo: "factory", runId: "run_2047" },
+      source: "agent:run_2047",
+      decision: decision(),
+      dedupeKey: "ESCALATED:WM-2047",
+    };
+    const expected = synthesizeInboxItem(input);
+
+    const created = createInboxItem(db, input, {
+      id: "agent_presentation",
+      now: 1000,
+    });
+
+    expect({ title: created.title, body: created.body }).toEqual({
+      title: expected.title,
+      body: expected.body,
+    });
+    expect(created.title).not.toBe(input.title);
+    expect(created.body).not.toBe(input.body);
+    expect(created.body).toContain("What happened:");
+    expect(created.body).toContain("Why it matters:");
+    expect(created.decision).toEqual(input.decision);
+    expect(created.dedupeKey).toBe(input.dedupeKey);
+
+    const cli = createInboxItem(
+      db,
+      {
+        ...input,
+        title: "CLI title stays verbatim",
+        body: "CLI body stays verbatim.",
+        refs: { issue: "WM-2048", repo: "factory", runId: "run_cli" },
+        source: "cli",
+        dedupeKey: null,
+      },
+      { id: "cli_presentation", now: 1000 },
+    );
+    expect({ title: cli.title, body: cli.body }).toEqual({
+      title: "CLI title stays verbatim",
+      body: "CLI body stays verbatim.",
     });
   });
 
@@ -178,7 +354,7 @@ describe("human inbox ledger (WM-285)", () => {
     );
     expect(second.id).toBe(first.id);
     expect(second.attached).toBe(true);
-    expect(second.body).toBe("old");
+    expect(second.body).toContain("old");
     expect(second.refs).toEqual({ issue: "WM-1", runId: "run_1" });
     expect(second.decision).toEqual(decision());
     expect(second.waiters).toEqual([
@@ -192,7 +368,7 @@ describe("human inbox ledger (WM-285)", () => {
     expect(db.query("SELECT COUNT(*) AS n FROM inbox_items").get().n).toBe(3);
   });
 
-  test("a dispatch proposal item stores the action-first title and why-line (WM-896)", () => {
+  test("a dispatch proposal item stores a human-readable title and decision details", () => {
     const db = openDb(":memory:");
     const refs = {
       proposalId: "prop_2dda1ca8-2469-4aab-8908-79c31a5df55b",
@@ -211,6 +387,7 @@ describe("human inbox ledger (WM-285)", () => {
       {
         kind: "decision_needed",
         title: "Dispatch WM-862 · factory · cursor-grok-4.6-high",
+        ticketTitle: "select Opus only for Claude parent runs",
         refs,
         source: "serve:notify",
         decision: templateFor("decision_needed", {
@@ -224,8 +401,10 @@ describe("human inbox ledger (WM-285)", () => {
       { id: "inbox_dispatch" },
     );
     expect(created.title).toBe(
-      "Dispatch WM-862 · factory · cursor-grok-4.6-high",
+      'Approve dispatch run (WM-862 "select Opus only for Claude parent runs")?',
     );
+    expect(created.body).toContain("Question: Run dispatch@1 for WM-862");
+    expect(created.body).toContain("Approve proposal — approves the proposal");
     expect(created.decision.question).toBe(
       "Run dispatch@1 for WM-862 (factory) on cursor-grok-4.6-high?",
     );
@@ -274,8 +453,8 @@ describe("human inbox ledger (WM-285)", () => {
       { id: "second" },
     );
     expect(second.id).toBe(first.id);
-    expect(second.title).toBe("second");
-    expect(second.body).toBe("new");
+    expect(second.title).toBe("Escalated: WM-1");
+    expect(second.body).toContain("new");
     expect(second.refs).toEqual({ issue: "WM-1", runId: "run_2" });
     expect(second.decision).toEqual(replacement);
     expect(second.delivery.supersededDecisions).toBe(1);
@@ -573,8 +752,13 @@ describe("human inbox ledger (WM-285)", () => {
     const started = new Promise((resolve) => {
       effectStarted = resolve;
     });
+    let releaseEffect;
+    const effectFinished = new Promise((resolve) => {
+      releaseEffect = resolve;
+    });
+    let deciding;
     try {
-      const deciding = decideInboxItem(
+      deciding = decideInboxItem(
         db,
         "slow_effect",
         {
@@ -586,18 +770,16 @@ describe("human inbox ledger (WM-285)", () => {
         {
           applyEffect: async () => {
             effectStarted();
-            await new Promise((resolve) => setTimeout(resolve, 250));
+            await effectFinished;
             return { outcome: "applied" };
           },
         },
       );
       await started;
 
-      const writeStarted = performance.now();
       expect(() =>
         createInboxItem(other, { kind: "BLOCKED", title: "other writer" }),
       ).not.toThrow();
-      expect(performance.now() - writeStarted).toBeLessThan(200);
       await expect(
         decideInboxItem(db, "slow_effect", {
           schemaVersion: "factory.decision-response/v1",
@@ -616,15 +798,67 @@ describe("human inbox ledger (WM-285)", () => {
         claimedAt: expect.any(String),
       });
 
+      releaseEffect();
       await deciding;
       expect(getInboxItem(db, "slow_effect").response.effect).toEqual({
         kind: "send_to_triage",
         outcome: "applied",
       });
     } finally {
+      releaseEffect?.();
+      await deciding;
       other.close();
       db.close();
     }
+  });
+
+  test("a failed decision effect leaves the item open and decidable (AC3b)", async () => {
+    const db = openDb(":memory:");
+    const request = decision([
+      { id: "triage", label: "Triage", effect: "send_to_triage" },
+    ]);
+    createInboxItem(
+      db,
+      {
+        kind: "ESCALATED",
+        title: "linear is down",
+        refs: { issue: "WM-1500" },
+        decision: request,
+      },
+      { id: "failed_effect_item" },
+    );
+    const response = {
+      schemaVersion: "factory.decision-response/v1",
+      requestHash: decisionRequestHash(request),
+      optionId: "triage",
+      fields: {},
+    };
+    const decided = await decideInboxItem(db, "failed_effect_item", response, {
+      now: 1_000,
+      applyEffect: () => ({ outcome: "failed", error: "linear unreachable" }),
+    });
+    expect(decided.effect).toEqual({
+      kind: "send_to_triage",
+      outcome: "failed",
+      error: "linear unreachable",
+    });
+    // The control-API path must not resolve the item on a failed effect —
+    // it stays open (unresolved) so the operator can retry the decision.
+    expect(decided.item.resolvedAt).toBeNull();
+    expect(decided.item.resolvedBy).toBeNull();
+    const stored = getInboxItem(db, "failed_effect_item");
+    expect(stored.resolvedAt).toBeNull();
+    expect(stored.response.effect).toMatchObject({
+      outcome: "failed",
+      error: "linear unreachable",
+    });
+
+    // Still decidable: a retry with a successful effect resolves it.
+    const retried = await retryInboxDecision(db, "failed_effect_item", {
+      now: 2_000,
+      applyEffect: () => ({ outcome: "applied" }),
+    });
+    expect(retried.item.resolvedAt).toBe(new Date(2_000).toISOString());
   });
 
   test("a retry takes over a pending claim once it is older than the transport timeout", async () => {
@@ -1013,6 +1247,10 @@ describe("human inbox ledger (WM-285)", () => {
       `INSERT INTO proposals (id, event_source, event_id, decision, status, created_at, ttl_seconds)
        VALUES ('live-proposal', 'test', 'live-evt', 'run', 'open', ?, 60)`,
     ).run(liveAt);
+    db.query(
+      `INSERT INTO proposals (id, event_source, event_id, decision, status, created_at, ttl_seconds)
+       VALUES ('parked-proposal', 'test', 'parked-evt', 'human_needed', 'open', ?, 60)`,
+    ).run(expiredAt);
     createInboxItem(db, { kind: "BLOCKED", title: "active" }, { id: "active" });
     createInboxItem(
       db,
@@ -1037,6 +1275,15 @@ describe("human inbox ledger (WM-285)", () => {
       },
       { id: "live-proposal-item" },
     );
+    createInboxItem(
+      db,
+      {
+        kind: "decision_needed",
+        title: "parked by proposal",
+        refs: { proposalId: "parked-proposal" },
+      },
+      { id: "parked-proposal-item" },
+    );
 
     const items = listInboxItems(db, { status: "all" });
     expect(
@@ -1050,6 +1297,14 @@ describe("human inbox ledger (WM-285)", () => {
     expect(
       items.find((item) => item.id === "live-proposal-item"),
     ).toMatchObject({
+      expired: false,
+    });
+    expect(
+      items.find((item) => item.id === "parked-proposal-item"),
+    ).toMatchObject({
+      expired: false,
+    });
+    expect(getInboxItem(db, "parked-proposal-item")).toMatchObject({
       expired: false,
     });
     expect(inboxCounts(db)).toMatchObject({
@@ -1141,7 +1396,7 @@ describe("human inbox ledger (WM-285)", () => {
 
     const started = performance.now();
     expect(inboxCounts(db).open).toBe(10_000);
-    expect(performance.now() - started).toBeLessThan(200);
+    expect(performance.now() - started).toBeLessThan(loadAdjustedTimeout(200));
     db.close();
   });
 
@@ -1182,6 +1437,442 @@ describe("human inbox ledger (WM-285)", () => {
       { id: "decision", resolvedBy: "auto:proposal_decided" },
       { id: "human", resolvedBy: "auto:event_requeued" },
     ]);
+  });
+
+  test("a run-progress notice for a finished run and a closed ticket auto-resolve as stale", async () => {
+    const db = openDb(":memory:");
+    const now = new Date(1000).toISOString();
+    db.query(
+      `INSERT INTO runs
+         (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+       VALUES ('run-terminal', 'terminal-key', '{}', 'sha256:test', 'COMPLETED', 1, ?, ?)`,
+    ).run(now, now);
+    createInboxItem(
+      db,
+      {
+        kind: "CI RED",
+        title: "terminal run",
+        refs: { runId: "run-terminal" },
+        source: "serve:notify",
+      },
+      { id: "terminal-run", now: 1000 },
+    );
+    createInboxItem(
+      db,
+      {
+        kind: "RC READY",
+        title: "closed ticket",
+        refs: { issue: "WM-closed" },
+      },
+      { id: "closed-ticket", now: 1000 },
+    );
+
+    expect(
+      await reconcileInbox(db, {
+        now: 60_000,
+        linearIssues: async () => [
+          {
+            identifier: "WM-closed",
+            state: { name: "Done", type: "completed" },
+            labels: { nodes: [] },
+          },
+        ],
+      }),
+    ).toEqual([
+      { id: "terminal-run", resolvedBy: "auto:stale_ref" },
+      { id: "closed-ticket", resolvedBy: "auto:stale_ref" },
+    ]);
+    expect(getInboxItem(db, "terminal-run")).toMatchObject({
+      resolvedReason: "stale_ref",
+    });
+    expect(getInboxItem(db, "closed-ticket")).toMatchObject({
+      resolvedReason: "stale_ref",
+    });
+  });
+
+  test("GitHub ticket lookups are deduped per ticket and fail open per row", async () => {
+    const db = openDb(":memory:");
+    // Two distinct items naming the same ticket — the shape that used to cost
+    // one un-batched GitHub read per open item, every poll.
+    for (const [id, kind, issue] of [
+      ["gh-a", "BLOCKED", "watt-mind/factory#1"],
+      ["gh-b", "RC READY", "watt-mind/factory#1"],
+      ["gh-c", "BLOCKED", "watt-mind/factory#2"],
+    ]) {
+      createInboxItem(
+        db,
+        { kind, title: id, refs: { issue, repo: "factory" } },
+        { id, now: 1000 },
+      );
+    }
+    const looked = [];
+    const resolved = await reconcileInbox(db, {
+      now: 60_000,
+      linearIssues: async () => {
+        throw new Error("GitHub rows must not reach the Linear batch");
+      },
+      controlPlane: () => ({
+        kind: "github",
+        getTicket: async (issue) => {
+          looked.push(issue);
+          // One unreadable ticket must not sink the whole poll.
+          if (issue === "watt-mind/factory#2") throw new Error("rate limited");
+          return { state: { name: "Closed", type: "completed" }, labels: [] };
+        },
+      }),
+    });
+
+    // Two rows share one ticket: one lookup, not one per open item.
+    expect(looked).toEqual(["watt-mind/factory#1", "watt-mind/factory#2"]);
+    expect(resolved).toEqual([
+      { id: "gh-a", resolvedBy: "auto:stale_ref" },
+      { id: "gh-b", resolvedBy: "auto:stale_ref" },
+    ]);
+    expect(getInboxItem(db, "gh-c").resolvedAt).toBeNull();
+  });
+
+  test("reconciles merged and closed referenced pull requests", async () => {
+    const db = openDb(":memory:");
+    createInboxItem(
+      db,
+      {
+        kind: "BLOCKED",
+        title: "merged",
+        refs: { repo: "factory", pr: "PR#17" },
+      },
+      { id: "merged-pr", now: 1000 },
+    );
+    createInboxItem(
+      db,
+      {
+        kind: "ESCALATED",
+        title: "closed",
+        refs: { repo: "factory", pr: "PR#18" },
+      },
+      { id: "closed-pr", now: 1000 },
+    );
+
+    await expect(
+      reconcileInbox(db, {
+        now: 60_000,
+        fetchPullRequest: async ({ github, pr }) => {
+          expect(github).toBe("watt-mind/factory");
+          return { state: pr === 17 ? "MERGED" : "CLOSED" };
+        },
+      }),
+    ).resolves.toEqual([
+      { id: "merged-pr", resolvedBy: "auto:pr_merged" },
+      { id: "closed-pr", resolvedBy: "auto:pr_closed" },
+    ]);
+  });
+
+  test("normalizes the REST pull request shape into referent states", async () => {
+    expect(
+      normalizePullRequestState({ state: "closed", merged_at: null }),
+    ).toBe("CLOSED");
+    expect(
+      normalizePullRequestState({
+        state: "closed",
+        merged_at: "2026-09-01T00:00:00Z",
+      }),
+    ).toBe("MERGED");
+    expect(normalizePullRequestState({ state: "open", merged_at: null })).toBe(
+      "OPEN",
+    );
+
+    // The default fetcher is what serve actually installs: drive it with the
+    // real REST payload shape rather than a hand-written {state:"MERGED"} stub.
+    const rest = {
+      "repos/watt-mind/factory/pulls/17": {
+        state: "closed",
+        merged_at: "2026-09-01T00:00:00Z",
+      },
+      "repos/watt-mind/factory/pulls/18": { state: "closed", merged_at: null },
+      "repos/watt-mind/factory/pulls/19": { state: "open", merged_at: null },
+    };
+    const api = async (method, route) => {
+      expect(method).toBe("GET");
+      return rest[route];
+    };
+    await expect(
+      defaultFetchPullRequest({ github: "watt-mind/factory", pr: 17, api }),
+    ).resolves.toEqual({ state: "MERGED" });
+    await expect(
+      defaultFetchPullRequest({ github: "watt-mind/factory", pr: 19, api }),
+    ).resolves.toEqual({ state: "OPEN" });
+
+    const db = openDb(":memory:");
+    createInboxItem(
+      db,
+      {
+        kind: "BLOCKED",
+        title: "merged",
+        refs: { repo: "factory", pr: "PR#17" },
+      },
+      { id: "rest-merged", now: 1000 },
+    );
+    createInboxItem(
+      db,
+      {
+        kind: "ESCALATED",
+        title: "closed",
+        refs: { repo: "factory", pr: "PR#18" },
+      },
+      { id: "rest-closed", now: 1000 },
+    );
+    createInboxItem(
+      db,
+      {
+        kind: "BLOCKED",
+        title: "open",
+        refs: { repo: "factory", pr: "PR#19" },
+      },
+      { id: "rest-open", now: 1000 },
+    );
+
+    await expect(
+      reconcileInbox(db, {
+        now: 60_000,
+        fetchPullRequest: (request) =>
+          defaultFetchPullRequest({ ...request, api }),
+      }),
+    ).resolves.toEqual([
+      { id: "rest-merged", resolvedBy: "auto:pr_merged" },
+      { id: "rest-closed", resolvedBy: "auto:pr_closed" },
+    ]);
+    expect(listInboxItems(db, { status: "open" }).map((i) => i.id)).toEqual([
+      "rest-open",
+    ]);
+    db.close();
+  });
+
+  test("bounds PR referent reads and resumes after the last key read", async () => {
+    const db = openDb(":memory:");
+    for (let pr = 101; pr <= 110; pr += 1) {
+      createInboxItem(
+        db,
+        {
+          kind: "BLOCKED",
+          title: `PR ${pr}`,
+          refs: { repo: "factory", pr: String(pr) },
+        },
+        { id: `pr-${pr}`, now: pr * 1000 },
+      );
+    }
+    const fetched = [];
+    const fetchPullRequest = async ({ pr }) => {
+      fetched.push(pr);
+      return { state: pr > 108 ? "MERGED" : "OPEN" };
+    };
+
+    await reconcileInbox(db, { now: 60_000, fetchPullRequest });
+    expect(fetched).toEqual([101, 102, 103, 104, 105, 106, 107, 108]);
+
+    await expect(
+      reconcileInbox(db, { now: 120_000, fetchPullRequest }),
+    ).resolves.toEqual([
+      { id: "pr-109", resolvedBy: "auto:pr_merged" },
+      { id: "pr-110", resolvedBy: "auto:pr_merged" },
+    ]);
+    // Resumed after watt-mind/factory#108 and wrapped, rather than replaying a
+    // numeric offset into a list that has since changed length.
+    expect(fetched.slice(8)).toEqual([109, 110, 101, 102, 103, 104, 105, 106]);
+    db.close();
+  });
+
+  test("keeps the PR rotation cursor stable when the pending set shrinks", async () => {
+    const db = openDb(":memory:");
+    for (let pr = 101; pr <= 112; pr += 1) {
+      createInboxItem(
+        db,
+        {
+          kind: "BLOCKED",
+          title: `PR ${pr}`,
+          refs: { repo: "factory", pr: String(pr) },
+        },
+        { id: `pr-${pr}`, now: pr * 1000 },
+      );
+    }
+    const fetched = [];
+    const fetchPullRequest = async ({ pr }) => {
+      fetched.push(pr);
+      return { state: "OPEN" };
+    };
+
+    await reconcileInbox(db, { now: 60_000, fetchPullRequest });
+    expect(fetched).toEqual([101, 102, 103, 104, 105, 106, 107, 108]);
+
+    // Two already-read referents vanish before the next poll. A numeric offset
+    // would skip past unread rows; the key cursor still resumes at #109.
+    resolveInboxItem(db, "pr-101", { now: 90_000, resolvedBy: "operator" });
+    resolveInboxItem(db, "pr-102", { now: 90_000, resolvedBy: "operator" });
+
+    fetched.length = 0;
+    await reconcileInbox(db, { now: 120_000, fetchPullRequest });
+    expect(fetched).toEqual([109, 110, 111, 112, 103, 104, 105, 106]);
+    db.close();
+  });
+
+  test("supersedes an older parked item when a newer run owns its ticket", () => {
+    const db = openDb(":memory:");
+    createInboxItem(
+      db,
+      {
+        kind: "BLOCKED",
+        title: "old parked dispatch",
+        refs: { issue: "watt-mind/factory#1158" },
+      },
+      { id: "old-park", now: 1000 },
+    );
+    const at = new Date(2000).toISOString();
+    db.query(
+      `INSERT INTO runs
+       (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at, subject)
+       VALUES ('run-new', 'new-subject', '{}', 'sha256:test', 'PROPOSED', 0, ?, ?, 'watt-mind/factory#1158')`,
+    ).run(at, at);
+
+    expect(reconcileInbox(db, { now: 3000 })).toEqual([
+      { id: "old-park", resolvedBy: "auto:superseded" },
+    ]);
+  });
+
+  test("supersedes an older parked item when a newer ticket event is admitted", () => {
+    const db = openDb(":memory:");
+    createInboxItem(
+      db,
+      {
+        kind: "human_needed",
+        title: "old parked event",
+        refs: { issue: "watt-mind/factory#1158" },
+      },
+      { id: "old-event-park", now: 1000 },
+    );
+    const at = new Date(2000).toISOString();
+    db.query(
+      `INSERT INTO events
+       (source, event_id, type, subject, occurred_at, received_at, envelope_json, payload_hash, status, admitted_at)
+       VALUES ('github', 'new-ticket-event', 'factory.dispatch.requested', 'watt-mind/factory#1158', ?, ?, '{}', 'sha256:test', 'admitted', ?)`,
+    ).run(at, at, at);
+
+    expect(reconcileInbox(db, { now: 3000 })).toEqual([
+      { id: "old-event-park", resolvedBy: "auto:superseded" },
+    ]);
+  });
+
+  test("a pending decision and an escalation survive a newer run for their ticket", async () => {
+    const db = openDb(":memory:");
+    insertEvent(db, { eventId: "ask-evt", status: "human_needed" });
+    createInboxItem(
+      db,
+      {
+        kind: "BLOCKED",
+        title: "unanswered ask",
+        refs: {
+          issue: "watt-mind/factory#1158",
+          eventSource: "test",
+          eventId: "ask-evt",
+        },
+        decision: decision(),
+        dedupeKey: "BLOCKED:ask-evt",
+      },
+      { id: "open-ask", now: 1000 },
+    );
+    createInboxItem(
+      db,
+      {
+        kind: "ESCALATED",
+        title: "refused run",
+        refs: { issue: "watt-mind/factory#1158" },
+      },
+      { id: "open-escalation", now: 1000 },
+    );
+    const at = new Date(2000).toISOString();
+    db.query(
+      `INSERT INTO runs
+       (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at, subject)
+       VALUES ('run-new', 'new-subject', '{}', 'sha256:test', 'PROPOSED', 0, ?, ?, 'watt-mind/factory#1158')`,
+    ).run(at, at);
+
+    await expect(
+      reconcileInbox(db, { now: 3000, linearIssues: async () => [] }),
+    ).resolves.toEqual([]);
+    expect(
+      db
+        .query(
+          "SELECT id FROM inbox_items WHERE resolved_at IS NULL ORDER BY id",
+        )
+        .all()
+        .map((row) => row.id),
+    ).toEqual(["open-ask", "open-escalation"]);
+  });
+
+  test("expires an old parked item with no actionable referent", () => {
+    const db = openDb(":memory:");
+    createInboxItem(
+      db,
+      { kind: "BLOCKED", title: "orphaned park" },
+      {
+        id: "orphaned-park",
+        now: 1000,
+      },
+    );
+
+    expect(reconcileInbox(db, { now: 1000 + MAX_PARKED_INBOX_AGE_MS })).toEqual(
+      [{ id: "orphaned-park", resolvedBy: "auto:stale_ref" }],
+    );
+  });
+
+  test("an escalation on a REFUSED run survives reconcile — it is born terminal", async () => {
+    const db = openDb(":memory:");
+    const at = new Date(1000).toISOString();
+    db.query(
+      `INSERT INTO runs
+         (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+       VALUES ('run-refused', 'refused-key', '{}', 'sha256:test', 'REFUSED', 1, ?, ?)`,
+    ).run(at, at);
+    const refs = { runId: "run-refused", issue: "WM-901", repo: "factory" };
+    createInboxItem(
+      db,
+      {
+        kind: "ESCALATED",
+        title: "How should the factory proceed with WM-901?",
+        refs,
+        source: "agent:run-refused",
+        decision: templateFor("ESCALATED", { producer: "escalation", refs }),
+      },
+      { id: "live-escalation", now: 1000 },
+    );
+    // A parked ask whose event is still parked must survive the same sweep.
+    db.query(
+      `INSERT INTO runs
+         (run_id, idempotency_key, spec_json, spec_hash, state, attempts, created_at, updated_at)
+       VALUES ('run-done', 'done-key', '{}', 'sha256:test', 'COMPLETED', 1, ?, ?)`,
+    ).run(at, at);
+    createInboxItem(
+      db,
+      {
+        kind: "human_needed",
+        title: "an unanswered ask about a finished run",
+        refs: { runId: "run-done" },
+        source: "serve:notify",
+      },
+      { id: "live-ask", now: 1000 },
+    );
+
+    expect(
+      await reconcileInbox(db, {
+        now: 60_000,
+        linearIssues: async () => [
+          {
+            identifier: "WM-901",
+            state: { name: "In Progress", type: "started" },
+            labels: { nodes: [{ name: "ai:agent-ready" }] },
+          },
+        ],
+      }),
+    ).toEqual([]);
+    expect(getInboxItem(db, "live-escalation").resolvedAt).toBeNull();
+    expect(getInboxItem(db, "live-ask").resolvedAt).toBeNull();
   });
 
   test("a pending decision becomes moot when its event leaves human_needed", async () => {
@@ -1698,10 +2389,10 @@ describe("approving an expired proposal retargets its item (WM-714)", () => {
     });
     expect(again.id).toBe(id);
     expect(again.title).toBe(
-      `DECISION NEEDED proposal ${FRESH}: expired undecided`,
+      `Proposal expired: proposal ${FRESH} — The proposal expired before an operator approved or rejected it`,
     );
     expect(listInboxItems(db).map((item) => item.title)).toEqual([
-      `DECISION NEEDED proposal ${FRESH}: expired undecided`,
+      `Proposal expired: proposal ${FRESH} — The proposal expired before an operator approved or rejected it`,
     ]);
     expect(db.query("SELECT COUNT(*) AS n FROM inbox_items").get().n).toBe(1);
     // Supersession does not lose the retarget the operator already paid for.

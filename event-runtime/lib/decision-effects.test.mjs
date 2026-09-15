@@ -8,6 +8,7 @@ import {
   decideInboxItem,
   retryInboxDecision,
 } from "./inbox.mjs";
+import { MalformedStoredRowError } from "./proposals.mjs";
 
 const NOW = Date.parse("2026-08-18T12:00:00.000Z");
 
@@ -172,6 +173,33 @@ describe("runtime decision effects", () => {
       outcome: "applied",
       detail: "replanned_awaiting_approval",
       newProposalId: "prop_fresh",
+    });
+  });
+
+  // A corrupt stored row throws out of approveProposal: the effect must record
+  // a failed transport, not resolve the inbox item as approved.
+  test("a malformed stored proposal row fails the effect instead of resolving it", async () => {
+    const result = await applyDecisionEffect(
+      null,
+      item("approve_proposal"),
+      response(),
+      {
+        linear: {},
+        planner: {
+          approveProposal: () => {
+            throw new MalformedStoredRowError(
+              "prop_313",
+              "malformed_proposal_spec",
+            );
+          },
+        },
+        now: NOW,
+      },
+    );
+    expect(result).toEqual({
+      kind: "approve_proposal",
+      outcome: "failed",
+      error: "proposal prop_313: malformed_proposal_spec",
     });
   });
 

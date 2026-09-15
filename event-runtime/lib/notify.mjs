@@ -29,6 +29,7 @@
  */
 import { spawn } from "node:child_process";
 import { createInboxItem, deliverInboxItem } from "./inbox.mjs";
+import { loadRepos } from "./repos.mjs";
 import { txImmediate } from "./db.mjs";
 import { templateFor } from "./decision-templates.mjs";
 import { proposalSubject } from "./proposal-subject.mjs";
@@ -161,13 +162,74 @@ function alreadyNotified(db, kind, target) {
  *
  * @returns {Array<{ kind: string, dedupKind?: string, target: string, title: string, message?: string, refs: object, source: string }>}
  */
+const COMPOUND_EVENT_ISSUE =
+  /([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#\d+)(?:$|[\s:)\]])/g;
+
+function regexEscape(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function issueFromEventId(eventId) {
+  if (typeof eventId !== "string") return {};
+  // Event coordinates prefix a configured GitHub issue with an opaque chain
+  // id. Resolve against the registry rather than greedily treating that
+  // prefix as part of an owner name (owners themselves may contain hyphens).
+  let issue;
+  try {
+    const github = [...loadRepos().values()]
+      .map((repo) => repo.github)
+      .filter(
+        (repo) =>
+          typeof repo === "string" &&
+          new RegExp(`${regexEscape(repo)}#\\d+$`).test(eventId),
+      )
+      .sort((a, b) => b.length - a.length)[0];
+    if (github)
+      issue = eventId.match(new RegExp(`(${regexEscape(github)}#\\d+)$`))?.[1];
+  } catch {
+    // Registry availability is not required for direct GitHub coordinates.
+  }
+  if (!issue) {
+    const matches = [...eventId.matchAll(COMPOUND_EVENT_ISSUE)];
+    const candidate = matches.at(-1)?.[1];
+    if (candidate && candidate === eventId) issue = candidate;
+  }
+  if (!issue) return {};
+  return { issue, repo: issue.slice(0, issue.lastIndexOf("#")) };
+}
+
+/** Ticket/repo the parked event's own envelope or coordinate names, if any. */
+function eventRefs(row) {
+  let payload;
+  try {
+    payload = JSON.parse(row.envelopeJson ?? "{}")?.payload;
+  } catch {
+    return issueFromEventId(row.eventId);
+  }
+  const coordinate = issueFromEventId(row.eventId);
+  if (!payload || typeof payload !== "object") return coordinate;
+  return {
+    ...(typeof payload.ticket === "string" && payload.ticket
+      ? { issue: payload.ticket }
+      : coordinate.issue
+        ? { issue: coordinate.issue }
+        : {}),
+    ...(typeof payload.repo === "string" && payload.repo
+      ? { repo: payload.repo }
+      : coordinate.repo
+        ? { repo: coordinate.repo }
+        : {}),
+  };
+}
+
 export function pendingNotifications(db, { now = Date.now() } = {}) {
   ensureNotifyLog(db);
   const pending = [];
 
   const parked = db
     .query(
-      `SELECT e.source, e.event_id AS eventId, e.type, e.last_plan_error AS lastPlanError,
+      `SELECT e.source, e.event_id AS eventId, e.type, e.envelope_json AS envelopeJson,
+              e.last_plan_error AS lastPlanError,
               (SELECT p.reason FROM proposals p
                 WHERE p.event_source = e.source AND p.event_id = e.event_id
                   AND p.decision = 'human_needed'
@@ -180,17 +242,26 @@ export function pendingNotifications(db, { now = Date.now() } = {}) {
   for (const e of parked) {
     const target = `${e.source}/${e.eventId}`;
     if (alreadyNotified(db, KIND_HUMAN_NEEDED, target)) continue;
+    const reason = e.reason ?? e.lastPlanError ?? "human_needed";
+    // A parked event knows only its own coordinates. Lift whatever the
+    // envelope already names so the operator's item can say which repo and
+    // ticket stalled instead of "this item".
+    const refs = { eventSource: e.source, eventId: e.eventId, ...eventRefs(e) };
     pending.push({
       kind: "BLOCKED",
       dedupKind: KIND_HUMAN_NEEDED,
       target,
-      title: `BLOCKED ${e.type} ${e.eventId}: ${e.reason ?? e.lastPlanError ?? "human_needed"}`,
-      message: `BLOCKED ${e.type} ${e.eventId}: ${e.reason ?? e.lastPlanError ?? "human_needed"}`,
-      refs: { eventSource: e.source, eventId: e.eventId },
+      title: `BLOCKED ${e.type} ${e.eventId}: ${reason}`,
+      message: `BLOCKED ${e.type} ${e.eventId}: ${reason}`,
+      refs,
+      // Structured presentation inputs: the reason is a code, not scraped
+      // back out of the title above.
+      reasonCode: reason,
+      eventType: e.type,
       source: "serve:notify",
       decision: templateFor("BLOCKED", {
         producer: "parked",
-        refs: { eventSource: e.source, eventId: e.eventId },
+        refs,
       }),
       dedupeKey: `BLOCKED:${target}`,
     });
@@ -208,6 +279,10 @@ export function pendingNotifications(db, { now = Date.now() } = {}) {
     const spec = p.spec_json ? JSON.parse(p.spec_json) : null;
     const agent = spec?.agent ?? "?";
     const title = proposalSubject(spec);
+    const ticketTitle =
+      typeof spec?.approvalPolicy?.dispatchEvidence?.ticket?.title === "string"
+        ? spec.approvalPolicy.dispatchEvidence.ticket.title
+        : null;
     const issue =
       typeof spec?.input?.ticket === "string" ? spec.input.ticket : null;
     const repo = typeof spec?.input?.repo === "string" ? spec.input.repo : null;
@@ -233,6 +308,7 @@ export function pendingNotifications(db, { now = Date.now() } = {}) {
           kind: KIND_PROPOSAL_EXPIRED,
           target: p.id,
           title,
+          ...(ticketTitle ? { ticketTitle } : {}),
           message: `DECISION NEEDED proposal ${p.id} (${agent}): expired undecided`,
           refs,
           source: "serve:notify",
@@ -247,6 +323,7 @@ export function pendingNotifications(db, { now = Date.now() } = {}) {
         dedupKind: DEDUP_PROPOSAL_TTL,
         target: p.id,
         title,
+        ...(ticketTitle ? { ticketTitle } : {}),
         message: `DECISION NEEDED proposal ${p.id} (${agent}): expires in ${minutesLeft}m`,
         refs,
         source: "serve:notify",

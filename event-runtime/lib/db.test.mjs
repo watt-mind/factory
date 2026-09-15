@@ -32,6 +32,7 @@ import {
 } from "./db.mjs";
 import { dbPath, isTestOrCiProcess, runtimeHome } from "./config.mjs";
 import { createIsolatedHome, realFactorySnapshot } from "../test-helpers.mjs";
+import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
 
 const freshFile = () => path.join(tmpDir("evrt-db-"), "runtime.db");
 
@@ -114,7 +115,7 @@ describe("retryBusy (#1349)", () => {
     ).rejects.toBe(busy);
     // The lowered timeout bounds the whole budget, not just one attempt.
     expect(attempts).toBe(1);
-    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(Date.now() - startedAt).toBeLessThan(loadAdjustedTimeout(1_000));
     expect(db.query("PRAGMA busy_timeout").get().timeout).toBe(10);
     db.close();
   });
@@ -284,10 +285,10 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     migrated.close();
   });
 
-  test("tier escalation handoffs, inbox proposal IDs and lookup indexes reach schema 19 from a fresh and from a v14 database", () => {
-    expect(CURRENT_SCHEMA_VERSION).toBe(19);
+  test("tier escalation handoffs and lookup indexes reach the current schema from a fresh and from a v14 database", () => {
+    expect(CURRENT_SCHEMA_VERSION).toBe(23);
     const fresh = openDb(freshFile());
-    expect(getSchemaVersion(fresh)).toBe(19);
+    expect(getSchemaVersion(fresh)).toBe(23);
     expect(
       fresh
         .query(`PRAGMA table_info(outbox)`)
@@ -300,6 +301,13 @@ describe("schema migration runner and assertions (OPS-415)", () => {
         .all()
         .map((row) => row.name),
     ).toContain("subject");
+    expect(
+      fresh
+        .query(
+          `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_subject'`,
+        )
+        .get()?.sql,
+    ).toContain("events (subject)");
     fresh.close();
 
     // #1230 (#1197) owns migration 14 and lands first; a database already at
@@ -310,7 +318,7 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     migrateDb(at14, { targetVersion: 13 });
     at14.exec("PRAGMA user_version = 14;");
     migrateDb(at14);
-    expect(getSchemaVersion(at14)).toBe(19);
+    expect(getSchemaVersion(at14)).toBe(23);
     expect(
       at14
         .query(`PRAGMA table_info(outbox)`)
@@ -324,7 +332,7 @@ describe("schema migration runner and assertions (OPS-415)", () => {
         .map((row) => row.name),
     ).toContain("subject");
     migrateDb(at14);
-    expect(getSchemaVersion(at14)).toBe(19);
+    expect(getSchemaVersion(at14)).toBe(23);
     expect(
       at14
         .query(
@@ -333,6 +341,77 @@ describe("schema migration runner and assertions (OPS-415)", () => {
         .get()?.name,
     ).toBe("tier_escalations");
     at14.close();
+  });
+
+  test("worker skipped diagnostics migrate an existing v20 database to an empty array", () => {
+    const file = freshFile();
+    const legacy = new Database(file);
+    migrateDb(legacy, { targetVersion: 20 });
+    legacy
+      .query(
+        `INSERT INTO workers (worker_id, host, pid, started_at, last_seen)
+         VALUES ('legacy-worker', 'host', 1, '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z')`,
+      )
+      .run();
+    expect(
+      legacy
+        .query(`PRAGMA table_info(workers)`)
+        .all()
+        .map((row) => row.name),
+    ).not.toContain("skipped_json");
+    legacy.close();
+
+    const upgraded = openDb(file);
+    expect(getSchemaVersion(upgraded)).toBe(23);
+    expect(
+      upgraded
+        .query(`PRAGMA table_info(workers)`)
+        .all()
+        .map((row) => row.name),
+    ).toContain("skipped_json");
+    expect(
+      JSON.parse(
+        upgraded
+          .query(`SELECT skipped_json FROM workers WHERE worker_id = ?`)
+          .get("legacy-worker").skipped_json,
+      ),
+    ).toEqual([]);
+    upgraded.close();
+  });
+
+  test("events subject index migrates a v21 database idempotently", () => {
+    const file = freshFile();
+    const legacy = new Database(file);
+    migrateDb(legacy, { targetVersion: 21 });
+    expect(getSchemaVersion(legacy)).toBe(21);
+    expect(
+      legacy
+        .query(
+          `SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_subject'`,
+        )
+        .get(),
+    ).toBeNull();
+    legacy.close();
+
+    const upgraded = openDb(file);
+    expect(getSchemaVersion(upgraded)).toBe(23);
+    expect(
+      upgraded
+        .query(
+          `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_subject'`,
+        )
+        .get()?.sql,
+    ).toContain("events (subject)");
+
+    MIGRATIONS.find((entry) => entry.version === 22).up(upgraded);
+    expect(
+      upgraded
+        .query(
+          `SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_subject'`,
+        )
+        .get().n,
+    ).toBe(1);
+    upgraded.close();
   });
 
   test("inbox proposal ID migration backfills populated v15 rows and indexes the column", () => {
@@ -349,8 +428,8 @@ describe("schema migration runner and assertions (OPS-415)", () => {
 
     migrateDb(db);
 
-    expect(CURRENT_SCHEMA_VERSION).toBe(19);
-    expect(getSchemaVersion(db)).toBe(19);
+    expect(CURRENT_SCHEMA_VERSION).toBe(23);
+    expect(getSchemaVersion(db)).toBe(23);
     expect(
       db
         .query(
@@ -438,7 +517,7 @@ describe("schema migration runner and assertions (OPS-415)", () => {
 
     migrateDb(db);
 
-    expect(getSchemaVersion(db)).toBe(19);
+    expect(getSchemaVersion(db)).toBe(23);
     expect(
       db.query(`SELECT run_id, subject FROM runs ORDER BY run_id`).all(),
     ).toEqual([
@@ -454,6 +533,47 @@ describe("schema migration runner and assertions (OPS-415)", () => {
         )
         .get()?.sql,
     ).toContain("runs (subject)");
+    db.close();
+  });
+
+  test("github intake freshness index and worker diagnostics upgrade v19 databases idempotently", () => {
+    const db = new Database(freshFile());
+    migrateDb(db, { targetVersion: 19 });
+    expect(getSchemaVersion(db)).toBe(19);
+
+    migrateDb(db);
+    expect(CURRENT_SCHEMA_VERSION).toBe(23);
+    expect(getSchemaVersion(db)).toBe(23);
+    expect(
+      db
+        .query(
+          `SELECT sql FROM sqlite_master
+           WHERE type = 'index' AND name = 'idx_events_source_admitted'`,
+        )
+        .get()?.sql,
+    ).toContain("events (source, admitted_at)");
+
+    const detail = db
+      .query(
+        `EXPLAIN QUERY PLAN
+         SELECT MAX(admitted_at) FROM events WHERE source = 'github'`,
+      )
+      .all()
+      .map((row) => row.detail)
+      .join("\n");
+    expect(detail).toMatch(/USING COVERING INDEX idx_events_source_admitted/);
+    expect(detail).not.toMatch(/SCAN events\b/);
+
+    // Re-running the guarded DDL leaves one index for concurrent upgrades.
+    MIGRATIONS.find((entry) => entry.version === 20).up(db);
+    expect(
+      db
+        .query(
+          `SELECT COUNT(*) AS n FROM sqlite_master
+           WHERE type = 'index' AND name = 'idx_events_source_admitted'`,
+        )
+        .get().n,
+    ).toBe(1);
     db.close();
   });
 
@@ -476,9 +596,9 @@ describe("schema migration runner and assertions (OPS-415)", () => {
     db.close();
 
     const migrated = openDb(file);
-    expect(getSchemaVersion(migrated)).toBe(19);
+    expect(getSchemaVersion(migrated)).toBe(23);
     migrateDb(migrated);
-    expect(getSchemaVersion(migrated)).toBe(19);
+    expect(getSchemaVersion(migrated)).toBe(23);
     const plans = [
       [
         "metrics latest proposal",
@@ -522,6 +642,51 @@ describe("schema migration runner and assertions (OPS-415)", () => {
       expect(detail, name).not.toMatch(/SCAN (?:p2|p|e)\b/);
     }
     migrated.close();
+  });
+
+  test("merge eligibility event type index migrates v22 databases idempotently", () => {
+    const db = new Database(freshFile());
+    migrateDb(db, { targetVersion: 22 });
+    expect(getSchemaVersion(db)).toBe(22);
+    expect(
+      db
+        .query(
+          `SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_type_source'`,
+        )
+        .get(),
+    ).toBeNull();
+
+    migrateDb(db);
+    expect(getSchemaVersion(db)).toBe(CURRENT_SCHEMA_VERSION);
+    expect(
+      db
+        .query(
+          `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_type_source'`,
+        )
+        .get()?.sql,
+    ).toContain("events (type, source)");
+
+    const detail = db
+      .query(
+        `EXPLAIN QUERY PLAN
+         SELECT event_id FROM events
+         WHERE type = 'factory.merge-landed'`,
+      )
+      .all()
+      .map((row) => row.detail)
+      .join("\n");
+    expect(detail).toMatch(/USING (?:COVERING )?INDEX idx_events_type_source/);
+    expect(detail).not.toMatch(/SCAN events\b/);
+
+    MIGRATIONS.find((entry) => entry.version === 23).up(db);
+    expect(
+      db
+        .query(
+          `SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_type_source'`,
+        )
+        .get().n,
+    ).toBe(1);
+    db.close();
   });
 
   test("metrics indexes migrate onto an existing v2 database (WM-281)", () => {

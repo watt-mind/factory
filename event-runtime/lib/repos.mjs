@@ -1,10 +1,11 @@
 /**
- * Repo facts, read from the factory's local config/repos.yaml (OPS-228).
+ * Repo facts, read from the factory's local config/repos.yaml (OPS-228) and
+ * overlaid with portable policy from each checkout's factory.repo/v1 file.
  *
- * Deliberately a reader, not an owner: repos.yaml is already the single
- * source of routing truth for the dispatcher (base branch, worktree scripts,
- * verify command). A second registry inside the event runtime would drift,
- * and a drifting port or base branch is how two agents collide.
+ * Deliberately a reader, not an owner: host config remains the source of
+ * checkout identity, routing, concurrency, and every input to a host-executed
+ * command (`verify`, the `security` scanner flags), while repository-intrinsic
+ * policy settings evolve with that repository in git.
  *
  * Tier 1 uses `name`, `path`, `github`, and `base`. The `worktree_*` and
  * `verify` fields are read but unused until tier 2 (docs/event-runtime-workers.md).
@@ -13,13 +14,15 @@
  * report-only one, and where its worktrees live (OPS-299).
  */
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import {
   DEFAULT_MAX_IN_FLIGHT,
   FACTORY_ROOT,
   resolveConfigPath,
 } from "./config.mjs";
+import { validate } from "./schema.mjs";
 // types.mjs only, never index.mjs: index.mjs reads this registry to resolve a
 // repo's control plane (WM-1007), so importing it back here would cycle.
 // types.mjs imports nothing.
@@ -44,6 +47,240 @@ export function reposRoot() {
 
 export function reposConfigPath(root = reposRoot()) {
   return resolveConfigPath("repos", { root });
+}
+
+const IN_REPO_CONFIG_PATHS = [".factory.yaml", ".factory/config.yaml"];
+/**
+ * Keys the host registry owns outright. An in-repo file may never set them:
+ * `verify` and `security` are inputs to commands the host executes against a
+ * PR's own checkout, so a PR that could author them could weaken its own
+ * verification or secret scan; `max_in_flight` and `control_plane` are host
+ * scheduling and routing controls (#1638 review).
+ */
+export const IN_REPO_HOST_OWNED_KEYS = Object.freeze([
+  "verify",
+  "security",
+  "max_in_flight",
+  "control_plane",
+]);
+const IN_REPO_CONFIG_SCHEMA_PATH = new URL(
+  "../schemas/repo-config.schema.json",
+  import.meta.url,
+);
+let inRepoConfigSchema;
+const inRepoConfigCache = new Map();
+const ignoredInRepoConfigWarnings = new Map();
+
+/** Clear in-repo config and warning caches, primarily for isolated tests. */
+export function resetInRepoConfigCache() {
+  inRepoConfigCache.clear();
+  ignoredInRepoConfigWarnings.clear();
+}
+
+function inRepoConfigCandidatePaths(repoRoot) {
+  return IN_REPO_CONFIG_PATHS.map((relative) =>
+    path.resolve(repoRoot, relative),
+  );
+}
+
+/** Remove cached overlays and warnings for repos absent from the registry. */
+function pruneInRepoConfigCaches(repoRoots) {
+  const configuredFiles = new Set(
+    repoRoots.flatMap((repoRoot) => inRepoConfigCandidatePaths(repoRoot)),
+  );
+  for (const file of inRepoConfigCache.keys()) {
+    if (!configuredFiles.has(file)) inRepoConfigCache.delete(file);
+  }
+  for (const [key, warning] of ignoredInRepoConfigWarnings) {
+    if (!warning.files.some((file) => configuredFiles.has(file))) {
+      ignoredInRepoConfigWarnings.delete(key);
+    }
+  }
+}
+
+function repoConfigSchema() {
+  if (inRepoConfigSchema) return inRepoConfigSchema;
+  try {
+    inRepoConfigSchema = JSON.parse(
+      readFileSync(IN_REPO_CONFIG_SCHEMA_PATH, "utf8"),
+    );
+  } catch (error) {
+    throw new RepoError(
+      `cannot load built-in factory.repo/v1 schema: ${error.message}`,
+    );
+  }
+  return inRepoConfigSchema;
+}
+
+const hasOwn = (value, key) =>
+  value !== null &&
+  typeof value === "object" &&
+  Object.prototype.hasOwnProperty.call(value, key);
+
+function validateInRepoConfigSemantics(config, file) {
+  normalizeToolchain(config.toolchain, "in-repo config", file);
+  normalizeOwnedPathsPolicy(config.owned_paths_policy, "in-repo config", file);
+
+  if (config.merge_ci !== undefined && config.merge_ci !== null) {
+    const { workflow, required_checks: requiredChecks } = config.merge_ci;
+    if (new Set(requiredChecks).size !== requiredChecks.length) {
+      throw new RepoError(
+        `${file}: in-repo config merge_ci.required_checks must be unique`,
+      );
+    }
+    if (!workflow.trim() || requiredChecks.some((check) => !check.trim())) {
+      throw new RepoError(
+        `${file}: in-repo config merge_ci values must be non-empty`,
+      );
+    }
+  }
+}
+
+/**
+ * Read portable repository policy from the checkout itself.
+ *
+ * A repository may use either the root-level shorthand or the namespaced
+ * location, never both. Missing files are the legacy/host-only case and return
+ * null; malformed or ambiguous declarations fail closed before host overlay.
+ */
+export function loadInRepoConfig(repoRoot = process.cwd()) {
+  const candidatePaths = inRepoConfigCandidatePaths(repoRoot);
+  const candidates = candidatePaths.map((file) => {
+    const stat = statSync(file, { throwIfNoEntry: false });
+    if (!stat) {
+      inRepoConfigCache.delete(file);
+      return null;
+    }
+    return { file, mtimeMs: stat.mtimeMs, size: stat.size };
+  });
+  const files = candidates.filter(Boolean);
+  const fingerprint = candidates
+    .map((candidate) =>
+      candidate
+        ? `${candidate.file}:${candidate.mtimeMs}:${candidate.size}`
+        : "missing",
+    )
+    .join("|");
+  if (files.length === 0) return null;
+  if (files.length > 1) {
+    const error = new RepoError(
+      `${repoRoot}: both .factory.yaml and .factory/config.yaml exist; keep exactly one in-repo config`,
+    );
+    error.inRepoConfigFingerprint = fingerprint;
+    error.inRepoConfigPaths = candidatePaths;
+    throw error;
+  }
+
+  const { file, mtimeMs, size } = files[0];
+  const cached = inRepoConfigCache.get(file);
+  if (cached?.mtimeMs === mtimeMs && cached.size === size) {
+    if (cached.error) throw cached.error;
+    return cached.config;
+  }
+
+  try {
+    const parsed = Bun.YAML.parse(readFileSync(file, "utf8"));
+    const hostOwned = IN_REPO_HOST_OWNED_KEYS.filter((key) =>
+      hasOwn(parsed, key),
+    );
+    if (hostOwned.length > 0) {
+      throw new RepoError(
+        `${file}: in-repo config may not set host-owned ${hostOwned
+          .map((key) => `"${key}"`)
+          .join(
+            ", ",
+          )}; the host repos.yaml owns ${IN_REPO_HOST_OWNED_KEYS.join(", ")}`,
+      );
+    }
+    const result = validate(repoConfigSchema(), parsed);
+    if (!result.valid) {
+      throw new RepoError(
+        `${file}: invalid factory.repo/v1 config: ${result.errors.join("; ")}`,
+      );
+    }
+    validateInRepoConfigSemantics(parsed, file);
+    inRepoConfigCache.set(file, { mtimeMs, size, config: parsed });
+    return parsed;
+  } catch (error) {
+    const wrapped =
+      error instanceof RepoError
+        ? error
+        : new RepoError(`${file}: invalid YAML: ${error.message}`);
+    wrapped.inRepoConfigFingerprint = fingerprint;
+    wrapped.inRepoConfigPaths = candidatePaths;
+    inRepoConfigCache.set(file, { mtimeMs, size, error: wrapped });
+    throw wrapped;
+  }
+}
+
+function warnInRepoConfigIgnored(repoName, error) {
+  const key = `${repoName}\u0000${error.message}`;
+  const fingerprint = error.inRepoConfigFingerprint;
+  if (ignoredInRepoConfigWarnings.get(key)?.fingerprint === fingerprint) return;
+  ignoredInRepoConfigWarnings.set(key, {
+    fingerprint,
+    files: error.inRepoConfigPaths ?? [],
+  });
+  console.warn(
+    `warning: repo ${repoName}: in-repo config ignored, host config applies: ${error.message}`,
+  );
+}
+
+/**
+ * Overlay repository-owned policy onto one host registry entry.
+ *
+ * Host identity and infrastructure stay intact. In-repo values own the
+ * portable fields, escalate paths are a stable union, and every
+ * IN_REPO_HOST_OWNED_KEYS entry always comes from the host — even for direct
+ * callers that bypass loadInRepoConfig's rejection.
+ */
+export function mergeRepoConfig(hostConfig, inRepoConfig) {
+  if (inRepoConfig === null || inRepoConfig === undefined) {
+    return { ...hostConfig };
+  }
+
+  const { schemaVersion: _schemaVersion, worktree, ...portable } = inRepoConfig;
+  const merged = { ...hostConfig, ...portable };
+
+  if (hasOwn(inRepoConfig, "escalate_paths")) {
+    const hostPaths = hostConfig.escalate_paths;
+    const repoPaths = inRepoConfig.escalate_paths;
+    if (Array.isArray(hostPaths) && Array.isArray(repoPaths)) {
+      merged.escalate_paths = [...new Set([...hostPaths, ...repoPaths])];
+    } else if (
+      (hostPaths === undefined || hostPaths === null) &&
+      Array.isArray(repoPaths)
+    ) {
+      merged.escalate_paths = [...repoPaths];
+    } else {
+      // Preserve malformed host policy as malformed. loadRepos projects it to
+      // null so the planner's escalate-path gate refuses to evaluate it.
+      merged.escalate_paths = hostPaths;
+    }
+  }
+
+  if (hasOwn(inRepoConfig, "worktree") && worktree === null) {
+    // An omitted worktree block inherits the host lifecycle. Explicit null is
+    // an overlay value like the other nullable portable fields: it removes
+    // every inherited lifecycle script without affecting host worktree_root.
+    merged.worktree_up = null;
+    merged.worktree_down = null;
+    merged.worktree_warm = null;
+  } else if (worktree && typeof worktree === "object") {
+    for (const [nested, flat] of [
+      ["up", "worktree_up"],
+      ["down", "worktree_down"],
+      ["warm", "worktree_warm"],
+    ]) {
+      if (hasOwn(worktree, nested)) merged[flat] = worktree[nested];
+    }
+  }
+
+  for (const hostOnly of IN_REPO_HOST_OWNED_KEYS) {
+    if (hasOwn(hostConfig, hostOnly)) merged[hostOnly] = hostConfig[hostOnly];
+    else delete merged[hostOnly];
+  }
+  return merged;
 }
 
 /** Expand a leading ~ the way the config files write paths. */
@@ -278,7 +515,7 @@ export function isToolchainConstraint(constraint) {
  * Absent/null returns null — "not declared" — which is what keeps this change
  * additive for every repo that has no block.
  */
-function normalizeToolchain(raw, repoName, file) {
+export function normalizeToolchain(raw, repoName, file) {
   if (raw === undefined || raw === null) return null;
 
   /** @type {Array<[unknown, unknown]>} */
@@ -407,6 +644,11 @@ async function defaultWhich(executable) {
   return Bun.which(executable) ?? null;
 }
 
+/** Synchronous counterpart for the planner's deterministic admission path. */
+function defaultWhichSync(executable) {
+  return Bun.which(executable) ?? null;
+}
+
 /**
  * Default probe: run the resolved executable with exactly one argument,
  * `--version`, with no shell and no inherited stdin. This is the only
@@ -419,12 +661,176 @@ async function defaultSpawn(argv) {
     stderr: "pipe",
     timeout: TOOLCHAIN_PROBE_TIMEOUT_MS,
   });
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  const exitCode = await proc.exited;
-  return { exitCode, stdout, stderr };
+  // A timeout can abort one of the pipe reads before its sibling has drained.
+  // Preserve whatever was read and turn the probe into a normal failed result
+  // so the caller can attest the tool instead of losing the whole preflight.
+  const [stdoutResult, stderrResult, exitCodeResult] = await Promise.allSettled(
+    [
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ],
+  );
+  return {
+    exitCode:
+      exitCodeResult.status === "fulfilled" ? exitCodeResult.value : null,
+    stdout: stdoutResult.status === "fulfilled" ? stdoutResult.value : "",
+    stderr: stderrResult.status === "fulfilled" ? stderrResult.value : "",
+  };
+}
+
+/**
+ * Synchronous version probe for planner admission. Keep its result shape
+ * identical to defaultSpawn so both preflight variants produce the same typed
+ * attestation. `spawnSync` enforces the same bounded probe timeout.
+ */
+function defaultSpawnSync(argv) {
+  const result = spawnSync(argv[0], argv.slice(1), {
+    stdio: ["ignore", "pipe", "pipe"],
+    encoding: "utf8",
+    timeout: TOOLCHAIN_PROBE_TIMEOUT_MS,
+  });
+  if (result.error) throw result.error;
+  return {
+    exitCode: result.status,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+  };
+}
+
+function probeErrorMessage(error) {
+  const message = error?.message;
+  return typeof message === "string" && message.trim()
+    ? message
+    : String(error);
+}
+
+function failedToolchainProbe({
+  node,
+  repo,
+  executable,
+  constraint,
+  resolved,
+  error,
+  detail,
+}) {
+  const observedRaw = probeErrorMessage(error);
+  return {
+    tool: {
+      executable,
+      constraint,
+      resolved,
+      observed: null,
+      observedRaw,
+      satisfied: false,
+    },
+    reason: {
+      reason: REPO_TOOLCHAIN_MISSING,
+      node,
+      repo,
+      executable,
+      constraint,
+      observed: null,
+      observedRaw,
+      detail,
+      action: `check that ${executable} is present and executable on ${node}, then re-run toolchain preflight for repo ${repo}`,
+    },
+  };
+}
+
+/**
+ * Typed result for a tool `which` could not find on PATH. The reason's action
+ * differs from a failed probe: the operator installs, not investigates.
+ */
+function missingToolchainProbe({ node, repo, executable, constraint }) {
+  return {
+    tool: {
+      executable,
+      constraint,
+      resolved: null,
+      observed: null,
+      observedRaw: null,
+      satisfied: false,
+    },
+    reason: {
+      reason: REPO_TOOLCHAIN_MISSING,
+      node,
+      repo,
+      executable,
+      constraint,
+      observed: null,
+      action: `install ${executable} ${constraint} on ${node}, or drop it from repo ${repo}'s toolchain in config/repos.yaml`,
+    },
+  };
+}
+
+/**
+ * Turn one `--version` probe result into its typed tool record and, when the
+ * constraint is not satisfied, its mismatch reason. Shared by the async and
+ * sync preflights so both attest identically.
+ */
+function probedToolchainTool({
+  node,
+  repo,
+  executable,
+  constraint,
+  resolved,
+  probe,
+}) {
+  const { exitCode, stdout, stderr } = probe;
+  const output = stdout?.trim() ? stdout : (stderr ?? "");
+  const observedRaw =
+    output
+      .split("\n")
+      .find((line) => line.trim())
+      ?.trim() ?? null;
+  const observed = exitCode === 0 ? normalizeToolVersion(output) : null;
+  const satisfied = satisfiesConstraint(observed, constraint);
+  const tool = {
+    executable,
+    constraint,
+    resolved,
+    observed,
+    observedRaw,
+    satisfied,
+  };
+  if (satisfied) return { tool, reason: null };
+  return {
+    tool,
+    reason: {
+      reason: REPO_TOOLCHAIN_MISMATCH,
+      node,
+      repo,
+      executable,
+      constraint,
+      // The observed version is the whole point of the payload: without it the
+      // operator still has to go to the node to find out what is installed.
+      observed,
+      observedRaw,
+      detail:
+        exitCode !== 0
+          ? "version_probe_failed"
+          : observed === null
+            ? "unparseable_version"
+            : "constraint_unsatisfied",
+      action: `make ${executable} ${constraint} the resolved version on ${node} (observed ${observed ?? observedRaw ?? "nothing"}), or relax repo ${repo}'s constraint in config/repos.yaml`,
+    },
+  };
+}
+
+/** Assemble the attestation both preflight variants return. */
+function toolchainAttestation({ repo, node, now, toolchain, tools, reasons }) {
+  return {
+    repo: repo?.name ?? null,
+    node,
+    implementationVersion: TOOLCHAIN_PREFLIGHT_VERSION,
+    toolchainHash: toolchainHash(toolchain),
+    declared: toolchain !== null,
+    verifiedAt: now().toISOString(),
+    ok: reasons.length === 0,
+    tools,
+    reasons,
+  };
 }
 
 /**
@@ -452,82 +858,113 @@ export async function preflightToolchain(
   const toolchain = repo?.toolchain ?? null;
   const tools = [];
   const reasons = [];
+  const record = ({ tool, reason }) => {
+    tools.push(tool);
+    if (reason) reasons.push(reason);
+  };
 
   for (const { executable, constraint } of toolchain ?? []) {
-    const resolved = await which(executable);
+    const probeContext = { node, repo: repo.name, executable, constraint };
+    let resolved;
+    try {
+      resolved = await which(executable);
+    } catch (error) {
+      record(
+        failedToolchainProbe({
+          ...probeContext,
+          resolved: null,
+          error,
+          detail: "which_failed",
+        }),
+      );
+      continue;
+    }
     if (!resolved) {
-      tools.push({
-        executable,
-        constraint,
-        resolved: null,
-        observed: null,
-        observedRaw: null,
-        satisfied: false,
-      });
-      reasons.push({
-        reason: REPO_TOOLCHAIN_MISSING,
-        node,
-        repo: repo.name,
-        executable,
-        constraint,
-        observed: null,
-        action: `install ${executable} ${constraint} on ${node}, or drop it from repo ${repo.name}'s toolchain in config/repos.yaml`,
-      });
+      record(missingToolchainProbe(probeContext));
       continue;
     }
 
-    const { exitCode, stdout, stderr } = await spawn([
-      resolved,
-      TOOLCHAIN_VERSION_ARG,
-    ]);
-    const output = stdout?.trim() ? stdout : (stderr ?? "");
-    const observedRaw =
-      output
-        .split("\n")
-        .find((l) => l.trim())
-        ?.trim() ?? null;
-    const observed = exitCode === 0 ? normalizeToolVersion(output) : null;
-    const satisfied = satisfiesConstraint(observed, constraint);
-    tools.push({
-      executable,
-      constraint,
-      resolved,
-      observed,
-      observedRaw,
-      satisfied,
-    });
-    if (satisfied) continue;
-    reasons.push({
-      reason: REPO_TOOLCHAIN_MISMATCH,
-      node,
-      repo: repo.name,
-      executable,
-      constraint,
-      // The observed version is the whole point of the payload: without it the
-      // operator still has to go to the node to find out what is installed.
-      observed,
-      observedRaw,
-      detail:
-        exitCode !== 0
-          ? "version_probe_failed"
-          : observed === null
-            ? "unparseable_version"
-            : "constraint_unsatisfied",
-      action: `make ${executable} ${constraint} the resolved version on ${node} (observed ${observed ?? observedRaw ?? "nothing"}), or relax repo ${repo.name}'s constraint in config/repos.yaml`,
-    });
+    let probe;
+    try {
+      probe = await spawn([resolved, TOOLCHAIN_VERSION_ARG]);
+    } catch (error) {
+      record(
+        failedToolchainProbe({
+          ...probeContext,
+          resolved,
+          error,
+          detail: "version_probe_threw",
+        }),
+      );
+      continue;
+    }
+    record(probedToolchainTool({ ...probeContext, resolved, probe }));
   }
 
-  return {
-    repo: repo?.name ?? null,
-    node,
-    implementationVersion: TOOLCHAIN_PREFLIGHT_VERSION,
-    toolchainHash: toolchainHash(toolchain),
-    declared: toolchain !== null,
-    verifiedAt: now().toISOString(),
-    ok: reasons.length === 0,
-    tools,
-    reasons,
+  return toolchainAttestation({ repo, node, now, toolchain, tools, reasons });
+}
+
+/**
+ * Synchronous form of preflightToolchain for the planner. Planning is
+ * deliberately synchronous; returning the same attestation shape keeps the
+ * admission decision typed without turning planEvent into an async API.
+ */
+export function preflightToolchainSync(
+  repo,
+  {
+    node = "local",
+    now = () => new Date(),
+    which = defaultWhichSync,
+    spawn = defaultSpawnSync,
+  } = {},
+) {
+  const toolchain = repo?.toolchain ?? null;
+  const tools = [];
+  const reasons = [];
+  const record = ({ tool, reason }) => {
+    tools.push(tool);
+    if (reason) reasons.push(reason);
   };
+
+  for (const { executable, constraint } of toolchain ?? []) {
+    const probeContext = { node, repo: repo.name, executable, constraint };
+    let resolved;
+    try {
+      resolved = which(executable);
+    } catch (error) {
+      record(
+        failedToolchainProbe({
+          ...probeContext,
+          resolved: null,
+          error,
+          detail: "which_failed",
+        }),
+      );
+      continue;
+    }
+    if (!resolved) {
+      record(missingToolchainProbe(probeContext));
+      continue;
+    }
+
+    let probe;
+    try {
+      probe = spawn([resolved, TOOLCHAIN_VERSION_ARG]);
+    } catch (error) {
+      record(
+        failedToolchainProbe({
+          ...probeContext,
+          resolved,
+          error,
+          detail: "version_probe_threw",
+        }),
+      );
+      continue;
+    }
+    record(probedToolchainTool({ ...probeContext, resolved, probe }));
+  }
+
+  return toolchainAttestation({ repo, node, now, toolchain, tools, reasons });
 }
 
 /** Does this attestation still describe this repo on this node, recently enough? */
@@ -599,7 +1036,7 @@ export function repoReadiness({
           // Must be runnable: `bin/factory` has no `repo` subcommand, so the
           // repo-scoped `factory repo doctor <name>` the design sketches does
           // not exist yet. Name what exists and what is pending.
-          action: `re-run toolchain preflight for repo ${repo.name} on ${node} — \`factory doctor\` reports it once #1097 lands`,
+          action: `re-run toolchain preflight for repo ${repo.name} on ${node} — \`factory doctor\` reports the mismatch`,
         },
       ],
       refusal: `repo ${repo.name} has no current toolchain attestation on ${node} (${detail})`,
@@ -682,6 +1119,45 @@ export async function repoDispatchPreflight(
 }
 
 /**
+ * Synchronous dispatch readiness gate for planEvent. It deliberately mirrors
+ * repoDispatchPreflight's return contract so callers can use either boundary
+ * without changing their refusal handling.
+ */
+export function repoDispatchPreflightSync(
+  repo,
+  {
+    node = "local",
+    attestation = null,
+    now = () => new Date(),
+    maxAgeMs = TOOLCHAIN_ATTESTATION_MAX_AGE_MS,
+    which,
+    spawn,
+  } = {},
+) {
+  if (!repo?.toolchain?.length) {
+    return {
+      ready: true,
+      attested: false,
+      reasons: [],
+      refusal: null,
+      attestation: null,
+    };
+  }
+  const { current } = toolchainAttestationCurrent(attestation, repo, {
+    node,
+    now,
+    maxAgeMs,
+  });
+  const fresh = current
+    ? attestation
+    : preflightToolchainSync(repo, { node, now, which, spawn });
+  return {
+    ...repoReadiness({ repo, attestation: fresh, node, now, maxAgeMs }),
+    attestation: fresh,
+  };
+}
+
+/**
  * @returns {Map<string, {name: string, path: string, github: string|null, base: string,
  *                        deployBranch: string|null, team: string|null, project: string|null,
  *                        controlPlane: "linear"|"memory"|"github"|null,
@@ -705,11 +1181,29 @@ export function loadRepos({ root = reposRoot() } = {}) {
   } catch (err) {
     throw new RepoError(`${file}: invalid YAML: ${err.message}`);
   }
+  pruneInRepoConfigCaches(
+    (parsed?.repos ?? [])
+      .filter((entry) => entry?.path)
+      .map((entry) => expandHome(entry.path)),
+  );
   const repos = new Map();
-  for (const entry of parsed?.repos ?? []) {
-    if (!entry?.name) throw new RepoError(`${file}: a repo entry has no name`);
-    if (!entry.path)
-      throw new RepoError(`${file}: repo ${entry.name} has no path`);
+  for (const hostEntry of parsed?.repos ?? []) {
+    if (!hostEntry?.name)
+      throw new RepoError(`${file}: a repo entry has no name`);
+    if (!hostEntry.path)
+      throw new RepoError(`${file}: repo ${hostEntry.name} has no path`);
+    // One checkout's malformed .factory.yaml must not take the whole registry
+    // down (and every other repo's dispatch with it): skip that repo's overlay,
+    // warn, and let the host entry stand on its own. Mirrors the escalate_paths
+    // stance below — the strict check belongs to the repo it describes.
+    let inRepoConfig = null;
+    try {
+      inRepoConfig = loadInRepoConfig(expandHome(hostEntry.path));
+    } catch (err) {
+      if (!(err instanceof RepoError)) throw err;
+      warnInRepoConfigIgnored(hostEntry.name, err);
+    }
+    const entry = mergeRepoConfig(hostEntry, inRepoConfig);
     let maxInFlight = null;
     if (entry.max_in_flight !== undefined && entry.max_in_flight !== null) {
       if (
@@ -950,12 +1444,9 @@ export function reposView(repos) {
     hasWorktreeDown: repo.worktreeDown !== null,
     hasWorktreeWarm: repo.worktreeWarm !== null,
     verify: repo.verify,
-    // `toolchain` is deliberately NOT published here yet. Adding a field to
-    // this projection changes /repos and the config view in the same commit,
-    // and both are asserted exactly in files outside gh-1076's Owned Paths
-    // (api-registry.test.mjs, api-config.test.mjs). Issue #1097 — teach
-    // `factory doctor` to report toolchain status — publishes it and updates
-    // those assertions alongside.
+    // Declared constraints only — observed versions belong to a node's
+    // attestation, not the registry projection.
+    toolchain: repo.toolchain ?? null,
   }));
 }
 

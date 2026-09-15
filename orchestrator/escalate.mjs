@@ -44,7 +44,16 @@ import { loadForge } from "../lib/forge/index.mjs";
 
 export const EXIT = { CLEAN: 0, ESCALATE: 2, CANNOT_EVALUATE: 3 };
 
-/** Which changed files hit which escalate globs? Pure, for tests. */
+/**
+ * Which changed files hit which escalate globs? Pure, for tests.
+ *
+ * Root-anchoring (`globToRegExp(..., { repoRoot })`) is deliberately NOT
+ * applied here: the escalation gate errs broad. A bare `schema.prisma` keeps
+ * its any-depth basename semantics even when a file by that name also sits at
+ * the checkout root. A false escalation costs one human review; a missed one
+ * ships an unreviewed security-sensitive change. Matching is therefore pure
+ * text — it never stats the filesystem and never consults `process.cwd()`.
+ */
 export function matchEscalations(files, globs) {
   const hits = [];
   for (const f of files) {

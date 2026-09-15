@@ -1,14 +1,21 @@
 import { describe, expect, test } from "bun:test";
+import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { withTmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-auto-approval-test-mjs";
 
 import {
   autoApproveChains,
+  buildChainApprovalPolicy,
   chainRuntimeGuard,
   CHAIN_AUTO_APPROVAL_ACTOR,
   CHAIN_AUTO_APPROVAL_EVENT_TYPES,
+  DEFAULT_STALE_CHAIN_REVISIT_MS,
   CHAIN_AUTO_APPROVAL_REASON,
+  DEFAULT_CHAIN_AUTO_APPROVAL_DEADLINE_MS,
   loadChainAutoApprovalPolicy,
 } from "./auto-approval.mjs";
 import { canonicalJson, hashJson } from "./canonical.mjs";
+import { FACTORY_ROOT } from "./config.mjs";
 import { openDb } from "./db.mjs";
 import { createHookRegistry, hookDecisionsFor } from "./hooks.mjs";
 import { admitEvent } from "./intake.mjs";
@@ -16,7 +23,7 @@ import { planAdmittedEvents } from "./planner.mjs";
 import { lifecycleOf, runState } from "./lifecycle.mjs";
 import { openProposals } from "./proposals.mjs";
 import { loadRegistry } from "./registry.mjs";
-import { LinearRateLimitError } from "../../tools/linear.mjs";
+import { LinearRateLimitError } from "../../tools/ticket.mjs";
 
 const registry = loadRegistry();
 const now = Date.parse("2026-08-19T12:00:00.000Z");
@@ -209,6 +216,17 @@ const auto = (db, options = {}) => {
     ...approvalOptions,
   });
 };
+
+async function captureConsoleErrors(fn) {
+  const originalConsoleError = console.error;
+  const errors = [];
+  console.error = (...args) => errors.push(args.join(" "));
+  try {
+    return { value: await fn(), errors };
+  } finally {
+    console.error = originalConsoleError;
+  }
+}
 
 const independentMergeRegistry = ({
   independent = true,
@@ -488,12 +506,104 @@ describe("declared chain command edge characterization (WM-469)", () => {
 });
 
 describe("chain auto approval (WM-357)", () => {
-  test("git-owned policy is an explicit closed allowlist", async () => {
-    const loaded = loadChainAutoApprovalPolicy();
-    expect([...loaded.allowed].sort()).toEqual(
-      [...CHAIN_AUTO_APPROVAL_EVENT_TYPES].sort(),
-    );
-    expect(loaded.reason).toBeNull();
+  test("git-owned policy is an explicit closed allowlist", () => {
+    withTmpDir("factory-auto-approval-", (root) => {
+      mkdirSync(path.join(root, "config"));
+      copyFileSync(
+        path.join(FACTORY_ROOT, "config", "policy.example.yaml"),
+        path.join(root, "config", "policy.yaml"),
+      );
+      const loaded = loadChainAutoApprovalPolicy({ root });
+      expect([...loaded.allowed].sort()).toEqual(
+        [...CHAIN_AUTO_APPROVAL_EVENT_TYPES].sort(),
+      );
+      expect(loaded.reason).toBeNull();
+    });
+  });
+
+  test("invalid chain policy logs and clips its parse failure", async () => {
+    await withTmpDir("factory-auto-approval-", async (root) => {
+      mkdirSync(path.join(root, "config"));
+      writeFileSync(
+        path.join(root, "config", "policy.yaml"),
+        "chain_auto_approval: [",
+      );
+
+      const { value: loaded, errors } = await captureConsoleErrors(() =>
+        loadChainAutoApprovalPolicy({ root }),
+      );
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toStartWith("policy_invalid: ");
+      expect(loaded.reason).toBe(
+        `policy_invalid:${errors[0]
+          .slice("policy_invalid: ".length)
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 180)}`,
+      );
+    });
+  });
+
+  test("invalid runtime policy logs and clips its parse failure", async () => {
+    await withTmpDir("factory-auto-approval-", async (root) => {
+      mkdirSync(path.join(root, "config"));
+      writeFileSync(path.join(root, "config", "policy.yaml"), "workers: [");
+      const db = openDb(":memory:");
+      const candidate = seed(db, { id: "invalid-runtime-policy" });
+
+      const { errors } = await captureConsoleErrors(() =>
+        auto(db, { runtimeGuardOptions: { root } }),
+      );
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toStartWith("runtime_policy_unavailable: ");
+      expect(reasonOf(db, candidate.id)).toBe(
+        `auto_approval_ineligible:runtime_policy_unavailable:${errors[0]
+          .slice("runtime_policy_unavailable: ".length)
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 180)}`,
+      );
+    });
+  });
+
+  test("ci-doctor diagnoses can be explicitly auto-approved by chain policy", () => {
+    withTmpDir("factory-auto-approval-", (root) => {
+      mkdirSync(path.join(root, "config"));
+      writeFileSync(
+        path.join(root, "config", "policy.yaml"),
+        "chain_auto_approval:\n  allowed_event_types:\n    - factory.ci-diagnose.requested\n",
+      );
+
+      const allowed = loadChainAutoApprovalPolicy({ root });
+      expect(allowed.reason).toBeNull();
+      expect(
+        buildChainApprovalPolicy("factory.ci-diagnose.requested", {
+          source: "chain",
+          policy: allowed,
+        }),
+      ).toEqual({
+        source: "chain",
+        mode: "auto",
+        eventType: "factory.ci-diagnose.requested",
+      });
+
+      writeFileSync(
+        path.join(root, "config", "policy.yaml"),
+        "chain_auto_approval:\n  allowed_event_types: []\n",
+      );
+      const watched = loadChainAutoApprovalPolicy({ root });
+      expect(
+        buildChainApprovalPolicy("factory.ci-diagnose.requested", {
+          source: "chain",
+          policy: watched,
+        }),
+      ).toEqual({
+        source: "chain",
+        mode: "watched",
+        eventType: "factory.ci-diagnose.requested",
+        reason: "event_type_not_allowlisted",
+      });
+    });
   });
 
   test("merge-scan REVIEW proposals auto-approve factory.merge-review.requested (WM-907)", async () => {
@@ -645,6 +755,99 @@ describe("chain auto approval (WM-357)", () => {
     expect(openProposals(guardedDb, {})[0].reason).toContain(
       "circuit_breaker_tripped",
     );
+  });
+
+  test("hook and runtime guard failures log and retain their diagnostics", async () => {
+    const hookDb = openDb(":memory:");
+    const hookCandidate = seed(hookDb, { id: "hook-diagnostic" });
+    const hookRegistry = { ...registry, agents: new Map() };
+    const missingAgent = registry.eventTypes["factory.work.requested"].agent;
+    const hookFailure = await captureConsoleErrors(() =>
+      auto(hookDb, {
+        approvalRegistry: hookRegistry,
+        runtimeGuard: () => null,
+      }),
+    );
+    expect(reasonOf(hookDb, hookCandidate.id)).toBe(
+      `auto_approval_ineligible:approve_hooks_failed:unregistered agent ${missingAgent}`,
+    );
+    expect(hookFailure.errors).toEqual([
+      `approve_hooks_failed: unregistered agent ${missingAgent}`,
+    ]);
+
+    const guardDb = openDb(":memory:");
+    const guardCandidate = seed(guardDb, { id: "guard-diagnostic" });
+    const guardFailure = await captureConsoleErrors(() =>
+      auto(guardDb, {
+        runtimeGuard: () => {
+          throw new Error("worker capacity lookup failed");
+        },
+      }),
+    );
+    expect(reasonOf(guardDb, guardCandidate.id)).toBe(
+      "auto_approval_ineligible:runtime_guard_failed:worker capacity lookup failed",
+    );
+    expect(guardFailure.errors).toEqual([
+      "runtime_guard_failed: worker capacity lookup failed",
+    ]);
+  });
+
+  // approveProposal throws MalformedStoredRowError on a corrupt stored row, so
+  // this pass can never mistake corruption for a completed re-plan. Chain
+  // eligibility catches both corruption kinds first, with a typed reason, and
+  // the row is held open rather than approved or dropped.
+  test("a malformed stored row is held open, never approved or reported as re-planned", async () => {
+    for (const [id, table, column, reason] of [
+      ["malformed-envelope", "events", "envelope_json", "event_unparseable"],
+      ["malformed-spec", "proposals", "spec_json", "proposal_unparseable"],
+    ]) {
+      const db = openDb(":memory:");
+      const candidate = seed(db, { id });
+      const idColumn = table === "events" ? "event_id" : "id";
+      const rowId = table === "events" ? `event-${id}` : candidate.id;
+      db.query(`UPDATE ${table} SET ${column} = ? WHERE ${idColumn} = ?`).run(
+        "{damaged stored row",
+        rowId,
+      );
+
+      const result = await auto(db, { runtimeGuard: () => null });
+
+      expect(result.approved).toEqual([]);
+      expect(result.errors).toEqual([]);
+      expect(result.open).toEqual([{ proposalId: candidate.id, reason }]);
+      expect(runState(db, candidate.runId)).toBe("PROPOSED");
+      expect(reasonOf(db, candidate.id)).toContain(reason);
+    }
+  });
+
+  test("dispatch.paused skips open chain proposals and resumes them after it clears", async () => {
+    const db = openDb(":memory:");
+    const candidate = seed(db, { id: "paused" });
+    const runtimePolicy = {
+      budget: { per_day_usd: 1 },
+      workers: { max: 2 },
+      circuit_breaker: { consecutive_env_failures: 2 },
+      dispatch: { paused: true },
+    };
+    const runtimeGuardOptions = { runtimePolicy };
+
+    const paused = await auto(db, {
+      runtimeGuardOptions,
+    });
+    expect(paused).toMatchObject({
+      approved: [],
+      open: [],
+      skipped: 1,
+    });
+    expect(runState(db, candidate.runId)).toBe("PROPOSED");
+    expect(openProposals(db, {})[0].reason).toBe(
+      "auto_approval_ineligible:dispatch_paused",
+    );
+
+    runtimePolicy.dispatch.paused = false;
+    expect((await auto(db, { runtimeGuardOptions })).approved).toEqual([
+      { proposalId: candidate.id, runId: candidate.runId },
+    ]);
   });
 
   test("eligible chain work and triage proposals advance with an auditable actor and reason", async () => {
@@ -1239,6 +1442,183 @@ describe("chain auto approval (WM-357)", () => {
     for (const candidate of [merge, fix, escalation]) {
       expect(runState(db, candidate.runId)).toBe("QUEUED");
     }
+  });
+
+  test("a malformed merge-fix history envelope is warned about but does not poison another PR", async () => {
+    const db = openDb(":memory:");
+    const fixInput = {
+      repo: "factory",
+      github: "watt-mind/factory",
+      base: "develop",
+      pr: 430,
+      headSha: "a".repeat(40),
+      baseSha: "b".repeat(40),
+      headRef: "feat/WM-430",
+      ticket: "WM-430",
+      finding: "mechanical in-scope fix",
+      findingHash: "c".repeat(64),
+      round: 1,
+      mechanical: true,
+      withinOwnedPaths: true,
+      ownedPaths: ["event-runtime/lib/auto-approval.mjs"],
+    };
+    const predecessorArtifact = {
+      recommendation: "FIX",
+      repo: fixInput.repo,
+      github: fixInput.github,
+      base: fixInput.base,
+      plan: [],
+      fix: [fixInput],
+      escalate: [],
+      summary: "selected mechanical fix",
+    };
+    const malformed = seed(db, {
+      id: "malformed-fix-history",
+      type: "factory.merge-fix.requested",
+      input: { ...fixInput, pr: 429, ticket: "WM-429" },
+      predecessorAgent: "merge-scan@2",
+      predecessorArtifact: {
+        ...predecessorArtifact,
+        fix: [{ ...fixInput, pr: 429, ticket: "WM-429" }],
+      },
+      predecessorInput: { repo: "factory" },
+    });
+    db.query(
+      `UPDATE events SET envelope_json = '{not-json' WHERE event_id = ?`,
+    ).run(`event-${malformed.id}`);
+    const candidate = seed(db, {
+      id: "candidate-after-malformed-history",
+      type: "factory.merge-fix.requested",
+      input: fixInput,
+      predecessorAgent: "merge-scan@2",
+      predecessorArtifact,
+      predecessorInput: { repo: "factory" },
+    });
+
+    const warnings = [];
+    const warn = console.warn;
+    console.warn = (...args) => warnings.push(args.join(" "));
+    try {
+      const result = await auto(db, {
+        policy: {
+          ...policy,
+          maxFixRounds: 2,
+          autoMergeBase: new Set(["develop"]),
+          autoMergeOwners: new Set(["watt-mind"]),
+        },
+        runtimeGuard: () => null,
+      });
+      expect(result.approved).toContainEqual({
+        proposalId: candidate.id,
+        runId: candidate.runId,
+      });
+    } finally {
+      console.warn = warn;
+    }
+
+    expect(runState(db, candidate.runId)).toBe("QUEUED");
+    expect(warnings).toContain(
+      "Skipping malformed merge-fix history envelope for event event-malformed-fix-history",
+    );
+  });
+
+  test("a malformed merge-fix history envelope is warned about once per event, not on every tick", async () => {
+    const db = openDb(":memory:");
+    const fixInput = {
+      repo: "factory",
+      github: "watt-mind/factory",
+      base: "develop",
+      pr: 430,
+      headSha: "a".repeat(40),
+      baseSha: "b".repeat(40),
+      headRef: "feat/WM-430",
+      ticket: "WM-430",
+      finding: "mechanical in-scope fix",
+      findingHash: "c".repeat(64),
+      round: 1,
+      mechanical: true,
+      withinOwnedPaths: true,
+      ownedPaths: ["event-runtime/lib/auto-approval.mjs"],
+    };
+    const artifactFor = (input) => ({
+      recommendation: "FIX",
+      repo: input.repo,
+      github: input.github,
+      base: input.base,
+      plan: [],
+      fix: [input],
+      escalate: [],
+      summary: "selected mechanical fix",
+    });
+    const malformed = seed(db, {
+      id: "malformed-fix-history-once",
+      type: "factory.merge-fix.requested",
+      input: { ...fixInput, pr: 429, ticket: "WM-429" },
+      predecessorAgent: "merge-scan@2",
+      predecessorArtifact: artifactFor({
+        ...fixInput,
+        pr: 429,
+        ticket: "WM-429",
+      }),
+      predecessorInput: { repo: "factory" },
+    });
+    db.query(
+      `UPDATE events SET envelope_json = '{not-json' WHERE event_id = ?`,
+    ).run(`event-${malformed.id}`);
+    const first = seed(db, {
+      id: "candidate-warn-once-first",
+      type: "factory.merge-fix.requested",
+      input: fixInput,
+      predecessorAgent: "merge-scan@2",
+      predecessorArtifact: artifactFor(fixInput),
+      predecessorInput: { repo: "factory" },
+    });
+
+    const warnings = [];
+    const warn = console.warn;
+    console.warn = (...args) => warnings.push(args.join(" "));
+    const chainPolicy = {
+      ...policy,
+      maxFixRounds: 2,
+      autoMergeBase: new Set(["develop"]),
+      autoMergeOwners: new Set(["watt-mind"]),
+    };
+    try {
+      const result = await auto(db, {
+        policy: chainPolicy,
+        runtimeGuard: () => null,
+      });
+      expect(result.approved).toContainEqual({
+        proposalId: first.id,
+        runId: first.runId,
+      });
+
+      // A later tick with a fresh candidate scans the same malformed history
+      // row but must not repeat the warning.
+      const laterInput = { ...fixInput, pr: 431, ticket: "WM-431" };
+      const second = seed(db, {
+        id: "candidate-warn-once-second",
+        type: "factory.merge-fix.requested",
+        input: laterInput,
+        predecessorAgent: "merge-scan@2",
+        predecessorArtifact: artifactFor(laterInput),
+        predecessorInput: { repo: "factory" },
+      });
+      const again = await auto(db, {
+        policy: chainPolicy,
+        runtimeGuard: () => null,
+      });
+      expect(again.approved).toContainEqual({
+        proposalId: second.id,
+        runId: second.runId,
+      });
+    } finally {
+      console.warn = warn;
+    }
+
+    const message =
+      "Skipping malformed merge-fix history envelope for event event-malformed-fix-history-once";
+    expect(warnings.filter((line) => line === message)).toHaveLength(1);
   });
 
   test("an independent recommendation edge with an empty selector remains watched", async () => {
@@ -1948,5 +2328,223 @@ describe("chain auto approval (WM-357)", () => {
       backlog.map((row) => row.id).sort(),
     );
     expect(inFlightReads).toBe(1);
+  });
+
+  /** Re-pin a seeded proposal/run pair to an older registry version (#1706). */
+  const pinRegistryVersion = (db, seeded, version) => {
+    const spec = {
+      ...JSON.parse(
+        db
+          .query(`SELECT spec_json FROM runs WHERE run_id = ?`)
+          .get(seeded.runId).spec_json,
+      ),
+      promptVersion: version,
+      policyVersion: version,
+    };
+    const json = canonicalJson(spec);
+    const hash = hashJson(spec);
+    db.query(
+      `UPDATE runs SET spec_json = ?, spec_hash = ? WHERE run_id = ?`,
+    ).run(json, hash, seeded.runId);
+    db.query(
+      `UPDATE proposals SET spec_json = ?, spec_hash = ? WHERE id = ?`,
+    ).run(json, hash, seeded.id);
+    return seeded;
+  };
+
+  test("a large pending chain backlog is bounded per pass (#1706)", async () => {
+    const db = openDb(":memory:");
+    const backlog = Array.from({ length: 50 }, (_, i) =>
+      dispatchSeed(db, `bounded-${i}`, { ticket: `WM-${17060 + i}` }),
+    );
+    let eligibilityChecks = 0;
+    const startedAt = Date.now();
+
+    const result = await auto(db, {
+      maxRows: 8,
+      dispatchEligibility: () => {
+        eligibilityChecks += 1;
+        return {
+          ok: false,
+          reason: "registry_stale",
+          evidence: { ticket: { labels: [] }, escalatePathIntersections: [] },
+        };
+      },
+      runtimeGuard: () => null,
+    });
+
+    expect(result.skipped).toBe(42);
+    expect(result.memoised).toBe(0);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(eligibilityChecks).toBe(8);
+    expect(result.open).toHaveLength(8);
+    expect(
+      db.query(`SELECT COUNT(*) AS n FROM runs WHERE state = 'PROPOSED'`).get()
+        .n,
+    ).toBe(backlog.length);
+  });
+
+  test("an asynchronous dispatch recheck yields and the pass defers remaining rows at its deadline (#2123)", async () => {
+    const db = openDb(":memory:");
+    const backlog = Array.from({ length: 3 }, (_, index) =>
+      dispatchSeed(db, `deadline-${index}`, { ticket: `WM-${21230 + index}` }),
+    );
+    let checks = 0;
+    const result = await auto(db, {
+      deadlineMs: 100,
+      dispatchEligibility: async () => {
+        checks += 1;
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        return dispatchOk();
+      },
+      runtimeGuard: () => null,
+    });
+
+    expect(DEFAULT_CHAIN_AUTO_APPROVAL_DEADLINE_MS).toBe(2_000);
+    expect(checks).toBe(1);
+    expect(result.approved).toEqual([
+      { proposalId: backlog[0].id, runId: backlog[0].runId },
+    ]);
+    expect(result.skipped).toBe(2);
+    expect(result.deadlineSkipped).toBe(2);
+  });
+
+  test("a slow open head yields the next pass to the following proposal (#2148)", async () => {
+    const db = openDb(":memory:");
+    const backlog = Array.from({ length: 3 }, (_, index) =>
+      dispatchSeed(db, `round-robin-${index}`, {
+        ticket: `WM-${21480 + index}`,
+      }),
+    );
+    const checked = [];
+    const options = {
+      deadlineMs: 50,
+      dispatchEligibility: async ({ ticket }) => {
+        checked.push(ticket);
+        await new Promise((resolve) => setTimeout(resolve, 70));
+        return {
+          ok: false,
+          refusal: { reason: "recheck_deferred" },
+          evidence: {
+            ticket: { labels: [] },
+            escalatePathIntersections: [],
+          },
+        };
+      },
+      runtimeGuard: () => null,
+    };
+
+    const first = await auto(db, options);
+    expect(first.open).toEqual([
+      {
+        proposalId: backlog[0].id,
+        reason: "dispatch_ineligible:recheck_deferred",
+      },
+    ]);
+    expect(first.skipped).toBe(2);
+    expect(first.deadlineSkipped).toBe(2);
+
+    const second = await auto(db, options);
+    expect(second.open).toEqual([
+      {
+        proposalId: backlog[1].id,
+        reason: "dispatch_ineligible:recheck_deferred",
+      },
+    ]);
+    expect(second.deadlineSkipped).toBe(2);
+    expect(checked).toEqual(["WM-21480", "WM-21481"]);
+  });
+
+  test("registry-stale rows are evaluated once per (run, registryVersion) and then memoised (#1706)", async () => {
+    const db = openDb(":memory:");
+    const backlog = Array.from({ length: 60 }, (_, i) =>
+      pinRegistryVersion(
+        db,
+        dispatchSeed(db, `stale-${i}`, { ticket: `WM-${17100 + i}` }),
+        "git:old",
+      ),
+    );
+    const checksByRun = new Map();
+    const options = {
+      maxRows: 100,
+      policyVersion: "git:new",
+      dispatchEligibility: ({ ticket }) => {
+        checksByRun.set(ticket, (checksByRun.get(ticket) ?? 0) + 1);
+        return {
+          ok: false,
+          reason: "registry_stale",
+          evidence: { ticket: { labels: [] }, escalatePathIntersections: [] },
+        };
+      },
+      runtimeGuard: () => null,
+    };
+
+    const startedAt = Date.now();
+    const first = await auto(db, options);
+    expect(first.open).toHaveLength(backlog.length);
+    expect(first.memoised).toBe(0);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+
+    // Every subsequent tick under the same registry version skips the whole
+    // backlog without another control-plane read.
+    for (let tick = 1; tick <= 5; tick += 1) {
+      const next = await auto(db, { ...options, now: now + tick * 1000 });
+      expect(next.open).toHaveLength(0);
+      expect(next.skipped).toBe(backlog.length);
+      expect(next.memoised).toBe(backlog.length);
+    }
+    expect(checksByRun.size).toBe(backlog.length);
+    for (const count of checksByRun.values()) expect(count).toBe(1);
+
+    // The hold expires, and a registry bump re-evaluates immediately.
+    const revisited = await auto(db, {
+      ...options,
+      now: now + Math.ceil(DEFAULT_STALE_CHAIN_REVISIT_MS * 1.1) + 1,
+    });
+    expect(revisited.memoised).toBe(0);
+    expect(revisited.open).toHaveLength(backlog.length);
+    const bumped = await auto(db, { ...options, policyVersion: "git:newer" });
+    expect(bumped.memoised).toBe(0);
+    expect(bumped.open).toHaveLength(backlog.length);
+    expect(
+      db.query(`SELECT COUNT(*) AS n FROM runs WHERE state = 'PROPOSED'`).get()
+        .n,
+    ).toBe(backlog.length);
+  });
+
+  test("memoised stale rows do not consume the per-tick budget of fresh rows (#1706)", async () => {
+    const db = openDb(":memory:");
+    for (let i = 0; i < 20; i += 1)
+      pinRegistryVersion(
+        db,
+        dispatchSeed(db, `stale-${i}`, { ticket: `WM-${17200 + i}` }),
+        "git:old",
+      );
+    const fresh = dispatchSeed(db, "fresh", { ticket: "WM-17299" });
+    const ineligible = {
+      ok: false,
+      reason: "registry_stale",
+      evidence: { ticket: { labels: [] }, escalatePathIntersections: [] },
+    };
+    const options = {
+      maxRows: 8,
+      policyVersion: "git:new",
+      dispatchEligibility: ({ ticket }) =>
+        ticket === "WM-17299" ? dispatchOk() : ineligible,
+      runtimeGuard: () => null,
+    };
+
+    // Three ticks walk the stale backlog (8 + 8 + 4) before the newest row.
+    const first = await auto(db, options);
+    expect(first.approved).toEqual([]);
+    expect(first.memoised).toBe(0);
+    const second = await auto(db, { ...options, now: now + 1000 });
+    expect(second.memoised).toBe(8);
+    const third = await auto(db, { ...options, now: now + 2000 });
+    expect(third.memoised).toBe(16);
+    expect(third.approved).toEqual([
+      { proposalId: fresh.id, runId: fresh.runId },
+    ]);
+    expect(runState(db, fresh.runId)).toBe("QUEUED");
   });
 });

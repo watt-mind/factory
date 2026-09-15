@@ -155,7 +155,7 @@ Workers idle if supply dries up. Ensure a continuous pipeline of dispatchable wo
 
 1. **Capacity vs Collision Sets**:
    - **Capacity**: Active `RUNNING` or `VERIFYING` runs occupy physical worker slots (up to max workers, e.g. 10).
-   - **Owned Paths overlap is advisory** (`config/policy.yaml` `dispatch.owned_paths_collision: advisory`, WM-677). The gate records the overlapping claims on the proposal as evidence and dispatches anyway; only a `**` claim on either side still refuses (`owned_paths_conflict_hard`). Textual overlap — same directory, same file, different lines — is a rebase job that `merge-fix` already does; refusing it at dispatch was starving the pool (9 attempts → 2 workers under `strict`). Merging stays serialized (`max_concurrent_merges: 1`), which is where real conflicts are caught. `strict` is the fail-closed default if the key is absent.
+   - **Owned Paths overlap is advisory** (`config/policy.yaml` `dispatch.owned_paths_collision: advisory`, WM-677). The gate records every overlapping claim — including a whole-repo `**` claim — on the proposal as evidence and dispatches anyway. Textual overlap — same directory, same file, different lines — is a rebase job that `merge-fix` already does; refusing it at dispatch was starving the pool (9 attempts → 2 workers under `strict`). Merging stays serialized (`max_concurrent_merges: 1`), which is where real conflicts are caught. `strict` is the fail-closed default if the key is absent.
 2. **Dispatching** — inject a `factory.dispatch.requested` envelope; the payload field is `ticket` (not `ticketId`) and `repo` is the `config/repos.yaml` short name:
    ```bash
    bun event-runtime/cli.mjs inject - <<'EOF'
@@ -169,7 +169,7 @@ Workers idle if supply dries up. Ensure a continuous pipeline of dispatchable wo
 3. **Idempotency Pin Trap**:
    - A `FAILED` or `BLOCKED` run pins its ticket's idempotency key. A duplicate `dispatch.requested` will be ignored as `noop` (`ticket_dispatch_already_live`).
    - To re-run a pinned run **of the current `policyVersion`**: `bun event-runtime/cli.mjs retry <runId> --force`. A run planned before a stack restart is pinned to the old `policyVersion` and no worker will ever claim it (`registry_stale` spin) — `cancel` it and inject fresh instead.
-   - Every terminal failure strips `ai:agent-ready` from the ticket, even for harness-side causes (WM-682); relabel with `factory ticket labels <T> --add ai:agent-ready` before re-injecting.
+   - Terminal failures release the ticket back to `Todo` with `ai:agent-ready`, so a corrected or retried dispatch remains eligible for the queue.
 
 ---
 
@@ -210,7 +210,49 @@ The factory automatically merges PRs targeting `develop` once all gates pass.
 3. **Fail-Closed Stance**:
    - If the API (`:7381`) is unreachable or returns 500s, treat the worker pool as **FULL** and hold dispatch until recovery.
 
-4. **Keep the Main Checkout Pullable — a Dirty Tree Is Yours to Clear**:
+4. **Base-Branch CI Health — `factory ci-health` (WM-1103)**:
+
+   The standing loop that watches the _trunk_, not a PR. Nothing else does:
+   `factory ci` measures CI as fourteen-day friction (medians, flake counts) and
+   is a retro input; the merge stage only ever reads one PR's checks. So a job
+   that fails on every push is invisible until a human happens to read a merge
+   report — which is exactly how legalease `develop` stayed red in one gate for
+   ten hours and six consecutive pushes on 2026-09-15 while deploy and smoke
+   were green, stranding every image publication and the master receipt gate.
+
+   ```bash
+   factory ci-health --repo legalease            # dry: what it would say
+   factory ci-health --repo legalease --apply    # send + remember (the loop)
+   factory ci-health --report                    # remembered alarms, no GitHub calls
+   bun run ci-health legalease                   # the supervisor form, one pass
+   ```
+
+   Per repo it reads the last three completed runs of the repo's CI workflow on
+   `base`, collapses reruns to one verdict per head SHA, drops `cancelled` runs
+   (a superseded run is not evidence either way), ignores jobs listed in the
+   repo's `advisory_jobs:`, and when the **same job** is red on two consecutive
+   distinct SHAs sends exactly one
+
+   ```
+   CI RED <repo>/<base>: <job> red on <n> consecutive pushes since <sha> (<age>); latest <run url>
+   ```
+
+   The alarm is remembered in `~/.factory/state/ci-health.json` and is not
+   repeated, however many more red pushes land; when the job is seen green again
+   it sends one `CI GREEN <repo>/<base>: <job> recovered at <sha>` and clears.
+   Silence never clears an alarm — a job that vanished from the workflow, a
+   forge that would not answer, and a run still in progress are all unknown, and
+   unknown holds. Without `--apply` nothing is sent **and** nothing is written,
+   because a preview that consumed the alarm would silence the real alert.
+   `--window N` widens the three-push lookback when you want the message to
+   quote the true length of a long outage (each extra push costs one jobs call).
+
+   Enable it on a 15-minute cadence by copying the `ci-health` job out of
+   `config/schedule.example.yaml` into `config/schedule.yaml`. Acting on a red
+   base — pausing dispatch, filing the ticket, rerunning — is still the
+   operator's call; this loop only makes sure the operator knows.
+
+5. **Keep the Main Checkout Pullable — a Dirty Tree Is Yours to Clear**:
 
    The live stack pins `policyVersion` at startup and loads agent definitions
    once, so **the factory keeps running whatever was on disk when it booted**.
@@ -252,8 +294,10 @@ The factory automatically merges PRs targeting `develop` once all gates pass.
    `config/**`. Model-tier and routing changes resolve at _plan_ time inside
    `serve`, so a `serve`-only restart is enough for those and leaves running
    workers untouched; a definition change needs the workers restarted too.
-   Drain first — `bin/live-stack.sh down` finishes in-flight runs — and prefer
-   restarting when no dispatch is mid-flight.
+   Drain first — `bin/live-stack.sh down` gives the supervised pool up to
+   `FACTORY_POOL_DRAIN_TIMEOUT` (180 seconds by default) to finish in-flight
+   runs, then stops it anyway and leaves any remaining lease for the reaper —
+   and prefer restarting when no dispatch is mid-flight.
 
 ---
 
@@ -350,10 +394,11 @@ factory watchdog --interval-sec 300 --notify # Background daemon with Telegram a
 # --- Live Stack Management ---
 bin/live-stack.sh up --workers 3:10      # Start API, Web UI, and 10 workers
 bin/live-stack.sh down                   # Graceful shutdown
-bin/live-stack.sh ps                     # List running factory processes
+factory ps                                # List running factory processes
 
 # --- Event Runtime CLI ---
-export FACTORY_EVENT_SECRET=$(cat ~/.factory/orchestration/event-secret.txt)
+# Load FACTORY_CONTROL_API_TOKEN from the mode-600 ~/.factory/secrets.env
+set -a; source ~/.factory/secrets.env; set +a
 bun event-runtime/cli.mjs status         # Summary of active pool, proposals, runs
 bun event-runtime/cli.mjs proposals      # Pending proposals awaiting execution
 bun event-runtime/cli.mjs runs           # In-flight and recent runs
@@ -371,12 +416,16 @@ factory ticket detail WM-123 "..."       # Append criteria / verification block
 factory ticket file --team WM --title "..." --body "..." --type bug # File new issue
 
 # --- CI & GitHub Checks ---
+# Is any base branch stuck red in the same job across pushes? (read-only)
+factory ci-health --report
+factory ci-health --repo <repo>
 # One-shot reads — fine inline:
 gh pr view <PR> --json headRefOid,mergeable,mergeStateStatus
 gh api repos/<owner>/<repo>/commits/<sha>/check-runs --jq '.check_runs[] | "\(.name)=\(.conclusion // .status)"'
 # Blocking waits — NEVER inline (Loop 6 hard rule); give these to a subagent:
-gh pr checks <PR> --watch --fail-fast    # blocks until checks settle
-gh run watch <run-id> --exit-status      # blocks until the run ends
+gh run list --workflow ci.yml --commit <sha> --json databaseId --limit 1
+gh run watch <run-id> --exit-status --interval 60
+# Before a merge, assert every check-run on <sha> completed green via the REST API above.
 ```
 
 ---
@@ -390,7 +439,7 @@ gh run watch <run-id> --exit-status      # blocks until the run ends
 | **Idempotency Pinning**                    | `FAILED`/`BLOCKED` runs pin their input hash key; re-injected `dispatch.requested` no-ops.                                                                                                                                              | Always use `cli.mjs retry <runId> --force` to unstick a failed run.                                                                                                                                                            |
 | **`git stash` in Worktrees**               | The stash stack (`.git/refs/stash`) is repo-global, not isolated per worktree.                                                                                                                                                          | **NEVER use `git stash` or `git rebase --autostash`** in agent worktrees. Use temporary patches or WIP commits.                                                                                                                |
 | **macOS Bash 3.2**                         | Default macOS bash lacks `mapfile` / `readarray` and modern expansions.                                                                                                                                                                 | Use POSIX `while IFS= read -r line` loops in all shell scripts.                                                                                                                                                                |
-| **Prettier Scope**                         | Running prettier across whole repo reformats hundreds of `.mjs` files unnecessarily.                                                                                                                                                    | Prettier is configured ONLY for `shared/**/*.md` (`bun run format:check`).                                                                                                                                                     |
+| **Prettier Scope**                         | Running `bun run format` across the whole repo can reformat hundreds of files unnecessarily.                                                                                                                                            | `bun run format:check` checks the whole tree with `prettier --check .`; use a targeted write command when formatting a focused change.                                                                                         |
 | **Label Replacement**                      | Direct GraphQL label mutations replace the whole array, wiping `type:*` and `area:*`.                                                                                                                                                   | Always use `--add` / `--remove` flags via `factory ticket state` or `factory ticket labels`.                                                                                                                                   |
 | **Restart Orphans In-Flight Runs**         | `bin/live-stack.sh down` can end an in-flight leaseholder. Every `serve` tick runs the `reap` step in `event-runtime/cli/serve.mjs`, which reaps expired leases after `LEASE_GRACE_SECONDS`; no reap tick runs while the stack is down. | Restart only when no `dispatch@1` run is `RUNNING`/`LEASED`. After `down`, preserve and push uncommitted worktree work before an expired lease is retried; after restart, let the reap step reclaim it after the grace period. |
 | **Stale Rebase Reverts Trunk**             | A fixer that rebases onto an `origin/develop` fetched minutes earlier silently drops PRs merged in between and still passes CI. Nearly reverted #582 via #583.                                                                          | Before merging any rebased PR: `git diff --stat origin/develop origin/<branch>` must show no unexplained deletions of develop-side files. Tell fixers to `git fetch` immediately before `rebase`.                              |

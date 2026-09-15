@@ -261,7 +261,11 @@ jobs:
     name: CodeQL
     # Keep CodeQL on the labeled self-hosted runner used by the previous
     # GitHub-managed default setup. Its explicit resource cap prevents a scan
-    # from consuming every CPU and nearly all RAM on the shared host.
+    # from consuming every CPU and nearly all RAM on the shared host. This
+    # group spans PRs and branches because they share that one host.
+    concurrency:
+      group: codeql-shadow-host
+      cancel-in-progress: false
     runs-on: shadow
     timeout-minutes: 120
     permissions:
@@ -293,9 +297,9 @@ jobs:
           build-mode: none
           # GitHub's default setup used all 32 host threads and 60 GiB RAM.
           # This repository is about 146K LOC, for which GitHub recommends
-          # 16 GiB and 4–8 cores on a self-hosted runner.
-          threads: 8
-          ram: 16384
+          # 8 GiB and four cores leave headroom for the dispatched CI lanes.
+          threads: 4
+          ram: 8192
 
       - name: Analyze with CodeQL
         uses: github/codeql-action/analyze@v4

@@ -71,7 +71,7 @@ release_worktree_lifecycle_lock() {
 # unreachable control plane leaves the worktree in place.
 ticket_is_terminal() { # <ticket> <branch>
   local ticket="$1" branch="$2" json="" state="" merged=""
-  if json=$(bun "$REPO/tools/linear.mjs" get "$ticket" --json 2>/dev/null); then
+  if json=$(bun "$REPO/tools/ticket.mjs" get "$ticket" --json 2>/dev/null); then
     state=$(printf '%s\n' "$json" | awk '
       {
         line=$0
@@ -104,7 +104,8 @@ if [[ "$PRUNE" -eq 1 ]]; then
   for WT in "$WT_ROOT"/*; do
     [[ -d "$WT" ]] || continue
     ticket=$(basename "$WT")
-    [[ "$ticket" =~ ^[A-Z]+-[0-9]+(-[A-Za-z0-9][A-Za-z0-9-]*)?$ ]] || continue
+    ticket_is_valid "$ticket" || continue
+    [[ "$(ticket_slug "$ticket")" == "$ticket" ]] || continue
 
     status=$(git -C "$WT" status --porcelain 2>/dev/null) || {
       warn "skipping $ticket — cannot inspect worktree status"

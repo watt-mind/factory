@@ -126,7 +126,26 @@ export function parseIndentedMap(text) {
   for (const raw of String(text ?? "").split(/\r?\n/)) {
     const line = stripComment(raw);
     if (line.trim() === "") continue;
-    if (/^\s*-/.test(line)) continue;
+    if (
+      stack[stack.length - 1].blockScalar &&
+      raw.search(/\S|$/) > stack[stack.length - 1].indent
+    ) {
+      continue;
+    }
+    if (/^\s*-/.test(line)) {
+      // A sequence directly under a map key turns that key into a list, so
+      // callers expecting a map can tell "sequence" apart from "empty map".
+      const top = stack[stack.length - 1];
+      if (
+        top.key !== undefined &&
+        !top.blockScalar &&
+        Object.keys(top.node).length === 0 &&
+        raw.search(/\S|$/) > top.indent
+      ) {
+        top.parent[top.key] = [];
+      }
+      continue;
+    }
     const match = /^(\s*)([A-Za-z0-9_.-]+):\s*(.*)$/.exec(line);
     if (!match) continue;
     const [, pad, key, rest] = match;
@@ -137,9 +156,14 @@ export function parseIndentedMap(text) {
     if (rest.trim() === "") {
       const node = {};
       parent[key] = node;
-      stack.push({ indent, node });
+      stack.push({ indent, node, key, parent });
     } else {
       parent[key] = unquote(rest);
+      // Block scalar header: `|`/`>` with optional chomping (`+`/`-`) and
+      // explicit indentation (`|2`, `>2-`, `|-2`) indicators, either order.
+      if (/^[|>](?:[+-]?\d?|\d?[+-]?)$/.test(rest.trim())) {
+        stack.push({ indent, node: parent, blockScalar: true });
+      }
     }
   }
   return root;
@@ -172,6 +196,20 @@ function readLimits(stanza, file) {
   const limits = stanza?.limits ?? {};
   if (typeof limits !== "object" || Array.isArray(limits)) {
     throw new EvalConfigError(`${file}: evals.limits must be a map`);
+  }
+  const recognizedKeys = [
+    "case_timeout_seconds",
+    "case_budget_usd",
+    "total_seconds",
+    "total_budget_usd",
+  ];
+  if (
+    stanza?.limits !== undefined &&
+    !recognizedKeys.some((key) => limits[key] !== undefined)
+  ) {
+    throw new EvalConfigError(
+      `${file}: evals.limits has no recognized keys (expected: ${recognizedKeys.join(", ")})`,
+    );
   }
   const pick = (key, fallback) =>
     limits[key] === undefined
@@ -237,25 +275,28 @@ export function loadEvalPolicy({
         : DEFAULT_MODEL,
   };
   const graderModel = stanza?.grader?.model;
-  if (typeof graderModel !== "string" || graderModel.trim() === "") {
+  const normalizedGraderModel =
+    typeof graderModel === "string" ? graderModel.trim() : "";
+  if (
+    normalizedGraderModel === "" ||
+    normalizedGraderModel === DEFAULT_MODEL ||
+    normalizedGraderModel === "null" ||
+    normalizedGraderModel === "~"
+  ) {
+    const reason =
+      normalizedGraderModel === ""
+        ? "is not set"
+        : `is ${JSON.stringify(normalizedGraderModel)} — the grader must name a model, so that changing it is reviewable`;
     return {
       ...base,
       subject,
       limits,
-      problem: `${policyFile}: evals.grader.model is not set`,
-    };
-  }
-  if (graderModel.trim() === DEFAULT_MODEL) {
-    return {
-      ...base,
-      subject,
-      limits,
-      problem: `${policyFile}: evals.grader.model is "${DEFAULT_MODEL}" — the grader must name a model, so that changing it is reviewable`,
+      problem: `${policyFile}: evals.grader.model ${reason}`,
     };
   }
   return {
     file: policyFile,
-    grader: { model: graderModel.trim() },
+    grader: { model: normalizedGraderModel },
     subject,
     limits,
     problem: null,

@@ -12,7 +12,7 @@ factory economics $ARGUMENTS
 factory ci $ARGUMENTS
 ```
 
-Friction is what wasted the agents' _time_ inside a session; economics is what consumed _context and the usage window_ (context burn, cache thrash, zero-result runs); CI is the clock agents wait on _outside_ the session — `gh pr checks --watch` in factory-merge/factory-ship sitting idle for however long GitHub Actions takes, per repo per workflow, with repeat-failure and slowdown-trend flags already computed. A repeat in any of the three is actionable — a tool that fails three runs running, a tool whose payloads dominate context burn, and an e2e job that's crept 40% slower over two weeks are all harness defects.
+Friction is what wasted the agents' _time_ inside a session; economics is what consumed _context and the usage window_ (context burn, cache thrash, zero-result runs); CI is the clock agents wait on _outside_ the session — workflow-scoped REST run watches in factory-merge/factory-ship sitting idle for however long GitHub Actions takes, per repo per workflow, with repeat-failure and slowdown-trend flags already computed. A repeat in any of the three is actionable — a tool that fails three runs running, a tool whose payloads dominate context burn, and an e2e job that's crept 40% slower over two weeks are all harness defects.
 
 **friction.mjs and economics.mjs need `~/.factory/logs/` transcripts, which only exist for runs the orchestrator itself dispatched.** Invoked directly from the harness — you running `/factory-retro` in a repo without going through orchestrator dispatch — there may be no matching transcripts; `friction.mjs` exits with "no transcripts" in that case, which is expected, not a failure, so don't chase it as one. `ci.mjs` has no such dependency: it reads GitHub's own run history, so it carries the CI-reflection half of retro on its own even when the other two have nothing. Run all three regardless; treat an empty friction/economics result as "no session data this time," not as a broken retro.
 
@@ -34,14 +34,14 @@ Ignore one-offs, however annoying. A single flaky network call is not a harness 
 
 Ask what would have made the friction impossible, then put the fix where it belongs:
 
-| Friction                                            | Wrong fix                             | Right layer                                                                                               |
-| :-------------------------------------------------- | :------------------------------------ | :-------------------------------------------------------------------------------------------------------- |
-| Shell glob bites every agent                        | tell agents to be careful             | the shell invocation, or a rule in `shared/floor.md`                                                      |
-| Test needs a cookie banner clicked every run        | a UI-clicking snippet                 | an env flag in the repo that skips it                                                                     |
-| Wrong Linear label name, repeatedly                 | correct it each time                  | list the canonical values where the agent will see them                                                   |
-| Same expensive setup per ticket                     | accept it                             | do it once, before the batch                                                                              |
-| e2e workflow creeping slower every window           | wait longer in `gh pr checks --watch` | cache/parallelize/split the job in the repo's own workflow file — that's a repo change, not a factory one |
-| Same GitHub Actions job failing across multiple PRs | rerun until green                     | fix the flaky step or its test, in that repo                                                              |
+| Friction                                            | Wrong fix                 | Right layer                                                                                               |
+| :-------------------------------------------------- | :------------------------ | :-------------------------------------------------------------------------------------------------------- |
+| Shell glob bites every agent                        | tell agents to be careful | the shell invocation, or a rule in `shared/floor.md`                                                      |
+| Test needs a cookie banner clicked every run        | a UI-clicking snippet     | an env flag in the repo that skips it                                                                     |
+| Wrong Linear label name, repeatedly                 | correct it each time      | list the canonical values where the agent will see them                                                   |
+| Same expensive setup per ticket                     | accept it                 | do it once, before the batch                                                                              |
+| e2e workflow creeping slower every window           | wait longer for CI        | cache/parallelize/split the job in the repo's own workflow file — that's a repo change, not a factory one |
+| Same GitHub Actions job failing across multiple PRs | rerun until green         | fix the flaky step or its test, in that repo                                                              |
 
 **Prefer removing the need over documenting the workaround.** A rule an agent must remember is weaker than a default it cannot get wrong: an env var, a script flag, a generated config. Only when the fix genuinely cannot be automated does it become a line in `AGENTS.md` or `shared/floor.md`.
 

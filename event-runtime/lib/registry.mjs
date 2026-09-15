@@ -18,13 +18,18 @@ import {
 import path from "node:path";
 import { format as prettierFormat, resolveConfig } from "prettier";
 import { hashBytes } from "./canonical.mjs";
-import { APPROVAL_MODES, CATCH_UP_MODES, parseCadence } from "./schedules.mjs";
+import {
+  APPROVAL_MODES,
+  CATCH_UP_MODES,
+  parseCadence,
+} from "./schedule-config.mjs";
 import { RUNTIME_ROOT, resolveConfigPath } from "./config.mjs";
 import { MEMO_KINDS, SUBJECT_TYPES } from "./memos.mjs";
 import { reposRoot } from "./repos.mjs";
 import { contractViewRel, validateArtifactView } from "./artifact-view.mjs";
 import { PANELS_DIR, loadPanelDir, mergePanels } from "./panel-view.mjs";
 import { HarnessPinError, verifyHarnessPins } from "./pins.mjs";
+import { MODEL_ADAPTERS } from "./model-adapters.mjs";
 
 export class RegistryError extends Error {
   constructor(message) {
@@ -564,8 +569,10 @@ export const MODEL_TIERS = ["strong", "standard", "light"];
 export const DEFAULT_MODEL = "default";
 
 /** Adapters that accept a model at all. command/actions/fake take none: a
- * declared tier there resolves to null (not applicable), never an error. */
-export const MODEL_ADAPTERS = new Set(["claude", "pi", "agy", "cursor"]);
+ * declared tier there resolves to null (not applicable), never an error.
+ * Defined in the import-free lib/model-adapters.mjs (GH-1736) so
+ * adapters/sandboxed.mjs can read it without pulling in this loader. */
+export { MODEL_ADAPTERS };
 
 /**
  * Compose independently persisted runtime tier cells over the tracked policy
@@ -1028,10 +1035,18 @@ export function loadRegistry({
   modelTiers = loadModelTierMap(),
   trackedModelTiers = modelTiers,
   loaderFor = defaultLoaderFor,
-  scheduleConfigPath = resolveConfigPath("schedule", {
-    root: path.dirname(root),
-    warn: false,
-  }),
+  // Unit tests must describe the committed kernel unless they explicitly
+  // pass an overlay fixture. Dispatched worktrees intentionally contain a
+  // copy of the operator's ignored config/schedule.yaml; letting that ambient
+  // instance state leak into `bun test` makes kernel expectations depend on
+  // whichever loops the operator currently enabled. Operational processes do
+  // not set NODE_ENV=test and continue to resolve the effective local config.
+  scheduleConfigPath = process.env.NODE_ENV === "test"
+    ? path.join(path.dirname(root), "config", ".test-no-schedule.yaml")
+    : resolveConfigPath("schedule", {
+        root: path.dirname(root),
+        warn: false,
+      }),
 } = {}) {
   const configured =
     packRoots ??

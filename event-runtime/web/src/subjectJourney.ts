@@ -10,7 +10,18 @@ import { nextScheduledRetry, scheduledRetryLabel } from "./chainTimeline";
 import { REASONS, humanizeReason } from "./reasons";
 import type { Attempt } from "./types";
 
-export const TICKET_ID_PATTERN = /^[A-Z][A-Z0-9]{1,9}-\d+$/;
+export const TICKET_ID_PATTERN =
+  /^(?:[A-Z][A-Z0-9]{1,9}-\d+|[A-Z0-9_.-]+\/[A-Z0-9_.-]+#[1-9][0-9]{0,9})$/i;
+
+/** Canonical ticket IDs: uppercase Linear IDs and lowercase GitHub owner/repo IDs. */
+export function normalizeTicketId(value: string): string | null {
+  const ticket = value.trim();
+  const linear = ticket.toUpperCase();
+  if (/^[A-Z][A-Z0-9]{1,9}-\d+$/.test(linear)) return linear;
+  if (/^[A-Z0-9_.-]+\/[A-Z0-9_.-]+#[1-9][0-9]{0,9}$/i.test(ticket))
+    return ticket.toLowerCase();
+  return null;
+}
 
 /** `#541`, `PR 541`, `pr:541`, `pull/541`, `541` — what an operator types for a PR. */
 export const PR_REF_PATTERN = /^(?:#|pr[:#\s-]?|pull\/)?(\d{1,7})$/i;
@@ -34,11 +45,10 @@ export function installTicketJourneyLinks(
   const decorate = () => {
     for (const span of root.querySelectorAll<HTMLSpanElement>("span")) {
       if (span.childElementCount > 0 || span.dataset.ticketJourneyId) continue;
-      const ticket = (span.textContent ?? "")
-        .trim()
-        .replace(/^([\"'])|([\"'])$/g, "")
-        .toUpperCase();
-      if (!TICKET_ID_PATTERN.test(ticket)) continue;
+      const ticket = normalizeTicketId(
+        (span.textContent ?? "").trim().replace(/^([\"'])|([\"'])$/g, ""),
+      );
+      if (!ticket) continue;
       span.dataset.ticketJourneyId = ticket;
       span.setAttribute("role", "link");
       span.tabIndex = 0;
@@ -60,13 +70,11 @@ export function installTicketJourneyLinks(
         : null;
     if (!element) return null;
     const dataTicket = element.dataset.ticketJourneyId;
-    const ticket = (dataTicket ?? element.textContent ?? "")
-      .trim()
-      .toUpperCase();
+    const ticket = normalizeTicketId(dataTicket ?? element.textContent ?? "");
     const exactCopyButton =
       element.tagName === "BUTTON" &&
-      element.title.trim().toUpperCase() === ticket;
-    return (dataTicket || exactCopyButton) && TICKET_ID_PATTERN.test(ticket)
+      normalizeTicketId(element.title) === ticket;
+    return ticket && (dataTicket || exactCopyButton)
       ? { element, ticket }
       : null;
   };
@@ -391,8 +399,8 @@ export function ticketIdsIn(value: unknown): string[] {
   const ids = new Set<string>();
   const add = (candidate: unknown) => {
     if (typeof candidate !== "string") return;
-    const normalized = candidate.trim().toUpperCase();
-    if (TICKET_ID_PATTERN.test(normalized)) ids.add(normalized);
+    const normalized = normalizeTicketId(candidate);
+    if (normalized) ids.add(normalized);
   };
   if (typeof value === "string") add(value);
   walk(value, (key, entry) => {
@@ -639,7 +647,9 @@ export function scanVerdictFor(
       headSha: typeof entry.headSha === "string" ? entry.headSha : null,
       headRef: typeof entry.headRef === "string" ? entry.headRef : null,
       ticket:
-        typeof entry.ticket === "string" ? entry.ticket.toUpperCase() : null,
+        typeof entry.ticket === "string"
+          ? normalizeTicketId(entry.ticket)
+          : null,
       mergeable: typeof entry.mergeable === "boolean" ? entry.mergeable : null,
       reason:
         typeof entry.reason === "string"
@@ -1415,8 +1425,10 @@ export function selectPrSource(
         (item): item is ArtifactPrEntry =>
           isArtifactPrEntry(item) && Number(item.pr) === pr,
       );
-      if (typeof entry?.ticket === "string")
-        tickets.add(entry.ticket.toUpperCase());
+      if (typeof entry?.ticket === "string") {
+        const ticket = normalizeTicketId(entry.ticket);
+        if (ticket) tickets.add(ticket);
+      }
     }
   }
   // Same-ticket runs are the other chain that moves the PR's head (the

@@ -1,8 +1,15 @@
 import { spawn } from "node:child_process";
 import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
-import { artifactsRoot, runtimeHome } from "./config.mjs";
+import {
+  artifactsRoot,
+  DEFAULT_PROPOSAL_TTL_SECONDS,
+  runtimeHome,
+  workspacesRoot,
+} from "./config.mjs";
 import { openDb, txImmediate } from "./db.mjs";
+import { ALL_TERMINAL_STATES, transition } from "./lifecycle.mjs";
+import { isProposalExpired } from "./proposals.mjs";
 import { reposRoot } from "./repos.mjs";
 
 /** Bound so a hung Linear call cannot freeze serve forever (OPS-301 review). */
@@ -11,6 +18,7 @@ export const JANITOR_MAX_BUFFER = 1_000_000;
 export const DEFAULT_TRACE_RETENTION_DAYS = 14;
 export const DEFAULT_ARTIFACT_RETENTION_DAYS = 30;
 export const DEFAULT_ROW_RETENTION_DAYS = 30;
+export const DEFAULT_WORKSPACE_RETENTION_DAYS = 30;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -23,13 +31,7 @@ const SHA256 = /^[a-f0-9]{64}$/;
  * to sweep here. Active/in-flight states (PROPOSED, APPROVED, QUEUED, LEASED,
  * RUNNING, VERIFYING) are deliberately absent so they can never be removed.
  */
-const TERMINAL_RUN_STATES = [
-  "COMPLETED",
-  "REFUSED",
-  "TIMED_OUT",
-  "CANCELLED",
-  "FAILED",
-];
+const TERMINAL_RUN_STATES = [...ALL_TERMINAL_STATES];
 
 /** Per-run child tables keyed by run_id, cleared alongside a swept run. */
 const RUN_CHILD_TABLES = [
@@ -94,6 +96,79 @@ function sweepTerminalRows(db, { rowCutoff, nowIso, apply }) {
   };
 }
 
+/**
+ * Find proposal runs that no longer have a possible admission path. A run
+ * without any proposal is only dead after the proposal TTL: a just-created
+ * run may still be between its creation and proposal insert statements.
+ */
+function expiredProposedRunIds(db, now) {
+  const proposalsByRun = new Map();
+  for (const row of db
+    .query(
+      `SELECT runs.run_id AS proposed_run_id,
+              runs.created_at AS run_created_at,
+              proposals.*
+         FROM runs
+         LEFT JOIN proposals ON proposals.run_id = runs.run_id
+        WHERE runs.state = 'PROPOSED'
+        ORDER BY runs.run_id, proposals.rowid`,
+    )
+    .all()) {
+    const entry = proposalsByRun.get(row.proposed_run_id) ?? {
+      createdAt: row.run_created_at,
+      proposals: [],
+    };
+    if (row.id !== null) entry.proposals.push(row);
+    proposalsByRun.set(row.proposed_run_id, entry);
+  }
+  return [...proposalsByRun].flatMap(([runId, { createdAt, proposals }]) =>
+    proposals.some(
+      (proposal) =>
+        proposal.status === "open" && !isProposalExpired(proposal, now),
+    )
+      ? []
+      : proposals.length === 0 && !isProposalLessRunExpired(createdAt, now)
+        ? []
+        : [runId],
+  );
+}
+
+function isProposalLessRunExpired(createdAt, now) {
+  const createdAtMs = Date.parse(createdAt);
+  return (
+    Number.isFinite(createdAtMs) &&
+    createdAtMs + DEFAULT_PROPOSAL_TTL_SECONDS * 1000 < now
+  );
+}
+
+/**
+ * Cancel PROPOSED runs when no open proposal remains within its TTL. Runs
+ * without proposals wait one proposal TTL, allowing proposal insertion to
+ * follow run creation.
+ * The candidate query and legal transitions share an immediate transaction so
+ * a concurrent replan cannot insert a fresh proposal between the two.
+ */
+function terminalizeExpiredProposedRuns(db, { now, apply }) {
+  const cancel = () => {
+    const runIds = expiredProposedRunIds(db, now);
+    if (apply) {
+      for (const runId of runIds) {
+        transition(db, {
+          runId,
+          to: "CANCELLED",
+          expectFrom: "PROPOSED",
+          actor: "janitor",
+          reason: "proposal_expired",
+          now,
+        });
+      }
+    }
+    return runIds.length;
+  };
+  const cancelled = apply ? txImmediate(db, cancel) : cancel();
+  return { cancelled, dryRun: !apply };
+}
+
 function retentionMs(days, name) {
   if (!Number.isFinite(days) || days <= 0)
     throw new Error(`${name} must be a positive number of days`);
@@ -112,6 +187,30 @@ function resultArtifactHashes(result, fallbackHash) {
   return hashes;
 }
 
+/** Remove only expired retained workspace-integrity evidence directories. */
+function sweepRetainedIntegrityWorkspaces(
+  root,
+  { cutoffMs, apply = false } = {},
+) {
+  let deleted = 0;
+  let retained = 0;
+  if (!root || !existsSync(root)) return { deleted, retained, dryRun: !apply };
+
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const workspace = path.join(root, entry.name);
+    if (!existsSync(path.join(workspace, "workspace-integrity-status.txt")))
+      continue;
+    if (statSync(workspace).mtimeMs >= cutoffMs) {
+      retained += 1;
+      continue;
+    }
+    deleted += 1;
+    if (apply) rmSync(workspace, { recursive: true, force: true });
+  }
+  return { deleted, retained, dryRun: !apply };
+}
+
 /**
  * Retain recent trace audit rows and artifacts referenced by recently-created
  * runs. This is deliberately a standalone maintenance operation: dry-run is
@@ -124,6 +223,8 @@ export function sweepRuntimeRetention(
     traceRetentionDays = DEFAULT_TRACE_RETENTION_DAYS,
     artifactRetentionDays = DEFAULT_ARTIFACT_RETENTION_DAYS,
     rowRetentionDays = DEFAULT_ROW_RETENTION_DAYS,
+    workspaceRetentionDays = DEFAULT_WORKSPACE_RETENTION_DAYS,
+    workspaceRoot = null,
     now = Date.now(),
     apply = false,
     log = () => {},
@@ -137,7 +238,10 @@ export function sweepRuntimeRetention(
   const rowCutoff = new Date(
     now - retentionMs(rowRetentionDays, "rowRetentionDays"),
   ).toISOString();
+  const workspaceCutoffMs =
+    now - retentionMs(workspaceRetentionDays, "workspaceRetentionDays");
   const nowIso = new Date(now).toISOString();
+  const proposed = terminalizeExpiredProposedRuns(db, { now, apply });
   const trace = db
     .query(`SELECT COUNT(*) AS count FROM attempt_trace WHERE ts < ?`)
     .get(traceCutoff).count;
@@ -190,6 +294,10 @@ export function sweepRuntimeRetention(
     }
   }
   const rows = sweepTerminalRows(db, { rowCutoff, nowIso, apply });
+  const workspaces = sweepRetainedIntegrityWorkspaces(workspaceRoot, {
+    cutoffMs: workspaceCutoffMs,
+    apply,
+  });
 
   // VACUUM reclaims the file space freed by the row deletions (#1065). It must
   // run outside any transaction, so it follows the sweep's own commit.
@@ -198,14 +306,17 @@ export function sweepRuntimeRetention(
   const result = {
     trace: { deleted: trace, dryRun: !apply },
     artifacts: { deleted, freedBytes, retained, dryRun: !apply },
+    proposed,
     runs: rows.runs,
     proposals: rows.proposals,
     events: rows.events,
+    workspaces,
     vacuum: { ran: apply },
   };
   log(
     `retention: ${trace} trace rows and ${deleted} artifacts (${freedBytes} bytes)` +
-      `, ${rows.runs.deleted} runs, ${rows.proposals.deleted} proposals, ${rows.events.deleted} events ` +
+      `, ${proposed.cancelled} proposed runs ${apply ? "cancelled" : "would be cancelled"}` +
+      `, ${rows.runs.deleted} runs, ${rows.proposals.deleted} proposals, ${rows.events.deleted} events, ${workspaces.deleted} retained integrity workspaces ` +
       `${apply ? "deleted (VACUUMed)" : "would be deleted"}`,
   );
   return result;
@@ -217,15 +328,18 @@ export function runtimeRetentionCommand(args = [], options = {}) {
   let traceRetentionDays = DEFAULT_TRACE_RETENTION_DAYS;
   let artifactRetentionDays = DEFAULT_ARTIFACT_RETENTION_DAYS;
   let rowRetentionDays = DEFAULT_ROW_RETENTION_DAYS;
+  let workspaceRetentionDays = DEFAULT_WORKSPACE_RETENTION_DAYS;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--apply") apply = true;
     else if (args[i] === "--trace-days") traceRetentionDays = Number(args[++i]);
     else if (args[i] === "--artifact-days")
       artifactRetentionDays = Number(args[++i]);
     else if (args[i] === "--row-days") rowRetentionDays = Number(args[++i]);
+    else if (args[i] === "--workspace-days")
+      workspaceRetentionDays = Number(args[++i]);
     else
       throw new Error(
-        "usage: janitor.mjs retention [--apply] [--trace-days N] [--artifact-days N] [--row-days N]",
+        "usage: janitor.mjs retention [--apply] [--trace-days N] [--artifact-days N] [--row-days N] [--workspace-days N]",
       );
   }
   const db = options.db ?? openDb();
@@ -237,6 +351,8 @@ export function runtimeRetentionCommand(args = [], options = {}) {
         traceRetentionDays,
         artifactRetentionDays,
         rowRetentionDays,
+        workspaceRetentionDays,
+        workspaceRoot: options.workspaceRoot ?? workspacesRoot(runtimeHome()),
         apply,
         now: options.now,
         log: options.log ?? console.log,

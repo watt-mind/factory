@@ -415,6 +415,7 @@ factory ticket file --team WM --title "..." --body "..." --type docs
 gh pr view <PR> --json headRefOid,mergeable,mergeStateStatus
 gh api repos/<owner>/<repo>/commits/<sha>/check-runs --jq '.check_runs[] | "\(.name)=\(.conclusion // .status)"'
 # blocking waits — subagent only
-gh pr checks <PR> --watch --fail-fast
-gh run watch <run-id> --exit-status
+gh run list --workflow ci.yml --commit <sha> --json databaseId --limit 1
+gh run watch <run-id> --exit-status --interval 60
+# Before a merge, assert every check-run on <sha> completed green via the REST API above.
 ```

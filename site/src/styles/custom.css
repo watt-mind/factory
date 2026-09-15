@@ -37,6 +37,7 @@
   --wm-color-outline: oklch(55% 0.018 178);
   --wm-color-outline-variant: oklch(84% 0.012 178);
   --wm-color-grid: oklch(39.325% 0.01702 185.19 / 0.12);
+  --wm-color-grid-wash: oklch(98.331% 0.00249 165.08 / 0.72);
   --wm-color-panel: oklch(100% 0 0 / 0.82);
   --wm-color-panel-hover: oklch(97% 0.005 178 / 0.96);
   --sl-color-accent-low: var(--wm-color-primary-container);
@@ -65,10 +66,22 @@ body {
 
 body:has(.hero) {
   background-image:
+    linear-gradient(
+      90deg,
+      transparent max(0px, calc(50% - 47rem)),
+      var(--wm-color-grid-wash) max(var(--wm-page-margin), calc(50% - 41rem)),
+      var(--wm-color-grid-wash)
+        min(calc(100% - var(--wm-page-margin)), calc(50% + 41rem)),
+      transparent min(100%, calc(50% + 47rem))
+    ),
     linear-gradient(var(--wm-color-grid) 0.5px, transparent 0.5px),
     linear-gradient(90deg, var(--wm-color-grid) 0.5px, transparent 0.5px);
   background-position: center;
-  background-size: 40px 40px;
+  background-repeat: no-repeat, repeat, repeat;
+  background-size:
+    100% 100%,
+    40px 40px,
+    40px 40px;
 }
 
 h1,

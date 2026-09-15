@@ -463,6 +463,88 @@ describe("metrics breakdowns (WM-281)", () => {
     db.close();
   });
 
+  test("agent terminal outcomes and newest run timestamps share breakdown facts", () => {
+    const db = openDb(":memory:");
+    insertRun(db, "refused", {
+      agent: "alpha@1",
+      state: "REFUSED",
+      createdAt: at(15 * 60_000),
+      updatedAt: at(12 * 60_000),
+    });
+    insertRun(db, "timed-out", {
+      agent: "beta@1",
+      state: "TIMED_OUT",
+      createdAt: at(25 * 60_000),
+      updatedAt: at(11 * 60_000),
+    });
+    insertRun(db, "failed", {
+      agent: "gamma@1",
+      state: "FAILED",
+      createdAt: at(40 * 60_000),
+      updatedAt: at(10 * 60_000),
+    });
+    insertRun(db, "gamma-newest", {
+      agent: "gamma@1",
+      createdAt: at(5 * 60_000),
+    });
+    insertRun(db, "outside-window", {
+      agent: "outside@1",
+      state: "REFUSED",
+      createdAt: at(25 * 60 * 60_000),
+      updatedAt: at(25 * 60 * 60_000),
+    });
+    // Seen first for delta@1: sorts inside the SQL window but Date.parse()
+    // returns NaN, which must not pin the key ahead of the parsable run.
+    insertRun(db, "delta-unparsable", {
+      agent: "delta@1",
+      createdAt: "2026-08-15T11:3x:00.000Z",
+      updatedAt: at(1 * 60_000),
+    });
+    insertRun(db, "delta-parsable", {
+      agent: "delta@1",
+      createdAt: at(20 * 60_000),
+    });
+
+    const options = { now: NOW, window: "24h", by: "agent" };
+    expect(
+      metricsBreakdownView(db, { ...options, metric: "failures" }).rows,
+    ).toEqual([
+      { key: "alpha@1", value: 1 },
+      { key: "beta@1", value: 1 },
+      { key: "gamma@1", value: 1 },
+    ]);
+    expect(
+      metricsBreakdownView(db, { ...options, metric: "refusals" }).rows,
+    ).toEqual([{ key: "alpha@1", value: 1 }]);
+    expect(
+      metricsBreakdownView(db, { ...options, metric: "timeouts" }).rows,
+    ).toEqual([{ key: "beta@1", value: 1 }]);
+    expect(
+      metricsBreakdownView(db, { ...options, metric: "last_run_at" }).rows,
+    ).toEqual([
+      { key: "gamma@1", value: NOW - 5 * 60_000, at: at(5 * 60_000) },
+      { key: "alpha@1", value: NOW - 15 * 60_000, at: at(15 * 60_000) },
+      { key: "delta@1", value: NOW - 20 * 60_000, at: at(20 * 60_000) },
+      { key: "beta@1", value: NOW - 25 * 60_000, at: at(25 * 60_000) },
+    ]);
+
+    try {
+      metricsBreakdownView(db, { ...options, metric: "unknown" });
+      throw new Error("expected invalid metric error");
+    } catch (err) {
+      expect(err).toBeInstanceOf(MetricsQueryError);
+      expect(err.body).toMatchObject({
+        error: "invalid_metric",
+        validMetrics: expect.arrayContaining([
+          "refusals",
+          "timeouts",
+          "last_run_at",
+        ]),
+      });
+    }
+    db.close();
+  });
+
   test("modelTier cohorts use dispatch pins, merged events, and every ticket run cost", () => {
     const db = openDb(":memory:");
     insertRun(db, "standard-dispatch", {

@@ -31,6 +31,36 @@ Follow the existing capture and specification protocols before handoff:
 3. Use `ticket-spec` to fill derivable gaps. If intent or credentials are missing, leave it in Triage and report what is needed; do not hand it off yet.
 4. Once the ticket is `Todo` + `ai:agent-ready` + unassigned, invoke `factory handoff` as above.
 
+## Checking run progress and traces
+
+When an operator asks for the status of a handed-off ticket or wants to inspect execution:
+
+1. **Query receipt state via request ID** (idempotent; returns event, proposal, and run status):
+
+   ```sh
+   factory handoff --request-id <requestId> [--repo <repo>] <ticket>
+   ```
+
+2. **Check the ticket on the control plane**:
+
+   ```sh
+   factory ticket get [--repo <repo>] <ticket>
+   ```
+
+3. **Inspect run details, token usage, and lifecycle history on the runner**:
+
+   ```sh
+   ssh runner "factory events inspect <runId>"
+   ```
+
+4. **Stream or view the agent execution trace**:
+
+   ```sh
+   ssh runner "factory events trace <runId> | tail -n 50"
+   ```
+
+5. **Web dashboard**: `https://factory.whale-pike.ts.net`
+
 ## Retry rule
 
 The client creates a unique request ID. If transport failed after the request may have reached the server, retry with the **same** ID so admission deduplicates:

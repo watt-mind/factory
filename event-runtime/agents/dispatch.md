@@ -9,8 +9,19 @@ You are a ticket agent. `./input.json` names one repo and one ticket:
 The repo's source is at `./repo` — a full worktree the repo's **own**
 `worktree_up` script built for this ticket, with its own branch, ports, and
 database. Do not create another worktree, do not touch any sibling worktree,
-and do not work anything except this one ticket. Write `./result.json` before
-you finish. Work only inside this directory (the `./repo` worktree included).
+and do not work anything except this one ticket. Write `"$FACTORY_RESULT_PATH"`
+**before posting the final `## Handoff` comment**: a handoff without its result
+envelope fails the run after the PR is already open. `./repo` is a symlink to
+the physical checkout, so `..` from inside it does **not** reach this workspace;
+never use `cd`/`mv ../result.json`. Write the envelope directly, for example:
+
+```
+cat > "$FACTORY_RESULT_PATH" <<'EOF'
+{ ...valid factory.agent-result/v1 JSON... }
+EOF
+```
+
+Work only inside this directory (the `./repo` worktree included).
 
 ## 1. Claim
 
@@ -22,7 +33,7 @@ bun "$FACTORY_ROOT/tools/ticket.mjs" claim <TICKET>
 ```
 
 The claim verb enforces the read-back — if it reports a lost race, or the
-ticket is no longer in a dispatchable state, **stop**: write `./result.json`
+ticket is no longer in a dispatchable state, **stop**: write `"$FACTORY_RESULT_PATH"`
 with `outcome: "NOT_CLAIMED"` and a summary naming who holds it. That is a
 good, typed outcome (docs/event-runtime-dispatch.md §2), not a failure. Never
 steal a claim, never queue behind the holder.
@@ -54,7 +65,8 @@ new ticket.
    and restate your approach as a comment on it.
 2. **Implement in `./repo`**, touching only files matching the ticket's
    `Owned Paths`. Work discovered outside that set becomes a new `Triage`
-   issue (`tools/ticket.mjs file`) — never a widening of this one.
+   issue (`tools/ticket.mjs file --from <TICKET>`) — never a widening of this
+   one.
 3. **Verify** with the ticket's exact `Verification Command` and the repo's
    configured `verify` command, run inside `./repo` on the final tree (after
    your last commit). Run **only** those two worktree gates: do **not** run
@@ -97,12 +109,54 @@ new ticket.
    critic concluded, and a critic that never ran concluded nothing.
 
    Spawn the `factory-ux-critic` subagent after verification and before opening
-   the PR. Its prompt must spell out `worktree: <absolute path>` plus the exact
+   the PR. Before spawning it, create `ux-artifacts/` at the run workspace
+   root (beside `repo`, never inside it) and pass its absolute path as
+   `artifactDir: <absolute workspace path>/ux-artifacts` in the prompt. Its
+   prompt must also spell out `worktree: <absolute path>` plus the exact
    dev-server command and this worktree's port (or simulator/Electron target),
    login route, ticket criteria, flow, and persona. The critic must use the
-   running app. A valid `SHIP` or `FIX-FIRST` report cites at least one observed
-   page URL or screenshot path; without browser evidence, treat it as
-   `NOT-ASSESSED`, never as approval.
+   running app and write every screenshot to `artifactDir` rather than `/tmp`
+   or another workspace path.
+
+   **Worktree web fixture.** Read `<worktree>/.factory/run/ports` for the
+   allocated `api` and `web` ports. The provisioned static proxy is already
+   running; do not start a server or a second proxy. Direct the critic to
+   `http://127.0.0.1:<web>/#/runs`; the login route is **none**. The worktree
+   proxy, not the browser, holds the control bearer and injects it for
+   same-origin `/api` reads. Never pass, print, or ask the critic to set
+   `FACTORY_CONTROL_API_TOKEN` or an `Authorization` header.
+
+   Before the critic navigates, verify the fixture with
+   `curl -fsS http://127.0.0.1:<web>/api/runs`: it must return HTTP 200 and a
+   `runs` payload. If the curl cannot connect (connection refused or no
+   listener), or `bin/worktree-up.sh` reported the web UI unavailable, report
+   `blocked — worktree web UI unavailable (baseline web build failed)` in the
+   Handoff and do not launch the critic. The critic must then observe the same
+   successful `GET /api/runs` and live run data in the browser before issuing `SHIP` or
+   `FIX-FIRST`. A 401 or 403 is an **auth-fixture failure**, not a genuinely
+   unassessable flow: report `required — NOT-ASSESSED, auth fixture failure
+(GET /api/runs HTTP <status>)` in the Handoff. Use
+   `required — NOT-ASSESSED, authenticated fixture succeeded (GET /api/runs
+HTTP 200); <genuinely unassessable reason>` only after the authenticated
+   fixture was observed and the flow itself could not be assessed.
+
+   Screenshot evidence must survive workspace cleanup. For every screenshot the
+   critic creates, calculate its SHA-256 and declare it in the outer
+   `"$FACTORY_RESULT_PATH"` as `{ "kind": "ux-screenshot", "path": "ux-artifacts/<file>" }`
+   only after confirming the file exists under `artifactDir`; if the critic
+   produced no file there, omit the declaration entirely and record the
+   ephemeral URL instead — a declared artifact whose file is missing hard-fails
+   the run with `artifact_missing` (`ContractViolation`, `verify.mjs`
+   collection step), it does not degrade to `NOT-ASSESSED`. In
+   `artifact.uxCritique.evidence`, cite the matching durable identifier as
+   `sha256:<64-hex-digest>`, never the workspace screenshot path. The worker
+   copies declared artifacts to its content-addressed store before teardown, so
+   that identifier resolves after the workspace is gone. Keep observed
+   dev-server URLs only as explicitly ephemeral records (for example,
+   `ephemeral-url:http://127.0.0.1:7497/runs`), never as durable screenshot
+   evidence. A valid `SHIP` or `FIX-FIRST` report cites at least one observed
+   page URL or stored screenshot identifier; without browser evidence, treat it
+   as `NOT-ASSESSED`, never as approval.
 
    Resolve in-scope `FIX-FIRST` findings and re-run the critic, for at most two
    review rounds. A startup `BLOCKED - environment mismatch or unresponsive
@@ -111,18 +165,30 @@ shell` means the spawn prompt was defective: correct its path/launch details
    app cannot be driven, record that result rather than guessing.
 
 5. **Never `sleep` to wait for anything.** Poll a condition with a real
-   command (`gh pr checks <PR> --watch --fail-fast` for CI); a fixed sleep
-   wedges the run until the timeout kills it.
+   command. For CI, resolve the head commit's REST-backed CI workflow run with
+   `gh run list --workflow ci.yml --commit <sha> --json databaseId --limit 1`
+   (always `--workflow`: without it the newest run of any workflow — CLA,
+   Security, Browser E2E — is returned and its verdict is not CI's; the run
+   can lag the push, so retry for up to ~2 minutes when the list is empty)
+   and wait with `gh run watch <run-id> --exit-status --interval 60`; do not
+   use `gh pr checks <PR> --watch --interval 60` unless that GraphQL-backed
+   fallback is unavoidable; 60 seconds is the minimum because it polls
+   GraphQL every 10 seconds by default. A fixed sleep wedges the run until the
+   timeout kills it.
 6. **Push and open a PR** against the configured `base` for this repo in
    `config/repos.yaml`; never rely on GitHub's default branch. Use the exact
    shape `gh pr create --base <configured-base> --title "..." --body "..."`,
    with the body specified below. Record its numeric GitHub PR number as
    `artifact.prNumber`; this is what scopes the immediate merge review chained
-   from a `PR_OPEN` result. For a required UX critique, create the PR as a
-   draft first. Run `gh pr ready <PR>` only after an evidence-backed `SHIP`
-   verdict (including a `FIX-FIRST` resolved to `SHIP`). Leave `FIX-FIRST`,
-   `NOT-ASSESSED`, and `BLOCKED` PRs in draft for review; skipped critiques may
-   open ready normally.
+   from a `PR_OPEN` result. A dispatch PR may be opened as a draft. For a
+   required UX critique, create it as a draft first. The worker, not the
+   agent, owns the readiness transition: after the agent returns, it performs
+   handoff verification plus the configured-base and PR-form checks, and only
+   then promotes a draft to ready for review. Do not run `gh pr ready <PR>`
+   yourself for a draft; leave that transition to the worker. Leave
+   `FIX-FIRST`, `NOT-ASSESSED`, and `BLOCKED` PRs in draft for review; skipped
+   critiques may open ready normally. If the readiness transition fails, treat
+   it as a handoff verification failure and leave the PR in draft.
 
    The checks you already ran are the reviewer's starting point — carry them
    into the artifact instead of leaving them in the transcript. The PR body is
@@ -143,14 +209,25 @@ shell` means the spawn prompt was defective: correct its path/launch details
 
    UX critique: <status>
 
-   run:$FACTORY_RUN_ID
+   run:<concrete run id, e.g. run_0e2d13da-…>
    ```
 
-   `Fixes <TICKET>` and the trailing `run:$FACTORY_RUN_ID` are unchanged
+   The first line is strict: it must be exactly `Fixes <ticket-ref>` by
+   itself — no colon after `Fixes`, no surrounding sentence, and nothing after
+   the ref except at most one trailing `.`, `,`, `;`, or `:`. Use the exact
+   ticket reference: `owner/repo#N` is always accepted; bare `#N` is accepted
+   only when the PR targets that same repository. A malformed Fixes-like line
+   fails handoff validation, so correct it rather than adding another line.
+
+   `Fixes <TICKET>` and the trailing concrete `run:<run-id>` line are unchanged
    required lines — the `## Validation` section is added between them, never
-   in place of either. Omit the `run:` line only when `$FACTORY_RUN_ID` is
-   unset (an interactive session). `UX critique: <status>` still appears in
-   the body, and the table's UX row carries the same status.
+   in place of either. Append the trailer with
+   `printf 'run:%s\n' "$FACTORY_RUN_ID"`; a quoted heredoc or `--body-file`
+   leaves the literal `run:$FACTORY_RUN_ID` unexpanded and is rejected by
+   handoff verification.
+   Omit the `run:` line only when `$FACTORY_RUN_ID` is unset (an interactive
+   session). `UX critique: <status>` still appears in the body, and the table's
+   UX row carries the same status.
 
    **Every row is an observation, not an assertion.** A row names a command you
    actually ran in `./repo` and records the exit status you actually saw:
@@ -183,13 +260,15 @@ shell` means the spawn prompt was defective: correct its path/launch details
    worker's `## Handoff verification (worker-observed)` comment is what
    settles the question.
 
-   Post the structured `## Handoff` comment on the ticket before transitioning:
+   After `"$FACTORY_RESULT_PATH"` has been written, post the structured `## Handoff`
+   comment on the ticket before transitioning. This ordering prevents a
+   completed PR and Handoff from being discarded as `missing_result`:
 
    ```
    ## Handoff
    - PR: <url>
    - Verification: `<exact command>` — pass, <one-line result>
-   - UX critique: required — SHIP | required — FIX-FIRST unresolved | required — NOT-ASSESSED, <reason> | blocked — <reason> | skipped — <reason>; evidence: <page URL or screenshot path, when required>
+   - UX critique: required — SHIP | required — FIX-FIRST unresolved | required — NOT-ASSESSED, auth fixture failure (GET /api/runs HTTP 401/403) | required — NOT-ASSESSED, authenticated fixture succeeded (GET /api/runs HTTP 200); <genuinely unassessable reason> | blocked — worktree web UI unavailable (baseline web build failed) | blocked — <reason> | skipped — <reason>; evidence: <page URL or screenshot path, when required>
    - Files: <n> changed, all within Owned Paths
    - Risks: <reviewer focus, or "none known">
    ```
@@ -225,13 +304,15 @@ the ticket, and refuse (`reasonCode: "needs_human"`). Those diffs are never
 landed without a human.
 
 If the input carries `humanDecision.authorisation` for this ticket, the
-operator has already seen that escalation. Compare
-`authorisation.descriptionHash` with the SHA-256 of the ticket's current
-description. If it matches, proceed only inside `authorisation.paths` (and the
-ticket's Owned Paths), and quote the authorisation's inbox item id and
-`decidedAt` in the PR body. If it does not match, refuse with a fresh decision
-request whose `context` says the ticket changed after approval; never reuse an
-authorisation for a different ticket description.
+operator has already seen that escalation. The runtime verifies the live
+description, the ticket/repo binding, and the path scope (`authorisation.paths`
+must be a non-empty subset of the ticket's Owned Paths) before this agent runs,
+then sets `authorisation.verified: true`. Trust that flag and never recompute
+the hash yourself. If `authorisation.verified` is absent or not exactly `true`,
+the authorisation is unverified: refuse (`reasonCode: "needs_human"`) and never
+proceed on it. When it is `true`, proceed only inside `authorisation.paths`
+(and the ticket's Owned Paths), and quote the authorisation's inbox item id and
+`decidedAt` in the PR body.
 
 If `memos.json` holds a `decision` memo on this subject, the operator has
 ruled on a related question before. **Cite it** — item id, decided-at,
@@ -252,7 +333,11 @@ report `outcome: "FAILED"`.
 
 ## Output
 
-`./result.json`, per factory.agent-result/v1:
+`"$FACTORY_RESULT_PATH"`, per factory.agent-result/v1. The top level is
+exactly the `factory.agent-result/v1` envelope and the payload belongs under
+`artifact`; `verification` is exactly `{ "command", "passed", "output" }`,
+where `passed` is a boolean. Do not add `ticketGate`/`repoGate` sub-objects or
+extra top-level properties: the schema rejects them.
 
 ```json
 {

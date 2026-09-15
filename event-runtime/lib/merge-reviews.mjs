@@ -14,6 +14,7 @@ import path from "node:path";
 import { loadForge, ForgeError } from "../../lib/forge/index.mjs";
 import { sha256Hex } from "./canonical.mjs";
 import { openDb } from "./db.mjs";
+import { ALL_TERMINAL_STATES } from "./lifecycle.mjs";
 import { policyMergeBatchSize } from "./planner.mjs";
 import { getRepo, loadRepos, RepoError } from "./repos.mjs";
 import {
@@ -30,11 +31,14 @@ export const MERGE_SCAN_AGENT = "merge-scan@2";
 export const MERGE_REVIEW_AGENT = "merge-review@1";
 
 const SHA40 = /^[0-9a-f]{40}$/;
-const TICKET = /[A-Z]+-[0-9]+/;
+const REF_TICKET = /(?:^|[^A-Za-z0-9_])([A-Z]+-[0-9]+)(?=$|[^A-Za-z0-9_])/;
 const GITHUB_REF_TICKET = /(?:^|\/)gh-([0-9]+)$/i;
 const BARE_GITHUB_REF_TICKET = /^([0-9]+)$/;
 const GITHUB_BODY_TICKET =
   /(?:^|\n)\s*fixes\s+([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[0-9]+)\b/i;
+const allTerminalStateList = [...ALL_TERMINAL_STATES]
+  .map((state) => `'${state}'`)
+  .join(", ");
 const PR_LIST_FIELDS = [
   "number",
   "state",
@@ -46,9 +50,13 @@ const PR_LIST_FIELDS = [
   "body",
   "mergeable",
   "mergeStateStatus",
+  "labels",
 ];
-const PR_VIEW_FIELDS = [...PR_LIST_FIELDS, "labels"];
+const PR_VIEW_FIELDS = PR_LIST_FIELDS;
 const REBASE_FINDING = "rebase_onto_base";
+const FULL_VERIFICATION_CHECK = "Full verification";
+const REBASE_SKIP_FRESH_CI_DEFAULT_MINUTES = 60;
+const invalidMinuteConfigWarnings = new Set();
 const IN_FLIGHT_RUN_STATES = [
   "PROPOSED",
   "APPROVED",
@@ -57,7 +65,7 @@ const IN_FLIGHT_RUN_STATES = [
   "RUNNING",
   "VERIFYING",
 ];
-const GITHUB_HOLD_LABELS = new Set(["escalated", "ai:escalated"]);
+const GITHUB_HOLD_LABELS = new Set(["escalated", "ai:escalated", "ai:landing"]);
 
 function iso(now = Date.now()) {
   return new Date(now).toISOString();
@@ -74,7 +82,14 @@ function asPr(value) {
   return Number.isInteger(n) && n >= 1 ? n : null;
 }
 
-function ticketFromRef(headRef, title, body, github) {
+function githubTicketFromText(text, prNumber) {
+  const match =
+    typeof text === "string" ? text.match(GITHUB_BODY_TICKET) : null;
+  if (!match || Number(match[1].split("#")[1]) === prNumber) return null;
+  return match[1];
+}
+
+function ticketFromRef(headRef, title, body, github, prNumber) {
   const githubRef =
     typeof headRef === "string"
       ? (headRef.match(GITHUB_REF_TICKET) ??
@@ -84,14 +99,14 @@ function ticketFromRef(headRef, title, body, github) {
     return `${github}#${githubRef[1] ?? githubRef[2]}`;
   }
   const fromRef =
-    typeof headRef === "string" ? headRef.toUpperCase().match(TICKET) : null;
-  if (fromRef) return fromRef[0];
-  const fromBody =
-    typeof body === "string" ? body.match(GITHUB_BODY_TICKET) : null;
-  if (fromBody) return fromBody[1];
-  const fromTitle =
-    typeof title === "string" ? title.toUpperCase().match(TICKET) : null;
-  return fromTitle ? fromTitle[0] : null;
+    typeof headRef === "string" ? headRef.match(REF_TICKET) : null;
+  if (fromRef) return fromRef[1];
+  const fromBody = githubTicketFromText(body, prNumber);
+  if (fromBody) return fromBody;
+  const fromTitleGithub = githubTicketFromText(title, prNumber);
+  if (fromTitleGithub) return fromTitleGithub;
+  const fromTitle = typeof title === "string" ? title.match(REF_TICKET) : null;
+  return fromTitle ? fromTitle[1] : null;
 }
 
 function parseJsonColumn(raw, fallback) {
@@ -255,14 +270,89 @@ function normalizeListedPr(raw, baseSha, github) {
     baseSha: base,
     headRef: typeof raw.headRefName === "string" ? raw.headRefName : null,
     baseRefName: typeof raw.baseRefName === "string" ? raw.baseRefName : null,
-    ticket: ticketFromRef(raw.headRefName, raw.title, raw.body, github),
+    ticket: ticketFromRef(raw.headRefName, raw.title, raw.body, github, number),
     mergeable:
       typeof raw.mergeable === "string" ? raw.mergeable.toUpperCase() : "",
     mergeStateStatus:
       typeof raw.mergeStateStatus === "string"
         ? raw.mergeStateStatus.toUpperCase()
         : "",
+    labels: githubLabelsOf(raw),
   };
+}
+
+function positiveIntegerMinutes(env, name, defaultMinutes) {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return defaultMinutes;
+  const value = Number(raw);
+  if (Number.isInteger(value) && value > 0) return value;
+  if (!invalidMinuteConfigWarnings.has(name)) {
+    invalidMinuteConfigWarnings.add(name);
+    console.warn(
+      `invalid ${name}=${JSON.stringify(raw)}; using default ${defaultMinutes} minutes`,
+    );
+  }
+  return defaultMinutes;
+}
+
+export function resetInvalidMinuteConfigWarnings() {
+  invalidMinuteConfigWarnings.clear();
+}
+
+export function rebaseSkipFreshCiMinutes(env = process.env) {
+  return positiveIntegerMinutes(
+    env,
+    "FACTORY_MERGE_REBASE_SKIP_FRESH_CI_MINUTES",
+    REBASE_SKIP_FRESH_CI_DEFAULT_MINUTES,
+  );
+}
+
+function fullVerificationRebaseSkip({ forge, github, pr, now }) {
+  if (pr.labels?.some((label) => label.toLowerCase() === "ai:landing")) {
+    return "ai_landing";
+  }
+  if (pr.mergeable === "CONFLICTING") return null;
+
+  let checkRuns;
+  try {
+    checkRuns = JSON.parse(
+      forge.apiRaw(
+        `repos/${github}/commits/${pr.headSha}/check-runs?per_page=100`,
+      ),
+    )?.check_runs;
+  } catch {
+    // Conservative: if the check-run state cannot be read, assume CI may be
+    // in flight rather than rebasing over a potentially live landing run.
+    return "ci_in_flight";
+  }
+  if (!Array.isArray(checkRuns)) return null;
+
+  const fullVerification = checkRuns.filter(
+    (check) => check?.name === FULL_VERIFICATION_CHECK,
+  );
+  if (
+    fullVerification.some((check) => {
+      const status = String(check?.status ?? "").toUpperCase();
+      return status === "IN_PROGRESS" || status === "QUEUED";
+    })
+  ) {
+    return "ci_in_flight";
+  }
+
+  const freshAfter = now - rebaseSkipFreshCiMinutes() * 60 * 1000;
+  if (
+    fullVerification.some((check) => {
+      const completedAt = Date.parse(check?.completed_at ?? "");
+      return (
+        String(check?.conclusion ?? "").toUpperCase() === "SUCCESS" &&
+        Number.isFinite(completedAt) &&
+        completedAt >= freshAfter
+      );
+    })
+  ) {
+    return "ci_fresh";
+  }
+  return null;
 }
 
 function classifySelectedPr(raw, { base, baseSha, github }) {
@@ -403,6 +493,120 @@ function hasInFlightAgent(db, agent, { github, pr, headSha }) {
   return Boolean(proposal);
 }
 
+const MERGE_FIX_REFUSAL_COOLDOWN_DEFAULT_MINUTES = 15;
+const MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_DEFAULT_MINUTES = 6 * 60;
+const DURABLE_MERGE_FIX_REFUSALS = new Set([
+  "merge_fix_ticket_escalated",
+  "merge_fix_ticket_security",
+]);
+
+export function mergeFixRefusalCooldownMs(env = process.env) {
+  return (
+    positiveIntegerMinutes(
+      env,
+      "FACTORY_MERGE_FIX_REFUSAL_COOLDOWN_MINUTES",
+      MERGE_FIX_REFUSAL_COOLDOWN_DEFAULT_MINUTES,
+    ) * 60_000
+  );
+}
+
+export function mergeFixDurableRefusalCooldownMs(env = process.env) {
+  return (
+    positiveIntegerMinutes(
+      env,
+      "FACTORY_MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MINUTES",
+      MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_DEFAULT_MINUTES,
+    ) * 60_000
+  );
+}
+
+// Slack between a run's creation and its final attempt finishing. Runs are
+// bounded well below this by dispatch timeouts, so a run created before
+// `cooldown + slack` ago cannot have finished inside the cooldown horizon.
+const MERGE_FIX_MAX_RUN_LIFETIME_MS = 24 * 60 * 60_000;
+
+export function latestMergeFixTerminalAttempt(db, item, { github, now }) {
+  // The query bound must cover the widest cooldown any reason code can earn,
+  // not just the durable one: an operator can configure the durable window
+  // below the transient one, and a bound derived from the durable window alone
+  // would then drop transient refusals that are still inside their cooldown.
+  const durableCooldownMs = mergeFixDurableRefusalCooldownMs();
+  const maxCooldownMs = Math.max(
+    durableCooldownMs,
+    mergeFixRefusalCooldownMs(),
+  );
+  const refusalCutoff = new Date(Number(now) - maxCooldownMs).toISOString();
+  // Pure prefilter on the join's outer loop: it keeps whole runs (and their
+  // json_extract work) out of the scan without ever being the deciding term —
+  // `a.finished_at > refusalCutoff` remains the correctness bound.
+  const runCreatedCutoff = new Date(
+    Number(now) - maxCooldownMs - MERGE_FIX_MAX_RUN_LIFETIME_MS,
+  ).toISOString();
+  return db
+    .query(
+      `SELECT a.terminal_state AS terminalState,
+              a.reason_code AS reasonCode,
+              a.finished_at AS finishedAt
+         FROM runs r
+         JOIN attempts a ON a.run_id = r.run_id AND a.attempt = r.attempts
+        WHERE r.state IN (${allTerminalStateList})
+          AND a.terminal_state IN (${allTerminalStateList})
+          AND a.finished_at > ?
+          AND r.created_at > ?
+          AND json_extract(r.spec_json, '$.agent') = 'merge-fix@1'
+          AND json_extract(r.spec_json, '$.input.pr') = ?
+          AND json_extract(r.spec_json, '$.input.headSha') = ?
+          AND json_extract(r.spec_json, '$.input.github') = ?
+          AND json_extract(r.spec_json, '$.input.findingHash') = ?
+        ORDER BY a.finished_at DESC, r.rowid DESC
+        LIMIT 1`,
+    )
+    .get(
+      refusalCutoff,
+      runCreatedCutoff,
+      item.pr,
+      item.headSha,
+      github,
+      item.findingHash,
+    );
+}
+
+/**
+ * A terminal merge-fix is normally safe to retry, but retrying the exact same
+ * refusal every scan turns a tracker outage or an escalated ticket into a
+ * dispatch storm. Keep the suppression scoped to the finding and pinned head:
+ * a new commit is fresh evidence and remains eligible for a new correction.
+ *
+ * Any refusal earns at least the transient cooldown — a per-code allowlist
+ * silently misses every reason code added later. Refusals that need a human to
+ * clear a blocker get a much longer cooldown, but never permanent suppression:
+ * the blocker can be lifted without a new push, and the scan must eventually
+ * re-notice that.
+ *
+ * Returns the suppressing reason code, or null when the item is dispatchable.
+ */
+function refusedMergeFixSuppressed(db, item, { github, now }) {
+  if (!db) return null;
+  const latestTerminalAttempt = latestMergeFixTerminalAttempt(db, item, {
+    github,
+    now,
+  });
+  if (
+    latestTerminalAttempt?.terminalState !== "REFUSED" ||
+    !latestTerminalAttempt.reasonCode
+  )
+    return null;
+  const cooldownMs = DURABLE_MERGE_FIX_REFUSALS.has(
+    latestTerminalAttempt.reasonCode,
+  )
+    ? mergeFixDurableRefusalCooldownMs()
+    : mergeFixRefusalCooldownMs();
+  const finishedAt = Date.parse(latestTerminalAttempt.finishedAt ?? "");
+  if (!Number.isFinite(finishedAt)) return null;
+  if (Number(now) - finishedAt >= cooldownMs) return null;
+  return latestTerminalAttempt.reasonCode;
+}
+
 /**
  * Deterministic enumerator. Does not review diffs — it classifies live PRs
  * against the ledger and emits reviews for misses (or every selected PR).
@@ -521,6 +725,7 @@ export function enumerateMergeScan({
       targets,
       forceReview: true,
       listedCount: targets.length,
+      now,
     });
   }
 
@@ -562,10 +767,12 @@ function assemble({
   wrongBase = [],
   forceReview,
   listedCount,
+  now,
 }) {
   const reviews = [];
   const mergeHits = [];
   const fix = [];
+  const rebaseSkipped = [];
   for (const pr of targets) {
     const hit = lookupMergeReview(db, {
       github,
@@ -586,6 +793,11 @@ function assemble({
       continue;
     }
     if (isBehindOrConflicting(pr, hit)) {
+      const skip = fullVerificationRebaseSkip({ forge, github, pr, now });
+      if (skip) {
+        rebaseSkipped.push({ pr: pr.number, reason: skip });
+        continue;
+      }
       if (
         hasInFlightAgent(db, "merge-fix@1", {
           github,
@@ -595,8 +807,18 @@ function assemble({
       ) {
         continue;
       }
+      if (!pr.ticket) {
+        rebaseSkipped.push({ pr: pr.number, reason: "ticket_missing" });
+        continue;
+      }
       const item = rebaseFixItem(pr, hit, { forge, github });
-      if (item) fix.push(item);
+      if (!item) continue;
+      const suppressed = refusedMergeFixSuppressed(db, item, { github, now });
+      if (suppressed) {
+        rebaseSkipped.push({ pr: pr.number, reason: `refused_${suppressed}` });
+        continue;
+      }
+      fix.push(item);
       continue;
     }
     if (hit.verdict === "MERGE") mergeHits.push(hit);
@@ -637,6 +859,7 @@ function assemble({
       wrongBase,
       forceReview,
       planRequests,
+      rebaseSkipped,
     }),
   };
   const noopReason = noopReasonOf({
@@ -660,6 +883,7 @@ function summaryFor({
   wrongBase = [],
   forceReview,
   planRequests = [],
+  rebaseSkipped = [],
 }) {
   const bits = [];
   if (forceReview) bits.push(`selected scan of ${listedCount} PR(s)`);
@@ -673,6 +897,9 @@ function summaryFor({
   }
   bits.push(`${reviews.length} review(s) to run`);
   if (fix.length > 0) bits.push(`${fix.length} rebase fix(es)`);
+  for (const { pr, reason } of rebaseSkipped) {
+    bits.push(`rebase_skipped:${reason} #${pr}`);
+  }
   if (planRequests.length > 0) bits.push("MERGE hits queued for planning");
   if (plan.length > 0) bits.push(`lowest MERGE candidate is #${plan[0].pr}`);
   return bits.join("; ") + ".";

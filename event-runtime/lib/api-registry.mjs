@@ -52,6 +52,7 @@ export function agentsView(registry, { overrides = emptyOverrides() } = {}) {
       return {
         ref: def.ref,
         id: def.id,
+        pack: def.pack && def.pack !== "default" ? def.pack : null,
         version: def.version,
         outputContract: def.output_contract,
         workspace: def.workspace,

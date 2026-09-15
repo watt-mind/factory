@@ -86,6 +86,58 @@ export function githubWebhookSecret() {
   return process.env.FACTORY_GITHUB_WEBHOOK_SECRET || null;
 }
 
+// GitHub is normally active during the working day, but quiet stretches are
+// expected overnight and at weekends. Twelve hours catches a broken intake
+// during an active day (including this incident's 16-hour outage) without
+// paging for an ordinary short idle period. This is deliberately a process
+// counter: rejected deliveries are not admitted to the immutable event ledger
+// and must never be persisted there as if they were trusted events.
+export const GITHUB_INTAKE_STALE_AFTER_MS = 12 * 60 * 60 * 1000;
+let githubWebhookRejections = 0;
+
+/** Record a GitHub delivery refused before it can enter the event ledger. */
+export function recordGitHubWebhookRejection() {
+  githubWebhookRejections += 1;
+}
+
+/**
+ * Read-only GitHub intake observability for health and status projections.
+ * `lastAdmittedAt` comes from the durable admission ledger; rejected delivery
+ * totals are necessarily process-local because untrusted payloads are never
+ * persisted as events. Staleness requires a prior admission: a configured
+ * intake that has never admitted a delivery reports `lastAdmittedAt: null`
+ * and `stale: false`, so a freshly started runtime is not flagged as broken.
+ */
+export function githubIntakeView(
+  db,
+  {
+    nowMs = Date.now(),
+    configured = Boolean(githubWebhookSecret()),
+    staleAfterMs = GITHUB_INTAKE_STALE_AFTER_MS,
+  } = {},
+) {
+  const row = db
+    .query(
+      `SELECT MAX(admitted_at) AS last_admitted_at
+       FROM events WHERE source = 'github'`,
+    )
+    .get();
+  const lastAdmittedAt = row?.last_admitted_at ?? null;
+  const admittedMs = lastAdmittedAt ? Date.parse(lastAdmittedAt) : Number.NaN;
+  const ageMs = Number.isNaN(admittedMs)
+    ? null
+    : Math.max(0, nowMs - admittedMs);
+  const stale = configured && ageMs !== null && ageMs >= staleAfterMs;
+  return {
+    configured,
+    lastAdmittedAt,
+    ageMs,
+    rejected: githubWebhookRejections,
+    stale,
+    staleAfterMs,
+  };
+}
+
 /**
  * Verify GitHub's `X-Hub-Signature-256: sha256=<hex>` where <hex> is
  * HMAC-SHA256(secret, rawBody) — GitHub's scheme, which signs no timestamp.
@@ -128,9 +180,15 @@ const PR_ACTIONS = ["opened", "synchronize", "ready_for_review"];
 
 /** The repos.yaml entry whose `github` slug matches, or null when unconfigured. */
 function repoForSlug(repos, slug) {
-  if (typeof slug !== "string" || slug === "") return null;
+  if (typeof slug !== "string" || slug.trim() === "") return null;
+  const normalizedSlug = slug.trim().toLowerCase();
   for (const repo of repos.values()) {
-    if (repo.github === slug) return repo;
+    if (
+      typeof repo.github === "string" &&
+      repo.github.trim().toLowerCase() === normalizedSlug
+    ) {
+      return repo;
+    }
   }
   return null;
 }
@@ -144,7 +202,9 @@ function repoForSlug(repos, slug) {
  *                 (short name); `report_only` repos never yield it.
  *   workflow_run  completed + failure on a configured repo → the EXISTING
  *                 `github.workflow-run.failed` shape ci-log-capture consumes
- *                 ({repo: owner/name slug, runId}); report_only repos included.
+ *                 ({repo: owner/name slug, runId, runAttempt?}); report_only
+ *                 repos included. The attempt keeps a later re-run from
+ *                 replacing the failed attempt's capture target.
  *
  * eventId is GitHub's delivery GUID, so at-least-once delivery dedupes on the
  * (source, eventId) key like every other admission. Anything else is a typed
@@ -222,15 +282,28 @@ export function translateGitHubEvent({
     if (!repo) return { ok: false, ignored: true, reason: "unconfigured_repo" };
     if (run.id === undefined || run.id === null)
       return { ok: false, ignored: false, reason: "malformed_payload" };
+    // A malformed attempt is not a malformed event: the run id — the thing
+    // the capture actually needs — is intact, so drop the attempt and let
+    // ci-log-capture take its no-attempt fallback rather than losing the
+    // failure entirely.
+    const attempt =
+      Number.isInteger(run.run_attempt) && run.run_attempt >= 1
+        ? run.run_attempt
+        : null;
     return {
       ok: true,
       // The existing shape ci-log-capture@1 consumes: the GitHub slug, not the
-      // short name — see schemas/ci-log-capture.input.json.
+      // short name — see schemas/ci-log-capture.input.json. Including the
+      // webhook's attempt also makes each re-run a distinct input hash.
       envelope: {
         ...base,
         type: "github.workflow-run.failed",
         subject: "ci",
-        payload: { repo: slug, runId: run.id },
+        payload: {
+          repo: slug,
+          runId: run.id,
+          ...(attempt === null ? {} : { runAttempt: attempt }),
+        },
       },
     };
   }

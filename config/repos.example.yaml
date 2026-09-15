@@ -17,6 +17,7 @@ repos:
     # Linear — without it the choice is global and moving one moves all.
     # control_plane: github
     base: develop # Base branch for promotion PRs; defaults to main.
+    # handoff_host: factory-runner # Optional SSH alias for remote ticket handoff.
     deploy_branch: main # Optional human-reviewed release branch.
     worktree_up: bin/worktree-up.sh # Script that creates an isolated ticket worktree.
     worktree_down: bin/worktree-down.sh # Script that tears down an isolated worktree.
@@ -66,6 +67,8 @@ repos:
           requires:
             - dist/**
             - plugins/core/**
+            # Shared harness content must update its committed content pins.
+            - event-runtime/pins.json
       pin_manifests: # Pin manifests that must accompany matching path changes.
         - event-runtime/agents/*.json
       # Registry inputs change the tracked zero-pack digest baseline.
@@ -83,10 +86,78 @@ repos:
       required_checks:
         - Shadow runner fleet available
         - Verify
+    # Jobs that are red by design or by policy and must never raise an alarm
+    # (WM-1103). `factory ci-health` ignores them when it looks for the same job
+    # failing on consecutive pushes to `base`, and the ship pre-flight reads the
+    # same list for its "every non-advisory job is green" check. Names are the
+    # job names GitHub reports — for a job inside a called workflow that is
+    # "<calling job name> / <job name>". Matched exactly; omit for none.
+    # advisory_jobs:
+    #   - Security Scan (advisory)
+    # By default ci-health watches the same workflow merge_ci names (else "CI").
+    # Give the workflow's `name:` (as shown by `gh run list`), not its filename:
+    # ci-health matches run.workflowName, so `ci.yml` here would never match.
+    # Set this only when the trunk's verdict lives in a different workflow than
+    # the merge gate's.
+    # ci_health:
+    #   workflow: CI
     escalate_paths: [] # Paths that require human escalation; empty means none.
     security: # Optional allow-listed settings for the security audit.
       python_version: "3.12" # Optional Python version for the security audit.
 
+
+  # ---- release pre-flight and chain (WM-1104) ---------------------------
+  # Read by `factory ship-preflight --repo <name>` and `factory ship-chain`.
+  # Every key is optional; a repo without them still gets the base-CI,
+  # escalated-PR and bot-pin-PR checks. Shown on the commented example below
+  # rather than on a real deployment: the shape belongs in git, one machine's
+  # runner address and a client's prod hostname do not (docs/ship.md).
+  #
+  # - name: example
+  #   ...
+  #   deploy_branch: main
+  #   # CI jobs whose failure must not block a release — a reporting-only lane.
+  #   # A *skipped* job is never counted as a failure, so this is only for jobs
+  #   # that genuinely may go red without meaning anything.
+  #   advisory_jobs:
+  #     - Nightly perf report
+  #   # The publishers share one promotion lock, so dispatch at most one at a
+  #   # time and let the next round pick up the rest.
+  #   serial_publishers: true
+  #   # Optional read-only probe that must print exactly `clean`. A non-empty
+  #   # promotion journal means a publish transaction — possibly another
+  #   # repo's — is still open, and promoting over it strands the release.
+  #   ssh_probe: ssh <user>@<runner-host> 'test -z "$(ls -A /var/lib/runtime-promotion/active 2>/dev/null)" && echo clean || echo dirty'
+  #   # Run from the repo checkout once the deploy branch has deployed.
+  #   post_release_checks:
+  #     - curl -fsS https://<prod-host>/healthz
+  #   # The bot that opens pin PRs, when it is not app/watt-mind-factory.
+  #   pin_pr:
+  #     author: app/your-bot
+  #     title_prefix: "chore(runtime)"
+  #   runtime_roles:
+  #     # `paths` mirrors the publisher workflow's own `on.push.paths`: if one
+  #     # of them moved since the pinned commit, the pin is stale by the
+  #     # publisher's own definition, and the release would ship source the
+  #     # runtime image does not contain. It is REQUIRED for a role built in
+  #     # this repo — without it the check has no definition of stale and so
+  #     # can never fail, and a misspelled key would silently disable it.
+  #     - role: case_agent
+  #       manifest: config/runtime-images.json
+  #       publisher_workflow: case-agent-image.yml
+  #       paths:
+  #         - docker/agent/**
+  #         - .github/workflows/case-agent-image.yml
+  #     # A role built in another repository: its pinned commit is not in this
+  #     # history, so freshness is reported SKIP rather than answered wrongly.
+  #     # The SKIP still prints the pinned commit; add the optional
+  #     # `foreign_repo` (read-only) to also compare it with that repo's newest
+  #     # successful publisher run and WARN when the pin is behind.
+  #     - role: research_runner
+  #       manifest: config/runtime-images.json
+  #       publisher_workflow: research-runner-image.yml
+  #       source_repo: your-org/other-repo
+  #       foreign_repo: your-org/other-repo
 
   # Add product repositories only to your ignored config/repos.yaml. Start in
   # report-only mode until their isolated worktree lifecycle is proven.

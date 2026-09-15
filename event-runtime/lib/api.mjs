@@ -28,6 +28,7 @@ import { handleChainApiRoute } from "./api-chain.mjs";
 import { handleConfigApiRoute } from "./api-config.mjs";
 import { handleMetricsApiRoute } from "./api-metrics.mjs";
 import { handlePanelsApiRoute } from "./api-panels.mjs";
+import { createRepoApi } from "./api-repos.mjs";
 import { handleRegistryApiRoute } from "./api-registry.mjs";
 import {
   handleRunApiRoute,
@@ -68,6 +69,7 @@ import { loadRepos, reposRoot } from "./repos.mjs";
 import { scheduleView } from "./schedules.mjs";
 import { handleStatusApiRoute, workerCapacityView } from "./status-view.mjs";
 import { loadWorkerPolicy } from "./workers.mjs";
+import { loadLinearBudget } from "../../tools/ticket.mjs";
 
 export {
   isLoopbackHost,
@@ -124,6 +126,7 @@ function bearerAuthorized(authHeader, token) {
 export function createApi({
   db,
   registry,
+  registryRef,
   secret = webhookSecret(),
   githubSecret = githubWebhookSecret(),
   now = () => Date.now(),
@@ -154,18 +157,22 @@ export function createApi({
   buildArtifactReferenceIndex = artifactReferenceIndex,
   buildArtifactInventory = artifactInventory,
   getTickStats = null,
+  getLinearBudget = loadLinearBudget,
+  // Injectable so dispatcher tests can prove a route group receives a path.
+  registryApi = handleRegistryApiRoute,
 } = {}) {
   const actor = "operator";
-  const registryLoadedAt = new Date(now()).toISOString();
+  const staticRegistryLoadedAt = new Date(now()).toISOString();
+  // GET /artifacts snapshots the inventory for 10 s, so an out-of-band blob
+  // removal can remain listed until that snapshot expires.
   const storeStatsTtlMs = 10_000;
-  const composedInboxPlanner =
-    inboxPlanner ?? decisionEffectPlanner(registry, { onEvent, policyVersion });
   let cachedStoreStats = null;
   let cachedStoreStatsAt = 0;
   let cachedArtifactReferences = null;
   let cachedArtifactResultsRowid = null;
   let cachedArtifactInventory = null;
   let cachedArtifactInventoryAt = 0;
+  const repoApi = createRepoApi({ repos, db, configRoot });
 
   function getStoreStats(nowMs) {
     if (cachedStoreStats && nowMs - cachedStoreStatsAt < storeStatsTtlMs)
@@ -187,22 +194,38 @@ export function createApi({
     cachedArtifactInventoryAt = 0;
   }
 
+  function sameArtifactShaSet(previous, current) {
+    if (previous.length !== current.length) return false;
+    const seen = new Set(previous.map((entry) => entry.sha256));
+    return current.every((entry) => seen.has(entry.sha256));
+  }
+
   function getArtifactPage(options, nowMs) {
     const storeRoot = artifactsRoot(env?.home);
     const resultsRowid =
       db.query(`SELECT MAX(rowid) AS rowid FROM results`).get().rowid ?? 0;
     const resultsChanged = resultsRowid !== cachedArtifactResultsRowid;
-    if (resultsChanged) {
-      cachedArtifactReferences = buildArtifactReferenceIndex(db);
-      cachedArtifactResultsRowid = resultsRowid;
-    }
-    if (
+    const inventoryStale =
       resultsChanged ||
       !cachedArtifactInventory ||
-      nowMs - cachedArtifactInventoryAt >= storeStatsTtlMs
-    ) {
-      cachedArtifactInventory = buildArtifactInventory(storeRoot);
+      nowMs - cachedArtifactInventoryAt >= storeStatsTtlMs;
+    let inventoryChanged = false;
+    if (inventoryStale) {
+      const inventory = buildArtifactInventory(storeRoot);
+      // A TTL refresh that finds the same blob set leaves the reference
+      // index valid: only a changed sha set can add or drop references.
+      inventoryChanged =
+        !cachedArtifactInventory ||
+        !sameArtifactShaSet(cachedArtifactInventory, inventory);
+      cachedArtifactInventory = inventory;
       cachedArtifactInventoryAt = nowMs;
+    }
+    if (resultsChanged || inventoryChanged || !cachedArtifactReferences) {
+      cachedArtifactReferences = buildArtifactReferenceIndex(
+        db,
+        cachedArtifactInventory,
+      );
+      cachedArtifactResultsRowid = resultsRowid;
     }
     return listArtifactPage(db, storeRoot, {
       ...options,
@@ -237,6 +260,14 @@ export function createApi({
       }
 
       const nowMs = now();
+      // One coherent snapshot per request.  A swap between requests is
+      // visible immediately; a swap during a request cannot mix definitions.
+      const currentRegistry = registryRef?.current ?? registry;
+      const registryState = registryRef?.state?.() ?? {
+        loadedAt: staticRegistryLoadedAt,
+        stamp: null,
+        lastReloadError: null,
+      };
       const send = (status, body) => sendJson(res, status, body);
       const common = {
         route,
@@ -244,18 +275,20 @@ export function createApi({
         res,
         url,
         db,
-        registry,
+        registry: currentRegistry,
+        registryHealth: registryState,
         secret,
         githubSecret,
         policyVersion,
         env,
-        repos,
+        repos: repoApi.repos,
         workerPolicy,
         workerRunDir,
         nowMs,
         actor,
         onEvent,
         getTickStats,
+        getLinearBudget,
         send,
         readBody,
         parseJson,
@@ -291,7 +324,12 @@ export function createApi({
             const applyEffect = (effectDb, item, response) =>
               inboxApplyEffect(effectDb, item, response, {
                 linear: inboxLinear,
-                planner: composedInboxPlanner,
+                planner:
+                  inboxPlanner ??
+                  decisionEffectPlanner(currentRegistry, {
+                    onEvent,
+                    policyVersion,
+                  }),
                 now: nowMs,
               });
             if (decisionMatch[2] === "retry") {
@@ -350,7 +388,7 @@ export function createApi({
           ...common,
           root: configRoot,
           now: nowMs,
-          registryLoadedAt,
+          registryLoadedAt: registryState.loadedAt,
         });
       }
       if (route === "GET /memos") {
@@ -403,11 +441,11 @@ export function createApi({
             return send(status, body);
           }
           const loop = decodeURIComponent(triggerMatch[1]);
-          const schedule = scheduleView(db, registry, { now: nowMs }).find(
-            (item) => item.loop === loop,
-          );
+          const schedule = scheduleView(db, currentRegistry, {
+            now: nowMs,
+          }).find((item) => item.loop === loop);
           if (!schedule) return send(status, body);
-          const repo = registry.schedules?.[loop]?.payload?.repo;
+          const repo = currentRegistry.schedules?.[loop]?.payload?.repo;
           if (
             loop.startsWith("ship-") &&
             typeof repo === "string" &&
@@ -438,14 +476,19 @@ export function createApi({
         const result = handlePanelsApiRoute(common);
         if (result !== false) return result;
       }
+      if (url.pathname === "/repos" || url.pathname.startsWith("/repos/")) {
+        const result = await repoApi.handle(common);
+        if (result !== false) return result;
+      }
       if (
         url.pathname === "/agents" ||
         url.pathname === "/overrides" ||
         url.pathname.startsWith("/overrides/") ||
+        url.pathname.startsWith("/promotion/") ||
         url.pathname === "/repos" ||
         url.pathname.startsWith("/repos/")
       ) {
-        const result = await handleRegistryApiRoute({ ...common, janitor });
+        const result = await registryApi({ ...common, janitor });
         if (result !== false) return result;
       }
       if (

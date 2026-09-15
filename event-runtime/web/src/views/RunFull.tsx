@@ -23,9 +23,13 @@ import {
   RunFailureBanner,
   isCancellable,
 } from "../components/RunDetailBlocks";
-import { handleRunArtifactClick, toggleRunPin } from "./Runs";
+import {
+  RunHumanIdentity,
+  handleRunArtifactClick,
+  toggleRunPin,
+  type RunIdentityFields,
+} from "./Runs";
 import { AgentHoverCard } from "../components/AgentHoverCard";
-import { TicketText } from "../components/TicketHoverCard";
 import type { RunSummary } from "../types";
 import { formatDuration, formatRelative } from "../format";
 import { leaseRemaining } from "./Runs";
@@ -125,6 +129,12 @@ export function RunFull({
   // detail without its root run as unpopulated so every guarded d.run access
   // below stays on the loading/fallback path.
   const d = detail.data?.run ? detail.data : undefined;
+  const identity =
+    (d as (typeof d & { identity?: RunIdentityFields }) | undefined)
+      ?.identity ??
+    (listRow as (RunSummary & RunIdentityFields) | null) ??
+    undefined;
+  const identityAgent = d?.run.spec.agent ?? listRow?.agent ?? "run";
   const attemptsExhausted = d
     ? d.run.attempts >= d.run.spec.maxAttempts
     : false;
@@ -430,23 +440,24 @@ export function RunFull({
                 <li aria-hidden="true" className="shrink-0 text-(--text-faint)">
                   /
                 </li>
-                <li
-                  className="flex min-w-0 items-center gap-2"
-                  aria-current="page"
-                >
-                  {(d?.run.state || listRow?.state) && (
-                    <StateBadge state={d?.run.state ?? listRow!.state} />
-                  )}
-                  <span
-                    className="display min-w-0 truncate text-[15px] font-semibold text-(--text)"
-                    title={d?.subject ? `${d.subject} · ${runId}` : runId}
+                <li className="min-w-0" aria-current="page">
+                  <div
+                    aria-label="Run identity"
+                    className="display min-w-0 text-[15px] text-(--text)"
                   >
-                    {d?.subject ? (
-                      <TicketText text={d.subject} />
-                    ) : (
-                      <span className="mono">{shortId(runId)}</span>
+                    <RunHumanIdentity
+                      agent={identityAgent}
+                      identity={identity}
+                    />
+                  </div>
+                  <div className="mt-1 flex min-w-0 items-center gap-2 text-[12px]">
+                    {(d?.run.state || listRow?.state) && (
+                      <StateBadge state={d?.run.state ?? listRow!.state} />
                     )}
-                  </span>
+                    <span className="mono text-(--text-dim)" title={runId}>
+                      {shortId(runId)}
+                    </span>
+                  </div>
                 </li>
               </ol>
             </nav>

@@ -37,7 +37,7 @@ tracker the factory cannot reach must never be silently read as "no tickets".
 
 | Protocol     | GitHub                                                                                        |
 | :----------- | :-------------------------------------------------------------------------------------------- |
-| `identifier` | `owner/repo#42`                                                                               |
+| `identifier` | `owner/repo#42` or `configured-repo-name#42`                                                  |
 | `team`       | Repository, via `controlPlane.github.teams` (or a key that already looks like `owner/name`)   |
 | `labels`     | Issue labels of the **same spelling**. Writes send the complete resulting set, never a delta. |
 | `assignee`   | Issue assignee. `claim` assigns the `gh` viewer, then **reads the assignee back**.            |
@@ -114,6 +114,7 @@ them to native labels of the same spelling.
 | `ai:needs-review` | PR is up; merge stage owns it.                                                        |
 | `ai:blocked`      | Waiting on a human.                                                                   |
 | `ai:escalated`    | Security-relevant (or intent-changing) diff; a human must merge.                      |
+| `ai:landing`      | An external lander owns the branch; merge-scan must not rebase it.                    |
 | `agent:<harness>` | Which harness holds the claim. CLI `claude` maps to `agent:claude-code`.              |
 | `type:*`          | `bug` `feature` `ui-ux` `security` `performance` `maintenance` `docs` `a11y`          |
 | `source:*`        | `agent` `human` `sentry` `client-support`                                             |
@@ -175,6 +176,19 @@ A ticket missing a load-bearing section (`Owned Paths` or `Verification
 Command`) is demoted to `Triage`; do not dispatch it. `factory label-guard`
 checks those two mechanically.
 
+When a §5 heading is duplicated (the usual cause: a respec appended with
+`ticket detail`), every reader **unions** the matching blocks in document
+order — dispatch, handoff verification, and the template guard alike, so they
+can never disagree about which copy counts. `Owned Paths` becomes the
+deduplicated union of all blocks (first occurrence keeps its position), so an
+appended respec widens scope to cover the old and the new block and is never
+silently narrower than either. `Verification Command` becomes the distinct
+commands joined with `&&` — all of them must pass. A first-match win is
+deliberately not what happens. `factory ticket detail ISSUE -- "..."` appends
+an idempotent detail block; use `factory ticket detail ISSUE --replace -- "..."`
+to replace the complete description when re-specifying a ticket, which is the
+only way to make a stale block stop counting.
+
 ## 6. Bundles
 
 Bundling several tickets into one worktree is the **human's** call, never
@@ -218,6 +232,10 @@ open) and at least every 20 minutes, saying what changed. After 45 minutes
 of silence the ticket is reclaimed.
 
 **Verification is a gate.** Run the ticket's exact Verification Command.
+When a handoff changes `event-runtime/lib/**`, the worker also runs
+`bun test event-runtime/lib --timeout 20000` unless that exact lib suite (or
+an explicit parent suite) is already covered by the ticket command. Narrow
+single-file commands are therefore still safe to use for ticket verification.
 For a ticket that changes `event-runtime/web/src/**`, run
 `cd event-runtime/web && bun x tsc --noEmit` before the ticket command as
 well (the root `bun run check` runs it too, once `event-runtime/web` has had
@@ -225,6 +243,24 @@ well (the root `bun run check` runs it too, once `event-runtime/web` has had
 `bun x` to `bunx`; the handoff sandbox provides both spellings for existing
 ticket commands. Never advance state, open a PR, or report success on
 failing output. Never weaken a test to get green.
+
+### Sandboxed verify smoke
+
+CI's **Sandboxed verify smoke** job runs the factory `verify:` command through
+`runHandoffVerifySmoke` → `runHandoffCommand`, the same production seam the
+worker uses before accepting a dispatch handoff. It is merge-blocking via
+`Verify`, unlike the explicitly non-blocking **Timing-bound tests** quarantine
+lane. The job prints the sandbox facts — scrubbed environment, `HOME=/tmp/home`,
+worktree mounted at `/workspace`, and namespaces — before the command output.
+
+Therefore **host/CI green + sandbox red is a hermeticity bug, not a branch
+bug**. First inspect tests that read ambient homes or an operator checkout.
+Use `event-runtime/lib/worker-test-helpers.mjs` helpers such as
+`dispatchConfigSnapshot()` to point registry-dependent tests at the checkout
+under test, and use the repository's test-home helpers instead of inheriting
+`FACTORY_EVENT_HOME`. Do not add an unsandboxed fallback or weaken the smoke;
+if a timing-only flake needs quarantine, document its visible non-blocking
+policy in `.github/workflows/ci.yml`.
 
 **Mandatory `## Handoff` comment** before moving to `In Review`:
 
@@ -291,7 +327,7 @@ Every verb returns this object (or a list of them). Labels are a flat array
 | `listComments(id)`                                 | Comments as `{ id?, body, createdAt?, user }`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `listDispatchable({ team, project? })`             | `Todo` + `ai:agent-ready` + unassigned. This **is** the dispatcher's predicate; do not rephrase it at a call site.                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `claim(id, { harness? })`                          | Move to `In Progress`, assign the viewer, drop `ai:agent-ready`, add `ai:in-progress` + `agent:<harness>`. Then **read the assignee back**. `{ ok: false }` means another actor won the race — not an exception. Linear has no compare-and-swap; this advisory read-back detects the common case, and every adapter must perform and honour it. The authoritative dispatch lock is the per-repository lock at `~/.factory/locks/<repo>.dispatch.lock`, shared by supervisors to serialize the claim window (the mechanism shipped in #928 for #877). |
-| `comment(id, body)`                                | Create a comment. `FACTORY_RUN_ID` is stamped as `run:<id>` when set.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `comment(id, body)`                                | Create a comment. It is unchanged by default; when `FACTORY_COMMENT_ATTRIBUTION=1` and `FACTORY_RUN_ID` is set, it is stamped as `run:<id>`.                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `transition(id, state, { add, remove, unassign })` | Move to a named state and/or change labels. Unknown state → error listing the ones that exist.                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `setLabels(id, { add, remove })`                   | Compute the **complete** resulting label set and write that. Passing only the labels you want added is how every other label on the ticket disappears.                                                                                                                                                                                                                                                                                                                                                                                               |
 | `file({ team, title, body?, labels?, state? })`    | Create a ticket. Default state `Triage`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
@@ -355,8 +391,11 @@ and its `claim` verb performs the advisory read-back. The authoritative
 concurrency control is the per-repository dispatch lock described in §7.
 
 ```bash
-# Read a ticket.
+# Read a ticket. GitHub Issues accept either the full slug or the configured
+# repository name; both spellings resolve to the full `owner/repo#N` form.
 factory ticket get CLNT-616
+factory ticket get watt-mind/factory#123
+factory ticket get factory#123
 # List its comments.
 factory ticket comments CLNT-616
 # Atomically claim a dispatchable ticket (`--agent` selects the harness).
@@ -369,15 +408,22 @@ factory ticket comment CLNT-616 "..."
 factory ticket triage CLNT-616 --comment "..."
 # Record an answer and return a blocked ticket to Todo when applicable.
 factory ticket answer CLNT-616 "..."
-# Append idempotent Markdown detail to a ticket.
+# Append idempotent Markdown detail to a ticket (the default never replaces).
 factory ticket detail CLNT-616 -- "..."
+# Replace the complete description when re-specifying a ticket.
+factory ticket detail CLNT-616 --replace -- "..."
 # Read or mutate labels (`label` is an alias for `labels`).
 factory ticket labels CLNT-616 --add ai:needs-review --remove ai:in-progress
 factory ticket label CLNT-616
 # Change state and/or labels, optionally with a comment.
 factory ticket state CLNT-616 "In Review" --add ai:needs-review
-# File a new Triage or Todo ticket.
+# File a new Triage or Todo ticket. `--from owner/repo#N` routes a dispatched
+# workspace to that repository's control plane (no `--team` needed on GitHub);
+# a Linear id such as `--from CLNT-616` names no repository, so it falls
+# through to cwd and then to the default plane, where `--team` is required.
+# With neither flag nor a resolvable cwd, `file` refuses instead of guessing.
 factory ticket file --team CLNT --title "..." --body "..." --type bug
+factory ticket file --from owner/repo#123 --title "..." --body "..." --type bug
 # List In Progress tickets for Owned Paths collision checks.
 factory ticket inflight --team CLNT --project "BJ29 Coaching"
 # List dispatchable tickets for a team or configured repo.
@@ -391,7 +437,15 @@ factory ticket raw '<query>' --var key=value
 `claim` exits non-zero when another agent won the race — that is not a
 retry. For anything the verbs do not cover, `raw '<query>' --var k=v`
 beats inventing a new flag. Fallback when the CLI is missing:
-`bun "$FACTORY_ROOT/tools/linear.mjs"`.
+`bun "$FACTORY_ROOT/tools/ticket.mjs"`.
+
+### GitHub CLI timeout
+
+The GitHub forge bounds every synchronous `gh` invocation with
+`FACTORY_GH_TIMEOUT_MS`, in milliseconds. It defaults to `30000`; set it to a
+positive integer to override that default. Invalid values emit a warning and
+use `30000` so a malformed environment never leaves a forge caller blocked
+indefinitely. Individual forge calls may still supply their own `timeout`.
 
 ## 14. Loops
 

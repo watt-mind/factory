@@ -1,0 +1,24 @@
+{
+  "id": "review",
+  "version": 1,
+  "prompt": "agents/review.md",
+  "input_schema": "schemas/review.input.json",
+  "output_schema": "schemas/review.output.json",
+  "output_contract": "factory.editorial-review/v1",
+  "model_tier": "strong",
+  "effort": "high",
+  "workspace": { "type": "ephemeral", "retainOnFailure": true },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": [],
+    "cells": [
+      {
+        "binding": "ARTICLE_CELL",
+        "access": "read-write",
+        "description": "Article reviews and quality verdicts"
+      }
+    ]
+  },
+  "limits": { "timeout_seconds": 180, "attempts": 1 },
+  "mutating": false
+}

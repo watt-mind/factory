@@ -11,7 +11,7 @@
 #   factory tail                 # tail all live logs (serve.log, worker.log, web.log)
 #   factory tail worker          # tail a specific daemon log
 #   factory logs rotate          # rotate oversized daemon logs now
-#   factory status               # report total bytes held by daemon logs (+ archives)
+#   factory status               # report control API and registry health plus log bytes
 #
 # Log rotation knobs (read by `up`, `logs rotate`, and the web supervisor tick):
 #   FACTORY_LOG_ROTATE_BYTES     # rotate a daemon log once it exceeds this many
@@ -21,11 +21,27 @@
 #                                # (<log>.1 .. <log>.N); default 3, minimum 1
 #   FACTORY_LOG_ROTATE_INTERVAL  # seconds between size checks while the stack is
 #                                # up (web supervisor tick); default 300
+#   FACTORY_API_READY_TIMEOUT    # seconds `up` waits for the runtime /health
+#                                # endpoint before tearing its daemons down;
+#                                # default 60
+#   FACTORY_WORKER_READY_TIMEOUT # seconds `up` confirms a newly started worker
+#                                # (and pool supervisor, when configured) stays
+#                                # alive before declaring the stack ready;
+#                                # default 5
+#   FACTORY_POOL_DRAIN_TIMEOUT   # seconds `down` lets a supervised worker pool
+#                                # drain before ordinary teardown; default 180
+#   FACTORY_WEB_SUPERVISOR_INTERVAL  # seconds between web supervisor ticks;
+#                                   # default 1 (positive decimals allowed)
 #
-set -euo pipefail
+# -E: `up` installs an ERR trap that tears down the daemons it started. Without
+# errexit-trace the trap is not inherited by functions or command substitutions,
+# so a `set -e` abort inside ensure_deps/spawn_daemon_tracked would exit the
+# shell with the trap never having fired.
+set -eEuo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/worktree-common.sh"
 
+# >>> up-pidfile-tracking
 # `up` can start several detached daemons before an endpoint health check
 # proves the stack is usable. Keep this invocation's pidfiles separate from
 # pre-existing daemons: an error must clean up what we started, but never tear
@@ -75,6 +91,25 @@ track_up_pidfile() { # <label> <pidfile>
   UP_STARTED_LABELS+=("$label")
 }
 
+untrack_up_pidfile() { # <pidfile>
+  local target="$1" i
+  local kept_pidfiles=() kept_labels=()
+  [[ ${#UP_STARTED_PIDFILES[@]} -gt 0 ]] || return 0
+  for i in "${!UP_STARTED_PIDFILES[@]}"; do
+    [[ "${UP_STARTED_PIDFILES[$i]}" == "$target" ]] && continue
+    kept_pidfiles+=("${UP_STARTED_PIDFILES[$i]}")
+    kept_labels+=("${UP_STARTED_LABELS[$i]}")
+  done
+  if [[ ${#kept_pidfiles[@]} -gt 0 ]]; then
+    UP_STARTED_PIDFILES=("${kept_pidfiles[@]}")
+    UP_STARTED_LABELS=("${kept_labels[@]}")
+  else
+    UP_STARTED_PIDFILES=()
+    UP_STARTED_LABELS=()
+  fi
+}
+# <<< up-pidfile-tracking
+
 track_up_pool_pidfiles() {
   local pidfile label
   for pidfile in "$RUN_DIR/supervisor.pid" "$RUN_DIR"/worker-[0-9]*.pid; do
@@ -122,6 +157,21 @@ cleanup_up_daemons() {
   UP_STARTED_LABELS=()
 }
 
+cleanup_up_daemons_on_signal() {
+  # Disable the traps before teardown: cleanup itself awaits processes and must
+  # not recursively re-enter if another signal arrives while it is doing so.
+  trap - INT TERM ERR
+  cleanup_up_daemons
+  exit 130
+}
+
+cleanup_up_daemons_on_error() {
+  local status=$?
+  trap - INT TERM ERR
+  cleanup_up_daemons
+  exit "$status"
+}
+
 die() {
   cleanup_up_daemons
   printf '\033[31merror:\033[0m %s\n' "$*" >&2
@@ -154,6 +204,51 @@ LOG_ROTATE_BYTES="${FACTORY_LOG_ROTATE_BYTES:-52428800}"
 LOG_KEEP="${FACTORY_LOG_KEEP:-3}"
 LOG_ROTATE_INTERVAL="${FACTORY_LOG_ROTATE_INTERVAL:-300}"
 LOG_ROTATE_MIN_BYTES=1048576
+API_READY_TIMEOUT="${FACTORY_API_READY_TIMEOUT:-60}"
+WORKER_READY_TIMEOUT="${FACTORY_WORKER_READY_TIMEOUT:-5}"
+POOL_DRAIN_TIMEOUT="${FACTORY_POOL_DRAIN_TIMEOUT:-180}"
+WEB_SUPERVISOR_INTERVAL="${FACTORY_WEB_SUPERVISOR_INTERVAL:-1}"
+
+# These values feed shell arithmetic and sleep below. Validate them before an
+# action can snapshot, spawn, or signal a daemon so malformed environment
+# overrides leave an existing stack untouched.
+# The three timeouts accept 0 (an immediate deadline: no wait, then the usual
+# teardown / fall-through); the supervisor interval must stay positive because
+# it is the sleep between ticks.
+validate_timing_knobs() {
+  [[ "$POOL_DRAIN_TIMEOUT" =~ ^(0|[1-9][0-9]*)$ ]] ||
+    die "FACTORY_POOL_DRAIN_TIMEOUT must be a non-negative integer"
+  [[ "$API_READY_TIMEOUT" =~ ^(0|[1-9][0-9]*)$ ]] ||
+    die "FACTORY_API_READY_TIMEOUT must be a non-negative integer"
+  [[ "$WORKER_READY_TIMEOUT" =~ ^(0|[1-9][0-9]*)$ ]] ||
+    die "FACTORY_WORKER_READY_TIMEOUT must be a non-negative integer"
+  [[ "$WEB_SUPERVISOR_INTERVAL" =~ ^([1-9][0-9]*(\.[0-9]+)?|0\.[0-9]*[1-9][0-9]*)$ ]] ||
+    die "FACTORY_WEB_SUPERVISOR_INTERVAL must be a positive number"
+}
+
+print_health_status() {
+  local health health_lines
+  if ! health="$(curl -sf -m 3 "http://127.0.0.1:$API_PORT/health" 2>/dev/null)"; then
+    printf 'control API: unreachable on :%s\n' "$API_PORT"
+    return 0
+  fi
+  if ! health_lines="$(printf '%s' "$health" | bun -e '
+const health = JSON.parse(await Bun.stdin.text());
+const registry = health?.registry;
+const compact = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+console.log("control API: reachable");
+console.log(`registry: stamp ${registry?.stamp ?? "unknown"}; loaded ${registry?.loadedAt ?? "unknown"}`);
+console.log(`registry reload: ${registry?.lastReloadError?.message ? compact(registry.lastReloadError.message) : "none"}`);
+if (Object.hasOwn(health ?? {}, "planner")) {
+  const planner = health.planner;
+  console.log(`planner: last success ${planner?.lastSuccessAt ?? planner?.lastPlannedAt ?? planner?.lastPlanAt ?? planner?.lastCompletedAt ?? planner?.lastRunAt ?? planner?.lastAt ?? "unknown"}`);
+}
+' 2>/dev/null)"; then
+    printf 'control API: invalid health response on :%s\n' "$API_PORT"
+    return 0
+  fi
+  printf '%s\n' "$health_lines"
+}
 
 # Reject knob values before anything touches a log. A threshold below 1 MiB
 # would rotate on nearly every tick (and lose the log's recent tail every time);
@@ -175,10 +270,124 @@ rotate_stack_logs() {
   rotate_run_logs "$RUN_DIR" "$LOG_ROTATE_BYTES" "$LOG_KEEP"
 }
 
-# `up` creates these itself once `--dry-run` has had its chance to exit: a dry
-# run must leave no trace on disk.
-if [[ "$ACTION" != "up" ]]; then mkdir -p "$RUN_DIR" "$HOME_DIR"; fi
+worker_startup_failed() { # <message>
+  warn "worker startup failed; tail of $RUN_DIR/worker.log:"
+  tail -n 50 "$RUN_DIR/worker.log" >&2 || true
+  die "$1 — check logs at $RUN_DIR/worker.log"
+}
+
+wait_for_worker_ready() {
+  local started
+  started=$SECONDS
+  while true; do
+    if ! pid_alive "$RUN_DIR/worker.pid"; then
+      worker_startup_failed "worker exited during startup"
+    fi
+    if [[ "$POOL" -eq 1 ]] && ! pid_alive "$RUN_DIR/supervisor.pid"; then
+      if (( SECONDS - started >= WORKER_READY_TIMEOUT )); then
+        worker_startup_failed "worker pool supervisor did not start within ${WORKER_READY_TIMEOUT}s"
+      fi
+    elif (( SECONDS - started >= WORKER_READY_TIMEOUT )); then
+      return 0
+    fi
+    sleep 0.1
+  done
+}
+
+# Validate before actions touch disk or daemon lifecycle state. `up` validates
+# after its option parsing (so `--help` still prints on a malformed knob) and
+# creates these itself once `--dry-run` has had its chance to exit.
+if [[ "$ACTION" != "up" ]]; then
+  validate_timing_knobs
+  mkdir -p "$RUN_DIR" "$HOME_DIR"
+fi
 REPO="$(repo_root)"
+
+gh_app_release_root() {
+  if [[ -n "${FACTORY_HOME:-}" ]]; then
+    printf '%s\n' "${FACTORY_HOME%/}/releases"
+  elif [[ "${FACTORY_ROOT:-}" == */releases/* ]]; then
+    printf '%s\n' "${FACTORY_ROOT%%/releases/*}/releases"
+  elif [[ "$REPO" == */releases/* ]]; then
+    printf '%s\n' "${REPO%%/releases/*}/releases"
+  fi
+}
+
+gh_app_daemon_command_matches() { # <ps command>
+  local command="$1" script release_root relative release_id
+  [[ "$command" =~ ^([^[:space:]]*/)?bun[[:space:]]+([^[:space:]]+)[[:space:]]+--daemon(-held)?$ ]] \
+    || return 1
+  script="${BASH_REMATCH[2]}"
+  [[ "$script" == "$REPO/lib/control-plane/gh-app-auth.mjs" ]] && return 0
+
+  release_root="$(gh_app_release_root)"
+  [[ -n "$release_root" && "$script" == "$release_root/"* ]] || return 1
+  relative="${script#"$release_root/"}"
+  release_id="${relative%%/*}"
+  [[ -n "$release_id" && "$release_id" != "$relative" \
+    && "$relative" == "$release_id/lib/control-plane/gh-app-auth.mjs" ]]
+}
+
+gh_app_lock_file() {
+  printf '%s.lock\n' "${FACTORY_GH_APP_TOKEN_FILE:-$HOME/.factory/gh-app-token.json}"
+}
+
+gh_app_daemon_pid_is_valid() { # <pid>
+  local pid="$1" command owner
+  [[ "$pid" =~ ^[0-9]+$ && "$pid" -ne $$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  gh_app_daemon_command_matches "$command" || return 1
+  owner="$(cat "$(gh_app_lock_file)" 2>/dev/null || true)"
+  [[ "$owner" == "$pid" ]]
+}
+
+gh_app_daemon_pid() {
+  local pid command processes
+  processes="$(ps -axo pid=,command= 2>/dev/null || true)"
+  while read -r pid command; do
+    if gh_app_daemon_command_matches "$command" \
+      && gh_app_daemon_pid_is_valid "$pid"; then
+      printf '%s\n' "$pid"
+      return 0
+    fi
+  done <<<"$processes"
+  return 1
+}
+
+adopt_gh_app_daemon() { # <pid>
+  local pid="$1"
+  gh_app_daemon_pid_is_valid "$pid" || return 1
+  printf '%s\n' "$pid" >"$RUN_DIR/gh-app-auth.pid"
+  info "GitHub App token daemon already running (adopted pid $pid)"
+}
+
+wait_for_started_gh_app_daemon() { # <spawned pid>
+  local started_pid="$1" owner winner _
+  for _ in {1..50}; do
+    owner="$(cat "$(gh_app_lock_file)" 2>/dev/null || true)"
+    if [[ "$owner" == "$started_pid" ]] \
+      && pid_alive "$RUN_DIR/gh-app-auth.pid"; then
+      return 0
+    fi
+    # Wrapper still alive: lock file now names the --daemon-held grandchild
+    # that actually holds flock. Rewrite the pidfile so down/cleanup signal
+    # the lock owner, but keep tracking so a later up-failure still stops it.
+    if pid_alive "$RUN_DIR/gh-app-auth.pid" \
+      && [[ "$owner" =~ ^[0-9]+$ ]] \
+      && gh_app_daemon_pid_is_valid "$owner"; then
+      printf '%s\n' "$owner" >"$RUN_DIR/gh-app-auth.pid"
+      return 0
+    fi
+    if winner="$(gh_app_daemon_pid)"; then
+      untrack_up_pidfile "$RUN_DIR/gh-app-auth.pid"
+      rm -f "$RUN_DIR/gh-app-auth.pid"
+      adopt_gh_app_daemon "$winner" && return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
 
 elapsed_seconds() {
   local elapsed="${1//[[:space:]]/}" days=0 rest hours=0 minutes=0 seconds=0
@@ -336,6 +545,7 @@ case "$ACTION" in
       esac
       shift
     done
+    validate_timing_knobs
 
     # A supervised pool and --dev both want to own the worker slot, and they
     # want it for different reasons (scale vs. reload). Saying so beats silently
@@ -418,6 +628,13 @@ case "$ACTION" in
     # Record what was already running before this invocation starts anything,
     # so a failed `up` can tell its own daemons from the operator's.
     snapshot_up_pidfiles
+    # From here until the ready banner, this invocation may own detached
+    # daemons. Always remove only those daemons if an interrupt or an unchecked
+    # command failure exits the shell early.
+    trap 'cleanup_up_daemons_on_signal' INT TERM
+    trap 'cleanup_up_daemons_on_error' ERR
+
+    command -v curl >/dev/null 2>&1 || die "curl not found — install curl before running factory up"
 
     # Dependency freshness (WM-312). A runtime dependency added to the repo does
     # not exist on the running stack until someone remembers `bun install` after
@@ -521,6 +738,8 @@ case "$ACTION" in
     if [[ -n "${FACTORY_GH_APP_ID:-}" && -n "${FACTORY_GH_APP_PRIVATE_KEY_PATH:-}" ]]; then
       if pid_alive "$RUN_DIR/gh-app-auth.pid"; then
         info "GitHub App token daemon already running (pid $(cat "$RUN_DIR/gh-app-auth.pid"))"
+      elif GH_APP_DAEMON_PID="$(gh_app_daemon_pid)"; then
+        adopt_gh_app_daemon "$GH_APP_DAEMON_PID"
       else
         info "minting initial GitHub App installation token"
         if ! (cd "$REPO" && bun "$REPO/lib/control-plane/gh-app-auth.mjs" >>"$RUN_DIR/gh-app-auth.log" 2>&1); then
@@ -529,6 +748,9 @@ case "$ACTION" in
         info "starting GitHub App token-refresh daemon"
         spawn_daemon_tracked "GitHub App token daemon" "$RUN_DIR/gh-app-auth.pid" "$RUN_DIR/gh-app-auth.log" "$REPO" \
           bun "$REPO/lib/control-plane/gh-app-auth.mjs" --daemon
+        GH_APP_STARTED_PID="$(cat "$RUN_DIR/gh-app-auth.pid")"
+        wait_for_started_gh_app_daemon "$GH_APP_STARTED_PID" \
+          || die "GitHub App token daemon exited during startup without an adoptable lock owner"
       fi
     fi
 
@@ -542,13 +764,24 @@ case "$ACTION" in
         bun "$REPO/event-runtime/cli.mjs" "${SERVE_ARGS[@]}"
     fi
 
-    # 2. Wait for API to respond
-    for i in $(seq 30); do
-      if curl -sf -m 1 "http://127.0.0.1:$API_PORT/health" >/dev/null 2>&1; then break; fi
+    # 2. Wait for API to respond. The budget is wall-clock, not an attempt
+    # count: a connection-refused curl returns instantly, while a bound socket
+    # whose /health stalls eats the full `-m 1` per attempt — counting attempts
+    # would make the latter wait ~10x longer than the former.
+    API_READY=0
+    API_WAIT_STARTED=$SECONDS
+    while (( SECONDS - API_WAIT_STARTED < API_READY_TIMEOUT )); do
+      if curl -sf -m 1 "http://127.0.0.1:$API_PORT/health" >/dev/null 2>&1; then
+        API_READY=1
+        break
+      fi
+      if ! pid_alive "$RUN_DIR/serve.pid"; then
+        die "event runtime exited before becoming healthy on $API_PORT — check logs at $RUN_DIR/serve.log"
+      fi
       sleep 0.1
     done
-    if ! curl -sf -m 1 "http://127.0.0.1:$API_PORT/health" >/dev/null 2>&1; then
-      die "event runtime failed to start on $API_PORT — check logs at $RUN_DIR/serve.log"
+    if [[ "$API_READY" -ne 1 ]]; then
+      die "event runtime failed to start on $API_PORT within ${API_READY_TIMEOUT}s — check logs at $RUN_DIR/serve.log"
     fi
 
     # 3. Start or verify worker
@@ -563,6 +796,7 @@ case "$ACTION" in
       spawn_daemon_tracked "worker" "$RUN_DIR/worker.pid" "$RUN_DIR/worker.log" "$REPO" \
         env FACTORY_EVENT_HOME="$HOME_DIR" FACTORY_EVENT_PORT="$API_PORT" \
         "${WORKER_ARGS[@]}"
+      wait_for_worker_ready
     fi
 
     # 4. Start or verify web server
@@ -635,6 +869,7 @@ case "$ACTION" in
     printf '  status:  factory events status\n'
     printf '  tail:    factory tail\n'
     printf '  down:    factory down\n\n'
+    trap - INT TERM ERR
     ;;
 
   __supervise-web)
@@ -700,7 +935,7 @@ case "$ACTION" in
         rotate_stack_logs
         LOG_ROTATE_CHECKED=$(date +%s)
       fi
-      sleep "${FACTORY_WEB_SUPERVISOR_INTERVAL:-1}"
+      sleep "$WEB_SUPERVISOR_INTERVAL"
     done
     printf '%s [web-supervisor] event runtime stopped; supervisor exiting\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     ;;
@@ -753,7 +988,7 @@ case "$ACTION" in
     # patience; past it we fall through to the ordinary teardown, which is the
     # operator's "stop now" and says so.
     if [[ -f "$RUN_DIR/supervisor.pid" ]] && pid_alive "$RUN_DIR/worker.pid"; then
-      POOL_WAIT="${FACTORY_POOL_DRAIN_TIMEOUT:-180}"
+      POOL_WAIT="$POOL_DRAIN_TIMEOUT"
       info "draining worker pool (up to ${POOL_WAIT}s — runs in flight finish first)"
       term_daemon "$RUN_DIR/worker.pid" "worker pool supervisor"
       DEADLINE=$(( $(date +%s) + POOL_WAIT ))
@@ -822,6 +1057,7 @@ case "$ACTION" in
     ;;
 
   status)
+    print_health_status
     printf 'total log bytes: %s\n' "$(run_log_total_bytes "$RUN_DIR")"
     ;;
 

@@ -56,6 +56,7 @@ export type GraphNode = (
       capabilities: string[];
       actions: string[];
       hosts: string[];
+      pack?: string | null;
       activeRuns?: Array<{ state: string; count: number }>;
     }
   | { id: string; kind: "terminal"; label: string; reason: string }
@@ -357,6 +358,7 @@ export function buildCapabilityGraph(
       capabilities: def.capabilities?.services ?? [],
       actions: def.actionRegistry ? Object.keys(def.actionRegistry) : [],
       hosts: def.hosts ?? [],
+      pack: def.pack ?? null,
       activeRuns,
     });
   }

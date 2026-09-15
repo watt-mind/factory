@@ -178,6 +178,49 @@ describe("formatValue", () => {
     });
   });
 
+  test("url arrays link stored artifact identifiers and preserve legacy evidence", () => {
+    const sha256 = "a".repeat(64);
+    expect(
+      formatValue(
+        [
+          `sha256:${sha256}`,
+          `file:///var/lib/factory/artifacts/${sha256}`,
+          "http://127.0.0.1:7497/runs",
+        ],
+        "url",
+      ),
+    ).toEqual({
+      kind: "links",
+      items: [
+        { text: `sha256:${sha256}`, href: `#/artifacts/${sha256}` },
+        {
+          text: `file:///var/lib/factory/artifacts/${sha256}`,
+          href: `#/artifacts/${sha256}`,
+        },
+        { text: "http://127.0.0.1:7497/runs", href: null },
+      ],
+    });
+    expect(formatValue([], "url")).toEqual({ kind: "empty" });
+  });
+
+  test("url arrays never leave an undefined-typed element (empty li, bad key)", () => {
+    const items = (
+      formatValue([undefined, { note: "not a string" }], "url") as {
+        kind: "links";
+        items: Array<{ text: string; href: string | null }>;
+      }
+    ).items;
+    expect(items).toHaveLength(2);
+    for (const item of items) {
+      expect(typeof item.text).toBe("string");
+      expect(item.text.length).toBeGreaterThan(0);
+    }
+    expect(items[1]).toEqual({
+      text: '{"note":"not a string"}',
+      href: null,
+    });
+  });
+
   test("no format: prose is proportional, identifiers and numbers are mono, nested values are json, absent is empty", () => {
     expect(formatValue("Scope unclear.")).toEqual({
       kind: "text",

@@ -9,6 +9,7 @@ import {
   fail,
   handoffErrorBody,
   printReceipt,
+  resolveHandoffHost,
   resolveHandoffRepo,
   sendHandoff,
   validateHandoffRequest,
@@ -87,6 +88,113 @@ describe("strict handoff request", () => {
     expect(() =>
       resolveHandoffRepo({ repos, cwd: "/tmp", repo: "missing" }),
     ).toThrow(/unconfigured repo/);
+  });
+});
+
+describe("handoff SSH host resolution", () => {
+  const home = "/home/operator";
+  const root = "/factory";
+  const filesFor = () =>
+    new Map([
+      [
+        "/factory/config/repos.yaml",
+        "repos:\n  - name: factory\n    handoff_host: repo-runner\n",
+      ],
+      ["/factory/config/policy.yaml", "handoff:\n  host: policy-runner\n"],
+      [
+        "/home/operator/.factory/config.json",
+        JSON.stringify({ handoff: { host: "config-runner" } }),
+      ],
+      [
+        "/home/operator/.factory/handoff.json",
+        JSON.stringify({ host: "handoff-runner" }),
+      ],
+      [
+        "/home/operator/.factory/secrets.env",
+        "FACTORY_HANDOFF_HOST=secrets-runner\n",
+      ],
+    ]);
+  const resolve = (files, overrides = {}) => {
+    const readFile = (file) => {
+      if (!files.has(file)) throw new Error(`missing ${file}`);
+      return files.get(file);
+    };
+    return resolveHandoffHost({
+      repo: "factory",
+      home,
+      root,
+      readFile,
+      env: {},
+      ...overrides,
+    });
+  };
+
+  test("uses every source in documented precedence order", () => {
+    const files = filesFor();
+    expect(resolve(files, { host: "flag-runner" })).toBe("flag-runner");
+    expect(
+      resolve(files, { env: { FACTORY_HANDOFF_SSH_HOST: "ssh-env-runner" } }),
+    ).toBe("ssh-env-runner");
+    expect(
+      resolve(files, { env: { FACTORY_HANDOFF_HOST: "env-runner" } }),
+    ).toBe("env-runner");
+    expect(resolve(files)).toBe("config-runner");
+
+    files.delete("/home/operator/.factory/config.json");
+    expect(resolve(files)).toBe("handoff-runner");
+    files.delete("/home/operator/.factory/handoff.json");
+    expect(resolve(files)).toBe("secrets-runner");
+    files.delete("/home/operator/.factory/secrets.env");
+    expect(resolve(files)).toBe("repo-runner");
+    files.set("/factory/config/repos.yaml", "repos: []\n");
+    expect(resolve(files)).toBe("policy-runner");
+    files.set("/factory/config/policy.yaml", "{}\n");
+    expect(resolve(files)).toBe("factory-runner");
+  });
+
+  test("accepts policy shorthand and ignores empty configured values", () => {
+    const files = filesFor();
+    files.delete("/home/operator/.factory/config.json");
+    files.delete("/home/operator/.factory/handoff.json");
+    files.delete("/home/operator/.factory/secrets.env");
+    expect(
+      resolve(files, {
+        repoConfig: null,
+        policy: { handoff_host: "policy-shorthand" },
+      }),
+    ).toBe("policy-shorthand");
+    expect(
+      resolve(files, {
+        repoConfig: { handoff_host: " " },
+        policy: { handoff: { host: "policy-runner" } },
+      }),
+    ).toBe("policy-runner");
+  });
+
+  test("trims aliases, rejects an explicit blank flag, and strips dotenv comments", () => {
+    const files = filesFor();
+    expect(resolve(files, { host: " runner " })).toBe("runner");
+    expect(() => resolve(files, { host: "" })).toThrow(/ssh_host_missing/);
+
+    files.delete("/home/operator/.factory/config.json");
+    files.delete("/home/operator/.factory/handoff.json");
+    files.set(
+      "/home/operator/.factory/secrets.env",
+      "FACTORY_HANDOFF_HOST=secrets-runner # operator alias\n",
+    );
+    expect(resolve(files)).toBe("secrets-runner");
+  });
+
+  test("falls back when local JSON or raw configuration YAML is malformed", () => {
+    const files = filesFor();
+    files.set("/home/operator/.factory/config.json", "{oops");
+    files.delete("/home/operator/.factory/handoff.json");
+    files.delete("/home/operator/.factory/secrets.env");
+    files.set("/factory/config/repos.yaml", "repos: [");
+    expect(resolve(files)).toBe("policy-runner");
+
+    files.set("/factory/config/policy.yaml", "handoff: [");
+    expect(resolve(files)).toBe("factory-runner");
   });
 });
 

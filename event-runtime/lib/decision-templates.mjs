@@ -4,9 +4,9 @@ import {
   proposalQuestion,
 } from "./proposal-subject.mjs";
 
-const dismiss = () => ({
+const dismiss = (label = "Not now") => ({
   id: "dismiss",
-  label: "Not now",
+  label,
   effect: "dismiss",
   tone: "neutral",
 });
@@ -41,12 +41,17 @@ function escalation(refs) {
       tone: "primary",
     });
   }
-  options.push(dismiss());
+  options.push(dismiss("Acknowledge"));
+  const subject = refs.pr
+    ? `PR ${refs.pr}`
+    : refs.runId
+      ? `run ${refs.runId}`
+      : "this refused run";
   return {
     schemaVersion: "factory.decision-request/v1",
     question: refs.issue
       ? `How should the factory proceed with ${refs.issue}?`
-      : "How should the factory handle this refused run?",
+      : `What follow-up is needed for ${subject}?`,
     options,
     fields: refs.issue
       ? [textField({ required: true, whenOption: ["answer"] })]
@@ -113,12 +118,15 @@ function mergeEscalation(refs) {
       tone: "primary",
     });
   }
-  options.push(dismiss());
+  options.push(dismiss("Acknowledge"));
+  const subject = refs.pr
+    ? `PR ${refs.pr}`
+    : refs.runId
+      ? `run ${refs.runId}`
+      : "this merge escalation";
   return {
     schemaVersion: "factory.decision-request/v1",
-    question: refs.pr
-      ? `How should the merge escalation for ${refs.pr} be handled?`
-      : "How should this merge escalation be handled?",
+    question: `How should the merge escalation for ${subject} be handled?`,
     options,
     fields: refs.issue
       ? [textField({ required: true, whenOption: ["answer"] })]

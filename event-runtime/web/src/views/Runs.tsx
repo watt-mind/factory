@@ -58,7 +58,7 @@ import {
 } from "../components/RunDetailBlocks";
 import { readPinnedRuns, savePinnedRuns } from "../components/ContextTabs";
 import type { OperatorContext } from "../context";
-import { matchesInFlight, matchesRepo } from "../context";
+import { matchesInFlight, matchesRepo, projectFromContext } from "../context";
 import {
   RUN_FACETS,
   matchesFilterQuery,
@@ -233,6 +233,75 @@ export function runDrilldownFilters(hash: string): RunListFilters | null {
  */
 const rowModel = (r: RunListItem) => pinnedModelText(r.adapter, r.model);
 
+export interface RunIdentityFields {
+  agentKind?: string | null;
+  ticketSubject?: string | null;
+  subjectLabel?: string | null;
+  subjectTitle?: string | null;
+  subjectUrl?: string | null;
+  originType?: string | null;
+  originLabel?: string | null;
+}
+
+type IdentityRun = RunListItem & RunIdentityFields;
+
+export function runAgentKind(agent: string, identity?: RunIdentityFields) {
+  return identity?.agentKind || agent.replace(/@\d+$/, "");
+}
+
+/** Ticket/title when present; origin event type for subject-less chain runs. */
+export function RunSubject({ identity }: { identity?: RunIdentityFields }) {
+  const subject = identity?.subjectLabel ?? identity?.originLabel ?? null;
+  if (!subject) return <span>{EMPTY}</span>;
+  const fullSubject = identity?.subjectTitle
+    ? `${subject} — ${identity.subjectTitle}`
+    : subject;
+  const content = (
+    <>
+      <span>{subject}</span>
+      {identity?.subjectTitle && (
+        <span className="text-(--text-dim)"> — {identity.subjectTitle}</span>
+      )}
+    </>
+  );
+  return identity?.subjectUrl ? (
+    <a
+      href={identity.subjectUrl}
+      target="_blank"
+      rel="noreferrer"
+      onClick={(event) => event.stopPropagation()}
+      className="hover:text-(--accent) hover:underline"
+      title={`${fullSubject} · Open ${identity.ticketSubject ?? subject}`}
+    >
+      {content}
+    </a>
+  ) : (
+    <span title={identity?.originType ?? identity?.ticketSubject ?? undefined}>
+      {content}
+    </span>
+  );
+}
+
+/** The shared human-readable identity used by the full-run header. */
+export function RunHumanIdentity({
+  agent,
+  identity,
+}: {
+  agent: string;
+  identity?: RunIdentityFields;
+}) {
+  return (
+    <span className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+      <span className="mono shrink-0 font-semibold">
+        {runAgentKind(agent, identity)}
+      </span>
+      <span className="min-w-0 break-words">
+        <RunSubject identity={identity} />
+      </span>
+    </span>
+  );
+}
+
 /** The budget deadline shared by the Remaining display and its sort order. */
 const remainingDeadline = (r: RunListItem): string => {
   if (r.deadlineAt) return r.deadlineAt;
@@ -289,6 +358,15 @@ const RUNS_DISPLAY: DisplayConfig<RunListItem> = {
     },
     { key: "agent", label: "Agent", get: (r) => r.agent, column: "agent" },
     {
+      key: "subject",
+      label: "Subject",
+      get: (r) => {
+        const identity = r as IdentityRun;
+        return identity.subjectLabel ?? identity.originLabel ?? "";
+      },
+      column: "subject",
+    },
+    {
       key: "adapter",
       label: "Adapter",
       get: (r) => r.adapter,
@@ -330,10 +408,11 @@ const RUNS_DISPLAY: DisplayConfig<RunListItem> = {
   ],
   columns: [
     { key: "run", label: "Run", always: true },
+    { key: "agent", label: "Agent" },
+    { key: "subject", label: "Subject" },
     { key: "state", label: "State" },
     { key: "remaining", label: "Remaining" },
     { key: "duration", label: "Duration" },
-    { key: "agent", label: "Agent" },
     { key: "adapter", label: "Adapter" },
     { key: "model", label: "Model" },
     { key: "attempts", label: "Attempts" },
@@ -600,6 +679,7 @@ export function Runs({
   const [cancelReason, setCancelReason] = useState("");
   const drilldown = runDrilldownFilters(window.location.hash);
   const drilldownKey = JSON.stringify(drilldown);
+  const contextProject = projectFromContext(context);
   const [runCursor, setRunCursor] = useState<string | null>(null);
 
   const proposalsQ = useQuery({
@@ -619,10 +699,17 @@ export function Runs({
   // A project / In-flight filter is client-side; fetching only the active
   // status tab would make every other tab's badge a factory-wide lie.
   const fetchAll = context.kind !== "all" || drilldown !== null;
+
+  // A cursor identifies a boundary in one particular list. Carrying it into a
+  // different tab, drilldown, or context can hide that list's newest runs.
+  useEffect(() => {
+    setRunCursor(null);
+  }, [tab, drilldownKey, contextProject]);
+
   const list = useQuery({
     queryKey: ["runs", fetchAll ? "ALL" : tab, drilldownKey, runCursor],
     queryFn: () =>
-      api.runs(undefined, {
+      api.runs(fetchAll || tab === "ALL" ? undefined : tab, {
         ...(drilldown ?? {}),
         before: runCursor ?? undefined,
       }),
@@ -886,20 +973,11 @@ export function Runs({
       selectedId ? (visible.find((r) => r.runId === selectedId) ?? null) : null,
     [visible, selectedId],
   );
-  // A side pane turns the list into a compact comparison rail. Keep the five
-  // decision-bearing columns instead of forcing a horizontal scrollbar; the
-  // pane and the unselected list retain every configured column.
-  const listCols = sel
+  // A side pane turns the list into a compact comparison rail. Identity comes
+  // first there too: "what is this run?" matters before its secondary clocks.
+  const listCols = selectedId
     ? cols.filter((c) =>
-        [
-          "run",
-          "state",
-          "remaining",
-          "duration",
-          "reason",
-          "origin",
-          "updated",
-        ].includes(c.key),
+        ["run", "agent", "subject", "state", "reason"].includes(c.key),
       )
     : cols;
   const show = useMemo(() => new Set(listCols.map((c) => c.key)), [listCols]);
@@ -913,7 +991,11 @@ export function Runs({
   const detail = useQuery({
     queryKey: ["run", selectedId],
     queryFn: () => api.run(selectedId as string),
-    enabled: sel !== null,
+    // The run summary is deliberately bounded. A hash link from Workers can
+    // therefore name a current run which is not in `visible` (or `rows`) at
+    // all. Fetch its canonical detail by id rather than making that deep link
+    // look like an empty Runs list.
+    enabled: selectedId !== null,
     ...refetchIntervals.primary,
   });
 
@@ -1004,6 +1086,14 @@ export function Runs({
   // detail without its root run as unpopulated so every guarded d.run access
   // below stays on the loading/fallback path.
   const d = detail.data?.run ? detail.data : undefined;
+  // A direct link can select a run outside the bounded summary page. Once its
+  // canonical detail resolves, use it for every selection verb just as a row
+  // in the current page would be used.
+  const selectedRun = sel ?? d?.run ?? null;
+  // GET /runs/:id deliberately does not include the proposal-origin join used
+  // by the summary list. Give detail rendering an explicit unknown origin
+  // rather than treating an off-page selection as an absent selection.
+  const origin = sel ?? { eventId: null, eventSource: null };
   const attemptsExhausted = d
     ? d.run.attempts >= d.run.spec.maxAttempts
     : false;
@@ -1044,12 +1134,15 @@ export function Runs({
 
   useListKeys({
     count: flat.length,
-    selected: selectedIndex,
+    // useListKeys only invokes custom verbs for a non-negative list index.
+    // An off-page direct link has no index, but its resolved detail is still
+    // a real selection and must retain those verbs.
+    selected: selectedRun ? Math.max(selectedIndex, 0) : selectedIndex,
     onSelect: (i) => onSelectRun(flat[i]?.runId ?? null),
     // §5 "Enter/o — open detail": selection already opens the panel, so the
     // open verb graduates to the full-page run view (`g o` is safe — list
     // verbs stand down while the chord prefix is armed, hooks.ts).
-    onOpen: () => sel && onOpenFull(sel.runId),
+    onOpen: () => selectedRun && onOpenFull(selectedRun.runId),
     onClose: () => {
       if (selectedId) onSelectRun(null);
       else if (filter) setFilter("");
@@ -1062,24 +1155,27 @@ export function Runs({
         setConfirmApprove(true),
       // §5 convention: `x` is the destructive verb on the selection — here, cancel.
       x: () =>
-        sel && connected && isCancellable(sel.state) && setConfirm("cancel"),
+        selectedRun &&
+        connected &&
+        isCancellable(selectedRun.state) &&
+        setConfirm("cancel"),
       c: () => {
-        if (!sel) return;
+        if (!selectedRun) return;
         const now = Date.now();
         if (pendingC.current > 0 && now - pendingC.current < 800) {
           copyText(
-            `bun event-runtime/cli.mjs inspect ${sel.runId}`,
+            `bun event-runtime/cli.mjs inspect ${selectedRun.runId}`,
             "CLI inspect command",
           );
           pendingC.current = 0;
         } else {
-          copyText(sel.runId, "run id");
+          copyText(selectedRun.runId, "run id");
           pendingC.current = now;
         }
       },
       l: () => {
         if (
-          sel &&
+          selectedRun &&
           pendingC.current > 0 &&
           Date.now() - pendingC.current < 800
         ) {
@@ -1087,7 +1183,7 @@ export function Runs({
           pendingC.current = 0;
         }
       },
-      p: () => sel && toggleRunPin(sel.runId),
+      p: () => selectedRun && toggleRunPin(selectedRun.runId),
     },
   });
 
@@ -1095,14 +1191,14 @@ export function Runs({
     function onKey(e: KeyboardEvent) {
       if (keyGuard(e) || e.metaKey || e.ctrlKey || e.altKey) return;
       if (goPrefixActive()) return;
-      if (!sel) return;
+      if (!selectedRun) return;
       const now = Date.now();
       if (pendingC.current > 0 && now - pendingC.current < 800) {
         if (e.key === "i" || e.key === "I") {
           e.preventDefault();
           e.stopImmediatePropagation();
           copyText(
-            `bun event-runtime/cli.mjs inspect ${sel.runId}`,
+            `bun event-runtime/cli.mjs inspect ${selectedRun.runId}`,
             "CLI inspect command",
           );
           pendingC.current = 0;
@@ -1112,31 +1208,35 @@ export function Runs({
     window.addEventListener("keydown", onKey, { capture: true });
     return () =>
       window.removeEventListener("keydown", onKey, { capture: true });
-  }, [sel]);
+  }, [selectedRun]);
 
   // Offer the selection's verbs in the ⌘K palette (§5).
   useEffect(() => {
-    if (!sel) {
+    if (!selectedRun) {
       setContextActions([]);
     } else {
       const copy = [
-        { label: "Open in tab", hint: "p", run: () => toggleRunPin(sel.runId) },
+        {
+          label: "Open in tab",
+          hint: "p",
+          run: () => toggleRunPin(selectedRun.runId),
+        },
         {
           label: "Open full view",
           hint: "o",
-          run: () => onOpenFull(sel.runId),
+          run: () => onOpenFull(selectedRun.runId),
         },
         {
           label: "Copy run id",
           hint: "c",
-          run: () => copyText(sel.runId, "run id"),
+          run: () => copyText(selectedRun.runId, "run id"),
         },
         {
           label: "Copy CLI inspect command",
           hint: "c i",
           run: () =>
             copyText(
-              `bun event-runtime/cli.mjs inspect ${sel.runId}`,
+              `bun event-runtime/cli.mjs inspect ${selectedRun.runId}`,
               "CLI inspect command",
             ),
         },
@@ -1193,7 +1293,7 @@ export function Runs({
     return () => setContextActions([]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    sel?.runId,
+    selectedRun?.runId,
     d?.run?.runId,
     d?.run?.state,
     attemptsExhausted,
@@ -1305,10 +1405,16 @@ export function Runs({
         <Table
           role="grid"
           aria-label="Runs"
-          className="w-full table-fixed border-separate border-spacing-0"
+          className={`w-full table-fixed border-separate border-spacing-0 ${
+            visible.length === 0
+              ? "[&_tbody>tr>td>div]:sticky [&_tbody>tr>td>div]:left-0 [&_tbody>tr>td>div]:w-screen"
+              : ""
+          }`}
           style={{
             minWidth: `${listCols.reduce(
-              (width, c) => width + (c.key === "state" ? 176 : 112),
+              (width, c) =>
+                width +
+                (c.key === "state" ? 176 : c.key === "subject" ? 320 : 112),
               0,
             )}px`,
           }}
@@ -1317,7 +1423,13 @@ export function Runs({
             {listCols.map((c) => (
               <col
                 key={c.key}
-                className={c.key === "state" ? "w-44" : "w-28"}
+                className={
+                  c.key === "state"
+                    ? "w-44"
+                    : c.key === "subject"
+                      ? "w-80"
+                      : "w-28"
+                }
               />
             ))}
           </colgroup>
@@ -1380,6 +1492,21 @@ export function Runs({
                       onJumpRun={onOpenFull}
                     />
                   </td>
+                  {show.has("agent") && (
+                    <td className="max-w-32 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)">
+                      <AgentHoverCard
+                        agentRef={r.agent}
+                        onJumpAgent={onJumpAgent}
+                      >
+                        {runAgentKind(r.agent, r as IdentityRun)}
+                      </AgentHoverCard>
+                    </td>
+                  )}
+                  {show.has("subject") && (
+                    <td className="max-w-80 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text)">
+                      <RunSubject identity={r as IdentityRun} />
+                    </td>
+                  )}
                   {/*
                     State cell carries no `max-w-*`/`truncate` (WM-505): its content is a
                     bounded-length badge plus an optional `proposal` jump link, and
@@ -1425,14 +1552,6 @@ export function Runs({
                   {show.has("duration") && (
                     <td className="max-w-24 overflow-hidden whitespace-nowrap border-b border-(--border) px-3 py-1.5 tabular-nums text-(--text-dim)">
                       <DurationCell r={r} now={now} />
-                    </td>
-                  )}
-                  {show.has("agent") && (
-                    <td className="max-w-32 truncate border-b border-(--border) px-3 py-1.5 whitespace-nowrap text-(--text-dim)">
-                      <AgentHoverCard
-                        agentRef={r.agent}
-                        onJumpAgent={onJumpAgent}
-                      />
                     </td>
                   )}
                   {show.has("adapter") && (
@@ -1532,12 +1651,17 @@ export function Runs({
               range={[windowStart, windowEnd, tokens.length]}
               move={moveWindow}
             />
-            {nextBefore && (
+            {(nextBefore || runCursor) && (
               <tr>
                 <td>
-                  <button onClick={() => setRunCursor(nextBefore)}>
-                    Older
-                  </button>
+                  {runCursor && (
+                    <button onClick={() => setRunCursor(null)}>Newest</button>
+                  )}
+                  {nextBefore && (
+                    <button onClick={() => setRunCursor(nextBefore)}>
+                      Older
+                    </button>
+                  )}
                 </td>
               </tr>
             )}
@@ -1578,7 +1702,7 @@ export function Runs({
         </Table>
       </ListPane>
 
-      {sel && (
+      {selectedId && (
         <DetailPane
           widthClass="fixed inset-0 z-20 w-full sm:static sm:z-auto sm:w-[440px]"
           title={
@@ -1602,14 +1726,22 @@ export function Runs({
                 className="flex min-w-0 items-center gap-2 truncate font-semibold text-(--text)"
                 aria-current="page"
               >
-                <StateBadge state={sel.state} />
-                <JumpLink
-                  onClick={() => onOpenFull(sel.runId)}
-                  title={`Open ${sel.runId}`}
-                  className="truncate mono"
-                >
-                  {shortId(sel.runId)}
-                </JumpLink>
+                {d ? (
+                  <>
+                    <StateBadge state={d.run.state} />
+                    <JumpLink
+                      onClick={() => onOpenFull(selectedId)}
+                      title={`Open ${selectedId}`}
+                      className="truncate mono"
+                    >
+                      {shortId(selectedId)}
+                    </JumpLink>
+                  </>
+                ) : detail.isError ? (
+                  "Run not found"
+                ) : (
+                  "Loading run…"
+                )}
               </span>
             </nav>
           }
@@ -1671,7 +1803,7 @@ export function Runs({
                   ))}
               </div>
               <div className="flex items-center gap-1.5">
-                <Button onClick={() => onOpenFull(sel.runId)}>
+                <Button onClick={() => onOpenFull(selectedId)}>
                   Expand{" "}
                   <span
                     className="mono ml-1 text-(--text-faint)"
@@ -1680,7 +1812,7 @@ export function Runs({
                     o
                   </span>
                 </Button>
-                <Button onClick={() => toggleRunPin(sel.runId)}>
+                <Button onClick={() => toggleRunPin(selectedId)}>
                   Open in tab{" "}
                   <span
                     className="mono ml-1 text-(--text-faint)"
@@ -1694,9 +1826,9 @@ export function Runs({
           }
           utility={
             <CopyActions
-              id={sel.runId}
+              id={selectedId}
               idLabel="run id"
-              cli={`bun event-runtime/cli.mjs inspect ${sel.runId}`}
+              cli={`bun event-runtime/cli.mjs inspect ${selectedId}`}
               cliLabel="CLI inspect command"
             />
           }
@@ -1704,7 +1836,12 @@ export function Runs({
         >
           {!d && (
             <div className="text-(--text-faint)">
-              {detail.isError ? "Could not load run detail." : "Loading run…"}
+              {detail.isError
+                ? detail.error instanceof ApiError &&
+                  detail.error.status === 404
+                  ? `Run ${selectedId} was not found.`
+                  : "Could not load run detail."
+                : "Loading run…"}
             </div>
           )}
 
@@ -1747,7 +1884,7 @@ export function Runs({
                   d={d}
                   now={now}
                   connected={connected}
-                  origin={sel}
+                  origin={origin}
                   onJumpAgent={onJumpAgent}
                   onJumpEvent={onJumpEvent}
                   onCancel={() => setConfirm("cancel")}

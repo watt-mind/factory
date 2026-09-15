@@ -85,9 +85,31 @@ function chainEvent(
     proposalStatus: null,
     proposalDecision: null,
     runId: null,
+    envelope: {
+      schemaVersion: "factory.event/v1",
+      eventId,
+      type: "factory.dispatch.requested",
+      source: "factory",
+      subject: "WM-273",
+      occurredAt: NOW,
+      correlationId: "operator:dispatch:WM-518",
+      causationId: null,
+      payload: {},
+    },
+    envelopeMalformed: false,
     repos: [],
     ...overrides,
   };
+}
+
+/** Reproducible damaged-history fixture for the selected-chain envelope UI. */
+function malformedChainEvent(eventId: string): ChainEvent {
+  return chainEvent(eventId, {
+    source: "chain",
+    correlationId: CORR,
+    envelope: null,
+    envelopeMalformed: true,
+  });
 }
 
 function renderChainGraph() {
@@ -128,6 +150,17 @@ function chainView(): ChainView {
         proposalStatus: "approved",
         proposalDecision: "run",
         runId: FIX_RUN,
+        envelope: {
+          schemaVersion: "factory.event/v1",
+          eventId: FIX_EVENT,
+          type: "factory.merge-fix.requested",
+          source: "chain",
+          subject: "factory",
+          occurredAt: "2026-08-17T19:05:58.000Z",
+          correlationId: CORR,
+          causationId: null,
+          payload: { repo: "factory" },
+        },
         repos: ["factory"],
       },
     ],
@@ -583,5 +616,89 @@ describe("Chain navigation shortcuts (WM-875)", () => {
     // Open in Events via 'e'
     fireEvent.keyDown(document.body, { key: "e" });
     expect(view.jumpedEvents).toContain(`chain:${FIX_EVENT}`);
+  });
+
+  test("when an old event node is selected, renders its chain envelope without a recent-events lookup", async () => {
+    localStorage.clear();
+    const evtNodeId = `event:chain:${FIX_EVENT}`;
+    const events = mock(async () => {
+      throw new Error("recent event window must not be queried");
+    });
+    await withApi({ events }, async () => {
+      const view = renderChain({ focusNodeId: evtNodeId });
+      await waitFor(() => {
+        expect(view.getByText("Envelope")).toBeTruthy();
+        expect(
+          view.getAllByText("factory.merge-fix.requested").length,
+        ).toBeGreaterThan(0);
+      });
+      expect(events).not.toHaveBeenCalled();
+    });
+  });
+
+  test("uses the complete-envelope fallback for a malformed stored envelope", async () => {
+    const evtNodeId = `event:chain:${FIX_EVENT}`;
+    const view = renderWithClient(
+      <Chain
+        correlationId={CORR}
+        focusNodeId={evtNodeId}
+        onSelectNode={noop}
+        onJumpEvent={noop}
+        onJumpRun={noop}
+        onOpenRunFull={noop}
+        onJumpProposal={noop}
+        onJumpAgent={noop}
+      />,
+      {
+        apiMocks: {
+          chain: async () => ({
+            ...chainView(),
+            events: [malformedChainEvent(FIX_EVENT)],
+          }),
+        },
+      },
+    );
+    await waitFor(() => {
+      expect(
+        view
+          .getByText("Complete envelope unavailable in this chain response.")
+          .getAttribute("role"),
+      ).toBe("status");
+    });
+  });
+
+  test("announces the malformed-envelope fallback as a live status region", async () => {
+    const evtNodeId = `event:chain:${FIX_EVENT}`;
+    const view = renderWithClient(
+      <Chain
+        correlationId={CORR}
+        focusNodeId={evtNodeId}
+        onSelectNode={noop}
+        onJumpEvent={noop}
+        onJumpRun={noop}
+        onOpenRunFull={noop}
+        onJumpProposal={noop}
+        onJumpAgent={noop}
+      />,
+      {
+        apiMocks: {
+          chain: async () => ({
+            ...chainView(),
+            events: [malformedChainEvent(FIX_EVENT)],
+          }),
+        },
+      },
+    );
+    await waitFor(() => {
+      expect(
+        view.getByText("Complete envelope unavailable in this chain response."),
+      ).toBeTruthy();
+    });
+    // Assistive tech reaches this text through the status role, so assert the
+    // role lookup itself resolves to the node carrying the fallback copy.
+    const status = view.getByRole("status");
+    expect(status.textContent).toBe(
+      "Complete envelope unavailable in this chain response.",
+    );
   });
 });

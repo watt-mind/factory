@@ -25,6 +25,7 @@ authoring kit (`factory pack init` / `validate`, and `docs/packs.md`).
 | :-------------- | :-------------------- | :--------------------------------------------------------------------------------------------- |
 | `example-hello` | `packs/example-hello` | Smallest valid first-party pack. A namespaced hello-world loop for authoring and admission.    |
 | `ops-disk`      | `packs/ops-disk`      | First-party ops loop (disk / host operations). Proof that a shipped loop is not only software. |
+| `editorial`     | `packs/editorial`     | First-party editorial loop (topic discovery, research, drafting, and review) backed by cells.  |
 
 First-party packs follow the same loader rules as every other pack: a
 non-empty namespace, content hashes in `pins.json`, no `mutating: true`

@@ -171,6 +171,32 @@ describe("Metrics", () => {
     expect(retryBar?.querySelector('[data-segment="first"]')).toBeTruthy();
   });
 
+  test("pins all decision-mix chart hues", async () => {
+    const data = structuredClone(populated);
+    data.series["proposals.decisions"] = {
+      approved: [1, 1],
+      rejected: [1, 1],
+      expired: [1, 1],
+      superseded: [1, 1],
+    };
+    response = Response.json(data);
+
+    const view = renderMetrics();
+    const chart = await view.findByRole("img", { name: /Decision mix:/ });
+    expect(
+      chart.querySelector('[data-segment="approved"]')?.getAttribute("fill"),
+    ).toBe("var(--hue-ok)");
+    expect(
+      chart.querySelector('[data-segment="rejected"]')?.getAttribute("fill"),
+    ).toBe("var(--hue-err)");
+    expect(
+      chart.querySelector('[data-segment="expired"]')?.getAttribute("fill"),
+    ).toBe("var(--hue-warn)");
+    expect(
+      chart.querySelector('[data-segment="superseded"]')?.getAttribute("fill"),
+    ).toBe("var(--hue-verify)");
+  });
+
   test("Harness and Model share cards render ranked bars with window drilldown", async () => {
     const view = renderMetrics();
     const harness = await view.findByRole("img", {

@@ -1,7 +1,10 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-worker-test-helpers-mjs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import * as fake from "./adapters/fake.mjs";
 import { canonicalJson, hashJson } from "./canonical.mjs";
 import { createRun, transition } from "./lifecycle.mjs";
+import { policySnapshot } from "./planner.mjs";
 import { loadRegistry } from "./registry.mjs";
 
 export const registry = loadRegistry();
@@ -88,6 +91,43 @@ export function freshRoot() {
 
 /** A config-free checkout root for fail-closed policy tests. */
 export const EMPTY_POLICY_ROOT = tmpDir("evrt-worker-empty-policy-");
+
+/**
+ * A dispatch config snapshot whose `factory` entry points at THIS checkout.
+ *
+ * `config/repos.example.yaml` is the live registry fallback for a checkout
+ * without `config/repos.yaml`, and it pins `factory` to `~/Develop/factory`.
+ * The dispatch gate's owned-path closure check reads that directory, so every
+ * test that drives a real dispatch gate for repo `factory` silently depended
+ * on the operator's own checkout existing at that path. repo-verify runs this
+ * suite inside the handoff sandbox, where only the worktree is mounted and
+ * `HOME` is `/tmp/home`: the gate refused with `owned_paths_not_closed:
+ * owned-path closure check failed: repo path does not exist`, and those tests
+ * failed there while passing on a developer box (#2031). Pinning the entry to
+ * the checkout under test keeps the closure check running against a real
+ * factory tree in both environments instead of disabling it.
+ */
+let dispatchConfigSnapshotCache = null;
+export function dispatchConfigSnapshot() {
+  if (dispatchConfigSnapshotCache) return dispatchConfigSnapshotCache;
+  const checkout = path.resolve(new URL("../..", import.meta.url).pathname);
+  const registryConfig = Bun.YAML.parse(
+    readFileSync(path.join(checkout, "config/repos.example.yaml"), "utf8"),
+  );
+  for (const entry of registryConfig?.repos ?? []) {
+    if (entry?.name === "factory") entry.path = checkout;
+  }
+  const root = tmpDir("evrt-worker-dispatch-config-");
+  mkdirSync(path.join(root, "config"), { recursive: true });
+  // JSON is valid YAML, and the registry loader parses this file with the same
+  // YAML parser, so no serializer is needed to round-trip the example.
+  writeFileSync(
+    path.join(root, "config", "repos.yaml"),
+    `${JSON.stringify(registryConfig, null, 2)}\n`,
+  );
+  dispatchConfigSnapshotCache = policySnapshot(root);
+  return dispatchConfigSnapshotCache;
+}
 
 export function opts(extra = {}) {
   return {

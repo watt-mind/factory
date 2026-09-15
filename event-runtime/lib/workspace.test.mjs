@@ -10,8 +10,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { Database } from "bun:sqlite";
 import { canonicalJson, sha256Hex } from "./canonical.mjs";
+import { FACTORY_ROOT } from "./config.mjs";
 import { MEMO_SCHEMA_VERSION, memoDigest, withProvenance } from "./memos.mjs";
 import {
   assertSandboxWorkspaceSupported,
@@ -19,6 +21,9 @@ import {
   WorktreeSandboxUnsupportedError,
   WorktreeError,
   MEMOS_JSON_NOTICE,
+  commentOnPreservedWorktree,
+  preservationCommentTimeoutMs,
+  PRESERVATION_COMMENT_TIMEOUT_MS,
   confinedRegularFile,
   createWorkspace,
   destroyWorkspace,
@@ -106,16 +111,16 @@ test("detectWorktreeOwnershipConflict identifies the current run's compound leas
   const databasePath = path.join(root, "runtime.db");
   const db = new Database(databasePath);
   db.exec(`
-    CREATE TABLE runs (run_id TEXT, state TEXT, spec_json TEXT);
+    CREATE TABLE runs (run_id TEXT, state TEXT, spec_json TEXT, attempts INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE attempts (run_id TEXT, attempt INTEGER, lease_owner TEXT);
   `);
   const spec = JSON.stringify({ input: { repo: "factory", ticket: "WM-627" } });
-  db.query(`INSERT INTO runs VALUES (?, ?, ?)`).run(
+  db.query(`INSERT INTO runs (run_id, state, spec_json) VALUES (?, ?, ?)`).run(
     "run_self",
     "RUNNING",
     spec,
   );
-  db.query(`INSERT INTO runs VALUES (?, ?, ?)`).run(
+  db.query(`INSERT INTO runs (run_id, state, spec_json) VALUES (?, ?, ?)`).run(
     "run_done",
     "COMPLETED",
     spec,
@@ -180,7 +185,7 @@ test("detectWorktreeOwnershipConflict identifies the current run's compound leas
 
   const competingDb = new Database(databasePath);
   competingDb
-    .query(`INSERT INTO runs VALUES (?, ?, ?)`)
+    .query(`INSERT INTO runs (run_id, state, spec_json) VALUES (?, ?, ?)`)
     .run("run_other", "FAILED", spec);
   competingDb.close();
   const conflict = detectWorktreeOwnershipConflict({
@@ -195,6 +200,78 @@ test("detectWorktreeOwnershipConflict identifies the current run's compound leas
     runs: [{ runId: "run_other", state: "FAILED" }],
     leases: [],
   });
+});
+
+test("detectWorktreeOwnershipConflict releases only attempts-exhausted FAILED owners", () => {
+  const root = tmpRoot();
+  const databasePath = path.join(root, "runtime.db");
+  const db = new Database(databasePath);
+  db.exec(`
+    CREATE TABLE runs (
+      run_id TEXT,
+      state TEXT,
+      spec_json TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+  const repo = "factory";
+  const insert = (runId, ticket, state, attempts, maxAttempts) =>
+    db.query(`INSERT INTO runs VALUES (?, ?, ?, ?)`).run(
+      runId,
+      state,
+      JSON.stringify({
+        input: { repo, ticket },
+        ...(maxAttempts === undefined ? {} : { maxAttempts }),
+      }),
+      attempts,
+    );
+  insert("run_exhausted", "WM-EXHAUSTED", "FAILED", 3, 3);
+  insert("run_retryable", "WM-RETRYABLE", "FAILED", 2, 3);
+  insert("run_unbounded", "WM-UNBOUNDED", "FAILED", 3, undefined);
+  insert("run_running", "WM-RUNNING", "RUNNING", 1, 3);
+  insert("run_dead", "WM-DEAD", "COMPLETED", 1, 3);
+  insert("run_mixed_exhausted", "WM-MIXED", "FAILED", 3, 3);
+  insert("run_mixed_live", "WM-MIXED", "RUNNING", 1, 3);
+  db.close();
+
+  const staleOwners = [];
+  const detect = (ticket, leases = []) =>
+    detectWorktreeOwnershipConflict({
+      repo,
+      ticket,
+      runId: "run_new",
+      databasePath,
+      leases,
+      staleOwnerLog: (staleRunId) => staleOwners.push(staleRunId),
+    });
+
+  expect(detect("WM-EXHAUSTED")).toBeNull();
+  expect(staleOwners).toEqual(["run_exhausted"]);
+  expect(detect("WM-RETRYABLE")?.runs).toEqual([
+    { runId: "run_retryable", state: "FAILED" },
+  ]);
+  expect(detect("WM-UNBOUNDED")?.runs).toEqual([
+    { runId: "run_unbounded", state: "FAILED" },
+  ]);
+  expect(detect("WM-RUNNING")?.runs).toEqual([
+    { runId: "run_running", state: "RUNNING" },
+  ]);
+  // An exhausted owner beside a live one is not released, so nothing is
+  // announced as stale.
+  expect(detect("WM-MIXED")?.runs).toEqual([
+    { runId: "run_mixed_live", state: "RUNNING" },
+  ]);
+  expect(staleOwners).toEqual(["run_exhausted"]);
+
+  const liveLease = {
+    repo,
+    ticket: "WM-DEAD",
+    owner: "worker_dead_run",
+    pid: process.pid + 1,
+  };
+  expect(detect("WM-DEAD", [liveLease])?.leases).toEqual([
+    { owner: "worker_dead_run", pid: process.pid + 1 },
+  ]);
 });
 
 describe("createWorkspace / destroyWorkspace", () => {
@@ -252,7 +329,7 @@ describe("worktree workspaces (WM-108)", () => {
     mkdirSync(path.join(repoDir, "bin"), { recursive: true });
     writeFileSync(
       path.join(repoDir, "bin", "worktree-up.sh"),
-      `#!/bin/bash\nset -e\nWT="${wtRoot}/$1"\necho "up $1 cwd=$PWD" >> "${callsLog}"\nif [[ -e "$WT/ports" || -e "$WT/run/serve.pid" || -e "$WT/run/worker.pid" || -e "$WT/run/web.pid" ]]; then\n  echo "stale daemon state for $1" >&2\n  exit 9\nfi\nmkdir -p "$WT/run"\nprintf '7740 7741\\n' > "$WT/ports"\ntouch "$WT/run/serve.pid" "$WT/run/worker.pid" "$WT/run/web.pid"\n`,
+      `#!/bin/bash\nset -e\nWT="${wtRoot}/$1"\necho "up $1 cwd=$PWD seed=\${FACTORY_WORKTREE_SEED:-unset}" >> "${callsLog}"\n[[ "\${FACTORY_WORKTREE_SEED:-}" == "0" ]] || { echo "dispatch must disable demo seeding" >&2; exit 10; }\nif [[ -e "$WT/ports" || -e "$WT/run/serve.pid" || -e "$WT/run/worker.pid" || -e "$WT/run/web.pid" ]]; then\n  echo "stale daemon state for $1" >&2\n  exit 9\nfi\nmkdir -p "$WT/run"\nprintf '7740 7741\\n' > "$WT/ports"\ntouch "$WT/run/serve.pid" "$WT/run/worker.pid" "$WT/run/web.pid"\n`,
     );
     writeFileSync(
       path.join(repoDir, "bin", "worktree-down.sh"),
@@ -345,7 +422,7 @@ describe("worktree workspaces (WM-108)", () => {
 
   test("up is delegated to the repo's script; the tree is reachable at ./repo; verify rides along", () => {
     const { dir, worktree } = make("wtrepo", "WM-1", "run_wt1");
-    expect(calls()).toContainEqual(`up WM-1 cwd=${repoDir}`);
+    expect(calls()).toContainEqual(`up WM-1 cwd=${repoDir} seed=0`);
     expect(worktree).toEqual({
       repo: "wtrepo",
       ticket: "WM-1",
@@ -364,7 +441,30 @@ describe("worktree workspaces (WM-108)", () => {
     expect(
       JSON.parse(readFileSync(path.join(dir, ".worktree.json"), "utf8")).ticket,
     ).toBe("WM-1");
+    expect(existsSync(path.join(wtRoot, "WM-1", ".factory", "demo.db"))).toBe(
+      false,
+    );
     expect(destroyWorkspace(dir)).toBe(true);
+  });
+
+  test("uses an injected materializeWorktree seam when provided", () => {
+    const calls = [];
+    const created = make("wtrepo", "WM-seam", "run_wt_seam", {
+      materializeWorktree: (args) => {
+        calls.push(args);
+        return { injected: true };
+      },
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      input: { repo: "wtrepo", ticket: "WM-seam" },
+      checkoutDir: "repo",
+      runId: "run_wt_seam",
+      attempt: 1,
+    });
+    expect(created.worktree).toEqual({ injected: true });
+    expect(destroyWorkspace(created.dir)).toBe(true);
   });
 
   test("a sandboxed definition is refused when the workspace carries a worktree marker", () => {
@@ -545,6 +645,107 @@ describe("worktree workspaces (WM-108)", () => {
       guidance: expect.stringContaining("abandoned prior attempt"),
     });
     expect(destroyWorkspace(dir)).toBe(true);
+  });
+
+  test("the preservation comment timeout is bounded by the worktree script timeout", () => {
+    const previous = process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS;
+    try {
+      delete process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS;
+      expect(preservationCommentTimeoutMs()).toBe(
+        PRESERVATION_COMMENT_TIMEOUT_MS,
+      );
+      process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS = "25";
+      expect(preservationCommentTimeoutMs()).toBe(25);
+    } finally {
+      if (previous === undefined)
+        delete process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS;
+      else process.env.FACTORY_WORKTREE_SCRIPT_TIMEOUT_MS = previous;
+    }
+  });
+
+  test("a preservation comment spawns tools/ticket.mjs, not the deleted tools/linear.mjs", () => {
+    const calls = [];
+    const result = commentOnPreservedWorktree({
+      ticket: "WM-13-argv",
+      preservation: { ref: "wip/x", commit: "abc", push: "pushed" },
+      spawn: (...args) => {
+        calls.push(args);
+        return { error: null, status: 0, stdout: "", stderr: "" };
+      },
+    });
+    expect(result).toEqual({ status: "posted" });
+    expect(calls).toHaveLength(1);
+    const [command, argv] = calls[0];
+    expect(command).toBe("bun");
+    expect(argv[0]).toBe(path.join(FACTORY_ROOT, "tools", "ticket.mjs"));
+    expect(argv[0]).not.toMatch(/linear\.mjs$/);
+    expect(argv.slice(1, 3)).toEqual(["comment", "WM-13-argv"]);
+  });
+
+  test("a preservation comment that fails to spawn records the cause, not a blank error", () => {
+    expect(() =>
+      commentOnPreservedWorktree({
+        ticket: "WM-13-enoent",
+        preservation: { ref: "wip/x", commit: "abc", push: "pushed" },
+        spawn: () => ({
+          error: Object.assign(new Error("spawnSync bun ENOENT"), {
+            code: "ENOENT",
+          }),
+          status: null,
+          stdout: "",
+          stderr: "",
+        }),
+      }),
+    ).toThrow(/Linear comment failed to run: spawnSync bun ENOENT/);
+  });
+
+  test("a timed-out preservation comment records the failure without losing the preserved ref", () => {
+    // Only the preservation path gets the short timeout; the real worktree_up
+    // spawn keeps a generous bound so this cannot flake under load.
+    const root = tmpRoot();
+    const workspaceDir = path.join(root, "run_wt13_timeout-a1");
+    const calls = [];
+    let caught;
+    try {
+      createWorkspace({
+        root,
+        runId: "run_wt13_timeout",
+        attempt: 1,
+        input: { repo: "recovered-up", ticket: "WM-13-timeout" },
+        workspace: { type: "worktree" },
+        worktreeTimeoutMs: 120_000,
+        worktreePreservationComment: ({ ticket, preservation }) =>
+          commentOnPreservedWorktree({
+            ticket,
+            preservation,
+            timeoutMs: 25,
+            spawn: (...args) => {
+              calls.push(args);
+              return { error: { code: "ETIMEDOUT" } };
+            },
+          }),
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(WorktreeError);
+    expect(caught.message).toContain("Linear comment timed out after 25ms");
+    expect(calls).toHaveLength(1);
+    expect(calls[0][2]).toMatchObject({ timeout: 25 });
+    const marker = JSON.parse(
+      readFileSync(path.join(workspaceDir, ".worktree.json"), "utf8"),
+    );
+    expect(marker).toMatchObject({
+      preservedWip: {
+        ref: "wip/WM-13-20260817T183000Z",
+        commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        comment: {
+          status: "failed",
+          error: "Linear comment timed out after 25ms",
+        },
+      },
+    });
   });
 
   test("a red baseline is recorded in the marker and agent input without aborting workspace creation", () => {
@@ -798,5 +999,56 @@ describe("memos.json materialization (WM-810)", () => {
       artifactStore: tmpDir("evrt-memo-store-absent-"),
     });
     expect(existsSync(path.join(created.dir, "memos.json"))).toBe(false);
+  });
+});
+
+describe("bin/worktree-up.sh seed_demo_data (#1758)", () => {
+  const BIN = path.resolve(import.meta.dir, "..", "..", "bin");
+
+  // Drive the real `seed_demo_data` function (extracted from worktree-up.sh so
+  // the rest of the script — git, ports, daemons — stays out of the way) against
+  // a fake `event-runtime/demo/seed.mjs` under a temp worktree.
+  function runSeed(fakeSeedSource) {
+    const wt = tmpDir("evrt-seed-wt-");
+    mkdirSync(path.join(wt, "event-runtime", "demo"), { recursive: true });
+    writeFileSync(
+      path.join(wt, "event-runtime", "demo", "seed.mjs"),
+      fakeSeedSource,
+    );
+    const script = [
+      `source '${path.join(BIN, "worktree-common.sh")}'`,
+      `eval "$(sed -n '/^seed_demo_data() {/,/^}/p' '${path.join(BIN, "worktree-up.sh")}')"`,
+      `seed_demo_data '${wt}' 7999 demo`,
+    ].join("\n");
+    const r = spawnSync("bash", ["-c", script], { encoding: "utf8" });
+    return { ...r, wt };
+  }
+
+  test("retries exit 78 (adapter-probe timeout) and succeeds on the next attempt", () => {
+    const r = runSeed(
+      `import { existsSync, writeFileSync } from "node:fs";\n` +
+        `const marker = new URL("./attempted", import.meta.url).pathname;\n` +
+        `if (!existsSync(marker)) {\n` +
+        `  writeFileSync(marker, "1");\n` +
+        `  console.error("seed_probe_timeout: no proposal for demo-adapter-probe within 1ms");\n` +
+        `  process.exit(78);\n` +
+        `}\n` +
+        `console.log("seeded ok " + process.argv.slice(2).join(" "));\n`,
+    );
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain("retryable error (attempt 1/5, exit 78)");
+    expect(r.stdout).toContain("seeded ok --port 7999 --prefix demo");
+    expect(
+      existsSync(path.join(r.wt, "event-runtime", "demo", "attempted")),
+    ).toBe(true);
+  });
+
+  test("dies on a non-retryable exit code without retrying", () => {
+    const r = runSeed(
+      `console.error("seed: refusing — runtime is not fake");\nprocess.exit(1);\n`,
+    );
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("seed failed (exit 1)");
+    expect(r.stderr).not.toContain("retryable error");
   });
 });
