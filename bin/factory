@@ -157,6 +157,8 @@ case "$cmd" in
   escalate)     run_bun orchestrator/escalate.mjs "$@" ;;
   branch-guard) run_bun orchestrator/branch-guard.mjs "$@" ;;
   reconcile)    run_bun orchestrator/reconcile.mjs "$@" ;;
+  ship-preflight) run_bun orchestrator/ship.mjs preflight "$@" ;;
+  ship-chain)   run_bun orchestrator/ship.mjs chain "$@" ;;
   reaper)       run_bun orchestrator/reaper.mjs "$@" ;;
   janitor)      run_bun orchestrator/janitor.mjs "$@" ;;
   warm)         run_bun orchestrator/warm.mjs "$@" ;;
@@ -434,6 +436,11 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   escalate      orchestrator/escalate.mjs
   branch-guard  orchestrator/branch-guard.mjs (mechanical open-PR and protected branch guard)
   reconcile     orchestrator/reconcile.mjs
+  ship-preflight orchestrator/ship.mjs (read-only release gate: base CI green for
+                the exact SHA, runtime pins fresh, publishers idle, no bot pin or
+                escalated PR, promotion journal clean; --repo <name> --json)
+  ship-chain    orchestrator/ship.mjs (publish -> reconcile -> pin -> release;
+                --repo <name> --until preflight|pin|release, dry run without --apply)
   reaper        orchestrator/reaper.mjs
   janitor       orchestrator/janitor.mjs
   warm          orchestrator/warm.mjs
