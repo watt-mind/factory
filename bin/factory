@@ -155,6 +155,7 @@ case "$cmd" in
   digest)       run_bun orchestrator/digest.mjs "$@" ;;
   doctor)       run_bun orchestrator/doctor.mjs "$@" ;;
   escalate)     run_bun orchestrator/escalate.mjs "$@" ;;
+  infra)        run_bun orchestrator/infra.mjs "$@" ;;
   branch-guard) run_bun orchestrator/branch-guard.mjs "$@" ;;
   reconcile)    run_bun orchestrator/reconcile.mjs "$@" ;;
   reaper)       run_bun orchestrator/reaper.mjs "$@" ;;
@@ -432,6 +433,9 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   digest        orchestrator/digest.mjs
   doctor        orchestrator/doctor.mjs
   escalate      orchestrator/escalate.mjs
+  infra         orchestrator/infra.mjs (audited legal-dev recovery verbs:
+                rotate-driver-digest, discard-unprepared-transaction,
+                sweep-evicted-pods; dry-run by default, --yes to act)
   branch-guard  orchestrator/branch-guard.mjs (mechanical open-PR and protected branch guard)
   reconcile     orchestrator/reconcile.mjs
   reaper        orchestrator/reaper.mjs
@@ -471,6 +475,7 @@ FACTORY_CONTROL_API_ALLOW_INSECURE=1).
 
 Works from any cwd (worktrees included).
   factory notify "BLOCKED LAB-176: need approval"
+  factory infra sweep-evicted-pods            dry run; --yes to delete
   factory emit          regenerate + link harnesses, CLI, and repo commands
   factory emit --check  CI: verify dist matches shared/
 EOF
