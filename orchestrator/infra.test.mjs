@@ -1424,3 +1424,23 @@ describe("the log directory is not world-readable", () => {
     expect(statSync(dir).mode & 0o777).toBe(0o700);
   });
 });
+
+describe("--dry-run with a swallowed value is still a dry run", () => {
+  test("sweep-evicted-pods --yes --dry-run now refuses and deletes nothing", () => {
+    const calls = [];
+    const code = runCli(["sweep-evicted-pods", "--yes", "--dry-run", "now"], {
+      ssh: (...args) => {
+        calls.push(["ssh", ...args]);
+        return { status: 0, stdout: "[]", stderr: "" };
+      },
+      gh: (...args) => {
+        calls.push(["gh", ...args]);
+        return { status: 0, stdout: "", stderr: "" };
+      },
+      log: () => {},
+      err: () => {},
+    });
+    expect(code).toBe(EXIT.CANNOT_EVALUATE);
+    expect(calls).toEqual([]);
+  });
+});

@@ -1142,7 +1142,10 @@ export function runCli(argv, deps = {}) {
   // must never reach the runner. Each of these values ends up in ssh's argv or
   // in a script that runs as root on the other side.
   const yes = flags.yes === true || flags.yes === "true";
-  const dryRun = flags["dry-run"] === true || flags["dry-run"] === "true";
+  // Any spelling of --dry-run is a dry run unless it is literally "false":
+  // the parser lets a flag swallow the next bare token, and "--yes --dry-run
+  // now" must not become an apply.
+  const dryRun = flags["dry-run"] !== undefined && flags["dry-run"] !== "false";
   if (yes && dryRun) {
     err(
       "CANNOT EVALUATE — contradictory flags: --yes says apply, --dry-run says do not. Pass exactly one.",
