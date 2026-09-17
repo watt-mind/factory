@@ -24,6 +24,14 @@ For user-facing PRs, open the Linear ticket's attached screenshots and judge the
 
 Then check CI for the reviewed head SHA: select only its CI workflow with `gh run list --workflow ci.yml --commit <sha> --json databaseId --limit 1`, wait with `gh run watch <run-id> --exit-status --interval 60`, and before merging assert every check run is complete and green with `gh api repos/<owner>/<repo>/commits/<sha>/check-runs`. The workflow run can lag the push, so retry the workflow-selected lookup for up to about two minutes when it is empty. **Never `sleep` and re-poll**: use only a bounded condition poll. Also check whether the branch is behind or conflicting with the base.
 
+### Complete expected automated reviews
+
+Identify the automated reviewers required by the repository's configuration and recorded policy; do not invent a requirement for every installed bot to comment on every PR. For the reviewed head, wait for each expected review and read its findings as well as human review threads. Disposition every finding as fixed, already addressed, or dismissed with a written reason. Reply before resolving a thread, and resolve only once that disposition is supported. Zero unresolved review threads is a merge precondition; record a non-blocking follow-up on its ticket before resolving the thread that raised it.
+
+After any push, re-check review freshness and unresolved threads against the new head. A review of an earlier head is not automatically evidence for newly changed code. Use the review service's documented timeout, or a bounded 10-minute wait if none is recorded; if an expected review remains unavailable, leave the PR open and report BLOCKED with the missing service/check and the action needed. Do not poll indefinitely or treat silence as approval. A broken or expired reviewer does not grant standing permission for an admin bypass. Any human-approved exception must identify the exact PR/head and missing evidence, while preserving the repository's production and sensitive-change approval requirements.
+
+If a valid finding arrives after merge, file a linked follow-up and fix it through the normal PR path; escalate immediately when it exposes a security-sensitive change or broken essential flow.
+
 ### 2. Classify
 
 - **MERGE** — CI green, no blocking findings. Minor/polish findings don't block: file them to Linear `Triage` per §8 and merge anyway.
