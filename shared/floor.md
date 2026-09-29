@@ -140,6 +140,20 @@ for i in $(seq 60); do curl -sf localhost:4222 >/dev/null && break; sleep 2; don
 
 **Never end your turn while background jobs are running.** Subagents must not park mid-flow or yield prematurely while waiting for slow commands, test suites, or background sub-processes. When an agent yields without active foreground execution, the orchestrator cannot distinguish between an agent legitimately waiting on slow work, an agent stalled needing a nudge, or an agent finished but under-reporting. Block on readiness (e.g. `gh run watch <run-id> --exit-status --interval 60`, `wait <pid>`, or bounded polling) until the work is complete before completing your turn.
 
+**Long-running verify commands: use the status-file idiom.** The Bash tool auto-backgrounds any foreground command that outlives its `timeout` (max 600000ms) — even one launched with `run_in_background` left false and an explicit large timeout. The auto-backgrounded call's framing exit code is not the command's exit code, so a `0` there proves nothing. For any verify command expected to exceed ~10 minutes, never trust the framing exit code; run the command so its own exit code is written to a status file, with output directed to a log file, then poll for the status file with repeated short Bash calls:
+
+```bash
+<verify-cmd> >verify.log 2>&1; echo $? >verify.status
+```
+
+```bash
+test -f verify.status && cat verify.status || echo "still running"
+```
+
+Once the status file exists, its content is the command's real exit code — read the log file (`tail -30 verify.log`) for the summary. Each poll is a separate short call that returns immediately; never put a `sleep` loop in a single blocked call to wait one out.
+
+Do not judge a long test run through `| tail -N` pipe framing either: piped stdout is fully buffered while the test runner's progress and summary on stderr are not, so the buffered stdout flushes at process exit and pushes the real summary out of the tail window — and the pipeline's exit code is the last command's (`tail`'s, always 0), not the test run's. That is a false-pass trap. Direct output to a log file and read the status file instead.
+
 **GitHub Actions secondary rate limits.** Avoid rapid, unthrottled polling of GitHub's Actions and jobs APIs (e.g. tight loops calling `gh run view` or `gh api`). Aggressive polling triggers GitHub's secondary rate limits and blocks the harness. Prefer the REST-backed `gh run watch <run-id> --exit-status --interval 60`; the GraphQL-backed PR-check fallback must use an interval of at least 60 seconds when unavoidable.
 
 **Session scratchpad isolation.** Never use generic shared filenames (such as `pr-body.md` or `scratch/critique.json`) across concurrent tasks. Reviewer, implementer, and critic agents operating in shared session scratchpads must namespace all temporary files by ticket ID or session identifier (e.g. `pr-body-<TICKET-ID>.md`, `<TICKET-ID>-critique.json`) to prevent cross-agent collisions and silent overwrites.
