@@ -1,7 +1,8 @@
 version: 2
 updates:
-  # Maintain dependencies for npm / bun package ecosystem (root)
-  - package-ecosystem: "npm"
+  # Maintain dependencies for the bun package ecosystem (root). The repo is
+  # bun-managed (bun.lock only), which the npm updater refuses to fetch.
+  - package-ecosystem: "bun"
     directory: "/"
     target-branch: "develop"
     schedule:
@@ -23,8 +24,8 @@ updates:
       - "dependencies"
       - "security"
 
-  # Maintain dependencies for event-runtime/web
-  - package-ecosystem: "npm"
+  # Maintain dependencies for event-runtime/web (bun-managed)
+  - package-ecosystem: "bun"
     directory: "/event-runtime/web"
     target-branch: "develop"
     schedule:
