@@ -217,7 +217,7 @@ jobs:
           fi
           "$uvx_bin" --version
       - name: Semgrep scan
-        run: uvx --from semgrep==1.111.0 --with "setuptools<70" semgrep scan --config p/security-audit --error --metrics=off .
+        run: uvx --python 3.12 --from semgrep==1.111.0 --with "setuptools<70" semgrep scan --config p/security-audit --error --metrics=off .
 
   actionlint:
     name: Actionlint
