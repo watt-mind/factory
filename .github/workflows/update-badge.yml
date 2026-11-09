@@ -1,7 +1,9 @@
 # Weekly dogfood-in-public badge (WM-958).
 #
 # Rewrites the README marker block from tools/update-dogfood-badge.mjs and
-# commits only when the count changed. Schedule + workflow_dispatch only —
+# commits only when the count changed. develop is protected (required
+# checks), so the commit goes to chore/dogfood-badge and a PR is opened or
+# updated instead of pushing to develop (WM-1135). Schedule + workflow_dispatch only —
 # never pull_request — so the contents:write token is not exposed to a fork
 # PR. No marketplace `uses:` (WM-573): the shadow fleet 429s on
 # actions/checkout; a plain git fetch of develop is the same checkout.
@@ -14,6 +16,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 concurrency:
   group: update-badge
@@ -76,4 +79,12 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "chore(oss): refresh dogfood-in-public badge"
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
-          git push origin HEAD:develop
+          # develop is protected: push a fixed branch and open/update a PR.
+          git push --force origin HEAD:refs/heads/chore/dogfood-badge
+          if [ -n "$(gh pr list --repo "$REPO" --head chore/dogfood-badge --base develop --state open --json number -q '.[0].number')" ]; then
+            echo "PR already open; branch updated"
+          else
+            gh pr create --repo "$REPO" --base develop --head chore/dogfood-badge \
+              --title "chore(oss): refresh dogfood-in-public badge" \
+              --body "Weekly automated badge refresh (WM-958, WM-1135)."
+          fi
