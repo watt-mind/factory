@@ -221,13 +221,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Prepends the pinned bun to GITHUB_PATH; a runner bun of another
+          # version is never reused (WM-1137).
           .github/scripts/install-pinned-tools.sh bun
-          if [ -x "$HOME/.bun/bin/bun" ]; then
-            echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
-            "$HOME/.bun/bin/bun" --version
-          else
-            bun --version
-          fi
       - name: Install root dependencies
         run: bun install --frozen-lockfile
 
@@ -350,13 +346,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Prepends the pinned bun to GITHUB_PATH; a runner bun of another
+          # version is never reused (WM-1137).
           .github/scripts/install-pinned-tools.sh bun
-          if [ -x "$HOME/.bun/bin/bun" ]; then
-            echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
-            "$HOME/.bun/bin/bun" --version
-          else
-            bun --version
-          fi
       - name: Install root dependencies
         run: bun install --frozen-lockfile
 
@@ -470,13 +462,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Prepends the pinned bun to GITHUB_PATH; a runner bun of another
+          # version is never reused (WM-1137).
           .github/scripts/install-pinned-tools.sh bun
-          if [ -x "$HOME/.bun/bin/bun" ]; then
-            echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
-            "$HOME/.bun/bin/bun" --version
-          else
-            bun --version
-          fi
 
       - name: Install root dependencies
         run: bun install --frozen-lockfile
@@ -594,19 +582,15 @@ jobs:
 
       # Same reason: oven-sh/setup-bun@v2 is the next codeload download in
       # line, and it also re-fetched bun-linux-x64.zip from GitHub releases on
-      # every job. The runner user on the shadow host already has bun under
-      # ~/.bun; only install (from bun.sh, not codeload) if it is missing.
+      # every job. The pinned bun is cached per version on the runner host and
+      # only downloaded (checksum-verified) when that version is missing.
       - name: Setup bun (no action download)
         shell: bash
         run: |
           set -euo pipefail
+          # Prepends the pinned bun to GITHUB_PATH; a runner bun of another
+          # version is never reused (WM-1137).
           .github/scripts/install-pinned-tools.sh bun
-          if [ -x "$HOME/.bun/bin/bun" ]; then
-            echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
-            "$HOME/.bun/bin/bun" --version
-          else
-            bun --version
-          fi
       - name: Install root dependencies
         run: bun install --frozen-lockfile
 
