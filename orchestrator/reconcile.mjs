@@ -153,6 +153,110 @@ export function settledLabelIds(issue) {
     .map((l) => l.id);
 }
 
+/** How far back to look for merged PRs carrying `Fixes` lines (WM-1140). */
+export const FIXES_WINDOW_DAYS = 14;
+/** Upper bound on merged PRs inspected per repo, newest first. */
+export const FIXES_PR_LIMIT = 300;
+
+/**
+ * Explicit completion markers in a PR body (WM-1140): a line that is *only*
+ * `Fixes|Closes|Resolves <TEAM>-<n>` (case-insensitive; optional list bullet,
+ * optional trailing punctuation). A bare ID mentioned in prose, a caveat or a
+ * "related to" note never matches — that scraping closed the wrong ticket in
+ * the CLNT-5138 incident (2026-10-03). Lines inside fenced code blocks are
+ * examples, not claims, and are ignored.
+ * @returns {{id:string, line:string}[]} unique by id, in body order
+ */
+export function parseFixesLines(body, team = null) {
+  const out = [];
+  const seen = new Set();
+  let fenced = false;
+  const re =
+    /^(?:[-*+]\s+)?(?:fixes|closes|resolves)\s+([A-Za-z][A-Za-z0-9]*-\d+)\s*[.,;]?$/i;
+  for (const raw of String(body ?? "").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (/^(```|~~~)/.test(line)) {
+      fenced = !fenced;
+      continue;
+    }
+    if (fenced) continue;
+    const m = re.exec(line);
+    if (!m) continue;
+    const id = m[1].toUpperCase();
+    if (team && !id.startsWith(`${team.toUpperCase()}-`)) continue;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push({ id, line });
+  }
+  return out;
+}
+
+/**
+ * Merged PRs into the repo's base branch within the window, as
+ * `{number, body, mergedAt, baseRefName}`. Empty (with a warning) when the
+ * forge cannot answer — never a reason to act.
+ */
+export function recentMergedPrs(repo, { now = Date.now() } = {}, forge = null) {
+  try {
+    const f = forge ?? loadForge();
+    const cutoff = now - FIXES_WINDOW_DAYS * 86400000;
+    return f
+      .prList(repo.github, {
+        state: "merged",
+        limit: FIXES_PR_LIMIT,
+        fields: ["number", "body", "mergedAt", "baseRefName", "state"],
+      })
+      .filter(
+        (pr) =>
+          pr.mergedAt &&
+          Date.parse(pr.mergedAt) >= cutoff &&
+          (!repo.base || pr.baseRefName === repo.base),
+      );
+  } catch (err) {
+    console.warn(
+      c.yellow(
+        `  warning: could not list merged PRs for ${repo.github}: ${err?.message ?? err}`,
+      ),
+    );
+    return [];
+  }
+}
+
+/**
+ * Drift descriptors for non-terminal tickets named on a `Fixes` line of a
+ * merged PR. Unlike the attachment rule this applies to *every* non-terminal
+ * state: an explicit own-line `Fixes` is positive completion evidence even for
+ * a Blocked/Backlog ticket. First (earliest-listed) PR wins per ticket.
+ */
+export function evaluateFixesLines(issues, mergedPrs, team = null) {
+  const byId = new Map(
+    issues
+      .filter(
+        (i) =>
+          i.state?.type !== "completed" &&
+          i.state?.type !== "canceled" &&
+          i.state?.name?.toLowerCase() !== "done",
+      )
+      .map((i) => [i.identifier?.toUpperCase(), i]),
+  );
+  const out = new Map();
+  for (const pr of mergedPrs) {
+    for (const { id, line } of parseFixesLines(pr.body, team)) {
+      const issue = byId.get(id);
+      if (!issue || out.has(id)) continue;
+      out.set(id, {
+        type: "merged-fixes-line",
+        issue,
+        merged: [pr.number],
+        mergedAt: pr.mergedAt,
+        fixesLine: line,
+        targetState: "Done",
+      });
+    }
+  }
+  return [...out.values()];
+}
+
 /**
  * Evaluate drift between ticket state in Linear and PR state on GitHub.
  * Returns drift descriptor or null if ticket is consistent.
@@ -298,7 +402,49 @@ export async function reconcileRepo(
   let drift = 0;
   const actions = [];
 
+  const handled = new Set();
+  const mergedPrs = deps.mergedPrs ?? recentMergedPrs(repo);
+  for (const ev of evaluateFixesLines(nodes, mergedPrs, repo.team)) {
+    const issue = ev.issue;
+    handled.add(issue.id);
+    drift++;
+    actions.push(ev);
+    if (gate) continue;
+    console.log(
+      `  ${c.yellow(issue.identifier)} is ${issue.state?.name ?? "open"} but merged PR #${ev.merged[0]} says "${ev.fixesLine}" — ${apply ? "moving to Done" : "would move to Done"}`,
+    );
+    console.log(c.dim(`    ${issue.title.slice(0, 70)}`));
+    if (!apply) continue;
+    if (!doneId) {
+      console.log(
+        c.red(`    ! no completed state on team ${repo.team}, skipping`),
+      );
+      continue;
+    }
+    await queryGql(
+      `mutation($id:String!,$in:IssueUpdateInput!){ issueUpdate(id:$id,input:$in){ success } }`,
+      {
+        id: issue.id,
+        in: { stateId: doneId, labelIds: settledLabelIds(issue) },
+      },
+    );
+    await queryGql(
+      `mutation($in:CommentCreateInput!){ commentCreate(input:$in){ success } }`,
+      {
+        in: {
+          issueId: issue.id,
+          body:
+            `**State reconciled: \`${issue.state?.name ?? "open"}\` → \`Done\` (WM-1140).**\n\n` +
+            `PR #${ev.merged[0]} merged at ${ev.mergedAt} and its body carries the line \`${ev.fixesLine}\`, ` +
+            `which is explicit completion evidence regardless of ticket state. ` +
+            `Removed the factory lifecycle labels (\`ai:in-progress\`, \`ai:needs-review\`, \`ai:blocked\`, ...); project labels were preserved.`,
+        },
+      },
+    );
+  }
+
   for (const issue of nodes) {
+    if (handled.has(issue.id)) continue;
     const prs = prNumbers(issue, repo.github);
     if (!prs.length) continue;
 
