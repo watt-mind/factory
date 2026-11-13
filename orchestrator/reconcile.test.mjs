@@ -10,6 +10,9 @@ import {
   reconcileRepo,
   parseArgs,
   LIFECYCLE_LABELS,
+  fetchAllPages,
+  Q,
+  Q_DONE,
 } from "./reconcile.mjs";
 
 describe("parseArgs", () => {
@@ -317,5 +320,95 @@ describe("reconcileRepo (WM-11)", () => {
 
     expect(res.drift).toBe(1);
     expect(mutations).toHaveLength(0);
+  });
+});
+
+describe("reconcile pagination (WM-1139)", () => {
+  const repo = {
+    name: "legalease",
+    team: "CLNT",
+    project: "LegalEase",
+    github: "watt-mind/legalease",
+  };
+  const states = [
+    { id: "s-in-review", name: "In Review", type: "started" },
+    { id: "s-done", name: "Done", type: "completed" },
+  ];
+  const mk = (id, withPr) => ({
+    id,
+    identifier: id.toUpperCase(),
+    title: id,
+    state: { id: "s-in-review", name: "In Review", type: "started" },
+    labels: { nodes: [] },
+    attachments: {
+      nodes: withPr
+        ? [{ url: "https://github.com/watt-mind/legalease/pull/77" }]
+        : [],
+    },
+  });
+
+  test("evaluates tickets from page 2 of a two-page response", async () => {
+    const seen = [];
+    const gql = async (q, vars) => {
+      if (q.includes("issueUpdate") || q.includes("commentCreate"))
+        return { success: true };
+      if (q === Q) {
+        seen.push(vars.after);
+        return vars.after === null
+          ? {
+              issues: {
+                nodes: [mk("clnt-1", false)],
+                pageInfo: { hasNextPage: true, endCursor: "cur-1" },
+              },
+            }
+          : {
+              issues: {
+                nodes: [mk("clnt-2", true)],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            };
+      }
+      if (q === Q_DONE)
+        return { issues: { nodes: [], pageInfo: { hasNextPage: false } } };
+      return {};
+    };
+    const res = await reconcileRepo(
+      repo,
+      { apply: false, gate: true },
+      {
+        gql,
+        states,
+        labels: [],
+        prState: () => ({ state: "MERGED", isDraft: false, labels: [] }),
+      },
+    );
+    expect(seen).toEqual([null, "cur-1"]);
+    expect(res.actions).toHaveLength(1);
+    expect(res.actions[0].type).toBe("merged-not-done");
+    expect(res.actions[0].issue.identifier).toBe("CLNT-2");
+  });
+
+  test("stops at the page bound and warns", async () => {
+    let calls = 0;
+    const gql = async () => {
+      calls++;
+      return {
+        issues: {
+          nodes: [mk(`t-${calls}`, false)],
+          pageInfo: { hasNextPage: true, endCursor: `c${calls}` },
+        },
+      };
+    };
+    const warns = [];
+    const orig = console.warn;
+    console.warn = (m) => warns.push(String(m));
+    try {
+      const nodes = await fetchAllPages(gql, Q, {}, 3, "open-ticket");
+      expect(nodes).toHaveLength(3);
+      expect(calls).toBe(3);
+    } finally {
+      console.warn = orig;
+    }
+    expect(warns.join("")).toContain("3-page bound");
   });
 });
