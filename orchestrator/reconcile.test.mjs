@@ -11,6 +11,9 @@ import {
   parseArgs,
   LIFECYCLE_LABELS,
   fetchAllPages,
+  parseFixesLines,
+  evaluateFixesLines,
+  recentMergedPrs,
   Q,
   Q_DONE,
 } from "./reconcile.mjs";
@@ -263,6 +266,7 @@ describe("reconcileRepo (WM-11)", () => {
         gql: mockGql,
         prState: mockPrState,
         issues: [issue],
+        mergedPrs: [],
         states,
         labels,
       },
@@ -313,6 +317,7 @@ describe("reconcileRepo (WM-11)", () => {
         gql: mockGql,
         prState: () => ({ state: "OPEN", labels: [] }),
         issues: [issue],
+        mergedPrs: [],
         states,
         labels,
       },
@@ -378,6 +383,7 @@ describe("reconcile pagination (WM-1139)", () => {
       {
         gql,
         states,
+        mergedPrs: [],
         labels: [],
         prState: () => ({ state: "MERGED", isDraft: false, labels: [] }),
       },
@@ -410,5 +416,232 @@ describe("reconcile pagination (WM-1139)", () => {
       console.warn = orig;
     }
     expect(warns.join("")).toContain("3-page bound");
+  });
+});
+
+describe("Fixes lines on merged PRs (WM-1140)", () => {
+  const repo = {
+    name: "legalease",
+    team: "CLNT",
+    project: "LegalEase",
+    github: "watt-mind/legalease",
+    base: "develop",
+  };
+  const states = [
+    { id: "s-in-review", name: "In Review", type: "started" },
+    { id: "s-done", name: "Done", type: "completed" },
+  ];
+  const labels = [{ id: "l-bug", name: "type:bug" }];
+  const lbl = (...names) => ({
+    nodes: names.map((n) => ({ id: `id-${n}`, name: n })),
+  });
+  const mk = (identifier, stateName, type, labelNames = []) => ({
+    id: `i-${identifier}`,
+    identifier,
+    title: `t ${identifier}`,
+    state: { id: "x", name: stateName, type },
+    labels: lbl(...labelNames),
+    attachments: { nodes: [] },
+  });
+  const pr = (number, body, extra = {}) => ({
+    number,
+    body,
+    mergedAt: "2026-11-12T10:00:00Z",
+    baseRefName: "develop",
+    ...extra,
+  });
+  const run = async (issues, mergedPrs, opts = { apply: true }) => {
+    const mutations = [];
+    const res = await reconcileRepo(repo, opts, {
+      gql: async (q, v) => {
+        mutations.push({ query: q, vars: v });
+        return { success: true };
+      },
+      prState: () => ({}),
+      issues,
+      mergedPrs,
+      states,
+      labels,
+    });
+    return { res, mutations };
+  };
+
+  describe("parseFixesLines", () => {
+    test("matches Fixes/Closes/Resolves in any case, one per own line", () => {
+      const body =
+        "Summary\n\nFixes CLNT-1\ncloses clnt-2.\nRESOLVES CLNT-3\n- Fixes CLNT-4\n";
+      expect(parseFixesLines(body).map((m) => m.id)).toEqual([
+        "CLNT-1",
+        "CLNT-2",
+        "CLNT-3",
+        "CLNT-4",
+      ]);
+    });
+    test("never matches bare mentions or lines with other text", () => {
+      const body = [
+        "See CLNT-5138 for context",
+        "This does not fix CLNT-9 yet",
+        "Fixes CLNT-10 partially",
+        "Related: Fixes CLNT-11",
+        "Fixes #12",
+        "CLNT-13",
+      ].join("\n");
+      expect(parseFixesLines(body)).toEqual([]);
+    });
+    test("ignores fenced code, other teams when scoped, and duplicates", () => {
+      const body =
+        "```\nFixes CLNT-1\n```\nFixes OPS-2\nFixes CLNT-3\nFixes CLNT-3";
+      expect(parseFixesLines(body, "CLNT").map((m) => m.id)).toEqual([
+        "CLNT-3",
+      ]);
+    });
+    test("tolerates null bodies and CRLF", () => {
+      expect(parseFixesLines(null)).toEqual([]);
+      expect(parseFixesLines("Fixes CLNT-5\r\n").map((m) => m.id)).toEqual([
+        "CLNT-5",
+      ]);
+    });
+  });
+
+  test("a Fixes line closes a Blocked ticket and strips lifecycle labels", async () => {
+    const issue = mk("CLNT-5353", "Blocked", "started", [
+      "ai:blocked",
+      "ai:in-progress",
+      "ai:needs-review",
+      "type:bug",
+    ]);
+    const { res, mutations } = await run(
+      [issue],
+      [pr(2434, "Body\n\nFixes CLNT-5353\n")],
+    );
+    expect(res.drift).toBe(1);
+    expect(res.actions[0].type).toBe("merged-fixes-line");
+    const upd = mutations.find((m) => m.query.includes("issueUpdate"));
+    expect(upd.vars.in.stateId).toBe("s-done");
+    expect(upd.vars.in.labelIds).toEqual(["id-type:bug"]);
+    const body = mutations.find((m) => m.query.includes("commentCreate")).vars
+      .in.body;
+    expect(body).toContain("#2434");
+    expect(body).toContain("2026-11-12T10:00:00Z");
+    expect(body).toContain("Fixes CLNT-5353");
+  });
+
+  test("works for Todo, Backlog and Triage tickets too", async () => {
+    const issues = [
+      mk("CLNT-1", "Todo", "unstarted"),
+      mk("CLNT-2", "Backlog", "backlog"),
+      mk("CLNT-3", "Triage", "triage"),
+    ];
+    const { res } = await run(issues, [
+      pr(1, "Fixes CLNT-1\nCloses CLNT-2\nresolves CLNT-3"),
+    ]);
+    expect(res.drift).toBe(3);
+  });
+
+  test("a bare mention does not close the ticket", async () => {
+    const { res, mutations } = await run(
+      [mk("CLNT-5138", "Blocked", "started")],
+      [pr(5, "Caveat: CLNT-5138 is NOT fixed here.\nSee CLNT-5138.")],
+    );
+    expect(res.drift).toBe(0);
+    expect(mutations).toHaveLength(0);
+  });
+
+  test("an already-Done ticket is a no-op", async () => {
+    const { res, mutations } = await run(
+      [mk("CLNT-7", "Done", "completed")],
+      [pr(7, "Fixes CLNT-7")],
+    );
+    expect(res.drift).toBe(0);
+    expect(mutations).toHaveLength(0);
+  });
+
+  test("dry run and gate mode report drift without mutating", async () => {
+    const issue = mk("CLNT-8", "In Review", "started");
+    for (const opts of [{ apply: false }, { apply: false, gate: true }]) {
+      const { res, mutations } = await run(
+        [issue],
+        [pr(8, "Fixes CLNT-8")],
+        opts,
+      );
+      expect(res.drift).toBe(1);
+      expect(mutations).toHaveLength(0);
+    }
+  });
+
+  test("does not double-process a ticket the attachment rule also matches", async () => {
+    const issue = {
+      ...mk("CLNT-9", "In Review", "started"),
+      attachments: {
+        nodes: [{ url: "https://github.com/watt-mind/legalease/pull/9" }],
+      },
+    };
+    const mutations = [];
+    const res = await reconcileRepo(
+      repo,
+      { apply: true },
+      {
+        gql: async (q, v) => (mutations.push(q), { success: true }),
+        prState: () => ({ state: "MERGED" }),
+        issues: [issue],
+        mergedPrs: [pr(9, "Fixes CLNT-9")],
+        states,
+        labels,
+      },
+    );
+    expect(res.drift).toBe(1);
+    expect(mutations.filter((q) => q.includes("issueUpdate"))).toHaveLength(1);
+  });
+
+  test("the attachment-only rule is unchanged: a Blocked ticket with a merged attached PR but no Fixes line stays", async () => {
+    const issue = {
+      ...mk("CLNT-10", "Blocked", "started"),
+      attachments: {
+        nodes: [{ url: "https://github.com/watt-mind/legalease/pull/10" }],
+      },
+    };
+    const res = await reconcileRepo(
+      repo,
+      { apply: true },
+      {
+        gql: async () => ({ success: true }),
+        prState: () => ({ state: "MERGED" }),
+        issues: [issue],
+        mergedPrs: [],
+        states,
+        labels,
+      },
+    );
+    expect(res.drift).toBe(0);
+  });
+
+  test("recentMergedPrs keeps only in-window merges into the base branch", () => {
+    const now = Date.parse("2026-11-13T00:00:00Z");
+    const forge = {
+      prList: () => [
+        pr(1, "a"),
+        pr(2, "b", { mergedAt: "2026-10-01T00:00:00Z" }),
+        pr(3, "c", { baseRefName: "main" }),
+        pr(4, "d", { mergedAt: null }),
+      ],
+    };
+    expect(recentMergedPrs(repo, { now }, forge).map((p) => p.number)).toEqual([
+      1,
+    ]);
+  });
+
+  test("a forge failure yields no PRs rather than throwing", () => {
+    const forge = {
+      prList: () => {
+        throw new Error("rate limited");
+      },
+    };
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      expect(recentMergedPrs(repo, {}, forge)).toEqual([]);
+    } finally {
+      console.warn = warn;
+    }
   });
 });
