@@ -1,16 +1,40 @@
 import { describe, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 
 const HELPER_URL = new URL("./test-helpers-process.mjs", import.meta.url).href;
 const HELPER = JSON.stringify(HELPER_URL);
 
 // Every scenario runs in its own detached bun process so the child is a group
 // leader (pgid === pid) and so stubbing getpgid/PATH cannot leak into the suite.
+// Async spawn, not spawnSync: Bun 1.3.x (the CI pin) silently ignores
+// `detached` on spawnSync, leaving the child in the runner's group — inside the
+// handoff sandbox's PID namespace that group is then invisible (ps reports
+// pgid 0), and outside it a scenario could signal the real runner (WM-1137).
 function runIsolated(script) {
-  return spawnSync("bun", ["-e", script], {
-    detached: true,
-    encoding: "utf8",
-    timeout: 30_000,
+  return new Promise((resolve) => {
+    const child = spawn("bun", ["-e", script], {
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk));
+    child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk));
+    const timer = setTimeout(() => {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        // The group already exited between the timeout firing and the kill.
+      }
+    }, 30_000);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({ status: null, signal: null, stdout, stderr, error });
+    });
+    child.on("close", (status, signal) => {
+      clearTimeout(timer);
+      resolve({ status, signal, stdout, stderr });
+    });
   });
 }
 
@@ -18,7 +42,7 @@ const BREAK_PS = `process.env.PATH = "/definitely-missing";`;
 const HIDE_GETPGID = `process.getpgid = undefined;`;
 
 describe("tracked test process safety (WM-1982)", () => {
-  test("refuses the runner process group resolved through ps", () => {
+  test("refuses the runner process group resolved through ps", async () => {
     // Bun does not implement process.getpgid, so this is the production path.
     // Asserted from a nested, non-detached grandchild so that its own PID
     // differs from the group's PGID: only the ps resolver can refuse it, not
@@ -46,7 +70,7 @@ describe("tracked test process safety (WM-1982)", () => {
       }
       throw new Error("registered the isolated runner process group");
     `;
-    const result = runIsolated(`
+    const result = await runIsolated(`
       import { spawnSync } from "node:child_process";
       const nested = spawnSync("bun", ["-e", ${JSON.stringify(inner)}], {
         encoding: "utf8",
@@ -60,9 +84,9 @@ describe("tracked test process safety (WM-1982)", () => {
     expect(result.stderr).not.toContain("registered the isolated runner");
   });
 
-  test("prefers getpgid over ps when the runtime provides it", () => {
+  test("prefers getpgid over ps when the runtime provides it", async () => {
     // ps is made unusable, so only the getpgid branch can supply the PGID.
-    const result = runIsolated(`
+    const result = await runIsolated(`
       const { trackProcess } = await import(${HELPER});
       const fakePgid = 424242;
       process.getpgid = () => fakePgid;
@@ -83,8 +107,8 @@ describe("tracked test process safety (WM-1982)", () => {
     expect(result.stderr).not.toContain("did not refuse");
   });
 
-  test("tracks normally when neither getpgid nor ps can resolve the runner group", () => {
-    const result = runIsolated(`
+  test("tracks normally when neither getpgid nor ps can resolve the runner group", async () => {
+    const result = await runIsolated(`
       import { spawn } from "node:child_process";
       const { trackProcess, cleanupTrackedProcesses } = await import(${HELPER});
       const child = spawn("/bin/sleep", ["30"], { detached: true, stdio: "ignore" });
@@ -105,8 +129,8 @@ describe("tracked test process safety (WM-1982)", () => {
     expect(result.stderr).not.toContain("refusing to track");
   });
 
-  test("refuses the runner PID itself when no resolver is available", () => {
-    const result = runIsolated(`
+  test("refuses the runner PID itself when no resolver is available", async () => {
+    const result = await runIsolated(`
       const { trackProcess } = await import(${HELPER});
       ${HIDE_GETPGID}
       ${BREAK_PS}
@@ -126,11 +150,11 @@ describe("tracked test process safety (WM-1982)", () => {
     expect(result.stderr).not.toContain("registered the isolated runner PID");
   });
 
-  test("trackProcessGroupsMatching skips rows carrying the runner's own group", () => {
+  test("trackProcessGroupsMatching skips rows carrying the runner's own group", async () => {
     // The unique token appears only in this child's own `ps` command line, so
     // the scanner is guaranteed to see a row whose PGID is the runner's.
     const token = `wm1982-scan-${process.pid}-${Date.now()}`;
-    const result = runIsolated(`
+    const result = await runIsolated(`
       const marker = ${JSON.stringify(token)};
       const { trackProcessGroupsMatching, cleanupTrackedProcesses } = await import(${HELPER});
       trackProcessGroupsMatching(marker);
@@ -146,8 +170,8 @@ describe("tracked test process safety (WM-1982)", () => {
     expect(result.stderr).not.toContain("refusing to track");
   });
 
-  test("trackMarkedFakeRuntimeGroups skips a non-detached marked fixture", () => {
-    const result = runIsolated(`
+  test("trackMarkedFakeRuntimeGroups skips a non-detached marked fixture", async () => {
+    const result = await runIsolated(`
       import { spawn } from "node:child_process";
       const marker = "wm1982-marked-" + process.pid;
       const { trackMarkedFakeRuntimeGroups, cleanupTrackedProcesses } = await import(${HELPER});
