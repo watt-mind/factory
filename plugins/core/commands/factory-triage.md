@@ -14,6 +14,15 @@ Before working an issue, mark it so it appears in **Agents In Flight** and no ot
 
 **Remove `ai:in-progress` when you finish that issue**, whether you promoted it, held it, or closed it. A claim marker left behind makes a finished ticket look live forever. (The reaper clears stale ones after 45 minutes of silence, but relying on that means a lost 45 minutes.)
 
+## Intake cap
+
+The `Todo` + `ai:agent-ready` queue must keep meaning "next up", so triage caps it.
+
+- **Count first.** At the start of the sweep, count this repo's tickets that are `Todo` + `ai:agent-ready` (after `factory label-guard --apply` in step 0, so demotions are not counted). Read the cap from the repo's `intake_cap:` in `config/repos.yaml` (documented in `config/repos.example.yaml`); default **200** when unset.
+- **Above the cap** (count > cap), a ticket you would promote does not go to `Todo` when it is `source:agent` **and** priority is P3, P4 or none. Specify it fully as usual, keep `ai:agent-ready` (and its `tier:*` label), move it to `Backlog`, and comment: `spec complete; parked by intake cap (<count> > <cap>)`. Remove your `ai:in-progress` claim as always.
+- **Never capped:** P1/P2 (Urgent/High), `source:human`, `source:client-support`, `source:sentry`, and security tickets (`type:security`, or touching auth/authz, secrets or payments). They promote to `Todo` regardless of the count.
+- Parked tickets are not re-parked or re-counted on later sweeps: only newly specified tickets are capped; an existing `Backlog` ticket is left alone. Increment the count for each ticket you promote to `Todo` during the sweep, so the cap holds within a single run.
+
 Claim one issue at a time as you get to it, not all of them up front — a batch claimed and then abandoned blocks the queue for everything you never reached.
 
 **Answered holds come first.** Before the Triage pile, check for tickets carrying `ai:blocked` (in `Blocked` or `Triage`) that have a comment newer than the label's application — the orchestrator's gate resurfaces exactly these, and a human answer that sits unread costs a round-trip through the slowest part of the pipeline. For each: read the reply, **remove `ai:blocked`**, then re-run promote-or-hold below with the answer in hand (and record the decision in the product-decisions doc where it belongs). If the reply doesn't actually resolve the hold, comment a sharper question and **re-add `ai:blocked`** — removing and re-adding is required, not optional: the fresh label event is what resets the orchestrator's reply detection, and a hold that keeps the old label event gets re-examined every tick forever.
@@ -47,5 +56,7 @@ When you do resolve intent from those sources, cite where in the ticket so the n
 Batch the questions: one notification at the end of the run listing everything held and what each needs, rather than a ping per ticket.
 
 Do **not** start implementing anything — triage only. Never promote a ticket you couldn't verify against the actual codebase.
+
+The report must also state the intake cap, the current `Todo` + `ai:agent-ready` count (at sweep start), and how many tickets were parked to `Backlog` by the cap this run (list them).
 
 Finish with a summary table: issue, action taken (promoted / held / duplicate / closed), and what's blocking each held one.

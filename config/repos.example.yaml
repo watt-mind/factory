@@ -24,6 +24,7 @@ repos:
     worktree_root: ~/Develop/.worktrees/factory # Optional root for ticket worktrees.
     # worktree_warm: bin/worktree-warm.sh # Optional script that warms a worktree template.
     max_in_flight: 20 # Optional positive per-repository dispatch cap.
+    # intake_cap: 200 # Optional positive Todo + ai:agent-ready ceiling for /factory-triage (default 200). Above it, newly specified source:agent P3/P4/no-priority tickets are parked in Backlog instead of Todo.
     verify: bun test event-runtime/lib --timeout 20000 && bun build/emit.mjs --check && bun run format:check # Optional local verification command.
     # smoke_workflow: smoke-prod.yml # Optional post-deploy GitHub Actions workflow.
     # smoke_url: https://factory.example.com/healthz # Optional post-deploy smoke endpoint.
