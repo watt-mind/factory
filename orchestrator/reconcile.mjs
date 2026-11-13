@@ -62,19 +62,47 @@ const c = {
   cyan: (s) => `\x1b[36m${s}\x1b[0m`,
 };
 
-export const Q = `query($t:String!,$p:String!){ issues(first:250, filter:{
+export const Q = `query($t:String!,$p:String!,$after:String){ issues(first:250, after:$after, filter:{
     team:{key:{eq:$t}}, project:{name:{eq:$p}}, state:{type:{nin:["completed","canceled"]}} }){
   nodes{ id identifier title startedAt updatedAt labels(first:20){nodes{id name}}
          state{ id name type }
          comments(last:1){ nodes{ createdAt } }
-         attachments(first:20){ nodes{ url } } } } }`;
+         attachments(first:20){ nodes{ url } } }
+  pageInfo{ hasNextPage endCursor } } }`;
 
-export const Q_DONE = `query($t:String!,$p:String!){ issues(first:100, filter:{
+export const Q_DONE = `query($t:String!,$p:String!,$after:String){ issues(first:100, after:$after, filter:{
     team:{key:{eq:$t}}, project:{name:{eq:$p}}, state:{type:{eq:"completed"}} }, orderBy:updatedAt){
   nodes{ id identifier title startedAt updatedAt labels(first:20){nodes{id name}}
          state{ id name type }
          comments(last:1){ nodes{ createdAt } }
-         attachments(first:20){ nodes{ url } } } } }`;
+         attachments(first:20){ nodes{ url } } }
+  pageInfo{ hasNextPage endCursor } } }`;
+
+/** Upper bounds on pagination so a runaway cursor can never loop forever. */
+export const MAX_PAGES_ACTIVE = 12; // 12 x 250 = 3000 open tickets
+export const MAX_PAGES_DONE = 10; // 10 x 100 = 1000 most recently completed
+
+/**
+ * Follow `pageInfo { hasNextPage endCursor }` until exhausted or `maxPages`
+ * is hit (then warn on stderr and return what was collected).
+ */
+export async function fetchAllPages(queryGql, query, vars, maxPages, label) {
+  const nodes = [];
+  let after = null;
+  for (let page = 1; page <= maxPages; page++) {
+    const conn = (await queryGql(query, { ...vars, after }))?.issues;
+    nodes.push(...(conn?.nodes ?? []));
+    const info = conn?.pageInfo;
+    if (!info?.hasNextPage || !info.endCursor) return nodes;
+    after = info.endCursor;
+  }
+  console.warn(
+    c.yellow(
+      `  warning: ${label} query hit the ${maxPages}-page bound (${nodes.length} tickets fetched); more tickets exist and were not evaluated`,
+    ),
+  );
+  return nodes;
+}
 
 /** PR numbers attached to a ticket, for this repo only. */
 export function prNumbers(issue, nameWithOwner) {
@@ -229,12 +257,21 @@ export async function reconcileRepo(
         i.state?.name?.toLowerCase() === "done",
     );
   } else {
-    activeNodes =
-      (await queryGql(Q, { t: repo.team, p: repo.project }))?.issues?.nodes ??
-      [];
-    doneNodes =
-      (await queryGql(Q_DONE, { t: repo.team, p: repo.project }))?.issues
-        ?.nodes ?? [];
+    const vars = { t: repo.team, p: repo.project };
+    activeNodes = await fetchAllPages(
+      queryGql,
+      Q,
+      vars,
+      MAX_PAGES_ACTIVE,
+      "open-ticket",
+    );
+    doneNodes = await fetchAllPages(
+      queryGql,
+      Q_DONE,
+      vars,
+      MAX_PAGES_DONE,
+      "completed-ticket",
+    );
   }
   const nodes = [...activeNodes, ...doneNodes];
 
