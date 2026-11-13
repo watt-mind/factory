@@ -159,9 +159,144 @@ export function environmentName(home = runtimeHome()) {
   return base.replace(/^event-runtime-?/, "") || base;
 }
 
-/** Loopback only in the MVP — the control API is a local trust surface (§14). */
+/**
+ * Loopback is the default control API target and the local trust surface (§14):
+ * with no explicit opt-in every client pins 127.0.0.1 exactly as the MVP did.
+ * Remote targeting (#2188) is opt-in — an operator flag (`factory <cmd> --host`,
+ * which bin/factory forwards as FACTORY_EVENT_HOST) or ~/.factory/config.json —
+ * and plaintext http to a non-loopback host is refused unless the operator sets
+ * FACTORY_CONTROL_API_ALLOW_INSECURE=1, because the bearer travels in the clear.
+ */
 export const API_HOST = "127.0.0.1";
 export const DEFAULT_PORT = Number(process.env.FACTORY_EVENT_PORT || 7381);
+
+/**
+ * Environment overrides for the control API target, highest precedence first.
+ *
+ * FACTORY_EVENT_URL is deliberately excluded: it already names the handoff
+ * event URL (tools/handoff.mjs, docs/remote-handoff.md), so honouring it here
+ * would silently redirect a handoff operator's control bearer to that host.
+ */
+const CONTROL_API_ENV_KEYS = Object.freeze([
+  "FACTORY_EVENT_HOST",
+  "FACTORY_CONTROL_API_URL",
+]);
+
+const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "::1"]);
+
+/** True for the addresses where an unencrypted bearer never leaves the box. */
+export function isLoopbackHostname(hostname) {
+  const host = String(hostname || "")
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "");
+  if (LOOPBACK_HOSTNAMES.has(host)) return true;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+}
+
+/**
+ * Read the operator's optional control target from the `controlApi` block of
+ * ~/.factory/config.json. A malformed file never blocks an explicit override.
+ */
+export function loadControlApiConfig({
+  configPath = path.join(homedir(), ".factory", "config.json"),
+} = {}) {
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, "utf8"));
+    const block = parsed?.controlApi;
+    return block && typeof block === "object" ? block : {};
+  } catch {
+    return {};
+  }
+}
+
+function normalizedControlApiTarget(
+  value,
+  { defaultPort, source, allowInsecure },
+) {
+  const raw = String(value ?? "").trim();
+  if (!raw) throw new Error("control API target must not be empty");
+  const hasScheme = /^[a-z][a-z\d+.-]*:\/\//i.test(raw);
+  let parsed;
+  try {
+    parsed = new URL(hasScheme ? raw : `http://${raw}`);
+  } catch {
+    throw new Error(`invalid control API target: ${raw}`);
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("control API target must use http or https");
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error("control API target must not contain credentials");
+  }
+  if (parsed.search || parsed.hash) {
+    throw new Error("control API target must not contain a query or fragment");
+  }
+  if (!hasScheme && !parsed.port) parsed.port = String(defaultPort);
+  // The control API bearer is sent on every request. Over plaintext to anything
+  // but loopback that hands the token to the network, so refuse by default and
+  // make the operator either use https:// or opt in explicitly (#2188 review).
+  if (
+    parsed.protocol === "http:" &&
+    !isLoopbackHostname(parsed.hostname) &&
+    !allowInsecure
+  ) {
+    throw new Error(
+      `refusing to send the control API bearer in plaintext to ${parsed.host} — ` +
+        "use https://, or set FACTORY_CONTROL_API_ALLOW_INSECURE=1 to accept the risk",
+    );
+  }
+
+  const pathname = parsed.pathname.replace(/\/+$/, "");
+  const protocolDefault = parsed.protocol === "https:" ? 443 : 80;
+  return {
+    baseUrl: `${parsed.protocol}//${parsed.host}${pathname}`,
+    host: parsed.hostname,
+    port: Number(parsed.port || protocolDefault),
+    source,
+  };
+}
+
+/**
+ * Resolve the control API target for a caller that opted into remote targeting.
+ *
+ * An explicit target (apiClient's `url`/`host`) wins, then the documented
+ * environment sequence, then ~/.factory/config.json, then loopback. Command-line
+ * flags are parsed by bin/factory and arrive as FACTORY_EVENT_HOST — this
+ * library never reads process.argv, so importing it can never retarget a caller.
+ */
+export function resolveControlApiTarget({
+  target = null,
+  env = process.env,
+  localConfig = undefined,
+  defaultPort = Number(env.FACTORY_EVENT_PORT || DEFAULT_PORT),
+  allowInsecure = env.FACTORY_CONTROL_API_ALLOW_INSECURE === "1",
+} = {}) {
+  let value = target;
+  let source = target ? "explicit" : null;
+  if (!value) {
+    for (const key of CONTROL_API_ENV_KEYS) {
+      if (env[key]) {
+        value = env[key];
+        source = "environment";
+        break;
+      }
+    }
+  }
+  if (!value) {
+    const config =
+      localConfig === undefined ? loadControlApiConfig() : localConfig;
+    const configured = config?.url || config?.host;
+    if (configured) {
+      value = configured;
+      source = "config";
+    }
+  }
+  return normalizedControlApiTarget(value || API_HOST, {
+    defaultPort,
+    source: source || "default",
+    allowInsecure,
+  });
+}
 
 /** Shared secret for webhook HMAC. Absent secret means intake refuses webhooks. */
 export function webhookSecret() {

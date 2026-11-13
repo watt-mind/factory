@@ -13,12 +13,17 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   closeSync,
+  cpSync,
   existsSync,
   mkdtempSync,
   openSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -97,17 +102,28 @@ export class ContractViolation extends Error {
  * (3 of 10 PRs on 2026-08-18 failed CI on exactly the check the ticket named).
  * The repo `verify:` gate below is deliberately a subset of CI (WM-528), so
  * it let those through. This is the same check made honest: the WORKER runs
- * the ticket's own Verification Command, the web build when the diff reaches
+ * the ticket's own Verification Command, the full lib suite when the diff
+ * reaches `event-runtime/lib/**`, the web build when it reaches
  * `event-runtime/web/src/**`, and compares the diff with the ticket's Owned
  * Paths — and authors the Verification line itself.
  */
+/** The host could not restore dependencies before entering the offline guest. */
+export const HANDOFF_DEPENDENCIES_MISSING = "handoff_dependencies_missing";
 export const HANDOFF_REASON_CODES = new Set([
   "handoff_verification_failed",
   "handoff_verification_unspecified",
   "handoff_owned_paths_violation",
   "handoff_pr_form_invalid",
+  "run_trailer_unexpanded",
+  "event_runtime_lib_verify_failed",
+  HANDOFF_DEPENDENCIES_MISSING,
 ]);
 export const HANDOFF_TAIL_LINES = 40;
+/** reasonCode the worker stamps on a result.json it synthesized itself (#1592). */
+export const RECOVERED_RESULT_REASON = "worker_recovered_missing_result";
+export const HANDOFF_EVENT_RUNTIME_LIB_PREFIX = "event-runtime/lib/";
+export const HANDOFF_EVENT_RUNTIME_LIB_VERIFY_COMMAND =
+  "bun test event-runtime/lib --timeout 20000";
 export const HANDOFF_WEB_SRC_PREFIX = "event-runtime/web/src/";
 export const HANDOFF_WEB_BUILD_DIR = "event-runtime/web";
 export const HANDOFF_WEB_BUILD_COMMAND = "bun run build";
@@ -128,6 +144,7 @@ export const HANDOFF_GUEST_PATH =
 /** Where the verified worktree is mounted inside the chroot. */
 export const HANDOFF_GUEST_WORKSPACE = "/workspace";
 export const DEFAULT_HANDOFF_SANDBOX_TMPFS_MB = 1024;
+export const DEFAULT_HANDOFF_DEPENDENCY_TIMEOUT_MS = 180_000;
 export const HANDOFF_SANDBOX_NAMESPACES = Object.freeze([
   "user",
   "mount",
@@ -483,6 +500,28 @@ export function resetHandoffSandboxProbe() {
   sandboxProbeCache = null;
 }
 
+/**
+ * Why a suite whose case genuinely drives the production handoff boundary must
+ * not run here — or `null` when this host can build the sandbox (GH-2267).
+ *
+ * A few end-to-end cases (the WM-108 dispatch e2e in particular) assert a
+ * COMPLETED terminal state that is only reachable when the verified-PR handoff
+ * can actually enter a namespace; on a host without one the run legitimately
+ * refuses with `sandbox_unavailable`, and the case fails for an environment
+ * reason rather than a code one. GitHub-hosted cloud runners are exactly such
+ * a host, and the cloud lane must keep running the rest of the suite.
+ *
+ * The decision comes from `handoffSandboxAvailable` — the same real `unshare`
+ * probe the production gate uses — and from nothing else. There is
+ * deliberately no environment variable or CI flag in this path: a skip that a
+ * pull request could switch on for itself would let a fork drop the coverage
+ * it is supposed to be held to.
+ */
+export function handoffSandboxSkipReason(options = {}) {
+  if (handoffSandboxAvailable(options)) return null;
+  return `${HANDOFF_SANDBOX_UNAVAILABLE}: host cannot create an unprivileged user+mount namespace (probed with ${HANDOFF_SANDBOX_PYTHON} + /usr/bin/unshare); skipping the cases that require a real handoff sandbox`;
+}
+
 /** Thrown when the host cannot provide the handoff sandbox (GH-967). */
 export class SandboxUnavailable extends Error {
   constructor() {
@@ -667,8 +706,8 @@ export function runHandoffCommand({
     command,
     cwd: commandCwd,
     confinement: nested
-      ? "inherited handoff sandbox (already namespaced + chrooted); minimal env"
-      : `user+mount+pid+network namespace; chroot; ${handoffSandboxLimits(sandboxTmpfsMb)}`,
+      ? `inherited handoff sandbox (already namespaced + chrooted); minimal env; HOME=${process.env.HOME ?? "/tmp/home"}; workspace=${commandCwd}`
+      : `env scrubbed; HOME=/tmp/home; workspace=/workspace; user+mount+pid+network namespace; chroot; ${handoffSandboxLimits(sandboxTmpfsMb)}`,
     sandbox: {
       tmpfsMb: sandboxTmpfsMb,
       namespaces: HANDOFF_SANDBOX_NAMESPACES,
@@ -681,6 +720,60 @@ export function runHandoffCommand({
     tail: outputTail(output),
     logPath,
   };
+}
+
+/**
+ * The stable, at-a-glance facts CI prints beside a sandboxed verification.
+ * Keep this derived from the observation returned by `runHandoffCommand` so
+ * the CI smoke lane does not grow a second sandbox implementation or drift
+ * from the worker's production handoff boundary.
+ */
+export function handoffSandboxFacts(observation) {
+  const confinement =
+    typeof observation?.confinement === "string" &&
+    observation.confinement.trim().length > 0
+      ? observation.confinement.trim()
+      : "confinement=unknown";
+  const namespaces = Array.isArray(observation?.sandbox?.namespaces)
+    ? observation.sandbox.namespaces.join(",")
+    : HANDOFF_SANDBOX_NAMESPACES.join(",");
+  const tmpfs = Number.isSafeInteger(observation?.sandbox?.tmpfsMb)
+    ? `${observation.sandbox.tmpfsMb}MiB`
+    : "unknown";
+  return `Handoff sandbox facts: ${confinement}; namespaces=${namespaces}; tmpfs=${tmpfs}.`;
+}
+
+/** Map the expected unavailable-sandbox refusal to a GitHub annotation. */
+export function handoffVerifySmokeErrorAnnotation(error, { lane } = {}) {
+  if (error?.reasonCode !== HANDOFF_SANDBOX_UNAVAILABLE) return null;
+  const runner =
+    typeof lane === "string" && lane.trim().length > 0
+      ? lane.trim()
+      : "unknown";
+  return `::error::sandbox_unavailable on ${runner} runner`;
+}
+
+/**
+ * Execute a configured repository verify command through the worker's actual
+ * handoff seam. CI calls this for its smoke lane; the injected runner exists
+ * solely to keep the seam testable without creating a real namespace.
+ */
+export function runHandoffVerifySmoke({
+  command,
+  cwd,
+  worktreePath = cwd,
+  logPath,
+  timeoutMs,
+  runHandoffCommandFn = runHandoffCommand,
+}) {
+  const observation = runHandoffCommandFn({
+    command,
+    cwd,
+    worktreePath,
+    logPath,
+    timeoutMs,
+  });
+  return { ...observation, sandboxFacts: handoffSandboxFacts(observation) };
 }
 
 /**
@@ -727,6 +820,14 @@ const BUN_TEST_VALUE_FLAGS = new Set([
   "-c",
 ]);
 
+/** Value-taking flags that limit default test discovery rather than configure it. */
+const BUN_TEST_LIMITING_VALUE_FLAGS = new Set([
+  "-t",
+  "--test-name-pattern",
+  "--path-ignore-patterns",
+  "--filter",
+]);
+
 /** Filename shapes bun's default discovery treats as tests. */
 const BUN_TEST_FILE_RE =
   /(?:^|[._-])(?:test|spec)\.(?:[cm]?[jt]sx?)$|(?:^|\/)(?:test|spec)\.[cm]?[jt]sx?$/;
@@ -738,12 +839,17 @@ export function isBunTestFile(filePath) {
 function bunTestPaths(command) {
   if (typeof command !== "string") return null;
   const paths = [];
+  let hasBunTestSegment = false;
+  let wholeSuite = false;
   const segments = command.split(/(?:&&|;)/);
   for (const segment of segments) {
     // Shell expansion or a pipeline makes the set of executed tests unclear.
     if (/[$`'"\\(){}[\]|<>*?]/.test(segment)) return null;
     const words = segment.trim().split(/\s+/);
     if (words[0] !== "bun" || words[1] !== "test") continue;
+    hasBunTestSegment = true;
+    let hasTestPath = false;
+    let limitsTestDiscovery = false;
     let skipValue = false;
     for (const word of words.slice(2)) {
       if (skipValue) {
@@ -752,6 +858,8 @@ function bunTestPaths(command) {
         continue;
       }
       if (word.startsWith("-")) {
+        const flag = word.split("=", 1)[0];
+        if (BUN_TEST_LIMITING_VALUE_FLAGS.has(flag)) limitsTestDiscovery = true;
         skipValue = !word.includes("=") && BUN_TEST_VALUE_FLAGS.has(word);
         continue;
       }
@@ -769,15 +877,19 @@ function bunTestPaths(command) {
       )
         return null;
       paths.push(normalized.replace(/\/$/, ""));
+      hasTestPath = true;
     }
+    // Bun's default test discovery runs the whole suite when there is no
+    // explicit path, including when the segment has only value-taking flags.
+    if (!hasTestPath && !limitsTestDiscovery) wholeSuite = true;
   }
-  return paths.length > 0 ? paths : null;
+  return hasBunTestSegment ? { paths, wholeSuite } : null;
 }
 
 /**
- * True only when every explicit ticket test path is contained by an explicit
- * `bun test` path in repo verify. Unparseable commands and default test
- * discovery return false, preserving the independent ticket check.
+ * True only when every explicit ticket test path is contained by the repo
+ * verify command. A bare `bun test` runs Bun's default whole-suite discovery.
+ * Unparseable commands return false, preserving the independent ticket check.
  *
  * Exact-path matches stand on their own. A ticket path covered only by a
  * repo-verify DIRECTORY additionally has to be a real file under `root` whose
@@ -794,9 +906,11 @@ export function ticketVerifyCoveredByRepoVerify(
   const ticketPaths = bunTestPaths(ticketCommand);
   const repoPaths = bunTestPaths(repoVerify);
   if (!ticketPaths || !repoPaths) return false;
-  return ticketPaths.every((ticketPath) => {
-    if (repoPaths.includes(ticketPath)) return true;
-    const underDirectory = repoPaths.some((repoPath) =>
+  if (repoPaths.wholeSuite) return true;
+  if (ticketPaths.wholeSuite) return false;
+  return ticketPaths.paths.every((ticketPath) => {
+    if (repoPaths.paths.includes(ticketPath)) return true;
+    const underDirectory = repoPaths.paths.some((repoPath) =>
       ticketPath.startsWith(`${repoPath}/`),
     );
     if (!underDirectory) return false;
@@ -804,6 +918,25 @@ export function ticketVerifyCoveredByRepoVerify(
     if (typeof root !== "string" || root === "") return false;
     return exists(path.join(root, ticketPath));
   });
+}
+
+/**
+ * A ticket's explicit `bun test` target covers the lib backstop only when it
+ * names event-runtime/lib itself or one of its parent directories. A focused
+ * test inside lib is deliberately not enough: the backstop protects the rest
+ * of the suite from narrow ticket commands.
+ */
+function ticketVerifyCoversEventRuntimeLibSuite(ticketCommand) {
+  const ticketPaths = bunTestPaths(ticketCommand);
+  return (
+    (ticketPaths?.wholeSuite ||
+      ticketPaths?.paths.some(
+        (ticketPath) =>
+          ticketPath === HANDOFF_EVENT_RUNTIME_LIB_PREFIX.slice(0, -1) ||
+          HANDOFF_EVENT_RUNTIME_LIB_PREFIX.startsWith(`${ticketPath}/`),
+      )) ??
+    false
+  );
 }
 
 /** Best-effort timeout for the pre-diff `git fetch origin <base>` (F4). */
@@ -878,11 +1011,15 @@ export function changedFilesSince({
 }
 
 /** Files outside every Owned Paths glob (`**` owns everything). */
-export function ownedPathsDeviations(files = [], ownedPaths = []) {
+export function ownedPathsDeviations(
+  files = [],
+  ownedPaths = [],
+  { repoRoot } = {},
+) {
   if (!Array.isArray(files)) return [];
   const globs = (ownedPaths ?? []).map((g) => String(g).trim()).filter(Boolean);
   if (globs.length === 0 || globs.includes("**")) return [];
-  const matchers = globs.map((g) => globToRegExp(g));
+  const matchers = globs.map((g) => globToRegExp(g, { repoRoot }));
   return files.filter((file) => !matchers.some((re) => re.test(file)));
 }
 
@@ -901,6 +1038,22 @@ function commandLine(label, obs) {
   return `- ${label}: \`${obs.command}\` — ${verdict}`;
 }
 
+function optionalStepLines({
+  label,
+  activeLabel,
+  observation,
+  diff,
+  skippedReason,
+}) {
+  if (observation) {
+    const lines = [commandLine(activeLabel ?? label, observation)];
+    if (!observation.passed) lines.push(fenceBlock(observation.tail));
+    return lines;
+  }
+  if (diff?.ok) return [`- ${label}: skipped (${skippedReason})`];
+  return [`- ${label}: unknown (diff unavailable)`];
+}
+
 /**
  * The worker-authored Handoff verification (WM-718). Composed only from what
  * the worker observed; the agent's own claim, when present, is kept below it
@@ -916,12 +1069,12 @@ export function composeHandoffVerification(handoff) {
     const draftState =
       typeof handoff.pr?.draft === "boolean"
         ? handoff.pr.draft
-          ? "draft"
-          : "ready"
+          ? "yes"
+          : "no"
         : typeof handoff.prDraft === "boolean"
           ? handoff.prDraft
-            ? "draft"
-            : "ready"
+            ? "yes"
+            : "no"
           : "draft state unknown";
     const fixes =
       typeof handoff.pr?.hasFixesLine === "boolean"
@@ -935,8 +1088,12 @@ export function composeHandoffVerification(handoff) {
           ? "yes"
           : "no"
         : "unknown";
+    const headSha =
+      typeof handoff.pr?.headSha === "string" && handoff.pr.headSha.trim()
+        ? handoff.pr.headSha.trim().slice(0, 12)
+        : "unknown";
     lines.push(
-      `- PR: #${prNumber} (${draftState}) · Fixes: ${fixes} · run trailer: ${runTrailer}`,
+      `- PR: #${prNumber} (${draftState === "draft state unknown" ? draftState : `draft: ${draftState}`}) · head SHA: ${headSha} · Fixes: ${fixes} · run trailer: ${runTrailer}`,
     );
   }
   const primary = handoff.verification;
@@ -961,17 +1118,42 @@ export function composeHandoffVerification(handoff) {
   }
   if (handoff.repoVerify && handoff.repoVerify !== primary)
     lines.push(commandLine("Repo verify", handoff.repoVerify));
-  if (handoff.webBuild) {
+  if (handoff.repoVerify?.executionContext) {
+    lines.push(`- Repo verify context: ${handoff.repoVerify.executionContext}`);
+    const failingTests = handoff.repoVerify.failingTests ?? [];
     lines.push(
-      commandLine(
-        `Web build (${HANDOFF_WEB_SRC_PREFIX}** changed)`,
-        handoff.webBuild,
-      ),
+      failingTests.length > 0
+        ? `- Repo verify failing tests: ${failingTests
+            .map((name) =>
+              name.startsWith("…and ")
+                ? name
+                : `\`${name.replaceAll("`", "'")}\``,
+            )
+            .join(", ")}`
+        : "- Repo verify failing tests: none parseable",
     );
-    if (!handoff.webBuild.passed) lines.push(fenceBlock(handoff.webBuild.tail));
-  } else if (handoff.diff?.ok) {
-    lines.push(`- Web build: skipped (no ${HANDOFF_WEB_SRC_PREFIX}** changes)`);
   }
+  lines.push(
+    ...optionalStepLines({
+      label: "Web build",
+      activeLabel: `Web build (${HANDOFF_WEB_SRC_PREFIX}** changed)`,
+      observation: handoff.webBuild,
+      diff: handoff.diff,
+      skippedReason: `no ${HANDOFF_WEB_SRC_PREFIX}** changes`,
+    }),
+  );
+  const libSuiteSkippedReason = handoff.ticketVerifyCoversEventRuntimeLibSuite
+    ? "ticket or repo verify command already covers it"
+    : `no ${HANDOFF_EVENT_RUNTIME_LIB_PREFIX}** changes`;
+  lines.push(
+    ...optionalStepLines({
+      label: "Event-runtime lib suite",
+      activeLabel: `Event-runtime lib suite (${HANDOFF_EVENT_RUNTIME_LIB_PREFIX}** changed)`,
+      observation: handoff.eventRuntimeLibVerify,
+      diff: handoff.diff,
+      skippedReason: libSuiteSkippedReason,
+    }),
+  );
   if (handoff.diff?.ok) {
     const n = handoff.diff.files.length;
     lines.push(
@@ -1002,9 +1184,13 @@ export function composeHandoffVerification(handoff) {
   }
   const claim = handoff.agentReported;
   if (claim && (claim.command || claim.output)) {
-    lines.push(
-      `- agent-reported: \`${claim.command ?? "(no command)"}\` — ${claim.passed === true ? "pass" : "not passed"}${claim.output ? `, ${String(claim.output).split("\n").filter(Boolean).slice(-1)[0]}` : ""}`,
-    );
+    if (claim.recovered === true) {
+      lines.push("- agent-reported: recovered — not agent-claimed");
+    } else {
+      lines.push(
+        `- agent-reported: \`${claim.command ?? "(no command)"}\` — ${claim.passed === true ? "pass" : "not passed"}${claim.output ? `, ${String(claim.output).split("\n").filter(Boolean).slice(-1)[0]}` : ""}`,
+      );
+    }
   }
   return lines.filter((line) => line !== null).join("\n");
 }
@@ -1033,8 +1219,6 @@ function normalizeFailureOutput(output) {
 
 /**
  * Deterministic normalized signature of a failure payload.
- * Exact equality is intentionally strict: any new signal (even a single
- * additional line) proves the failure signature changed.
  */
 function failureSignature(output) {
   return normalizeFailureOutput(output).join("\n");
@@ -1042,11 +1226,28 @@ function failureSignature(output) {
 
 /**
  * Conservative evidence that post-agent verification hit the recorded red baseline.
- * Unlike partial line overlap, this compares full normalized signatures and fails
- * closed on ambiguous signal drift.
+ * Test failures are compared by name in the fail-closed direction: every failure
+ * observed on the branch must also have failed at the recorded baseline, so a
+ * branch that *adds* a failure is never absorbed. A branch that fixes some of the
+ * baseline's failures still lands, because absorption only needs its remaining
+ * failures to be a subset. Non-test failures retain exact normalized-signature
+ * matching because there is no narrower stable identity.
  */
 function matchesRedBaseline(baseline, verifyOutput) {
   if (baseline?.status !== "red") return false;
+  const baselineTests = repoVerifyFailingTests(baseline.output);
+  const verifyTests = repoVerifyFailingTests(verifyOutput);
+  if (baselineTests.length > 0 || verifyTests.length > 0) {
+    // A truncated list is not a complete failure set; containment over it could
+    // absorb a branch-introduced failure that fell past the cap.
+    if (isTruncatedTestList(baselineTests) || isTruncatedTestList(verifyTests))
+      return false;
+    return (
+      baselineTests.length > 0 &&
+      verifyTests.length > 0 &&
+      verifyTests.every((testName) => baselineTests.includes(testName))
+    );
+  }
   const baselineSig = failureSignature(baseline.output);
   const verifySig = failureSignature(verifyOutput);
   if (!baselineSig || !verifySig) return false;
@@ -1060,6 +1261,186 @@ export const HANDOFF_FAILURE_OUTPUT_MAX_CHARS = 2 * 1024;
 // as the failure (WM-918's own registry test says "reads bun (fail) and ✗").
 const REPO_VERIFY_TEST_FAILURE_LINE = /^\s*(?:\(fail\)|✗)/i;
 const REPO_VERIFY_ERROR_LINE = /\berror\b/i;
+// bun appends a per-test wall-clock suffix (e.g. "[12.34ms]", "[1.2s]") after
+// the marker is stripped; it varies run to run and defeats the Set dedup.
+const REPO_VERIFY_TIMING_SUFFIX = /\s*\[[\d.]+m?s\]$/;
+// Bound the handoff record itself, independent of how the comment renders
+// it: an unbounded name list can blow GitHub's 64KB comment limit on broad
+// failures (a single suite regression can list hundreds of test names).
+const REPO_VERIFY_FAILING_TESTS_MAX = 20;
+
+/**
+ * Extract runner-reported failing test names for the handoff record. Keeping
+ * this separate from the diagnostic excerpt makes the original observation
+ * useful to triage without asking it to parse a truncated failure message.
+ */
+export function repoVerifyFailingTests(output) {
+  const names = [
+    ...new Set(
+      stripAnsi(output)
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => REPO_VERIFY_TEST_FAILURE_LINE.test(line))
+        .map((line) =>
+          line
+            .replace(REPO_VERIFY_TEST_FAILURE_LINE, "")
+            .replace(REPO_VERIFY_TIMING_SUFFIX, "")
+            .trim(),
+        )
+        .filter(Boolean),
+    ),
+  ];
+  if (names.length <= REPO_VERIFY_FAILING_TESTS_MAX) return names;
+  const shown = names.slice(0, REPO_VERIFY_FAILING_TESTS_MAX);
+  shown.push(`…and ${names.length - REPO_VERIFY_FAILING_TESTS_MAX} more`);
+  return shown;
+}
+
+// The sentinel repoVerifyFailingTests appends once it caps the list. Any set
+// comparison over a truncated list is unsound in both directions, so both
+// absorption paths refuse rather than guess at the names they cannot see.
+const REPO_VERIFY_TRUNCATION_SENTINEL = /^…and \d+ more$/;
+
+/** True when a failing-test list was capped and is therefore incomplete. */
+export function isTruncatedTestList(names) {
+  return (
+    Array.isArray(names) &&
+    names.some(
+      (name) =>
+        typeof name === "string" && REPO_VERIFY_TRUNCATION_SENTINEL.test(name),
+    )
+  );
+}
+
+// Bun prints a source-file heading before the tests it reports from that file.
+// Keep this deliberately narrow: an unrecognised runner format is ambiguous and
+// must not trigger the branch-external baseline retry.
+// The path is one flat character class (no nested quantifier over a group) so
+// the match stays linear on adversarial input — CodeQL flags the grouped form
+// as polynomial-backtracking ReDoS.
+const REPO_VERIFY_TEST_FILE_LINE =
+  /^\s*(?<path>[\w@./-]+\.(?:test|spec)\.[cm]?[jt]sx?)\s*:\s*$/i;
+
+/**
+ * Return the runner-reported source files for failing tests, or null when a
+ * failure cannot be tied to a file. The null result is the fail-closed path.
+ */
+export function repoVerifyFailingTestFiles(output) {
+  const files = new Set();
+  let currentFile = null;
+  let failures = 0;
+  for (const rawLine of stripAnsi(output).split("\n")) {
+    const line = rawLine.trim();
+    const match = REPO_VERIFY_TEST_FILE_LINE.exec(line);
+    if (match) {
+      currentFile = match.groups.path.replace(/^\.\//, "");
+      continue;
+    }
+    if (!REPO_VERIFY_TEST_FAILURE_LINE.test(line)) continue;
+    failures += 1;
+    if (!currentFile) return null;
+    files.add(currentFile);
+  }
+  return failures > 0 ? [...files] : null;
+}
+
+function sameFailingTestSet(left, right) {
+  // A capped list hides names, so equality over it would absorb a branch
+  // failure the cap swallowed. Truncation is ambiguous; ambiguous is fail-closed.
+  if (isTruncatedTestList(left) || isTruncatedTestList(right)) return false;
+  return (
+    left.length > 0 &&
+    left.length === right.length &&
+    left.every((testName) => right.includes(testName))
+  );
+}
+
+function failingTestsAreOutsideChangedFiles(obs, changedFiles) {
+  const failingFiles = repoVerifyFailingTestFiles(obs.output);
+  return (
+    Array.isArray(changedFiles) &&
+    obs.failingTests.length > 0 &&
+    Array.isArray(failingFiles) &&
+    failingFiles.length > 0 &&
+    failingFiles.every((file) => !changedFiles.includes(file))
+  );
+}
+
+/**
+ * Execute a second repo verify at the branch's merge-base without mutating the
+ * dispatched checkout. Dependencies are copied only into the disposable
+ * checkout; a linked worktree otherwise has no ignored node_modules tree.
+ */
+function runRepoVerifyBaseline({
+  command,
+  worktreePath,
+  workspaceDir,
+  baseCommit,
+  timeoutMs,
+  runHandoffStep,
+}) {
+  const scratchPath = mkdtempSync(
+    path.join(workspaceDir, ".repo-verify-baseline-"),
+  );
+  rmSync(scratchPath, { recursive: true, force: true });
+  try {
+    try {
+      execFileSync(
+        "git",
+        ["worktree", "add", "--detach", "--force", scratchPath, baseCommit],
+        {
+          cwd: worktreePath,
+          stdio: ["ignore", "pipe", "pipe"],
+          timeout: 60_000,
+        },
+      );
+      const dependencies = path.join(worktreePath, "node_modules");
+      if (existsSync(dependencies)) {
+        const scratchDependencies = path.join(scratchPath, "node_modules");
+        // node_modules is multi-GB here; a symlink makes the scratch checkout
+        // free. Copy only where a link is not usable (e.g. no symlink support).
+        try {
+          symlinkSync(dependencies, scratchDependencies, "dir");
+        } catch {
+          cpSync(dependencies, scratchDependencies, {
+            recursive: true,
+            verbatimSymlinks: true,
+          });
+        }
+      }
+    } catch (err) {
+      return {
+        passed: false,
+        timedOut: false,
+        setupFailed: true,
+        output: String(err?.stderr ?? err?.message ?? err),
+      };
+    }
+    const obs = runHandoffStep({
+      command,
+      cwd: scratchPath,
+      worktreePath: scratchPath,
+      logPath: path.join(workspaceDir, ".verify.baseline.log"),
+      timeoutMs,
+    });
+    obs.source = "repo_verify_baseline";
+    obs.executionContext = "merge_base_scratch";
+    obs.failingTests = repoVerifyFailingTests(obs.output);
+    obs.failingTestFiles = repoVerifyFailingTestFiles(obs.output);
+    return obs;
+  } finally {
+    try {
+      execFileSync("git", ["worktree", "remove", "--force", scratchPath], {
+        cwd: worktreePath,
+        stdio: "ignore",
+        timeout: 60_000,
+      });
+    } catch {
+      // The directory is disposable even if Git has already pruned its entry.
+    }
+    rmSync(scratchPath, { recursive: true, force: true });
+  }
+}
 
 function boundedDiagnostic(lines) {
   const excerpt = [];
@@ -1090,6 +1471,76 @@ function boundedTail(text, maxChars = HANDOFF_FAILURE_OUTPUT_MAX_CHARS) {
   return `…${text.slice(-(maxChars - 1))}`;
 }
 
+const MISSING_MODULE_RE = /Cannot find (?:package|module) ['"]([^'"\n]+)['"]/gi;
+
+/** The specifiers a Bun/Node resolver could not find in the guest. */
+export function missingModuleSpecifiers(output) {
+  const specifiers = [];
+  for (const match of stripAnsi(output).matchAll(MISSING_MODULE_RE))
+    specifiers.push(match[1]);
+  return specifiers;
+}
+
+/** `./x`, `../x`, `/x` and `file:` URLs resolve against the tree, not the registry. */
+function isBareSpecifier(specifier) {
+  return !(
+    specifier.startsWith(".") ||
+    specifier.startsWith("/") ||
+    /^(?:file|node|bun):/i.test(specifier)
+  );
+}
+
+/** `@scope/name/sub` -> `@scope/name`; `name/sub` -> `name`. */
+function packageNameOf(specifier) {
+  const parts = specifier.split("/");
+  return specifier.startsWith("@") && parts.length > 1
+    ? `${parts[0]}/${parts[1]}`
+    : parts[0];
+}
+
+/**
+ * The packages the worktree declares (dependencies + devDependencies), or
+ * null when there is no readable manifest to consult.
+ */
+function declaredPackages(worktreePath) {
+  if (!worktreePath) return null;
+  let manifest;
+  try {
+    manifest = JSON.parse(
+      readFileSync(path.join(worktreePath, "package.json"), "utf8"),
+    );
+  } catch {
+    return null;
+  }
+  return new Set([
+    ...Object.keys(manifest?.dependencies ?? {}),
+    ...Object.keys(manifest?.devDependencies ?? {}),
+  ]);
+}
+
+/**
+ * Missing modules in the guest prove the host worktree was not installable —
+ * but only when every missing specifier is a bare package the worktree's
+ * package.json declares. A relative import that does not resolve, or a bare
+ * package the branch forgot to add, is the agent's failure and stays
+ * `handoff_verification_failed`. Without a readable manifest the bare
+ * specifier alone decides, since there is nothing the branch could have
+ * declared it in.
+ */
+export function handoffFailureReasonCode(obs, { worktreePath } = {}) {
+  const specifiers = missingModuleSpecifiers(obs?.output);
+  if (specifiers.length === 0) return "handoff_verification_failed";
+  const declared = declaredPackages(worktreePath);
+  const environmental = specifiers.every(
+    (specifier) =>
+      isBareSpecifier(specifier) &&
+      (declared === null || declared.has(packageNameOf(specifier))),
+  );
+  return environmental
+    ? HANDOFF_DEPENDENCIES_MISSING
+    : "handoff_verification_failed";
+}
+
 /**
  * Preserve enough of a handoff red for its one permitted continuation. Same
  * curated diagnostic as the repository verification reason (timeout, then
@@ -1104,6 +1555,134 @@ export function handoffFailureOutput(obs, { timeoutMs } = {}) {
     repoVerifyFailureExcerpt(obs?.output) ||
     stripAnsi(obs?.output).trimEnd().slice(-HANDOFF_FAILURE_OUTPUT_MAX_CHARS);
   return boundedTail(curated.trim()) || `exit ${obs?.exitCode ?? "unknown"}`;
+}
+
+function defaultDependencyInstaller({ cwd, timeoutMs }) {
+  // Source the worker checkout's helper, never the agent-writable worktree.
+  // This retains the same global Bun-cache lock and SQLITE_BUSY retry policy
+  // used while materializing worktrees without granting ticket code host-shell
+  // execution before the handoff sandbox is active.
+  const helper = path.resolve(import.meta.dir, "../../bin/worktree-common.sh");
+  const result = spawnSync(
+    "/bin/bash",
+    ["-c", 'source "$1"; locked_bun_install "$2"', "--", helper, cwd],
+    {
+      encoding: "utf8",
+      timeout: timeoutMs,
+      env: {
+        ...process.env,
+        FACTORY_LOCK_MAX_WAIT: String(
+          Math.min(120, Math.floor(timeoutMs / 1000)),
+        ),
+      },
+    },
+  );
+  return {
+    passed: result.status === 0 && !result.error,
+    exitCode: result.status,
+    timedOut: result.error?.code === "ETIMEDOUT",
+    output: `${result.stdout ?? ""}${result.stderr ?? ""}`.trim(),
+  };
+}
+
+/** True when node_modules holds anything beyond the preflight's own stamp. */
+function nodeModulesPopulated(nodeModules) {
+  try {
+    return readdirSync(nodeModules).some((entry) => entry !== ".bun-lock-sha");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Restore stale worktree dependencies before any handoff command enters the
+ * no-network namespace. The stamp is owned by this preflight: Bun itself does
+ * not provide a stable cross-version lockfile marker.
+ */
+export function preflightHandoffDependencies({
+  worktreePath,
+  needsWebBuild = false,
+  installer = defaultDependencyInstaller,
+  timeoutMs = DEFAULT_HANDOFF_DEPENDENCY_TIMEOUT_MS,
+}) {
+  const directories = [worktreePath];
+  if (needsWebBuild)
+    directories.push(path.join(worktreePath, HANDOFF_WEB_BUILD_DIR));
+  const details = [];
+  const started = Date.now();
+
+  for (const directory of directories) {
+    const packageJson = path.join(directory, "package.json");
+    const lockfile = path.join(directory, "bun.lock");
+    if (!existsSync(packageJson) || !existsSync(lockfile)) continue;
+
+    const nodeModules = path.join(directory, "node_modules");
+    const stamp = path.join(nodeModules, ".bun-lock-sha");
+    const lockHash = sha256Hex(readFileSync(lockfile));
+    let stampedHash = null;
+    try {
+      stampedHash = readFileSync(stamp, "utf8").trim();
+    } catch {
+      // Missing or unreadable stamps are stale dependencies, never a pass.
+    }
+    if (existsSync(nodeModules) && stampedHash === lockHash) {
+      details.push({
+        dir: path.relative(worktreePath, directory) || ".",
+        installed: false,
+        ms: 0,
+      });
+      continue;
+    }
+
+    const installStarted = Date.now();
+    let observation;
+    try {
+      observation = installer({
+        command: "bun install --frozen-lockfile",
+        cwd: directory,
+        timeoutMs,
+      });
+    } catch (err) {
+      observation = {
+        passed: false,
+        exitCode: null,
+        output: `installer error: ${err?.message ?? String(err)}`,
+      };
+    }
+    const ms = Date.now() - installStarted;
+    const detail = {
+      dir: path.relative(worktreePath, directory) || ".",
+      installed: Boolean(observation?.passed),
+      ms,
+    };
+    details.push(detail);
+    if (!observation?.passed) {
+      return {
+        passed: false,
+        installed: false,
+        ms: Date.now() - started,
+        dirs: details,
+        failed: {
+          ...detail,
+          output: handoffFailureOutput(observation, { timeoutMs }),
+        },
+      };
+    }
+
+    // An installer can exit 0 without populating node_modules (a mocked
+    // no-op, or a bun that silently skipped the install). A stamp on an
+    // empty tree would pin that tree as current and skip every later
+    // preflight, so only stamp what the install actually produced.
+    if (nodeModulesPopulated(nodeModules))
+      writeFileSync(stamp, `${lockHash}\n`, "utf8");
+  }
+
+  return {
+    passed: true,
+    installed: details.some((detail) => detail.installed),
+    ms: Date.now() - started,
+    dirs: details,
+  };
 }
 
 /**
@@ -1160,17 +1739,26 @@ export function verifyResult({
   registry,
   workspaceDir,
   attempt,
+  attemptStartedAt = null,
   journalHead = null,
   extraArtifacts = [],
   worktreeRecord = null,
+  checkoutPath = null,
+  onTrace = null,
+  checkoutResultIsTrackedFn = checkoutResultIsTracked,
   verifyTimeoutMs = repoVerifyTimeoutMs(),
+  runHandoffCommandFn = runHandoffCommand,
+  dependencyInstaller = defaultDependencyInstaller,
 }) {
-  let raw;
-  try {
-    raw = readFileSync(path.join(workspaceDir, "result.json"), "utf8");
-  } catch {
-    throw new ContractViolation(["missing_result"]);
-  }
+  const raw = readResultFile({
+    workspaceDir,
+    // The stray probe only needs the physical checkout. Callers that suppress
+    // worktree command verification still pass it explicitly.
+    checkout: checkoutPath ?? worktreeRecord?.path ?? null,
+    attemptStartedAt,
+    onTrace,
+    checkoutResultIsTrackedFn,
+  });
 
   let candidate;
   try {
@@ -1197,7 +1785,123 @@ export function verifyResult({
     extraArtifacts,
     worktreeRecord,
     verifyTimeoutMs,
+    runHandoffCommandFn,
+    dependencyInstaller,
   });
+}
+
+/**
+ * Result authors work in `workspaceDir/repo`, which may be a symlink to the
+ * physical checkout. Recover the two historical stray locations only when
+ * their mtime proves they belong to this attempt; an old sibling ticket's
+ * envelope is never a valid substitute for this run's result.
+ */
+function readResultFile({
+  workspaceDir,
+  checkout,
+  attemptStartedAt,
+  onTrace,
+  checkoutResultIsTrackedFn,
+}) {
+  const resultPath = path.join(workspaceDir, "result.json");
+  try {
+    return readFileSync(resultPath, "utf8");
+  } catch {
+    // The workspace result is deliberately the only unconditional location.
+  }
+
+  const candidates = [];
+  if (checkout) {
+    candidates.push(path.join(checkout, "result.json"));
+    try {
+      candidates.push(path.join(realpathSync(checkout), "..", "result.json"));
+    } catch {
+      // The normal missing-result path will report the primary result path.
+    }
+  }
+
+  const startMs = Date.parse(attemptStartedAt);
+  const nowMs = Date.now();
+  const stalePaths = [];
+  for (const candidatePath of [...new Set(candidates)]) {
+    let stat;
+    try {
+      stat = statSync(candidatePath);
+    } catch {
+      continue;
+    }
+    // A checkout can legitimately own a root result.json. Never adopt or
+    // delete that repository file; only untracked checkout output is a stray.
+    // Checked after the existence probe so git is not spawned for a candidate
+    // that does not exist.
+    if (
+      checkout &&
+      candidatePath === path.join(checkout, "result.json") &&
+      checkoutResultIsTrackedSafely(checkout, checkoutResultIsTrackedFn)
+    ) {
+      stalePaths.push({ path: candidatePath, skipped: "tracked_in_checkout" });
+      continue;
+    }
+    const mtimeMs = stat.mtimeMs;
+    if (!Number.isFinite(startMs) || mtimeMs < startMs || mtimeMs > nowMs) {
+      stalePaths.push({ path: candidatePath, mtime: stat.mtime.toISOString() });
+      continue;
+    }
+    let raw;
+    try {
+      raw = readFileSync(candidatePath, "utf8");
+    } catch {
+      // A concurrent cleanup can remove a candidate between stat and read.
+      continue;
+    }
+    try {
+      JSON.parse(raw);
+    } catch {
+      // Adoption destroys the candidate, so only well-formed JSON is adopted:
+      // a truncated or foreign file is left in place for the next candidate
+      // (and for the operator) rather than deleted unread.
+      continue;
+    }
+    rmSync(candidatePath, { force: true });
+    onTrace?.("lifecycle", {
+      note: "result_recovered_from_stray_path",
+      path: candidatePath,
+    });
+    return raw;
+  }
+
+  const err = new ContractViolation(["missing_result"]);
+  if (stalePaths.length > 0) err.missingResultPaths = stalePaths;
+  if (candidates.length > 0) err.missingResultFallbacks = candidates;
+  throw err;
+}
+
+// A failed subprocess probe is indistinguishable from a tracked file at this
+// deletion boundary. Keep that fail-closed decision outside the subprocess
+// helper so recovery tests can exercise it without relying on host git timing.
+function checkoutResultIsTrackedSafely(checkout, checkoutResultIsTrackedFn) {
+  try {
+    return checkoutResultIsTrackedFn(checkout);
+  } catch {
+    return true;
+  }
+}
+
+function checkoutResultIsTracked(checkout) {
+  try {
+    execFileSync(
+      "git",
+      ["-C", checkout, "ls-files", "--error-unmatch", "result.json"],
+      { stdio: "ignore", timeout: 60_000 },
+    );
+    return true;
+  } catch (err) {
+    // Exit 1 is the definitive "not tracked" answer. Anything else (not a
+    // repository, dubious ownership, a locked index, no git on PATH, timeout)
+    // is ambiguous — fail closed and treat the file as tracked so a stray
+    // git failure can never make us adopt and delete a repository file.
+    return err?.status !== 1;
+  }
 }
 
 /**
@@ -1596,6 +2300,8 @@ function verifyCompleted({
   extraArtifacts = [],
   worktreeRecord = null,
   verifyTimeoutMs,
+  runHandoffCommandFn,
+  dependencyInstaller,
 }) {
   if (candidate.artifact === undefined)
     throw new ContractViolation(["missing_artifact"]);
@@ -1658,6 +2364,7 @@ function verifyCompleted({
       runId: spec.runId,
       verification: null,
       repoVerify: null,
+      eventRuntimeLibVerify: null,
       webBuild: null,
       diff: null,
       ownedPaths,
@@ -1670,6 +2377,9 @@ function verifyCompleted({
             command: claim.command ?? null,
             passed: claim.passed === true,
             output: claim.output ?? null,
+            // Derived from the persisted artifact, never stamped after the
+            // fact: a worker-synthesized result.json is not an agent claim.
+            recovered: candidate.reasonCode === RECOVERED_RESULT_REASON,
           }
         : null,
       ticketVerifyCoveredByRepoVerify: ticketVerifyCoveredByRepoVerify(
@@ -1677,6 +2387,9 @@ function verifyCompleted({
         worktreeRecord.verify,
         { root: worktreePath },
       ),
+      ticketVerifyCoversEventRuntimeLibSuite:
+        ticketVerifyCoversEventRuntimeLibSuite(ticketCommand) ||
+        ticketVerifyCoversEventRuntimeLibSuite(worktreeRecord.verify),
       reasonCode: null,
     };
     const refuse = (reasonCode, violation) => {
@@ -1688,7 +2401,7 @@ function verifyCompleted({
     // PR or returns the ticket over it.
     const runHandoffStep = (options) => {
       try {
-        return runHandoffCommand(options);
+        return runHandoffCommandFn(options);
       } catch (err) {
         if (err instanceof SandboxUnavailable) {
           refuse(HANDOFF_SANDBOX_UNAVAILABLE, err.message);
@@ -1711,6 +2424,35 @@ function verifyCompleted({
       );
     }
 
+    // The guest has no network and receives only this worktree as a mount.
+    // Compute the diff first so a pending web build gets its own dependency
+    // preflight, then restore both directories before any sandboxed command.
+    handoff.diff = changedFilesSince({
+      worktreePath,
+      base: worktreeRecord.base ?? null,
+    });
+    const files = handoff.diff.files ?? [];
+    const needsEventRuntimeLibVerify =
+      files.some((file) => file.startsWith(HANDOFF_EVENT_RUNTIME_LIB_PREFIX)) &&
+      existsSync(path.join(worktreePath, HANDOFF_EVENT_RUNTIME_LIB_PREFIX));
+    const needsWebBuild =
+      files.some((file) => file.startsWith(HANDOFF_WEB_SRC_PREFIX)) &&
+      existsSync(
+        path.join(worktreePath, HANDOFF_WEB_BUILD_DIR, "package.json"),
+      );
+    handoff.dependencies = preflightHandoffDependencies({
+      worktreePath,
+      needsWebBuild,
+      installer: dependencyInstaller,
+    });
+    if (!handoff.dependencies.passed) {
+      const failed = handoff.dependencies.failed;
+      refuse(
+        HANDOFF_DEPENDENCIES_MISSING,
+        `${HANDOFF_DEPENDENCIES_MISSING}: ${failed.dir}: ${failed.output}`,
+      );
+    }
+
     // 1. The repo's own verify command (the pre-WM-718 gate, kept as-is: it
     //    is what the red-baseline logic is keyed on).
     if (worktreeRecord.verify) {
@@ -1724,9 +2466,45 @@ function verifyCompleted({
       obs.source = "repo_verify";
       handoff.repoVerify = obs;
       if (!obs.passed) {
+        // This is deliberately failure-only: successful repo verification
+        // retains its existing pass path and emits only repo_verify_passed.
+        // The marker lets triage distinguish this observation from a later
+        // clean-checkout reproduction at the same commit.
+        obs.executionContext = "dispatch_worktree";
+        obs.failingTests = repoVerifyFailingTests(obs.output);
+        obs.failingTestFiles = repoVerifyFailingTestFiles(obs.output);
         const baselineStillRed =
           !obs.timedOut &&
           matchesRedBaseline(worktreeRecord.baseline, obs.output);
+        const shouldRecheckBase =
+          !obs.timedOut &&
+          !baselineStillRed &&
+          handoff.diff.ok &&
+          failingTestsAreOutsideChangedFiles(obs, handoff.diff.files) &&
+          typeof handoff.diff.mergeBase === "string";
+        if (shouldRecheckBase) {
+          const baselineObs = runRepoVerifyBaseline({
+            command: worktreeRecord.verify,
+            worktreePath,
+            workspaceDir,
+            baseCommit: handoff.diff.mergeBase,
+            timeoutMs: verifyTimeoutMs,
+            runHandoffStep,
+          });
+          handoff.repoVerifyBaseline = baselineObs;
+          if (
+            !baselineObs.setupFailed &&
+            !baselineObs.timedOut &&
+            !baselineObs.passed &&
+            sameFailingTestSet(obs.failingTests, baselineObs.failingTests)
+          ) {
+            handoff.reasonCode = "baseline_red";
+            throw new ContractViolation(
+              [`repo_verify_failed: ${failureWhy(obs)}`],
+              { reasonCode: handoff.reasonCode, handoff },
+            );
+          }
+        }
         handoff.reasonCode = baselineStillRed
           ? "baseline_red"
           : "handoff_verification_failed";
@@ -1756,8 +2534,9 @@ function verifyCompleted({
       obs.source = "ticket";
       handoff.verification = obs;
       if (!obs.passed) {
+        const reasonCode = handoffFailureReasonCode(obs, { worktreePath });
         refuse(
-          "handoff_verification_failed",
+          reasonCode,
           `ticket_verify_failed: ${handoffWhy(obs)}; sandbox_limits: ${handoffSandboxLimits(obs.sandbox.tmpfsMb)}`,
         );
       }
@@ -1766,19 +2545,36 @@ function verifyCompleted({
       handoff.verification = handoff.repoVerify;
     }
 
-    // 3. What the PR actually carries.
-    handoff.diff = changedFilesSince({
-      worktreePath,
-      base: worktreeRecord.base ?? null,
-    });
-    const files = handoff.diff.files ?? [];
+    // 3. The full event-runtime/lib suite for a changed lib file. A ticket
+    // command that explicitly names lib (or a parent suite) already ran it.
+    if (
+      needsEventRuntimeLibVerify &&
+      !handoff.ticketVerifyCoversEventRuntimeLibSuite
+    ) {
+      const obs = runHandoffStep({
+        command: HANDOFF_EVENT_RUNTIME_LIB_VERIFY_COMMAND,
+        cwd: worktreePath,
+        worktreePath,
+        logPath: path.join(workspaceDir, ".verify.event-runtime-lib.log"),
+        timeoutMs: verifyTimeoutMs,
+      });
+      obs.source = "event_runtime_lib";
+      handoff.eventRuntimeLibVerify = obs;
+      if (!obs.passed) {
+        const baselineStillRed =
+          !obs.timedOut &&
+          matchesRedBaseline(worktreeRecord.baseline, obs.output);
+        refuse(
+          baselineStillRed ? "baseline_red" : "event_runtime_lib_verify_failed",
+          `event_runtime_lib_verify_failed: ${handoffWhy(obs)}`,
+        );
+      }
+      handoffChecks.push("event_runtime_lib_verify_passed");
+    }
 
     // 4. tsc + vite for anything under event-runtime/web/src/** — the check
     //    #593 failed on, regardless of what the ticket's command covers.
-    if (
-      files.some((file) => file.startsWith(HANDOFF_WEB_SRC_PREFIX)) &&
-      existsSync(path.join(worktreePath, HANDOFF_WEB_BUILD_DIR, "package.json"))
-    ) {
+    if (needsWebBuild) {
       const obs = runHandoffStep({
         command: HANDOFF_WEB_BUILD_COMMAND,
         cwd: path.join(worktreePath, HANDOFF_WEB_BUILD_DIR),
@@ -1799,7 +2595,13 @@ function verifyCompleted({
 
     // 5. Owned Paths conformance: listed always; refused under strict.
     if (handoff.diff.ok && ownedPathsKnown) {
-      handoff.ownedPathsDeviations = ownedPathsDeviations(files, ownedPaths);
+      // The handoff deviation gate is the one place root-anchoring applies:
+      // narrowing here only ever removes a false deviation report, and the
+      // worktree root is known on disk. Resolve it so the matcher can never
+      // fall back to the process CWD.
+      handoff.ownedPathsDeviations = ownedPathsDeviations(files, ownedPaths, {
+        repoRoot: path.resolve(worktreePath),
+      });
       if (handoff.ownedPathsDeviations.length === 0) {
         handoffChecks.push("owned_paths_conformant");
       } else if (conformance === "strict") {

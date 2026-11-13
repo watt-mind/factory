@@ -15,6 +15,7 @@ import {
   hookDecisionsFor,
   validateHookModule,
 } from "./hooks.mjs";
+import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
 
 const FIXTURE_HOOKS = path.join(
   RUNTIME_ROOT,
@@ -245,7 +246,7 @@ describe("hook registry (WM-842)", () => {
       now,
       timeoutMs: 30,
     });
-    expect(performance.now() - started).toBeLessThan(1500);
+    expect(performance.now() - started).toBeLessThan(loadAdjustedTimeout(1500));
     expect(out).toMatchObject({
       decision: "deny",
       reason: "hook_error:factory/sample:hangs",

@@ -114,8 +114,27 @@ Before blocking on product intent, check whether it's already written down — t
 **For CI:**
 
 ```bash
-gh pr checks <PR> --watch --fail-fast     # returns the moment checks settle
+# Select the CI workflow's run for this exact commit. Without --workflow,
+# `gh run list` returns the newest run of ANY workflow (CLA, Security, ...)
+# and its verdict is not the CI verdict. The run can lag the push by a
+# minute or two, so retry (bounded) instead of failing on the first miss.
+run_id=""
+for i in $(seq 8); do
+  run_id="$(gh run list --workflow ci.yml --commit <sha> --json databaseId --limit 1 --jq '.[0].databaseId // empty')"
+  test -n "$run_id" && break
+  sleep 15
+done
+test -n "$run_id" || { echo "no CI workflow run found for this commit" >&2; exit 1; }
+gh run watch "$run_id" --exit-status --interval 60
 ```
+
+`gh run list` and `gh run watch` use GitHub's REST API. Do not default to the
+GraphQL-backed `gh pr checks` waiter: it polls every 10 seconds by default and
+can exhaust the shared GraphQL budget. If that fallback is unavoidable, use an
+interval of at least 60 seconds. A green `gh run watch` covers one
+workflow; before a merge that must be fully green, assert every check-run on
+the commit is completed and successful via REST
+(`gh api repos/<owner>/<repo>/commits/<sha>/check-runs`).
 
 **For a dev server, migration, or anything with an observable ready state** — poll the condition on a short interval with a bounded ceiling, so it returns as soon as it is up and still terminates if it never is:
 
@@ -125,9 +144,9 @@ for i in $(seq 60); do curl -sf localhost:4222 >/dev/null && break; sleep 2; don
 
 **For a background job you started**, wait on the process (`wait`, or the harness's own background-task mechanism) rather than guessing how long it takes.
 
-**Never end your turn while background jobs are running.** Subagents must not park mid-flow or yield prematurely while waiting for slow commands, test suites, or background sub-processes. When an agent yields without active foreground execution, the orchestrator cannot distinguish between an agent legitimately waiting on slow work, an agent stalled needing a nudge, or an agent finished but under-reporting. Block on readiness (e.g. `gh pr checks --watch`, `wait <pid>`, or bounded polling) until the work is complete before completing your turn.
+**Never end your turn while background jobs are running.** Subagents must not park mid-flow or yield prematurely while waiting for slow commands, test suites, or background sub-processes. When an agent yields without active foreground execution, the orchestrator cannot distinguish between an agent legitimately waiting on slow work, an agent stalled needing a nudge, or an agent finished but under-reporting. Block on readiness (e.g. `gh run watch <run-id> --exit-status --interval 60`, `wait <pid>`, or bounded polling) until the work is complete before completing your turn.
 
-**GitHub Actions secondary rate limits.** Avoid rapid, unthrottled polling of GitHub's Actions and jobs APIs (e.g. tight loops calling `gh run view` or `gh api`). Aggressive polling triggers GitHub's secondary rate limits and blocks the harness. Use `gh pr checks <PR> --watch --fail-fast` or bounded polling intervals with backoff.
+**GitHub Actions secondary rate limits.** Avoid rapid, unthrottled polling of GitHub's Actions and jobs APIs (e.g. tight loops calling `gh run view` or `gh api`). Aggressive polling triggers GitHub's secondary rate limits and blocks the harness. Prefer the REST-backed `gh run watch <run-id> --exit-status --interval 60`; the GraphQL-backed PR-check fallback must use an interval of at least 60 seconds when unavoidable.
 
 **Session scratchpad isolation.** Never use generic shared filenames (such as `pr-body.md` or `scratch/critique.json`) across concurrent tasks. Reviewer, implementer, and critic agents operating in shared session scratchpads must namespace all temporary files by ticket ID or session identifier (e.g. `pr-body-<TICKET-ID>.md`, `<TICKET-ID>-critique.json`) to prevent cross-agent collisions and silent overwrites.
 
@@ -180,6 +199,13 @@ A tool result is not paid for once. It stays in the context window and is re-sen
 ### Browsers
 
 Factory-spawned sessions get their **own isolated headless Chrome** (via `--mcp-config`, `config/mcp/claude.json` in the factory repo) — a temp profile per session, screenshots served as capped webp. There is nothing to share and nothing to fight over.
+
+**Tab routing across concurrent subagents.** In harnesses sharing a browser pane (e.g. Claude Browser pane), all subagents in a session share a single flat tab pool and one global fronted tab. Calls omitting `tabId` race on whatever tab a sibling fronted, silently reading or writing another ticket's app (misdiagnosed as product or auth bugs).
+
+- **Pass `tabId` explicitly on every browser call** — `navigate`, `get_page_text`, `read_page`, `computer`, `javascript_tool`. Explicit `tabId` routes correctly; omitting it targets the fronted tab, which any sibling can steal.
+- **Own a tab from `tabs_create`** and never rely on the fronted tab — fronting is global mutable state.
+- **Assert origin before trusting a read** — verify the host/port in the page output matches your ticket's app before acting on page text or screenshots.
+- **Re-read after reload** — reading immediately after `location.reload()` can return the pre-reload DOM; take a second read before concluding a session or auth state is invalid.
 
 If an IDE browser tool reports a stale/missing tab, its tab listing disagrees with navigation, or a call deadlocks, use **one bounded recovery**: record the backend/tool/URL and exact error (or the harness timeout with no result), call `list_pages`/`tabs` once, discard every cached tab ID, select or create a page from the fresh result, and navigate once. If listing and navigation still disagree or either call times out, that browser backend is unavailable — never retry it in a loop.
 
@@ -234,7 +260,7 @@ factory ticket queue --team CLNT                         # what is dispatchable
 
 `claim` **exits non-zero when another agent won the race** — that is not a retry, it means take the next ticket. For anything the verbs do not cover, `raw '<graphql>' --var k=v` beats inventing a new flag.
 
-**Attribution.** Factory runs set `$FACTORY_RUN_ID`. Comments and issues filed through `tools/ticket.mjs` are stamped with it automatically; the one surface the tool cannot reach is GitHub, so **end every PR body with a final line `run:$FACTORY_RUN_ID`** (after `Fixes <ISSUE-ID>`). That one line is what joins the PR back to its transcript and metrics row when someone asks "which run produced this?". Unset (interactive session) — omit it.
+**Attribution.** Factory runs set `$FACTORY_RUN_ID`. Comments and issues filed through `tools/ticket.mjs` are stamped with it automatically; the one surface the tool cannot reach is GitHub, so end every PR body with a concrete final `run:<run-id>` line (after `Fixes <ISSUE-ID>`): append it with `printf 'run:%s\n' "$FACTORY_RUN_ID"`, never paste the literal variable reference. That line joins the PR back to its transcript and metrics row when someone asks "which run produced this?". Unset (interactive session) — omit it.
 
 **Labels are replaced wholesale, never merged.** Always go through `--add` / `--remove` via `factory ticket state` or `factory ticket claim`; a hand-written mutation or `linear issue update -l` that passes only the labels you want added silently replaces the entire label set, stripping `type:*`, `area:*`, `source:*`, and other existing taxonomy labels from the ticket. `type:*` has exactly eight values: `bug feature ui-ux security performance maintenance docs a11y` — `type:chore` fails. `area:*` is per-team; copy an existing ticket in the project rather than inventing one. Every new issue carries exactly one `source:*`: `source:agent` for work you discover yourself, `source:human` for a direct request, `source:sentry` / `source:client-support` for those intake paths.
 

@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Install checksum-pinned CI tools when the runner does not already provide them.
 # Set FORCE_INSTALL=1 to populate INSTALL_PREFIX/bin even when a tool is on PATH.
+#
+# bun is the exception to "already provided": a runner's own bun is reused only
+# when it reports exactly BUN_VERSION. Otherwise the pinned build goes into a
+# versioned cache dir (never over the host's ~/.bun, which concurrent runners
+# and other repos share) and, under Actions, that dir is prepended via
+# GITHUB_PATH so every later step resolves the pinned bun (WM-1137).
 set -euo pipefail
 
 readonly BUN_VERSION='1.3.14'
@@ -27,22 +33,49 @@ download() {
   curl "${CURL_DOWNLOAD_FLAGS[@]}" -o "$destination" "$url"
 }
 
+bun_reports_pinned_version() { # <bun-executable>
+  [ -x "$1" ] && [ "$("$1" --version 2>/dev/null || true)" = "$BUN_VERSION" ]
+}
+
 install_bun() {
-  local prefix archive extract_dir destination
-  prefix="${custom_prefix:-$HOME/.bun}"
+  local prefix archive extract_dir destination existing staged
+  prefix="${custom_prefix:-${BUN_CACHE_ROOT:-$HOME/.cache/factory-ci}/bun-${BUN_VERSION}}"
   destination="$prefix/bin/bun"
-  if [ "$force_install" != '1' ] && { [ -x "$destination" ] || { [ -z "$custom_prefix" ] && command -v bun >/dev/null 2>&1; }; }; then
-    return
+  if [ "$force_install" != '1' ] && [ -z "$custom_prefix" ]; then
+    # A runner-provided bun of the pinned version is fine as-is. Any other
+    # version (e.g. a host upgraded to 1.4.x) silently changes test semantics
+    # such as Bun.semver, so it must not short-circuit the install.
+    for existing in "$HOME/.bun/bin/bun" "$(command -v bun 2>/dev/null || true)"; do
+      if [ -n "$existing" ] && bun_reports_pinned_version "$existing"; then
+        destination="$existing"
+        break
+      fi
+    done
   fi
 
-  archive="$temp_dir/bun-linux-x64.zip"
-  extract_dir="$temp_dir/bun-linux-x64"
-  rm -rf "$extract_dir"
-  download "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64.zip" "$archive"
-  printf '%s  %s\n' "$BUN_SHA256" "$archive" | sha256sum -c -
-  unzip -q "$archive" -d "$temp_dir"
-  mkdir -p "$prefix/bin"
-  install -m 0755 "$extract_dir/bun" "$destination"
+  if [ "$force_install" = '1' ] || ! bun_reports_pinned_version "$destination"; then
+    archive="$temp_dir/bun-linux-x64.zip"
+    extract_dir="$temp_dir/bun-linux-x64"
+    rm -rf "$extract_dir"
+    download "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64.zip" "$archive"
+    printf '%s  %s\n' "$BUN_SHA256" "$archive" | sha256sum -c -
+    unzip -q "$archive" -d "$temp_dir"
+    mkdir -p "$prefix/bin"
+    # Stage then rename: the cache dir is shared by every runner on the host,
+    # so a concurrent job must never exec a half-written binary.
+    staged="$(mktemp "$prefix/bin/.bun.XXXXXX")"
+    install -m 0755 "$extract_dir/bun" "$staged"
+    mv -f "$staged" "$destination"
+  fi
+
+  if ! bun_reports_pinned_version "$destination"; then
+    echo "pinned bun at $destination does not report $BUN_VERSION" >&2
+    exit 1
+  fi
+  if [ -n "${GITHUB_PATH:-}" ]; then
+    dirname "$destination" >> "$GITHUB_PATH"
+  fi
+  echo "bun $BUN_VERSION: $destination" >&2
 }
 
 install_gitleaks() {

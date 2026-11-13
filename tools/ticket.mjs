@@ -4,23 +4,31 @@
  *
  * Named `ticket`, not `linear`, because it has routed through
  * `loadControlPlane()` since WM-894 and picks its control plane per repo
- * since WM-1007 — only the filename still said Linear (WM-1026).
- * `tools/linear.mjs` remains as a deprecated shim.
+ * since WM-1007 — only the filename still said Linear (WM-1026). The
+ * deprecated `tools/linear.mjs` shim was removed in WM-2017.
  *
  *   bun tools/ticket.mjs get CLNT-616
+ *   bun tools/ticket.mjs get owner/repo#123  # or configured-repo-name#123
  *   bun tools/ticket.mjs comments CLNT-616
  *   bun tools/ticket.mjs claim CLNT-616 --agent claude
  *   bun tools/ticket.mjs unclaim CLNT-616
  *   bun tools/ticket.mjs comment CLNT-616 "verified: 42 tests pass"
  *   bun tools/ticket.mjs triage CLNT-616 --comment "Owned Paths need revision"
  *   bun tools/ticket.mjs answer CLNT-616 "Use the existing token cache"
- *   bun tools/ticket.mjs detail CLNT-616 -- "## Acceptance criteria\n- [ ] ..."
+ *   bun tools/ticket.mjs detail CLNT-616 -- "## Acceptance criteria\n- [ ] ..." # append
+ *   bun tools/ticket.mjs detail CLNT-616 --replace -- "## Acceptance criteria\n- [ ] ..."
  *   bun tools/ticket.mjs labels CLNT-616 --add ai:needs-review --remove ai:in-progress
  *   bun tools/ticket.mjs state CLNT-616 "In Review" --add ai:needs-review
  *   bun tools/ticket.mjs file --team CLNT --title "..." --body "..." --type bug --dedupe-key "..."
+ *   bun tools/ticket.mjs file --from owner/repo#123 --title "..." --body "..." --type bug
  *   bun tools/ticket.mjs queue --repo bj29
  *   bun tools/ticket.mjs budget
+ *   bun tools/ticket.mjs linear-summary --minutes 60
  *   bun tools/ticket.mjs raw '<graphql>' --var key=value
+ *
+ * Linear network safety: requests are blocked when `FACTORY_LINEAR_OFFLINE=1`,
+ * `NODE_ENV=test`, or `BUN_TEST` is set. For a deliberate integration probe,
+ * set `FACTORY_LINEAR_ALLOW_NETWORK=1` on that command to opt in explicitly.
  *
  * WHY THIS EXISTS, given a perfectly good Linear MCP. (These reasons are
  * Linear-specific and still true; they are why the factory does not depend on
@@ -52,12 +60,22 @@
  * `loadControlPlane()` (WM-894); retries, backoff and key loading stay in
  * `orchestrator/reaper.mjs` as the Linear transport behind the adapter.
  */
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { loadRepos } from "../event-runtime/lib/repos.mjs";
 import {
   loadControlPlane,
+  ControlPlaneError,
   TYPE_LABELS,
   SOURCE_LABELS,
   validateLabels,
@@ -66,7 +84,11 @@ import {
   claimLabels,
   appendIssueDetail,
 } from "../lib/control-plane/index.mjs";
-import { releaseLabels } from "../lib/control-plane/labels.mjs";
+import {
+  clampGithubBody,
+  releaseLabels,
+  stampRun,
+} from "../lib/control-plane/labels.mjs";
 import {
   parseOwnedPaths,
   ownedPathsClosureGaps,
@@ -84,10 +106,188 @@ export {
   appendIssueDetail,
 };
 
+const CONTROL_PLANE_MUTATION_RETRY_BACKOFF_MS = 250;
+
+const controlPlaneMutationBackoff = (ms) =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+function controlPlaneTimeoutMessage(controlPlane, error) {
+  const message = String(error?.message ?? "");
+  if (controlPlane?.kind === "linear") {
+    const match = /^linear graphql timed out after (\d+)ms$/.exec(message);
+    return match ? `linear graphql timed out after ${match[1]}ms` : null;
+  }
+  if (controlPlane?.kind === "github") {
+    const graphql =
+      /^github(?: projects)? graphql timed out after (\d+)ms$/.exec(message);
+    if (graphql)
+      return `github projects graphql timed out after ${graphql[1]}ms`;
+    const api = /^gh timed out after (\d+)ms$/.exec(message);
+    return api ? `github api timed out after ${api[1]}ms` : null;
+  }
+  return null;
+}
+
+/**
+ * Idempotent state/label reads and transitions are safe to retry once after a
+ * timeout. Keep this at the CLI boundary: it covers both configured control
+ * planes while their adapters retain ownership of their respective transports.
+ */
+export async function retryControlPlaneMutation(
+  controlPlane,
+  mutation,
+  { backoff = controlPlaneMutationBackoff } = {},
+) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await mutation();
+    } catch (cause) {
+      const timeout = controlPlaneTimeoutMessage(controlPlane, cause);
+      if (!timeout) throw cause;
+      if (attempt === 1)
+        throw new ControlPlaneError(timeout, {
+          status: cause?.status ?? null,
+          cause,
+        });
+      await backoff(CONTROL_PLANE_MUTATION_RETRY_BACKOFF_MS);
+    }
+  }
+  throw new Error("unreachable: control-plane mutation retry loop exhausted");
+}
+
+function commentBodyMatches(comment, expected, actor) {
+  const body = String(comment?.body ?? "");
+  const landedBodies = new Set([
+    expected,
+    stampRun(expected),
+    clampGithubBody(expected),
+    clampGithubBody(stampRun(expected)),
+  ]);
+  if (!landedBodies.has(body)) return false;
+
+  // Author metadata REFINES the body match; it never vetoes it. Only a
+  // positive mismatch — we know who we write as, the timeline says someone
+  // else wrote this — is evidence that our own write never landed. Treating
+  // "no identity available" as a mismatch would be strictly worse than not
+  // checking at all: control planes that expose no actor (linear, memory, or a
+  // github adapter whose identity read failed) still populate `comment.user`,
+  // so every landed comment would be judged foreign and double-posted.
+  const authorId = comment?.user?.id == null ? null : String(comment.user.id);
+  const actorId = actor?.id == null ? null : String(actor.id);
+  if (!authorId || !actorId) return true;
+  return authorId === actorId;
+}
+
+/**
+ * The identity the control plane writes as, or null when it has none to give.
+ *
+ * Adapters may expose `actor` as a value (tests, fakes) or as an async verb
+ * that costs a request (github's viewer read). A failure resolves to null,
+ * which `commentBodyMatches` treats as "no refinement available" rather than
+ * as a mismatch — an identity lookup outage must not start duplicating
+ * comments.
+ */
+async function resolveCommentActor(cp) {
+  try {
+    const actor =
+      typeof cp?.actor === "function" ? await cp.actor() : cp?.actor;
+    return actor ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Retry a comment only after checking whether the timed-out write landed.
+ *
+ * Comment creation is not idempotent: blindly replaying a request after its
+ * response timed out can create a duplicate timeline entry. The check runs
+ * only on the retry path, so ordinary comments remain one write.
+ *
+ * This is also where ticket item (c) — "a replayed transition must not re-post
+ * its rationale" — is satisfied: `transitionThenComment` and `triageTicket`
+ * retry the transition and the comment as two separate mutations, and their
+ * comment half is always routed through this function, so a transition replay
+ * cannot reach `cp.comment` without first passing the landed-check.
+ */
+export async function commentWithRetry(cp, key, body) {
+  let retrying = false;
+  return retryControlPlaneMutation(cp, async () => {
+    if (retrying) {
+      const [comments, actor] = await Promise.all([
+        getCommentsWithRetry(cp, key),
+        resolveCommentActor(cp),
+      ]);
+      if (comments.some((comment) => commentBodyMatches(comment, body, actor)))
+        return;
+    }
+    retrying = true;
+    return cp.comment(key, body);
+  });
+}
+
+/** Read comments through the same timeout recovery used by other ticket reads. */
+export async function getCommentsWithRetry(cp, key) {
+  return retryControlPlaneMutation(cp, () => cp.listComments(key));
+}
+
 /** Transition first, so a promotion rationale is never posted for a failed move. */
 export async function transitionThenComment(cp, key, state, options, comment) {
-  await cp.transition(key, state, options);
-  if (comment?.trim()) await cp.comment(key, comment);
+  await retryControlPlaneMutation(cp, () => cp.transition(key, state, options));
+  if (comment?.trim()) await commentWithRetry(cp, key, comment);
+}
+
+/** Apply a complete label delta through the same retry policy as state writes. */
+export async function setLabelsWithRetry(cp, key, options) {
+  await retryControlPlaneMutation(cp, () => cp.setLabels(key, options));
+}
+
+/** Read a ticket through the same timeout recovery used by state mutations. */
+export async function getTicketWithRetry(cp, key) {
+  return retryControlPlaneMutation(cp, () => cp.getTicket(key));
+}
+
+/** Move a ticket to Triage, then safely add the required rationale. */
+export async function triageTicket(cp, key, comment) {
+  await retryControlPlaneMutation(cp, () =>
+    cp.transition(key, "Triage", { remove: ["ai:agent-ready"] }),
+  );
+  if (comment.trim()) await commentWithRetry(cp, key, comment);
+}
+
+/** Answer a blocked ticket without replaying its state transition on retry. */
+export async function answerTicket(cp, key, text) {
+  const issue = await getTicketWithRetry(cp, key);
+  if (issue.state?.name?.toLowerCase() === "blocked")
+    await retryControlPlaneMutation(cp, () => cp.transition(key, "Todo"));
+  await commentWithRetry(cp, key, text);
+}
+
+/** Replace a ticket body with a retried absolute write. */
+export async function replaceTicketDetail(cp, key, rawDetail) {
+  const issue = await getTicketWithRetry(cp, key);
+  const description = String(rawDetail).trim();
+  const current = String(issue.description ?? "").trim();
+  if (description === current) return { replaced: false };
+  const request = descriptionReplacementRequest(key, issue.id, description, {
+    kind: cp.kind,
+  });
+  const result = await retryControlPlaneMutation(cp, () =>
+    cp.raw(request.query, request.variables),
+  );
+  if (!replacementSucceeded(result, request.resultAt))
+    throw new Error(`detail replacement failed for ${key}`);
+  return { replaced: true };
+}
+
+/** Release a ticket only after its labels have been read through retry policy. */
+export async function unclaimTicket(cp, key) {
+  const issue = await getTicketWithRetry(cp, key);
+  const currentNames = (issue.labels ?? []).map((label) => label.name);
+  const { add, remove } = releaseLabels(currentNames, { to: "Todo" });
+  await retryControlPlaneMutation(cp, () =>
+    cp.transition(key, "Todo", { add, remove, unassign: true }),
+  );
 }
 
 /**
@@ -100,6 +300,9 @@ export async function transitionThenComment(cp, key, state, options, comment) {
  *
  * The control plane may return `warnings` (a follow-up board write failed, or
  * the key matched a closed issue) and `reused` (no new issue was created).
+ * A reused issue that already has a board Status keeps it instead of applying
+ * the requested state (including `Done`); the preserved value is returned as
+ * `status`. A reuse with no board item is still assigned the requested state.
  * Warnings flip the structured result to `ok: false` and set a non-zero exit
  * code: the issue exists, but callers must not mistake it for a complete
  * filing. The result stays available for recovery either way.
@@ -138,6 +341,57 @@ export async function fileTicket(
 const CACHE_DIR = path.join(homedir(), ".factory/cache/linear");
 const BUDGET_FILE = "budget.json";
 const LINEAR_API_HOST = "api.linear.app";
+const LINEAR_REQUEST_LOG_FILE = "linear-requests.jsonl";
+const LINEAR_REQUEST_LOG_MAX_BYTES = 1_000_000;
+const LINEAR_REQUEST_LOG_ROTATIONS = 3;
+export const LINEAR_TELEMETRY = Symbol.for("factory.linear.telemetry");
+
+/**
+ * Test processes must never spend the operator's shared Linear budget. The
+ * explicit allow escape hatch exists for the rare integration probe and is
+ * deliberately inherited by CLI children through their environment.
+ */
+export function linearNetworkIsOffline(env = process.env) {
+  return linearOfflineGuardTrigger(env) !== null;
+}
+
+/** Return the exact environment setting which enabled the offline guard. */
+export function linearOfflineGuardTrigger(env = process.env) {
+  if (env.FACTORY_LINEAR_ALLOW_NETWORK === "1") return null;
+  if (env.FACTORY_LINEAR_OFFLINE === "1") return "FACTORY_LINEAR_OFFLINE=1";
+  if (env.NODE_ENV === "test") return "NODE_ENV=test";
+  if (env.BUN_TEST) return `BUN_TEST=${env.BUN_TEST}`;
+  return null;
+}
+
+/** Dedicated refusal distinct from generic CLI failure and rate limiting. */
+export const LINEAR_OFFLINE_GUARD_EXIT = 4;
+
+export class LinearOfflineGuardError extends Error {
+  constructor(trigger) {
+    super(
+      `linear_offline_guard: Linear network access is disabled by ${trigger}; set FACTORY_LINEAR_ALLOW_NETWORK=1 to allow Linear network access`,
+    );
+    this.name = "LinearOfflineGuardError";
+    this.code = "linear_offline_guard";
+    this.exitCode = LINEAR_OFFLINE_GUARD_EXIT;
+  }
+}
+
+export function assertLinearNetworkAllowed(url, env = process.env) {
+  const trigger = linearOfflineGuardTrigger(env);
+  if (String(url).includes(LINEAR_API_HOST) && trigger) {
+    throw new LinearOfflineGuardError(trigger);
+  }
+}
+
+/** Adapters may preserve the operator-facing message but not error fields. */
+export function isLinearOfflineGuardError(err) {
+  return (
+    err?.code === "linear_offline_guard" ||
+    String(err?.message ?? "").startsWith("linear_offline_guard:")
+  );
+}
 
 /** Distinct from generic CLI failure (exit 1) so planners can retry-later. */
 export const LINEAR_RATE_LIMIT_EXIT = 3;
@@ -231,7 +485,77 @@ export function parseRateLimitHeaders(headers, now = Date.now()) {
 }
 
 export function linearCacheDir() {
-  return process.env.LINEAR_CACHE_DIR || CACHE_DIR;
+  if (process.env.LINEAR_CACHE_DIR) return process.env.LINEAR_CACHE_DIR;
+  // A scoped runtime home owns its own budget capture: tests and isolated
+  // stacks (FACTORY_EVENT_HOME) must never read or spend the operator's
+  // shared ~/.factory budget clock.
+  if (process.env.FACTORY_EVENT_HOME) {
+    return path.join(process.env.FACTORY_EVENT_HOME, "cache", "linear");
+  }
+  return CACHE_DIR;
+}
+
+/** Directory for fail-open Linear request telemetry, scoped in test stacks. */
+export function linearRequestLogDir() {
+  if (process.env.LINEAR_REQUEST_LOG_DIR)
+    return process.env.LINEAR_REQUEST_LOG_DIR;
+  if (process.env.FACTORY_EVENT_HOME)
+    return path.join(process.env.FACTORY_EVENT_HOME, "run");
+  return path.join(homedir(), ".factory/run");
+}
+
+function numberHeader(headers, name) {
+  return parseHeaderNumber(headers?.get?.(name));
+}
+
+function linearRateLimitLogHeaders(headers) {
+  return {
+    requestsRemaining: numberHeader(headers, "x-ratelimit-requests-remaining"),
+    requestsLimit: numberHeader(headers, "x-ratelimit-requests-limit"),
+    requestsReset: headers?.get?.("x-ratelimit-requests-reset") ?? null,
+    complexityRemaining: numberHeader(
+      headers,
+      "x-ratelimit-complexity-remaining",
+    ),
+    complexityLimit: numberHeader(headers, "x-ratelimit-complexity-limit"),
+    complexityReset: headers?.get?.("x-ratelimit-complexity-reset") ?? null,
+  };
+}
+
+function rotateLinearRequestLog(dir) {
+  const current = path.join(dir, LINEAR_REQUEST_LOG_FILE);
+  try {
+    if (statSync(current).size < LINEAR_REQUEST_LOG_MAX_BYTES) return;
+    try {
+      unlinkSync(`${current}.${LINEAR_REQUEST_LOG_ROTATIONS}`);
+    } catch {
+      // The oldest generation may simply not exist yet; nothing to discard.
+    }
+    for (let i = LINEAR_REQUEST_LOG_ROTATIONS - 1; i >= 1; i -= 1) {
+      try {
+        renameSync(`${current}.${i}`, `${current}.${i + 1}`);
+      } catch {
+        // A generation that was never written yet leaves a gap, not an error.
+      }
+    }
+    renameSync(current, `${current}.1`);
+  } catch {
+    // Logging is telemetry only and must never affect a Linear request.
+  }
+}
+
+function appendLinearRequestLog(entry) {
+  try {
+    const dir = linearRequestLogDir();
+    mkdirSync(dir, { recursive: true });
+    rotateLinearRequestLog(dir);
+    appendFileSync(
+      path.join(dir, LINEAR_REQUEST_LOG_FILE),
+      `${JSON.stringify(entry)}\n`,
+    );
+  } catch {
+    // Fail open: a full or unavailable local disk must not break Linear.
+  }
 }
 
 export function loadLinearBudget() {
@@ -242,6 +566,19 @@ export function loadLinearBudget() {
   } catch {
     return null;
   }
+}
+
+/**
+ * Return the currently actionable Linear rate-limit state, if any.
+ *
+ * A stale cache entry must not hold the control plane offline forever: Linear
+ * gives us a reset clock, and only a future clock represents a live refusal.
+ */
+export function linearRateLimitState(budget, now = Date.now()) {
+  if (!budget?.rateLimited || !budget.resetAt) return null;
+  const resetMs = Date.parse(budget.resetAt);
+  if (!Number.isFinite(resetMs) || resetMs <= now) return null;
+  return { rateLimited: true, resetAt: new Date(resetMs).toISOString() };
 }
 
 export function saveLinearBudget(budget) {
@@ -277,36 +614,163 @@ export function linearBudgetStatus(budget) {
   return "pass";
 }
 
-function recordLinearBudgetFromResponse(res) {
-  const parsed = parseRateLimitHeaders(res.headers);
-  if (!parsed && res.status !== 400 && res.status !== 429) return;
-  const prior = loadLinearBudget() ?? {};
-  const rateLimited =
-    res.status === 429 ||
-    (res.status === 400 && parsed?.remaining === 0) ||
-    parsed?.remaining === 0;
-  saveLinearBudget({
-    remaining:
-      parsed?.remaining ?? (rateLimited ? 0 : (prior.remaining ?? null)),
-    limit: parsed?.limit ?? prior.limit ?? LINEAR_REQUESTS_LIMIT,
-    resetAt: parsed?.resetAt ?? prior.resetAt ?? null,
-    rateLimited: Boolean(rateLimited || prior.rateLimited),
-    status: res.status,
-  });
+/**
+ * Identity of the process that issued a Linear request. `caller` alone names
+ * the module (there are only two), which cannot separate serve from a worker
+ * from a CLI invocation on the same box — and separating them is the entire
+ * point of this log. The entry-point basename, pid and declared role do.
+ */
+function linearProcessIdentity() {
+  return {
+    process: path.basename(process.argv[1] ?? ""),
+    pid: process.pid,
+    role: process.env.FACTORY_ROLE ?? null,
+  };
+}
+
+/**
+ * Persist telemetry for one Linear response. It shares the budget snapshot so
+ * the logged delta is the exact change the existing rate-limit guard observes.
+ */
+export function recordLinearResponse(
+  res,
+  context = {},
+  // `Date` as a bare default would be called as `Date()`, whose string form
+  // has no milliseconds; a thunk keeps the entry at full resolution.
+  { now = () => new Date() } = {},
+) {
+  try {
+    const parsed = parseRateLimitHeaders(res?.headers);
+    const prior = loadLinearBudget() ?? {};
+    const rateLimited =
+      res?.status === 429 ||
+      (res?.status === 400 && parsed?.remaining === 0) ||
+      parsed?.remaining === 0;
+    const remaining =
+      parsed?.remaining ?? (rateLimited ? 0 : (prior.remaining ?? null));
+    if (parsed || res?.status === 400 || res?.status === 429) {
+      saveLinearBudget({
+        remaining,
+        limit: parsed?.limit ?? prior.limit ?? LINEAR_REQUESTS_LIMIT,
+        resetAt: parsed?.resetAt ?? prior.resetAt ?? null,
+        rateLimited,
+        status: res?.status ?? null,
+      });
+    }
+    appendLinearRequestLog({
+      timestamp: new Date(now()).toISOString(),
+      caller: context.caller ?? "fetch",
+      ...linearProcessIdentity(),
+      ticket: context.ticket ?? null,
+      status: Number.isInteger(res?.status) ? res.status : null,
+      rateLimit: linearRateLimitLogHeaders(res?.headers),
+      budgetDelta:
+        Number.isFinite(parsed?.remaining) && Number.isFinite(prior.remaining)
+          ? remaining - prior.remaining
+          : null,
+    });
+  } catch {
+    // Response instrumentation is strictly fail-open.
+  }
+}
+
+/** Aggregate a recent request log window by caller without touching Linear. */
+export function summarizeLinearRequests({
+  dir = linearRequestLogDir(),
+  minutes = 60,
+  now = Date.now(),
+} = {}) {
+  const cutoff = now - Math.max(0, Number(minutes) || 0) * 60_000;
+  const rows = new Map();
+  for (let i = LINEAR_REQUEST_LOG_ROTATIONS; i >= 0; i -= 1) {
+    const file = path.join(
+      dir,
+      i === 0 ? LINEAR_REQUEST_LOG_FILE : `${LINEAR_REQUEST_LOG_FILE}.${i}`,
+    );
+    let text;
+    try {
+      text = readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of text.split("\n")) {
+      try {
+        const entry = JSON.parse(line);
+        const timestamp = Date.parse(entry.timestamp);
+        if (!Number.isFinite(timestamp) || timestamp < cutoff) continue;
+        const caller = String(entry.caller ?? "unknown");
+        // Rows are keyed on caller AND process: one module is reached from
+        // serve, workers and the CLI at once, and "who is spending the
+        // budget" is only answerable when those stay apart.
+        const proc = String(entry.process ?? "");
+        const key = `${caller}\u0000${proc}`;
+        const row = rows.get(key) ?? {
+          caller,
+          process: proc,
+          requests: 0,
+          failures: 0,
+          latestRemaining: null,
+          budgetDelta: 0,
+        };
+        row.requests += 1;
+        if (Number(entry.status) >= 400) row.failures += 1;
+        if (Number.isFinite(entry.rateLimit?.requestsRemaining))
+          row.latestRemaining = entry.rateLimit.requestsRemaining;
+        if (Number.isFinite(entry.budgetDelta))
+          row.budgetDelta += entry.budgetDelta;
+        rows.set(key, row);
+      } catch {
+        // A partial append or manually edited telemetry line is ignorable.
+      }
+    }
+  }
+  return [...rows.values()].sort(
+    (a, b) =>
+      a.caller.localeCompare(b.caller) || a.process.localeCompare(b.process),
+  );
+}
+
+function formatLinearRequestSummary(rows, minutes) {
+  if (!rows.length)
+    return `No Linear requests recorded in the last ${minutes}m`;
+  const lines = [`Linear requests in the last ${minutes}m:`];
+  for (const row of rows)
+    lines.push(
+      `${row.caller}${row.process ? ` (${row.process})` : ""}: ` +
+        `${row.requests} request(s), ${row.failures} failure(s), ` +
+        `budget delta ${row.budgetDelta}, remaining ${row.latestRemaining ?? "unknown"}`,
+    );
+  return lines.join("\n");
 }
 
 let fetchHookInstalled = false;
 
 export function installLinearBudgetCapture() {
   if (fetchHookInstalled) return;
+  // `bind` does not carry own properties across, so the marker is read here.
+  const wasOfflineGuarded = Boolean(
+    globalThis.fetch?.__factoryLinearOfflineGuard,
+  );
   const originalFetch = globalThis.fetch.bind(globalThis);
   fetchHookInstalled = true;
   globalThis.fetch = async function linearBudgetFetch(input, init) {
     const url = String(input?.url ?? input);
-    const res = await originalFetch(input, init);
-    if (url.includes(LINEAR_API_HOST)) recordLinearBudgetFromResponse(res);
-    return res;
+    assertLinearNetworkAllowed(url);
+    try {
+      const res = await originalFetch(input, init);
+      if (url.includes(LINEAR_API_HOST))
+        recordLinearResponse(res, init?.[LINEAR_TELEMETRY]);
+      return res;
+    } catch (error) {
+      if (url.includes(LINEAR_API_HOST))
+        recordLinearResponse(null, init?.[LINEAR_TELEMETRY]);
+      throw error;
+    }
   };
+  // The capture hook delegates to whatever `fetch` it wrapped, so a test
+  // process's offline guard stays in the chain — carry its marker forward so
+  // the guard is still recognised as installed rather than reinstalled on top.
+  if (wasOfflineGuarded) globalThis.fetch.__factoryLinearOfflineGuard = true;
 }
 
 /**
@@ -391,26 +855,76 @@ export function resolveRepoName({
 /**
  * When cwd identifies no repo (dispatched agents run from ephemeral runtime
  * workspaces under ~/.factory, matching neither `path` nor `worktree_root` —
- * GH-975), the ticket identifier itself still can: `owner/repo#N` names the
- * GitHub repo, and a registry entry whose `github:` matches decides the
- * plane. Without this, a workspace-run claim silently falls back to the
- * workspace-wide default plane and misreads or misses the ticket entirely.
+ * GH-975), the ticket identifier itself still can: `owner/repo#N` or a
+ * configured `repo-name#N` names the GitHub repo. Without this, a workspace-
+ * run claim silently falls back to the workspace-wide default plane and
+ * misreads or misses the ticket entirely.
  */
 export function resolveRepoNameFromTicket(ticketArg, repos) {
   const registry = repos ?? getRepos();
-  const m =
-    typeof ticketArg === "string" &&
-    ticketArg.match(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#[0-9]+/);
-  if (!m) return null;
-  const github = m[1].toLowerCase();
+  const ref = configuredGithubTicketRef(ticketArg, registry);
+  return ref?.repo.name ?? null;
+}
+
+function configuredGithubTicketRef(ticketArg, registry) {
+  if (typeof ticketArg !== "string") return null;
+  const full = ticketArg.match(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#([0-9]+)$/);
+  const short = ticketArg.match(/^([A-Za-z0-9_.-]+)#([0-9]+)$/);
+  if (!full && !short) return null;
+  const [, rawName, number] = full ?? short;
+  const name = rawName.toLowerCase();
   for (const repo of registry.values()) {
-    if (typeof repo.github === "string" && repo.github.toLowerCase() === github)
-      return repo.name;
+    const matches = full
+      ? typeof repo.github === "string" && repo.github.toLowerCase() === name
+      : typeof repo.name === "string" && repo.name.toLowerCase() === name;
+    if (matches) return { repo, identifier: `${repo.github}#${number}` };
   }
   return null;
 }
 
-function controlPlane(ticketArg = positional[0]) {
+/** Return the full GitHub slug, or reject a miss before fallback routing. */
+export function normalizeTicketRef(ticketArg, repos) {
+  // Same registry `controlPlane()` binds to, so the ref that passes here is
+  // the ref the adapter is built for.
+  const registry = repos ?? getRepos(instanceConfigRoot());
+  const ref = configuredGithubTicketRef(ticketArg, registry);
+  if (ref) return ref.identifier;
+  if (typeof ticketArg === "string" && /^[^#\s]+#[0-9]+$/.test(ticketArg)) {
+    const err = new Error(
+      `unrecognised ticket ref ${JSON.stringify(ticketArg)}: expected <owner>/<repo>#N or <repo-name>#N for a configured GitHub repo, or a Linear id like CLNT-616`,
+    );
+    err.exitCode = 2;
+    throw err;
+  }
+  return ticketArg;
+}
+
+/**
+ * Resolve the repository for `file`. Unlike ticket verbs, an explicit
+ * `--from` is the only durable repository signal an agent running from an
+ * ephemeral workspace has, so it takes precedence over cwd (after --repo).
+ * A `--from` that names no configured GitHub repository (a Linear id such as
+ * `CLNT-616`) is not a routing decision: it falls through to cwd exactly as
+ * if it had not been given, so a Linear-sourced dispatch keeps its default
+ * (`--team`) route instead of being refused.
+ */
+export function resolveRepoNameForFile({
+  cwd = process.cwd(),
+  repos,
+  repoFlag = flag("repo"),
+  fromFlag = flag("from"),
+} = {}) {
+  if (repoFlag) return resolveRepoName({ cwd, repos, repoFlag });
+  return (
+    (fromFlag ? resolveRepoNameFromTicket(fromFlag, repos) : null) ??
+    resolveRepoName({ cwd, repos, repoFlag: undefined })
+  );
+}
+
+function controlPlane(
+  ticketArg = positional[0],
+  { forFile = false, team = flag("team") } = {},
+) {
   // All ticket verbs act on instance-local state. Resolve this before looking
   // at cwd or the identifier so a missing runner config is an explicit refusal
   // rather than a silent default-plane lookup.
@@ -419,6 +933,16 @@ function controlPlane(ticketArg = positional[0]) {
   // Absent a resolvable repo, fall back to the workspace default exactly as
   // before — a CLI run from /tmp must still work.
   let repoName = null;
+  if (forFile) {
+    repoName = resolveRepoNameForFile({ repos });
+    if (repoName) return loadControlPlane({ root, repoName });
+    // An explicit --team is the Linear route and needs no repository; refuse
+    // only when nothing at all says where the finding belongs.
+    if (team) return loadControlPlane({ root });
+    throw new Error(
+      "file cannot resolve a control plane outside a configured repository; pass --repo <name> or --from <owner/repo#N> (or --team <KEY> for a Linear team)",
+    );
+  }
   try {
     repoName = resolveRepoName({ repos });
   } catch (err) {
@@ -512,6 +1036,53 @@ export function closureCheckMessages(issue) {
   return formatOwnedPathClosureGaps(gaps);
 }
 
+/** A Linear issue key: team prefix, dash, number (`CLNT-616`, `WM-1007`). */
+const LINEAR_KEY = /^[A-Z][A-Z0-9]*-\d+$/;
+
+/**
+ * Build the tracker-native escape-hatch mutation for `detail --replace`.
+ *
+ * The replacement stays in the ticket CLI's declared surface while adapters
+ * grow a first-class replacement verb (see #1666). The control plane's own
+ * `kind` decides the tracker; without one, a Linear key shape (`CLNT-616`)
+ * selects Linear and everything else — `owner/repo#N`, `#N`, bare `N`, all of
+ * which the GitHub adapter accepts — selects GitHub.
+ */
+export function descriptionReplacementRequest(
+  identifier,
+  id,
+  description,
+  { kind } = {},
+) {
+  const linear =
+    kind === "linear" ||
+    (kind == null && LINEAR_KEY.test(String(identifier).trim()));
+  if (linear) {
+    return {
+      query:
+        "mutation($id:String!,$description:String!){issueUpdate(id:$id,input:{description:$description}){success}}",
+      variables: { id, description },
+      resultAt: ["issueUpdate", "success"],
+    };
+  }
+  return {
+    query:
+      "mutation($id:ID!,$body:String!){updateIssue(input:{id:$id,body:$body}){issue{id}}}",
+    variables: { id, body: description },
+    resultAt: ["updateIssue", "issue", "id"],
+  };
+}
+
+/**
+ * Did the replacement mutation take? The tail of `resultAt` is either a
+ * boolean (`success`) or an id; both must be truthy — `success: false` is a
+ * failure, not "a value came back".
+ */
+export function replacementSucceeded(result, resultAt) {
+  const payload = result?.data ?? result;
+  return Boolean(resultAt.reduce((value, key) => value?.[key], payload));
+}
+
 const teamOf = (key) => String(key).split("-")[0];
 
 // ------------------------------------------------------------------ verbs ---
@@ -522,6 +1093,7 @@ const VALUE_FLAGS = new Set([
   "body",
   "comment",
   "dedupe-key",
+  "from",
   "label",
   "project",
   "remove",
@@ -591,23 +1163,24 @@ const out = (obj, text) =>
 
 const VERBS = {
   async get() {
-    const issue = await controlPlane().getTicket(positional[0]);
+    const key = normalizeTicketRef(positional[0]);
+    const issue = await controlPlane(key).getTicket(key);
     out(issue, formatTicket(issue));
   },
 
   async comments() {
-    const key = positional[0];
-    if (!key) throw new Error(`usage: comments <ISSUE-ID>`);
-    const nodes = await controlPlane().listComments(key);
+    if (!positional[0]) throw new Error(`usage: comments <ISSUE-ID>`);
+    const key = normalizeTicketRef(positional[0]);
+    const nodes = await controlPlane(key).listComments(key);
     out(nodes, formatComments(nodes));
   },
 
   async claim() {
-    const key = positional[0];
+    const key = normalizeTicketRef(positional[0]);
     const harness = flag("agent", "claude");
     // Linear has no compare-and-swap; the adapter's read-back IS the
     // concurrency control. `ok: false` is a lost race, not a transport error.
-    const result = await controlPlane().claim(key, { harness });
+    const result = await controlPlane(key).claim(key, { harness });
     out(
       result,
       result.ok
@@ -618,13 +1191,10 @@ const VERBS = {
   },
 
   async unclaim() {
-    const key = positional[0];
-    if (!key) throw new Error(`usage: unclaim <ISSUE-ID>`);
-    const cp = controlPlane();
-    const issue = await cp.getTicket(key);
-    const currentNames = (issue.labels ?? []).map((label) => label.name);
-    const { add, remove } = releaseLabels(currentNames, { to: "Todo" });
-    await cp.transition(key, "Todo", { add, remove, unassign: true });
+    if (!positional[0]) throw new Error(`usage: unclaim <ISSUE-ID>`);
+    const key = normalizeTicketRef(positional[0]);
+    const cp = controlPlane(key);
+    await unclaimTicket(cp, key);
     out(
       { ok: true, identifier: key, state: "Todo" },
       `unclaimed ${key} -> Todo`,
@@ -632,43 +1202,55 @@ const VERBS = {
   },
 
   async comment() {
-    const key = positional[0];
+    const key = normalizeTicketRef(positional[0]);
     const body = positional[1];
     if (!body) throw new Error(`usage: comment <ISSUE-ID> [--] "<text>"`);
-    await controlPlane().comment(key, body);
+    await controlPlane(key).comment(key, body);
     out({ ok: true, identifier: key }, `commented on ${key}`);
   },
 
   async triage() {
-    const key = positional[0];
     const comment = flag("comment");
-    if (!key || comment === null)
+    if (!positional[0] || comment === null)
       throw new Error(`usage: triage <ISSUE-ID> --comment "<text>"`);
-    const cp = controlPlane();
-    await cp.transition(key, "Triage", { remove: ["ai:agent-ready"] });
-    if (comment.trim()) await cp.comment(key, comment);
+    const key = normalizeTicketRef(positional[0]);
+    const cp = controlPlane(key);
+    await triageTicket(cp, key, comment);
     out({ ok: true, identifier: key }, `${key} -> Triage`);
   },
 
   async answer() {
-    const key = positional[0];
     const text = positional[1];
-    if (!key || !text)
+    if (!positional[0] || !text)
       throw new Error(`usage: answer <ISSUE-ID> [--] "<text>"`);
-    const cp = controlPlane();
-    const issue = await cp.getTicket(key);
-    if (issue.state?.name?.toLowerCase() === "blocked")
-      await cp.transition(key, "Todo");
-    await cp.comment(key, text);
+    const key = normalizeTicketRef(positional[0]);
+    const cp = controlPlane(key);
+    await answerTicket(cp, key, text);
     out({ ok: true, identifier: key }, `answered ${key}`);
   },
 
   async detail() {
-    const key = positional[0];
     const rawDetail = positional[1];
-    if (!key || !rawDetail)
-      throw new Error(`usage: detail <ISSUE-ID> [--] "<markdown>"`);
-    const { appended } = await controlPlane().appendDetail(key, rawDetail);
+    if (!positional[0] || !rawDetail)
+      throw new Error(`usage: detail <ISSUE-ID> [--replace] [--] "<markdown>"`);
+    const key = normalizeTicketRef(positional[0]);
+    const cp = controlPlane(key);
+    if (has("replace")) {
+      const { replaced } = await replaceTicketDetail(cp, key, rawDetail);
+      if (!replaced) {
+        out(
+          { ok: true, identifier: key, replaced: false },
+          `${key} detail already matches`,
+        );
+        return;
+      }
+      out(
+        { ok: true, identifier: key, replaced: true },
+        `${key} detail replaced`,
+      );
+      return;
+    }
+    const { appended } = await cp.appendDetail(key, rawDetail);
     if (!appended) {
       out(
         { ok: true, identifier: key, appended: false },
@@ -683,21 +1265,21 @@ const VERBS = {
   },
 
   async labels() {
-    const key = positional[0];
-    if (!key)
+    if (!positional[0])
       throw new Error(
         `usage: labels <ISSUE-ID> [--add <label>] [--remove <label>]`,
       );
-    const cp = controlPlane();
+    const key = normalizeTicketRef(positional[0]);
+    const cp = controlPlane(key);
     const add = flagAll("add"),
       remove = flagAll("remove");
     if (!add.length && !remove.length) {
-      const issue = await cp.getTicket(key);
+      const issue = await getTicketWithRetry(cp, key);
       const current = (issue.labels ?? []).map((l) => l.name);
       out(current, current.join(" ") || "(none)");
       return;
     }
-    await cp.setLabels(key, { add, remove });
+    await setLabelsWithRetry(cp, key, { add, remove });
     out(
       { ok: true, identifier: key, added: add, removed: remove },
       `${key} labels updated`,
@@ -709,12 +1291,11 @@ const VERBS = {
   },
 
   async state() {
-    const key = positional[0];
     const wanted = positional[1];
     const add = flagAll("add"),
       remove = flagAll("remove");
     const comment = flag("comment");
-    if (!key)
+    if (!positional[0])
       throw new Error(
         `usage: state <ISSUE-ID> ["<State Name>"] [--add label] [--remove label] [--comment "<text>"]`,
       );
@@ -723,8 +1304,9 @@ const VERBS = {
         `usage: state <ISSUE-ID> "<State Name>" [--add label] [--remove label] [--comment "<text>"]`,
       );
     }
-    const cp = controlPlane();
-    const issue = await cp.getTicket(key);
+    const key = normalizeTicketRef(positional[0]);
+    const cp = controlPlane(key);
+    const issue = await getTicketWithRetry(cp, key);
 
     if (add.includes("ai:agent-ready")) {
       const gaps = closureCheckMessages(issue);
@@ -753,10 +1335,11 @@ const VERBS = {
     const team = flag("team");
     const title = flag("title");
     const dedupeKey = flag("dedupe-key")?.trim() || undefined;
-    if (!team || !title)
-      throw new Error(
-        `usage: file --team CLNT --title "..." [--body "..."] [--type bug] [--area x] [--source agent] [--todo] [--dedupe-key "..."]`,
-      );
+    const usage = `usage: file --title "..." [--from owner/repo#N | --repo name] [--team CLNT] [--body "..."] [--type bug] [--area x] [--source agent] [--todo] [--dedupe-key "..."]`;
+    // Argument shape first: a missing title is a usage error, not a routing one.
+    if (!title) throw new Error(usage);
+    const cp = controlPlane(undefined, { forFile: true, team });
+    if (!team && cp.kind !== "github") throw new Error(usage);
 
     // New findings land in Triage unless they already meet the agent-ready bar.
     const stateName = has("todo") ? "Todo" : "Triage";
@@ -767,7 +1350,7 @@ const VERBS = {
       ...(has("todo") ? ["ai:agent-ready"] : []),
       ...flagAll("label"),
     ];
-    await fileTicket(controlPlane(), {
+    await fileTicket(cp, {
       team,
       title,
       body: flag("body", ""),
@@ -803,15 +1386,20 @@ const VERBS = {
   async queue() {
     let team = flag("team") ?? teamOf(positional[0] ?? "");
     let project = flag("project") ?? null;
+    const repoFlag = flag("repo");
+    // Validate an explicit repository even when --team also supplied one. A
+    // typo is an operator error, not a reason to discard the repo scoping and
+    // fall through to the generic queue usage message.
+    const repos = repoFlag ? getRepos() : null;
+    const repoName = repoFlag ? resolveRepoName({ repos, repoFlag }) : null;
     if (!team) {
       // Repo-scoped read (work-scan calls `queue --repo <name>`): derive the
       // team from the repo's config. GitHub-plane repos have no meaningful
       // team of their own — listDispatchable maps it back to the repo — but
       // the verb still needs *a* team, and requiring the caller to pass it for
       // a --repo read is exactly the mismatch that made work-scan refuse.
-      const repoName = flag("repo");
       if (repoName) {
-        const cfg = getRepos().get(repoName);
+        const cfg = repos.get(repoName);
         team = cfg?.team ?? null;
         // ...and its project. Several repos share one Linear team (CLNT covers
         // BJ29 Coaching, CashMap, RiccoMoto, ...); without the project filter
@@ -846,6 +1434,16 @@ const VERBS = {
     );
   },
 
+  async "linear-summary"() {
+    const minutes = Number(flag("minutes", "60"));
+    if (!Number.isFinite(minutes) || minutes < 0)
+      throw new Error(
+        `usage: linear-summary [--minutes <non-negative number>]`,
+      );
+    const rows = summarizeLinearRequests({ minutes });
+    out(rows, formatLinearRequestSummary(rows, minutes));
+  },
+
   async raw() {
     const vars = Object.fromEntries(
       flagAll("var").map((kv) => {
@@ -860,8 +1458,8 @@ const VERBS = {
 };
 
 /**
- * The CLI entry point, exported so `tools/linear.mjs` (the deprecated shim,
- * WM-1026) can delegate to exactly this and stay behaviourally identical.
+ * The CLI entry point, exported so embedders can drive exactly the argv the
+ * shell entry does (the WM-1026 shim that relied on this is gone, WM-2017).
  */
 export async function main() {
   installLinearBudgetCapture();
@@ -883,7 +1481,11 @@ export async function main() {
       process.exit(LINEAR_RATE_LIMIT_EXIT);
     }
     console.error(`ticket ${verb}: ${e.message}`);
-    process.exit(1);
+    process.exit(
+      isLinearOfflineGuardError(e)
+        ? LINEAR_OFFLINE_GUARD_EXIT
+        : (e.exitCode ?? 1),
+    );
   }
 }
 

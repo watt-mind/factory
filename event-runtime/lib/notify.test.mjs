@@ -83,6 +83,7 @@ function insertProposal(
     agent = "worktree-ticket@1",
     input,
     model,
+    approvalPolicy,
     createdAt,
     ttlSeconds = 1800,
   },
@@ -93,6 +94,7 @@ function insertProposal(
           agent,
           ...(input ? { input } : {}),
           ...(model ? { model } : {}),
+          ...(approvalPolicy ? { approvalPolicy } : {}),
         }
       : null;
   db.query(
@@ -216,6 +218,13 @@ describe("notify (WM-65)", () => {
     await first.deliveries;
     expect(stub.pushes()).toEqual([
       "BLOCKED linear.ticket.agent_ready evt-park: repo_report_only",
+      "What happened: An item needs attention for linear.ticket.agent_ready evt-park (blocked).",
+      "",
+      "Why it matters: The runtime reported “repo report only” and needs an operator to decide what happens next.",
+      "",
+      "Reason code: repo_report_only.",
+      // The push renders the ask once: the body's restatement is stripped and
+      // only the question plus its numbered options follow.
       "Should this parked event be requeued?",
       "1. Requeue the event",
       "2. Not now",
@@ -248,7 +257,7 @@ describe("notify (WM-65)", () => {
     });
     expect(afterRestart.sent).toEqual([]);
     await afterRestart.deliveries;
-    expect(stub.pushes()).toHaveLength(5);
+    expect(stub.pushes()).toHaveLength(10);
     db.close();
   });
 
@@ -292,7 +301,9 @@ describe("notify (WM-65)", () => {
         "SELECT title, decision_json, dedupe_key FROM inbox_items WHERE kind = 'decision_needed'",
       )
       .get();
-    expect(proposalItem.title).toBe("Ci-Doctor");
+    expect(proposalItem.title).toBe(
+      "Approve ci-doctor run (proposal prop-aging)?",
+    );
     expect(
       JSON.parse(proposalItem.decision_json).options.map(
         (option) => option.effect,
@@ -331,6 +342,11 @@ describe("notify (WM-65)", () => {
       agent: "dispatch@1",
       model: "cursor-grok-4.6-high",
       input: { ticket: "WM-862", repo: "factory" },
+      approvalPolicy: {
+        dispatchEvidence: {
+          ticket: { title: "select Opus only for Claude parent runs" },
+        },
+      },
       reason: "auto_approval_ineligible:dispatch_recheck_failed",
       createdAt: new Date(now - 16 * 60_000).toISOString(),
       ttlSeconds: 1800,
@@ -344,7 +360,7 @@ describe("notify (WM-65)", () => {
     });
     expect(out.sent).toHaveLength(1);
     expect(out.sent[0].title).toBe(
-      "Dispatch WM-862 · factory · cursor-grok-4.6-high",
+      "Dispatch WM-862 · factory · cursor-grok-4.6-high — select Opus only for Claude parent runs",
     );
     expect(out.sent[0].message).toBe(
       "DECISION NEEDED proposal prop_2dda1ca8-2469-4aab-8908-79c31a5df55b (dispatch@1): expires in 14m",
@@ -354,7 +370,9 @@ describe("notify (WM-65)", () => {
         "SELECT title, refs_json, decision_json FROM inbox_items WHERE kind = 'decision_needed'",
       )
       .get();
-    expect(item.title).toBe("Dispatch WM-862 · factory · cursor-grok-4.6-high");
+    expect(item.title).toBe(
+      'Approve dispatch run (WM-862 "select Opus only for Claude parent runs")?',
+    );
     expect(JSON.parse(item.refs_json)).toMatchObject({
       proposalId: "prop_2dda1ca8-2469-4aab-8908-79c31a5df55b",
       issue: "WM-862",
@@ -372,7 +390,10 @@ describe("notify (WM-65)", () => {
     expect(stub.pushes()[0]).toBe(
       "DECISION NEEDED proposal prop_2dda1ca8-2469-4aab-8908-79c31a5df55b (dispatch@1): expires in 14m",
     );
-    expect(stub.pushes()[1]).toBe(
+    expect(stub.pushes()).toContain(
+      'What happened: An item needs attention for WM-862 "select Opus only for Claude parent runs" (decision needed).',
+    );
+    expect(stub.pushes()).toContain(
       "Run dispatch@1 for WM-862 (factory) on cursor-grok-4.6-high?",
     );
   });
@@ -552,6 +573,25 @@ describe("notify (WM-65)", () => {
     const outcome = await delivery;
     expect(outcome.ok).toBe(false);
     expect(outcome.error).toContain("timed out after 250ms");
+  });
+
+  test("extracts a GitHub issue from a compound parked-event coordinate", () => {
+    const db = openDb(":memory:");
+    insertEvent(db, {
+      eventId: "chain-run_123-watt-mind/factory#1158",
+      status: "human_needed",
+    });
+
+    expect(pendingNotifications(db)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          refs: expect.objectContaining({
+            issue: "watt-mind/factory#1158",
+            repo: "watt-mind/factory",
+          }),
+        }),
+      ]),
+    );
   });
 
   test("a missing notifier binary resolves as a failure instead of throwing", async () => {

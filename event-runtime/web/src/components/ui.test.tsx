@@ -18,6 +18,7 @@ import {
   KVGroup,
   ListToolbar,
   notify,
+  PROPOSAL_STATUS_HUES,
   Section,
   shortId,
   StateBadge,
@@ -25,7 +26,7 @@ import {
   ToastContainer,
   Tooltip,
 } from "./ui";
-import { parseFilterQuery, RUN_FACETS } from "../filterQuery";
+import { parseFilterQuery, PROPOSAL_FACETS, RUN_FACETS } from "../filterQuery";
 import { modal } from "../hooks";
 import { changeInput, typeText } from "../test-render";
 
@@ -569,6 +570,52 @@ describe("ToastContainer", () => {
       r.queryByRole("button", { name: /Operation succeeded/i }),
     ).toBeNull();
   });
+
+  test("deduplicates repeated identical error messages", () => {
+    const r = render(<ToastContainer />);
+    act(() => {
+      notify("Workspace release failed", "err");
+      notify("Workspace release failed", "err");
+    });
+    expect(
+      r.getAllByRole("button", { name: "Workspace release failed" }),
+    ).toHaveLength(1);
+  });
+
+  test("does not deduplicate repeated ok toasts", () => {
+    const r = render(<ToastContainer />);
+    act(() => {
+      notify("Saved", "ok");
+      notify("Saved", "ok");
+    });
+    expect(r.getAllByRole("button", { name: "Saved" })).toHaveLength(2);
+  });
+
+  test("re-arms the dismissal timer when an error repeats", () => {
+    const r = render(<ToastContainer />);
+    act(() => {
+      notify("Workspace release keeps failing", "err");
+    });
+    act(() => {
+      jest.advanceTimersByTime(2000);
+    });
+    act(() => {
+      notify("Workspace release keeps failing", "err");
+    });
+    act(() => {
+      jest.advanceTimersByTime(2000);
+    });
+    // 4s after the first notify: without the re-arm the toast is gone.
+    expect(
+      r.getByRole("button", { name: "Workspace release keeps failing" }),
+    ).toBeTruthy();
+    act(() => {
+      jest.advanceTimersByTime(1500);
+    });
+    expect(
+      r.queryByRole("button", { name: "Workspace release keeps failing" }),
+    ).toBeNull();
+  });
 });
 
 describe("Countdown", () => {
@@ -723,6 +770,20 @@ describe("getValueHue", () => {
     expect(getValueHue("state", "RUNNING")).toBe("var(--hue-warn)");
     expect(getValueHue("decision", "run")).toBe("var(--hue-info)");
     expect(getValueHue("status", "admitted")).toBe("var(--hue-info)");
+    expect(getValueHue("status", "expired")).toBe(PROPOSAL_STATUS_HUES.expired);
+  });
+
+  test("covers every proposal status offered by the web filter", () => {
+    for (const status of PROPOSAL_FACETS.values?.status ?? []) {
+      expect(PROPOSAL_STATUS_HUES).toHaveProperty(status);
+    }
+  });
+
+  test("keeps superseded distinct from resolved where both statuses render", () => {
+    expect(PROPOSAL_STATUS_HUES.superseded).toBe("var(--hue-verify)");
+    expect(PROPOSAL_STATUS_HUES.superseded).not.toBe(
+      PROPOSAL_STATUS_HUES.resolved,
+    );
   });
 });
 

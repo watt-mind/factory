@@ -20,6 +20,7 @@ import { planAdmittedEvents } from "./lib/planner.mjs";
 import { approveProposal, openProposals } from "./lib/proposals.mjs";
 import { loadRegistry, resolveModel } from "./lib/registry.mjs";
 import { runOnce } from "./lib/worker.mjs";
+import { sandboxTest } from "./test-support/sandbox.mjs";
 
 const registry = loadRegistry();
 const PV = "git:test-pv";
@@ -471,8 +472,10 @@ describe("work-scan registration (WM-110)", () => {
     // is fast and on a separate subscription; triage-scan followed on 2026-08-18
     // evening to spare codex quota). agy-smoke rides agy by
     // definition. Any other route leaving pi must be an explicit, reviewed
-    // decision. No route rides claude any more.
-    expect(byAdapter.claude).toBeUndefined();
+    // decision. The only claude route is celld-smoke@1 (#2149): the celld
+    // durable-cell smoke agent is a standard claude-style workspace agent, and
+    // routing it to claude keeps that harness covered by a live smoke.
+    expect([...byAdapter.claude].sort()).toEqual(["celld-smoke@1"]);
     expect([...byAdapter.agy].sort()).toEqual([
       "agy-smoke@1",
       "merge-fix@1",
@@ -787,21 +790,28 @@ describe("work chain: scan → chained dispatch proposal (WM-110, WM-119)", () =
     expect(again.reason).toBeNull();
   });
 
-  test("the chained dispatch proposal can be approved and executed through worktree delegation and repo verification (WM-115)", async () => {
-    const { db, planAll, approveNext } = harness();
-    admitEvent(db, registry, workEnvelope("wm29", "work-exec-1"));
-    await approveNext("work-scan@1");
-    resolveChains(db, registry);
-    planAll();
+  sandboxTest(
+    "the chained dispatch proposal can be approved and executed through worktree delegation and repo verification (WM-115)",
+    async () => {
+      const { db, planAll, approveNext } = harness();
+      admitEvent(db, registry, workEnvelope("wm29", "work-exec-1"));
+      await approveNext("work-scan@1");
+      resolveChains(db, registry);
+      planAll();
 
-    const dispatch = await approveNext("dispatch@1");
-    expect(dispatch.summary.terminalState).toBe("COMPLETED");
-    expect(dispatch.summary.reasonCode).toBe("ok");
-    const resultRow = db
-      .query(`SELECT result_json FROM results WHERE run_id = ?`)
-      .get(dispatch.runId);
-    const result = JSON.parse(resultRow.result_json);
-    expect(result.artifact.outcome).toBe("PR_OPEN");
-    expect(result.verification.checks).toContain("repo_verify_passed");
-  });
+      const dispatch = await approveNext("dispatch@1");
+      // GH-2281: state and reason in one assertion — a bare `Expected
+      // "COMPLETED", received "FAILED"` hides whether this is a real bug or an
+      // environment fault (e.g. `sandbox_unavailable`).
+      expect(
+        `${dispatch.summary.terminalState} ${dispatch.summary.reasonCode}`,
+      ).toBe("COMPLETED ok");
+      const resultRow = db
+        .query(`SELECT result_json FROM results WHERE run_id = ?`)
+        .get(dispatch.runId);
+      const result = JSON.parse(resultRow.result_json);
+      expect(result.artifact.outcome).toBe("PR_OPEN");
+      expect(result.verification.checks).toContain("repo_verify_passed");
+    },
+  );
 });

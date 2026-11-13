@@ -37,6 +37,8 @@ import {
   writeFileSync,
 } from "./api-test-helpers.mjs";
 import { createHookRegistry } from "./hooks.mjs";
+import { GITHUB_INTAKE_STALE_AFTER_MS } from "./intake.mjs";
+import { statusView } from "./status-view.mjs";
 
 const makeServer = async (...args) => {
   const result = await makeApiServer(...args);
@@ -181,6 +183,10 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
       `INSERT INTO events (source, event_id, type, subject, status, payload_hash, occurred_at, received_at, correlation_id, plan_failures, last_plan_error, admitted_at, envelope_json)
        VALUES ("test", "evt-dead-1", "test.type", "test", "dead_lettered", "dummy-hash", ?, ?, "corr-1", 3, "failed to plan", ?, "{}")`,
     ).run(atIso, atIso, atIso);
+    db.query(
+      `INSERT INTO events (source, event_id, type, subject, status, payload_hash, occurred_at, received_at, correlation_id, plan_failures, last_plan_error, admitted_at, envelope_json)
+       VALUES ("test", "evt-budget-1", "test.type", "test", "admitted", "dummy-hash", ?, ?, "corr-2", 0, "linear_read_budget_exhausted", ?, "{}")`,
+    ).run(atIso, atIso, new Date(nowMs - 5 * 60_000 - 1).toISOString());
 
     // Proposals piling up for a scheduled loop
     for (let i = 1; i <= 4; i++) {
@@ -200,6 +206,14 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
       ).run(`prop-piling-reaper-${i}`, `clock:reaper:${i}`, atIso);
     }
 
+    // A GitHub delivery admitted 90 seconds ago supplies the intake freshness
+    // projection without changing the numeric event-status counts.
+    const githubAdmittedAt = new Date(nowMs - 90_000).toISOString();
+    db.query(
+      `INSERT INTO events (source, event_id, type, subject, status, payload_hash, occurred_at, received_at, admitted_at, envelope_json)
+       VALUES ("github", "delivery-status-1", "github.pull_request", "watt-mind/factory", "admitted", "dummy-hash", ?, ?, ?, "{}")`,
+    ).run(githubAdmittedAt, githubAdmittedAt, githubAdmittedAt);
+
     const s = await makeServer({
       db,
       secret: "sec",
@@ -217,7 +231,21 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
       const expectedStatusKeys =
         extractDirectProperties(statusViewBlock).sort();
       expect(Object.keys(status).sort()).toEqual(expectedStatusKeys);
+      expect(status.policy).toEqual({ dispatchPaused: expect.any(Boolean) });
       expect(status.inbox).toEqual({ open: 0, acked: 0, byKind: {} });
+      expect(status.githubIntake).toEqual({
+        configured: true,
+        lastAdmittedAt: githubAdmittedAt,
+        ageMs: 90_000,
+        rejected: expect.any(Number),
+        stale: false,
+        staleAfterMs: GITHUB_INTAKE_STALE_AFTER_MS,
+      });
+      expect(Object.keys(status.githubIntake).sort()).toEqual(
+        extractDirectProperties(
+          extractInterfaceBlock(typesSrc, "GithubIntakeStatus"),
+        ).sort(),
+      );
 
       // StatusView.env matches EnvIdentity
       const envIdentityBlock = extractInterfaceBlock(typesSrc, "EnvIdentity");
@@ -307,6 +335,9 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
 
       // Remaining anomaly primitives
       expect(Array.isArray(status.anomalies.configuration)).toBe(true);
+      expect(status.anomalies.configuration).toContain(
+        "Admitted event test:evt-budget-1 has been deferred for Linear read-budget exhaustion for over 5 minutes",
+      );
       expect(status.anomalies.expiredOpenProposals).toEqual(["prop-expired-1"]);
       expect(typeof status.anomalies.staleLeases).toBe("number");
       expect(typeof status.anomalies.unpublishedOutbox).toBe("number");
@@ -317,6 +348,20 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
           lastError: "failed to plan",
         },
       ]);
+    } finally {
+      s.close();
+    }
+  });
+
+  test("GET /status reports GitHub intake as unconfigured without a webhook secret", async () => {
+    const s = await makeServer({ githubSecret: null });
+    try {
+      const status = await (await fetch(s.url("/status"))).json();
+      expect(status.githubIntake).toMatchObject({
+        configured: false,
+        ageMs: null,
+        stale: false,
+      });
     } finally {
       s.close();
     }
@@ -342,6 +387,7 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
     heartbeat(db, "w-busy-1", {
       state: "busy",
       runId: "run-busy-1",
+      skipped: [{ runId: "run-skipped-1", reason: "label_mismatch" }],
       now: nowMs,
     });
     registerWorker(db, {
@@ -381,6 +427,12 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
         expect(typeof w.labels).toBe("object");
         expect(w.labels).not.toBeNull();
         expect(Array.isArray(w.adapters)).toBe(true);
+        expect(Array.isArray(w.skipped)).toBe(true);
+        for (const entry of w.skipped) {
+          expect(Object.keys(entry).sort()).toEqual(["reason", "runId"]);
+          expect(typeof entry.runId).toBe("string");
+          expect(typeof entry.reason).toBe("string");
+        }
         expect(["idle", "busy", "stopped"]).toContain(w.state);
         expect(w.currentRun === null || typeof w.currentRun === "string").toBe(
           true,
@@ -396,6 +448,7 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
       const idle = workers.find((w) => w.workerId === "w-idle-1");
       expect(idle.labels).toEqual({ role: "worker", node: "lab-1" });
       expect(idle.adapters).toEqual(["claude", "fake"]);
+      expect(idle.skipped).toEqual([]);
       expect(idle.state).toBe("idle");
       expect(idle.currentRun).toBeNull();
       expect(idle.stale).toBe(false);
@@ -404,6 +457,9 @@ describe("StatusView and Worker client types pinned to API response (OPS-284)", 
       const busy = workers.find((w) => w.workerId === "w-busy-1");
       expect(busy.state).toBe("busy");
       expect(busy.currentRun).toBe("run-busy-1");
+      expect(busy.skipped).toEqual([
+        { runId: "run-skipped-1", reason: "label_mismatch" },
+      ]);
       expect(busy.stale).toBe(false);
 
       const stale = workers.find((w) => w.workerId === "w-stale-1");
@@ -618,6 +674,27 @@ describe("GET /status hook decisions (WM-842)", () => {
     } finally {
       s.close();
     }
+  });
+
+  test("stalled Linear read-budget anomalies are capped at 20 rows plus a count line (#1937)", () => {
+    const dir = tmpDir("evrt-status-budget-cap-");
+    const db = openDb(path.join(dir, "runtime.db"));
+    const nowMs = 100000000;
+    const staleAt = new Date(nowMs - 5 * 60_000 - 1).toISOString();
+    for (let i = 1; i <= 25; i++) {
+      db.query(
+        `INSERT INTO events (source, event_id, type, subject, status, payload_hash, occurred_at, received_at, plan_failures, last_plan_error, admitted_at, envelope_json)
+         VALUES ("test", ?, "test.type", "test", "admitted", "dummy-hash", ?, ?, 0, "linear_read_budget_exhausted", ?, "{}")`,
+      ).run(`evt-budget-cap-${i}`, staleAt, staleAt, staleAt);
+    }
+    const anomalies = statusView(db, registry, nowMs, {
+      policyVersion: "git:test",
+    }).anomalies.configuration.filter((a) => a.includes("Linear read-budget"));
+    expect(anomalies).toHaveLength(21);
+    expect(anomalies[20]).toBe(
+      "More admitted events beyond the first 20 are deferred for Linear read-budget exhaustion",
+    );
+    db.close();
   });
 
   test("hooks.decisions24h is empty before any hook ever ran (no table yet)", async () => {

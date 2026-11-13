@@ -74,6 +74,55 @@ describe("webhook intake (§14)", () => {
     expect(typeof body.env.name).toBe("string"); // environment identity, always present
     expect(body.webhookSecret).toBe("set");
     expect(body.githubWebhookSecret).toBe("set");
+    expect(body.githubIntake).toMatchObject({
+      configured: true,
+      lastAdmittedAt: null,
+      ageMs: null,
+      stale: false,
+      staleAfterMs: 12 * 60 * 60 * 1000,
+    });
+    expect(body.registry).toMatchObject({
+      loadedAt: expect.any(String),
+      stamp: null,
+      lastReloadError: null,
+    });
+  });
+
+  test("GET /health exposes the live registry ref state", async () => {
+    const state = {
+      loadedAt: "2026-08-28T10:00:00.000Z",
+      stamp: "files:abc123",
+      lastReloadError: { at: "2026-08-28T10:01:00.000Z", message: "bad edges" },
+    };
+    const current = loadRegistry();
+    const live = await makeServer({
+      registryRef: { current, state: () => state },
+    });
+    try {
+      const body = await (await fetch(live.url("/health"))).json();
+      expect(body.registry).toEqual(state);
+    } finally {
+      live.close();
+    }
+  });
+
+  test("GET /health exposes planner liveness and recency", async () => {
+    const planner = {
+      lastPlannedAt: "2026-08-30T08:00:00.000Z",
+      ageMs: 60_000,
+      stale: true,
+      staleAfterMs: 300_000,
+      alive: false,
+    };
+    const live = await makeServer({
+      getTickStats: () => ({ planner }),
+    });
+    try {
+      const body = await (await fetch(live.url("/health"))).json();
+      expect(body.planner).toEqual(planner);
+    } finally {
+      live.close();
+    }
   });
 
   test("unknown route → 404 with an error body", async () => {
@@ -1183,6 +1232,7 @@ describe("missing FACTORY_EVENT_SECRET and FACTORY_GITHUB_WEBHOOK_SECRET visibil
       const body = await res.json();
       expect(body.webhookSecret).toBe("set");
       expect(body.githubWebhookSecret).toBe("set");
+      expect(body.githubIntake.configured).toBe(true);
     } finally {
       sWithSecret.close();
     }
@@ -1193,6 +1243,12 @@ describe("missing FACTORY_EVENT_SECRET and FACTORY_GITHUB_WEBHOOK_SECRET visibil
       const body = await res.json();
       expect(body.webhookSecret).toBe("absent");
       expect(body.githubWebhookSecret).toBe("absent");
+      expect(body.githubIntake).toMatchObject({
+        configured: false,
+        lastAdmittedAt: null,
+        ageMs: null,
+        stale: false,
+      });
     } finally {
       sNoSecret.close();
     }
@@ -1269,6 +1325,69 @@ describe("missing FACTORY_EVENT_SECRET and FACTORY_GITHUB_WEBHOOK_SECRET visibil
       expect(status.anomalies.configuration).toEqual([]);
     } finally {
       sClean.close();
+    }
+  });
+
+  test("GitHub admission refreshes health; refused signatures increment its counter", async () => {
+    let nowMs = Date.parse("2026-08-30T08:00:00.000Z");
+    const s = await makeServer({ now: () => nowMs });
+    try {
+      const payload = JSON.stringify({
+        action: "labeled",
+        issue: {
+          labels: ["ai:agent-ready"],
+          assignees: [],
+          state: "open",
+        },
+        repository: { full_name: "watt-mind/factory" },
+      });
+      const admitted = await fetch(s.url("/github"), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-github-event": "issues",
+          "x-github-delivery": "freshness-delivery",
+          "x-hub-signature-256": `sha256=${createHmac("sha256", GH_SECRET)
+            .update(payload)
+            .digest("hex")}`,
+        },
+        body: payload,
+      });
+      expect((await admitted.json()).admitted).toBe(true);
+
+      nowMs += 90_000;
+      const fresh = await (await fetch(s.url("/health"))).json();
+      expect(fresh.githubIntake).toMatchObject({
+        lastAdmittedAt: "2026-08-30T08:00:00.000Z",
+        ageMs: 90_000,
+        stale: false,
+      });
+
+      const before = fresh.githubIntake.rejected;
+      const refused = await fetch(s.url("/github"), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-github-event": "issues",
+          "x-github-delivery": "refused-delivery",
+          "x-hub-signature-256": "sha256=deadbeef",
+        },
+        body: payload,
+      });
+      expect(refused.status).toBe(401);
+      const rejected = await (await fetch(s.url("/health"))).json();
+      expect(rejected.githubIntake.rejected).toBe(before + 1);
+      expect(rejected.githubIntake.lastAdmittedAt).toBe(
+        "2026-08-30T08:00:00.000Z",
+      );
+
+      nowMs += 12 * 60 * 60 * 1000;
+      const stale = await s.client.status();
+      expect(stale.anomalies.configuration).toContain(
+        "GitHub webhook intake is stale (last admission was 43290000ms ago; threshold 43200000ms)",
+      );
+    } finally {
+      s.close();
     }
   });
 

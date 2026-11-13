@@ -10,6 +10,7 @@
 import {
   mkdtempSync,
   mkdirSync,
+  existsSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -28,15 +29,32 @@ import {
   formatComment,
   formatComments,
   parsePositionalArgs,
+  retryControlPlaneMutation,
+  commentWithRetry,
   transitionThenComment,
+  getTicketWithRetry,
+  triageTicket,
+  answerTicket,
+  replaceTicketDetail,
+  unclaimTicket,
   fileTicket,
   closureCheckMessages,
+  descriptionReplacementRequest,
+  replacementSucceeded,
   resolveRepoName,
   resolveRepoNameFromTicket,
+  normalizeTicketRef,
+  resolveRepoNameForFile,
   instanceConfigRoot,
   InstanceConfigMissingError,
   __resetLinearReposCache,
+  assertLinearNetworkAllowed,
+  LinearOfflineGuardError,
+  LINEAR_OFFLINE_GUARD_EXIT,
+  linearNetworkIsOffline,
 } from "./ticket.mjs";
+import { gql } from "../orchestrator/reaper.mjs";
+import { clampGithubBody, stampRun } from "../lib/control-plane/labels.mjs";
 
 const LABELS = [
   { id: "l-ready", name: "ai:agent-ready" },
@@ -47,6 +65,105 @@ const LABELS = [
   { id: "l-area", name: "area:api" },
   { id: "l-review", name: "ai:needs-review" },
 ];
+
+test("the Linear offline guard identifies its trigger and escape hatch", () => {
+  expect(linearNetworkIsOffline({ FACTORY_LINEAR_OFFLINE: "1" })).toBe(true);
+  let thrown;
+  try {
+    assertLinearNetworkAllowed("https://api.linear.app/graphql", {
+      FACTORY_LINEAR_OFFLINE: "1",
+    });
+  } catch (err) {
+    thrown = err;
+  }
+  expect(thrown).toBeInstanceOf(LinearOfflineGuardError);
+  expect(thrown?.message).toBe(
+    "linear_offline_guard: Linear network access is disabled by FACTORY_LINEAR_OFFLINE=1; set FACTORY_LINEAR_ALLOW_NETWORK=1 to allow Linear network access",
+  );
+  expect(thrown?.exitCode).toBe(LINEAR_OFFLINE_GUARD_EXIT);
+  expect(() =>
+    assertLinearNetworkAllowed("https://api.linear.app/graphql", {
+      FACTORY_LINEAR_OFFLINE: "1",
+      FACTORY_LINEAR_ALLOW_NETWORK: "1",
+    }),
+  ).not.toThrow();
+});
+
+test("the Linear transport fails offline before credential lookup or retry", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousKey = process.env.LINEAR_API_KEY;
+  const previousOffline = process.env.FACTORY_LINEAR_OFFLINE;
+  const previousAllow = process.env.FACTORY_LINEAR_ALLOW_NETWORK;
+  let calls = 0;
+  delete process.env.LINEAR_API_KEY;
+  process.env.FACTORY_LINEAR_OFFLINE = "1";
+  delete process.env.FACTORY_LINEAR_ALLOW_NETWORK;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response("{}", { status: 200 });
+  };
+
+  try {
+    let thrown;
+    try {
+      await gql("query { ping }", {}, { retries: 5 });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(LinearOfflineGuardError);
+    expect(thrown?.exitCode).toBe(LINEAR_OFFLINE_GUARD_EXIT);
+    expect(calls).toBe(0);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.LINEAR_API_KEY;
+    else process.env.LINEAR_API_KEY = previousKey;
+    if (previousOffline === undefined)
+      delete process.env.FACTORY_LINEAR_OFFLINE;
+    else process.env.FACTORY_LINEAR_OFFLINE = previousOffline;
+    if (previousAllow === undefined)
+      delete process.env.FACTORY_LINEAR_ALLOW_NETWORK;
+    else process.env.FACTORY_LINEAR_ALLOW_NETWORK = previousAllow;
+  }
+});
+
+test("the Linear transport does not retry a 429 rate-limit response", async () => {
+  const previousFetch = globalThis.fetch;
+  const previousKey = process.env.LINEAR_API_KEY;
+  const previousAllow = process.env.FACTORY_LINEAR_ALLOW_NETWORK;
+  let calls = 0;
+  process.env.LINEAR_API_KEY = "test-key";
+  process.env.FACTORY_LINEAR_ALLOW_NETWORK = "1";
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response('{"errors":[{"message":"RATELIMITED"}]}', {
+      status: 429,
+      headers: {
+        "x-ratelimit-requests-remaining": "0",
+        "x-ratelimit-requests-reset": "1786539600",
+      },
+    });
+  };
+
+  try {
+    let thrown = null;
+    try {
+      await gql("query { ping }", {}, { retries: 5 });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(String(thrown?.message)).toContain("linear_rate_limited");
+    // The raw header is a unix epoch; consumers get the ISO reset clock.
+    expect(thrown?.resetAt).toBe(new Date(1786539600 * 1000).toISOString());
+    expect(calls).toBe(1);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.LINEAR_API_KEY;
+    else process.env.LINEAR_API_KEY = previousKey;
+    if (previousAllow === undefined)
+      delete process.env.FACTORY_LINEAR_ALLOW_NETWORK;
+    else process.env.FACTORY_LINEAR_ALLOW_NETWORK = previousAllow;
+  }
+});
 
 // ------------------------------------------------------------ label math ---
 test("adding a label KEEPS the labels already on the ticket", () => {
@@ -332,6 +449,371 @@ test("state does not post a comment when the transition fails", async () => {
   expect(calls).toEqual(["transition"]);
 });
 
+test("state comment retry does not repeat a timed-out comment that landed", async () => {
+  const calls = { transition: 0, comment: 0, listComments: 0 };
+  const comments = [];
+  const cp = {
+    kind: "github",
+    actor: { id: "factory-app" },
+    async transition() {
+      calls.transition += 1;
+    },
+    async comment(_key, body) {
+      calls.comment += 1;
+      comments.push({ body, user: { id: "factory-app" } });
+      throw new Error("gh timed out after 15000ms");
+    },
+    async listComments() {
+      calls.listComments += 1;
+      return comments;
+    },
+  };
+
+  await expect(
+    transitionThenComment(cp, "WM-910", "Todo", {}, "explain the move"),
+  ).resolves.toBeUndefined();
+  expect(calls).toEqual({ transition: 1, comment: 1, listComments: 1 });
+  expect(comments).toEqual([
+    { body: "explain the move", user: { id: "factory-app" } },
+  ]);
+});
+
+test("comment retry recognizes the clamped, stamped body that GitHub landed", async () => {
+  const beforeAttribution = process.env.FACTORY_COMMENT_ATTRIBUTION;
+  const beforeRunId = process.env.FACTORY_RUN_ID;
+  process.env.FACTORY_COMMENT_ATTRIBUTION = "1";
+  process.env.FACTORY_RUN_ID = "run-ticket-clamp";
+  try {
+    const calls = { comment: 0, listComments: 0 };
+    const body = "x".repeat(70_000);
+    const landed = clampGithubBody(stampRun(body));
+    const cp = {
+      kind: "github",
+      async comment() {
+        calls.comment += 1;
+        throw new Error("gh timed out after 15000ms");
+      },
+      async listComments() {
+        calls.listComments += 1;
+        return [
+          {
+            body: landed,
+          },
+        ];
+      },
+    };
+
+    await expect(commentWithRetry(cp, "WM-910", body)).resolves.toBeUndefined();
+    expect(calls).toEqual({ comment: 1, listComments: 1 });
+  } finally {
+    if (beforeAttribution === undefined)
+      delete process.env.FACTORY_COMMENT_ATTRIBUTION;
+    else process.env.FACTORY_COMMENT_ATTRIBUTION = beforeAttribution;
+    if (beforeRunId === undefined) delete process.env.FACTORY_RUN_ID;
+    else process.env.FACTORY_RUN_ID = beforeRunId;
+  }
+});
+
+// Production shape, not a fixture shape: a control plane that exposes no
+// actor at all (linear, memory, or a github adapter whose identity read
+// failed) still returns `user` on every listed comment. Missing identity must
+// therefore refine nothing rather than veto the body match — otherwise every
+// timed-out-but-landed comment is posted twice.
+test("comment retry trusts the body match when the plane exposes no actor", async () => {
+  const beforeAttribution = process.env.FACTORY_COMMENT_ATTRIBUTION;
+  const beforeRunId = process.env.FACTORY_RUN_ID;
+  process.env.FACTORY_COMMENT_ATTRIBUTION = "1";
+  process.env.FACTORY_RUN_ID = "run-no-actor";
+  try {
+    const calls = { comment: 0, listComments: 0 };
+    const body = "explain the move";
+    const cp = {
+      kind: "github",
+      async comment() {
+        calls.comment += 1;
+        throw new Error("gh timed out after 15000ms");
+      },
+      async listComments() {
+        calls.listComments += 1;
+        return [{ body: clampGithubBody(stampRun(body)), user: { id: "123" } }];
+      },
+    };
+
+    await expect(commentWithRetry(cp, "WM-910", body)).resolves.toBeUndefined();
+    expect(calls).toEqual({ comment: 1, listComments: 1 });
+  } finally {
+    if (beforeAttribution === undefined)
+      delete process.env.FACTORY_COMMENT_ATTRIBUTION;
+    else process.env.FACTORY_COMMENT_ATTRIBUTION = beforeAttribution;
+    if (beforeRunId === undefined) delete process.env.FACTORY_RUN_ID;
+    else process.env.FACTORY_RUN_ID = beforeRunId;
+  }
+});
+
+// The github adapter resolves its identity lazily, with a request; the guard
+// must await that verb, not read a property that is always undefined on it.
+test("comment retry awaits an async actor and re-posts on a real mismatch", async () => {
+  const calls = { comment: 0, listComments: 0, actor: 0 };
+  const cp = {
+    kind: "github",
+    async actor() {
+      calls.actor += 1;
+      return { id: "322488792", name: "watt-mind-factory[bot]" };
+    },
+    async comment() {
+      calls.comment += 1;
+      if (calls.comment === 1) throw new Error("gh timed out after 15000ms");
+    },
+    async listComments() {
+      calls.listComments += 1;
+      return [{ body: "explain the move", user: { id: "10578603" } }];
+    },
+  };
+
+  await expect(
+    commentWithRetry(cp, "WM-910", "explain the move"),
+  ).resolves.toBeUndefined();
+  expect(calls).toEqual({ comment: 2, listComments: 1, actor: 1 });
+});
+
+// An identity read that throws must degrade to the body match, never to a
+// duplicate post.
+test("comment retry falls back to the body match when the actor read fails", async () => {
+  const calls = { comment: 0, listComments: 0 };
+  const cp = {
+    kind: "github",
+    async actor() {
+      throw new Error("github graphql timed out after 15000ms");
+    },
+    async comment() {
+      calls.comment += 1;
+      throw new Error("gh timed out after 15000ms");
+    },
+    async listComments() {
+      calls.listComments += 1;
+      return [{ body: "explain the move", user: { id: "123" } }];
+    },
+  };
+
+  await expect(
+    commentWithRetry(cp, "WM-910", "explain the move"),
+  ).resolves.toBeUndefined();
+  expect(calls).toEqual({ comment: 1, listComments: 1 });
+});
+
+test("comment retry does not mistake another actor's identical comment for ours", async () => {
+  const calls = { comment: 0, listComments: 0 };
+  const cp = {
+    kind: "github",
+    actor: { id: "factory-app" },
+    async comment() {
+      calls.comment += 1;
+      if (calls.comment === 1) throw new Error("gh timed out after 15000ms");
+    },
+    async listComments() {
+      calls.listComments += 1;
+      return [{ body: "explain the move", user: { id: "human" } }];
+    },
+  };
+
+  await expect(
+    commentWithRetry(cp, "WM-910", "explain the move"),
+  ).resolves.toBeUndefined();
+  expect(calls).toEqual({ comment: 2, listComments: 1 });
+});
+
+// Ticket item (c) — a replayed transition must not re-post its rationale — is
+// satisfied structurally: `transitionThenComment` retries the transition and
+// the comment as two separate mutations, and routes the comment half through
+// `commentWithRetry`, so the rationale can never reach `cp.comment` twice
+// without the landed-check running. Exercise both halves timing out at once,
+// which is the only shape in which the pairing could double-post.
+test("a transition retried after its response times out posts its rationale once", async () => {
+  const calls = { transition: 0, comment: 0, listComments: 0 };
+  const posted = [];
+  const cp = {
+    kind: "github",
+    actor: { id: "322488792" },
+    async transition() {
+      calls.transition += 1;
+      if (calls.transition === 1) throw new Error("gh timed out after 15000ms");
+    },
+    async comment(_key, body) {
+      calls.comment += 1;
+      posted.push(body);
+      // Landed on the timeline, then the response timed out.
+      throw new Error("gh timed out after 15000ms");
+    },
+    async listComments() {
+      calls.listComments += 1;
+      return posted.map((body) => ({ body, user: { id: "322488792" } }));
+    },
+  };
+
+  await expect(
+    transitionThenComment(cp, "WM-910", "Todo", {}, "explain the move"),
+  ).resolves.toBeUndefined();
+  expect(calls).toEqual({ transition: 2, comment: 1, listComments: 1 });
+  expect(posted).toEqual(["explain the move"]);
+});
+
+test("answer retries a timed-out comment without repeating its transition", async () => {
+  const calls = { getTicket: 0, transition: 0, comment: 0, listComments: 0 };
+  const comments = [];
+  const cp = {
+    kind: "linear",
+    async getTicket() {
+      calls.getTicket += 1;
+      return { state: { name: "Blocked" } };
+    },
+    async transition() {
+      calls.transition += 1;
+    },
+    async comment(_key, body) {
+      calls.comment += 1;
+      if (calls.comment === 1)
+        throw new Error("linear graphql timed out after 15000ms");
+      comments.push({ body });
+    },
+    async listComments() {
+      calls.listComments += 1;
+      return comments;
+    },
+  };
+
+  await expect(
+    answerTicket(cp, "WM-910", "the answer"),
+  ).resolves.toBeUndefined();
+  expect(calls).toEqual({
+    getTicket: 1,
+    transition: 1,
+    comment: 2,
+    listComments: 1,
+  });
+  expect(comments).toEqual([{ body: "the answer" }]);
+});
+
+test("triage retries its trailing comment without repeating its transition", async () => {
+  const calls = { transition: 0, comment: 0, listComments: 0 };
+  const comments = [];
+  const cp = {
+    kind: "linear",
+    async transition() {
+      calls.transition += 1;
+    },
+    async comment(_key, body) {
+      calls.comment += 1;
+      if (calls.comment === 1)
+        throw new Error("linear graphql timed out after 15000ms");
+      comments.push({ body });
+    },
+    async listComments() {
+      calls.listComments += 1;
+      return comments;
+    },
+  };
+
+  await expect(
+    triageTicket(cp, "WM-910", "scope needs revision"),
+  ).resolves.toBeUndefined();
+  expect(calls).toEqual({ transition: 1, comment: 2, listComments: 1 });
+  expect(comments).toEqual([{ body: "scope needs revision" }]);
+});
+
+test("detail replacement retries a timed-out absolute write", async () => {
+  const calls = { getTicket: 0, raw: 0 };
+  const cp = {
+    kind: "github",
+    async getTicket() {
+      calls.getTicket += 1;
+      return { id: "issue-910", description: "old detail" };
+    },
+    async raw() {
+      calls.raw += 1;
+      if (calls.raw === 1)
+        throw new Error("github graphql timed out after 15000ms");
+      return { updateIssue: { issue: { id: "issue-910" } } };
+    },
+  };
+
+  await expect(
+    replaceTicketDetail(cp, "WM-910", "new detail"),
+  ).resolves.toEqual({ replaced: true });
+  expect(calls).toEqual({ getTicket: 1, raw: 2 });
+});
+
+test("ticket state and label reads retry one GraphQL timeout", async () => {
+  const calls = { getTicket: 0, transition: 0 };
+  const cp = {
+    kind: "linear",
+    async getTicket() {
+      calls.getTicket += 1;
+      if (calls.getTicket === 1)
+        throw new Error("linear graphql timed out after 15000ms");
+      return { labels: [] };
+    },
+    async transition() {
+      calls.transition += 1;
+      if (calls.transition === 1)
+        throw new Error("linear graphql timed out after 15000ms");
+    },
+  };
+
+  await expect(getTicketWithRetry(cp, "WM-910")).resolves.toEqual({
+    labels: [],
+  });
+  await expect(
+    retryControlPlaneMutation(cp, () => cp.transition("WM-910", "Todo")),
+  ).resolves.toBeUndefined();
+  expect(calls).toEqual({ getTicket: 2, transition: 2 });
+});
+
+test("unclaim retries its ticket read after a GraphQL timeout", async () => {
+  const calls = { getTicket: 0, transition: [] };
+  const cp = {
+    kind: "linear",
+    async getTicket() {
+      calls.getTicket += 1;
+      if (calls.getTicket === 1)
+        throw new Error("linear graphql timed out after 15000ms");
+      return { labels: [{ name: "ai:in-progress" }] };
+    },
+    async transition(...args) {
+      calls.transition.push(args);
+    },
+  };
+
+  await expect(unclaimTicket(cp, "WM-910")).resolves.toBeUndefined();
+  expect(calls).toEqual({
+    getTicket: 2,
+    transition: [
+      [
+        "WM-910",
+        "Todo",
+        {
+          add: ["ai:agent-ready"],
+          remove: ["ai:in-progress", "ai:blocked"],
+          unassign: true,
+        },
+      ],
+    ],
+  });
+});
+
+test("ticket timeout retry preserves non-timeout errors", async () => {
+  const error = new Error("transition rejected");
+  const cp = {
+    kind: "linear",
+    async transition() {
+      throw error;
+    },
+  };
+
+  await expect(
+    retryControlPlaneMutation(cp, () => cp.transition("WM-910", "Todo")),
+  ).rejects.toBe(error);
+});
+
 // ------------------------------------------------------------- file verb ---
 
 function fileHarness(result) {
@@ -504,6 +986,64 @@ test("the end-of-options sentinel preserves arbitrary leading dashes", () => {
   expect(
     parsePositionalArgs(["comment", "WM-316", "--", "---\n\n## Heading"]),
   ).toEqual(["WM-316", "---\n\n## Heading"]);
+});
+
+test("detail --replace keeps its Markdown body positional", () => {
+  expect(
+    parsePositionalArgs(["detail", "WM-318", "--replace", "## Heading"]),
+  ).toEqual(["WM-318", "## Heading"]);
+});
+
+test("detail --replace uses each tracker's body replacement mutation", () => {
+  expect(
+    descriptionReplacementRequest("watt-mind/factory#42", "issue-id", "new"),
+  ).toMatchObject({
+    variables: { id: "issue-id", body: "new" },
+    resultAt: ["updateIssue", "issue", "id"],
+  });
+  expect(
+    descriptionReplacementRequest("CLNT-42", "issue-id", "new"),
+  ).toMatchObject({
+    variables: { id: "issue-id", description: "new" },
+    resultAt: ["issueUpdate", "success"],
+  });
+});
+
+test("detail --replace routes bare and #-prefixed GitHub numbers to GitHub, not Linear", () => {
+  for (const identifier of ["1564", "#1564", " 1564 "]) {
+    expect(
+      descriptionReplacementRequest(identifier, "I_1", "new").resultAt,
+    ).toEqual(["updateIssue", "issue", "id"]);
+  }
+});
+
+test("detail --replace lets the control plane's kind override the identifier shape", () => {
+  expect(
+    descriptionReplacementRequest("CLNT-42", "I_1", "new", { kind: "github" })
+      .resultAt,
+  ).toEqual(["updateIssue", "issue", "id"]);
+  expect(
+    descriptionReplacementRequest("42", "lin-id", "new", { kind: "linear" })
+      .resultAt,
+  ).toEqual(["issueUpdate", "success"]);
+});
+
+test("replacementSucceeded treats success:false as a failure", () => {
+  const at = ["issueUpdate", "success"];
+  expect(replacementSucceeded({ issueUpdate: { success: false } }, at)).toBe(
+    false,
+  );
+  expect(replacementSucceeded({ issueUpdate: { success: true } }, at)).toBe(
+    true,
+  );
+  expect(replacementSucceeded({ data: { issueUpdate: {} } }, at)).toBe(false);
+  expect(
+    replacementSucceeded({ updateIssue: { issue: { id: "I_1" } } }, [
+      "updateIssue",
+      "issue",
+      "id",
+    ]),
+  ).toBe(true);
 });
 
 test("unknown flags remain flags instead of becoming positional bodies", () => {
@@ -720,38 +1260,6 @@ test("resolveRepoName matches the checkout, the worktree root, and --repo", () =
   }
 });
 
-// ------------------------------------------------- rename + shim (WM-1026) ---
-// The rename is only safe because the old path keeps working: agent prompts,
-// shared commands and every emitted harness bundle still invoke
-// `tools/linear.mjs`, and they are swept separately.
-test("tools/linear.mjs still runs, delegating to ticket.mjs", () => {
-  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-  const r = Bun.spawnSync({
-    cmd: ["bun", path.join(root, "tools", "linear.mjs")],
-    cwd: root,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const stdout = r.stdout.toString();
-  const stderr = r.stderr.toString();
-  // Same usage output as the real CLI...
-  expect(stdout).toContain("verbs:");
-  expect(stdout).toContain("claim");
-  // ...and the deprecation notice on STDERR, never stdout: `get --json`,
-  // `queue` and `budget` print machine-readable output that callers parse.
-  expect(stderr).toContain("deprecated");
-  expect(stdout).not.toContain("deprecated");
-});
-
-test("the shim re-exports the module's public surface", async () => {
-  const shim = await import("./linear.mjs");
-  const real = await import("./ticket.mjs");
-  for (const name of Object.keys(real)) {
-    expect(shim[name]).toBe(real[name]);
-  }
-  expect(typeof real.main).toBe("function");
-});
-
 test("factory exposes `ticket`, and `linear` as a deprecated alias", () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const script = readFileSync(path.join(root, "bin", "factory"), "utf8");
@@ -779,10 +1287,228 @@ test("resolveRepoNameFromTicket: case-insensitive on the github slug", () => {
   );
 });
 
+test("resolveRepoNameFromTicket: configured repository names resolve case-insensitively", () => {
+  expect(resolveRepoNameFromTicket("factory#7", GH975_REPOS)).toBe("factory");
+  expect(resolveRepoNameFromTicket("Factory#7", GH975_REPOS)).toBe("factory");
+});
+
+test("normalizeTicketRef: both configured GitHub spellings use the full slug", () => {
+  expect(normalizeTicketRef("factory#7", GH975_REPOS)).toBe(
+    "watt-mind/factory#7",
+  );
+  expect(normalizeTicketRef("Watt-Mind/Factory#7", GH975_REPOS)).toBe(
+    "watt-mind/factory#7",
+  );
+});
+
 test("resolveRepoNameFromTicket: linear-style and bare ids resolve nothing", () => {
   expect(resolveRepoNameFromTicket("WM-123", GH975_REPOS)).toBeNull();
   expect(resolveRepoNameFromTicket("975", GH975_REPOS)).toBeNull();
   expect(resolveRepoNameFromTicket(undefined, GH975_REPOS)).toBeNull();
+  expect(resolveRepoNameFromTicket("nope#7", GH975_REPOS)).toBeNull();
+});
+
+test("resolveRepoNameForFile: --from chooses its GitHub repo and refuses an ambiguous workspace", () => {
+  expect(
+    resolveRepoNameForFile({
+      cwd: os.tmpdir(),
+      repos: GH975_REPOS,
+      repoFlag: undefined,
+      fromFlag: "watt-mind/factory#975",
+    }),
+  ).toBe("factory");
+  expect(
+    resolveRepoNameForFile({
+      cwd: os.tmpdir(),
+      repos: GH975_REPOS,
+      repoFlag: undefined,
+      fromFlag: undefined,
+    }),
+  ).toBeNull();
+});
+
+test("resolveRepoNameForFile: a Linear-style --from falls through to cwd instead of terminating", () => {
+  const repos = new Map([
+    [
+      "factory",
+      { name: "factory", path: "/srv/factory", github: "watt-mind/factory" },
+    ],
+  ]);
+  // Unresolvable cwd: the Linear id names no repository, so nothing resolves.
+  expect(
+    resolveRepoNameForFile({
+      cwd: os.tmpdir(),
+      repos,
+      repoFlag: undefined,
+      fromFlag: "CLNT-616",
+    }),
+  ).toBeNull();
+  // Inside a configured checkout the same flag lets cwd decide.
+  expect(
+    resolveRepoNameForFile({
+      cwd: "/srv/factory/tools",
+      repos,
+      repoFlag: undefined,
+      fromFlag: "CLNT-616",
+    }),
+  ).toBe("factory");
+});
+
+/**
+ * Spawn `ticket.mjs file` against an ephemeral instance root whose cwd is
+ * outside every configured repository. `gh` is shadowed by a stub that logs
+ * its arguments and fails, and HOME points at the fixture so no operator
+ * Linear key leaks in: each route therefore ends in a deterministic, offline
+ * failure that identifies which control plane was reached.
+ */
+function spawnTicketOutsideRepo(args, { controlPlane } = {}) {
+  const root = mkdtempSync(path.join(os.tmpdir(), "ticket-file-route-"));
+  const workspace = path.join(root, "workspace");
+  const bin = path.join(root, "bin");
+  const ghLog = path.join(root, "gh.log");
+  const cliRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+  );
+  try {
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    mkdirSync(workspace);
+    mkdirSync(bin);
+    writeFileSync(
+      path.join(bin, "gh"),
+      [
+        "#!/bin/sh",
+        `printf '%s\n' "$*" >> "${ghLog}"`,
+        'echo "stub gh: offline" >&2',
+        "exit 1",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    // The default (repo-less) plane is read from policy.yaml, as in a real
+    // instance root; the fixture pins it to Linear.
+    writeFileSync(
+      path.join(root, "config", "policy.yaml"),
+      "controlPlane:\n  kind: linear\n",
+    );
+    writeFileSync(
+      path.join(root, "config", "repos.yaml"),
+      `repos:\n  - name: factory\n    path: ${path.join(root, "repo")}\n    github: watt-mind/factory\n` +
+        (controlPlane ? `    control_plane: ${controlPlane}\n` : ""),
+    );
+    const env = { ...process.env, FACTORY_REPOS_ROOT: root, HOME: root };
+    env.PATH = `${bin}${path.delimiter}${env.PATH ?? ""}`;
+    for (const name of Object.keys(env)) {
+      if (
+        name === "LINEAR_API_KEY" ||
+        name === "GH_TOKEN" ||
+        name === "GITHUB_TOKEN" ||
+        name.startsWith("FACTORY_GH_APP_")
+      )
+        delete env[name];
+    }
+    const result = Bun.spawnSync({
+      cmd: ["bun", path.join(cliRoot, "tools", "ticket.mjs"), ...args],
+      cwd: workspace,
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return {
+      exitCode: result.exitCode,
+      stderr: result.stderr.toString(),
+      ghCalls: existsSync(ghLog) ? readFileSync(ghLog, "utf8") : "",
+    };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+const spawnFileOutsideRepo = (args, options) =>
+  spawnTicketOutsideRepo(["file", ...args], options);
+
+test("queue --repo rejects an unknown repository before reporting queue usage", () => {
+  const result = spawnTicketOutsideRepo(["queue", "--repo", "nosuch"]);
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain('unknown --repo "nosuch"');
+  expect(result.stderr).toContain("known: factory");
+  expect(result.stderr).not.toContain("usage: queue");
+  expect(result.ghCalls).toBe("");
+});
+
+test("file refuses an unresolvable workspace with both routing flags", () => {
+  const result = spawnFileOutsideRepo(["--title", "finding"]);
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain("--repo <name> or --from <owner/repo#N>");
+  expect(result.ghCalls).toBe("");
+});
+
+test("file --from <Linear-id> --team reaches the Linear plane from an unresolvable workspace", () => {
+  const result = spawnFileOutsideRepo([
+    "--from",
+    "CLNT-616",
+    "--team",
+    "CLNT",
+    "--title",
+    "finding",
+  ]);
+  expect(result.exitCode).toBe(LINEAR_OFFLINE_GUARD_EXIT);
+  // The default (Linear) plane was selected, but offline mode wins before
+  // credential lookup so the operator gets an actionable refusal instead.
+  expect(result.stderr).toContain(
+    "linear_offline_guard: Linear network access is disabled by FACTORY_LINEAR_OFFLINE=1",
+  );
+  expect(result.stderr).toContain("FACTORY_LINEAR_ALLOW_NETWORK=1");
+  expect(result.stderr).not.toContain("LINEAR_API_KEY not found");
+  expect(result.stderr).not.toContain("--repo <name> or --from <owner/repo#N>");
+  expect(result.ghCalls).toBe("");
+});
+
+test("file --from owner/repo#N reaches that repository's GitHub plane without --team", () => {
+  const result = spawnFileOutsideRepo(
+    ["--from", "watt-mind/factory#1", "--title", "finding"],
+    { controlPlane: "github" },
+  );
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).not.toContain("--repo <name> or --from <owner/repo#N>");
+  expect(result.stderr).not.toContain("usage: file");
+  // The GitHub adapter bound to watt-mind/factory and asked gh for its labels.
+  expect(result.ghCalls).toContain("repos/watt-mind/factory/labels");
+});
+
+test("file without --title reports usage before any routing", () => {
+  const result = spawnFileOutsideRepo(["--body", "no title"]);
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain("usage: file --title");
+  expect(result.stderr).not.toContain("--repo <name> or --from <owner/repo#N>");
+});
+
+test("unknown GitHub-shaped ticket refs fail before a control-plane transport", () => {
+  const result = spawnTicketOutsideRepo(["labels", "nope#7", "--remove", "x"]);
+  expect(result.exitCode).toBe(2);
+  expect(result.stderr).toContain('unrecognised ticket ref "nope#7"');
+  expect(result.stderr).toContain("<owner>/<repo>#N or <repo-name>#N");
+  expect(result.ghCalls).toBe("");
+});
+
+test("verbs missing the ticket argument report usage before ref normalisation", () => {
+  for (const verb of ["comments", "unclaim", "labels"]) {
+    const result = spawnTicketOutsideRepo([verb]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain(`usage: ${verb} <ISSUE-ID>`);
+    expect(result.stderr).not.toContain("unrecognised ticket ref");
+    expect(result.ghCalls).toBe("");
+  }
+});
+
+test("short configured GitHub refs reach the adapter as full identifiers", () => {
+  const result = spawnTicketOutsideRepo(
+    ["labels", "factory#7", "--remove", "x"],
+    { controlPlane: "github" },
+  );
+  expect(result.exitCode).toBe(1);
+  expect(result.ghCalls).toContain("repos/watt-mind/factory/issues/7");
+  expect(result.ghCalls).not.toContain("factory#7");
 });
 
 // ----------------------------------- instance config resolution (GH-975) ---
@@ -861,4 +1587,152 @@ test("instanceConfigRoot throws instance_config_missing when no instance config 
   } finally {
     rmSync(checkoutRoot, { recursive: true, force: true });
   }
+});
+
+/**
+ * Run `ticket.mjs detail <n> --replace` from inside a GitHub-plane repository
+ * against a stub `gh` on PATH that answers the reads the adapter makes and
+ * records every call (arguments and stdin) so the test can see which
+ * mutation the CLI actually issued.
+ */
+function spawnDetailReplaceAgainstStubGh(args, { body }) {
+  const root = mkdtempSync(path.join(os.tmpdir(), "ticket-detail-replace-"));
+  const repoDir = path.join(root, "repo");
+  const bin = path.join(root, "bin");
+  const ghLog = path.join(root, "gh.log");
+  const stdinLog = path.join(root, "gh-stdin.log");
+  const cliRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+  );
+  const issue = JSON.stringify({
+    number: 1564,
+    node_id: "I_1564",
+    title: "respec me",
+    body: "## Owned Paths\n\n- old/path.mjs\n",
+    state: "open",
+    html_url: "https://github.com/watt-mind/factory/issues/1564",
+    labels: [],
+    user: { login: "owner" },
+    author_association: "OWNER",
+  });
+  const project = JSON.stringify({
+    data: {
+      repository: {
+        projectsV2: {
+          nodes: [
+            {
+              id: "P_1",
+              title: "Factory",
+              field: {
+                id: "F_1",
+                options: [{ id: "o_todo", name: "Todo" }],
+              },
+            },
+          ],
+        },
+      },
+    },
+  });
+  try {
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    mkdirSync(repoDir);
+    mkdirSync(bin);
+    writeFileSync(
+      path.join(bin, "gh"),
+      [
+        "#!/bin/sh",
+        'input=""',
+        'for a in "$@"; do [ "$a" = "-" ] && input=$(cat); done',
+        `printf '%s\n' "$*" >> "${ghLog}"`,
+        `printf '%s\n' "$input" >> "${stdinLog}"`,
+        'case "$*" in',
+        "  *graphql*)",
+        '    case "$input" in',
+        `      *updateIssue*) printf '%s\\n' '{"data":{"updateIssue":{"issue":{"id":"I_1564"}}}}' ;;`,
+        `      *FindRepoProject*) printf '%s\\n' '${project}' ;;`,
+        `      *ProjectItems*) printf '%s\\n' '{"data":{"node":{"items":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}' ;;`,
+        `      *) printf '%s\\n' '{"data":{}}' ;;`,
+        "    esac ;;",
+        `  *issues/1564/comments*) printf '%s\\n' '[]' ;;`,
+        `  *issues/1564*) printf '%s\\n' '${issue}' ;;`,
+        `  *) printf '%s\\n' '{}' ;;`,
+        "esac",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      path.join(root, "config", "policy.yaml"),
+      "controlPlane:\n  kind: github\n",
+    );
+    writeFileSync(
+      path.join(root, "config", "repos.yaml"),
+      `repos:\n  - name: factory\n    path: ${repoDir}\n    github: watt-mind/factory\n    control_plane: github\n`,
+    );
+    const env = { ...process.env, FACTORY_REPOS_ROOT: root, HOME: root };
+    env.PATH = `${bin}${path.delimiter}${env.PATH ?? ""}`;
+    for (const name of Object.keys(env)) {
+      if (
+        name === "LINEAR_API_KEY" ||
+        name === "GH_TOKEN" ||
+        name === "GITHUB_TOKEN" ||
+        name.startsWith("FACTORY_GH_APP_")
+      )
+        delete env[name];
+    }
+    const result = Bun.spawnSync({
+      cmd: [
+        "bun",
+        path.join(cliRoot, "tools", "ticket.mjs"),
+        "detail",
+        ...args,
+        "--",
+        body,
+      ],
+      cwd: repoDir,
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return {
+      exitCode: result.exitCode,
+      stdout: result.stdout.toString(),
+      stderr: result.stderr.toString(),
+      ghCalls: existsSync(ghLog) ? readFileSync(ghLog, "utf8") : "",
+      ghStdin: existsSync(stdinLog) ? readFileSync(stdinLog, "utf8") : "",
+    };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("detail <bare number> --replace on a GitHub repo issues the GitHub updateIssue mutation", () => {
+  const result = spawnDetailReplaceAgainstStubGh(["1564", "--replace"], {
+    body: "## Owned Paths\n\n- new/path.mjs\n",
+  });
+  expect(result.stderr).toBe("");
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain("detail replaced");
+  expect(result.ghCalls).toContain("repos/watt-mind/factory/issues/1564");
+  const mutations = result.ghStdin
+    .split("\n")
+    .filter((line) => line.includes("mutation"));
+  expect(mutations).toHaveLength(1);
+  expect(mutations[0]).toContain("updateIssue");
+  expect(mutations[0]).not.toContain("issueUpdate");
+  expect(JSON.parse(mutations[0]).variables).toEqual({
+    id: "I_1564",
+    body: "## Owned Paths\n\n- new/path.mjs",
+  });
+});
+
+test("detail --replace with an unchanged body issues no mutation", () => {
+  const result = spawnDetailReplaceAgainstStubGh(["#1564", "--replace"], {
+    body: "## Owned Paths\n\n- old/path.mjs\n",
+  });
+  expect(result.stderr).toBe("");
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain("already matches");
+  expect(result.ghStdin).not.toContain("mutation");
 });

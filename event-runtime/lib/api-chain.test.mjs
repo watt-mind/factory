@@ -148,6 +148,16 @@ describe("GET /chain/:correlationId (WM-527)", () => {
     expect(byId["chain-run-1-B"].status).toBe("dead_lettered");
     expect(byId["chain-run-2"].causationId).toBe("run-2");
     expect(byId["chain-run-2"].runId).toBe("run-3");
+    expect(byId["origin-1"].envelope).toMatchObject({
+      schemaVersion: "factory.event/v1",
+      eventId: "origin-1",
+      payload: { repos: ["ok"] },
+    });
+    expect(byId["chain-run-1-A"].envelope).toMatchObject({
+      schemaVersion: "factory.event/v1",
+      eventId: "chain-run-1-A",
+      type: "factory.work.requested",
+    });
 
     expect(body.runs.map((r) => r.runId)).toEqual(["run-1", "run-2", "run-3"]);
     const run2 = body.runs.find((r) => r.runId === "run-2");
@@ -163,6 +173,63 @@ describe("GET /chain/:correlationId (WM-527)", () => {
     const run3 = body.runs.find((r) => r.runId === "run-3");
     expect(run3.state).toBe("RUNNING");
     expect(run3.finishedAt).toBeNull();
+  });
+
+  test("marks a historic malformed envelope without overloading its payload", () => {
+    const original = s.db
+      .query("SELECT envelope_json FROM events WHERE event_id = ?")
+      .get("chain-run-1-B").envelope_json;
+    s.db
+      .query("UPDATE events SET envelope_json = ? WHERE event_id = ?")
+      .run("{historic malformed JSON", "chain-run-1-B");
+    try {
+      const event = chainView(s.db, "corr-1").events.find(
+        (item) => item.eventId === "chain-run-1-B",
+      );
+      expect(event.envelope).toBeNull();
+      expect(event.envelopeMalformed).toBe(true);
+      expect(event.repos).toEqual([]);
+    } finally {
+      s.db
+        .query("UPDATE events SET envelope_json = ? WHERE event_id = ?")
+        .run(original, "chain-run-1-B");
+    }
+  });
+
+  test("returns a completed event's full envelope", () => {
+    const original = s.db
+      .query("SELECT type, envelope_json FROM events WHERE event_id = ?")
+      .get("chain-run-1-B");
+    const completed = envelope({
+      eventId: "chain-run-1-B",
+      source: "chain",
+      type: "factory.work.completed",
+      correlationId: "corr-1",
+      causationId: "run-1",
+      payload: { repo: "factory", outcome: "completed" },
+      malformed: true,
+    });
+    s.db
+      .query("UPDATE events SET type = ?, envelope_json = ? WHERE event_id = ?")
+      .run(completed.type, JSON.stringify(completed), "chain-run-1-B");
+    try {
+      const event = chainView(s.db, "corr-1").events.find(
+        (item) => item.eventId === "chain-run-1-B",
+      );
+      expect(event.type).toBe("factory.work.completed");
+      expect(event.envelope).toMatchObject({
+        type: "factory.work.completed",
+        payload: { repo: "factory", outcome: "completed" },
+        malformed: true,
+      });
+      expect(event.envelopeMalformed).toBe(false);
+    } finally {
+      s.db
+        .query(
+          "UPDATE events SET type = ?, envelope_json = ? WHERE event_id = ?",
+        )
+        .run(original.type, original.envelope_json, "chain-run-1-B");
+    }
   });
 
   test("falls back to the origin's own eventId when it carried no correlation id", async () => {

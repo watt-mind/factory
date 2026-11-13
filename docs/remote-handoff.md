@@ -56,6 +56,32 @@ factory handoff --repo factory watt-mind/factory#1153
 # equivalent: factory handoff --host factory-runner --repo factory watt-mind/factory#1153
 ```
 
+When `--host` is omitted, the client resolves the SSH alias in this order:
+
+1. `--host <alias>`
+2. `FACTORY_HANDOFF_SSH_HOST`, then `FACTORY_HANDOFF_HOST`
+3. `handoff.host` (or `handoff_host`) in `~/.factory/config.json` or
+   `~/.factory/handoff.json`, then the matching environment variable in
+   `~/.factory/secrets.env`
+4. `handoff_host` for the selected repository in `config/repos.yaml`
+5. `handoff.host` or `handoff_host` in `config/policy.yaml`
+6. the canonical `factory-runner` SSH alias
+
+`~/.factory/handoff.json` also accepts the bare top-level shorthand
+`{"host":"factory-runner"}`. In `~/.factory/secrets.env`, unquoted inline
+comments are stripped, so `FACTORY_HANDOFF_HOST=factory-runner # alias` uses
+the `factory-runner` alias.
+
+For example, an operator can set a repository-wide default without changing
+client shells:
+
+```yaml
+# config/repos.yaml
+repos:
+  - name: factory
+    handoff_host: factory-runner
+```
+
 When cwd is under a configured repo `path` or `worktree_root`, `--repo` may be omitted. The client supplies no remote command, so the server's forced command is the only executable path.
 
 ## Server forced command
@@ -100,6 +126,21 @@ factory handoff --request-id handoff-original-id --repo factory watt-mind/factor
 ```
 
 A retry returns `duplicate: true` and the original event rather than dispatching a second run. Reusing that request ID for a different repo or ticket fails with `idempotency_conflict`; it never reports the original dispatch as if it covered the new request.
+
+## Inspecting runs and traces
+
+Once a ticket has been admitted and planned, its execution details, token costs, and live traces can be inspected on the runner:
+
+```sh
+# List recent runs across the fleet
+ssh runner "factory events runs --limit 10"
+
+# Inspect lifecycle history, duration, token usage, and failure reasons
+ssh runner "factory events inspect <runId>"
+
+# Stream or view the live agent trace
+ssh runner "factory events trace <runId> | tail -n 50"
+```
 
 ## Rollout
 

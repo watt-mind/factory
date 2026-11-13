@@ -31,7 +31,7 @@ CI passing is not the bar. **Prefer spawning the `factory-merge-reviewer` agent 
 
 For user-facing PRs, open the Linear ticket's attached screenshots and judge the visual result too — layout, truncation, spacing, before/after coherence. A user-facing PR with no screenshots on its ticket is a (minor) protocol finding: note it, and if you fix the branch anyway, capture and attach them yourself.
 
-Then check CI with `gh pr checks <PR> --watch --fail-fast` — it returns the moment checks settle and exits non-zero on the first failure. **Never `sleep` and re-poll**: a fixed wait is dead wall clock if it is too long and a retry if it is too short. Also check whether the branch is behind or conflicting with the base.
+Then check CI for the reviewed head SHA: select only its CI workflow with `gh run list --workflow ci.yml --commit <sha> --json databaseId --limit 1`, wait with `gh run watch <run-id> --exit-status --interval 60`, and before merging assert every check run is complete and green with `gh api repos/<owner>/<repo>/commits/<sha>/check-runs`. The workflow run can lag the push, so retry the workflow-selected lookup for up to about two minutes when it is empty. **Never `sleep` and re-poll**: use only a bounded condition poll. Also check whether the branch is behind or conflicting with the base.
 
 ### 2. Classify
 
@@ -66,7 +66,15 @@ So:
 3. Merge the batch back to back, without waiting for base CI between them. Immediately before executing `gh pr merge` on each PR:
    - Run `factory escalate --repo <name> --pr <PR>` as an authoritative pre-merge gate. Any PR touching `escalate_paths` (exit code 2) is prohibited from merging even if labels are missing or out of sync (unless `$ARGUMENTS` contains `--include-escalated`). Exit 3 (cannot evaluate) also halts the merge.
    - Re-verify that the PR does not carry the `escalated` label (`gh pr view <PR> --json labels -q '.labels[].name'`). GitHub status checks do not re-run when labels change, so a passing check rollup can mask an escalation applied after CI settled. If the `escalated` label is present (and `$ARGUMENTS` does not contain `--include-escalated`), abort the merge immediately.
-   - Verify that the current PR head SHA matches the reviewed and approved commit SHA (`gh pr view <PR> --json headRefOid -q .headRefOid`). If the head SHA has changed (e.g. from an unreviewed push or review fix added after review approval), stop and re-review the diff before merging.
+   - Gate the merge itself on **one shell condition** over the head SHA and the check-run summary — not on the head SHA alone, and never on a `gh run watch` exit code:
+
+     ```bash
+     sha="$(gh pr view <PR> --json headRefOid -q .headRefOid)"
+     summ="$(gh api repos/<o>/<r>/commits/$sha/check-runs --paginate --jq '[.check_runs[]|{s:.status,c:.conclusion}]|group_by(.s+"/"+(.c//"-"))|map("\(.[0].s)/\(.[0].c//"-")=\(length)")|join(" ")')"
+     if [ "$sha" = "<reviewed sha>" ] && ! grep -qE 'failure|in_progress|queued|cancelled|timed_out|action_required' <<<"$summ"; then gh pr merge <PR> --merge; else echo "NOT merged: $summ"; fi
+     ```
+
+     A `gh run watch --exit-status` exit code is never a merge input — it only blocks until _one_ run finishes, and returns 0 for a run that was superseded before going green, not for a green run. A cancelled/superseded run on an **older** head is not a red — a later push superseded it — but a `failure` from **any** workflow on the **current** head (Security Scan, Escalated Gate, CI, …) is, even while another workflow on that same head reads green. If the head SHA has changed since review (an unreviewed push, or a fix added after approval), the condition above already fails closed — stop and re-review the diff before merging.
 4. Then wait **once** for base CI on the batch (`gh run watch <run> --exit-status`), plus the smoke check where the repo has one.
 5. Green: move every ticket in the batch to `Done` and clean up. Red: you have at most 5 suspects and their file sets are disjoint, so the failing job names the culprit. Revert that one merge (`git revert -m 1 <merge-sha>`, push, re-verify), keep the rest, and report what you reverted and why.
 

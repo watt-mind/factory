@@ -665,4 +665,46 @@ describe("PromotionPanel (gh-860)", () => {
       );
     });
   });
+
+  test("retargets a promotion after its repo context changes", async () => {
+    await withPromotionStubs(async () => {
+      const applied: { repo: string; digest: string; keys: string[] }[] = [];
+      api.promotionApply = async (body) => {
+        applied.push(body);
+        return {
+          status: "opened",
+          repo: body.repo,
+          ticket: "gh-1927-x",
+          branch: "promo/x",
+          pr: { url: "https://example/pr/10", number: 10 },
+        };
+      };
+
+      const client = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      const r = render(
+        <QueryClientProvider client={client}>
+          <PromotionPanel defaultRepo="factory" />
+        </QueryClientProvider>,
+      );
+      fireEvent.click(
+        r.getByRole("button", { name: "Promote overrides to Git…" }),
+      );
+      const good = await waitFor(() =>
+        r.getByLabelText("eventType:factory.demo/v1:adapter"),
+      );
+
+      r.rerender(
+        <QueryClientProvider client={client}>
+          <PromotionPanel defaultRepo="other" />
+        </QueryClientProvider>,
+      );
+      fireEvent.click(good);
+      fireEvent.click(r.getByRole("button", { name: "Promote 1 selected" }));
+
+      await waitFor(() => expect(applied).toHaveLength(1));
+      expect(applied[0]?.repo).toBe("other");
+    });
+  });
 });

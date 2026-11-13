@@ -12,9 +12,37 @@ import {
   nodesConfigPath,
   expandHome,
   loadNodesConfig,
+  DEFAULT_REMOTE_WORKER_REPO_URL,
 } from "./nodes-config.mjs";
 
-export { NodeConfigError, nodesConfigPath, expandHome, loadNodesConfig };
+export {
+  NodeConfigError,
+  nodesConfigPath,
+  expandHome,
+  loadNodesConfig,
+  DEFAULT_REMOTE_WORKER_REPO_URL,
+};
+
+export class RemoteWorkerConfigError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "RemoteWorkerConfigError";
+    this.code = "remote_worker_config_invalid";
+  }
+}
+
+/** Quote one value for a POSIX shell command. */
+export function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\"'\"'")}'`;
+}
+
+function validateEnvironmentKey(key) {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+    throw new RemoteWorkerConfigError(
+      `Invalid remote worker environment variable name: ${key}`,
+    );
+  }
+}
 
 /**
  * Build safe ssh argv array for child process execution.
@@ -190,21 +218,22 @@ export function probeRemoteNode(
 export function deployRemoteWorker(node, { ref = null, spawnFn = null } = {}) {
   const targetBranch = ref || node.branch || "develop";
   const remotePath = node.factoryRoot;
+  const repoUrl = node.repoUrl || DEFAULT_REMOTE_WORKER_REPO_URL;
 
   const deployScript = [
     `set -e;`,
-    `mkdir -p "${remotePath}";`,
-    `cd "${remotePath}";`,
+    `mkdir -p ${shellQuote(remotePath)};`,
+    `cd ${shellQuote(remotePath)};`,
     `if [ ! -d ".git" ]; then`,
     `  echo "Cloning repository...";`,
-    `  git clone https://github.com/watt-mind/factory.git . 2>&1;`,
+    `  git clone ${shellQuote(repoUrl)} . 2>&1;`,
     `fi;`,
-    `echo "Updating branch ${targetBranch}...";`,
+    `echo "Updating branch...";`,
     `git fetch origin 2>&1;`,
-    `git checkout "${targetBranch}" 2>&1;`,
-    `git pull --ff-only origin "${targetBranch}" 2>&1;`,
+    `git checkout ${shellQuote(targetBranch)} 2>&1;`,
+    `git pull --ff-only origin ${shellQuote(targetBranch)} 2>&1;`,
     `echo "Installing dependencies...";`,
-    `bun install 2>&1;`,
+    `bun install --frozen-lockfile 2>&1;`,
     `echo "DEPLOY_SUCCESS";`,
   ].join(" ");
 
@@ -226,7 +255,10 @@ export function deployRemoteWorker(node, { ref = null, spawnFn = null } = {}) {
 export function startRemoteWorker(node, { spawnFn = null } = {}) {
   const remotePath = node.factoryRoot;
   const envVars = Object.entries(node.env || {})
-    .map(([k, v]) => `export ${k}="${v}";`)
+    .map(([k, v]) => {
+      validateEnvironmentKey(k);
+      return `export ${k}=${shellQuote(v)};`;
+    })
     .join(" ");
 
   const labelsArg = Object.entries(node.labels || {})
@@ -236,13 +268,10 @@ export function startRemoteWorker(node, { spawnFn = null } = {}) {
   const adaptersArg = (node.adapters || []).join(",");
 
   const startScript = [
-    `cd "${remotePath}" 2>/dev/null || exit 1;`,
+    `cd ${shellQuote(remotePath)} 2>/dev/null || exit 1;`,
     `mkdir -p .factory/run;`,
     `${envVars}`,
-    `CMD="bun event-runtime/cli.mjs work";`,
-    labelsArg ? `CMD="$CMD --labels ${labelsArg}";` : ``,
-    adaptersArg ? `CMD="$CMD --adapters ${adaptersArg}";` : ``,
-    `nohup $CMD >> .factory/run/worker.log 2>&1 &`,
+    `nohup bun event-runtime/cli.mjs work${labelsArg ? ` --labels ${shellQuote(labelsArg)}` : ""}${adaptersArg ? ` --adapters ${shellQuote(adaptersArg)}` : ""} >> .factory/run/worker.log 2>&1 &`,
     `PID=$!;`,
     `echo $PID > .factory/run/worker.pid;`,
     `echo "START_SUCCESS:$PID"`,

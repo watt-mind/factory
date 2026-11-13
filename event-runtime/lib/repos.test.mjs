@@ -12,9 +12,12 @@ import semver from "semver";
 import { DEFAULT_MAX_IN_FLIGHT } from "./config.mjs";
 import {
   isToolchainConstraint,
+  loadInRepoConfig,
   loadRepos,
+  mergeRepoConfig,
   normalizeToolVersion,
   preflightToolchain,
+  preflightToolchainSync,
   proveMergeChecks,
   REPO_ATTESTATION_STALE,
   REPO_TOOLCHAIN_MISMATCH,
@@ -22,7 +25,9 @@ import {
   RepoError,
   findRepoForPath,
   repoDispatchPreflight,
+  repoDispatchPreflightSync,
   repoReadiness,
+  resetInRepoConfigCache,
   reposView,
   resolvePromotionTarget,
   selectMergeCheckGate,
@@ -48,6 +53,390 @@ function factoryRoot(yaml) {
   writeFileSync(path.join(root, "config", "repos.yaml"), yaml);
   return root;
 }
+
+function repositoryRoot(relativeConfigPath, yaml) {
+  const root = tmpDir("evrt-in-repo-config-");
+  scratch.push(root);
+  if (relativeConfigPath) {
+    const file = path.join(root, relativeConfigPath);
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, yaml);
+  }
+  return root;
+}
+
+const IN_REPO_YAML = `schemaVersion: factory.repo/v1
+base: develop
+deploy_branch: main
+toolchain:
+  bun: ">=1.3 <2"
+owned_paths_policy:
+  direct:
+    - source: shared/**
+      requires: [dist/**]
+  pin_manifests: [event-runtime/agents/*.json]
+  registry_digest:
+    inputs: [event-runtime/agents/**]
+    baseline: event-runtime/lib/registry.test.mjs
+escalate_paths: [src/auth/**]
+merge_ci:
+  workflow: CI
+  required_checks: [Verify]
+worktree:
+  up: bin/worktree-up.sh
+  down: bin/worktree-down.sh
+  warm: bin/worktree-warm.sh
+`;
+
+describe("factory.repo/v1 in-repo configuration", () => {
+  test("loads the root-level and namespaced file locations", () => {
+    for (const relative of [".factory.yaml", ".factory/config.yaml"]) {
+      const config = loadInRepoConfig(repositoryRoot(relative, IN_REPO_YAML));
+      expect(config).toMatchObject({
+        schemaVersion: "factory.repo/v1",
+        base: "develop",
+        deploy_branch: "main",
+        toolchain: { bun: ">=1.3 <2" },
+        escalate_paths: ["src/auth/**"],
+        worktree: {
+          up: "bin/worktree-up.sh",
+          down: "bin/worktree-down.sh",
+          warm: "bin/worktree-warm.sh",
+        },
+      });
+    }
+  });
+
+  test("returns null when a repository has no in-repo config", () => {
+    expect(loadInRepoConfig(repositoryRoot(null, null))).toBeNull();
+  });
+
+  test("caches unchanged in-repo config files and invalidates changed or removed files", () => {
+    const root = repositoryRoot(".factory.yaml", IN_REPO_YAML);
+    const file = path.join(root, ".factory.yaml");
+    const originalParse = Bun.YAML.parse;
+    let parseCount = 0;
+    resetInRepoConfigCache();
+    Bun.YAML.parse = (...args) => {
+      parseCount += 1;
+      return originalParse(...args);
+    };
+
+    try {
+      expect(loadInRepoConfig(root).base).toBe("develop");
+      expect(loadInRepoConfig(root).base).toBe("develop");
+      expect(parseCount).toBe(1);
+
+      writeFileSync(file, IN_REPO_YAML.replace("base: develop", "base: main"));
+      expect(loadInRepoConfig(root).base).toBe("main");
+      expect(parseCount).toBe(2);
+
+      rmSync(file);
+      expect(loadInRepoConfig(root)).toBeNull();
+      writeFileSync(file, IN_REPO_YAML);
+      expect(loadInRepoConfig(root).base).toBe("develop");
+      expect(parseCount).toBe(3);
+    } finally {
+      Bun.YAML.parse = originalParse;
+      resetInRepoConfigCache();
+    }
+  });
+
+  test("fails closed for ambiguous, malformed, unknown, and semantically invalid config", () => {
+    const ambiguous = repositoryRoot(".factory.yaml", IN_REPO_YAML);
+    mkdirSync(path.join(ambiguous, ".factory"), { recursive: true });
+    writeFileSync(path.join(ambiguous, ".factory/config.yaml"), IN_REPO_YAML);
+    expect(() => loadInRepoConfig(ambiguous)).toThrow(/both \.factory\.yaml/);
+
+    const invalidCases = [
+      ["invalid YAML", "schemaVersion: ["],
+      ["wrong version", "schemaVersion: factory.repo/v2\n"],
+      [
+        "unknown host field",
+        "schemaVersion: factory.repo/v1\nmax_in_flight: 4\n",
+      ],
+      [
+        "unknown nested field",
+        "schemaVersion: factory.repo/v1\nworktree:\n  root: /tmp/worktrees\n",
+      ],
+      [
+        "invalid toolchain range",
+        "schemaVersion: factory.repo/v1\ntoolchain:\n  bun: latest\n",
+      ],
+      [
+        "duplicate merge checks",
+        "schemaVersion: factory.repo/v1\nmerge_ci:\n  workflow: CI\n  required_checks: [Verify, Verify]\n",
+      ],
+    ];
+    for (const [, yaml] of invalidCases) {
+      const root = repositoryRoot(".factory.yaml", yaml);
+      expect(() => loadInRepoConfig(root)).toThrow(RepoError);
+    }
+  });
+
+  test("rejects host-owned verify and security by name (#1638 review)", () => {
+    // A PR that could author the verify command or the scanner flags could
+    // weaken its own verification or secret scan; those inputs to
+    // host-executed commands stay in repos.yaml.
+    const hostOwnedCases = [
+      ["verify", "schemaVersion: factory.repo/v1\nverify: bun test\n"],
+      [
+        "security",
+        "schemaVersion: factory.repo/v1\nsecurity:\n  gitleaks_args: --no-git\n",
+      ],
+      [
+        "security",
+        "schemaVersion: factory.repo/v1\nsecurity:\n  semgrep_args: --exclude-rule secrets\n",
+      ],
+      [
+        "security",
+        'schemaVersion: factory.repo/v1\nsecurity:\n  python_version: "3.12"\n',
+      ],
+      ["max_in_flight", "schemaVersion: factory.repo/v1\nmax_in_flight: 4\n"],
+      [
+        "control_plane",
+        "schemaVersion: factory.repo/v1\ncontrol_plane: linear\n",
+      ],
+    ];
+    for (const [key, yaml] of hostOwnedCases) {
+      const root = repositoryRoot(".factory.yaml", yaml);
+      expect(() => loadInRepoConfig(root)).toThrow(
+        new RegExp(`host-owned "${key}"`),
+      );
+    }
+    // Explicit null is still an attempt to own the key (it would clear the
+    // host verify command), so it is rejected the same way.
+    expect(() =>
+      loadInRepoConfig(
+        repositoryRoot(
+          ".factory.yaml",
+          "schemaVersion: factory.repo/v1\nverify: null\nsecurity: null\n",
+        ),
+      ),
+    ).toThrow(/host-owned "verify", "security"/);
+  });
+
+  test("overlays portable fields, unions escalation paths, and keeps host controls", () => {
+    const host = {
+      name: "configured",
+      path: "/tmp/configured",
+      base: "main",
+      verify: "host verify",
+      security: { gitleaks_args: "--redact" },
+      control_plane: "github",
+      max_in_flight: 7,
+      worktree_root: "/tmp/worktrees",
+      worktree_up: "host-up.sh",
+      escalate_paths: ["ops/**", "src/auth/**"],
+    };
+    const inRepo = {
+      schemaVersion: "factory.repo/v1",
+      base: "develop",
+      // These are rejected by loadInRepoConfig; direct callers still cannot
+      // use mergeRepoConfig to override host-owned controls or the inputs to
+      // host-executed commands.
+      verify: "true",
+      security: { gitleaks_args: "--no-git" },
+      control_plane: "linear",
+      max_in_flight: 100,
+      escalate_paths: ["src/auth/**", "payments/**"],
+      worktree: { up: "bin/up.sh", down: "bin/down.sh" },
+    };
+
+    expect(mergeRepoConfig(host, inRepo)).toEqual({
+      ...host,
+      base: "develop",
+      escalate_paths: ["ops/**", "src/auth/**", "payments/**"],
+      worktree_up: "bin/up.sh",
+      worktree_down: "bin/down.sh",
+    });
+    // Host-owned keys the host never set do not appear from the overlay.
+    expect(
+      mergeRepoConfig(
+        { name: "bare" },
+        { schemaVersion: "factory.repo/v1", verify: "true", security: {} },
+      ),
+    ).toEqual({ name: "bare" });
+  });
+
+  test("worktree omission inherits host scripts while null clears them", () => {
+    const host = {
+      worktree_root: "/tmp/worktrees",
+      worktree_up: "host-up.sh",
+      worktree_down: "host-down.sh",
+      worktree_warm: "host-warm.sh",
+    };
+
+    expect(mergeRepoConfig(host, { schemaVersion: "factory.repo/v1" })).toEqual(
+      host,
+    );
+    expect(
+      mergeRepoConfig(host, {
+        schemaVersion: "factory.repo/v1",
+        worktree: null,
+      }),
+    ).toEqual({
+      worktree_root: "/tmp/worktrees",
+      worktree_up: null,
+      worktree_down: null,
+      worktree_warm: null,
+    });
+    expect(
+      mergeRepoConfig(host, {
+        schemaVersion: "factory.repo/v1",
+        worktree: { up: null },
+      }),
+    ).toEqual({
+      ...host,
+      worktree_up: null,
+    });
+  });
+
+  test("loadRepos applies an in-repo overlay and preserves host-only fallback", () => {
+    const configured = repositoryRoot(".factory.yaml", IN_REPO_YAML);
+    const hostOnly = repositoryRoot(null, null);
+    const repos = loadRepos({
+      root: factoryRoot(`repos:
+  - name: configured
+    path: ${configured}
+    base: main
+    verify: host verify
+    security:
+      gitleaks_args: --redact
+    max_in_flight: 5
+    control_plane: github
+    escalate_paths: [ops/**]
+    worktree_root: /tmp/configured-worktrees
+  - name: host-only
+    path: ${hostOnly}
+    base: release
+    verify: host-only verify
+`),
+    });
+
+    expect(repos.get("configured")).toMatchObject({
+      base: "develop",
+      deployBranch: "main",
+      verify: "host verify",
+      maxInFlight: 5,
+      controlPlane: "github",
+      escalatePaths: ["ops/**", "src/auth/**"],
+      worktreeRoot: "/tmp/configured-worktrees",
+      worktreeUp: "bin/worktree-up.sh",
+      worktreeDown: "bin/worktree-down.sh",
+      worktreeWarm: "bin/worktree-warm.sh",
+      mergeCi: { workflow: "CI", requiredChecks: ["Verify"] },
+      security: {
+        pythonVersion: null,
+        semgrepArgs: null,
+        gitleaksArgs: "--redact",
+      },
+    });
+    expect(repos.get("configured").toolchain).toEqual([
+      { executable: "bun", constraint: ">=1.3 <2" },
+    ]);
+    expect(repos.get("host-only")).toMatchObject({
+      base: "release",
+      verify: "host-only verify",
+      maxInFlight: null,
+      controlPlane: null,
+    });
+  });
+
+  test("loadRepos skips one repo's malformed overlay with a warning instead of failing the registry", () => {
+    const broken = repositoryRoot(
+      ".factory.yaml",
+      "schemaVersion: factory.repo/v1\nsecurity:\n  gitleaks_args: --no-git\n",
+    );
+    const healthy = repositoryRoot(".factory.yaml", IN_REPO_YAML);
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (...args) => warnings.push(args.join(" "));
+    let repos;
+    const root = factoryRoot(`repos:
+  - name: broken
+    path: ${broken}
+    base: main
+    verify: host verify
+    security:
+      gitleaks_args: --redact
+  - name: healthy
+    path: ${healthy}
+    base: main
+`);
+    resetInRepoConfigCache();
+    try {
+      repos = loadRepos({ root });
+      expect(loadRepos({ root }).get("broken")).toMatchObject({
+        base: "main",
+        verify: "host verify",
+      });
+      writeFileSync(
+        path.join(broken, ".factory.yaml"),
+        "schemaVersion: factory.repo/v1\nsecurity:\n  gitleaks_args: --no-git\n# changed\n",
+      );
+      loadRepos({ root });
+    } finally {
+      console.warn = originalWarn;
+      resetInRepoConfigCache();
+    }
+
+    // The broken checkout keeps its host config verbatim...
+    expect(repos.get("broken")).toMatchObject({
+      base: "main",
+      verify: "host verify",
+      security: { gitleaksArgs: "--redact" },
+    });
+    // ...and the other repos still get their overlay.
+    expect(repos.get("healthy")).toMatchObject({
+      base: "develop",
+      worktreeUp: "bin/worktree-up.sh",
+    });
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]).toMatch(/repo broken: in-repo config ignored/);
+    expect(warnings[0]).toMatch(/host-owned "security"/);
+    expect(warnings[1]).toMatch(/host-owned "security"/);
+  });
+
+  test("loadRepos evicts removed repos from in-repo config and warning caches", () => {
+    const brokenYaml = "schemaVersion: factory.repo/v1\nsecurity: null\n";
+    const broken = repositoryRoot(".factory.yaml", brokenYaml);
+    const root = factoryRoot(`repos:
+  - name: broken
+    path: ${broken}
+`);
+    const warnings = [];
+    const originalWarn = console.warn;
+    const originalParse = Bun.YAML.parse;
+    let configParses = 0;
+    console.warn = (...args) => warnings.push(args.join(" "));
+    Bun.YAML.parse = (source, ...args) => {
+      if (source === brokenYaml) configParses += 1;
+      return originalParse(source, ...args);
+    };
+
+    try {
+      loadRepos({ root });
+      writeFileSync(path.join(root, "config", "repos.yaml"), "repos: []\n");
+      loadRepos({ root });
+      writeFileSync(
+        path.join(root, "config", "repos.yaml"),
+        `repos:
+  - name: broken
+    path: ${broken}
+`,
+      );
+      loadRepos({ root });
+    } finally {
+      Bun.YAML.parse = originalParse;
+      console.warn = originalWarn;
+      resetInRepoConfigCache();
+    }
+
+    expect(configParses).toBe(2);
+    expect(warnings).toHaveLength(2);
+  });
+});
 
 // One fully configured dispatch target and one report-only repo with nothing
 // but the minimum — between them they cover every field's present and absent
@@ -515,6 +904,7 @@ describe("reposView is what the control API serves", () => {
         "smokeUrl",
         "smokeWorkflow",
         "team",
+        "toolchain",
         "verify",
         "worktreeRoot",
       ]);
@@ -799,14 +1189,16 @@ describe("toolchain: declaration parsing and validation", () => {
     ).toThrow(/declares toolchain executable "bun" twice/);
   });
 
-  test("the registry projection does not publish toolchain yet (removed by #1097)", () => {
-    // Not an oversight: /repos and the config view assert this projection
-    // exactly, in api-registry.test.mjs and api-config.test.mjs, both outside
-    // gh-1076's Owned Paths. Issue #1097 — toolchain status in `factory
-    // doctor` — publishes the field and updates those assertions in the same
-    // commit, and deletes this pin.
+  test("the registry projection publishes declared toolchain constraints, never observed versions", () => {
     const rows = reposView(loadRepos({ root: factoryRoot(YAML) }));
-    expect(rows[0]).not.toHaveProperty("toolchain");
+    expect(rows[0].toolchain).toEqual([
+      { executable: "bun", constraint: ">=1.3 <2" },
+      { executable: "node", constraint: ">=22 <25" },
+    ]);
+    expect(rows[1].toolchain).toBeNull();
+    expect(JSON.stringify(rows[0].toolchain)).not.toMatch(
+      /observed|resolved|satisfied/,
+    );
   });
 });
 
@@ -963,6 +1355,64 @@ describe("preflightToolchain verifies without mutating the host", () => {
     ]);
     expect(reasons[1].observed).toBeNull();
     expect(reasons[1].observedRaw).toBe("no version here");
+  });
+
+  test("throwing which and spawn probes become failed attestations and later tools still run", async () => {
+    const repo = repoWith(
+      `    toolchain:\n      which-broken: ">=1"\n      spawn-broken: ">=1"\n      bun: ">=1.3 <2"\n`,
+    );
+    const spawnCalls = [];
+    const attestation = await preflightToolchain(repo, {
+      now,
+      which: async (executable) => {
+        if (executable === "which-broken") throw new Error("which denied");
+        return `/opt/bin/${executable}`;
+      },
+      spawn: async (argv) => {
+        spawnCalls.push(argv);
+        if (argv[0] === "/opt/bin/spawn-broken") {
+          throw new Error("spawn denied");
+        }
+        return { exitCode: 0, stdout: "1.3.14\n", stderr: "" };
+      },
+    });
+
+    expect(attestation.ok).toBe(false);
+    expect(attestation.tools).toMatchObject([
+      {
+        executable: "which-broken",
+        resolved: null,
+        observed: null,
+        observedRaw: "which denied",
+        satisfied: false,
+      },
+      {
+        executable: "spawn-broken",
+        resolved: "/opt/bin/spawn-broken",
+        observed: null,
+        observedRaw: "spawn denied",
+        satisfied: false,
+      },
+      { executable: "bun", observed: "1.3.14", satisfied: true },
+    ]);
+    expect(attestation.reasons.map((reason) => reason.executable)).toEqual([
+      "which-broken",
+      "spawn-broken",
+    ]);
+    expect(attestation.reasons).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ reason: REPO_TOOLCHAIN_MISSING }),
+      ]),
+    );
+    expect(
+      attestation.reasons.every((reason) =>
+        reason.action.includes(reason.executable),
+      ),
+    ).toBe(true);
+    expect(spawnCalls).toEqual([
+      ["/opt/bin/spawn-broken", "--version"],
+      ["/opt/bin/bun", "--version"],
+    ]);
   });
 
   test("preflight is non-mutating: the only command spawned is `<exe> --version`", async () => {
@@ -1178,6 +1628,35 @@ describe("readiness: a repo is ready only on a current, passing attestation", ()
 });
 
 describe("repoDispatchPreflight is the gate dispatch consults before claiming", () => {
+  test("the synchronous planner variant returns the same typed failed result", () => {
+    const repo = repoWith(`    toolchain:\n      uv: ">=0.5"\n`);
+    const whichCalls = [];
+    const spawnCalls = [];
+    const gate = repoDispatchPreflightSync(repo, {
+      node: "planner",
+      now,
+      which: (executable) => {
+        whichCalls.push(executable);
+        return null;
+      },
+      spawn: (argv) => {
+        spawnCalls.push(argv);
+        return { exitCode: 0, stdout: "0.5.0", stderr: "" };
+      },
+    });
+    expect(gate.ready).toBe(false);
+    expect(gate.reasons[0]).toMatchObject({
+      reason: REPO_TOOLCHAIN_MISSING,
+      executable: "uv",
+      node: "planner",
+    });
+    expect(whichCalls).toEqual(["uv"]);
+    expect(spawnCalls).toEqual([]);
+    expect(preflightToolchainSync(repo, { now, which: () => null }).ok).toBe(
+      false,
+    );
+  });
+
   test("a repo whose preflight fails is refused, with the failing constraint named", async () => {
     const repo = repoWith(`    toolchain:\n      node: ">=22 <25"\n`);
     const node = fakeNode({ versions: { node: "v18.19.1" } });

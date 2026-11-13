@@ -99,7 +99,9 @@ test("renders only diagnose-first jump/resolve chrome and explains escalations",
     />,
   );
   expect(escalated.getByText("Open PR")).toBeTruthy();
-  expect(escalated.getByText("Open issue")).toBeTruthy();
+  expect(escalated.getByText("Open issue").getAttribute("href")).toBe(
+    "https://linear.app/watt-mind/issue/WM-287",
+  );
   expect(escalated.getByText(/deliberately cannot merge/)).toBeTruthy();
   expect(escalated.queryByRole("button")).toBeNull();
   escalated.unmount();
@@ -117,6 +119,36 @@ test("renders only diagnose-first jump/resolve chrome and explains escalations",
   fireEvent.click(smoke.getByRole("button", { name: "Resolve…" }));
   expect(resolve).toHaveBeenCalledTimes(1);
   expect(smoke.queryByText(/retry/i)).toBeNull();
+});
+
+test("opens GitHub issue references in GitHub", () => {
+  const view = render(
+    <InboxActions
+      item={item({
+        kind: "SMOKE RED",
+        refs: { issue: "watt-mind/factory#1573" },
+      })}
+      connected
+      onResolve={() => {}}
+      onItemChange={() => {}}
+      apiCalls={
+        {
+          events: mock(async () => ({ events: [] })),
+          replay: mock(async () => ({
+            admitted: true,
+            duplicate: false,
+            eventId: "x",
+          })),
+          triggerSchedule: mock(async () => ({})),
+          repos: mock(async () => ({ repos: [] })),
+          schedules: mock(async () => ({ schedules: [] })),
+        } as never
+      }
+    />,
+  );
+  expect(view.getByText("Open issue").getAttribute("href")).toBe(
+    "https://github.com/watt-mind/factory/issues/1573",
+  );
 });
 
 test("Replay, Rerun CI, and Ship use their existing API request shapes and refetch", async () => {

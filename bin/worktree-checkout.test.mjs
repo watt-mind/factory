@@ -17,6 +17,21 @@ const COMMON = path.resolve(import.meta.dir, "worktree-common.sh");
 // The handoff sandbox intentionally mounts the shared Git directory read-only.
 // Nested-worktree integration cases cannot run there; focused helpers still do.
 const handoffSandbox = process.env.FACTORY_HANDOFF_SANDBOX === "1";
+const WORKTREE_INTEGRATION_TIMEOUT = 20_000;
+
+// Keep test worktree installs out of the shared live-instance lock. Tests that
+// exercise lock contention override this with their own shared fixture lock.
+process.env.FACTORY_LOCK_DIR ??= path.join(
+  tmpdir(),
+  `factory-test-bun-install-${process.pid}-${Date.now()}-${Math.random()
+    .toString(36)
+    .slice(2)}.lock`,
+);
+
+// Worktree setup/teardown shells out to Git and process groups. Retain a
+// bounded per-test timeout without masking their narrower liveness assertions.
+const t = (name, fn) =>
+  test(name, { timeout: WORKTREE_INTEGRATION_TIMEOUT }, fn);
 
 function sh(body, extraEnv = {}) {
   const result = Bun.spawnSync({
@@ -52,6 +67,22 @@ function makeTestLockDir(prefix = "test-lock") {
   return path.join(
     tmpdir(),
     `${prefix}-${Date.now()}-${process.pid}-${rand}.lock`,
+  );
+}
+
+function lifecycleLockPath(ticket) {
+  const repo = path.resolve(import.meta.dir, "..");
+  const common = Bun.spawnSync({
+    cmd: ["git", "-C", repo, "rev-parse", "--git-common-dir"],
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+    .stdout.toString()
+    .trim();
+  return path.join(
+    path.isAbsolute(common) ? common : path.join(repo, common),
+    "factory-worktree-locks",
+    `${ticket}.lock`,
   );
 }
 
@@ -393,7 +424,8 @@ test("high concurrency race of 8 parallel locked_bun_install processes serialize
   }
 });
 
-test("worktree-up --checkout-only creates checkout without daemons and worktree-down removes it", () => {
+// prettier-ignore
+t("worktree-up --checkout-only creates checkout without daemons and worktree-down removes it", () => {
   if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-root-"));
   const ticketId = makeTestTicket("TEST");
@@ -432,7 +464,74 @@ test("worktree-up --checkout-only creates checkout without daemons and worktree-
   }
 });
 
-test("re-dispatch fast-forwards a deliberately stale branch to the current base", () => {
+t("worktree-up releases its lifecycle lock when bun install fails", () => {
+  if (handoffSandbox) return;
+  const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-lock-fail-"));
+  const mockBin = mkdtempSync(path.join(tmpdir(), "factory-wt-lock-bin-"));
+  const ticketId = makeTestTicket("LOCKFAIL");
+  const worktreePath = path.join(tempWtRoot, ticketId);
+  const lockPath = lifecycleLockPath(ticketId);
+
+  writeFileSync(path.join(mockBin, "bun"), "#!/usr/bin/env bash\nexit 1\n", {
+    mode: 0o755,
+  });
+  writeFileSync(path.join(mockBin, "lsof"), "#!/usr/bin/env bash\nexit 1\n", {
+    mode: 0o755,
+  });
+
+  try {
+    const result = Bun.spawnSync({
+      cmd: ["bash", UP, ticketId, "--no-fetch"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        FACTORY_WT_ROOT: tempWtRoot,
+        FACTORY_SKIP_FETCH: "1",
+        PATH: `${mockBin}${path.delimiter}${process.env.PATH}`,
+      },
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("bun install failed");
+    expect(existsSync(lockPath)).toBe(false);
+  } finally {
+    Bun.spawnSync({
+      cmd: ["git", "worktree", "remove", "--force", worktreePath],
+    });
+    Bun.spawnSync({ cmd: ["git", "branch", "-D", `feat/${ticketId}`] });
+    rmSync(lockPath, { recursive: true, force: true });
+    rmSync(tempWtRoot, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
+  }
+});
+
+t("worktree-up refuses a live lifecycle lock during checkout-only", () => {
+  if (handoffSandbox) return;
+  const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-lock-live-"));
+  const ticketId = makeTestTicket("LOCKLIVE");
+  const lockPath = lifecycleLockPath(ticketId);
+
+  mkdirSync(lockPath, { recursive: true });
+  writeFileSync(path.join(lockPath, "pid"), String(process.pid));
+
+  try {
+    const result = Bun.spawnSync({
+      cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain("worktree_lifecycle_busy");
+    expect(existsSync(lockPath)).toBe(true);
+  } finally {
+    rmSync(lockPath, { recursive: true, force: true });
+    rmSync(tempWtRoot, { recursive: true, force: true });
+  }
+});
+
+// prettier-ignore
+t("re-dispatch fast-forwards a deliberately stale branch to the current base", () => {
   if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-stale-"));
   const ticketId = makeTestTicket("STALE");
@@ -501,7 +600,8 @@ test("re-dispatch fast-forwards a deliberately stale branch to the current base"
   }
 });
 
-test("re-dispatch preserves an abandoned dirty zero-ahead worktree on a conventional wip branch", () => {
+// prettier-ignore
+t("re-dispatch preserves an abandoned dirty zero-ahead worktree on a conventional wip branch", () => {
   if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(
     path.join(tmpdir(), "factory-wt-abandoned-dirty-"),
@@ -609,9 +709,10 @@ exec "${realGit}" "$@"
       cwd: path.resolve(import.meta.dir, ".."),
     });
   }
-}, 20_000);
+});
 
-test("re-dispatch refuses a dirty worktree with typed worktree_in_use when a live owner exists", () => {
+// prettier-ignore
+t("re-dispatch refuses a dirty worktree with typed worktree_in_use when a live owner exists", () => {
   if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-live-dirty-"));
   const ticketId = makeTestTicket("LIVEOWNER");
@@ -667,7 +768,7 @@ test("re-dispatch refuses a dirty worktree with typed worktree_in_use when a liv
   }
 });
 
-test("merge-fix re-dispatch resumes a committed PR branch as-is", () => {
+t("merge-fix re-dispatch resumes a committed PR branch as-is", () => {
   if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-merge-fix-"));
   const mockBin = mkdtempSync(path.join(tmpdir(), "factory-wt-open-pr-bin-"));
@@ -765,7 +866,8 @@ printf '1\\n'
   }
 });
 
-test("explicit resume flag and environment preserve committed branches without querying PRs", () => {
+// prettier-ignore
+t("explicit resume flag and environment preserve committed branches without querying PRs", () => {
   if (handoffSandbox) return;
   for (const mode of ["flag", "environment"]) {
     const tempWtRoot = mkdtempSync(
@@ -875,14 +977,15 @@ exit 99
       });
     }
   }
-}, 15_000);
+});
 
 // WM-680: a unique commit that is already on origin is preserved work (an
 // orphaned/blocked run's WIP the orchestrator pushed), not litter. worktree-up
 // resumes it without --resume so an unattended re-dispatch does not die on
 // worktree_branch_has_commits. The test above keeps the boundary: a unique
 // commit that exists ONLY locally still refuses.
-test("re-dispatch auto-resumes a branch whose unique commits are already on origin (WM-680)", () => {
+// prettier-ignore
+t("re-dispatch auto-resumes a branch whose unique commits are already on origin (WM-680)", () => {
   if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-pushed-"));
   const mockBin = mkdtempSync(path.join(tmpdir(), "factory-wt-pushed-bin-"));
@@ -1004,7 +1107,8 @@ exec "${realGit}" "$@"
   }
 });
 
-test("re-dispatch keeps unique-commit refusal ahead of dirty-worktree preservation", () => {
+// prettier-ignore
+t("re-dispatch keeps unique-commit refusal ahead of dirty-worktree preservation", () => {
   if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-unique-"));
   const mockBin = mkdtempSync(path.join(tmpdir(), "factory-wt-no-pr-bin-"));
@@ -1104,7 +1208,8 @@ exec "${realGit}" "$@"
   }
 });
 
-test("worktree-down --prune removes only clean terminal worktrees and preserves dirty or live trees", () => {
+// prettier-ignore
+t("worktree-down --prune removes only clean terminal worktrees and preserves dirty or live trees", () => {
   if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-prune-"));
   const mockBin = mkdtempSync(path.join(tmpdir(), "factory-wt-prune-bin-"));
@@ -1185,7 +1290,8 @@ test("worktree-down --prune removes only clean terminal worktrees and preserves 
   }
 });
 
-test("worktree-down --prune recognizes a merged PR for the worktree branch", () => {
+// prettier-ignore
+t("worktree-down --prune recognizes merged GitHub worktrees and preserves dirty ones", () => {
   if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(
     path.join(tmpdir(), "factory-wt-prune-merged-"),
@@ -1193,17 +1299,26 @@ test("worktree-down --prune recognizes a merged PR for the worktree branch", () 
   const mockBin = mkdtempSync(
     path.join(tmpdir(), "factory-wt-prune-merged-bin-"),
   );
-  const ticketId = makeTestTicket("MERGED");
-  const branch = `feat/${ticketId}`;
+  const ticketNumber = (Date.now() % 1_000_000_000) + process.pid;
+  const cleanTicket = `gh-${ticketNumber}`;
+  const dirtyTicket = `gh-${ticketNumber + 1}`;
+  const tickets = [cleanTicket, dirtyTicket];
+  const branches = tickets.map((ticket) => `feat/${ticket}`);
 
   try {
-    const up = Bun.spawnSync({
-      cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
-    });
-    expect(up.exitCode).toBe(0);
+    for (const ticket of tickets) {
+      const up = Bun.spawnSync({
+        cmd: ["bash", UP, ticket, "--checkout-only", "--no-fetch"],
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+      });
+      expect(up.exitCode).toBe(0);
+    }
+    writeFileSync(
+      path.join(tempWtRoot, dirtyTicket, "uncommitted.txt"),
+      "do not remove\n",
+    );
 
     writeFileSync(
       path.join(mockBin, "bun"),
@@ -1212,7 +1327,12 @@ test("worktree-down --prune recognizes a merged PR for the worktree branch", () 
     );
     writeFileSync(
       path.join(mockBin, "gh"),
-      `#!/usr/bin/env bash\n[[ "$*" == *"--head ${branch}"* ]] && printf '1\\n' || printf '0\\n'\n`,
+      `#!/usr/bin/env bash\n${branches
+        .map(
+          (branch) =>
+            `[[ "$*" == *"--head ${branch}"* ]] && { printf '1\\n'; exit 0; }`,
+        )
+        .join("\n")}\nprintf '0\\n'\n`,
       { mode: 0o755 },
     );
     const pruned = Bun.spawnSync({
@@ -1226,22 +1346,28 @@ test("worktree-down --prune recognizes a merged PR for the worktree branch", () 
       },
     });
     expect(pruned.exitCode).toBe(0);
-    expect(existsSync(path.join(tempWtRoot, ticketId))).toBe(false);
+    expect(existsSync(path.join(tempWtRoot, cleanTicket))).toBe(false);
+    expect(existsSync(path.join(tempWtRoot, dirtyTicket))).toBe(true);
   } finally {
-    Bun.spawnSync({
-      cmd: ["bash", DOWN, ticketId, "--force"],
-      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+    rmSync(path.join(tempWtRoot, dirtyTicket, "uncommitted.txt"), {
+      force: true,
     });
+    for (const ticket of tickets) {
+      Bun.spawnSync({
+        cmd: ["bash", DOWN, ticket, "--force"],
+        env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+      });
+    }
     rmSync(tempWtRoot, { recursive: true, force: true });
     rmSync(mockBin, { recursive: true, force: true });
     Bun.spawnSync({
-      cmd: ["git", "branch", "-D", branch],
+      cmd: ["git", "branch", "-D", ...branches],
       cwd: path.resolve(import.meta.dir, ".."),
     });
   }
 });
 
-test("concurrent worktree-up --checkout-only succeed in parallel", async () => {
+t("concurrent worktree-up --checkout-only succeed in parallel", async () => {
   if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-conc-"));
   const ticket1 = makeTestTicket("CONCA");
@@ -1337,7 +1463,8 @@ test("worktree_add retries transient worktree metadata read races", () => {
   }
 });
 
-test("high concurrency worktree-up --checkout-only with 4 parallel bring-ups succeeds", async () => {
+// prettier-ignore
+t("high concurrency worktree-up --checkout-only with 4 parallel bring-ups succeeds", async () => {
   if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-4conc-"));
   const tickets = [
@@ -1554,7 +1681,8 @@ test("worktree-down CLI argument parsing error paths", () => {
   }
 });
 
-test("worktree-down refuses dirty worktree without --force, leaves cwd-bound processes alone, and cleans up with --force", async () => {
+// prettier-ignore
+t("worktree-down refuses dirty worktree without --force, leaves cwd-bound processes alone, and cleans up with --force", async () => {
   if (handoffSandbox) return;
   const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-down-dirty-"));
   const ticketId = makeTestTicket("DIRTY");
@@ -1648,7 +1776,8 @@ test("worktree-down refuses dirty worktree without --force, leaves cwd-bound pro
   }
 });
 
-test("worktree teardown group-kills a cwd-bound fake serve with no pidfile", async () => {
+// prettier-ignore
+t("worktree teardown group-kills a cwd-bound fake serve with no pidfile", async () => {
   const expectedPath = mkdtempSync(
     path.join(tmpdir(), "factory-down-cwd-process-"),
   );

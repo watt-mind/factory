@@ -30,6 +30,9 @@ const c = {
   cyan: (s) => `\x1b[36m${s}\x1b[0m`,
 };
 
+const LINEAR_SUPPLY_PAGE_SIZE = 100;
+const MAX_LINEAR_SUPPLY_PAGES = 5;
+
 function sh(args, cwd = ROOT) {
   try {
     const result = Bun.spawnSync({
@@ -74,6 +77,10 @@ export async function gatherPulse({
   repoName = "factory",
   fetchLinear = true,
   fetchGitHub = true,
+  controlPlane,
+  webFetch = globalThis.fetch,
+  workspaceProbe = sh,
+  workspaceCwd = ROOT,
 } = {}) {
   const pulse = {
     timestamp: new Date().toISOString(),
@@ -89,6 +96,7 @@ export async function gatherPulse({
       dispatchable: 0,
       triage: 0,
       tickets: [],
+      truncated: false,
     },
     prs: { total: 0, candidates: [] },
     workspace: {
@@ -115,7 +123,7 @@ export async function gatherPulse({
 
   // 2. Web UI Health
   try {
-    const webRes = await fetch(`http://${host}:${webPort}/`, {
+    const webRes = await webFetch(`http://${host}:${webPort}/`, {
       signal: AbortSignal.timeout(2000),
     });
     const ok = webRes.ok || webRes.status === 404; // serving HTTP
@@ -209,26 +217,46 @@ export async function gatherPulse({
       }
       pulse.supply.team = team;
 
-      if (!hasLinearKey()) {
+      if (!controlPlane && !hasLinearKey()) {
         pulse.supply.error = "LINEAR_API_KEY not configured";
       } else {
-        const d = await loadControlPlane().raw(
-          `query($t:String!){
-            issues(first:100, filter:{ team:{key:{eq:$t}}, state:{type:{nin:["completed","canceled"]}} }){
-              nodes{ id identifier title state{ name } labels(first:20){ nodes{ name } } assignee{ name } }
-            }
-          }`,
-          { t: team },
-        );
+        const linear = controlPlane ?? loadControlPlane();
+        const ready = [];
+        const triage = [];
+        let after = null;
 
-        const nodes = d?.issues?.nodes ?? [];
-        const ready = nodes.filter(
-          (i) =>
-            i.state?.name === "Todo" &&
-            !i.assignee &&
-            (i.labels?.nodes ?? []).some((l) => l.name === "ai:agent-ready"),
-        );
-        const triage = nodes.filter((i) => i.state?.name === "Triage");
+        for (let page = 0; page < MAX_LINEAR_SUPPLY_PAGES; page += 1) {
+          const d = await linear.raw(
+            `query($t:String!,$after:String){
+              issues(first:${LINEAR_SUPPLY_PAGE_SIZE}, after:$after, filter:{ team:{key:{eq:$t}}, state:{name:{in:["Todo","Triage"]}} }){
+                nodes{ id identifier title state{ name } labels(first:20){ nodes{ name } } assignee{ name } }
+                pageInfo{ hasNextPage endCursor }
+              }
+            }`,
+            { t: team, after },
+          );
+
+          const issues = d?.issues?.nodes ?? [];
+          ready.push(
+            ...issues.filter(
+              (i) =>
+                i.state?.name === "Todo" &&
+                !i.assignee &&
+                (i.labels?.nodes ?? []).some(
+                  (l) => l.name === "ai:agent-ready",
+                ),
+            ),
+          );
+          triage.push(...issues.filter((i) => i.state?.name === "Triage"));
+
+          const pageInfo = d?.issues?.pageInfo;
+          if (!pageInfo?.hasNextPage) break;
+          if (page === MAX_LINEAR_SUPPLY_PAGES - 1 || !pageInfo.endCursor) {
+            pulse.supply.truncated = true;
+            break;
+          }
+          after = pageInfo.endCursor;
+        }
 
         pulse.supply.dispatchable = ready.length;
         pulse.supply.triage = triage.length;
@@ -285,16 +313,26 @@ export async function gatherPulse({
 
   // 6. Workspace Freshness
   try {
-    const branchRes = sh(["git", "branch", "--show-current"]);
-    const headRes = sh(["git", "rev-parse", "--short", "HEAD"]);
-    const statusRes = sh(["git", "status", "--porcelain"]);
-    const behindRes = sh([
-      "git",
-      "rev-list",
-      "--count",
-      "HEAD..origin/develop",
-    ]);
-    const aheadRes = sh(["git", "rev-list", "--count", "origin/develop..HEAD"]);
+    const branchRes = workspaceProbe(
+      ["git", "branch", "--show-current"],
+      workspaceCwd,
+    );
+    const headRes = workspaceProbe(
+      ["git", "rev-parse", "--short", "HEAD"],
+      workspaceCwd,
+    );
+    const statusRes = workspaceProbe(
+      ["git", "status", "--porcelain"],
+      workspaceCwd,
+    );
+    const behindRes = workspaceProbe(
+      ["git", "rev-list", "--count", "HEAD..origin/develop"],
+      workspaceCwd,
+    );
+    const aheadRes = workspaceProbe(
+      ["git", "rev-list", "--count", "origin/develop..HEAD"],
+      workspaceCwd,
+    );
 
     pulse.workspace = {
       branch: branchRes.ok ? branchRes.out : "unknown",
@@ -382,6 +420,9 @@ export function formatPulse(pulse) {
       `  Dispatchable:    ${supplyColor(`${pulse.supply.dispatchable} tickets`)} in Todo (ai:agent-ready, unassigned)`,
     );
     lines.push(`  Triage Backlog:  ${pulse.supply.triage} tickets in Triage`);
+    if (pulse.supply.truncated) {
+      lines.push(c.yellow("  Supply counts:   (truncated)"));
+    }
     if (pulse.supply.tickets.length > 0) {
       lines.push(c.dim("  Next up:"));
       for (const t of pulse.supply.tickets) {

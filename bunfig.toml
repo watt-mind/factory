@@ -10,4 +10,4 @@
 # one worktree and failed in another (#1285, #1223). Preloading the helper
 # makes the isolated home a property of the process, not of the file order.
 [test]
-preload = ["./event-runtime/test-helpers.mjs"]
+preload = ["./event-runtime/test-helpers.mjs", "./event-runtime/lib/test-helpers.mjs"]

@@ -1,9 +1,11 @@
 import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-chain-test-mjs";
-import { describe, expect, test } from "bun:test";
-import { cpSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, test } from "bun:test";
+import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { memoryForge } from "../../lib/forge/memory.mjs";
 import * as fake from "./adapters/fake.mjs";
+import { CHAIN_AUTO_APPROVAL_ACTOR } from "./auto-approval.mjs";
+import { FACTORY_ROOT } from "./config.mjs";
 import {
   admitChainEvent,
   buildChainInput,
@@ -18,7 +20,9 @@ import { planAdmittedEvents } from "./planner.mjs";
 import { approveProposal, openProposals } from "./proposals.mjs";
 import { loadRegistry, RegistryError } from "./registry.mjs";
 import { runOnce } from "./worker.mjs";
+import { LOG_FILE } from "./ci-log-capture.mjs";
 import { tick } from "../cli/serve.mjs";
+import { loadAdjustedTimeout } from "./test-helpers-timing.mjs";
 // Importing test-helpers pins FACTORY_EVENT_HOME/FACTORY_HOME to an isolated
 // temp home for this whole file, so default-home lookups (artifactsRoot(),
 // dbPath()) never reach the operator's real ~/.factory (OPS-425).
@@ -44,7 +48,49 @@ function failedRunEnvelope(overrides = {}) {
   };
 }
 
-function harness() {
+/**
+ * The chain auto-approval allowlist is read from `<reposRoot>/config/policy.yaml`
+ * at plan time (falling back to `config/policy.example.yaml` when the instance
+ * file is absent). Tests must not depend on whichever policy the checkout
+ * happens to carry, so each harness pins FACTORY_REPOS_ROOT to a temp root
+ * whose policy is the shipped example with an explicit allowlist (GH-1727).
+ */
+const CI_DIAGNOSE = "factory.ci-diagnose.requested";
+const envRestores = [];
+
+function chainPolicyRoot(allowed) {
+  const root = tmpDir("evrt-chain-policy-");
+  mkdirSync(path.join(root, "config"));
+  const policy = Bun.YAML.parse(
+    readFileSync(
+      path.join(FACTORY_ROOT, "config", "policy.example.yaml"),
+      "utf8",
+    ),
+  );
+  policy.chain_auto_approval = { allowed_event_types: allowed };
+  // The day-budget guard scans the operator's real ~/.factory/logs; no
+  // budget means no scan, keeping the harness hermetic.
+  delete policy.budget;
+  // YAML is a JSON superset, so the parsed object round-trips as-is.
+  writeFileSync(
+    path.join(root, "config", "policy.yaml"),
+    JSON.stringify(policy, null, 2),
+  );
+  const previous = process.env.FACTORY_REPOS_ROOT;
+  process.env.FACTORY_REPOS_ROOT = root;
+  envRestores.push(() => {
+    if (previous === undefined) delete process.env.FACTORY_REPOS_ROOT;
+    else process.env.FACTORY_REPOS_ROOT = previous;
+  });
+  return root;
+}
+
+afterEach(() => {
+  while (envRestores.length) envRestores.pop()();
+});
+
+function harness({ allowed = [CI_DIAGNOSE] } = {}) {
+  chainPolicyRoot(allowed);
   const dir = tmpDir("evrt-chain-");
   const db = openDb(path.join(dir, "runtime.db"));
   const workspaces = tmpDir("evrt-chain-ws-");
@@ -146,29 +192,98 @@ describe("buildChainInput", () => {
   });
 });
 
+/** Every proposal (any status) whose spec targets `agent`, oldest first. */
+function proposalsForAgent(db, agent) {
+  return db
+    .query(`SELECT * FROM proposals ORDER BY created_at, rowid`)
+    .all()
+    .map((row) => ({
+      ...row,
+      spec: row.spec_json && JSON.parse(row.spec_json),
+    }))
+    .filter((p) => p.spec?.agent === agent);
+}
+
 /**
  * github.workflow-run.failed now lands on ci-log-capture@1, which stores the
  * log as an artifact and chains to ci-doctor@2 (OPS-372). Run that first hop
  * so these tests stay about the *verdict* edges they were written for.
+ *
+ * With `factory.ci-diagnose.requested` allowlisted (the harness default) the
+ * planner's chain pass approves the diagnosis unattended: no operator click,
+ * the run is already QUEUED when planning returns (GH-1727).
  */
 async function throughCapture(h, eventId) {
   const capture = await h.runToCompletion(eventId);
+  const captureResult = h.db
+    .query(`SELECT result_json FROM results WHERE run_id = ?`)
+    .get(capture.runId);
+  expect(JSON.parse(captureResult.result_json).artifact.captured).toBe(
+    LOG_FILE,
+  );
   expect(resolveChains(h.db, registry).emitted).toBe(1);
   planAdmittedEvents(h.db, registry, { policyVersion: PV });
-  const diagnose = openProposals(h.db, {}).find(
-    (p) => p.spec?.agent === "ci-doctor@2",
-  );
-  expect(diagnose).toBeTruthy();
-  const approved = approveProposal(h.db, registry, diagnose.id, {
-    actor: "operator",
-    policyVersion: PV,
-  });
+  expect(
+    openProposals(h.db, {}).find((p) => p.spec?.agent === "ci-doctor@2"),
+  ).toBeUndefined();
+  const [diagnose, ...extra] = proposalsForAgent(h.db, "ci-doctor@2");
+  expect(extra).toEqual([]);
+  expect(diagnose.status).toBe("approved");
+  expect(diagnose.decided_by).toBe(CHAIN_AUTO_APPROVAL_ACTOR);
+  const run = h.db
+    .query(`SELECT state FROM runs WHERE run_id = ?`)
+    .get(diagnose.run_id);
+  expect(["APPROVED", "QUEUED"]).toContain(run.state);
   const summary = await runOnce(h.db, registry, h.adapters, h.workerOpts);
   expect(summary.terminalState).toBe("COMPLETED");
-  return { capture, diagnoseRunId: approved.runId, diagnoseProposal: diagnose };
+  return {
+    capture,
+    diagnoseRunId: diagnose.run_id,
+    diagnoseProposal: diagnose,
+  };
 }
 
 describe("discovered chain: ci-doctor → follow-up (OPS-223)", () => {
+  test("ci-doctor stays a watched proposal when the allowlist omits factory.ci-diagnose.requested", async () => {
+    const h = harness({ allowed: ["factory.work.requested"] });
+    const { db, adapters, workerOpts, runToCompletion } = h;
+    expect(
+      admitEvent(db, registry, failedRunEnvelope({ eventId: "gh-watched-1" }))
+        .admitted,
+    ).toBe(true);
+    await runToCompletion("gh-watched-1");
+    expect(resolveChains(db, registry).emitted).toBe(1);
+    planAdmittedEvents(db, registry, { policyVersion: PV });
+
+    const diagnose = openProposals(db, {}).find(
+      (p) => p.spec?.agent === "ci-doctor@2",
+    );
+    expect(diagnose).toBeTruthy();
+    expect(diagnose.status).toBe("open");
+    expect(diagnose.reason).toBe(
+      "auto_approval_ineligible:run_approval_policy_watched",
+    );
+    expect(diagnose.spec.approvalPolicy).toEqual({
+      source: "chain",
+      mode: "watched",
+      eventType: CI_DIAGNOSE,
+      reason: "event_type_not_allowlisted",
+    });
+    expect(
+      db.query(`SELECT state FROM runs WHERE run_id = ?`).get(diagnose.run_id)
+        .state,
+    ).toBe("PROPOSED");
+
+    // The human click still works exactly as before.
+    const approved = approveProposal(db, registry, diagnose.id, {
+      actor: "operator",
+      policyVersion: PV,
+    });
+    expect(approved.approved).toBe(true);
+    const summary = await runOnce(db, registry, adapters, workerOpts);
+    expect(summary.terminalState).toBe("COMPLETED");
+  });
+
   test("FLAKE verdict chains to a watched ci-rerun proposal with inherited correlation", async () => {
     const h = harness();
     const { db, runToCompletion } = h;
@@ -390,6 +505,7 @@ describe("multi-emit chain resolution (WM-119)", () => {
       agent,
       input,
       artifact,
+      artifacts = [],
       eventId = `evt-${runId}`,
       correlationId = `corr-${runId}`,
     },
@@ -426,7 +542,7 @@ describe("multi-emit chain resolution (WM-119)", () => {
     db.query(
       `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
        VALUES (?, 1, ?, 'art-hash', '{}', '{}', ?)`,
-    ).run(runId, JSON.stringify({ artifact }), now);
+    ).run(runId, JSON.stringify({ artifact, artifacts }), now);
   }
 
   function seedChainChild(db, runId, eventId) {
@@ -436,6 +552,61 @@ describe("multi-emit chain resolution (WM-119)", () => {
        VALUES ('chain', ?, 'factory.work.requested', 'perf-edge@1', ?, ?, ?, ?, '{}', 'hash', 'admitted', ?)`,
     ).run(eventId, now, now, `corr-${runId}`, runId, now);
   }
+
+  test("ci-log-capture with no captured artifact does not emit a ci-diagnose event", () => {
+    const db = openDb(":memory:");
+    seedCompletedRun(db, {
+      runId: "run-no-capture",
+      agent: "ci-log-capture@1",
+      input: { repo: "wm/factory", runId: 12345 },
+      artifact: { captured: "none", exitCode: 0 },
+    });
+
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 0,
+      skipped: 1,
+      errors: [],
+    });
+    expect(
+      db
+        .query(
+          `SELECT * FROM events WHERE source = 'chain' AND causation_id = 'run-no-capture'`,
+        )
+        .get(),
+    ).toBeNull();
+    expect(chainResolution(db, "run-no-capture")).toMatchObject({
+      note: "chain_resolved",
+      reason: "no_edge_selected",
+    });
+  });
+
+  test("ci-log-capture with failed.log emits the ci-diagnose edge", () => {
+    const db = openDb(":memory:");
+    const runId = "run-captured-log";
+    seedCompletedRun(db, {
+      runId,
+      agent: "ci-log-capture@1",
+      input: { repo: "wm/factory", runId: 12345 },
+      artifact: { captured: LOG_FILE, exitCode: 0 },
+      artifacts: [{ kind: "ci-log", sha256: "a".repeat(64) }],
+    });
+
+    expect(resolveChains(db, registry)).toEqual({
+      emitted: 1,
+      skipped: 0,
+      errors: [],
+    });
+    const chainEvent = db
+      .query(`SELECT * FROM events WHERE event_id = ?`)
+      .get(`chain-${runId}`);
+    expect(chainEvent.type).toBe(CI_DIAGNOSE);
+    expect(chainEvent.causation_id).toBe(runId);
+    expect(chainResolution(db, runId)).toMatchObject({
+      note: "chain_resolved",
+      reason: "emitted",
+      events: [`chain-${runId}`],
+    });
+  });
 
   test("fans out N planned items into N admitted chain events with chain-<runId>-<itemKey> IDs", () => {
     const dir = tmpDir("evrt-chain-multi-");
@@ -615,9 +786,9 @@ describe("multi-emit chain resolution (WM-119)", () => {
         `chain benchmark: tick=${tickMs.toFixed(1)}ms health_p95=${healthP95.toFixed(1)}ms child_event_lookups=${childEventLookups}`,
       );
       expect(childEventLookups).toBe(1); // one bulk lookup, never 2,000
-      expect(tickMs).toBeLessThan(200);
+      expect(tickMs).toBeLessThan(loadAdjustedTimeout(200));
       // /health p95 is measured against the stub Bun.serve above: it proves the tick does not block the event loop, not real API latency.
-      expect(healthP95).toBeLessThan(500);
+      expect(healthP95).toBeLessThan(loadAdjustedTimeout(500));
       // The production-shaped benchmark must never touch the operator's real
       // ~/.factory/event-runtime/runtime.db (no default-home openDb/migration).
       expect(realFactorySnapshot().dbMtime).toBe(realHomeBefore.dbMtime);
@@ -654,6 +825,77 @@ describe("multi-emit chain resolution (WM-119)", () => {
       emitted: 0,
       skipped: 1,
       errors: [],
+    });
+  });
+
+  const whenPathRegistryFor = (whenPath) => ({
+    ...registry,
+    edges: {
+      "when-path-edge@1": {
+        recommendationField: "recommendation",
+        edges: {
+          NEXT: {
+            eventType: "factory.work.requested",
+            input: {},
+            whenPath,
+          },
+        },
+      },
+    },
+  });
+
+  test("a malformed whenPath records the failing edge instead of silently skipping", () => {
+    const db = openDb(":memory:");
+    const whenPathRegistry = whenPathRegistryFor("$.nope.x");
+    seedCompletedRun(db, {
+      runId: "run-malformed-when-path",
+      agent: "when-path-edge@1",
+      input: { repo: "wm/when-path" },
+      artifact: { recommendation: "NEXT" },
+    });
+
+    const outcome = resolveChains(db, whenPathRegistry);
+    expect(outcome.emitted).toBe(0);
+    expect(outcome.skipped).toBe(0);
+    expect(outcome.errors).toEqual([
+      expect.stringMatching(
+        /chain edge "NEXT" whenPath "\$\.nope\.x" failed: .*unknown root "nope"/,
+      ),
+    ]);
+    expect(resolvedAtOf(db, "run-malformed-when-path")).not.toBeNull();
+    expect(chainResolution(db, "run-malformed-when-path")).toMatchObject({
+      note: "chain_resolved",
+      reason: "invalid_chain_data",
+      error: expect.stringMatching(
+        /chain edge "NEXT" whenPath "\$\.nope\.x" failed: .*unknown root "nope"/,
+      ),
+    });
+    expect(resolveChains(db, whenPathRegistry)).toEqual({
+      emitted: 0,
+      skipped: 0,
+      errors: [],
+    });
+  });
+
+  test("a well-formed whenPath with no value skips the edge without erroring", () => {
+    const db = openDb(":memory:");
+    const whenPathRegistry = whenPathRegistryFor("$.artifact.missing");
+    seedCompletedRun(db, {
+      runId: "run-absent-when-path",
+      agent: "when-path-edge@1",
+      input: { repo: "wm/when-path" },
+      artifact: { recommendation: "NEXT" },
+    });
+
+    // "condition not met" is how a rule declines an edge — not a defect.
+    expect(resolveChains(db, whenPathRegistry)).toEqual({
+      emitted: 0,
+      skipped: 1,
+      errors: [],
+    });
+    expect(chainResolution(db, "run-absent-when-path")).toMatchObject({
+      note: "chain_resolved",
+      reason: "no_edge_selected",
     });
   });
 
@@ -970,6 +1212,136 @@ describe("multi-emit chain resolution (WM-119)", () => {
       skipped: 0,
       errors: [],
     });
+  });
+
+  test("returns the outcome when bookkeeping cannot acquire a held write lock (#1589)", () => {
+    const dir = tmpDir("evrt-chain-bookkeeping-lock-");
+    const file = path.join(dir, "runtime.db");
+    const db = openDb(file);
+    const writer = openDb(file);
+    db.exec("PRAGMA busy_timeout = 10;");
+    seedCompletedRun(db, {
+      runId: "run-bookkeeping-lock",
+      agent: "work-scan@1",
+      input: { repo: "wm/bookkeeping-lock" },
+      artifact: {
+        recommendation: "DISPATCH",
+        repo: "wm/bookkeeping-lock",
+        plan: [{ ticket: "WM-1589" }],
+      },
+    });
+    failInsertOf(db, "chain-run-bookkeeping-lock-WM-1589");
+
+    writer.exec("BEGIN IMMEDIATE;");
+    try {
+      const outcome = resolveChains(db, registry);
+      expect(outcome.emitted).toBe(0);
+      expect(outcome.errors).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("chain-run-bookkeeping-lock-WM-1589"),
+          expect.stringContaining("chain-bookkeeping: database is locked"),
+        ]),
+      );
+      expect(resolvedAtOf(db, "run-bookkeeping-lock")).toBeNull();
+    } finally {
+      writer.exec("ROLLBACK;");
+      writer.close();
+      db.close();
+    }
+  });
+
+  test("a non-busy bookkeeping throw propagates instead of being retried every tick (#1589)", () => {
+    const db = openDb(":memory:");
+    seedCompletedRun(db, {
+      runId: "run-bookkeeping-bug",
+      agent: "work-scan@1",
+      input: { repo: "wm/bookkeeping-bug" },
+      artifact: {
+        recommendation: "DISPATCH",
+        repo: "wm/bookkeeping-bug",
+        plan: [{ ticket: "WM-1591" }],
+      },
+    });
+    failInsertOf(db, "chain-run-bookkeeping-bug-WM-1591");
+    // A permanent bookkeeping bug: the transient marker itself cannot be written.
+    db.exec(
+      `CREATE TRIGGER fail_bookkeeping_bug
+         BEFORE INSERT ON attempt_trace
+         WHEN NEW.run_id = 'run-bookkeeping-bug'
+       BEGIN SELECT RAISE(ABORT, 'constraint failed: attempt_trace'); END;`,
+    );
+
+    expect(() =>
+      resolveChains(db, registry, { maxTransientPasses: 1 }),
+    ).toThrow(/constraint failed: attempt_trace/);
+    expect(resolvedAtOf(db, "run-bookkeeping-bug")).toBeNull();
+    expect(
+      db
+        .query(
+          `SELECT COUNT(*) AS n FROM attempt_trace
+            WHERE run_id = 'run-bookkeeping-bug'`,
+        )
+        .get().n,
+    ).toBe(0);
+  });
+
+  test("records later transient passes and gives up once a bookkeeping lock is released (#1589)", () => {
+    const dir = tmpDir("evrt-chain-bookkeeping-recovery-");
+    const file = path.join(dir, "runtime.db");
+    const db = openDb(file);
+    const writer = openDb(file);
+    db.exec("PRAGMA busy_timeout = 10;");
+    seedCompletedRun(db, {
+      runId: "run-bookkeeping-recovery",
+      agent: "work-scan@1",
+      input: { repo: "wm/bookkeeping-recovery" },
+      artifact: {
+        recommendation: "DISPATCH",
+        repo: "wm/bookkeeping-recovery",
+        plan: [{ ticket: "WM-1590" }],
+      },
+    });
+    failInsertOf(db, "chain-run-bookkeeping-recovery-WM-1590");
+
+    writer.exec("BEGIN IMMEDIATE;");
+    try {
+      expect(
+        resolveChains(db, registry, { maxTransientPasses: 2 }).errors,
+      ).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("chain-bookkeeping: database is locked"),
+        ]),
+      );
+    } finally {
+      writer.exec("ROLLBACK;");
+      writer.close();
+    }
+
+    const first = resolveChains(db, registry, { maxTransientPasses: 2 });
+    expect(first.errors).toHaveLength(1);
+    expect(resolvedAtOf(db, "run-bookkeeping-recovery")).toBeNull();
+    expect(
+      db
+        .query(
+          `SELECT COUNT(*) AS n FROM attempt_trace
+            WHERE run_id = 'run-bookkeeping-recovery'
+              AND json_extract(payload_json, '$.note') = 'chain_transient_error'`,
+        )
+        .get().n,
+    ).toBe(1);
+
+    const last = resolveChains(db, registry, { maxTransientPasses: 2 });
+    expect(last.errors).toEqual(
+      expect.arrayContaining([
+        "chain-run-bookkeeping-recovery: gave up after 2 transient failure(s)",
+      ]),
+    );
+    expect(resolvedAtOf(db, "run-bookkeeping-recovery")).not.toBeNull();
+    expect(chainResolution(db, "run-bookkeeping-recovery")).toMatchObject({
+      reason: "chain_gave_up",
+      passes: 2,
+    });
+    db.close();
   });
 
   test("a transient failure on one sibling keeps the fan-out open and retries only that sibling (#1458)", () => {

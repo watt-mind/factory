@@ -20,7 +20,7 @@ import {
   parseCliJson,
   parseVerdict,
 } from "./lib/grader.mjs";
-import { loadEvalPolicy } from "./lib/policy.mjs";
+import { EvalConfigError, loadEvalPolicy, requirePin } from "./lib/policy.mjs";
 import { compareRuns } from "./lib/results.mjs";
 
 const EVALS_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -548,6 +548,33 @@ describe("--compare", () => {
       expect(report.comparison.added).toEqual(["ticket-spec/green-but-empty"]);
     }));
 
+  test("a passing case present in the previous run and absent from the current one is reported and does not fail the run", () =>
+    withTmpDir("evals-compare-removed-", async (dir) => {
+      const fixture = buildFixture(dir, { cases: twoCases() });
+      const previous = path.join(dir, "previous.json");
+      writeFileSync(
+        previous,
+        JSON.stringify({
+          startedAt: "2026-08-01T00:00:00.000Z",
+          grader: { model: "claude-sonnet-4-6" },
+          cases: [
+            { id: "ticket-spec/hidden-decision", status: "pass" },
+            { id: "ticket-spec/green-but-empty", status: "pass" },
+            { id: "ticket-spec/deleted-case", status: "pass" },
+          ],
+        }),
+      );
+      const result = await run({
+        argv: ["--json", "--compare", previous, "--no-results"],
+        deps: fakeDeps(),
+        ...fixture,
+      });
+      expect(result.code).toBe(EXIT_OK);
+      const report = JSON.parse(result.stdout);
+      expect(report.comparison.removed).toEqual(["ticket-spec/deleted-case"]);
+      expect(report.comparison.regressions).toEqual([]);
+    }));
+
   test("a missing or malformed comparison file is a usage error", () =>
     withTmpDir("evals-compare-bad-", async (dir) => {
       const fixture = buildFixture(dir, { cases: twoCases() });
@@ -653,6 +680,84 @@ describe("the grader pin", () => {
     expect(policy.problem).toContain("must name a model");
   });
 
+  test("block-scalar bodies are skipped instead of becoming policy keys", () => {
+    const policy = loadEvalPolicy({
+      root: "/nowhere",
+      file: "/nowhere/config/policy.yaml",
+      text: `evals:
+  note: |
+    grader:
+      model: evil-judge
+`,
+    });
+    expect(policy.grader).toBeNull();
+    expect(policy.problem).toContain("evals.grader.model is not set");
+  });
+
+  test("block scalars with explicit indentation indicators are skipped too", () => {
+    const policy = loadEvalPolicy({
+      root: "/nowhere",
+      file: "/nowhere/config/policy.yaml",
+      text: `evals:
+  note: |2
+    grader:
+      model: evil-judge
+  other: >2-
+    limits:
+      case_timeout_seconds: 1
+`,
+    });
+    expect(policy.grader).toBeNull();
+    expect(policy.problem).toContain("evals.grader.model is not set");
+    expect(policy.limits.caseTimeoutSeconds).not.toBe(1);
+  });
+
+  test("a limits map with no recognized keys is named as such", () => {
+    expect(() =>
+      loadEvalPolicy({
+        root: "/nowhere",
+        file: "/nowhere/config/policy.yaml",
+        text: `evals:
+  grader:
+    model: claude-sonnet-4-6
+  limits:
+    case_timeout_secs: 10
+`,
+      }),
+    ).toThrow(
+      "/nowhere/config/policy.yaml: evals.limits has no recognized keys (expected: case_timeout_seconds, case_budget_usd, total_seconds, total_budget_usd)",
+    );
+  });
+
+  test("a limits sequence is rejected instead of falling back to defaults", () => {
+    expect(() =>
+      loadEvalPolicy({
+        root: "/nowhere",
+        file: "/nowhere/config/policy.yaml",
+        text: `evals:
+  grader:
+    model: claude-sonnet-4-6
+  limits:
+    - case_timeout_seconds: 10
+`,
+      }),
+    ).toThrow("/nowhere/config/policy.yaml: evals.limits must be a map");
+  });
+
+  test.each(["null", "~"])(
+    "YAML %s is not accepted as a grader model",
+    (model) => {
+      const policy = loadEvalPolicy({
+        root: "/nowhere",
+        file: "/nowhere/config/policy.yaml",
+        text: `evals:\n  grader:\n    model: ${model}\n`,
+      });
+      expect(policy.grader).toBeNull();
+      expect(policy.problem).toContain("must name a model");
+      expect(() => requirePin(policy)).toThrow(/Add this stanza/);
+    },
+  );
+
   test("an absent stanza is reported, never guessed at", () => {
     const policy = loadEvalPolicy({
       root: "/nowhere",
@@ -661,6 +766,32 @@ describe("the grader pin", () => {
     });
     expect(policy.grader).toBeNull();
     expect(policy.problem).toContain("no `evals:` stanza");
+  });
+
+  test("an EvalConfigError from the policy loader is a usage error", async () => {
+    const result = await run({
+      argv: [],
+      policy: null,
+      deps: fakeDeps(),
+      loadPolicy: () => {
+        throw new EvalConfigError("bad limits");
+      },
+    });
+    expect(result.code).toBe(EXIT_USAGE);
+    expect(result.stderr).toContain("evals: bad limits");
+  });
+
+  test("a non-EvalConfigError from the policy loader is rethrown, not reported as exit 2", async () => {
+    await expect(
+      main({
+        argv: [],
+        stdout: sink(),
+        stderr: sink(),
+        loadPolicy: () => {
+          throw new TypeError("parser exploded");
+        },
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
   });
 });
 

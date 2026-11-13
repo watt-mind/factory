@@ -43,6 +43,49 @@ describe("default decision templates (WM-390)", () => {
     );
   });
 
+  test("escalations without a ticket name their PR or run and offer acknowledgement", () => {
+    const cases = [
+      [{ pr: "42", runId: "run_pr" }, "PR 42"],
+      [{ runId: "run_42" }, "run run_42"],
+    ];
+    for (const [refs, subject] of cases) {
+      const request = templateFor("ESCALATED", {
+        producer: "escalation",
+        refs,
+      });
+      expect(validateDecisionRequest(request, { refs })).toEqual({
+        valid: true,
+        errors: [],
+      });
+      expect(request.question).toContain(subject);
+      expect(request.options).toEqual([
+        {
+          id: "dismiss",
+          label: "Acknowledge",
+          effect: "dismiss",
+          tone: "neutral",
+        },
+      ]);
+    }
+  });
+
+  test("merge escalations without tickets name their PR and offer acknowledgement", () => {
+    const refs = { pr: "42", runId: "run_merge" };
+    const request = templateFor("ESCALATED", {
+      producer: "merge-escalation",
+      refs,
+    });
+    expect(validateDecisionRequest(request, { refs })).toEqual({
+      valid: true,
+      errors: [],
+    });
+    expect(request.question).toContain("PR 42");
+    expect(request.options[0]).toMatchObject({
+      label: "Acknowledge",
+      effect: "dismiss",
+    });
+  });
+
   test("a dispatch proposal names the ticket, repo, model, and why-line (WM-896)", () => {
     const refs = {
       proposalId: "prop_2dda1ca8-2469-4aab-8908-79c31a5df55b",

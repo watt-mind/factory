@@ -3,15 +3,21 @@ import {
   cpSync,
   existsSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   mkdirSync,
   writeFileSync,
   renameSync,
+  readdirSync,
+  symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { afterAll, expect, test } from "bun:test";
+import { sha256Hex } from "../event-runtime/lib/canonical.mjs";
+import { until } from "../event-runtime/lib/test-helpers-timing.mjs";
+import { preflightHandoffDependencies } from "../event-runtime/lib/verify.mjs";
 
 const COMMON = path.resolve(import.meta.dir, "worktree-common.sh");
 const WORKTREE_UP = path.resolve(import.meta.dir, "worktree-up.sh");
@@ -19,22 +25,33 @@ const WORKTREE_DAEMONS = path.resolve(import.meta.dir, "worktree-daemons.sh");
 
 // Private port band for this test run (WM-113). Fixed in-band ports (7752,
 // 7772, …) collide with real runtimes, leftover servers, and concurrent CI
-// jobs — EADDRINUSE before the assertion even runs. Instead, probe random
-// even bases in the ephemeral-ish 20000–60000 range until every offset the
-// fixtures bind is free, and pass the band to the scripts via
-// FACTORY_PORT_BASE / FACTORY_PORT_SPAN. No absolute ports below.
+// jobs — EADDRINUSE before the assertion even runs. Keep test ports below the
+// Linux ephemeral range and pass the band to the scripts via
+// FACTORY_PORT_BASE / FACTORY_PORT_SPAN.
 const PORT_SPAN = 200;
+const PORT_PICK_MIN = 10000;
+const PORT_PICK_COUNT = 11000;
 const FIXTURE_OFFSETS = [
   352, 353, 360, 361, 362, 363, 364, 365, 366, 367, 372, 373, 374, 375, 396,
   397,
 ];
+const DELAYED_HEALTH_PORT_SPAN = 3;
+const DELAYED_HEALTH_OFFSETS = Array.from(
+  { length: DELAYED_HEALTH_PORT_SPAN * 2 },
+  (_, offset) => offset,
+);
+// Offsets are contiguous from 0, so the count doubles as the band width
+// (last offset + 1). If DELAYED_HEALTH_OFFSETS ever grows sparse, use
+// Math.max(...DELAYED_HEALTH_OFFSETS) + 1 instead.
+const DELAYED_HEALTH_BAND_WIDTH = DELAYED_HEALTH_OFFSETS.length;
+const delayedHealthFixtureRanges = [];
 
-function offsetsBindable(base) {
-  for (const off of FIXTURE_OFFSETS) {
+function offsetsBindable(base, offsets) {
+  for (const offset of offsets) {
     try {
       const l = Bun.listen({
         hostname: "127.0.0.1",
-        port: base + off,
+        port: base + offset,
         socket: { data() {} },
       });
       l.stop(true);
@@ -45,16 +62,37 @@ function offsetsBindable(base) {
   return true;
 }
 
-function pickPortBase() {
+function overlapsExcludedRange(base, offsets, { start, end }) {
+  const first = base + Math.min(...offsets);
+  const last = base + Math.max(...offsets);
+  return first <= end && start <= last;
+}
+
+function pickFreeBase(offsets, excludedRanges = []) {
   for (let i = 0; i < 50; i++) {
-    // Even base in 20000–59998 so every slot in the band stays even.
-    const candidate = 20000 + 2 * Math.floor(Math.random() * 20000);
-    if (offsetsBindable(candidate)) return candidate;
+    // Even base in 10000–31998 keeps all fixture offsets below 32768.
+    const candidate =
+      PORT_PICK_MIN + 2 * Math.floor(Math.random() * PORT_PICK_COUNT);
+    if (
+      !excludedRanges.some((range) =>
+        overlapsExcludedRange(candidate, offsets, range),
+      ) &&
+      offsetsBindable(candidate, offsets)
+    ) {
+      return candidate;
+    }
   }
   throw new Error("could not find a free port band for worktree-common tests");
 }
 
-const PORT_BASE = pickPortBase();
+function delayedHealthPortBand(portBase) {
+  return {
+    start: portBase,
+    end: portBase + DELAYED_HEALTH_BAND_WIDTH - 1,
+  };
+}
+
+const PORT_BASE = pickFreeBase(FIXTURE_OFFSETS);
 const PORT_RESERVATION_ROOT = mkdtempSync(
   path.join(tmpdir(), "factory-port-reservations-"),
 );
@@ -74,6 +112,48 @@ const BAND_ENV = {
   FACTORY_PORT_SPAN: String(PORT_SPAN),
   FACTORY_PORT_RESERVATION_ROOT: PORT_RESERVATION_ROOT,
 };
+
+function delayedHealthExcludedRanges(
+  issuedRanges = delayedHealthFixtureRanges,
+) {
+  return [
+    { start: PORT_BASE, end: PORT_BASE + 2 * PORT_SPAN - 1 },
+    ...issuedRanges,
+  ];
+}
+
+test("delayed-health exclusions retain every issued fixture port band", () => {
+  const issuedRanges = [
+    delayedHealthPortBand(12000),
+    delayedHealthPortBand(14000),
+  ];
+
+  expect(delayedHealthExcludedRanges(issuedRanges)).toEqual([
+    { start: PORT_BASE, end: PORT_BASE + 2 * PORT_SPAN - 1 },
+    { start: 12000, end: 12005 },
+    { start: 14000, end: 14005 },
+  ]);
+});
+
+test("delayed-health exclusions default arg accumulates fixture bands pushed at runtime", () => {
+  const saved = delayedHealthFixtureRanges.slice();
+  try {
+    delayedHealthFixtureRanges.length = 0;
+    const bandA = delayedHealthPortBand(16000);
+    const bandB = delayedHealthPortBand(18000);
+    delayedHealthFixtureRanges.push(bandA);
+    delayedHealthFixtureRanges.push(bandB);
+
+    expect(delayedHealthExcludedRanges()).toEqual([
+      { start: PORT_BASE, end: PORT_BASE + 2 * PORT_SPAN - 1 },
+      bandA,
+      bandB,
+    ]);
+  } finally {
+    delayedHealthFixtureRanges.length = 0;
+    delayedHealthFixtureRanges.push(...saved);
+  }
+});
 
 afterAll(() => {
   rmSync(PORT_RESERVATION_ROOT, { recursive: true, force: true });
@@ -108,6 +188,24 @@ function command(cmd, cwd, extraEnv = {}) {
     stderr: result.stderr.toString(),
   };
 }
+
+test("loopback helpers fail closed on unset or non-numeric ports", () => {
+  for (const helper of ["port_listening", "health_json"]) {
+    const unset = sh(`${helper} ""`);
+    expect(unset.status).not.toBe(0);
+    expect(unset.stderr).toContain(`${helper}: port argument is unset`);
+    expect(`${unset.stdout}${unset.stderr}`).not.toContain("127.0.0.1:80");
+
+    const nonNumeric = sh(`${helper} not-a-port`);
+    expect(nonNumeric.status).not.toBe(0);
+    expect(nonNumeric.stderr).toContain(
+      `${helper}: port argument must be numeric`,
+    );
+    expect(`${nonNumeric.stdout}${nonNumeric.stderr}`).not.toContain(
+      "127.0.0.1:80",
+    );
+  }
+});
 
 test("run log rotation retains bounded generations and copy-truncates a live owner", () => {
   const r = sh(`
@@ -181,6 +279,150 @@ function runWorktreeUp(fixture, ticket) {
   );
 }
 
+function delayedHealthFixture({
+  webNeverBinds = false,
+  workerExitsImmediately = false,
+} = {}) {
+  const fixture = worktreeUpFixture();
+  // Reserve enough adjacent pairs for allocate_api_port to recover if the
+  // preferred pair is claimed after this probe. Exclude BAND_ENV and every
+  // delayed-health band already issued in this test-file run.
+  const portBase = pickFreeBase(
+    DELAYED_HEALTH_OFFSETS,
+    delayedHealthExcludedRanges(),
+  );
+  delayedHealthFixtureRanges.push(delayedHealthPortBand(portBase));
+  const fakeBun = path.join(fixture.mockBin, "bun");
+  mkdirSync(path.join(fixture.root, "event-runtime", "web"), {
+    recursive: true,
+  });
+  mkdirSync(path.join(fixture.root, "event-runtime", "web", "src"), {
+    recursive: true,
+  });
+  mkdirSync(path.join(fixture.root, "event-runtime", "web", "public"), {
+    recursive: true,
+  });
+  writeFileSync(
+    path.join(fixture.root, "event-runtime", "web", "package.json"),
+    '{"scripts":{"build:fast":"true"}}\n',
+  );
+  writeFileSync(
+    path.join(fixture.root, "event-runtime", "web", "src", "main.js"),
+    "export {};\n",
+  );
+  writeFileSync(
+    path.join(fixture.root, "event-runtime", "web", "public", ".keep"),
+    "\n",
+  );
+  for (const file of [
+    "bun.lock",
+    "vite.config.ts",
+    "tsconfig.json",
+    "index.html",
+  ]) {
+    writeFileSync(path.join(fixture.root, "event-runtime", "web", file), "\n");
+  }
+  if (webNeverBinds) {
+    writeFileSync(
+      path.join(fixture.root, "event-runtime", "web", "serve.mjs"),
+      [
+        'import { writeFileSync } from "node:fs";',
+        "writeFileSync(process.env.FAKE_WEB_PID_FILE, String(process.pid));",
+        "setInterval(() => {}, 1 << 30);",
+      ].join("\n"),
+    );
+  }
+  const webBunCases = webNeverBinds
+    ? `
+  "run build:fast") mkdir -p dist; exit 0 ;;
+`
+    : `
+  "run build:fast") exit 1 ;;
+`;
+  const workerBunCase = workerExitsImmediately
+    ? '"event-runtime/cli.mjs work") exit 1 ;;'
+    : '"event-runtime/cli.mjs work") exec "$REAL_BUN" --eval \'setInterval(() => {}, 1 << 30)\' ;;';
+  writeFileSync(
+    fakeBun,
+    `#!/usr/bin/env bash
+set -euo pipefail
+case "${"${1:-}"} ${"${2:-}"}" in
+  "--eval "|"-e ") exec "$REAL_BUN" "$@" ;;
+  "install "*) exit 0 ;;
+${webBunCases}
+  "event-runtime/cli.mjs serve")
+    exec "$REAL_BUN" --eval '
+      const delay = Number(Bun.env.FAKE_HEALTH_DELAY_MS ?? 2000);
+      setTimeout(() => Bun.serve({
+        hostname: "127.0.0.1",
+        port: Number(Bun.env.FACTORY_EVENT_PORT),
+        fetch() { return Response.json({ env: { home: Bun.env.FACTORY_EVENT_HOME, adapter: "fake" } }); },
+      }), delay);
+      setInterval(() => {}, 1 << 30);
+    '
+    ;;
+  ${workerBunCase}
+  *) exec "$REAL_BUN" "$@" ;;
+esac
+`,
+  );
+  chmodSync(fakeBun, 0o755);
+  git(fixture.root, "add", "event-runtime", "bin");
+  git(fixture.root, "commit", "-qm", "delayed health fixture");
+  git(fixture.root, "push", "-q", "origin", "develop");
+  return { ...fixture, portBase };
+}
+
+function runDelayedHealthWorktreeUp(fixture, timeout, resume = false) {
+  return command(
+    [
+      "bash",
+      "bin/worktree-up.sh",
+      "WM-1763",
+      "--no-seed",
+      ...(resume ? ["--resume"] : []),
+    ],
+    fixture.root,
+    {
+      FACTORY_WT_ROOT: fixture.worktrees,
+      FACTORY_LOCK_DIR: path.join(fixture.root, ".locks", "bun-install"),
+      FACTORY_PORT_BASE: String(fixture.portBase),
+      FACTORY_PORT_SPAN: String(DELAYED_HEALTH_PORT_SPAN),
+      FACTORY_PORT_RESERVATION_ROOT: path.join(fixture.root, ".locks", "ports"),
+      FACTORY_WORKTREE_HEALTH_TIMEOUT_S: String(timeout),
+      FAKE_HEALTH_DELAY_MS: "2000",
+      REAL_BUN: process.execPath,
+      PATH: `${fixture.mockBin}:${TEST_PATH}`,
+    },
+  );
+}
+
+function stopFixtureDaemons(fixture) {
+  const worktree = path.join(fixture.worktrees, "WM-1763");
+  for (const daemon of ["serve", "worker", "web"]) {
+    try {
+      const pid = Number(
+        readFileSync(path.join(worktree, ".factory", "run", `${daemon}.pid`)),
+      );
+      if (Number.isInteger(pid)) process.kill(-pid, "SIGTERM");
+    } catch {
+      // A failed bring-up cleans up daemons itself; absent pidfiles are normal.
+    }
+  }
+}
+
+function daemonPidAlive(worktree, daemon) {
+  try {
+    const pid = Number(
+      readFileSync(path.join(worktree, ".factory", "run", `${daemon}.pid`)),
+    );
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function shAsync(body, extraEnv = {}) {
   const proc = Bun.spawn(["bash", "-c", `source "${COMMON}"\n${body}`], {
     stdout: "pipe",
@@ -211,6 +453,13 @@ function expectPortBindable(port) {
     socket: { data() {} },
   });
   listener.stop(true);
+}
+
+async function waitForPort(port) {
+  await until(
+    `port ${port} to listen`,
+    () => sh(`port_listening ${port}`).status === 0,
+  );
 }
 
 function mockLsofDir() {
@@ -758,7 +1007,7 @@ test("colliding WM-294 and WM-345 startups reserve distinct pairs and stop indep
     expect(rerun.stdout).toContain(`${api1} ${api1 + 1}`);
 
     expect(stop(wt1).status).toBe(0);
-    expect(sh(`port_listening ${api2}`).status).toBe(0);
+    await waitForPort(api2);
     expect(stop(wt2).status).toBe(0);
     expect(sh(`port_listening ${api2}`).status).not.toBe(0);
   } finally {
@@ -1068,6 +1317,168 @@ test("worktree-up fails closed when a matching remote branch diverged after a st
   }
 });
 
+test("worktree timeout settings default only when unset and reject malformed values", () => {
+  const unset = sh(
+    "unset FACTORY_WORKTREE_HEALTH_TIMEOUT_S; validate_worktree_timeout FACTORY_WORKTREE_HEALTH_TIMEOUT_S 55",
+  );
+  expect(unset.status).toBe(0);
+  expect(unset.stdout.trim().split("\n").at(-1)).toBe("55");
+
+  const padded = sh(
+    "FACTORY_WORKTREE_HEALTH_TIMEOUT_S=07; validate_worktree_timeout FACTORY_WORKTREE_HEALTH_TIMEOUT_S 55",
+  );
+  expect(padded.status).toBe(0);
+  expect(padded.stdout.trim().split("\n").at(-1)).toBe("7");
+
+  for (const [name, value] of [
+    ["FACTORY_WORKTREE_HEALTH_TIMEOUT_S", ""],
+    ["FACTORY_WORKTREE_HEALTH_TIMEOUT_S", "0"],
+    ["FACTORY_WORKTREE_HEALTH_TIMEOUT_S", "abc"],
+    ["FACTORY_WORKTREE_WORKER_GRACE_S", "0"],
+    ["FACTORY_WORKTREE_WEB_TIMEOUT_S", "-1"],
+  ]) {
+    const r = sh(
+      `export ${name}=${JSON.stringify(value)}; validate_worktree_timeout ${name} 55`,
+    );
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("worktree_bad_timeout:");
+    expect(r.stderr).toContain(name);
+  }
+});
+
+test("worktree-up uses the elapsed health budget for delayed serve startup", () => {
+  const fixture = delayedHealthFixture();
+  try {
+    const shortBudget = runDelayedHealthWorktreeUp(fixture, 1);
+    expect(shortBudget.status).not.toBe(0);
+    expect(shortBudget.stderr).toContain("control API not healthy after");
+    expect(shortBudget.stderr).toContain("budget 1s");
+    expect(shortBudget.stderr).toMatch(/last curl exit \d+/);
+
+    const defaultBudget = runDelayedHealthWorktreeUp(fixture, 55, true);
+    expect(defaultBudget.status).toBe(0);
+  } finally {
+    stopFixtureDaemons(fixture);
+    rmSync(fixture.root, { recursive: true, force: true });
+    rmSync(fixture.worktrees, { recursive: true, force: true });
+    rmSync(fixture.mockBin, { recursive: true, force: true });
+  }
+});
+
+test("worktree-up rejects an immediately dead worker", () => {
+  const failedFixture = delayedHealthFixture({ workerExitsImmediately: true });
+  const failedWorktree = path.join(failedFixture.worktrees, "WM-1763");
+  try {
+    const failed = runDelayedHealthWorktreeUp(failedFixture, 5);
+    expect(failed.status).not.toBe(0);
+    expect(failed.stderr).toContain("worker died during startup");
+    for (const daemon of ["serve", "web"]) {
+      expect(daemonPidAlive(failedWorktree, daemon)).toBe(false);
+    }
+  } finally {
+    stopFixtureDaemons(failedFixture);
+    rmSync(failedFixture.root, { recursive: true, force: true });
+    rmSync(failedFixture.worktrees, { recursive: true, force: true });
+    rmSync(failedFixture.mockBin, { recursive: true, force: true });
+  }
+});
+
+test("worktree-up accepts a worker that survives the startup grace", () => {
+  const fixture = delayedHealthFixture();
+  try {
+    const result = runDelayedHealthWorktreeUp(fixture, 5);
+    expect(result.status).toBe(0);
+  } finally {
+    stopFixtureDaemons(fixture);
+    rmSync(fixture.root, { recursive: true, force: true });
+    rmSync(fixture.worktrees, { recursive: true, force: true });
+    rmSync(fixture.mockBin, { recursive: true, force: true });
+  }
+});
+
+test("worktree-up falls back when a delayed-health fixture's preferred pair is taken", () => {
+  const fixture = delayedHealthFixture();
+  const ticketChecksum = Number(
+    execFileSync("cksum", { input: "WM-1763", encoding: "utf8" }).split(" ")[0],
+  );
+  const preferredApiPort =
+    fixture.portBase + 2 * (ticketChecksum % DELAYED_HEALTH_PORT_SPAN);
+  const stolenApiPort = Bun.listen({
+    hostname: "127.0.0.1",
+    port: preferredApiPort,
+    socket: { data() {} },
+  });
+  try {
+    const result = runDelayedHealthWorktreeUp(fixture, 5);
+    expect(result.status).toBe(0);
+    const ports = readFileSync(
+      path.join(fixture.worktrees, "WM-1763", ".factory", "run", "ports"),
+      "utf8",
+    );
+    const apiPort = Number(ports.match(/^api=(\d+)$/m)?.[1]);
+    expect(apiPort).toBe(
+      fixture.portBase +
+        ((preferredApiPort - fixture.portBase + 2) %
+          (2 * DELAYED_HEALTH_PORT_SPAN)),
+    );
+  } finally {
+    stolenApiPort.stop(true);
+    stopFixtureDaemons(fixture);
+    rmSync(fixture.root, { recursive: true, force: true });
+    rmSync(fixture.worktrees, { recursive: true, force: true });
+    rmSync(fixture.mockBin, { recursive: true, force: true });
+  }
+});
+
+test("worktree-up times out a live web daemon that never binds and tears down all daemons", () => {
+  const fixture = delayedHealthFixture({ webNeverBinds: true });
+  const webPidFile = path.join(fixture.root, "web-daemon.pid");
+  const worktree = path.join(fixture.worktrees, "WM-1763");
+  try {
+    const started = Date.now();
+    const result = command(
+      ["bash", "bin/worktree-up.sh", "WM-1763", "--no-seed"],
+      fixture.root,
+      {
+        FACTORY_WT_ROOT: fixture.worktrees,
+        FACTORY_LOCK_DIR: path.join(fixture.root, ".locks", "bun-install"),
+        FACTORY_PORT_BASE: String(fixture.portBase),
+        FACTORY_PORT_SPAN: String(DELAYED_HEALTH_PORT_SPAN),
+        FACTORY_PORT_RESERVATION_ROOT: path.join(
+          fixture.root,
+          ".locks",
+          "ports",
+        ),
+        FACTORY_WORKTREE_HEALTH_TIMEOUT_S: "5",
+        FACTORY_WORKTREE_WEB_TIMEOUT_S: "1",
+        FAKE_HEALTH_DELAY_MS: "0",
+        FAKE_WEB_PID_FILE: webPidFile,
+        REAL_BUN: process.execPath,
+        PATH: `${fixture.mockBin}:${TEST_PATH}`,
+      },
+    );
+    // The whole worktree-up run (bun install, daemon spawn, health probe) is
+    // wrapped here; only the web bind wait is bounded by the 1s budget, so
+    // leave generous headroom for a loaded CI box.
+    expect(Date.now() - started).toBeLessThanOrEqual(15_000);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("did not bind reserved port");
+    expect(result.stderr).toContain("budget 1s");
+    expect(readFileSync(webPidFile, "utf8").trim()).toMatch(/^\d+$/);
+    for (const daemon of ["serve", "worker", "web"]) {
+      expect(daemonPidAlive(worktree, daemon)).toBe(false);
+      expect(
+        existsSync(path.join(worktree, ".factory", "run", `${daemon}.pid`)),
+      ).toBe(false);
+    }
+  } finally {
+    stopFixtureDaemons(fixture);
+    rmSync(fixture.root, { recursive: true, force: true });
+    rmSync(fixture.worktrees, { recursive: true, force: true });
+    rmSync(fixture.mockBin, { recursive: true, force: true });
+  }
+});
+
 test("ticket_number extracts numeric ID from valid ticket strings", () => {
   expect(sh("ticket_number OPS-123").stdout.trim()).toBe("123");
   expect(sh("ticket_number CLNT-456").stdout.trim()).toBe("456");
@@ -1219,5 +1630,220 @@ test("web_build_hash computes deterministic sha1 and changes on file rename or c
     );
   } finally {
     rmSync(mockWebDir, { recursive: true, force: true });
+  }
+});
+
+function mockBunInstallBin(succeed) {
+  const dir = mkdtempSync(path.join(tmpdir(), "mock-bun-install-"));
+  writeFileSync(
+    path.join(dir, "bun"),
+    succeed
+      ? `#!/usr/bin/env bash
+if [[ "$1" == "install" ]]; then
+  mkdir -p node_modules/placeholder
+  exit 0
+fi
+echo "unexpected bun invocation: $*" >&2
+exit 1
+`
+      : `#!/usr/bin/env bash
+if [[ "$1" == "install" ]]; then
+  echo "install failed" >&2
+  exit 1
+fi
+echo "unexpected bun invocation: $*" >&2
+exit 1
+`,
+  );
+  chmodSync(path.join(dir, "bun"), 0o755);
+  return dir;
+}
+
+function bunInstallFixture(lockContents = "fixture-lock\n") {
+  const dir = mkdtempSync(path.join(tmpdir(), "bun-lock-stamp-"));
+  writeFileSync(path.join(dir, "package.json"), '{"name":"fixture"}\n');
+  writeFileSync(path.join(dir, "bun.lock"), lockContents);
+  return dir;
+}
+
+test("locked_bun_install stamps node_modules/.bun-lock-sha after a successful install", () => {
+  const target = bunInstallFixture();
+  const mockBin = mockBunInstallBin(true);
+  const lockDir = path.join(tmpdir(), `bun-lock-${process.pid}-${Date.now()}`);
+  try {
+    const r = sh(`locked_bun_install "${target}"`, {
+      PATH: `${mockBin}:${TEST_PATH}`,
+      FACTORY_LOCK_DIR: lockDir,
+    });
+    expect(r.status).toBe(0);
+    const stamp = path.join(target, "node_modules", ".bun-lock-sha");
+    expect(existsSync(stamp)).toBe(true);
+    expect(readFileSync(stamp, "utf8").trim()).toBe(
+      sha256Hex(readFileSync(path.join(target, "bun.lock"))),
+    );
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
+test("locked_bun_install removes a stale stamp when install fails", () => {
+  const lockContents = "fixture-lock\n";
+  const target = bunInstallFixture(lockContents);
+  mkdirSync(path.join(target, "node_modules"));
+  writeFileSync(
+    path.join(target, "node_modules", ".bun-lock-sha"),
+    `${sha256Hex(lockContents)}\n`,
+  );
+  const mockBin = mockBunInstallBin(false);
+  const lockDir = path.join(
+    tmpdir(),
+    `bun-lock-fail-${process.pid}-${Date.now()}`,
+  );
+  try {
+    const r = sh(`locked_bun_install "${target}"`, {
+      PATH: `${mockBin}:${TEST_PATH}`,
+      FACTORY_LOCK_DIR: lockDir,
+    });
+    expect(r.status).not.toBe(0);
+    expect(existsSync(path.join(target, "node_modules", ".bun-lock-sha"))).toBe(
+      false,
+    );
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
+test("locked_bun_install does not create node_modules when install is a no-op success", () => {
+  const target = bunInstallFixture();
+  const mockBin = mkdtempSync(path.join(tmpdir(), "mock-bun-noop-"));
+  writeFileSync(
+    path.join(mockBin, "bun"),
+    `#!/usr/bin/env bash
+if [[ "$1" == "install" ]]; then
+  exit 0
+fi
+echo "unexpected bun invocation: $*" >&2
+exit 1
+`,
+  );
+  chmodSync(path.join(mockBin, "bun"), 0o755);
+  const lockDir = path.join(
+    tmpdir(),
+    `bun-lock-noop-${process.pid}-${Date.now()}`,
+  );
+  try {
+    const r = sh(`locked_bun_install "${target}"`, {
+      PATH: `${mockBin}:${TEST_PATH}`,
+      FACTORY_LOCK_DIR: lockDir,
+    });
+    expect(r.status).toBe(0);
+    expect(existsSync(path.join(target, "node_modules"))).toBe(false);
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
+// PATH identical to TEST_PATH except that every sha256sum/shasum is hidden,
+// so write_bun_lock_stamp has no hasher to run.
+function pathWithoutShaTools() {
+  const dir = mkdtempSync(path.join(tmpdir(), "no-sha-path-"));
+  const seen = new Set();
+  for (const entry of TEST_PATH.split(":")) {
+    if (!entry || !existsSync(entry)) continue;
+    let names;
+    try {
+      names = readdirSync(entry);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (name === "sha256sum" || name === "shasum" || seen.has(name)) continue;
+      seen.add(name);
+      try {
+        symlinkSync(path.join(entry, name), path.join(dir, name));
+      } catch {
+        // unreadable or racing entry: skip, first-wins semantics preserved
+      }
+    }
+  }
+  return dir;
+}
+
+test("locked_bun_install succeeds without a stamp when no sha256 tool is on PATH", () => {
+  const lockContents = "fixture-lock\n";
+  const target = bunInstallFixture(lockContents);
+  mkdirSync(path.join(target, "node_modules"));
+  // A stale stamp from a previous install must not survive a hasher-less run.
+  writeFileSync(
+    path.join(target, "node_modules", ".bun-lock-sha"),
+    `${sha256Hex("old-lock\n")}\n`,
+  );
+  const mockBin = mockBunInstallBin(true);
+  const noShaPath = pathWithoutShaTools();
+  const lockDir = path.join(
+    tmpdir(),
+    `bun-lock-nosha-${process.pid}-${Date.now()}`,
+  );
+  try {
+    const probe = sh("command -v sha256sum || command -v shasum", {
+      PATH: `${mockBin}:${noShaPath}`,
+    });
+    expect(probe.status).not.toBe(0);
+    const r = sh(`set -e; locked_bun_install "${target}"; echo installed-ok`, {
+      PATH: `${mockBin}:${noShaPath}`,
+      FACTORY_LOCK_DIR: lockDir,
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("installed-ok");
+    expect(r.stderr).toContain("bun lock stamp skipped");
+    expect(existsSync(path.join(target, "node_modules", "placeholder"))).toBe(
+      true,
+    );
+    expect(existsSync(path.join(target, "node_modules", ".bun-lock-sha"))).toBe(
+      false,
+    );
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
+    rmSync(noShaPath, { recursive: true, force: true });
+    rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
+test("preflightHandoffDependencies reports installed:false for a shell-stamped directory", () => {
+  const target = bunInstallFixture();
+  const mockBin = mockBunInstallBin(true);
+  const lockDir = path.join(
+    tmpdir(),
+    `bun-lock-preflight-${process.pid}-${Date.now()}`,
+  );
+  try {
+    const r = sh(`locked_bun_install "${target}"`, {
+      PATH: `${mockBin}:${TEST_PATH}`,
+      FACTORY_LOCK_DIR: lockDir,
+    });
+    expect(r.status).toBe(0);
+
+    let installs = 0;
+    const result = preflightHandoffDependencies({
+      worktreePath: target,
+      installer: () => {
+        installs += 1;
+        return { passed: true, exitCode: 0, output: "unexpected" };
+      },
+    });
+    expect(result.passed).toBe(true);
+    expect(result.installed).toBe(false);
+    expect(installs).toBe(0);
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
+    rmSync(lockDir, { recursive: true, force: true });
   }
 });

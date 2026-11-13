@@ -17,7 +17,7 @@
  * watched like any other.
  */
 import { admitEvent } from "./intake.mjs";
-import { tx } from "./db.mjs";
+import { isBusyError, txImmediate } from "./db.mjs";
 
 export const CHAIN_SOURCE = "chain";
 
@@ -43,6 +43,20 @@ export class ChainTerminalError extends Error {
     super(message);
     this.name = "ChainTerminalError";
     this.reason = reason;
+  }
+}
+
+/**
+ * A well-formed path whose value is simply absent. Distinct from a structural
+ * defect (unknown root, malformed expression): for a `whenPath` this is how a
+ * rule says "condition not met", so the edge is skipped rather than the chain
+ * terminated. It stays a ChainTerminalError so input mappings — which require
+ * every mapped path to resolve — keep terminating as before.
+ */
+export class ChainPathAbsentError extends ChainTerminalError {
+  constructor(message) {
+    super(message);
+    this.name = "ChainPathAbsentError";
   }
 }
 
@@ -75,14 +89,14 @@ function resolvePath(expr, context) {
   let value = context[root];
   for (const segment of segments) {
     if (value === null || typeof value !== "object" || !(segment in value)) {
-      throw new ChainTerminalError(
+      throw new ChainPathAbsentError(
         `chain input path "${expr}" resolves to nothing`,
       );
     }
     value = value[segment];
   }
   if (value === undefined)
-    throw new ChainTerminalError(
+    throw new ChainPathAbsentError(
       `chain input path "${expr}" resolves to nothing`,
     );
   return value;
@@ -245,14 +259,21 @@ export function resolveChains(
                 }
                 return [key, candidate];
               })
-              .filter(([, candidate]) => {
+              .filter(([key, candidate]) => {
                 if (candidate.whenPath === undefined) return true;
                 try {
                   return (
                     resolvePath(candidate.whenPath, selectionContext) !== null
                   );
-                } catch {
-                  return false;
+                } catch (err) {
+                  // A well-formed path with no value is the rule's own way of
+                  // saying "condition not met" — skip the edge. Only a
+                  // structural defect terminates the chain.
+                  if (err instanceof ChainPathAbsentError) return false;
+                  throw new ChainTerminalError(
+                    `chain edge "${key}" whenPath "${candidate.whenPath}" failed: ${err.message}`,
+                    err.reason,
+                  );
                 }
               });
           })();
@@ -486,26 +507,40 @@ export function resolveChains(
       resolvedAt,
       JSON.stringify({ note, ...payload }),
     );
-  tx(db, () => {
-    for (const { row, error } of transient) {
-      const passes = countTransient.get(row.run_id, CHAIN_TRANSIENT_NOTE).n + 1;
-      record(row, CHAIN_TRANSIENT_NOTE, { pass: passes, error });
-      if (passes >= maxTransientPasses) {
-        outcome.errors.push(
-          `chain-${row.run_id}: gave up after ${passes} transient failure(s)`,
-        );
-        resolved.push({
-          row,
-          reason: "chain_gave_up",
-          detail: { passes, error },
-        });
+  // Messages produced inside the transaction body are held back until it
+  // commits: a mid-body throw rolls the writes back, so a "gave up" line
+  // must not be reported for a marker that never landed.
+  const committed = [];
+  try {
+    txImmediate(db, () => {
+      for (const { row, error } of transient) {
+        const passes =
+          countTransient.get(row.run_id, CHAIN_TRANSIENT_NOTE).n + 1;
+        record(row, CHAIN_TRANSIENT_NOTE, { pass: passes, error });
+        if (passes >= maxTransientPasses) {
+          committed.push(
+            `chain-${row.run_id}: gave up after ${passes} transient failure(s)`,
+          );
+          resolved.push({
+            row,
+            reason: "chain_gave_up",
+            detail: { passes, error },
+          });
+        }
       }
-    }
-    for (const { row, reason, detail } of resolved) {
-      markResolved.run(resolvedAt, row.run_id);
-      record(row, CHAIN_RESOLVED_NOTE, { reason, ...detail });
-    }
-  });
+      for (const { row, reason, detail } of resolved) {
+        markResolved.run(resolvedAt, row.run_id);
+        record(row, CHAIN_RESOLVED_NOTE, { reason, ...detail });
+      }
+    });
+    outcome.errors.push(...committed);
+  } catch (err) {
+    // Only a lock collision is worth retrying on the next tick; a permanent
+    // bookkeeping bug (constraint violation, TypeError) must surface instead
+    // of becoming an unbounded per-tick retry.
+    if (!isBusyError(err)) throw err;
+    outcome.errors.push(`chain-bookkeeping: ${err.message}`);
+  }
   return outcome;
 }
 

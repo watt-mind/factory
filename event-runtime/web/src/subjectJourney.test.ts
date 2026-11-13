@@ -2,11 +2,13 @@ import { describe, expect, test } from "bun:test";
 import {
   buildTicketJourney,
   formatDurationMs,
+  normalizeTicketId,
   parsePrRef,
   prNumbersIn,
   scanVerdictFor,
   selectPrSource,
   subjectJourney,
+  TICKET_ID_PATTERN,
   ticketIdsIn,
   type JourneyEvent,
   type JourneyRun,
@@ -304,6 +306,24 @@ describe("ticket journey helpers", () => {
       ticketIdsIn({ subject: "wm-542", payload: { ticket: "WM-544" } }),
     ).toEqual(["WM-542", "WM-544"]);
     expect(ticketIdsIn({ note: "mentions WM-999 in prose" })).toEqual([]);
+  });
+
+  test("accepts and canonically normalizes GitHub and Linear ticket IDs", () => {
+    expect(TICKET_ID_PATTERN.test("WM-542")).toBe(true);
+    expect(TICKET_ID_PATTERN.test("Watt-Mind/Factory#1572")).toBe(true);
+    expect(TICKET_ID_PATTERN.test("watt-mind/factory#0")).toBe(false);
+    expect(TICKET_ID_PATTERN.test("watt-mind/factory#1572 extra")).toBe(false);
+    expect(normalizeTicketId("wm-542")).toBe("WM-542");
+    expect(normalizeTicketId("Watt-Mind/Factory#1572")).toBe(
+      "watt-mind/factory#1572",
+    );
+    expect(
+      ticketIdsIn({
+        ticket: "Watt-Mind/Factory#1572",
+        issue: "watt-mind/factory#1573",
+        note: "mentions watt-mind/factory#1574 in prose",
+      }),
+    ).toEqual(["watt-mind/factory#1572", "watt-mind/factory#1573"]);
   });
 
   test("humanizes known and unknown reason codes", () => {

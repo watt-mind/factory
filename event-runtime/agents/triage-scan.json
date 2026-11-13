@@ -18,7 +18,7 @@
   "limits": { "timeout_seconds": 900, "attempts": 1 },
   "mutating": false,
   "pins": {
-    "agents/triage-scan.md": "sha256:464b324d2a2ef543542f6c1aa99de833dc48e933610856c9907b0cfe37cfe0ec",
+    "agents/triage-scan.md": "sha256:df4608545ce8a1d564785e6030c8fbd4514c7ef770e91a77f3322b854317c14d",
     "schemas/triage-scan.input.json": "sha256:0c01941a0901e4094caa5f79a9c14d1f22c2ac06c15981bdbd0dde9d85ebf937",
     "schemas/triage-scan.output.json": "sha256:7f9776d3e3c99cd59beb04a04fc15286bf63ecf33c1f790152c55b5a29ef8bcb"
   }

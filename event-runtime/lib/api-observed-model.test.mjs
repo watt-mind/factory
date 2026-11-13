@@ -5,6 +5,7 @@ import {
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { clearObservedModelCache, handleRunApiRoute } from "./api-runs.mjs";
 import {
+  CONTROL_TOKEN,
   GH_SECRET,
   PV,
   SECRET,
@@ -167,7 +168,7 @@ describe("model surfacing on run views (WM-221)", () => {
     const { db, server, port, close } = await makeServer({
       env: { name: "test", home },
     });
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       await client.replay(envelope({ eventId: "model-1" }));
       planAdmittedEvents(db, registry, {

@@ -14,14 +14,17 @@ import { pruneWorkers } from "./workers.mjs";
  *
  * Every per-row failure is logged (so a poisoned row skipped tick after tick
  * is visible in the serve log, whose caller discards the return value) AND
- * collected as `{ runId, error }` with the original Error intact, so callers
- * that do inspect the result keep stack and cause.
+ * collected as `{ runId, error }` with the original Error intact. A worker
+ * pruning failure is similarly collected as
+ * `{ runId: null, stage: "prune_workers", error }`, so callers that do inspect
+ * the result keep stack and cause without losing successful reaps.
  */
 export function reapExpiredLeases(db, opts = {}) {
+  const { pruneWorkers: workerPruner = pruneWorkers, ...reapOpts } = opts;
   const errors = [];
   const log = opts.log ?? ((line) => console.error(line));
   const reaped = reapLeases(db, {
-    ...opts,
+    ...reapOpts,
     onError: ({ runId, error }) => {
       errors.push({ runId, error });
       log(
@@ -29,8 +32,11 @@ export function reapExpiredLeases(db, opts = {}) {
       );
     },
   });
-  pruneWorkers(db, opts);
+  try {
+    workerPruner(db, reapOpts);
+  } catch (error) {
+    errors.push({ runId: null, stage: "prune_workers", error });
+    log(`[reaper] worker prune skipped: ${error?.message ?? String(error)}`);
+  }
   return { reaped, errors };
 }
-
-export { pruneWorkers };

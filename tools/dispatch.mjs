@@ -13,6 +13,7 @@
  */
 import { parseArgs } from "node:util";
 import { unauthorizedMessage } from "../event-runtime/lib/client.mjs";
+import { ALL_TERMINAL_STATES } from "../event-runtime/lib/lifecycle.mjs";
 
 export const DEFAULT_PORT = 7381;
 export const DEFAULT_TIMEOUT_MS = 30_000;
@@ -24,13 +25,7 @@ export const EXIT = {
   RUN_NOT_COMPLETED: 2,
   NO_PROPOSAL: 3,
 };
-const TERMINAL_STATES = new Set([
-  "COMPLETED",
-  "FAILED",
-  "CANCELLED",
-  "REFUSED",
-  "TIMED_OUT",
-]);
+export const TERMINAL_STATES = ALL_TERMINAL_STATES;
 
 export function resolvePort(env = process.env) {
   return env.FACTORY_EVENT_PORT ? Number(env.FACTORY_EVENT_PORT) : DEFAULT_PORT;

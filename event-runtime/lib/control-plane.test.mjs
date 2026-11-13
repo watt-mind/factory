@@ -579,10 +579,12 @@ for (const [name, make] of IMPLEMENTATIONS) {
       const names = (await cp.getTicket("WM-1")).labels.map((l) => l.name);
       expect(names).toContain(AGENT_READY_LABEL);
       expect(names).toContain("type:bug");
-      await cp.setLabels("WM-1", { remove: [AGENT_READY_LABEL] });
-      expect((await cp.getTicket("WM-1")).labels.map((l) => l.name)).toEqual([
-        "type:bug",
-      ]);
+      await expect(
+        cp.setLabels("WM-1", { remove: [AGENT_READY_LABEL] }),
+      ).rejects.toThrow(/refusing to remove ai:agent-ready/);
+      expect(
+        (await cp.getTicket("WM-1")).labels.map((l) => l.name).sort(),
+      ).toEqual([AGENT_READY_LABEL, "type:bug"].sort());
     });
 
     test("setLabels rejects unknown type:* values before mutating", async () => {
@@ -649,6 +651,28 @@ for (const [name, make] of IMPLEMENTATIONS) {
       expect(t.description).toContain("## Owned Paths");
       expect(t.description).toContain("## Verification");
       expect(t.description.match(/## Verification/g)).toHaveLength(1);
+    });
+
+    test("replaceDetail replaces the description exactly", async () => {
+      const { cp } = make();
+      const replacement = "# Replacement\n\nThis is the complete body.";
+      await expect(
+        cp.replaceDetail("WM-1", replacement),
+      ).resolves.toBeUndefined();
+      expect((await cp.getTicket("WM-1")).description).toBe(replacement);
+    });
+
+    test("replaceDetail rejects invalid bodies", async () => {
+      const { cp } = make();
+      await expect(cp.replaceDetail("WM-1", "")).rejects.toThrow(
+        ControlPlaneError,
+      );
+      await expect(cp.replaceDetail("WM-1", null)).rejects.toThrow(
+        ControlPlaneError,
+      );
+      await expect(cp.replaceDetail("WM-999", "replacement")).rejects.toThrow(
+        ControlPlaneError,
+      );
     });
 
     test("raw is the escape hatch; unknown queries throw", async () => {

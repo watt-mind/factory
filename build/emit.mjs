@@ -529,6 +529,19 @@ function floorStatus({ preferRunning = false } = {}) {
   });
 }
 
+/**
+ * The current checkout is CI's one hermetic floor-delivery target. Unlike the
+ * configured-repository report below, it never follows config/repos.yaml to a
+ * sibling or the operator's live checkout.
+ */
+function runningFloorStatus() {
+  const agents = path.join(ROOT, "AGENTS.md");
+  if (!existsSync(agents)) return { agents, state: "missing" };
+  const body = read(agents);
+  if (!body.includes(FLOOR_BEGIN)) return { agents, state: "missing" };
+  return { agents, state: floorIsCurrent(body, floor) ? "ok" : "stale" };
+}
+
 if (process.argv.includes("--sync-floor")) {
   console.log("\nsyncing the floor into each configured repo's AGENTS.md:");
   // Writes target the running checkout for this repository, never the
@@ -592,6 +605,24 @@ if (CHECK) {
   }
   console.log(`ok — ${expected.length} generated files match shared/`);
 
+  // CI must reject a factory commit whose own committed floor splice is stale.
+  // This is intentionally independent of config/repos.yaml: that file names
+  // operator-local sibling checkouts, which are useful to report but cannot
+  // make a hermetic factory CI run pass or fail.
+  const runningFloor = runningFloorStatus();
+  let checkExitCode = 0;
+  if (runningFloor.state !== "ok") {
+    console.error(
+      `Current checkout floor is ${runningFloor.state}: ${rel(runningFloor.agents)}`,
+    );
+    console.error(
+      "Run `bun build/emit.mjs --sync-floor` and commit AGENTS.md.",
+    );
+    checkExitCode = 1;
+  } else {
+    console.log("ok — current checkout AGENTS.md carries the current floor");
+  }
+
   // A reproducible dist/ proves the floor was WRITTEN, not that it was
   // DELIVERED. Checking only the former passed green on 2026-08-04 while all
   // four repos carried no floor at all — the check was measuring the half that
@@ -618,7 +649,7 @@ if (CHECK) {
       `floor delivery: ${repos.length} repo(s) carrying the current floor`,
     );
   }
-  process.exit(0);
+  process.exit(checkExitCode);
 }
 
 console.log(

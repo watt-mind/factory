@@ -200,7 +200,7 @@ const HISTORY_DISPLAY: DisplayConfig<Proposal> = {
       key: "status",
       label: "Status",
       get: (p) => p.status,
-      order: ["approved", "rejected", "superseded", "resolved"],
+      order: ["approved", "rejected", "expired", "superseded", "resolved"],
       hue: PROPOSAL_STATUS_HUES,
     },
     { key: "agent", label: "Agent", get: (p) => p.agent ?? "" },
@@ -509,9 +509,13 @@ export function Proposals({
     });
   };
 
+  // Bulk actions target exactly the rows on screen. `scoped` (tab + expired
+  // chip + repo context) is not what the operator sees once a filter query is
+  // typed — `visible` is — so scoping the bulk set to `scoped` would still act
+  // on filter-hidden selections (#1899, same bug class as #1872).
   const selectedRows = useMemo(
-    () => rows.filter((p) => selectedIds.has(p.id)),
-    [rows, selectedIds],
+    () => visible.filter((p) => selectedIds.has(p.id)),
+    [visible, selectedIds],
   );
   const approvableSelected = useMemo(
     () =>
@@ -568,7 +572,13 @@ export function Proposals({
         return next;
       });
     } else {
-      setSelectedIds(new Set());
+      // Only the rows this action actually touched lose their selection;
+      // selections the scope/filter excluded are the operator's, not ours.
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        for (const id of processed) next.delete(id);
+        return next;
+      });
     }
     if (ok) notify(`Approved ${ok} proposal${ok === 1 ? "" : "s"}`, "ok");
     if (err)
@@ -581,7 +591,9 @@ export function Proposals({
     setBulkRejecting(true);
     let ok = 0;
     let err = 0;
+    const processed = new Set<string>();
     for (const p of rejectableSelected) {
+      processed.add(p.id);
       try {
         await api.reject(p.id, why);
         ok++;
@@ -590,7 +602,11 @@ export function Proposals({
       }
     }
     invalidate();
-    setSelectedIds(new Set());
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      for (const id of processed) next.delete(id);
+      return next;
+    });
     setBulkRejecting(false);
     setBulkRejectOpen(false);
     setBulkReason("");
@@ -975,7 +991,11 @@ export function Proposals({
         return;
       }
 
-      if (e.shiftKey && e.key.toLowerCase() === "a" && selectedIds.size > 0) {
+      if (
+        e.shiftKey &&
+        e.key.toLowerCase() === "a" &&
+        selectedRows.length > 0
+      ) {
         if (!connected || bulkApproving || approvableSelected.length === 0)
           return;
         e.preventDefault();
@@ -983,7 +1003,11 @@ export function Proposals({
         return;
       }
 
-      if (e.shiftKey && e.key.toLowerCase() === "x" && selectedIds.size > 0) {
+      if (
+        e.shiftKey &&
+        e.key.toLowerCase() === "x" &&
+        selectedRows.length > 0
+      ) {
         if (!connected || bulkRejecting || rejectableSelected.length === 0)
           return;
         e.preventDefault();
@@ -1002,7 +1026,7 @@ export function Proposals({
     connected,
     rejectableSelected,
     sel,
-    selectedIds.size,
+    selectedRows.length,
     tab,
   ]);
 
@@ -1934,9 +1958,9 @@ export function Proposals({
         </Dialog>
       )}
 
-      {selectedIds.size > 0 && tab === "open" && (
+      {selectedRows.length > 0 && tab === "open" && (
         <BulkActionBar
-          count={selectedIds.size}
+          count={selectedRows.length}
           onClear={() => setSelectedIds(new Set())}
         >
           <Button
@@ -1966,7 +1990,7 @@ export function Proposals({
               setBulkReason("");
             }}
           >
-            Reject selected ({selectedIds.size})
+            Reject selected ({selectedRows.length})
             <span
               className="mono ml-1 text-xs text-(--text-faint)"
               aria-hidden="true"
@@ -2069,6 +2093,21 @@ export function Proposals({
             Provide a rejection reason for all {rejectableSelected.length}{" "}
             selected proposals:
           </div>
+          <ul className="mb-3 max-h-[38vh] space-y-1 overflow-auto text-[12px]">
+            {rejectableSelected.map((p) => (
+              <li
+                key={p.id}
+                className="rounded-md border border-(--border) bg-(--surface-0) px-2.5 py-1.5"
+              >
+                <span className="font-medium">{p.agent ?? p.id}</span>
+                {p.agent && (
+                  <span className="ml-2 font-mono text-(--text-dim)">
+                    {p.id}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
           <div className="mb-3 flex flex-wrap gap-1.5">
             {CANNED_REJECTION_REASONS.map((tmpl) => (
               <PrimitiveButton

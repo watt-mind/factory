@@ -55,6 +55,24 @@ describe("SupplyStrip (WM-824)", () => {
     );
   });
 
+  test("uses GitHub repository links for GitHub-plane teams", () => {
+    const supply: TicketSupply = {
+      repos: [repo({ name: "factory", team: "watt-mind/factory", triage: 1 })],
+      recommendedAction: "triage",
+    };
+    const view = render(
+      <SupplyStrip
+        supply={supply}
+        now={Date.parse("2026-08-20T18:00:00.000Z")}
+        onFilter={() => {}}
+        onRefresh={() => {}}
+      />,
+    );
+    expect(
+      view.getByRole("link", { name: "factory" }).getAttribute("href"),
+    ).toBe("https://github.com/watt-mind/factory/issues?q=is%3Aopen");
+  });
+
   test("renders a compact matrix, Refresh, and collapsed unscanned repos", () => {
     const clicks: { repo: string; state: string }[] = [];
     const supply: TicketSupply = {

@@ -7,6 +7,7 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit && vite build",
     "build:fast": "vite build",
+    "lint": "eslint src",
     "test": "bun test",
     "test:e2e": "bun add --no-save --exact \"@playwright/test@$(bun e2e/playwright-version.mjs)\" && bun playwright test --config playwright.config.ts"
   },

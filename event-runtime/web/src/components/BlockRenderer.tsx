@@ -111,6 +111,22 @@ function FormattedValue({
           {value.text}
         </a>
       );
+    case "links":
+      return (
+        <ul className="m-0 list-none p-0">
+          {value.items.map((item, index) => (
+            <li key={`${item.text}:${index}`} className="break-all py-px">
+              {item.href ? (
+                <a href={item.href} className="text-(--accent) hover:underline">
+                  {item.text}
+                </a>
+              ) : (
+                <span>{item.text}</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      );
     case "chip": {
       const href = value.chip === "run" ? runHref(value.id) : value.href;
       if (!href) return <span className="mono">{value.text}</span>;

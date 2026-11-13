@@ -1,0 +1,29 @@
+{
+  "editorial/research@1": {
+    "recommendationField": "outcome",
+    "edges": {
+      "RESEARCHED": {
+        "eventType": "editorial.draft.requested",
+        "input": {
+          "siteId": "$.input.siteId",
+          "articleId": "$.input.articleId",
+          "cellEndpoint": "$.input.cellEndpoint"
+        }
+      }
+    }
+  },
+  "editorial/draft@1": {
+    "recommendationField": "outcome",
+    "edges": {
+      "DRAFTED": {
+        "eventType": "editorial.review.requested",
+        "input": {
+          "siteId": "$.input.siteId",
+          "articleId": "$.input.articleId",
+          "cellEndpoint": "$.input.cellEndpoint",
+          "revisionHash": "$.artifact.revisionHash"
+        }
+      }
+    }
+  }
+}

@@ -166,6 +166,21 @@ die() {
 info() { printf '\033[36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[33mwarn:\033[0m %s\n' "$*" >&2; }
 
+# Bring-up waits are host-dependent: first boot migrations and validation can
+# take substantially longer than a warmed runtime. Keep the startup budgets typed
+# and shared by every invocation mode before any worktree side effects begin.
+validate_worktree_timeout() { # <environment variable name> <default>
+  local name="$1" default="$2" value
+  value="${!name-$default}"
+  [[ "$value" =~ ^[0-9]+$ && "$value" =~ [1-9] ]] \
+    || die "worktree_bad_timeout: $name must be a positive integer (got '$value')"
+  printf '%d\n' "$((10#$value))"
+}
+
+WORKTREE_HEALTH_TIMEOUT_S="$(validate_worktree_timeout FACTORY_WORKTREE_HEALTH_TIMEOUT_S 55)"
+WORKTREE_WORKER_GRACE_S="$(validate_worktree_timeout FACTORY_WORKTREE_WORKER_GRACE_S 1)"
+WORKTREE_WEB_TIMEOUT_S="$(validate_worktree_timeout FACTORY_WORKTREE_WEB_TIMEOUT_S 5)"
+
 # Resolve a path without requiring its final component to exist. GNU `realpath
 # -m` offers this, but BSD/macOS realpath does not support `-m`. The parent
 # must exist here (as it does for the config paths below); `cd -P` both makes
@@ -793,16 +808,28 @@ listen_tcp_port() { # <pidfile>
   printf '%s' "$port"
 }
 
+require_loopback_port() { # <caller> <port>
+  local caller="$1" port="${2:-}"
+  [[ -n "$port" ]] || die "$caller: port argument is unset"
+  [[ "$port" =~ ^[0-9]+$ ]] || die "$caller: port argument must be numeric (got '$port')"
+  (( 10#$port >= 1 && 10#$port <= 65535 )) \
+    || die "$caller: port argument must be between 1 and 65535 (got '$port')"
+}
+
 port_listening() { # <port>
-  (exec 3<>/dev/tcp/127.0.0.1/"$1") 2>/dev/null && { exec 3>&- 3<&-; return 0; }
+  local port="${1:-}"
+  require_loopback_port port_listening "$port"
+  (exec 3<>/dev/tcp/127.0.0.1/"$port") 2>/dev/null && { exec 3>&- 3<&-; return 0; }
   if command -v lsof >/dev/null 2>&1; then
-    lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1 && return 0
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1 && return 0
   fi
   return 1
 }
 
 health_json() { # <port>
-  curl -sf -m 1 "http://127.0.0.1:$1/health" 2>/dev/null || true
+  local port="${1:-}"
+  require_loopback_port health_json "$port"
+  curl -sf -m 1 "http://127.0.0.1:$port/health" 2>/dev/null || true
 }
 
 # Extract env.<field> from a /health JSON body. Empty if missing/null/unparseable.
@@ -1060,6 +1087,51 @@ rename_dir_atomic() { # <src> <dst>
   fi
 }
 
+# Write node_modules/.bun-lock-sha as the lowercase hex sha256 of bun.lock
+# (same bytes preflightHandoffDependencies trims after sha256Hex(readFileSync)).
+# A matching stamp lets the handoff preflight skip a redundant frozen install
+# (gh-1694). Never mkdir node_modules: an empty tree would shadow Bun's
+# resolver (WM-115 baseline-red stubs `bun install` as a no-op). Missing
+# lockfile, missing/empty node_modules, or hasher failure leaves no stamp.
+write_bun_lock_stamp() { # <dir>
+  local dir="$1"
+  local lockfile="$dir/bun.lock"
+  local nm="$dir/node_modules"
+  local stamp="$nm/.bun-lock-sha"
+  local digest="" entry populated=0
+  if [[ ! -f "$lockfile" || ! -d "$nm" ]]; then
+    rm -f "$stamp"
+    return 0
+  fi
+  for entry in "$nm"/* "$nm"/.[!.]*; do
+    [[ -e "$entry" || -L "$entry" ]] || continue
+    [[ "$(basename -- "$entry")" == ".bun-lock-sha" ]] && continue
+    populated=1
+    break
+  done
+  if [[ "$populated" -eq 0 ]]; then
+    rm -f "$stamp"
+    return 0
+  fi
+  # A stale stamp must never survive a hasher/write failure: the preflight
+  # would otherwise trust it and skip a needed install. The non-zero status is
+  # advisory only (callers warn, never fail the install on it).
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest=$(sha256sum -- "$lockfile" 2>/dev/null) || { rm -f "$stamp"; return 1; }
+  elif command -v shasum >/dev/null 2>&1; then
+    digest=$(shasum -a 256 -- "$lockfile" 2>/dev/null) || { rm -f "$stamp"; return 1; }
+  else
+    rm -f "$stamp"
+    return 1
+  fi
+  digest=${digest%% *}
+  if [[ -z "$digest" ]] || ! printf '%s\n' "${digest,,}" > "$stamp" 2>/dev/null; then
+    rm -f "$stamp"
+    return 1
+  fi
+  return 0
+}
+
 # File-locked bun install with retry on SQLITE_BUSY (OPS-322).
 # Prevents concurrent worktree bring-ups from racing on bun's global cache DB.
 locked_bun_install() { # <dir>
@@ -1164,7 +1236,12 @@ locked_bun_install() { # <dir>
   [[ -n "$previous_exit_trap" ]] && eval "$previous_exit_trap"
   [[ -n "$previous_int_trap" ]] && eval "$previous_int_trap"
   [[ -n "$previous_term_trap" ]] && eval "$previous_term_trap"
-  if [[ $code -ne 0 ]]; then
+  if [[ $code -eq 0 ]]; then
+    # Cosmetic: a missing hasher or unwritable stamp must not fail a
+    # successful install (set -e callers such as worktree-up.sh).
+    write_bun_lock_stamp "$target_dir" || warn "bun lock stamp skipped for $target_dir (no sha256 tool or unwritable node_modules)"
+  else
+    rm -f "$target_dir/node_modules/.bun-lock-sha"
     printf '%s\n' "$out" >&2
   fi
   return $code

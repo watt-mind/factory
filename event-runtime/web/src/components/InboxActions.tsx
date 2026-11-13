@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { issueUrl } from "../trackerLinks";
 import type { AdmittedEvent, InboxItem } from "../types";
 import { Button, JumpLink, VerbError } from "./ui";
 
@@ -204,9 +205,7 @@ export function InboxActions({
       await apiCalls.triggerSchedule(loop);
     });
 
-  const issueUrl = item.refs.issue
-    ? `https://linear.app/watt-mind/issue/${encodeURIComponent(item.refs.issue)}`
-    : null;
+  const issueHref = issueUrl(item.refs.issue);
   const jumpChips =
     item.kind === "ESCALATED" ||
     item.kind === "SMOKE RED" ||
@@ -235,10 +234,10 @@ export function InboxActions({
             Open PR
           </JumpLink>
         )}
-        {jumpChips && issueUrl && (
+        {jumpChips && issueHref && (
           <JumpLink
-            href={issueUrl}
-            title="Open issue in Linear"
+            href={issueHref}
+            title="Open issue in tracker"
             className={CHIP_CLASS}
           >
             Open issue

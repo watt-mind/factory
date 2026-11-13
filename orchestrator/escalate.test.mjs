@@ -329,6 +329,59 @@ test("Prisma/SaaS app config leaves ordinary dashboard, analytics, and docs chan
   ).toEqual([]);
 });
 
+test("escalation stays any-depth for a bare name that also exists at the root", () => {
+  // The ESCALATE gate deliberately does NOT root-anchor bare escalate_paths
+  // entries. A client repo whose checkout root really holds `schema.prisma`
+  // must still escalate a nested `prisma/schema.prisma`: a false escalation
+  // costs one review, a missed one ships an unreviewed security change.
+  const root = mkdtempSync(path.join(tmpdir(), "escalate-root-"));
+  try {
+    writeFileSync(path.join(root, "schema.prisma"), "// root\n");
+    const files = ["schema.prisma", "prisma/schema.prisma", "docs/readme.md"];
+    expect(matchEscalations(files, ["schema.prisma"])).toEqual([
+      { file: "schema.prisma", globs: ["schema.prisma"] },
+      { file: "prisma/schema.prisma", globs: ["schema.prisma"] },
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("escalation matching never consults the process CWD", () => {
+  // Run the same match from a directory that does hold a root `schema.prisma`
+  // and from one that does not. Identical output proves the gate is pure text
+  // and cannot be narrowed by wherever the orchestrator happens to run.
+  const withFile = mkdtempSync(path.join(tmpdir(), "escalate-cwd-with-"));
+  const withoutFile = mkdtempSync(path.join(tmpdir(), "escalate-cwd-without-"));
+  try {
+    writeFileSync(path.join(withFile, "schema.prisma"), "// root\n");
+    const script = [
+      `const { matchEscalations } = await import(${JSON.stringify(
+        path.resolve(import.meta.dir, "escalate.mjs"),
+      )});`,
+      `console.log(JSON.stringify(matchEscalations(["schema.prisma", "prisma/schema.prisma"], ["schema.prisma"])));`,
+    ].join("\n");
+    const run = (cwd) =>
+      Bun.spawnSync({
+        cmd: [process.execPath, "-e", script],
+        cwd,
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+        .stdout.toString()
+        .trim();
+    const expected = JSON.stringify([
+      { file: "schema.prisma", globs: ["schema.prisma"] },
+      { file: "prisma/schema.prisma", globs: ["schema.prisma"] },
+    ]);
+    expect(run(withFile)).toBe(expected);
+    expect(run(withoutFile)).toBe(expected);
+  } finally {
+    rmSync(withFile, { recursive: true, force: true });
+    rmSync(withoutFile, { recursive: true, force: true });
+  }
+});
+
 test("flags a file under an escalate glob", () => {
   const hits = matchEscalations(["app/src/payment/stripe.ts"], globs);
   expect(hits.length).toBe(1);

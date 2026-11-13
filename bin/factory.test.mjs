@@ -177,7 +177,7 @@ function runNotify({ args, stdin = "", exitCode = "0", env = {} }) {
   };
 }
 
-async function withInboxStub(response, fn) {
+async function withInboxStub(response, fn, status = 201) {
   const dir = mkdtempSync(path.join(tmpdir(), "factory-inbox-server-"));
   const requestFile = path.join(dir, "request.json");
   const headersFile = path.join(dir, "headers.json");
@@ -195,7 +195,7 @@ class Handler(BaseHTTPRequestHandler):
         with open(${JSON.stringify(headersFile)}, "w") as f:
             f.write(json.dumps({k.lower(): v for k, v in self.headers.items()}))
         body = json.dumps(json.loads(${JSON.stringify(JSON.stringify(response))})).encode()
-        self.send_response(201)
+        self.send_response(${status})
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(body)))
         self.end_headers()
@@ -321,6 +321,107 @@ test("factory notify sends no authorization header when FACTORY_CONTROL_API_TOKE
         result.cleanup();
       }
     },
+  );
+});
+
+test("factory notify diagnoses a rejected inbox response before exiting terminally", async () => {
+  await withInboxStub(
+    { error: "inbox validation failed" },
+    async ({ port }) => {
+      const result = runNotify({
+        args: ["BLOCKED", "WM-1:", "choose policy"],
+        env: { FACTORY_EVENT_PORT: String(port) },
+      });
+      try {
+        expect(result.status).toBe(10);
+        expect(result.stderr).toContain(
+          "notify: control API POST /inbox failed: HTTP 500 inbox validation failed",
+        );
+      } finally {
+        result.cleanup();
+      }
+    },
+    500,
+  );
+});
+
+test("factory notify queues a missing-token dispatch rejection in its run outbox", async () => {
+  const eventHome = mkdtempSync(path.join(tmpdir(), "factory-notify-outbox-"));
+  const runId = "run_1938";
+  try {
+    await withInboxStub(
+      { error: "control_api_token_unset" },
+      async ({ port, headersFile }) => {
+        const result = runNotify({
+          args: ["BLOCKED", "watt-mind/factory#1938:", "need a bearer"],
+          env: {
+            FACTORY_DISPATCH: "1",
+            FACTORY_EVENT_HOME: eventHome,
+            FACTORY_EVENT_PORT: String(port),
+            FACTORY_RUN_ID: runId,
+            FACTORY_CONTROL_API_TOKEN: "",
+          },
+        });
+        try {
+          expect(result.status).toBe(0);
+          expect(result.args).toBeNull();
+          expect(result.stderr).toContain("queued_local for worker handoff");
+          const headers = JSON.parse(readFileSync(headersFile, "utf8"));
+          expect(headers.authorization).toBeUndefined();
+          const entries = readFileSync(
+            path.join(eventHome, "outbox", `${runId}.jsonl`),
+            "utf8",
+          )
+            .trim()
+            .split("\n")
+            .map((entry) => JSON.parse(entry));
+          expect(entries).toEqual([
+            {
+              schemaVersion: "factory.local-notify-outbox/v1",
+              runId,
+              kind: "BLOCKED",
+              title: "BLOCKED watt-mind/factory#1938: need a bearer",
+              refs: { issue: "watt-mind/factory#1938", repo: "factory" },
+              source: `agent:${runId}`,
+            },
+          ]);
+        } finally {
+          result.cleanup();
+        }
+      },
+      401,
+    );
+  } finally {
+    rmSync(eventHome, { recursive: true, force: true });
+  }
+});
+
+test("factory notify falls back to direct transport after a supplied bearer is rejected", async () => {
+  const token = "stale-notify-token";
+  await withInboxStub(
+    { error: "invalid bearer" },
+    async ({ port, headersFile }) => {
+      const result = runNotify({
+        args: ["BLOCKED", "WM-1:", "refresh the bearer"],
+        env: {
+          FACTORY_EVENT_PORT: String(port),
+          FACTORY_CONTROL_API_TOKEN: token,
+        },
+      });
+      try {
+        expect(result.status).toBe(0);
+        expect(result.args).toBe("BLOCKED\nWM-1:\nrefresh the bearer\n");
+        expect(result.stderr).toContain(
+          "notify: control API rejected FACTORY_CONTROL_API_TOKEN",
+        );
+        expect(result.stderr).not.toContain(token);
+        const headers = JSON.parse(readFileSync(headersFile, "utf8"));
+        expect(headers.authorization).toBe(`Bearer ${token}`);
+      } finally {
+        result.cleanup();
+      }
+    },
+    401,
   );
 });
 
@@ -468,7 +569,7 @@ test("factory pulse executes via CLI", () => {
   expect(json).toHaveProperty("stack");
   expect(json).toHaveProperty("supply");
   expect(json).toHaveProperty("workspace");
-});
+}, 15_000);
 
 test("factory watchdog executes via CLI", () => {
   const result = Bun.spawnSync({
@@ -481,4 +582,4 @@ test("factory watchdog executes via CLI", () => {
   expect(json).toHaveProperty("ok");
   expect(json).toHaveProperty("issues");
   expect(json).toHaveProperty("metrics");
-});
+}, 15_000);

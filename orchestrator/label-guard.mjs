@@ -25,27 +25,16 @@
  */
 import { loadControlPlane } from "../lib/control-plane/index.mjs";
 import { loadRepos } from "../event-runtime/lib/repos.mjs";
+import { readyPinStatus } from "../lib/queue-summary.mjs";
 import {
   parseOwnedPaths,
+  ticketSections,
   ownedPathsClosureGaps,
   readPinManifestRequirements,
   formatOwnedPathClosureGaps,
 } from "./owned-paths.mjs";
 
 const AI_AGENT_READY = "ai:agent-ready";
-
-/** Split markdown heading sections (levels 2-4), keyed by heading text and trimmed body. */
-function sections(description = "") {
-  return description
-    .split(/^#{2,4}\s+/m)
-    .slice(1)
-    .map((s) => {
-      const nl = s.indexOf("\n");
-      const heading = (nl === -1 ? s : s.slice(0, nl)).trim();
-      const body = (nl === -1 ? "" : s.slice(nl + 1)).trim();
-      return { heading, body };
-    });
-}
 
 /**
  * Which linear.md §5 sections a description is missing. [] means it passes.
@@ -81,14 +70,18 @@ const NOT_APPLICABLE =
  * variation.
  */
 export function templateGaps(description = "") {
-  const secs = sections(description);
+  // Same duplicate-heading rule as parseOwnedPaths: every matching block
+  // counts, so an appended respec cannot disagree with dispatch about which
+  // copy is authoritative.
+  const secs = ticketSections(description);
   const gaps = [];
 
   // A non-code ticket (deploy/env-var/business change) legitimately has no
   // repo paths -- linear.md's non-code exception applies here too. Accept an
   // explicit "not applicable" declaration in the section body.
-  const owned = secs.find((s) => /\bowned\s+paths\b/i.test(s.heading));
-  const ownedNA = owned && NOT_APPLICABLE.test(owned.body);
+  const ownedNA = secs.some(
+    (s) => /\bowned\s+paths\b/i.test(s.heading) && NOT_APPLICABLE.test(s.body),
+  );
   if (!parseOwnedPaths(description).length && !ownedNA)
     gaps.push("Owned Paths");
 
@@ -101,7 +94,9 @@ export function templateGaps(description = "") {
     return (
       (/\bverification\s+command\b/i.test(s.heading) ||
         /\bevidence\b.*\b(required|line)\b/i.test(s.heading)) &&
-      s.body.length > 0
+      // ticketSections leaves bodies untrimmed; a heading followed only by
+      // blank lines is still a gap.
+      s.body.trim().length > 0
     );
   });
   if (!verified) gaps.push("Verification Command");
@@ -156,14 +151,35 @@ export function ownedPathsClosureGuard(
   }
 }
 
-export async function fetchReadyIssues(repo) {
-  return loadControlPlane().listDispatchable({
+export async function fetchReadyIssues(
+  repo,
+  resolveControlPlane = loadControlPlane,
+) {
+  return resolveControlPlane({ repoName: repo.name }).listDispatchable({
     team: repo.team,
     project: repo.project,
   });
 }
 
-export async function demote(issue, _triageStateId, gaps, apply) {
+/** Read and classify a ready pin without turning a tracker outage into stale. */
+export async function readyPinGuard(issue, listComments) {
+  try {
+    return readyPinStatus(
+      issue.description ?? "",
+      await listComments(issue.identifier),
+    );
+  } catch {
+    return "unreadable";
+  }
+}
+
+export async function demote(
+  issue,
+  repo,
+  gaps,
+  apply,
+  resolveControlPlane = loadControlPlane,
+) {
   if (!apply) return;
 
   const body =
@@ -174,11 +190,11 @@ export async function demote(issue, _triageStateId, gaps, apply) {
     `\n\nMoved back to \`Triage\` and the label was removed so it isn't picked up for dispatch. ` +
     `A triage pass needs to add the missing section(s) before re-labeling \`ai:agent-ready\`.`;
 
-  const cp = loadControlPlane();
+  const cp = resolveControlPlane({ repoName: repo.name });
   await cp.transition(issue.identifier, "Triage", {
     remove: [AI_AGENT_READY],
+    demotionComment: body,
   });
-  await cp.comment(issue.identifier, body);
 }
 
 export function parseArgs(argv = process.argv.slice(2)) {
@@ -194,9 +210,15 @@ export function parseArgs(argv = process.argv.slice(2)) {
   return { apply, repos };
 }
 
-export async function main(argv = process.argv.slice(2)) {
+export async function main(
+  argv = process.argv.slice(2),
+  {
+    resolveControlPlane = loadControlPlane,
+    resolveRepos = () => [...loadRepos().values()],
+  } = {},
+) {
   const args = parseArgs(argv);
-  const allRepos = [...loadRepos().values()].filter(
+  const allRepos = resolveRepos().filter(
     (r) => !args.repos.length || args.repos.includes(r.name),
   );
   const repos = allRepos.map((r) => ({
@@ -223,37 +245,61 @@ export async function main(argv = process.argv.slice(2)) {
   let violations = 0;
 
   for (const repo of repos) {
-    const issues = await fetchReadyIssues(repo);
+    const issues = await fetchReadyIssues(repo, resolveControlPlane);
+    const controlPlane = resolveControlPlane({ repoName: repo.name });
     const closureRequirements = new Map();
-    const bad = issues
-      .map((issue) => {
-        const gapNames = [...templateGaps(issue.description ?? "")];
-        const closure = ownedPathsClosureGuard(
-          issue.description ?? "",
-          repo,
-          closureRequirements,
-        );
-        gapNames.push(...closure.messages);
-        return { issue, gaps: gapNames };
-      })
-      .filter((r) => r.gaps.length);
+    const bad = (
+      await Promise.all(
+        issues.map(async (issue) => {
+          const gapNames = [...templateGaps(issue.description ?? "")];
+          const closure = ownedPathsClosureGuard(
+            issue.description ?? "",
+            repo,
+            closureRequirements,
+          );
+          gapNames.push(...closure.messages);
+          return {
+            issue,
+            gaps: gapNames,
+            pinStatus: await readyPinGuard(
+              issue,
+              controlPlane.listComments.bind(controlPlane),
+            ),
+          };
+        }),
+      )
+    ).filter(
+      ({ gaps, pinStatus }) =>
+        gaps.length || pinStatus === "stale" || pinStatus === "unreadable",
+    );
 
     console.log(
-      `${repo.name}  ${repo.team} / ${repo.project}  --  ${issues.length} ai:agent-ready ticket(s), ${bad.length} failing §5`,
+      `${repo.name}  ${repo.team} / ${repo.project}  --  ${issues.length} ai:agent-ready ticket(s), ${bad.length} guard finding(s)`,
     );
 
     if (!bad.length) continue;
     violations += bad.length;
 
-    for (const { issue, gaps } of bad) {
+    for (const { issue, gaps, pinStatus } of bad) {
       console.log(
         `  ${issue.identifier.padEnd(10)} ${issue.title.slice(0, 60)}`,
       );
       for (const g of gaps) console.log(`      missing: ${g}`);
+      if (pinStatus === "stale")
+        console.log("      stale: Ready Pin (body changed after promotion)");
+      // A comment feed that could not be read is neither fresh nor stale;
+      // say so rather than silently passing the ticket as clean.
+      if (pinStatus === "unreadable")
+        console.log(
+          "      unreadable: Ready Pin (comment feed could not be read; re-run)",
+        );
 
-      if (args.apply) {
+      // `--apply` retains its existing structural-template demotion behavior,
+      // but a stale pin is reported only. Re-stamping it automatically would
+      // erase the approval-boundary signal the pin was introduced to keep.
+      if (args.apply && gaps.length) {
         try {
-          await demote(issue, null, gaps, true);
+          await demote(issue, repo, gaps, true, resolveControlPlane);
           console.log(`      -> demoted to Triage, ai:agent-ready removed`);
         } catch (err) {
           console.log(`      ! failed: ${err.message || err}`);
@@ -262,11 +308,11 @@ export async function main(argv = process.argv.slice(2)) {
     }
   }
 
-  console.log(
-    `\n=== ${args.apply ? "Demoted" : "Would demote"}: ${violations} ===`,
-  );
+  console.log(`\n=== Guard findings: ${violations} ===`);
   if (!args.apply && violations)
-    console.log("Run again with --apply to demote these.");
+    console.log(
+      "Run with --apply to demote structural gaps; re-promote stale pins after review.",
+    );
 }
 
 if (import.meta.main || process.argv[1]?.endsWith("label-guard.mjs")) {

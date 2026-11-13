@@ -22,34 +22,32 @@ import { createInterface } from "node:readline";
 import { Readable } from "node:stream";
 import { transcriptMaxBytes } from "../config.mjs";
 import {
-  HARNESS_LAYOUT as CLAUDE_HARNESS_LAYOUT,
-  KILL_GRACE_MS as CLAUDE_KILL_GRACE_MS,
+  HARNESS_LAYOUT,
+  KILL_GRACE_MS,
+  PROMPT_SUFFIX,
+  PUSH_CREDENTIAL_ENV,
+  safeChildEnvironment,
+  verifiedPrompt,
+} from "./child-env.mjs";
+import { boundedTranscriptStream, killProcessGroup } from "./child-process.mjs";
+import { refuseSandbox } from "./sandboxed.mjs";
+
+export {
+  HARNESS_LAYOUT,
+  KILL_GRACE_MS,
   PROMPT_SUFFIX,
   PUSH_CREDENTIAL_ENV,
   killProcessGroup,
-  safeChildEnvironment,
   verifiedPrompt,
-} from "./claude.mjs";
-import { boundedTranscriptStream } from "./child-process.mjs";
-import { refuseSandbox } from "./sandboxed.mjs";
-
-export { PROMPT_SUFFIX, PUSH_CREDENTIAL_ENV, killProcessGroup };
+};
 
 /** ACP v1 major version. Agents that answer anything else are refused. */
 export const PROTOCOL_VERSION = 1;
-
-export const KILL_GRACE_MS = CLAUDE_KILL_GRACE_MS;
 
 export const SANDBOX_SUPPORT = "unsupported";
 
 export const SANDBOX_DEFERRAL_REASON =
   "acp wraps host-authenticated coding agents (first target: claude-code-acp) whose binary, subscription OAuth, and permission surface have no Gondolin guest translation yet (WM-313 deferral; see lib/adapters/acp.mjs)";
-
-/**
- * First target is Claude Code via ACP, so harness packaging matches claude.
- * Not part of the WM-837 contract.
- */
-export const HARNESS_LAYOUT = CLAUDE_HARNESS_LAYOUT;
 
 /** Shipped default — the Zed `claude-code-acp` binary on PATH. */
 export const DEFAULT_ACP_CONFIG = Object.freeze({

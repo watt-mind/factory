@@ -28,3 +28,6 @@ graphify-out/
 
 # Event-runtime web bundle — built from source, never committed
 event-runtime/web/dist/
+
+# Eval run output — local timestamps, not repo content
+evals/.results/

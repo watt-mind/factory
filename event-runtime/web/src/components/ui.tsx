@@ -65,7 +65,8 @@ export const PROPOSAL_STATUS_HUES: Record<string, string> = {
   open: "var(--hue-info)",
   approved: "var(--hue-ok)",
   rejected: "var(--hue-err)",
-  superseded: "var(--hue-idle)",
+  expired: "var(--hue-warn)",
+  superseded: "var(--hue-verify)",
   resolved: "var(--hue-idle)",
 };
 
@@ -1720,15 +1721,43 @@ export interface ToastMessage {
 
 const toastListeners = new Set<(toasts: ToastMessage[]) => void>();
 let activeToasts: ToastMessage[] = [];
+const toastTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function armDismiss(id: string) {
+  const pending = toastTimers.get(id);
+  if (pending !== undefined) clearTimeout(pending);
+  toastTimers.set(
+    id,
+    setTimeout(() => dismissToast(id), 3000),
+  );
+}
 
 export function notify(message: string, type: "ok" | "err" | "info" = "ok") {
+  // A retrying mutation can report the same failure faster than an operator can
+  // act on it. Keep one visible, announced error rather than growing a stack —
+  // but re-arm its dismissal timer, so a still-recurring failure stays on
+  // screen instead of vanishing 3s after its first occurrence. Only errors
+  // dedupe: repeated ok/info toasts are distinct confirmations of distinct
+  // actions and each deserves its own announcement.
+  if (type === "err") {
+    const existing = activeToasts.find(
+      (toast) => toast.message === message && toast.type === type,
+    );
+    if (existing) {
+      armDismiss(existing.id);
+      return;
+    }
+  }
   const id = Math.random().toString(36).slice(2);
   activeToasts = [...activeToasts, { id, type, message }].slice(-5);
   toastListeners.forEach((l) => l(activeToasts));
-  setTimeout(() => dismissToast(id), 3000);
+  armDismiss(id);
 }
 
 function dismissToast(id: string) {
+  const pending = toastTimers.get(id);
+  if (pending !== undefined) clearTimeout(pending);
+  toastTimers.delete(id);
   const next = activeToasts.filter((t) => t.id !== id);
   if (next.length === activeToasts.length) return;
   activeToasts = next;
@@ -1736,6 +1765,8 @@ function dismissToast(id: string) {
 }
 
 export function clearToasts() {
+  toastTimers.forEach((timer) => clearTimeout(timer));
+  toastTimers.clear();
   activeToasts = [];
   toastListeners.forEach((l) => l(activeToasts));
 }
@@ -1876,10 +1907,17 @@ export function Disclosure({
   label,
   children,
   defaultOpen,
+  deferChildren,
 }: {
   label: ReactNode;
   children: ReactNode;
   defaultOpen?: boolean;
+  /**
+   * Keep `children` unmounted until the disclosure is first opened. `details`
+   * renders collapsed content into the DOM, so a body that fetches on mount
+   * costs a request per row even while nobody has looked at it.
+   */
+  deferChildren?: boolean;
 }) {
   const [open, setOpen] = useState(!!defaultOpen);
   return (
@@ -1895,7 +1933,7 @@ export function Disclosure({
         <DisclosureChevron open={open} />
         <span>{label}</span>
       </summary>
-      <div className="mt-1.5">{children}</div>
+      <div className="mt-1.5">{deferChildren && !open ? null : children}</div>
     </details>
   );
 }

@@ -20,7 +20,7 @@ import { goPrefix } from "./goSequence";
 import { refetchIntervals } from "./hooks";
 import { NAV } from "./nav";
 import { createProposalFixture } from "./test-render";
-import type { MetricsView, Proposal, StatusView } from "./types";
+import type { HealthView, MetricsView, Proposal, StatusView } from "./types";
 
 const actualSubjectJourney = await import("./subjectJourney");
 
@@ -47,7 +47,16 @@ const STATUS: StatusView = {
   },
 };
 
-const HEALTH = { ok: true, policyVersion: "test", env: ENV };
+const healthy = (): HealthView => ({
+  ok: true,
+  policyVersion: "test",
+  env: ENV,
+  registry: {
+    loadedAt: new Date().toISOString(),
+    stamp: "files:test",
+    lastReloadError: null,
+  },
+});
 // One approvable open proposal, so the proposals route renders the detail pane
 // whose Approve button carries the health-derived tooltip (WM-738).
 const OPEN_PROPOSAL_ID = "prop_health_wiring";
@@ -70,6 +79,7 @@ const EMPTY_METRICS: MetricsView = {
   },
 };
 let currentStatus = STATUS;
+let currentHealth = healthy();
 // "pending" never resolves, which is what a first load looks like before
 // /api/health answers; "error" is a runtime that answered with a failure.
 let healthMode: "ok" | "pending" | "error" = "ok";
@@ -105,6 +115,7 @@ function renderApp() {
 
 beforeEach(() => {
   currentStatus = STATUS;
+  currentHealth = healthy();
   healthMode = "ok";
   healthCalls = 0;
   currentProposals = [];
@@ -118,7 +129,7 @@ beforeEach(() => {
           status: 503,
           headers: { "content-type": "application/json" },
         });
-      return jsonResponse(HEALTH);
+      return jsonResponse(currentHealth);
     }
     if (url.includes("/api/status")) return jsonResponse(currentStatus);
     if (url.includes("/api/proposals")) {
@@ -684,7 +695,33 @@ describe("health connection chrome (WM-724)", () => {
     expect(chip.getAttribute("title")).toContain("/tmp/factory");
     expect(statusDot(statusBar).getAttribute("style")).toContain("--hue-ok");
     expect(statusBar.textContent).toContain("connected · test");
+    expect(statusBar.textContent).toMatch(/registry \d+s ago/);
     expect(utils.queryByText(/Runtime unreachable —/)).toBeNull();
+  });
+
+  test("a rejected registry edit warns that the runtime is using last-good configuration", async () => {
+    currentHealth = {
+      ...healthy(),
+      registry: {
+        loadedAt: new Date(Date.now() - 60_000).toISOString(),
+        stamp: "files:last-good",
+        lastReloadError: {
+          at: new Date().toISOString(),
+          message: "edges.json: unregistered source agent removed@1",
+        },
+      },
+    };
+    const utils = renderApp();
+    const statusBar = utils.getByRole("contentinfo", { name: "Status bar" });
+
+    const warning = await utils.findByText(
+      /Registry reload failed — running last-good configuration/,
+    );
+    expect(warning.closest('[role="alert"]')?.textContent).toContain(
+      "unregistered source agent removed@1",
+    );
+    expect(statusBar.textContent).toContain("connected");
+    expect(statusBar.textContent).toContain("registry 1m ago");
   });
 });
 

@@ -10,7 +10,9 @@ import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { loadControlPlane } from "../../lib/control-plane/index.mjs";
+import { makeGhApi } from "../../lib/control-plane/github.mjs";
 import { hashJson } from "./canonical.mjs";
+import { ApiParameterError } from "./api-params.mjs";
 import {
   decisionRequestHash,
   validateDecisionRequest,
@@ -22,7 +24,9 @@ import {
   templateFor,
 } from "./decision-templates.mjs";
 import { txImmediate } from "./db.mjs";
+import { ALL_TERMINAL_STATES } from "./lifecycle.mjs";
 import { registerInboxDecisionMemos } from "./memos.mjs";
+import { loadRepos } from "./repos.mjs";
 
 export const INBOX_KINDS = Object.freeze([
   "BLOCKED",
@@ -109,6 +113,199 @@ function parseWaiters(value) {
   } catch {
     return [];
   }
+}
+
+const INBOX_REASON_GLOSSARY = Object.freeze({
+  owned_paths_not_closed:
+    "The ticket's allowed paths do not cover every required file, so the change cannot be safely completed as scoped.",
+  needs_human:
+    "The runtime stopped because an operator decision is required before it can proceed.",
+  ticket_untrusted_author:
+    "The ticket author is not trusted by this repository's dispatch policy.",
+  proposal_expired:
+    "The proposal expired before an operator approved or rejected it.",
+  proposal_terminal:
+    "The proposal is no longer open, so the requested decision would have no effect.",
+  stale_ref:
+    "The referenced ticket, run, or proposal is already terminal, so this item no longer needs action.",
+});
+
+const INBOX_KIND_LABELS = Object.freeze({
+  BLOCKED: "Blocked",
+  ESCALATED: "Escalated",
+  "CI RED": "CI failed",
+  "SMOKE RED": "Smoke check failed",
+  "CIRCUIT BREAKER": "Circuit breaker",
+  "RC READY": "Release candidate ready",
+  human_needed: "Human action needed",
+  decision_needed: "Decision needed",
+  proposal_expired: "Proposal expired",
+});
+
+const DECISION_EFFECTS = Object.freeze({
+  authorise: "authorizes the scoped work and dispatches a new run",
+  send_to_triage: "removes ai:agent-ready so a human can re-scope the ticket",
+  answer: "records the operator's reply for the agent",
+  requeue: "puts the parked event back into planning",
+  approve_proposal: "approves the proposal and allows its run to proceed",
+  reject_proposal: "rejects the proposal and stops that requested run",
+  dismiss: "keeps the item resolved without changing the referenced work",
+});
+
+function readableSubject(refs, ticketTitle, eventType) {
+  if (refs.issue) {
+    const match = /(?:^|\/)([^/\s#]+)#(\d+)$/.exec(refs.issue);
+    if (match) {
+      const ticket = `${match[1]}#${match[2]}`;
+      return ticketTitle ? `${ticket} "${ticketTitle}"` : ticket;
+    }
+    return ticketTitle ? `${refs.issue} "${ticketTitle}"` : refs.issue;
+  }
+  if (refs.pr) return `PR ${refs.pr.replace(/^PR\s*/i, "")}`;
+  if (refs.proposalId) return `proposal ${refs.proposalId}`;
+  if (refs.runId) return `run ${refs.runId}`;
+  // Parked-event notices carry only their event coordinates. Name the event
+  // rather than degrading to "this item"; the repo qualifies it when known.
+  if (refs.eventId) {
+    const named = eventType
+      ? `${eventType} ${refs.eventId}`
+      : `event ${refs.eventId}`;
+    return refs.repo ? `${named} (${refs.repo})` : named;
+  }
+  if (refs.repo) return refs.repo;
+  return "this item";
+}
+
+/**
+ * Reason codes are structured input, never scraped out of a producer's title:
+ * a machine title is prose, and guessing a code from it invents facts (an
+ * English word or a ticket slug rendered as if it were a runtime reason).
+ * Producers that know their reason pass `reasonCode`; the rest render none.
+ */
+function reasonCodeFor(input) {
+  if (typeof input?.reasonCode === "string" && input.reasonCode.trim())
+    return input.reasonCode.trim();
+  if (input?.kind === "proposal_expired") return "proposal_expired";
+  return null;
+}
+
+function humanReason(reason) {
+  if (!reason) return "The runtime needs an operator to review what happened.";
+  return (
+    INBOX_REASON_GLOSSARY[reason] ??
+    `The runtime reported “${reason.replaceAll("_", " ")}” and needs an operator to decide what happens next.`
+  );
+}
+
+function titleReason(reason) {
+  if (reason === "owned_paths_not_closed")
+    return "its allowed paths do not cover every required file";
+  return humanReason(reason)
+    .replace(/^The runtime /, "")
+    .replace(/\.$/, "");
+}
+
+function linksFor(refs) {
+  const links = [];
+  if (refs.issue) links.push(`Ticket: ${refs.issue}`);
+  if (refs.runId) links.push(`Run: ${refs.runId}`);
+  if (refs.pr) links.push(`PR: ${refs.pr}`);
+  if (refs.proposalId) links.push(`Proposal: ${refs.proposalId}`);
+  return links;
+}
+
+function proposalSubject(decision) {
+  const question = decision?.question;
+  const match =
+    typeof question === "string"
+      ? /^Run\s+([^\s]+)(?:\s+for\s+(.+?))?\?$/i.exec(question.trim())
+      : null;
+  if (!match) return null;
+  return {
+    agent: match[1].replace(/@\d+$/, ""),
+    subject: match[2]?.trim() ?? null,
+  };
+}
+
+function optionEffect(option) {
+  return (
+    DECISION_EFFECTS[option.effect] ??
+    `asks the runtime to ${String(option.effect ?? "continue").replaceAll("_", " ")}`
+  );
+}
+
+/**
+ * The durable body restates the ask and what each option does. The Telegram
+ * push renders that request itself (question plus numbered options), so it
+ * strips exactly these paragraphs back out and the operator reads it once.
+ */
+function decisionParagraphs(decision) {
+  const effects = Array.isArray(decision?.options)
+    ? decision.options.map(
+        (option) => `${option.label} — ${optionEffect(option)}.`,
+      )
+    : [];
+  return [
+    typeof decision?.question === "string" && decision.question.trim()
+      ? `Question: ${decision.question.trim()}`
+      : null,
+    typeof decision?.context === "string" && decision.context.trim()
+      ? `Context: ${decision.context.trim()}`
+      : null,
+    effects.length ? `Option effects:\n${effects.join("\n")}` : null,
+  ].filter(Boolean);
+}
+
+/**
+ * Convert producer-oriented inbox data into an operator-readable message.
+ * Producers retain their concise machine title as an input signal, while the
+ * persisted title/body explain what happened, why it matters, and where the
+ * operator can inspect the referenced work.
+ */
+export function synthesizeInboxItem(input) {
+  const refs = input?.refs ?? {};
+  const kind = input?.kind ?? "human_needed";
+  const reason = reasonCodeFor(input);
+  const label = INBOX_KIND_LABELS[kind] ?? String(kind).replaceAll("_", " ");
+  const ticketTitle =
+    typeof input?.ticketTitle === "string" && input.ticketTitle.trim()
+      ? input.ticketTitle.trim()
+      : null;
+  const eventType =
+    typeof input?.eventType === "string" && input.eventType.trim()
+      ? input.eventType.trim()
+      : null;
+  const subject = readableSubject(refs, ticketTitle, eventType);
+  const why = humanReason(reason);
+  const originalBody =
+    typeof input?.body === "string" && input.body.trim()
+      ? input.body.trim()
+      : null;
+  const decision = input?.decision;
+  const proposal = proposalSubject(decision);
+  // Keep the serialized request untouched. It is hashed by decision responses,
+  // so rewriting its context after a producer has handed it off would make a
+  // valid response look stale. The durable body carries the same information.
+  const body = [
+    `What happened: An item needs attention for ${subject} (${label.toLowerCase()}).`,
+    `Why it matters: ${why}`,
+    reason ? `Reason code: ${reason}.` : null,
+    linksFor(refs).length ? `Links:\n${linksFor(refs).join("\n")}` : null,
+    ...decisionParagraphs(decision),
+    originalBody,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  return {
+    ...input,
+    title:
+      proposal && (kind === "decision_needed" || kind === "proposal_expired")
+        ? `Approve ${proposal.agent} run (${ticketTitle ? subject : (proposal.subject ?? subject)})?`
+        : reason
+          ? `${label}: ${subject} — ${titleReason(reason)}`
+          : `${label}: ${subject}`,
+    body,
+  };
 }
 
 /** Option id+effect (+ authorise paths); free text is not part of "same question". */
@@ -345,6 +542,7 @@ function inboxExpiredPredicate(item = "i") {
     SELECT 1 FROM proposals p
      WHERE p.id = ${item}.proposal_id
        AND p.status = 'open'
+       AND p.decision = 'run'
        AND p.ttl_seconds > 0
        AND unixepoch(p.created_at) + p.ttl_seconds <= unixepoch()
   ))`;
@@ -400,8 +598,6 @@ export function createInboxItem(
 ) {
   const kind = requiredString(input?.kind, "kind");
   if (!KIND_SET.has(kind)) throw new Error(`unknown inbox kind: ${kind}`);
-  const title = requiredString(input?.title, "title");
-  const body = optionalString(input?.body, "body");
   const severity = optionalString(input?.severity, "severity") ?? "normal";
   const source = optionalString(input?.source, "source") ?? "cli";
   if (
@@ -412,7 +608,16 @@ export function createInboxItem(
     throw new Error(`unknown inbox source: ${source}`);
   }
   const refs = normalizeRefs(input?.refs);
-  const decision = input?.decision ?? null;
+  // Runtime notifications and agent-produced items begin as machine-oriented
+  // events. Synthesize their durable presentation here so producers do not
+  // need to duplicate this policy before the item reaches the operator.
+  const presentation =
+    source === "serve:notify" || source.startsWith("agent:")
+      ? synthesizeInboxItem({ ...input, kind, refs, source })
+      : input;
+  const title = requiredString(presentation?.title, "title");
+  const body = optionalString(presentation?.body, "body");
+  const decision = presentation?.decision ?? null;
   if (decision !== null) {
     const checked = validateDecisionRequest(decision, { refs });
     if (!checked.valid) {
@@ -1025,7 +1230,12 @@ export function listInboxPage(
   db,
   { status = "open", limit = 100, before = null } = {},
 ) {
-  if (!STATUSES.has(status)) throw new Error(`unknown inbox status: ${status}`);
+  if (!STATUSES.has(status)) {
+    throw new ApiParameterError(
+      "invalid_status",
+      `unknown inbox status: ${status}`,
+    );
+  }
   const where = {
     open: "resolved_at IS NULL AND acked_at IS NULL",
     acked: "resolved_at IS NULL AND acked_at IS NOT NULL",
@@ -1237,7 +1447,15 @@ function correlatedProposal(db, inboxItemId) {
 
 function telegramMessage(item, webUrl) {
   const lines = [item.title];
-  if (item.body) lines.push(item.body);
+  if (item.body) {
+    // The push renders the ask below; drop the body's restatement of it.
+    const duplicated = new Set(decisionParagraphs(item.decision));
+    const kept = item.body
+      .split("\n\n")
+      .filter((paragraph) => !duplicated.has(paragraph))
+      .join("\n\n");
+    if (kept) lines.push(kept);
+  }
   if (item.decision) {
     lines.push(item.decision.question);
     item.decision.options.forEach((option, index) => {
@@ -1312,6 +1530,29 @@ export async function deliverInboxItem(
 
 const LINEAR_POLL_INTERVAL_MS = 60_000;
 const linearPollAt = new WeakMap();
+/** Unactionable parked notices must not remain in the operator queue forever. */
+export const MAX_PARKED_INBOX_AGE_MS = 48 * 60 * 60 * 1000;
+// Notices that only report how a run went. Their referent is the run itself,
+// so a terminal run makes them stale. Asks are deliberately excluded: an
+// ESCALATED item is *born* on a REFUSED run, and a decision the operator has
+// not answered stays open no matter what the run it names went on to do.
+const RUN_PROGRESS_KINDS = new Set(["CI RED", "SMOKE RED", "CIRCUIT BREAKER"]);
+// Notices parked on work the factory itself owns. Only these may be retired
+// automatically when the ticket moves on; an ESCALATED ask or any other kind
+// names something an operator still has to look at.
+const PARKED_KINDS = new Set(["BLOCKED", "human_needed"]);
+// A busy inbox must not read every distinct PR on every poll. The cursor is
+// kept per database and holds the last `owner/repo#pr` key actually read, so
+// the next poll resumes after it in sorted key order. Keying on the referent
+// rather than a numeric offset keeps the rotation stable when the pending set
+// grows, shrinks or reorders between polls.
+const PR_FETCH_LIMIT = 8;
+const prFetchCursor = new WeakMap();
+
+/** An ask the operator has been handed and has not answered yet. */
+function hasPendingDecision(row) {
+  return row.decision_json != null && row.response_json == null;
+}
 
 function prNumber(ref) {
   if (typeof ref !== "string") return null;
@@ -1319,6 +1560,117 @@ function prNumber(ref) {
     /^(?:PR\s*)?#?(\d+)$/i.exec(ref.trim()) ??
     /\/pull\/(\d+)(?:[/?#]|$)/.exec(ref);
   return match ? Number(match[1]) : null;
+}
+
+function githubRepoFor(refs) {
+  const issueRepo =
+    typeof refs.issue === "string"
+      ? /^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#\d+$/.exec(refs.issue.trim())?.[1]
+      : null;
+  if (issueRepo) return issueRepo;
+  if (typeof refs.repo !== "string" || refs.repo.trim() === "") return null;
+  if (refs.repo.includes("/")) return refs.repo;
+  try {
+    return loadRepos().get(refs.repo)?.github ?? null;
+  } catch {
+    // A missing or malformed local repository registry must not make an
+    // otherwise unrelated inbox sweep fail.
+    return null;
+  }
+}
+
+/**
+ * REST reports `state` as "open"/"closed" and flags a merge only via
+ * `merged_at`; the reconciler speaks the GraphQL vocabulary. Normalise here so
+ * a merged pull request is never mistaken for a still-open one.
+ */
+export function normalizePullRequestState(pull) {
+  if (pull?.merged_at || pull?.merged === true) return "MERGED";
+  const state = typeof pull?.state === "string" ? pull.state.toUpperCase() : "";
+  if (state === "CLOSED" || state === "MERGED") return state;
+  return "OPEN";
+}
+
+export async function defaultFetchPullRequest({ github, pr, api }) {
+  // makeGhApi uses ghSpawn, rather than the forge's spawnSync transport, so
+  // the serve loop yields while GitHub answers this read.
+  const pull = await (api ?? makeGhApi())("GET", `repos/${github}/pulls/${pr}`);
+  return { state: normalizePullRequestState(pull) };
+}
+
+async function fetchReferencedInboxPullRequests(rows, fetchPullRequest, db) {
+  const unique = new Map();
+  for (const { refs } of rows) {
+    const pr = prNumber(refs.pr);
+    const github = githubRepoFor(refs);
+    if (pr && github) unique.set(`${github}#${pr}`, { github, pr });
+  }
+  const fetchOne = async ([key, request]) => {
+    try {
+      return [key, await fetchPullRequest(request)];
+    } catch {
+      // A deleted PR or rate-limited repository must not stall unrelated
+      // inbox reconciliation. The next poll can retry this one referent.
+      return [key, null];
+    }
+  };
+  const entries = [...unique.entries()].sort(([a], [b]) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  );
+  if (entries.length === 0) return new Map();
+  const cursor = prFetchCursor.get(db);
+  // Resume after the last key actually read. A key that has since disappeared
+  // still orders the remainder correctly, and an unseen list simply starts at
+  // the beginning.
+  const resumeAt =
+    typeof cursor === "string" ? entries.findIndex(([key]) => key > cursor) : 0;
+  const start = resumeAt === -1 ? 0 : resumeAt;
+  const selected = Array.from(
+    { length: Math.min(PR_FETCH_LIMIT, entries.length) },
+    (_, index) => entries[(start + index) % entries.length],
+  );
+  prFetchCursor.set(db, selected[selected.length - 1][0]);
+  const fetched = await Promise.all(selected.map(fetchOne));
+  return new Map(fetched.filter(([, pull]) => pull));
+}
+
+function hasNewerSubjectRun(db, subject, createdAt) {
+  if (typeof subject !== "string" || subject.trim() === "") return false;
+  const newerRun = db
+    .query(
+      `SELECT 1 FROM runs
+       WHERE subject = ? AND created_at > ?
+       LIMIT 1`,
+    )
+    .get(subject, createdAt);
+  if (newerRun) return true;
+  return Boolean(
+    db
+      .query(
+        `SELECT 1 FROM events
+         WHERE subject = ? AND admitted_at > ?
+           AND status IN ('admitted', 'planned', 'human_needed')
+         LIMIT 1`,
+      )
+      .get(subject, createdAt),
+  );
+}
+
+function staleParkedItem(db, row, refs, now) {
+  if (!PARKED_KINDS.has(row.kind)) return false;
+  const createdAt = Date.parse(row.created_at);
+  if (!Number.isFinite(createdAt) || now - createdAt < MAX_PARKED_INBOX_AGE_MS)
+    return false;
+  if (refs.eventSource && refs.eventId) {
+    const event = db
+      .query("SELECT 1 FROM events WHERE source = ? AND event_id = ?")
+      .get(refs.eventSource, refs.eventId);
+    return !event;
+  }
+  // A parked row without an event, ticket, PR, proposal, or run cannot be
+  // acted on or reconciled later. Keep referent-backed asks for their normal
+  // reconciliation paths instead of expiring them merely because they age.
+  return !refs.issue && !refs.pr && !refs.proposalId && !refs.runId;
 }
 
 function completedShipProposal(db, proposalId) {
@@ -1392,6 +1744,58 @@ export async function fetchLinearInboxIssues(
     .filter(Boolean);
 }
 
+/**
+ * GitHub Issues cannot answer Linear's batched `issue(id:)` query. Resolve
+ * those rows through their repository-selected adapter, while preserving one
+ * bounded batch for the Linear rows and the injectable test seam.
+ */
+async function fetchReferencedInboxIssues(rows, fallback, controlPlane) {
+  const linearIds = [];
+  // One lookup per distinct ticket, not per open item: several inbox rows
+  // routinely name the same ticket, and each GitHub lookup is its own
+  // un-batched API call against a shared token budget.
+  const githubRows = new Map();
+  for (const entry of rows) {
+    const repoName = entry.refs.repo;
+    if (!repoName) {
+      linearIds.push(entry.refs.issue);
+      continue;
+    }
+    try {
+      const plane = controlPlane({ repoName });
+      if (plane.kind === "github") {
+        if (!githubRows.has(entry.refs.issue))
+          githubRows.set(entry.refs.issue, plane);
+        continue;
+      }
+    } catch {
+      // The existing poll is fail-open. A stale/missing repo config should not
+      // make unrelated Linear inbox rows stop reconciling.
+    }
+    linearIds.push(entry.refs.issue);
+  }
+  const githubIssues = await Promise.all(
+    [...githubRows].map(async ([issue, plane]) => {
+      // Per-row fail-open: one deleted ticket or one rate-limited read must
+      // not reject the whole batch and stall every other row's reconcile.
+      try {
+        const ticket = await plane.getTicket(issue);
+        return {
+          identifier: issue,
+          state: ticket.state,
+          labels: ticket.labels,
+          title: ticket.title,
+        };
+      } catch {
+        return null;
+      }
+    }),
+  );
+  const linearIssues =
+    linearIds.length > 0 ? await fallback([...new Set(linearIds)]) : [];
+  return [...githubIssues.filter(Boolean), ...linearIssues];
+}
+
 function linearIssueResolved(row, issue, db) {
   const state = issue?.state?.name;
   if (typeof state !== "string" || state === "") return false;
@@ -1420,10 +1824,19 @@ function linearIssueResolved(row, issue, db) {
   return false;
 }
 
+function issueIsClosed(issue) {
+  return issue?.state?.type === "completed";
+}
+
 /** Resolve asks when their runtime-owned or externally polled referent moves on. */
 export function reconcileInbox(
   db,
-  { now = Date.now(), linearIssues = fetchLinearInboxIssues } = {},
+  {
+    now = Date.now(),
+    linearIssues = fetchLinearInboxIssues,
+    controlPlane = loadControlPlane,
+    fetchPullRequest = defaultFetchPullRequest,
+  } = {},
 ) {
   const resolved = [];
   const rows = db
@@ -1466,11 +1879,13 @@ export function reconcileInbox(
             };
           });
   const linearRows = [];
+  const prRows = [];
   for (const row of rows) {
     // Pending decisions are not skipped: once the referent stops waiting the
     // ask is moot and resolveInboxItem records it as superseded (auto:*).
     const refs = parseObject(row.refs_json);
     let resolvedBy = null;
+    let resolvedReason = null;
     if (row.kind === "decision_needed" || row.kind === "proposal_expired") {
       if (!refs.proposalId) continue;
       const proposal = db
@@ -1497,33 +1912,115 @@ export function reconcileInbox(
         .get(refs.eventSource, refs.eventId);
       if (event && event.status !== "human_needed")
         resolvedBy = "auto:event_requeued";
-    } else if (
-      (row.kind === "BLOCKED" || row.kind === "ESCALATED") &&
-      refs.issue
+    }
+    // A parked notice about a ticket the factory has already picked back up is
+    // stale. This never applies to an open ask or an escalation: a newer run
+    // does not answer a decision the operator still owes, and silently
+    // resolving one would discard it.
+    if (
+      !resolvedBy &&
+      PARKED_KINDS.has(row.kind) &&
+      !hasPendingDecision(row) &&
+      hasNewerSubjectRun(db, refs.issue, row.created_at)
     ) {
-      linearRows.push({ row, refs });
+      resolvedBy = "auto:superseded";
+    }
+    // A run-progress notice about a run that has already finished is stale.
+    // This never applies to an open ask: the operator still owes an answer.
+    if (
+      !resolvedBy &&
+      refs.runId &&
+      RUN_PROGRESS_KINDS.has(row.kind) &&
+      !hasPendingDecision(row)
+    ) {
+      const run = db
+        .query("SELECT state FROM runs WHERE run_id = ?")
+        .get(refs.runId);
+      if (run && ALL_TERMINAL_STATES.has(run.state)) {
+        resolvedBy = "auto:stale_ref";
+        resolvedReason = "stale_ref";
+      }
+    }
+    if (!resolvedBy && staleParkedItem(db, row, refs, now)) {
+      resolvedBy = "auto:stale_ref";
+      resolvedReason = "stale_ref";
     }
     if (!resolvedBy) continue;
-    resolveInboxItem(db, row.id, { now, resolvedBy });
+    resolveInboxItem(db, row.id, {
+      now,
+      resolvedBy,
+      ...(resolvedReason ? { reason: resolvedReason } : {}),
+    });
     resolved.push({ id: row.id, resolvedBy });
   }
 
-  if (linearRows.length === 0) return resolved;
+  // A ticket can be referenced by any inbox kind. The kind-specific branches
+  // above handle local proposal/event state first; a closed external ticket is
+  // stale regardless of whether the item was BLOCKED, RC READY, or a decision.
+  for (const row of rows) {
+    const refs = parseObject(row.refs_json);
+    if (
+      refs.pr &&
+      row.kind !== "CI RED" &&
+      !resolved.some((entry) => entry.id === row.id) &&
+      !prRows.some((entry) => entry.row.id === row.id)
+    ) {
+      prRows.push({ row, refs });
+    }
+    if (
+      refs.issue &&
+      !resolved.some((entry) => entry.id === row.id) &&
+      !linearRows.some((entry) => entry.row.id === row.id)
+    ) {
+      linearRows.push({ row, refs });
+    }
+  }
+
+  if (linearRows.length === 0 && prRows.length === 0) return resolved;
   const lastPoll = linearPollAt.get(db) ?? -Infinity;
   if (now - lastPoll < LINEAR_POLL_INTERVAL_MS) return resolved;
   linearPollAt.set(db, now);
-  const issueIds = [...new Set(linearRows.map(({ refs }) => refs.issue))];
-  return Promise.resolve(linearIssues(issueIds))
-    .then((issues) => {
+  return Promise.all([
+    linearRows.length
+      ? fetchReferencedInboxIssues(linearRows, linearIssues, controlPlane)
+      : [],
+    prRows.length
+      ? fetchReferencedInboxPullRequests(prRows, fetchPullRequest, db)
+      : new Map(),
+  ])
+    .then(([issues, pulls]) => {
       const byId = new Map(issues.map((issue) => [issue.identifier, issue]));
-      for (const { row, refs } of linearRows) {
-        const issue = byId.get(refs.issue);
-        if (!issue || !linearIssueResolved(row, issue, db)) continue;
+      // Only the rows collected for the PR sweep are eligible here: a CI RED
+      // row that happens to share a PR reference with another item must not be
+      // retired by that item's fetch.
+      for (const { row, refs } of prRows) {
+        if (resolved.some((entry) => entry.id === row.id)) continue;
+        const pr = prNumber(refs.pr);
+        const github = githubRepoFor(refs);
+        const pull = pr && github ? pulls.get(`${github}#${pr}`) : null;
+        if (!["MERGED", "CLOSED"].includes(pull?.state)) continue;
         const resolvedBy =
-          row.kind === "BLOCKED"
-            ? "auto:linear_unblocked"
-            : "auto:linear_escalation_cleared";
+          pull.state === "MERGED" ? "auto:pr_merged" : "auto:pr_closed";
         resolveInboxItem(db, row.id, { now, resolvedBy });
+        resolved.push({ id: row.id, resolvedBy });
+      }
+      for (const { row, refs } of linearRows) {
+        if (resolved.some((entry) => entry.id === row.id)) continue;
+        const issue = byId.get(refs.issue);
+        if (!issue) continue;
+        const stale = issueIsClosed(issue);
+        if (!stale && !linearIssueResolved(row, issue, db)) continue;
+        const resolvedBy =
+          stale || (row.kind !== "BLOCKED" && row.kind !== "ESCALATED")
+            ? "auto:stale_ref"
+            : row.kind === "BLOCKED"
+              ? "auto:linear_unblocked"
+              : "auto:linear_escalation_cleared";
+        resolveInboxItem(db, row.id, {
+          now,
+          resolvedBy,
+          ...(resolvedBy === "auto:stale_ref" ? { reason: "stale_ref" } : {}),
+        });
         resolved.push({ id: row.id, resolvedBy });
       }
       return resolved;

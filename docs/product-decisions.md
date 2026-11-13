@@ -4,6 +4,31 @@ Recorded so the next agent does not re-litigate them. The webui spec
 (`docs/event-runtime-webui.md`) is the view-level contract; this file is the
 cross-cutting calls that several tickets share.
 
+## GitHub App installation grant (gh-1594)
+
+Decided 2026-08-30: deliberately retain the current `watt-mind-factory` App
+installation grant through the next review rather than narrowing it now. The
+live installation has `repository_selection: all` and eight permissions:
+Actions read, Checks write, Contents write, Issues write, Metadata read, Pull
+requests write, Statuses read, and organization Projects write. The complete
+field-level grant and drift procedure are recorded in
+[`docs/event-runtime-github-app.md`](event-runtime-github-app.md#installation-permissions).
+
+This is a time-bounded exception, not a claim that Factory currently needs the
+whole grant. The App token is used only by the GitHub control plane; the forge
+still uses the operator PAT, and several App permissions are unused. Retention
+keeps the planned #1136 phase 3 path open to move forge operations onto the App
+without another immediate organization approval. The present blast radius is
+accepted because `watt-mind` is a single-operator organization and no
+client-repository dispatch through this App is authorized.
+
+Owner: repository operator `hdkiller`. Review date: 2026-09-30. At that review,
+either give #1136 phase 3 a concrete migration target with permissions derived
+from its implementation, or use the documented human-operated narrowing
+runbook to select only active GitHub-control-plane repositories and remove
+unused scopes. Any live grant change requires a fresh installation read and a
+real dispatch reaching `RUNNING`.
+
 ## Operator context tabs (OPS-356)
 
 The Linear-style strip above the inverted-L is a **filter context**, not a

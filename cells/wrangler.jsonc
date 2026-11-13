@@ -1,0 +1,29 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "factory-cells",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "GENERIC_CELL",
+        "class_name": "GenericCell",
+      },
+      {
+        "name": "SITE_CELL",
+        "class_name": "SiteCell",
+      },
+      {
+        "name": "ARTICLE_CELL",
+        "class_name": "ArticleCell",
+      },
+    ],
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["GenericCell", "SiteCell", "ArticleCell"],
+    },
+  ],
+}

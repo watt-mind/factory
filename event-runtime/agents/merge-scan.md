@@ -13,13 +13,25 @@ ledger (`baseSha` is recorded, not part of the key), and emits `reviews[]` only
 for misses — a moved head. A moved base with the same head is a hit. A selected
 scan (`prNumbers`) forces a review even on a ledger hit. For a hit whose live
 state is CONFLICTING or BEHIND (or whose recorded `baseSha` differs from the
-live base tip), emit an operational `rebase_onto_base` item in `fix[]` with
+live base tip), normally emit an operational `rebase_onto_base` item in `fix[]` with
 `mechanical: true`, `withinOwnedPaths: true`, and `round` from the ledger; do
-not start a review run. Do not emit a review item when an open, queued, or
+not start a review run. Never emit a rebase for a PR labelled `ai:landing`.
+For a non-conflicting rebase candidate, also skip the rebase when the current
+head has a `Full verification` check that is queued/running or succeeded within
+the `FACTORY_MERGE_REBASE_SKIP_FRESH_CI_MINUTES` fresh-CI window (default 60);
+the scan summary names the skip reason. A
+CONFLICTING PR still emits a rebase unless it carries `ai:landing`. Do not emit a review item when an open, queued, or
 running `merge-review@1` proposal or run already exists at the same
 `(pr, headSha)`. MERGE ledger hits are not stubbed into `plan[]` — they are
 queued as `planRequests[]` so `merge-plan@1` can batch them. `plan[]` on a
 scan artifact is always empty.
+
+The scan also suppresses a prior refused merge-fix finding for
+`FACTORY_MERGE_FIX_REFUSAL_COOLDOWN_MINUTES` (default 15 minutes). The durable
+cooldown, `FACTORY_MERGE_FIX_DURABLE_REFUSAL_COOLDOWN_MINUTES` (default 360
+minutes), applies to `merge_fix_ticket_escalated` and
+`merge_fix_ticket_security` refusals. Its refusal lookup is bounded by the
+larger cooldown, so raising either setting widens the scan window for both.
 
 When `prNumbers` is absent, enumerate **all** open PRs and consider every
 base-targeting, non-draft PR. Emit an `escalate[]` item for every non-draft PR

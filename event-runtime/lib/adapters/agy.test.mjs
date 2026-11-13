@@ -429,10 +429,20 @@ describe("execute with fake binary", () => {
   });
 
   /** Fake agy emitting the line shapes captured from the real CLI (WM-435). */
-  function writeFakeAgy(binDir, lines, beforeOutput = "") {
+  function writeFakeAgy(
+    binDir,
+    lines,
+    beforeOutput = "",
+    { newlineLessLastLine = false } = {},
+  ) {
     const fakeAgy = path.join(binDir, "agy");
     const body = lines
-      .map((l) => `echo ${JSON.stringify(JSON.stringify(l))}`)
+      .map((line, index) => {
+        const encoded = JSON.stringify(JSON.stringify(line));
+        return newlineLessLastLine && index === lines.length - 1
+          ? `printf '%s' ${encoded}`
+          : `echo ${encoded}`;
+      })
       .join("\n");
     writeFileSync(
       fakeAgy,
@@ -441,6 +451,12 @@ describe("execute with fake binary", () => {
     );
     return fakeAgy;
   }
+
+  test("tmpDir returns its own canonical realpath (GH-1099)", () => {
+    tmp = tmpDir("agy-test-realpath-");
+    // On Darwin this distinguishes /var/... from its /private/var/... realpath.
+    expect(tmp).toBe(realpathSync(tmp));
+  });
 
   test("refuses a definition without verified promptText before launching agy", async () => {
     tmp = tmpDir("agy-test-");
@@ -518,6 +534,52 @@ describe("execute with fake binary", () => {
     expect(readFileSync(argvFile, "utf8")).toContain(`Do task${PROMPT_SUFFIX}`);
     expect(readFileSync(argvFile, "utf8")).not.toContain("mutable replacement");
     expect(existsSync(path.join(tmp, ".transcript.json"))).toBe(true);
+  });
+
+  test("waits for a newline-less terminal result before resolving", async () => {
+    tmp = tmpDir("agy-test-");
+    const binDir = path.join(tmp, "bin");
+    mkdirSync(binDir, { recursive: true });
+    writeFakeAgy(
+      binDir,
+      [
+        { event: "init", conversation_id: "c1" },
+        {
+          event: "result",
+          result: {
+            status: "SUCCESS",
+            response: "Final response.",
+            duration_seconds: 1,
+            num_turns: 2,
+            usage: { input_tokens: 10, output_tokens: 20 },
+          },
+        },
+      ],
+      "",
+      { newlineLessLastLine: true },
+    );
+
+    const traces = [];
+    const res = await execute({
+      spec: {},
+      def: { promptText: "Do task" },
+      workspaceDir: tmp,
+      env: { PATH: `${binDir}:${process.env.PATH}` },
+      onTrace: (kind, payload) => traces.push({ kind, payload }),
+    });
+
+    expect(res.exitCode).toBe(0);
+    expect(traces).toContainEqual({
+      kind: "assistant_text",
+      payload: { text: "Final response." },
+    });
+    expect(traces).toContainEqual({
+      kind: "usage",
+      payload: expect.objectContaining({
+        usage: { input: 10, output: 20 },
+      }),
+    });
+    expect(res.usage).toEqual({ input: 10, output: 20, turns: 2 });
   });
 
   test("a failed run still produces a trace carrying the error (WM-435)", async () => {
@@ -662,11 +724,14 @@ describe("execute with fake binary", () => {
     tmp = tmpDir("agy-test-");
     const binDir = path.join(tmp, "bin");
     const pidFile = path.join(tmp, "grandchild.pid");
+    const fixtureErrorFile = path.join(tmp, "grandchild-error.txt");
     mkdirSync(binDir, { recursive: true });
     writeFakeAgy(
       binDir,
       [],
-      'sleep 30 & echo $! > "$FACTORY_TEST_PID_FILE"; wait',
+      // GH-1099: keep fixture setup stderr in the workspace so a Darwin spawn
+      // or PID-file failure is reported instead of becoming only "false".
+      '{ sleep 30 & grandchild_pid=$!; printf "%s\\n" "$grandchild_pid" > "$FACTORY_TEST_PID_FILE"; wait "$grandchild_pid"; } 2> "$FACTORY_TEST_ERROR_FILE"',
     );
 
     const outcome = await execute({
@@ -678,13 +743,21 @@ describe("execute with fake binary", () => {
       env: {
         PATH: `${binDir}:${process.env.PATH}`,
         FACTORY_TEST_PID_FILE: pidFile,
+        FACTORY_TEST_ERROR_FILE: fixtureErrorFile,
       },
     });
     expect(outcome.timedOut).toBe(true);
 
     // Give the kernel a brief moment to reap the signalled process group.
     await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(existsSync(pidFile)).toBe(true);
+    if (!existsSync(pidFile)) {
+      const fixtureError = existsSync(fixtureErrorFile)
+        ? readFileSync(fixtureErrorFile, "utf8")
+        : "fixture wrote no diagnostic";
+      throw new Error(
+        `agy grandchild fixture did not write ${pidFile}: ${fixtureError}`,
+      );
+    }
     const grandchildPid = parseInt(readFileSync(pidFile, "utf8").trim(), 10);
     let alive = true;
     try {

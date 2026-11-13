@@ -24,9 +24,9 @@ Prefer removing the need over documenting the workaround. An env var or a script
 
 **Seen:** `sleep 150; gh pr checks 166`, `sleep 180; echo done`, `sleep 60; echo done` across multiple runs. Still ×20 in the 697-run window (Aug 2026 retro) — includes runs from before the harness block landed; watch the next window.
 
-A fixed sleep is a guess: too long wastes wall clock in a process holding a concurrency slot, too short means a re-poll. `gh pr checks <PR> --watch --fail-fast` returns the moment checks settle and exits non-zero on the first failure.
+A fixed sleep is a guess: too long wastes wall clock in a process holding a concurrency slot, too short means a re-poll. Select the pushed SHA's CI workflow with `gh run list --workflow ci.yml --commit <sha>`, wait with `gh run watch <run-id> --exit-status --interval 60`, and assert every check run is green via the REST check-runs endpoint.
 
-**Fix:** rule added to `shared/floor.md` (§Waiting). Verified `--watch`, `--fail-fast` and `-i` exist in gh 2.97. factory-ticket.md documents that sleep-polling is blocked by the harness (a blocked tool call kills the run).
+**Fix:** rule added to `shared/floor.md` (§Waiting). The REST workflow selector and `gh run watch --exit-status --interval 60` avoid the shared GraphQL budget. factory-ticket.md documents that sleep-polling is blocked by the harness (a blocked tool call kills the run).
 
 **Status:** fixed in the floor + harness block — if sleeps persist in _new_ transcripts after Aug 2026, the next step is a `scripts/wait-for-ci.sh` wrapper agents must call.
 
@@ -56,7 +56,7 @@ Raising `--print-timeout` alone would trade a short hang for a long one: a wedge
 
 **Status:** fixed — watch whether profile-lock errors drop in the next friction window.
 
-### F-12 · Agents use the schpet `linear` CLI instead of `tools/linear.mjs`
+### F-12 · Agents use the schpet `linear` CLI instead of `tools/ticket.mjs`
 
 **Seen:** `linear issue comment CLNT-526 --body` (×23, wrong syntax — needs `comment add`), `linear issue query ...` (×28, filter type errors), plus ×18 Linear MCP `list_issues` validation failures.
 
@@ -83,6 +83,14 @@ Raising `--print-timeout` alone would trade a short hang for a long one: a wedge
 ---
 
 ## Fixed
+
+### F-15 · `/factory-merge`'s pre-merge gate accepted a false-green `gh run watch` — `fixed` (WM-1106)
+
+On 2026-09-15 the merge agent merged legalease PR #1170 while two check runs on its head were `failure`: `gh run watch --exit-status` on one workflow run had returned 0 (a run superseded by a newer push exits 0 without ever going green), and the merge one-liner asserted only that the head SHA matched the reviewed one — it never re-checked the check-run summary at merge time. Develop's unit job went red until PR #1171 fixed it forward.
+
+**Fix:** `.claude/commands/factory-merge.md` step 4.3 now states the pre-merge gate as one shell condition — head SHA match **and** a `check-runs` summary with no `failure`/`in_progress`/`queued`/`cancelled`/`timed_out`/`action_required` entries — with two rules spelled out: a `gh run watch` exit code is never a merge input, and a cancelled run on an older (superseded) head is not a red, but a `failure` from any workflow on the current head is. `/merge` shares the same bar; this repo has no `.claude/commands/merge.md` of its own, so the equivalent user-level command file needs the same block by hand.
+
+**Status:** fixed.
 
 ### F-1 · zsh glob-expands unquoted `--include=*.ts` — `fixed` (OPS-41)
 

@@ -2,6 +2,7 @@ import { tmpDir } from "../test-support/tmp.mjs?file=event-runtime-demo-seed-tes
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { cpus as osCpus } from "node:os";
 import { fileURLToPath } from "node:url";
 import { loadAdjustedTimeout } from "../cli/test-helpers.mjs";
 import { validate } from "../lib/schema.mjs";
@@ -29,11 +30,87 @@ const TRIAGE_SCAN_OUTPUT_SCHEMA = JSON.parse(
 // all-or-nothing — the factory could not complete a ticket cleanly, and at
 // least one agent discarded a correct fix because of it.
 //
-// 20s is ~2x the observed cost. CI stretches this liveness ceiling with its
-// measured load factor, while a genuine wrong-edge hang still fails here (and,
-// failing that, at the load-adjusted test timeout). Rediscovered as WM-487,
-// WM-492, WM-499 and WM-90 before WM-503.
-const SEED_TIMEOUT_MS = loadAdjustedTimeout(20_000);
+// 20s is ~2x the observed cost, and it is the floor: an unloaded machine keeps
+// exactly today's bound. CI run 33558811006 (OPS-464) measured 22,518ms against
+// it under self-hosted runner load. That run already had the CI_LOAD_FACTOR
+// wiring active and it computed a factor of 1 — the workflow takes
+// ceil(runnable/cpus) = ceil(16/32) = 1, so genuine contention reads as
+// "unloaded", and it samples at job start, ~28s before this assertion runs and
+// before bun install and the concurrent lanes create the load. Trusting the env
+// factor alone therefore cannot fix this flake.
+//
+// So the budget measures contention itself, here, when the assertion runs:
+// /proc/loadavg's runnable count (and the 1-min average) against the CPU count
+// as a FRACTIONAL multiplier, maxed with CI_LOAD_FACTOR when CI supplies a
+// larger one. Floor 20s, ceiling 28s — the timing lane runs
+// `bun test --timeout 30000`, so any budget at or above 30s is unreachable and
+// the old 4x clamp was theatre above that. A genuine wrong-edge hang blocks
+// indefinitely and still fails here (and, failing that, at the test timeout).
+// Rediscovered as WM-487, WM-492, WM-499 and WM-90 before WM-503.
+const SEED_BUDGET_BASE_MS = 20_000;
+const SEED_BUDGET_CEILING_MS = 28_000;
+
+/** Clamp a load multiplier into the [base, ceiling] wall-clock budget. */
+export function seedBudgetMs(
+  factor,
+  { baseMs = SEED_BUDGET_BASE_MS, ceilingMs = SEED_BUDGET_CEILING_MS } = {},
+) {
+  const multiplier = Number.isFinite(factor) && factor > 1 ? factor : 1;
+  return Math.min(Math.ceil(baseMs * multiplier), ceilingMs);
+}
+
+/**
+ * Fractional contention multiplier from /proc/loadavg text.
+ * Field 4 is "runnable/total" (e.g. "16/1024"); field 1 is the 1-min average.
+ * 1 + busy/cpus: idle ~1.0, half-saturated 1.5, fully saturated 2.0+.
+ */
+export function procLoadFactor(loadavgText, cpuCount) {
+  const cpus = Number(cpuCount);
+  if (!Number.isFinite(cpus) || cpus <= 0) return 1;
+  const fields = String(loadavgText ?? "")
+    .trim()
+    .split(/\s+/);
+  const oneMinute = Number.parseFloat(fields[0]);
+  const runnable = Number.parseInt(String(fields[3] ?? "").split("/")[0], 10);
+  const busy = Math.max(
+    Number.isFinite(oneMinute) ? oneMinute : 0,
+    Number.isFinite(runnable) ? runnable : 0,
+  );
+  if (busy <= 0) return 1;
+  return 1 + busy / cpus;
+}
+
+/** Never throw at module load: no /proc/loadavg (macOS, sandboxes) → 1. */
+function measuredLoadFactor() {
+  try {
+    return procLoadFactor(
+      readFileSync("/proc/loadavg", "utf8"),
+      osCpus()?.length ?? 0,
+    );
+  } catch {
+    return 1;
+  }
+}
+
+function envLoadFactor() {
+  const parsed = Number.parseFloat(process.env.CI_LOAD_FACTOR ?? "1");
+  return Number.isFinite(parsed) && parsed > 1 ? parsed : 1;
+}
+
+// Sampled once at module load so a machine already busy before the suite starts
+// is accounted for, and re-sampled at each assertion (below) so load created
+// during the run counts too.
+const SEED_LOAD_FACTOR_AT_LOAD = Math.max(
+  measuredLoadFactor(),
+  envLoadFactor(),
+);
+
+/** The wall-clock budget for a seed, measured at the moment it is asserted. */
+function seedTimeoutMs() {
+  return seedBudgetMs(
+    Math.max(SEED_LOAD_FACTOR_AT_LOAD, measuredLoadFactor(), envLoadFactor()),
+  );
+}
 
 const redact = (text) =>
   String(text ?? "")
@@ -139,6 +216,51 @@ async function waitForPublishedOutbox(port) {
     `seeded runtime did not publish its outbox within ${timeoutMs}ms`,
   );
 }
+
+describe("seed wall-clock budget math (OPS-464 load sensitivity)", () => {
+  test("an unloaded machine keeps exactly the 20s floor", () => {
+    expect(seedBudgetMs(1)).toBe(20_000);
+    // Anything at or below 1x — including a missing/garbage factor — floors.
+    expect(seedBudgetMs(0.5)).toBe(20_000);
+    expect(seedBudgetMs(Number.NaN)).toBe(20_000);
+    expect(seedBudgetMs(undefined)).toBe(20_000);
+    expect(procLoadFactor("0.00 0.01 0.05 1/1024 4242", 32)).toBeCloseTo(
+      1 + 1 / 32,
+      5,
+    );
+  });
+
+  test("fractional load stretches the budget and clamps below the 30s test timeout", () => {
+    // 1.5x would be 30_000 — unreachable under `bun test --timeout 30000`.
+    expect(seedBudgetMs(1.5)).toBe(28_000);
+    expect(seedBudgetMs(1.2)).toBe(24_000);
+    expect(seedBudgetMs(4)).toBe(28_000);
+    expect(seedBudgetMs(1000)).toBe(28_000);
+    // The failing run's own reading: 16 runnable on 32 CPUs → 1.5x, not the
+    // ceil(16/32) = 1 the workflow computed.
+    expect(procLoadFactor("8.00 6.00 5.00 16/1024 4242", 32)).toBeCloseTo(
+      1.5,
+      5,
+    );
+    expect(
+      seedBudgetMs(procLoadFactor("8.00 6.00 5.00 16/1024 4242", 32)),
+    ).toBe(28_000);
+  });
+
+  test("CI_LOAD_FACTOR still applies when /proc/loadavg reads idle", () => {
+    const idle = procLoadFactor("0.00 0.00 0.00 1/512 7", 64);
+    expect(seedBudgetMs(Math.max(idle, 2))).toBe(28_000);
+    expect(seedBudgetMs(Math.max(idle, 1.1))).toBe(22_000);
+  });
+
+  test("a missing or unreadable /proc/loadavg falls back to 1x", () => {
+    expect(procLoadFactor("", 32)).toBe(1);
+    expect(procLoadFactor(undefined, 32)).toBe(1);
+    expect(procLoadFactor("garbage", 32)).toBe(1);
+    expect(procLoadFactor("0.5 0.5 0.5 2/100 7", 0)).toBe(1);
+    expect(procLoadFactor("0.5 0.5 0.5 2/100 7", undefined)).toBe(1);
+  });
+});
 
 describe("triage-scan write-detail contract (WM-352)", () => {
   const artifactWithDetail = (detail) => ({
@@ -307,11 +429,12 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
       );
       await expectSuccess("initial seed", seedRes, port);
       expect(seedRes.stdout).toContain("merge-apply@2 watched");
+      expect(seedRes.stdout).toContain("structured dispatch handoff");
       expect(seedRes.stdout).not.toContain(
         "merge-verify@1 exact landed lifecycle",
       );
       // The triage chain now waits for its auto-approved apply run to finish.
-      expect(Date.now() - t0).toBeLessThan(SEED_TIMEOUT_MS);
+      expect(Date.now() - t0).toBeLessThan(seedTimeoutMs());
       initialTriageApplyRun = seedRes.stdout.match(
         /^seed: (\S+) → COMPLETED \(triage-apply@1 chain auto-approved/m,
       )?.[1];
@@ -323,12 +446,95 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
         env: suiteEnv(home),
       });
       await expectSuccess("initial verify", verifyRes, port);
+      expect(verifyRes.stdout).toContain(
+        "GET /inbox?status=open returns ≥1 open item",
+      );
+      expect(verifyRes.stdout).toContain(
+        "BLOCKED parked human_needed Inbox item has requeue/dismiss decision",
+      );
+      expect(verifyRes.stdout).toContain(
+        "TTL-expired Inbox item offers approve/reject decision",
+      );
+
+      const inboxResponse = await fetch(
+        `http://127.0.0.1:${port}/inbox?status=open`,
+        { headers: controlAuthHeaders() },
+      );
+      expect(inboxResponse.ok).toBe(true);
+      const { items } = await inboxResponse.json();
+      const fixture = items.find(
+        (item) => item.id === "inbox_t1_dispatch_detail",
+      );
+      expect(
+        fixture,
+        `seeded inbox refs: ${JSON.stringify(items.map((item) => item.refs))}`,
+      ).toBeTruthy();
+      expect(fixture).toMatchObject({
+        title: "Review seeded dispatch handoff",
+        refs: {
+          runId: "run_t1_dispatch_wm100",
+          eventSource: "demo-seed",
+          eventId: "t1-human-needed",
+          issue: "DEMO-100",
+        },
+      });
+      expect(fixture.refs.proposalId).toStartWith("prop_");
+      expect(fixture.refs.pr).toMatch(
+        /^https:\/\/github\.com\/watt-mind\/.+\/pull\/999999$/,
+      );
+      expect(fixture.refs.repo).toBeTruthy();
+      expect(fixture.body).toContain("## Handoff");
+      expect(fixture.body).toContain("## References");
+      expect(fixture.body).toContain(
+        "```\nbun test event-runtime/demo/seed.test.mjs\n```",
+      );
+
+      // The seeded malformed chain envelope (#2301) is what makes the degraded
+      // Chain UI state browser-observable, so assert the API actually degrades
+      // rather than trusting the seed log line alone.
+      const malformedLog = seedRes.stdout.match(
+        /^seed: (\S+) inserted \(malformed chain envelope; open #\/chain\/(\S+)\)$/m,
+      );
+      expect(
+        malformedLog,
+        `seed stdout lacked the malformed-envelope line:\n${seedRes.stdout}`,
+      ).toBeTruthy();
+      const [, malformedEventId, malformedCorrelationId] = malformedLog;
+
+      const chainResponse = await fetch(
+        `http://127.0.0.1:${port}/chain/${encodeURIComponent(malformedCorrelationId)}`,
+        { headers: controlAuthHeaders() },
+      );
+      expect(chainResponse.ok).toBe(true);
+      const chain = await chainResponse.json();
+      const malformedEvents = chain.events.filter(
+        (event) => event.eventId === malformedEventId,
+      );
+      // The hardcoded payload_hash + ON CONFLICT upsert keep re-seeding from
+      // producing a second copy of this row.
+      expect(malformedEvents).toHaveLength(1);
+      expect(malformedEvents[0]).toMatchObject({
+        envelope: null,
+        envelopeMalformed: true,
+        repos: [],
+        status: "planned",
+      });
+
+      // The same row must not take down the flat events list (#2301).
+      const eventsResponse = await fetch(`http://127.0.0.1:${port}/events`, {
+        headers: controlAuthHeaders(),
+      });
+      expect(eventsResponse.status).toBe(200);
+      const { events } = await eventsResponse.json();
+      expect(events.some((event) => event.eventId === malformedEventId)).toBe(
+        true,
+      );
     },
     loadAdjustedTimeout(30_000),
   );
 
   test(
-    "re-running seed with the SAME prefix fails immediately (<1s) on duplicate intake",
+    "re-running seed with the SAME prefix stays fast on duplicate intake",
     () => {
       const t0 = Date.now();
       const res = spawnSync("bun", [SEED, "--port", port, "--prefix", "t1"], {
@@ -337,7 +543,9 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
       });
       const elapsedMs = Date.now() - t0;
       expect(res.status).not.toBe(0);
-      expect(elapsedMs).toBeLessThan(2000);
+      // Protect the duplicate fast path from regressing into a full seed run;
+      // account for shared-runner contention without masking that regression.
+      expect(elapsedMs).toBeLessThan(loadAdjustedTimeout(2000));
       const output = `${res.stdout}${res.stderr}`;
       expect(output).toContain('duplicate prefix "t1"');
     },
@@ -363,7 +571,7 @@ describe("seed & re-seed deduplication (OPS-464)", () => {
       );
       // A fresh prefix must follow the new scan's causal edge, never reuse the
       // prior terminal triage-apply proposal while waiting for that edge.
-      expect(Date.now() - t0).toBeLessThan(SEED_TIMEOUT_MS);
+      expect(Date.now() - t0).toBeLessThan(seedTimeoutMs());
       const reseedTriageApplyRun = seedRes.stdout.match(
         /^seed: (\S+) → COMPLETED \(triage-apply@1 chain auto-approved/m,
       )?.[1];

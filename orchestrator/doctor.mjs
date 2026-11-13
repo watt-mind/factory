@@ -24,11 +24,25 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { homedir } from "node:os";
 import { factoryRoot } from "../lib/factory-root.mjs";
+import { PLANNER_STALE_MS } from "./watchdog.mjs";
 import {
   controlPlaneKindFromPolicy,
   loadControlPlane,
 } from "../lib/control-plane/index.mjs";
 import { harnessGitignoreIsCurrent } from "../lib/factory-gitignore.mjs";
+import {
+  normalizeToolchain,
+  preflightToolchain,
+  reposRoot,
+} from "../event-runtime/lib/repos.mjs";
+import {
+  codeStamp,
+  REGISTRY_STAMP_PATHS,
+} from "../event-runtime/lib/worker.mjs";
+import {
+  CHAIN_AUTO_APPROVAL_EVENT_TYPES,
+  loadChainAutoApprovalPolicy,
+} from "../event-runtime/lib/auto-approval.mjs";
 import {
   browserLaunchCheck,
   piChromeDevtoolsCheck,
@@ -38,10 +52,147 @@ import {
   installLinearBudgetCapture,
   linearBudgetStatus,
   loadLinearBudget,
-} from "../tools/linear.mjs";
+} from "../tools/ticket.mjs";
+import { readWorkflowRuns } from "./ci.mjs";
 
 export const MIN_BUN_VERSION = "1.1.0";
 export const MIN_GIT_VERSION = "2.40.0";
+export const BASE_BRANCH_CI_TIMEOUT_MS = 10_000;
+// Each repository gets at most 10s, while the wider aggregate ceiling lets a
+// slow read fail in isolation instead of starving every repository after it.
+export const BASE_BRANCH_CI_AGGREGATE_TIMEOUT_MS = 60_000;
+export const BASE_BRANCH_CI_RUN_LIMIT = 20;
+
+const defaultWorkflowRunList = (repo, options) =>
+  readWorkflowRuns({ repo, ...options });
+
+/**
+ * Report whether every emitted factory command is available in a repository.
+ * Command links are intentionally untracked and can be restored with one
+ * `factory emit`, so missing and dangling links are actionable warnings.
+ */
+export function factoryCommandLinkDiagnostic({
+  commandsDir,
+  expectedCommands = [],
+} = {}) {
+  const missing = [];
+  const broken = [];
+  for (const name of expectedCommands) {
+    const target = path.join(commandsDir, `${name}.md`);
+    let st = null;
+    try {
+      st = lstatSync(target);
+    } catch {
+      /* intentionally ignored */
+    }
+    if (!st) {
+      missing.push(name);
+      continue;
+    }
+    if (st.isSymbolicLink() && !existsSync(target)) broken.push(name);
+  }
+  const problems = [...missing, ...broken];
+  return {
+    ok: problems.length === 0 ? true : "warn",
+    label: "/factory-* commands linked",
+    detail: problems.length
+      ? `${problems.length}/${expectedCommands.length} missing or broken: ${problems.join(", ")}`
+      : `${expectedCommands.length} commands`,
+    fix: problems.length ? "factory emit" : null,
+  };
+}
+
+/**
+ * Report whether a repository's base branch has a healthy completed Actions
+ * run. The reader is injectable so doctor tests never need GitHub access.
+ */
+export function baseBranchCiDiagnostics({
+  repos = [],
+  runList = defaultWorkflowRunList,
+  deadlineMs = Infinity,
+  now = Date.now,
+} = {}) {
+  return repos.map((repo) => {
+    const label = "base branch CI";
+    if (!repo.github) {
+      return {
+        ok: "info",
+        label,
+        detail: "skipped — no GitHub repository configured",
+        fix: null,
+      };
+    }
+
+    const branch = repo.base || "main";
+    const remainingMs = deadlineMs - now();
+    if (remainingMs <= 0) {
+      return {
+        ok: "info",
+        label,
+        detail: `${branch} — skipped, aggregate GitHub Actions deadline exhausted`,
+        fix: null,
+      };
+    }
+    const runs = (() => {
+      try {
+        return runList(repo.github, {
+          branch,
+          limit: BASE_BRANCH_CI_RUN_LIMIT,
+          timeout: Math.min(BASE_BRANCH_CI_TIMEOUT_MS, remainingMs),
+        });
+      } catch {
+        // An injected reader may throw while the production helper returns null.
+        return null;
+      }
+    })();
+    if (runs === null) {
+      return {
+        ok: "info",
+        label,
+        detail: `${branch} — skipped, GitHub Actions could not be read`,
+        fix: null,
+      };
+    }
+
+    const latest = runs.find((run) => run.status === "completed");
+    if (!latest) {
+      return {
+        ok: "info",
+        label,
+        detail: `${branch} — skipped, no completed Actions history`,
+        fix: null,
+      };
+    }
+
+    const workflow = latest.workflowName || latest.name || "unnamed workflow";
+    const runId = latest.databaseId ?? "unknown";
+    const runRef = latest.url
+      ? `run #${runId} (${latest.url})`
+      : `run #${runId}`;
+    if (latest.conclusion === "success") {
+      return {
+        ok: true,
+        label,
+        detail: `${branch} — ${workflow} succeeded (${runRef})`,
+        fix: null,
+      };
+    }
+    if (["skipped", "neutral"].includes(latest.conclusion)) {
+      return {
+        ok: "info",
+        label,
+        detail: `${branch} — ${workflow} ${latest.conclusion} (${runRef})`,
+        fix: null,
+      };
+    }
+    return {
+      ok: "warn",
+      label,
+      detail: `${branch} — ${workflow} ${latest.conclusion ?? "without a conclusion"} (${runRef})`,
+      fix: "open the run, repair the failing workflow, then re-run `factory doctor`",
+    };
+  });
+}
 
 /** Extract the numeric component from ordinary CLI version output. */
 export function parseCliVersion(output) {
@@ -206,59 +357,638 @@ export function ossOnboardingDiagnostics({
   return diagnostics;
 }
 
-const ROOT = factoryRoot();
-installLinearBudgetCapture();
-const argv = process.argv.slice(2);
-const val = (f) => {
-  const i = argv.indexOf(f);
-  return i === -1 ? null : argv[i + 1];
-};
-const only = (val("--repo") || "")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
+/**
+ * Per-repo toolchain status for `factory doctor` (WM-316 / #1097).
+ *
+ * Pure except for the injectable `which`/`spawn` probes — the same
+ * injection `preflightToolchain` uses — so doctor.test.mjs can cover
+ * pass, mismatch, and the undeclared no-block case without touching the
+ * host. Repos may be raw YAML entries (map-form `toolchain:`) or
+ * `loadRepos()` records; the helper always normalizes first so iterating a
+ * map cannot throw, and a malformed block becomes a red `toolchain` check
+ * instead of an exception.
+ */
+export async function repoToolchainDiagnostics({
+  repos = [],
+  file = "config/repos.yaml",
+  node = "local",
+  which,
+  spawn,
+} = {}) {
+  const diagnostics = [];
+  const preflightOpts = { node };
+  if (typeof which === "function") preflightOpts.which = which;
+  if (typeof spawn === "function") preflightOpts.spawn = spawn;
 
-const expand = (p) => String(p ?? "").replace(/^~/, homedir());
-const cfg = Bun.YAML.parse(
-  readFileSync(path.join(ROOT, "config/repos.yaml"), "utf8"),
-);
-const repos = (cfg.repos ?? []).filter(
-  (r) => !only.length || only.includes(r.name),
-);
-
-// Commits behind origin/<base> before the main checkout is worth flagging.
-const BEHIND_WARN = 10;
-
-const c = {
-  dim: (s) => `\x1b[2m${s}\x1b[0m`,
-  bold: (s) => `\x1b[1m${s}\x1b[0m`,
-  green: (s) => `\x1b[32m${s}\x1b[0m`,
-  red: (s) => `\x1b[31m${s}\x1b[0m`,
-  yellow: (s) => `\x1b[33m${s}\x1b[0m`,
-};
-
-let failures = 0;
-const check = (ok, label, detail, fix) => {
-  if (ok === "warn") {
-    console.log(
-      `  ${c.yellow("!")} ${label}${detail ? c.dim("  " + detail) : ""}`,
+  for (const repo of repos) {
+    // A malformed `toolchain:` block is itself the diagnosis — surface it as
+    // a red check and keep going rather than letting the RepoError kill
+    // doctor with a stack trace before the remaining repos are examined.
+    let toolchain;
+    try {
+      toolchain = normalizeToolchain(repo?.toolchain, repo?.name, file);
+    } catch (err) {
+      diagnostics.push({
+        ok: false,
+        label: "toolchain",
+        detail: err?.message ?? String(err),
+        fix: `fix the toolchain: block for ${repo?.name ?? "this repo"} in ${file}`,
+      });
+      continue;
+    }
+    if (!toolchain?.length) continue;
+    const attestation = await preflightToolchain(
+      { ...repo, toolchain },
+      preflightOpts,
     );
-    if (fix) console.log(`      ${c.dim(fix)}`);
-    return;
+    for (const tool of attestation.tools) {
+      const reason = attestation.reasons.find(
+        (r) => r.executable === tool.executable,
+      );
+      const observed = tool.observed ?? tool.observedRaw ?? null;
+      diagnostics.push({
+        ok: tool.satisfied,
+        label: `toolchain ${tool.executable}`,
+        detail: observed
+          ? `${tool.constraint}  observed ${observed}`
+          : `${tool.constraint}  missing`,
+        fix: reason?.action ?? null,
+      });
+    }
   }
-  console.log(
-    `  ${ok ? c.green("✓") : c.red("✗")} ${label}${detail ? c.dim("  " + detail) : ""}`,
-  );
-  if (!ok) {
-    failures++;
-    if (fix) console.log(`      ${c.bold("fix:")} ${fix}`);
-  }
-};
+  return diagnostics;
+}
 
-const sh = (cmd, cwd) =>
-  spawnSync("/bin/bash", ["-lc", cmd], { cwd, encoding: "utf8" });
+const CHAIN_POLICY_FIX =
+  "compare config/policy.yaml chain_auto_approval.allowed_event_types with CHAIN_AUTO_APPROVAL_EVENT_TYPES";
+
+function chainPolicySource(root) {
+  const local = path.join(root, "config", "policy.yaml");
+  if (existsSync(local)) return local;
+  const example = path.join(root, "config", "policy.example.yaml");
+  return existsSync(example) ? example : local;
+}
+
+function invalidAllowedEventTypesDetail(root) {
+  try {
+    const allowed = Bun.YAML.parse(
+      readFileSync(chainPolicySource(root), "utf8"),
+    )?.chain_auto_approval?.allowed_event_types;
+    if (!Array.isArray(allowed)) {
+      return "chain_auto_approval.allowed_event_types must be an array of strings";
+    }
+    if (!allowed.every((eventType) => typeof eventType === "string")) {
+      return "chain_auto_approval.allowed_event_types contains non-string entries";
+    }
+  } catch {
+    return "config/policy.yaml is not valid YAML";
+  }
+  return "chain_auto_approval.allowed_event_types is invalid";
+}
+
+function forbiddenAllowedEventTypes(root) {
+  try {
+    const allowed = Bun.YAML.parse(
+      readFileSync(chainPolicySource(root), "utf8"),
+    )?.chain_auto_approval?.allowed_event_types;
+    return Array.isArray(allowed)
+      ? allowed.filter(
+          (eventType) =>
+            typeof eventType === "string" &&
+            !CHAIN_AUTO_APPROVAL_EVENT_TYPES.has(eventType),
+        )
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Diagnose the instance policy through the runtime's authoritative loader.
+ * Defaults to `reposRoot()` (FACTORY_REPOS_ROOT || FACTORY_ROOT) — the same
+ * resolution `loadChainAutoApprovalPolicy()` uses in serve — so the doctor
+ * validates the config/policy.yaml the runtime actually reads.
+ */
+export function chainAutoApprovalPolicyDiagnostic({ root = reposRoot() } = {}) {
+  const policy = loadChainAutoApprovalPolicy({ root });
+  const label = "chain auto-approval policy";
+  if (policy.reason === null) {
+    const allowed = [...policy.allowed].sort();
+    return {
+      ok: true,
+      label,
+      detail:
+        `ok (${allowed.length} allowed event type${allowed.length === 1 ? "" : "s"}: ${allowed.join(", ")}; ` +
+        `merge max_fix_rounds=${policy.maxFixRounds}, batch_size=${policy.mergeBatchSize}; ` +
+        `escalation auto_merge_base=${[...policy.autoMergeBase].join(",") || "none"}, ` +
+        `auto_merge_owners=${[...policy.autoMergeOwners].join(",") || "none"})`,
+      fix: null,
+    };
+  }
+  if (policy.reason === "policy_missing") {
+    return {
+      ok: "warn",
+      label,
+      detail: "policy_missing — every chain proposal is watched",
+      fix: "add config/policy.yaml chain_auto_approval.allowed_event_types to opt into safe chain approvals",
+    };
+  }
+  if (String(policy.reason ?? "").startsWith("policy_invalid")) {
+    // The loader appends a clipped parse-error message to the reason
+    // (`policy_invalid:<message>`, GH-1901); match the prefix so a YAML
+    // syntax error still reports as the policy failure it is.
+    const [, loaderDetail] = String(policy.reason).split(/:(.*)/s);
+    return {
+      ok: false,
+      label,
+      detail: `policy_invalid — ${loaderDetail?.trim() || invalidAllowedEventTypesDetail(root)}`,
+      fix: CHAIN_POLICY_FIX,
+    };
+  }
+  if (policy.reason === "policy_contains_forbidden_event") {
+    const offending = forbiddenAllowedEventTypes(root);
+    return {
+      ok: false,
+      label,
+      detail: `policy_contains_forbidden_event — offending entries: ${offending.join(", ") || "unreadable"}`,
+      fix: CHAIN_POLICY_FIX,
+    };
+  }
+  return {
+    ok: false,
+    label,
+    detail:
+      "merge_policy_invalid — merge.max_fix_rounds and escalation.auto_merge_base/auto_merge_owners must be valid when merge events are allowed",
+    fix: "repair merge.max_fix_rounds and escalation.auto_merge_base/auto_merge_owners in config/policy.yaml",
+  };
+}
+
+const GH_APP_DAEMON =
+  /(?:^|[\s/])gh-app-auth\.mjs(?=\s|$).*?(?:^|\s)--daemon(?:\s|$)/;
+const SERVE_ENTRYPOINT =
+  /event-runtime\/cli\.mjs(?=\s|$).*?(?:^|\s)serve(?:\s|$)/;
+
+function defaultProcessTable() {
+  const result = spawnSync("ps", ["-axo", "pid=,command="], {
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    return {
+      ok: false,
+      detail: String(result.stderr ?? "unable to inspect process table").trim(),
+      processes: [],
+    };
+  }
+  return {
+    ok: true,
+    processes: String(result.stdout ?? "")
+      .split("\n")
+      .map((line) => line.trim().match(/^(\d+)\s+(.+)$/))
+      .filter(Boolean)
+      .map(([, pid, command]) => ({ pid: Number(pid), command })),
+  };
+}
+
+function defaultProcessProbe(pid) {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if (error?.code === "ESRCH") return { alive: false };
+    if (error?.code !== "EPERM") {
+      return { alive: false, detail: error?.message ?? String(error) };
+    }
+  }
+
+  try {
+    return {
+      alive: true,
+      command: readFileSync(`/proc/${pid}/cmdline`, "utf8").replaceAll(
+        "\0",
+        " ",
+      ),
+    };
+  } catch {
+    const result = spawnSync("ps", ["-p", String(pid), "-o", "command="], {
+      encoding: "utf8",
+    });
+    return {
+      alive: true,
+      command: String(result.stdout ?? "").trim(),
+    };
+  }
+}
+
+export function defaultControlApiProbe(
+  pathname,
+  { port, token = null, spawn = spawnSync },
+) {
+  // The bearer travels on stdin via `--config -`, never in argv: anything in
+  // the argument vector is world-readable through /proc/*/cmdline for the
+  // lifetime of the curl process.
+  const useAuth = Boolean(token) && pathname !== "/health";
+  const result = spawn(
+    "curl",
+    [
+      "-fsS",
+      "--max-time",
+      "3",
+      ...(useAuth ? ["--config", "-"] : []),
+      `http://127.0.0.1:${port}${pathname}`,
+    ],
+    {
+      encoding: "utf8",
+      ...(useAuth
+        ? { input: `header = "Authorization: Bearer ${token}"\n` }
+        : {}),
+    },
+  );
+  if (result.status !== 0) {
+    return {
+      ok: false,
+      detail: String(result.stderr ?? "control API did not respond").trim(),
+    };
+  }
+  try {
+    return { ok: true, body: JSON.parse(result.stdout) };
+  } catch {
+    return { ok: false, detail: "control API returned invalid JSON" };
+  }
+}
+
+function plannerAgeMs(value, now) {
+  const parsed =
+    typeof value === "number"
+      ? value < 1_000_000_000_000
+        ? value * 1000
+        : value
+      : Date.parse(String(value ?? ""));
+  return Number.isFinite(parsed) ? now() - parsed : null;
+}
+
+/**
+ * Reports the two daemons that make a local factory stack usable. Process and
+ * pidfile probes are injectable so a test never has to manufacture a real
+ * daemon or rely on the host's /proc implementation.
+ */
+export function stackDaemonDiagnostics({
+  env = process.env,
+  runDir = env.FACTORY_RUN_DIR || path.join(homedir(), ".factory", "run"),
+  root = factoryRoot(),
+  listProcesses = defaultProcessTable,
+  readPidFile = (file) => readFileSync(file, "utf8"),
+  probeProcess = defaultProcessProbe,
+  controlApiProbe = defaultControlApiProbe,
+  registryStamp = (checkout) => codeStamp(checkout, REGISTRY_STAMP_PATHS),
+  now = () => Date.now(),
+} = {}) {
+  const appConfigured = Boolean(
+    env.FACTORY_GH_APP_ID &&
+    env.FACTORY_GH_APP_INSTALLATION_ID &&
+    env.FACTORY_GH_APP_PRIVATE_KEY_PATH,
+  );
+  const diagnostics = [];
+
+  let table;
+  try {
+    table = listProcesses();
+  } catch (error) {
+    table = {
+      ok: false,
+      detail: error?.message ?? String(error),
+      processes: [],
+    };
+  }
+  const processes = Array.isArray(table) ? table : (table?.processes ?? []);
+  const processTableOk = Array.isArray(table) || table?.ok !== false;
+  const ghAppEntrypoint = path.join(
+    path.resolve(root),
+    "lib",
+    "control-plane",
+    "gh-app-auth.mjs",
+  );
+  const isThisStackGhAppDaemon = (command) => {
+    const value = String(command ?? "");
+    return GH_APP_DAEMON.test(value) && value.includes(ghAppEntrypoint);
+  };
+  const ghAppDaemons = processes.filter(({ command }) =>
+    isThisStackGhAppDaemon(command),
+  );
+  if (!processTableOk) {
+    diagnostics.push({
+      ok: appConfigured ? false : "warn",
+      label: "gh-app-auth daemon",
+      detail: `cannot inspect process table${table?.detail ? ` — ${table.detail}` : ""}`,
+      fix: "restore process-table access, then run `factory doctor` again",
+    });
+  } else if (ghAppDaemons.length > 1) {
+    diagnostics.push({
+      ok: false,
+      label: "gh-app-auth daemon",
+      detail: `duplicate daemons — found ${ghAppDaemons.length} (${ghAppDaemons.map(({ pid }) => pid).join(", ")})`,
+      fix: "stop duplicate gh-app-auth.mjs --daemon processes, leaving exactly one",
+    });
+  } else {
+    const ghAppPidFile = path.join(runDir, "gh-app-auth.pid");
+    let pidText = null;
+    try {
+      pidText = readPidFile(ghAppPidFile);
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        diagnostics.push({
+          ok: appConfigured ? false : "warn",
+          label: "gh-app-auth daemon",
+          detail: appConfigured
+            ? "GitHub App auth is configured but no daemon is running"
+            : "not applicable — GitHub App auth is not configured",
+          fix: appConfigured
+            ? "run `factory up` to start gh-app-auth.mjs --daemon"
+            : null,
+        });
+      } else {
+        diagnostics.push({
+          ok: false,
+          label: "gh-app-auth daemon",
+          detail: `cannot read ${ghAppPidFile} — ${error?.message ?? String(error)}`,
+          fix: "repair or remove the unreadable gh-app-auth.pid, then run `factory up`",
+        });
+      }
+    }
+
+    if (pidText !== null) {
+      const pid = Number(String(pidText).trim());
+      if (!Number.isSafeInteger(pid) || pid <= 0) {
+        diagnostics.push({
+          ok: false,
+          label: "gh-app-auth daemon",
+          detail: `stale gh-app-auth.pid — invalid PID ${JSON.stringify(String(pidText).trim())}`,
+          fix: "remove the stale gh-app-auth.pid and run `factory up`",
+        });
+      } else {
+        let probe;
+        try {
+          probe = probeProcess(pid);
+        } catch (error) {
+          probe = { alive: false, detail: error?.message ?? String(error) };
+        }
+        if (!probe?.alive) {
+          diagnostics.push({
+            ok: false,
+            label: "gh-app-auth daemon",
+            detail: `stale gh-app-auth.pid — PID ${pid} is not running${probe?.detail ? ` (${probe.detail})` : ""}`,
+            fix: "remove the stale gh-app-auth.pid and run `factory up`",
+          });
+        } else if (!isThisStackGhAppDaemon(probe.command)) {
+          diagnostics.push({
+            ok: false,
+            label: "gh-app-auth daemon",
+            detail: `recycled gh-app-auth.pid — PID ${pid} belongs to ${probe.command || "an unidentifiable process"}`,
+            fix: "remove the recycled gh-app-auth.pid and run `factory up`",
+          });
+        } else {
+          diagnostics.push({
+            ok: true,
+            label: "gh-app-auth daemon",
+            detail: `one daemon running (pid ${pid})`,
+            fix: null,
+          });
+        }
+      }
+    }
+  }
+
+  const servePidFile = path.join(runDir, "serve.pid");
+  let pidText;
+  try {
+    pidText = readPidFile(servePidFile);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      diagnostics.push({
+        ok: "warn",
+        label: "serve.pid identity",
+        detail:
+          "not applicable — no serve.pid; stack is not running on this machine",
+        fix: null,
+      });
+      return diagnostics;
+    }
+    diagnostics.push({
+      ok: false,
+      label: "serve.pid identity",
+      detail: `cannot read ${servePidFile} — ${error?.message ?? String(error)}`,
+      fix: "repair or remove the unreadable serve.pid, then run `factory up`",
+    });
+    return diagnostics;
+  }
+
+  const pid = Number(String(pidText).trim());
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    diagnostics.push({
+      ok: false,
+      label: "serve.pid identity",
+      detail: `stale serve.pid — invalid PID ${JSON.stringify(String(pidText).trim())}`,
+      fix: "remove the stale serve.pid and run `factory up`",
+    });
+    return diagnostics;
+  }
+
+  let probe;
+  try {
+    probe = probeProcess(pid);
+  } catch (error) {
+    probe = { alive: false, detail: error?.message ?? String(error) };
+  }
+  if (!probe?.alive) {
+    diagnostics.push({
+      ok: false,
+      label: "serve.pid identity",
+      detail: `stale serve.pid — PID ${pid} is not running${probe?.detail ? ` (${probe.detail})` : ""}`,
+      fix: "remove the stale serve.pid and run `factory up`",
+    });
+  } else if (!SERVE_ENTRYPOINT.test(String(probe.command ?? ""))) {
+    diagnostics.push({
+      ok: false,
+      label: "serve.pid identity",
+      detail: `recycled serve.pid — PID ${pid} belongs to ${probe.command || "an unidentifiable process"}`,
+      fix: "remove the recycled serve.pid and run `factory up`",
+    });
+  } else {
+    diagnostics.push({
+      ok: true,
+      label: "serve.pid identity",
+      detail: `PID ${pid} is event-runtime/cli.mjs serve`,
+      fix: null,
+    });
+  }
+
+  // A matching process is necessary but not sufficient: it can be serving a
+  // last-good registry while the checkout has moved. Health stays bearer-free
+  // precisely so doctor can make this local liveness check without reading a
+  // credential.
+  const port = Number(env.FACTORY_EVENT_PORT ?? 7381);
+  const probeOptions = {
+    port,
+    token:
+      env.FACTORY_CONTROL_API_TOKEN ?? process.env.FACTORY_CONTROL_API_TOKEN,
+  };
+  const healthProbe = controlApiProbe("/health", probeOptions);
+  if (!healthProbe?.ok) {
+    diagnostics.push({
+      ok: false,
+      label: "control API health",
+      detail: `unreachable on :${port}${healthProbe?.detail ? ` — ${healthProbe.detail}` : ""}`,
+      fix: "run `factory down && factory up`, then run `factory doctor` again",
+    });
+    return diagnostics;
+  }
+  diagnostics.push({
+    ok: true,
+    label: "control API health",
+    detail: `reachable on :${port}`,
+    fix: null,
+  });
+
+  const registry = healthProbe.body?.registry;
+  const expectedStamp = registryStamp(root);
+  if (!registry?.stamp) {
+    diagnostics.push({
+      ok: "warn",
+      label: "registry health",
+      detail: "not reported by this serve",
+      fix: "restart serve from the current checkout to expose registry health",
+    });
+  } else if (registry.stamp !== expectedStamp) {
+    diagnostics.push({
+      ok: false,
+      label: "registry health",
+      detail: `stale — served ${registry.stamp}, local ${expectedStamp}`,
+      fix: "restart serve so it loads the current registry",
+    });
+  } else {
+    diagnostics.push({
+      ok: true,
+      label: "registry health",
+      detail: `current (${registry.stamp}; loaded ${registry.loadedAt ?? "unknown"})`,
+      fix: null,
+    });
+  }
+  if (registry?.lastReloadError?.message) {
+    diagnostics.push({
+      ok: "warn",
+      label: "registry reload",
+      detail: registry.lastReloadError.message,
+      fix: "repair the rejected registry change, then restart or wait for a successful reload",
+    });
+  } else {
+    diagnostics.push({
+      ok: true,
+      label: "registry reload",
+      detail: "no reload error reported",
+      fix: null,
+    });
+  }
+
+  if (Object.hasOwn(healthProbe.body ?? {}, "planner")) {
+    const statusProbe = controlApiProbe("/status", probeOptions);
+    if (!statusProbe?.ok) {
+      diagnostics.push({
+        ok: "warn",
+        label: "planner health",
+        detail: `cannot read admitted events${statusProbe?.detail ? ` — ${statusProbe.detail}` : ""}`,
+        fix: "restore control API access, then run `factory doctor` again",
+      });
+      return diagnostics;
+    }
+    const admitted = statusProbe?.body?.events?.admitted;
+    const queued = Number.isFinite(admitted)
+      ? admitted
+      : Number.isFinite(admitted?.count)
+        ? admitted.count
+        : 0;
+    const age = plannerAgeMs(
+      healthProbe.body.planner?.lastPlannedAt ?? null,
+      now,
+    );
+    if (queued > 0 && (age === null || age > PLANNER_STALE_MS)) {
+      diagnostics.push({
+        ok: false,
+        label: "planner health",
+        detail:
+          age === null
+            ? `${queued} admitted event(s) queued; planner recency unavailable`
+            : `${queued} admitted event(s) queued; planner last succeeded ${Math.round(age / 60000)}m ago`,
+        fix: "inspect serve logs and restart the planner after resolving its error",
+      });
+    } else {
+      diagnostics.push({
+        ok: true,
+        label: "planner health",
+        detail:
+          queued > 0
+            ? `current with ${queued} admitted event(s)`
+            : "no admitted events waiting",
+        fix: null,
+      });
+    }
+  } else {
+    diagnostics.push({
+      ok: "warn",
+      label: "planner health",
+      detail: "not reported by this serve",
+      fix: null,
+    });
+  }
+  return diagnostics;
+}
 
 if (import.meta.main) {
+  const ROOT = factoryRoot();
+  installLinearBudgetCapture();
+  const argv = process.argv.slice(2);
+  const val = (f) => {
+    const i = argv.indexOf(f);
+    return i === -1 ? null : argv[i + 1];
+  };
+  const only = (val("--repo") || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const expand = (p) => String(p ?? "").replace(/^~/, homedir());
+  const cfg = Bun.YAML.parse(
+    readFileSync(path.join(ROOT, "config/repos.yaml"), "utf8"),
+  );
+  const repos = (cfg.repos ?? []).filter(
+    (r) => !only.length || only.includes(r.name),
+  );
+
+  // Commits behind origin/<base> before the main checkout is worth flagging.
+  const BEHIND_WARN = 10;
+  const c = {
+    dim: (s) => `\x1b[2m${s}\x1b[0m`,
+    bold: (s) => `\x1b[1m${s}\x1b[0m`,
+    green: (s) => `\x1b[32m${s}\x1b[0m`,
+    red: (s) => `\x1b[31m${s}\x1b[0m`,
+    yellow: (s) => `\x1b[33m${s}\x1b[0m`,
+  };
+  let failures = 0;
+  const check = (ok, label, detail, fix) => {
+    if (ok === "warn" || ok === "info") {
+      console.log(
+        `  ${ok === "warn" ? c.yellow("!") : c.dim("-")} ${label}${detail ? c.dim("  " + detail) : ""}`,
+      );
+      if (fix) console.log(`      ${c.dim(fix)}`);
+      return;
+    }
+    console.log(
+      `  ${ok ? c.green("✓") : c.red("✗")} ${label}${detail ? c.dim("  " + detail) : ""}`,
+    );
+    if (!ok) {
+      failures++;
+      if (fix) console.log(`      ${c.bold("fix:")} ${fix}`);
+    }
+  };
+  const sh = (cmd, cwd) =>
+    spawnSync("/bin/bash", ["-lc", cmd], { cwd, encoding: "utf8" });
+
   // ------------------------------------------------------------------ machine ---
   console.log(c.bold("\nmachine"));
   const controlPlaneKind = controlPlaneKindFromPolicy(ROOT);
@@ -273,6 +1003,10 @@ if (import.meta.main) {
     controlPlaneKind,
     linearConfigured: Boolean(key),
   })) {
+    check(diagnostic.ok, diagnostic.label, diagnostic.detail, diagnostic.fix);
+  }
+
+  for (const diagnostic of stackDaemonDiagnostics()) {
     check(diagnostic.ok, diagnostic.label, diagnostic.detail, diagnostic.fix);
   }
 
@@ -317,6 +1051,11 @@ if (import.meta.main) {
     );
   }
 
+  {
+    const diagnostic = chainAutoApprovalPolicyDiagnostic();
+    check(diagnostic.ok, diagnostic.label, diagnostic.detail, diagnostic.fix);
+  }
+
   // Disk: worktrees are the bulk of what this machine holds, and a bootstrap that
   // fails halfway leaves a half-provisioned database behind.
   const df = sh('df -h ~ | tail -1 | awk \'{print $5" used, "$4" free"}\'');
@@ -346,10 +1085,25 @@ if (import.meta.main) {
     .map((f) => path.basename(f, ".md"));
 
   // -------------------------------------------------------------------- repos ---
+  const baseBranchCiDeadline = Date.now() + BASE_BRANCH_CI_AGGREGATE_TIMEOUT_MS;
   for (const repo of repos) {
     console.log(
       c.bold(`\n${repo.name}`) + c.dim(`  ${repo.team} / ${repo.project}`),
     );
+
+    // Node-local: independent of whether the checkout exists. A mismatch is
+    // diagnosable here instead of only as a dispatch refusal.
+    for (const row of await repoToolchainDiagnostics({ repos: [repo] })) {
+      check(row.ok, row.label, row.detail, row.fix);
+    }
+
+    for (const row of baseBranchCiDiagnostics({
+      repos: [repo],
+      deadlineMs: baseBranchCiDeadline,
+    })) {
+      check(row.ok, row.label, row.detail, row.fix);
+    }
+
     const p = expand(repo.path);
 
     const cloned = existsSync(p) && existsSync(path.join(p, ".git"));
@@ -432,31 +1186,15 @@ if (import.meta.main) {
       }
     }
 
-    const commandsDir = path.join(p, ".claude", "commands");
-    const missing = [];
-    const broken = [];
-    for (const name of expectedCommands) {
-      const target = path.join(commandsDir, `${name}.md`);
-      let st = null;
-      try {
-        st = lstatSync(target);
-      } catch {
-        /* intentionally ignored */
-      }
-      if (!st) {
-        missing.push(name);
-        continue;
-      }
-      if (st.isSymbolicLink() && !existsSync(target)) broken.push(name); // dangling symlink
-    }
-    const problems = [...missing, ...broken];
+    const commandLinks = factoryCommandLinkDiagnostic({
+      commandsDir: path.join(p, ".claude", "commands"),
+      expectedCommands,
+    });
     check(
-      problems.length === 0,
-      "/factory-* commands linked",
-      problems.length
-        ? `${problems.length}/${expectedCommands.length} missing or broken: ${problems.join(", ")}`
-        : `${expectedCommands.length} commands`,
-      problems.length ? "factory emit" : null,
+      commandLinks.ok,
+      commandLinks.label,
+      commandLinks.detail,
+      commandLinks.fix,
     );
 
     const gitignorePath = path.join(p, ".gitignore");

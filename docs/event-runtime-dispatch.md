@@ -194,7 +194,7 @@ Linear allows 2500 requests per hour. The factory used to treat a 400/429
 open chain-dispatch proposal re-ran `fetchTicket` + `fetchViewer` +
 `fetchInFlight` on every tick. Rate-limited outcomes are **retry-later**:
 
-- `tools/linear.mjs` records `X-RateLimit-Requests-*` (falling back to the
+- `tools/ticket.mjs` records `X-RateLimit-Requests-*` (falling back to the
   complexity headers), exposes `factory ticket budget`, and exits 3 with
   `{rateLimited:true, resetAt}` instead of a generic failure.
 - One planning pass memoizes in-flight issues by team+project for ≤60s and
@@ -216,6 +216,20 @@ Linear API; a follow-up re-pin of `dispatch@1` plus `verify.mjs`
 `REFUSAL_REASONS` is required before the agent result itself can carry
 `linear_rate_limited` without a contract violation. The planner and
 auto-approval path above is what stops the inbox escalation.
+
+### Linear test/offline guard
+
+`bun test` preloads `FACTORY_LINEAR_OFFLINE=1`, and CI sets it for every job.
+While it is set (or `NODE_ENV=test` / `BUN_TEST` is present),
+`tools/ticket.mjs` rejects any `api.linear.app` fetch with
+`linear_offline_guard` before a connection opens. The refusal identifies the
+setting that enabled it and exits with status 4. To deliberately run a Linear
+integration probe, set `FACTORY_LINEAR_ALLOW_NETWORK=1` on that command; this
+explicit escape hatch overrides the offline/test guard. The guard is inherited
+by spawned tracker CLIs, runs before credential lookup, and is never retried.
+Worker credential lookup reads only `LINEAR_API_KEY` by default; use
+`FACTORY_LINEAR_ENV_FILE=/path/to/.env` to opt into an env-file fallback.
+Offline/test mode never reads that file.
 
 ---
 
@@ -241,9 +255,10 @@ single rule.
 wastes an approval, the same reason the planner refuses on a missing artifact
 before the operator decides rather than after. And re-checked at execute:
 an approval may sit for its whole TTL, and within the TTL it executes as-is
-(event-runtime.md §12) — the world the operator approved against has had
-minutes to fill the cap. The plan-time check keeps the inbox honest; the
-execute-time check is the one that holds.
+(event-runtime.md §12) unless its prompt or policy registry version is stale,
+in which case approval re-plans it first — the world the operator approved
+against has had minutes to fill the cap. The plan-time check keeps the inbox
+honest; the execute-time check is the one that holds.
 
 **The usage window: a static split, not dynamic observation.** Every
 claude-adapter run draws on the same subscription usage window as interactive
@@ -372,6 +387,34 @@ sandbox step. It otherwise preserves the independent ticket command check;
 unparseable shell commands, missing files, non-test modules and flag values
 (`--preload x`) never qualify for skipping.
 
+### Dispatch pull-request readiness
+
+A dispatch agent may open its pull request as a draft. Draft status is a safe
+handoff state while the worker performs the authoritative checks: the ticket's
+and repository's verification commands, the configured base branch, and the
+required PR form. The worker promotes a draft to **ready for review** only
+after handoff verification and the base/form checks have all passed. The
+worker then records the PR's final draft state in the worker-authored handoff
+observation.
+
+Failure to complete the readiness transition is treated as a handoff
+verification failure. The PR remains a draft so the merge stage cannot land
+an unverified handoff; the recorded failure must be resolved before the PR is
+made ready for review.
+
+### Run-scoped notification fallback
+
+Dispatch adapters mark the child with `FACTORY_DISPATCH=1` and pass the
+isolated `FACTORY_EVENT_HOME` and port to the agent, but never
+`FACTORY_CONTROL_API_TOKEN`. If `factory notify` cannot create a durable
+control-API record during a run, it appends the structured notification to
+`$FACTORY_EVENT_HOME/outbox/<run-id>.jsonl` and reports `queued_local` instead
+of losing the message. After the agent exits, the worker submits each entry to
+`POST /inbox` with its own bearer. Delivered entries are removed; a failed or
+malformed entry remains in the outbox and its intended text is recorded on the
+ticket during handoff. This keeps the bearer out of the agent environment while
+making a missing or rejected agent-side token observable and recoverable.
+
 ---
 
 ## 6. Execution form: the `claude` adapter, `mutating: true`
@@ -471,10 +514,21 @@ requires the emitted repository to match the predecessor input.
 
 `config/policy.yaml` is the only allowlist for unattended chain proposals. Its
 closed set covers `factory.work.requested`, `factory.triage.requested`,
-`factory.triage-apply.requested`, and `factory.dispatch.requested`; missing or
-malformed policy means watched. The event must have been admitted with source
-`chain`, and the normal proposal, lifecycle, journal, budget, and worker gates
-remain in force.
+`factory.triage-apply.requested`, `factory.dispatch.requested`, and the
+read-only `factory.ci-diagnose.requested`; missing or malformed policy means
+watched. The event must have been admitted with source `chain`, and the normal
+proposal, lifecycle, journal, budget, and worker gates remain in force.
+
+`dispatch.paused: true` (shown in `config/policy.example.yaml`) is the
+operator brake for unattended dispatch. A non-operator
+`factory.dispatch.requested` becomes a durable NOOP with reason
+`dispatch_paused`, and the auto-approver leaves an already-open proposal with
+`auto_approval_ineligible:dispatch_paused`. Set `dispatch.paused: false` to
+resume on the next pass; no restart is required.
+
+`factory.ci-diagnose.requested` runs `ci-doctor@2`, which is non-mutating and
+limited to `gh:read`; its downstream `ci-rerun` and `dispatch` edges retain
+their separate approval gates.
 
 Dispatch is re-read immediately before approval: it must still be Todo,
 unassigned, `ai:agent-ready`, inside its lease cap, and disjoint from active
@@ -506,6 +560,7 @@ brackets.
 | `merge_policy_invalid`            | Supply valid merge fix rounds, auto-merge bases, and owners.                     |
 | `policy_unknown`                  | Load a policy which supplies a typed refusal reason.                             |
 | `event_type_not_allowlisted`      | Add the supported event type to the explicit allowlist, or use watched approval. |
+| `dispatch_paused`                 | Set `dispatch.paused: false`; the next pass resumes without a restart.           |
 
 **Capacity**
 

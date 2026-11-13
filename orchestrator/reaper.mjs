@@ -43,6 +43,11 @@ import { loadRepos } from "../event-runtime/lib/repos.mjs";
 import { dbPath } from "../event-runtime/lib/config.mjs";
 import { HEARTBEAT_STALE_MS } from "../event-runtime/lib/workers.mjs";
 import { ticketSlug } from "../lib/ticket-slug.mjs";
+import {
+  assertLinearNetworkAllowed,
+  LINEAR_TELEMETRY,
+  parseRateLimitReset,
+} from "../tools/ticket.mjs";
 
 export const REAPER_LOG_DIR = path.join(homedir(), ".factory/logs");
 
@@ -174,6 +179,20 @@ function retryDelay(ms, signal) {
   });
 }
 
+function rateLimitError(message, response) {
+  // Linear's reset header is a raw unix epoch; downstream consumers
+  // (Date.parse in the planner cache, budget.json) expect ISO-8601.
+  const resetAt = parseRateLimitReset(
+    response?.headers?.get("x-ratelimit-requests-reset"),
+  );
+  const error = new Error(
+    `linear_rate_limited: resetAt=${resetAt ?? "unknown"}${message ? `: ${message}` : ""}`,
+  );
+  error.rateLimited = true;
+  error.resetAt = resetAt;
+  return error;
+}
+
 /**
  * Send a Linear GraphQL request, retrying transient responses unless cancelled.
  *
@@ -193,7 +212,20 @@ export async function gql(
       : retriesOrOptions instanceof AbortSignal
         ? { retries: 5, signal: retriesOrOptions }
         : (retriesOrOptions ?? {});
-  const { retries = 5, signal } = options;
+  const {
+    retries = 5,
+    signal,
+    caller = "orchestrator/reaper",
+    ticket = null,
+  } = options;
+  // This must precede credential loading: offline/test invocations should
+  // explain the deterministic network refusal, not report a missing key.
+  assertLinearNetworkAllowed(LINEAR_API_URL);
+  // The global `fetch` hook is deliberately NOT installed here. Patching a
+  // process-wide global from the per-request path would put every serve tick
+  // one import away from a swapped `fetch`; entry points install it once
+  // (tools/ticket.mjs, orchestrator/doctor.mjs, event-runtime/lib/linear.mjs,
+  // linearControlPlane) and this transport only annotates the request.
   const apiKey = getApiKey();
   const headers = {
     "Content-Type": "application/json",
@@ -210,11 +242,15 @@ export async function gql(
         headers,
         body,
         signal,
+        [LINEAR_TELEMETRY]: { caller, ticket },
       });
 
       if (!res.ok) {
+        if (res.status === 429) {
+          throw rateLimitError((await res.text()).slice(0, 500), res);
+        }
         if (
-          [429, 500, 502, 503, 504].includes(res.status) &&
+          [500, 502, 503, 504].includes(res.status) &&
           attempt < retries - 1
         ) {
           await retryDelay(delay, signal);
@@ -228,20 +264,16 @@ export async function gql(
       const data = await res.json();
       if (data.errors && data.errors.length > 0) {
         const msg = JSON.stringify(data.errors);
-        if (
-          msg.toUpperCase().includes("RATELIMITED") &&
-          attempt < retries - 1
-        ) {
-          await retryDelay(delay, signal);
-          delay *= 2;
-          continue;
-        }
+        if (msg.toUpperCase().includes("RATELIMITED"))
+          throw rateLimitError(msg, res);
         throw new Error(msg);
       }
 
       return data.data || {};
     } catch (err) {
       if (signal?.aborted) throw abortReason(signal);
+      if (err?.code === "linear_offline_guard") throw err;
+      if (err?.rateLimited) throw err;
       if (
         attempt < retries - 1 &&
         !(err.message && err.message.startsWith("HTTP 4"))
@@ -804,7 +836,7 @@ export async function reapDeadDispatchWorktrees(
     for (const { runId, repo: repoName, ticket } of db
       .query(DEAD_DISPATCH_WORKTREE_SQL)
       .all()) {
-      const key = `${repoName} ${ticket}`;
+      const key = `${repoName}\0${ticket}`;
       if (seen.has(key)) continue;
       seen.add(key);
 

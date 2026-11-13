@@ -60,7 +60,11 @@ function seedDivergentOverrides(db) {
  * write outside a captured in-memory worktree. Records every seam call so a
  * test can prove nothing targets the live root and no merge/delete occurs.
  */
-function fakeSeams({ worktreeDir = "/tmp/promo-wt-860", readTracked } = {}) {
+function fakeSeams({
+  worktreeDir = "/tmp/promo-wt-860",
+  readTracked,
+  readWorktree,
+} = {}) {
   const calls = [];
   const writes = new Map();
   return {
@@ -84,9 +88,12 @@ function fakeSeams({ worktreeDir = "/tmp/promo-wt-860", readTracked } = {}) {
       },
       readWorktree(dir, file) {
         calls.push(["readWorktree", dir, file]);
-        return writes.has(file)
-          ? writes.get(file)
-          : readFileSync(path.join(REPO_ROOT, file), "utf8");
+        return (
+          readWorktree?.(dir, file) ??
+          (writes.has(file)
+            ? writes.get(file)
+            : readFileSync(path.join(REPO_ROOT, file), "utf8"))
+        );
       },
       writeWorktree(dir, file, text) {
         calls.push(["writeWorktree", dir, file]);
@@ -143,6 +150,48 @@ describe("runtime-overrides (WM-887)", () => {
     expect(journal).toHaveLength(2);
     expect(journal[0].after).toBeNull();
     expect(journal[1].after).toEqual({ adapter: "cursor" });
+    db.close();
+  });
+
+  test("malformed agent overrides identify the stored row instead of leaking SyntaxError", () => {
+    const db = openDb(":memory:");
+    db.query(
+      `INSERT INTO runtime_overrides (kind, key, patch_json, updated_at, updated_by)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(
+      KIND_AGENT,
+      "agy-malformed@1",
+      "{ not json",
+      new Date(0).toISOString(),
+      "test",
+    );
+
+    expect(() => listOverrides(db)).toThrow(OverlayError);
+    expect(() => listOverrides(db)).toThrow(
+      /invalid stored agent override agy-malformed@1:.*delete or correct this runtime_overrides row/,
+    );
+    db.close();
+  });
+
+  test("unknown override kinds are retained for diagnostics and not applied", () => {
+    const db = openDb(":memory:");
+    db.query(
+      `INSERT INTO runtime_overrides (kind, key, patch_json, updated_at, updated_by)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(
+      "retiredKind",
+      "legacy-row",
+      "{ not json",
+      new Date(0).toISOString(),
+      "test",
+    );
+
+    expect(listOverrides(db)).toEqual({
+      eventTypes: {},
+      agents: {},
+      modelTierCells: {},
+      unknown: [{ kind: "retiredKind", key: "legacy-row" }],
+    });
     db.close();
   });
 
@@ -609,6 +658,35 @@ describe("overlay promotion (gh-860)", () => {
     ).rejects.toMatchObject({ status: 409 });
     // Failed drift means no worktree was ever created.
     expect(calls.some((c) => c[0] === "worktree.up")).toBe(false);
+    db.close();
+  });
+
+  test("base-branch drift after checkout fails before writing the worktree", async () => {
+    const db = openDb(":memory:");
+    seedDivergentOverrides(db);
+    const preview = buildPromotionPreview({ db, registry });
+    const key = preview.selections.find((s) => s.ref === PROMO_AGENT).key;
+    const { seams, calls } = fakeSeams({
+      readWorktree: () =>
+        JSON.stringify({ id: "agy-smoke", model_tier: "standard" }),
+    });
+
+    await expect(
+      applyPromotion({
+        db,
+        registry,
+        target: TARGET,
+        digest: preview.digest,
+        keys: [key],
+        seams,
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining(
+        "target drift on agent:agy-smoke@1:modelTier: base-branch value changed since preview",
+      ),
+    });
+    expect(calls.some((call) => call[0] === "writeWorktree")).toBe(false);
     db.close();
   });
 
