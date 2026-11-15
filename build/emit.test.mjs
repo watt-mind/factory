@@ -16,6 +16,7 @@ import path from "node:path";
 import { spliceFloor } from "../lib/floor.mjs";
 import {
   configuredGithubSlug,
+  emitToNodes,
   remoteGithubSlug,
   resolveFloorCheckouts,
 } from "./emit.mjs";
@@ -871,4 +872,115 @@ test("emit packages /factory-recap and /factory-recap-video across all five harn
   const readme = readFileSync(path.join(ROOT, "README.md"), "utf8");
   expect(readme).toContain("`/factory-recap`");
   expect(readme).toContain("`/factory-recap-video`");
+});
+
+test("emitToNodes skips cleanly when no remote nodes are configured", () => {
+  const logs = [];
+  const errors = [];
+  const res = emitToNodes({
+    root: ROOT,
+    nodesMap: new Map(),
+    log: (line) => logs.push(line),
+    error: (line) => errors.push(line),
+  });
+
+  expect(res.exitCode).toBe(0);
+  expect(res.results).toEqual([]);
+  expect(errors).toEqual([]);
+  expect(logs.join("\n")).toContain("no remote nodes configured");
+});
+
+test("emitToNodes syncs configured nodes and warns non-fatally on unreachable nodes under --nodes", () => {
+  const nodesMap = new Map([
+    [
+      "mac-mini",
+      {
+        name: "mac-mini",
+        host: "mac-mini.local",
+        factoryRoot: "~/Develop/factory",
+      },
+    ],
+    [
+      "offline-box",
+      {
+        name: "offline-box",
+        host: "offline.local",
+        factoryRoot: "~/Develop/factory",
+      },
+    ],
+  ]);
+  const logs = [];
+  const errors = [];
+  const visited = [];
+
+  const res = emitToNodes({
+    root: ROOT,
+    nodesMap,
+    emitNodeFn: (node) => {
+      visited.push(node.name);
+      if (node.name === "mac-mini") {
+        return { name: node.name, host: node.host, ok: true, step: "done" };
+      }
+      return {
+        name: node.name,
+        host: node.host,
+        ok: false,
+        step: "rsync",
+        error: "Operation timed out",
+      };
+    },
+    log: (line) => logs.push(line),
+    error: (line) => errors.push(line),
+  });
+
+  expect(visited).toEqual(["mac-mini", "offline-box"]);
+  expect(res.exitCode).toBe(0);
+  expect(res.results).toHaveLength(2);
+  expect(errors).toEqual([]);
+  expect(logs.join("\n")).toContain("synced   mac-mini (mac-mini.local)");
+  expect(logs.join("\n")).toContain("warn     offline-box (offline.local)");
+});
+
+test("emitToNodes fails closed when an explicit --node is unknown or fails", () => {
+  const nodesMap = new Map([
+    [
+      "mac-mini",
+      {
+        name: "mac-mini",
+        host: "mac-mini.local",
+        factoryRoot: "~/Develop/factory",
+      },
+    ],
+  ]);
+
+  const unknownErrors = [];
+  const unknownRes = emitToNodes({
+    root: ROOT,
+    targetNode: "missing-node",
+    nodesMap,
+    log: () => {},
+    error: (line) => unknownErrors.push(line),
+  });
+  expect(unknownRes.exitCode).toBe(1);
+  expect(unknownRes.results).toEqual([]);
+  expect(unknownErrors.join("\n")).toContain('unknown node "missing-node"');
+
+  const failErrors = [];
+  const failRes = emitToNodes({
+    root: ROOT,
+    targetNode: "mac-mini",
+    nodesMap,
+    emitNodeFn: (node) => ({
+      name: node.name,
+      host: node.host,
+      ok: false,
+      step: "link",
+      error: "remote link failed",
+    }),
+    log: () => {},
+    error: (line) => failErrors.push(line),
+  });
+  expect(failRes.exitCode).toBe(1);
+  expect(failRes.results).toHaveLength(1);
+  expect(failErrors.join("\n")).toContain("failed   mac-mini (mac-mini.local)");
 });
