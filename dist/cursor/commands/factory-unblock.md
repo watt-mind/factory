@@ -11,12 +11,13 @@ Same protocol as triage: before working an issue, set `assignee` to yourself and
 For each held ticket:
 
 1. **Reconstruct the hold** — read the blocking comment and what it says is missing. If the hold never stated what it needs, treat that as the finding: comment the specific question it should have asked, re-add `ai:blocked` (remove first if present — the fresh label event resets the orchestrator's reply clock), and move on.
-2. **Hunt for new evidence** — has anything changed since the hold?
+2. **Hunt for new or overlooked local evidence** — can this hold be resolved without waiting on the AFK human?
    - a blocking/related ticket has since moved to Done, or the referenced PR merged;
    - the answer now exists in the repo's `docs/product-decisions.md`, `docs/`, the Linear project Overview, or a newer ticket in the same area;
    - a missing credential/env detail is now in the repo's `docs/` or the operator's runbook;
-   - the code moved enough that the premise of the hold is gone (verify in the actual codebase — read-only).
-3. **With evidence: release the hold.** Remove `ai:blocked`, comment one line citing the evidence (link the ticket/PR/doc), then re-run triage's promote-or-hold: promote to `Todo` + `ai:agent-ready` only if the full §5 template is solid against the current code; otherwise leave it in `Triage` for the triage stage to spec. Never promote on a guess — a wrongly released hold hands an implementation agent a question a human was supposed to answer.
+   - the code moved enough that the premise of the hold is gone (verify in the actual codebase — read-only);
+   - the hold was an avoidable engineering or convention question (not a genuine user-visible product fork, missing credential, or `Never auto-merge` security boundary) whose answer is directly provable from `origin/<base>` code, tests, or repo conventions.
+3. **With evidence: release the hold.** Remove `ai:blocked`, comment one line citing the evidence (link the ticket/PR/doc/ref), then re-run triage's promote-or-hold: promote to `Todo` + `ai:agent-ready` (preserving an existing `tier:*` label or assigning one per the triage sizing rule) only if all five §5 sections are verified against `origin/<base>`; otherwise transition the state to `Triage` so the next triage tick specs it. Never promote on a guess — a wrongly released hold hands an implementation agent a question a human was supposed to answer.
 4. **Without evidence: leave silently.** No comment, no label churn, no re-stating the question. A sweep that re-derives the same hold on every run is the exact pathology this pipeline keeps having to un-learn (CLNT-504 collected ten identical hold comments). The ticket stays exactly as it was.
 
 Do **not** start implementing anything, and never remove `ai:blocked` just because the hold is old — age is not evidence.

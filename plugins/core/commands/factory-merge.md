@@ -8,7 +8,7 @@ argument-hint:
 model: opus
 ---
 
-Review and land the open PRs for this repository. My invoking this command is the human merge decision for routine changes — but the review must be real, and sensitive changes still come back to me.
+Review and land the open PRs for this repository autonomously — assume the operator is AFK by default. Routine changes targeting the repo's configured integration branch (e.g. `develop` on `hdkiller`/`watt-mind` repos, per the floor's **Never auto-merge** rule) merge once reviewed and green without asking; PRs targeting `master`/`main` or touching `Never auto-merge` / `escalate_paths` surfaces escalate to a human.
 
 Interpret $ARGUMENTS as specific PR numbers or Linear issue IDs; default is every open PR in this repo (`gh pr list`, cross-checked against the team's `In Review` tickets so orphaned PRs and ticket-less PRs both surface).
 
@@ -22,7 +22,7 @@ Interpret $ARGUMENTS as specific PR numbers or Linear issue IDs; default is ever
 
 **Start from the ticket's `## Handoff` comment** — dispatch posts one per PR (PR link, verification result, UX critique verdict, files vs `Owned Paths`, risks). It tells you where to concentrate: a stated risk gets read first, a `FIX-FIRST resolved` critique means re-checking those fixes, an exceptions line on Files means the `Owned Paths` check below already has a suspect. A missing or vague Handoff is a (minor) protocol finding to note — and a reason to trust the diff less, not to skip the review.
 
-CI passing is not the bar. **Prefer spawning the `factory-merge-reviewer` agent for this step** — one per PR, with the ticket, Handoff comment, `Owned Paths`, and the repo's `escalate_paths` in its prompt — so the full diff never enters this session's context; act on its MERGE/FIX/ESCALATE report (it never merges or edits; you do). Where subagents are unavailable, read the full diff yourself. Either way the review covers:
+CI passing is not the bar. **Prefer spawning the `factory-merge-reviewer` agent for this step** — one per PR, with the ticket (including `tier:*` labels), Handoff comment, `Owned Paths`, and the repo's `escalate_paths` in its prompt — so the full diff never enters this session's context; act on its MERGE/FIX/ESCALATE report (it never merges or edits; you do). Where subagents are unavailable, read the full diff yourself. Either way the review covers:
 
 - **Correctness**: logic errors, edge cases, race conditions, broken assumptions about existing code it touches.
 - **Bugs the tests don't catch**: error handling, null/undefined paths, off-by-ones, state that survives navigation, platform differences (iOS/Android/web).
@@ -38,7 +38,7 @@ Then check CI for the reviewed head SHA: select only its CI workflow with `gh ru
 
 - **MERGE** — CI green, no blocking findings. Minor/polish findings don't block: file them to Linear `Triage` per §8 and merge anyway.
 - **FIX** — CI red, merge conflicts, or blocking review findings that are mechanical to fix (a real bug, missing error handling, a failing test).
-- **ESCALATE** — never auto-merge, regardless of CI or review outcome: diffs touching auth/authz, payments/money, credentials/secrets handling, destructive DB migrations, prod infra config, or anything in a `CLNT` repo touching security. Also escalate when the fix would require changing the ticket's intent. Report these to me with the findings, add **`ai:escalated`** to the Linear ticket, **notify me** — `factory notify "ESCALATED PR#<n> (<TICKET>): <why, in one sentence>"` — rather than only writing it in the final report, and stop there.
+- **ESCALATE** — never auto-merge, regardless of CI or review outcome: diffs touching auth/authz, payments/money, credentials/secrets handling, destructive DB migrations, prod infra config, or anything in a `CLNT` repo touching security (plus PRs targeting `master`/`main`). Also escalate when the fix would require changing the ticket's intent. Apply atomic dual-labeling (`ai:escalated` on the Linear ticket and `escalated` on the GitHub PR), run `factory notify "ESCALATED PR#<n> (<TICKET>): <why, in one sentence>"` rather than only writing it in the final report, leave **this** PR open without merging (recording the findings for the final report), and **continue to the next non-overlapping open PR in the queue**.
 
   Exception: when `$ARGUMENTS` contains `--include-escalated`, the invoking human has explicitly cleared this escalation hold for this run. Review the PR just as thoroughly; if CI is green and there are no other blocking findings, classify it MERGE instead of holding it solely because it is escalated. This exception never overrides the normal MERGE prerequisites.
 
@@ -52,7 +52,7 @@ Then check CI for the reviewed head SHA: select only its CI workflow with `gh ru
 
 ### 3. Fix loop (for FIX)
 
-For a red CI run, spawn `factory-ci-doctor` on it first — it returns TICKET / ENV / FLAKE with the culprit step and log lines, so the failed-job logs stay out of this session; a FLAKE verdict with evidence justifies `gh run rerun` instead of a code fix. Then check out the PR branch in its worktree (or a fresh one), fix the findings / CI failures / conflicts (rebase or merge base branch per repo convention), run the ticket's Verification Command until clean, push, wait for CI, and **re-review your own fix diff** before reclassifying. Maximum **2 fix rounds per PR** — still not mergeable after that: escalate with a summary of what was tried. Never weaken tests, skip checks, or expand scope to force a green build; if the test is what's wrong, that's a finding to report, not to silently edit around.
+For a red CI run, spawn `factory-ci-doctor` on it first — it returns TICKET / ENV / FLAKE with the culprit step and log lines, so the failed-job logs stay out of this session; a FLAKE verdict with evidence justifies `gh run rerun` instead of a code fix. Then check out the PR branch in its worktree (or a fresh one), fix the findings / CI failures / conflicts (rebase or merge base branch per repo convention), run the ticket's Verification Command until clean, push, wait for CI, and **re-review your own fix diff** before reclassifying. Maximum **2 fix rounds per PR** — still not mergeable after that: escalate **this** PR (atomic dual-label `ai:escalated` + `escalated` and `factory notify "ESCALATED PR#<n> (<TICKET>): <summary of what was tried>"`), leave it open, and continue to the remaining open PRs in the queue. Never weaken tests, skip checks, or expand scope to force a green build; if the test is what's wrong, that's a finding to report, not to silently edit around.
 
 ### 4. Merge (for MERGE)
 
@@ -106,7 +106,7 @@ The same hold applies to the worktree teardown — `factory janitor` enforces it
 
 Per the floor's **Protected branches** rule, if `$HEAD_REF` comes back as the repo's `base` or `deploy_branch` (`develop`, `master`, `main`), stop — you are cleaning up the wrong PR. These repos have no branch protection to catch it for you.
 
-If base CI or the smoke check breaks after a batch, stop merging further batches immediately, notify me, and fix or revert first. On an auto-deploying branch a red smoke check means the environment is down right now, not that a test is flaky.
+If base CI or the smoke check breaks after a batch, stop merging further batches immediately, notify via `factory notify` (`CI RED <repo>: ...` or `SMOKE RED <repo>: ...`), and revert the culprit merge (per step 5 above) or fix forward autonomously without waiting for an AFK human reply before resuming. On an auto-deploying branch a red smoke check means the environment is down right now, not that a test is flaky.
 
 ## File what you find — every PR, every verdict
 

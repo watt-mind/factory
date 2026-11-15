@@ -7,7 +7,7 @@ description: "Recommend and optionally run the next factory stage for this repo.
 
 The user's accompanying request is this workflow's argument string. Wherever these instructions refer to `$ARGUMENTS`, interpret it as that request.
 
-Pick **one** next step in the factory loop for the current repository — diagnose by default, run only when asked.
+Pick **one** next step in the factory loop for the current repository — two explicit modes: read-only diagnostic mode without `--apply`, and autonomous AFK execution mode with `--apply`.
 
 The mechanical routing lives in `factory next`, which reads the same queue snapshot as `factory queue`. Do not re-derive gates from Linear yourself.
 
@@ -28,15 +28,15 @@ Show **session history** from `factory state` (what ran earlier in this harness 
 
 If `budgetBlocked` is set, stop — no new agent stages today.
 
-## 3. Apply (only when `$ARGUMENTS` contains `--apply`)
+## 3. Mode selection (`--apply` vs. diagnostic)
 
-**One bounded stage, then stop.** Do not loop until idle — that is the supervisor's job, not `/factory-next`.
+- **Without `--apply` (read-only diagnostic mode):** report the diagnosis and print the exact commands to execute next (`factory next --repo <repo> --apply` for one bounded stage, or `bun run supervise` for continuous loop execution), then stop cleanly. Never end with an interactive `"Would you like me to run this?"` prompt — assume the operator may be AFK or scripting.
+- **With `--apply` (autonomous AFK mode):** immediately execute **one bounded stage** to completion without pausing for confirmation, then stop. Do not loop until idle — that is the supervisor's job, not `/factory-next`.
+  - If the recommendation is a slash command (`/factory-merge`, `/factory-triage`, `/factory-work`, …), run **that command's skill/body** in this session — one pass, default caps (`5` triage, `3 at a time` work, `10` unblock).
+  - If `--orchestrated` is present and the recommendation is `tick` or `reconcile`, run the printed `exec` line instead.
+  - If the recommendation is `(wait)` with no command, report why and do not spawn work.
 
-- If the recommendation is a slash command (`/factory-merge`, `/factory-triage`, `/factory-work`, …), run **that command's skill/body** in this session — one pass, default caps (`5` triage, `3 at a time` work, `10` unblock).
-- If `--orchestrated` is present and the recommendation is `tick` or `reconcile`, run the printed `exec` line instead.
-- If the recommendation is `(wait)` with no command, report why and do not spawn work.
-
-Alternatively, delegate execution to the script:
+Alternatively, delegate `--apply` execution directly to the script:
 
 ```bash
 factory next --repo <repo> --apply [--orchestrated] [--harness <harness>] $OTHER_FLAGS
@@ -70,4 +70,4 @@ factory state record --type friction --repo <repo> --issues "OPS-123"
 6. Holds without answers → digest / unblock (alternate)
 7. Main loop idle + `--include-sweep` → sweep
 
-Retro, ship, audit, and friction capture are **not** auto-selected — run those on cadence or explicitly.
+Retro, garden, ship, audit, and friction capture are **not** auto-selected — run those on cadence or explicitly.

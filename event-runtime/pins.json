@@ -6,22 +6,23 @@
     "files": {
       "agents/factory-ci-doctor.md": "sha256:62c6c8ed0d2a6f671f4f4d742e38804091c693a5fcdb31f9e580db4497690bd0",
       "agents/factory-infra-scout.md": "sha256:4025fa714189b0480a5e052746ce7d4949ed4f0d4d8519a4c25da843aa716987",
-      "agents/factory-merge-reviewer.md": "sha256:f40d46f30e089480fa9c1a8e3fe58cc8c74de379ef16f1cf8cb0a2a73a4ee7e2",
+      "agents/factory-merge-reviewer.md": "sha256:8a97623ffb7a211ae9be47059a5cdca0c7f5787275d071be99bc289afd707496",
       "agents/factory-ux-critic.md": "sha256:e7df9de18af0e160b14b198f5a9b2633578c7e7a4145fca464879948616d3e98",
-      "commands/factory-audit.md": "sha256:68f87be9a5d17c3753db3260317853fb3def6e9593bb4239b098654c99ee757a",
-      "commands/factory-capture.md": "sha256:f67044989f33695340d723b7e85ddcdd21d412a1f416aea58d1a39d943f4ff57",
+      "commands/factory-audit.md": "sha256:8490101a0b902fe0f39c032176d84af4f00b2be26267335351adc39ed3c78089",
+      "commands/factory-capture.md": "sha256:1afaf35ce0b915f7636fdfb44f4fc2e1130d3953b7df5aaeb5ed5b2afdd1e216",
       "commands/factory-friction.md": "sha256:952b6573aad2e8cc8bbe3c7de2724336d0505e450c84b66abd0a5f028f2bd021",
-      "commands/factory-merge.md": "sha256:534e7c0863144baa237715213098e06852ecc895b5dba6f186a74310eecde191",
-      "commands/factory-next.md": "sha256:26d5a4f03b301d1bbf967a35aa93e643730bf10f5932a688e195f8d64d535ee6",
+      "commands/factory-garden.md": "sha256:5a5334173bc7a16148a91b0fd92423e5e78cb538653e0dbde7ef17585b71b74a",
+      "commands/factory-merge.md": "sha256:f6cf744ef3f442f35ed7e2db11557cd9b6adff0e4898cc4e724ab223ba936666",
+      "commands/factory-next.md": "sha256:13a2f58a39127d2e4b4c0b5f9c2883916bd54cb710dc918106892e9b9c78d2b1",
       "commands/factory-report.md": "sha256:08845be4cd1845df54ff0465dc0f7c74ec1cde174487334979a8774a7eb57f0b",
       "commands/factory-retro.md": "sha256:644d6e3e6f4b6efed28a69dfa296bbf5189c9153c57d202fec11aff77b77a163",
       "commands/factory-ship.md": "sha256:8456a2dfc3f75f66fb1e9a1a8c71fa07e33dabe5b67cfdfc2c101e5ed050bb03",
       "commands/factory-sweep.md": "sha256:f7dc737e45bcce94442cd78aea01868c5d9cce3312da83d3cc51322ab0bef4b4",
-      "commands/factory-ticket.md": "sha256:c8e07f4bb90f95f27c5889fb5b04acf66eb1374d96de622632e8430d70b6c84e",
-      "commands/factory-triage.md": "sha256:20d538ca3c7358b22ea2f263fa1ec8b75affbf222e58c77989b43d34750c0ff1",
-      "commands/factory-unblock.md": "sha256:496bffc002afea8eca9d6c1b80f38c6732eb2163f3e41f6d04f0357c4e2905cb",
-      "commands/factory-work.md": "sha256:5a949245b48938b28faedf273c5bf1d6799bf21cc5cfcd486621436294df1128",
-      "floor.md": "sha256:d3658d5c8ce6090c57fc3ff89dccdf3050180adb2e041352de2ea4a327c71fe8",
+      "commands/factory-ticket.md": "sha256:c05c5e85f388467cec740f9a04329f3e8c94583b8b43a6cef0089237ec46dd1d",
+      "commands/factory-triage.md": "sha256:dcc3e06a598ba9ba24e37f216b9ec8a89722d34499481955b29574c572fa9566",
+      "commands/factory-unblock.md": "sha256:ad23e193ba3ba72dff36574d571e3f768cd8874b15a07dd0cfe50213a86277fe",
+      "commands/factory-work.md": "sha256:78fe13ca7f76bba0e442faab90a1e541c9ee17041bdf44f2bf66e79c16af2640",
+      "floor.md": "sha256:665b319c11293d33987e0f859585ed06f443e0fece20ce6435213dd669039ea0",
       "skills/factory-handoff/SKILL.md": "sha256:c7163ec8c8f77b73fbdd7ce39e78e7264b9766121c483b77a58907b0da724957",
       "skills/principle-attack-the-premise/SKILL.md": "sha256:96c3d9cebb22252a04b89a585b3bf6010324305ea4d0effc115577fc94ab31d6",
       "skills/principle-boundary-discipline/SKILL.md": "sha256:404f45eaa34e044bff37bc54e31279b4dee974c3bcece1beb5931e025bb55661",
@@ -43,7 +44,7 @@
       "skills/principle-test-behavior-not-implementation/SKILL.md": "sha256:2e159d33249ea859ce8623b921c479bc4b8145b6f53f9473907059af8cd954a1",
       "skills/principle-type-system-discipline/SKILL.md": "sha256:8d72e717d23203034f4ddce86c31b165c917998310a69f8b754c6fecc311feb5",
       "skills/principles/SKILL.md": "sha256:6a7d9eb26427fd5a7024f259f1b3cb083011158093068d0297dede2413866d3c",
-      "skills/ticket-spec/SKILL.md": "sha256:b5c0d9c789d8e1fd6562813b242f32f27fff4635f94543f6a0ca1157effb1c2b"
+      "skills/ticket-spec/SKILL.md": "sha256:177f7780478c2536d9e0febafdd4b48208501a4cfdefc6a2117a638f91e273dc"
     }
   }
 }

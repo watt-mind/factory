@@ -11,7 +11,7 @@ So the job is not "spec everything" — it's **sorting tickets into three piles*
 
 ## The three outcomes
 
-**Auto-specifiable** — the problem is unambiguous and the answer is in the code. Explore read-only, write all five sections, promote to `Todo` + `ai:agent-ready` **plus a `tier:*` label**.
+**Auto-specifiable** — the problem is unambiguous and the answer is in the code. Assume the operator is AFK by default: resolve derivable technical/architectural choices (module shape, file layout, test strategy) and set evidence-based priority (from severity, frequency, and blast radius) directly from `origin/<base>` conventions rather than holding for confirmation. Explore read-only, write all five sections, and promote to `Todo` + `ai:agent-ready` **plus a `tier:*` label**.
 
 ### Sizing the `tier:*` label
 
@@ -23,9 +23,9 @@ Closed vocabulary, at most one per ticket: `tier:light`, `tier:standard`, `tier:
 
 If the ticket already carries a `tier:*` label, leave it — don't recompute or overwrite an existing tier decision. State the tier and why in the promotion comment.
 
-**Answerable from written decisions** — intent is unclear but already recorded: the repo's `docs/product-decisions.md`, `docs/`, the Linear project Overview, or a prior ticket in the same area. Resolve it, **cite where you found it** in the ticket so the next agent doesn't re-litigate, then promote.
+**Answerable from written decisions or codebase precedent** — intent looks unclear at first glance, but is already answered by the repo's `docs/product-decisions.md`, `docs/`, the Linear project Overview, prior tickets in the same area, or `origin/<base>` sibling conventions. Resolve it, **cite where you found it** in the ticket so the next agent doesn't re-litigate, then promote.
 
-**Genuinely needs a human** — a real product decision, a missing credential, a priority call. Move to `Blocked` + `ai:blocked`, strip `ai:agent-ready` if present (never leave an evaluated hold in `Triage`, where subsequent triage ticks will re-derive and re-comment it indefinitely), comment the specific question phrased so one reply unblocks it, and batch every such question into a single notification at the end of the run. Never a ping per ticket.
+**Genuinely needs a human** — an unrecorded user-visible product-intent fork, missing credentials/external access, or irreconcilable product scope (never derivable engineering choices or priority — priority is always set from severity/frequency/blast-radius evidence). Move to `Blocked` + `ai:blocked`, strip `ai:agent-ready` if present (never leave an evaluated hold in `Triage`, where subsequent triage ticks will re-derive and re-comment it indefinitely), comment the specific question phrased so one reply unblocks it, and batch every such question into a single notification at the end of the run. Never a ping per ticket.
 
 ## Rules that keep this honest
 
@@ -49,4 +49,4 @@ WM-289 is the worked failure: its spec owned `shared/` but omitted `dist/AGENTS.
 
 ## Before writing anything
 
-Check the ticket isn't already solved: duplicate of an open issue, fixed in git history, or obsolete. Say which, with evidence, and close or link it. Cheaper than a perfect spec for work nobody needs.
+Follow the floor's **Checkout freshness** check against `origin/<base>` (`git fetch --quiet`, then verify against `origin/<base>` rather than trusting a potentially stale working tree) to check the ticket isn't already solved: a duplicate of an open issue, already shipped on `origin/<base>`, or provably obsolete. When hard evidence on `origin/<base>` or the tracker proves it, retire it directly (`Duplicate` linking the surviving issue, or `Canceled` with a commit/PR citation — never delete) without pausing for confirmation. When non-obvious, leave it open rather than stalling on a question. Cheaper than a perfect spec for work nobody needs.
