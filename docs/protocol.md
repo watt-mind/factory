@@ -143,9 +143,25 @@ columns / labels / project status.
 - **`In Progress`** — an agent holds the claim (`ai:in-progress`).
 - **`In Review`** — PR is up (`ai:needs-review`). Merge stage owns it.
 - **`Done`** — merged **and** running: base-branch CI green after the merge,
-  and the post-deploy smoke check green where the repo has one.
-- **`Blocked`** — a question the agent cannot answer (`ai:blocked`). Never
-  leave a stalled ticket in `In Progress`.
+  and end-to-end post-deploy verification (`/factory-verify-deploy`) green
+  whenever a task triggers or lands a deployment: (1) rollout readiness and
+  live commit/revision identity proven, (2) zero new console, network, or
+  server/container errors confirmed, and (3) the changed user or API flow
+  exercised against the live URL (full flow on staging/dev; strictly read-only
+  or designated canary checks on `-prod`/apex domains — never mutate real
+  production data).
+- **`Blocked`** — waiting on an AFK human (`ai:blocked`), strictly for genuine
+  unrecorded product-intent forks, missing credentials or external access,
+  inseparable `Owned Paths` gaps, out-of-scope security entanglement, or
+  missing human authorisation in autonomous `dispatch@` gates. In-scope
+  `/factory-ticket` or `/factory-work` changes that touch `Never auto-merge` or
+  `escalate_paths` surfaces do **not** park in `Blocked`: implement, verify,
+  and open an escalated PR (`ai:escalated` on the ticket + `escalated` on the
+  GitHub PR + `factory notify "ESCALATED ..."`) for human review without
+  auto-merging. Never move a ticket to `Blocked` for derivable engineering
+  choices (resolve from `origin/<base>` conventions and record in `## Handoff`)
+  or for implementation failures with no human question (unclaim back to `Todo` +
+  `ai:agent-ready`). Never leave a stalled ticket in `In Progress`.
 
 **Canceled** and **Duplicate** are tracker-native close states. They keep the
 ticket recoverable; an actual delete does not. Retire obsolete work with a
@@ -169,8 +185,14 @@ A ticket is dispatchable only when it carries all five sections:
    that look like a path and contain no spaces, so a comma-separated list on
    one bullet is silently dropped and the ticket either fails to dispatch
    (`owned_paths_unknown`) or dispatches with a narrower scope than written.
-5. **Verification Command** — a command that actually runs in this repo.
-   For non-code work, an evidence line replaces it.
+5. **Verification Command** — a targeted command that actually runs in this
+   repo, scoped to the specific unit, integration, or E2E test file(s)/filter
+   exercising the ticket's change rather than bare full suites (`bun test`,
+   `npm test`, `uv run pytest`, `cargo test --workspace`, or full Playwright
+   runs) when CI covers the suite. Include a `- [ ] Post-deploy: ...` bullet in
+   `Acceptance Criteria` when HTTP/API contracts, user-facing flows,
+   SSR/routing, auth/middleware, DB migrations, Dockerfiles/workflows, or
+   external integrations move. For non-code work, an evidence line replaces it.
 
 A ticket missing a load-bearing section (`Owned Paths` or `Verification
 Command`) is demoted to `Triage`; do not dispatch it. `factory label-guard`
@@ -211,6 +233,13 @@ ticket; bundles never arrive there.
 **Work comes from the tracker, and only when it's ready.** Dispatchable means
 `Todo` + `ai:agent-ready` + unassigned. `Triage` is not a queue to pull from.
 
+**The operator is AFK by default.** Execute unattended to the stage's natural
+stop condition without pausing for routine confirmations when safe, reversible
+defaults exist. Resolve technical ambiguities from `origin/<base>` conventions
+and `docs/product-decisions.md` rather than stalling on a prompt, and record
+any reversible assumption in your approach comment and in `## Handoff` under
+`Risks`.
+
 **Claim before you code.** Assign yourself, move to `In Progress`, add
 `ai:in-progress` + `agent:<harness>`, drop `ai:agent-ready`, then **re-read
 the assignee**. If it isn't you, another agent won the race; take the next
@@ -231,7 +260,13 @@ mandatory — git isolates branches, not ports or databases.
 open) and at least every 20 minutes, saying what changed. After 45 minutes
 of silence the ticket is reclaimed.
 
-**Verification is a gate.** Run the ticket's exact Verification Command.
+**Verification is a gate.** Run the ticket's exact Verification Command. When
+CI already runs the repository's test suites, run **only** targeted unit,
+integration, or E2E test files/cases locally (never full unit or E2E suites
+unless cross-cutting blast radius genuinely requires it or CI lacks coverage),
+and **always** run fast, low-CPU static gates (lint, format check, typecheck,
+generated-tree drift check, framework system check) locally before every
+`git push` so trivial static failures never burn a CI cycle.
 When a handoff changes `event-runtime/lib/**`, the worker also runs
 `bun test event-runtime/lib --timeout 20000` unless that exact lib suite (or
 an explicit parent suite) is already covered by the ticket command. Narrow
@@ -277,9 +312,13 @@ Then `In Review` + `ai:needs-review`, remove `ai:in-progress`. The
 implementing agent never merges.
 
 **Never auto-merge** diffs that change auth/authz, payments, secrets,
-destructive migrations, production infra, or security behavior. Add
-`ai:escalated` and notify (§10, §14). `master`/`main` always goes through a
-human.
+destructive migrations, production infra, or security behavior (or touch
+`escalate_paths`). For in-scope work, implement, verify, open an escalated PR
+(`ai:escalated` on the ticket + `escalated` on the GitHub PR), and notify
+(`ESCALATED`, §10, §14) rather than auto-merging; reserve pre-push `Blocked` +
+`ai:blocked` holds for out-of-scope security entanglement or missing human
+authorisation in autonomous `dispatch@` gates. `master`/`main` always goes
+through a human.
 
 ## 8. Filing bar
 
@@ -450,10 +489,23 @@ indefinitely. Individual forge calls may still supply their own `timeout`.
 ## 14. Loops
 
 The factory commands (`/factory-work`, `/factory-merge`, `/factory-ship`,
-and the rest under `shared/commands/`) are the loops. Notify during a run
-only for the six events in §10. A ticket blocked, a PR escalated, base CI
-or smoke red, or the circuit breaker tripping is an interrupt; a clean
-claim, PR, or merge is not.
+`/factory-verify-deploy`, `/factory-garden`, and the rest under
+`shared/commands/`) run as autonomous loops for an AFK operator: each executes
+to its natural stop condition without mid-run confirmation prompts, isolating
+per-ticket or per-PR holds (`Blocked`, `ai:escalated`) while continuing
+unrelated work in scope. Notify during a run only for the six events in §10. A
+ticket blocked, a PR escalated, base CI or smoke red, or the circuit breaker
+tripping is an interrupt; a clean claim, PR, or merge is not.
 
-`Done` is merged and running, not "PR opened". The implementing agent
-stops at `In Review`; the merge stage lands the PR.
+`Done` is merged and running, not "PR opened". The implementing agent stops at
+`In Review`; the merge stage lands the PR, and whenever a stage or deploy
+workflow lands a deployment (`/factory-merge` on an auto-deployed branch,
+`/factory-ship`, or an ad-hoc deploy), `/factory-verify-deploy` runs end-to-end
+post-deploy verification against the live environment before `Done` holds.
+
+When the operator returns from AFK, `/factory-recap` (read-only text + inline
+artifacts/diagrams) and `/factory-recap-video` (silent subtitled `1280x720` MP4
+walkthrough + decision cards) synthesize what landed, autonomous `## Handoff`
+assumptions, and every human-owned call (`ai:escalated`, `ai:blocked`, release
+gates), complementing `/factory-report` (live queue snapshot) and
+`/factory-retro` (harness friction loop).

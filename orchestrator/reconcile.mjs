@@ -62,19 +62,47 @@ const c = {
   cyan: (s) => `\x1b[36m${s}\x1b[0m`,
 };
 
-export const Q = `query($t:String!,$p:String!){ issues(first:250, filter:{
+export const Q = `query($t:String!,$p:String!,$after:String){ issues(first:250, after:$after, filter:{
     team:{key:{eq:$t}}, project:{name:{eq:$p}}, state:{type:{nin:["completed","canceled"]}} }){
   nodes{ id identifier title startedAt updatedAt labels(first:20){nodes{id name}}
          state{ id name type }
          comments(last:1){ nodes{ createdAt } }
-         attachments(first:20){ nodes{ url } } } } }`;
+         attachments(first:20){ nodes{ url } } }
+  pageInfo{ hasNextPage endCursor } } }`;
 
-export const Q_DONE = `query($t:String!,$p:String!){ issues(first:100, filter:{
+export const Q_DONE = `query($t:String!,$p:String!,$after:String){ issues(first:100, after:$after, filter:{
     team:{key:{eq:$t}}, project:{name:{eq:$p}}, state:{type:{eq:"completed"}} }, orderBy:updatedAt){
   nodes{ id identifier title startedAt updatedAt labels(first:20){nodes{id name}}
          state{ id name type }
          comments(last:1){ nodes{ createdAt } }
-         attachments(first:20){ nodes{ url } } } } }`;
+         attachments(first:20){ nodes{ url } } }
+  pageInfo{ hasNextPage endCursor } } }`;
+
+/** Upper bounds on pagination so a runaway cursor can never loop forever. */
+export const MAX_PAGES_ACTIVE = 12; // 12 x 250 = 3000 open tickets
+export const MAX_PAGES_DONE = 10; // 10 x 100 = 1000 most recently completed
+
+/**
+ * Follow `pageInfo { hasNextPage endCursor }` until exhausted or `maxPages`
+ * is hit (then warn on stderr and return what was collected).
+ */
+export async function fetchAllPages(queryGql, query, vars, maxPages, label) {
+  const nodes = [];
+  let after = null;
+  for (let page = 1; page <= maxPages; page++) {
+    const conn = (await queryGql(query, { ...vars, after }))?.issues;
+    nodes.push(...(conn?.nodes ?? []));
+    const info = conn?.pageInfo;
+    if (!info?.hasNextPage || !info.endCursor) return nodes;
+    after = info.endCursor;
+  }
+  console.warn(
+    c.yellow(
+      `  warning: ${label} query hit the ${maxPages}-page bound (${nodes.length} tickets fetched); more tickets exist and were not evaluated`,
+    ),
+  );
+  return nodes;
+}
 
 /** PR numbers attached to a ticket, for this repo only. */
 export function prNumbers(issue, nameWithOwner) {
@@ -123,6 +151,110 @@ export function settledLabelIds(issue) {
       (l) => !LIFECYCLE_LABELS.includes(l.name) && !l.name.startsWith("agent:"),
     )
     .map((l) => l.id);
+}
+
+/** How far back to look for merged PRs carrying `Fixes` lines (WM-1140). */
+export const FIXES_WINDOW_DAYS = 14;
+/** Upper bound on merged PRs inspected per repo, newest first. */
+export const FIXES_PR_LIMIT = 300;
+
+/**
+ * Explicit completion markers in a PR body (WM-1140): a line that is *only*
+ * `Fixes|Closes|Resolves <TEAM>-<n>` (case-insensitive; optional list bullet,
+ * optional trailing punctuation). A bare ID mentioned in prose, a caveat or a
+ * "related to" note never matches — that scraping closed the wrong ticket in
+ * the CLNT-5138 incident (2026-10-03). Lines inside fenced code blocks are
+ * examples, not claims, and are ignored.
+ * @returns {{id:string, line:string}[]} unique by id, in body order
+ */
+export function parseFixesLines(body, team = null) {
+  const out = [];
+  const seen = new Set();
+  let fenced = false;
+  const re =
+    /^(?:[-*+]\s+)?(?:fixes|closes|resolves)\s+([A-Za-z][A-Za-z0-9]*-\d+)\s*[.,;]?$/i;
+  for (const raw of String(body ?? "").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (/^(```|~~~)/.test(line)) {
+      fenced = !fenced;
+      continue;
+    }
+    if (fenced) continue;
+    const m = re.exec(line);
+    if (!m) continue;
+    const id = m[1].toUpperCase();
+    if (team && !id.startsWith(`${team.toUpperCase()}-`)) continue;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push({ id, line });
+  }
+  return out;
+}
+
+/**
+ * Merged PRs into the repo's base branch within the window, as
+ * `{number, body, mergedAt, baseRefName}`. Empty (with a warning) when the
+ * forge cannot answer — never a reason to act.
+ */
+export function recentMergedPrs(repo, { now = Date.now() } = {}, forge = null) {
+  try {
+    const f = forge ?? loadForge();
+    const cutoff = now - FIXES_WINDOW_DAYS * 86400000;
+    return f
+      .prList(repo.github, {
+        state: "merged",
+        limit: FIXES_PR_LIMIT,
+        fields: ["number", "body", "mergedAt", "baseRefName", "state"],
+      })
+      .filter(
+        (pr) =>
+          pr.mergedAt &&
+          Date.parse(pr.mergedAt) >= cutoff &&
+          (!repo.base || pr.baseRefName === repo.base),
+      );
+  } catch (err) {
+    console.warn(
+      c.yellow(
+        `  warning: could not list merged PRs for ${repo.github}: ${err?.message ?? err}`,
+      ),
+    );
+    return [];
+  }
+}
+
+/**
+ * Drift descriptors for non-terminal tickets named on a `Fixes` line of a
+ * merged PR. Unlike the attachment rule this applies to *every* non-terminal
+ * state: an explicit own-line `Fixes` is positive completion evidence even for
+ * a Blocked/Backlog ticket. First (earliest-listed) PR wins per ticket.
+ */
+export function evaluateFixesLines(issues, mergedPrs, team = null) {
+  const byId = new Map(
+    issues
+      .filter(
+        (i) =>
+          i.state?.type !== "completed" &&
+          i.state?.type !== "canceled" &&
+          i.state?.name?.toLowerCase() !== "done",
+      )
+      .map((i) => [i.identifier?.toUpperCase(), i]),
+  );
+  const out = new Map();
+  for (const pr of mergedPrs) {
+    for (const { id, line } of parseFixesLines(pr.body, team)) {
+      const issue = byId.get(id);
+      if (!issue || out.has(id)) continue;
+      out.set(id, {
+        type: "merged-fixes-line",
+        issue,
+        merged: [pr.number],
+        mergedAt: pr.mergedAt,
+        fixesLine: line,
+        targetState: "Done",
+      });
+    }
+  }
+  return [...out.values()];
 }
 
 /**
@@ -229,12 +361,21 @@ export async function reconcileRepo(
         i.state?.name?.toLowerCase() === "done",
     );
   } else {
-    activeNodes =
-      (await queryGql(Q, { t: repo.team, p: repo.project }))?.issues?.nodes ??
-      [];
-    doneNodes =
-      (await queryGql(Q_DONE, { t: repo.team, p: repo.project }))?.issues
-        ?.nodes ?? [];
+    const vars = { t: repo.team, p: repo.project };
+    activeNodes = await fetchAllPages(
+      queryGql,
+      Q,
+      vars,
+      MAX_PAGES_ACTIVE,
+      "open-ticket",
+    );
+    doneNodes = await fetchAllPages(
+      queryGql,
+      Q_DONE,
+      vars,
+      MAX_PAGES_DONE,
+      "completed-ticket",
+    );
   }
   const nodes = [...activeNodes, ...doneNodes];
 
@@ -261,7 +402,49 @@ export async function reconcileRepo(
   let drift = 0;
   const actions = [];
 
+  const handled = new Set();
+  const mergedPrs = deps.mergedPrs ?? recentMergedPrs(repo);
+  for (const ev of evaluateFixesLines(nodes, mergedPrs, repo.team)) {
+    const issue = ev.issue;
+    handled.add(issue.id);
+    drift++;
+    actions.push(ev);
+    if (gate) continue;
+    console.log(
+      `  ${c.yellow(issue.identifier)} is ${issue.state?.name ?? "open"} but merged PR #${ev.merged[0]} says "${ev.fixesLine}" — ${apply ? "moving to Done" : "would move to Done"}`,
+    );
+    console.log(c.dim(`    ${issue.title.slice(0, 70)}`));
+    if (!apply) continue;
+    if (!doneId) {
+      console.log(
+        c.red(`    ! no completed state on team ${repo.team}, skipping`),
+      );
+      continue;
+    }
+    await queryGql(
+      `mutation($id:String!,$in:IssueUpdateInput!){ issueUpdate(id:$id,input:$in){ success } }`,
+      {
+        id: issue.id,
+        in: { stateId: doneId, labelIds: settledLabelIds(issue) },
+      },
+    );
+    await queryGql(
+      `mutation($in:CommentCreateInput!){ commentCreate(input:$in){ success } }`,
+      {
+        in: {
+          issueId: issue.id,
+          body:
+            `**State reconciled: \`${issue.state?.name ?? "open"}\` → \`Done\` (WM-1140).**\n\n` +
+            `PR #${ev.merged[0]} merged at ${ev.mergedAt} and its body carries the line \`${ev.fixesLine}\`, ` +
+            `which is explicit completion evidence regardless of ticket state. ` +
+            `Removed the factory lifecycle labels (\`ai:in-progress\`, \`ai:needs-review\`, \`ai:blocked\`, ...); project labels were preserved.`,
+        },
+      },
+    );
+  }
+
   for (const issue of nodes) {
+    if (handled.has(issue.id)) continue;
     const prs = prNumbers(issue, repo.github);
     if (!prs.length) continue;
 

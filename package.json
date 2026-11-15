@@ -71,6 +71,7 @@
     "reconcile": "bun orchestrator/run.mjs --only reconcile --once --apply --repo",
     "merge": "bun orchestrator/run.mjs --only merge --once --apply --repo",
     "janitor": "bun orchestrator/run.mjs --only janitor --once --apply --repo",
+    "ci-health": "bun orchestrator/run.mjs --only ci-health --once --apply --repo",
     "emit": "bun build/emit.mjs",
     "check": "bun build/emit.mjs --check && bun run check:web && bun run format:check",
     "check:web": "cd event-runtime/web && if [ -d node_modules ]; then bun run typecheck; else echo \"check:web: skipped (run 'bun install' in event-runtime/web to enable the TypeScript check)\"; fi",

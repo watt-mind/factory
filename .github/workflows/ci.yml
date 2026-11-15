@@ -162,29 +162,12 @@ jobs:
 
   fast-unit-tests:
     name: Fast unit tests
-    # `!cancelled()` overrides GitHub's implicit `success()` gate on `needs`, so
-    # this job is still evaluated when `shadow-runner-health` is intentionally
-    # skipped on the cloud lane (WM-1122). It stays fail-closed: a cancelled
-    # workflow or a failed `route` skips it, and on the self-hosted lane it
-    # still requires a healthy shadow fleet.
-    #
-    # This suite runs on BOTH lanes and is required on both: fork and
-    # Dependabot PRs must keep full unit/lint/format/build coverage (GH-2267).
-    # The handful of cases that need a real unprivileged user+mount namespace
-    # self-skip on hosts without one, via the `handoffSandboxAvailable` probe
-    # in event-runtime/lib/verify.mjs — a host-capability probe, never an
-    # env flag a PR could set.
-    if: >-
-      ${{
-        !cancelled() &&
-        needs.route.result == 'success' &&
-        (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
-        (needs.route.outputs.self_hosted != 'true' || needs.shadow-runner-health.result == 'success')
-      }}
-    needs: [route, shadow-runner-health]
-    # Measurements recorded in docs/ci.md show this bounded suite can run
-    # safely without joining the integration/E2E host-lock queue.
-    runs-on: ${{ fromJSON(needs.route.outputs.shadow_labels) }}
+    # Runs on GitHub-hosted ubuntu-latest for both internal and fork/Dependabot
+    # PRs: zero shared-host contention, and the handful of cases that need an
+    # unprivileged user+mount namespace self-skip via `handoffSandboxAvailable`
+    # while `sandboxed-verify-smoke` covers that boundary on self-hosted.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       # Every later step resolves the runtime home here, never the operator's
@@ -221,13 +204,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Prepends the pinned bun to GITHUB_PATH; a runner bun of another
+          # version is never reused (WM-1137).
           .github/scripts/install-pinned-tools.sh bun
-          if [ -x "$HOME/.bun/bin/bun" ]; then
-            echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
-            "$HOME/.bun/bin/bun" --version
-          else
-            bun --version
-          fi
       - name: Install root dependencies
         run: bun install --frozen-lockfile
 
@@ -246,25 +225,9 @@ jobs:
           git diff --exit-code
 
       - name: Measure shared-host load factor
+        if: runner.environment == 'self-hosted'
         shell: bash
-        run: |
-          set -euo pipefail
-          cpu_count="$(nproc)"
-          runner_jobs="$(pgrep -fc 'Runner\.Worker' || true)"
-          read -r _ _ _ runnable _ < /proc/loadavg
-          runnable="${runnable%%/*}"
-          runner_jobs="${runner_jobs:-1}"
-          pressure="$runner_jobs"
-          if [ "$runnable" -gt "$pressure" ]; then pressure="$runnable"; fi
-          load_factor="$(awk -v pressure="$pressure" -v cpu_count="$cpu_count" '
-            BEGIN {
-              load_factor = 1 + pressure / cpu_count
-              if (load_factor > 4) load_factor = 4
-              printf "%.2f", load_factor
-            }
-          ')"
-          echo "CI_LOAD_FACTOR=$load_factor" >> "$GITHUB_ENV"
-          echo "Spawn-test load factor: $load_factor ($pressure runnable/jobs across $cpu_count CPUs)."
+        run: .github/scripts/load-factor.sh
 
       - name: Test event-runtime library
         # Spawn-heavy suites can exceed Bun's 5s default on the shared host.
@@ -276,7 +239,7 @@ jobs:
           set -euo pipefail
           exclude="$(bun event-runtime/lib/test-helpers-timing.mjs exclude-pattern)"
           set +e
-          bun test --timeout 20000 --max-concurrency=4 --test-name-pattern "$exclude" event-runtime/lib | tee "$RUNNER_TEMP/bun-test.log"
+          bun test --timeout 20000 --max-concurrency=4 --test-name-pattern "$exclude" event-runtime/lib 2>&1 | tee "$RUNNER_TEMP/bun-test.log"
           status="${PIPESTATUS[0]}"
           set -e
           if [ "$status" -ne 0 ]; then
@@ -297,23 +260,11 @@ jobs:
 
   timing-bound-tests:
     name: Timing-bound tests
-    # WM-918: spawn-and-wait tests whose wall-clock ceilings flake under
-    # shared-host contention. Not a required check — required Verify and Fast
-    # unit tests exclude this group. A red result here is a flake signal, not
-    # a merge blocker.
-    # `!cancelled()` overrides GitHub's implicit `success()` gate on `needs`, so
-    # this job still reaches a hosted runner when `shadow-runner-health` is
-    # intentionally skipped on the cloud lane (WM-1122). Same fail-closed guards
-    # as Fast unit tests.
-    if: >-
-      ${{
-        !cancelled() &&
-        needs.route.result == 'success' &&
-        (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
-        (needs.route.outputs.self_hosted != 'true' || needs.shadow-runner-health.result == 'success')
-      }}
-    needs: [route, shadow-runner-health]
-    runs-on: ${{ fromJSON(needs.route.outputs.shadow_labels) }}
+    # WM-918: spawn-and-wait tests whose wall-clock ceilings previously flaked
+    # under shared-host contention. Runs on a dedicated ubuntu-latest VM; not a
+    # required check.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       # Every later step resolves the runtime home here, never the operator's
@@ -350,13 +301,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Prepends the pinned bun to GITHUB_PATH; a runner bun of another
+          # version is never reused (WM-1137).
           .github/scripts/install-pinned-tools.sh bun
-          if [ -x "$HOME/.bun/bin/bun" ]; then
-            echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
-            "$HOME/.bun/bin/bun" --version
-          else
-            bun --version
-          fi
       - name: Install root dependencies
         run: bun install --frozen-lockfile
 
@@ -375,25 +322,9 @@ jobs:
           git diff --exit-code
 
       - name: Measure shared-host load factor
+        if: runner.environment == 'self-hosted'
         shell: bash
-        run: |
-          set -euo pipefail
-          cpu_count="$(nproc)"
-          runner_jobs="$(pgrep -fc 'Runner\.Worker' || true)"
-          read -r _ _ _ runnable _ < /proc/loadavg
-          runnable="${runnable%%/*}"
-          runner_jobs="${runner_jobs:-1}"
-          pressure="$runner_jobs"
-          if [ "$runnable" -gt "$pressure" ]; then pressure="$runnable"; fi
-          load_factor="$(awk -v pressure="$pressure" -v cpu_count="$cpu_count" '
-            BEGIN {
-              load_factor = 1 + pressure / cpu_count
-              if (load_factor > 4) load_factor = 4
-              printf "%.2f", load_factor
-            }
-          ')"
-          echo "CI_LOAD_FACTOR=$load_factor" >> "$GITHUB_ENV"
-          echo "Spawn-test load factor: $load_factor ($pressure runnable/jobs across $cpu_count CPUs)."
+        run: .github/scripts/load-factor.sh
 
       - name: Run timing-group tests
         shell: bash
@@ -470,13 +401,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Prepends the pinned bun to GITHUB_PATH; a runner bun of another
+          # version is never reused (WM-1137).
           .github/scripts/install-pinned-tools.sh bun
-          if [ -x "$HOME/.bun/bin/bun" ]; then
-            echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
-            "$HOME/.bun/bin/bun" --version
-          else
-            bun --version
-          fi
 
       - name: Install root dependencies
         run: bun install --frozen-lockfile
@@ -536,23 +463,16 @@ jobs:
 
   verify:
     name: Full verification
-    # `!cancelled()` overrides GitHub's implicit `success()` gate on `needs`, so
-    # this job is still evaluated when `shadow-runner-health` is intentionally
-    # skipped on the cloud lane (WM-1122). It stays fail-closed: a cancelled
-    # workflow or a failed `route` skips it, on the self-hosted lane it still
-    # requires a healthy shadow fleet, and it always still requires successful
-    # fast unit tests.
+    # Runs on GitHub-hosted ubuntu-latest so full verification never queues on
+    # the self-hosted verify-lane or contends with other PRs.
     if: >-
       ${{
         !cancelled() &&
-        needs.route.result == 'success' &&
         (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
-        (needs.route.outputs.self_hosted != 'true' || needs.shadow-runner-health.result == 'success') &&
         needs.fast-unit-tests.result == 'success'
       }}
-    needs: [route, shadow-runner-health, fast-unit-tests]
-    runs-on: ${{ fromJSON(needs.route.outputs.verify_labels) }}
-    # Runaway guard only — queue time is now spent in GitHub's queue, not here.
+    needs: [fast-unit-tests]
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       # Every later step resolves the runtime home here, never the operator's
@@ -594,19 +514,15 @@ jobs:
 
       # Same reason: oven-sh/setup-bun@v2 is the next codeload download in
       # line, and it also re-fetched bun-linux-x64.zip from GitHub releases on
-      # every job. The runner user on the shadow host already has bun under
-      # ~/.bun; only install (from bun.sh, not codeload) if it is missing.
+      # every job. The pinned bun is cached per version on the runner host and
+      # only downloaded (checksum-verified) when that version is missing.
       - name: Setup bun (no action download)
         shell: bash
         run: |
           set -euo pipefail
+          # Prepends the pinned bun to GITHUB_PATH; a runner bun of another
+          # version is never reused (WM-1137).
           .github/scripts/install-pinned-tools.sh bun
-          if [ -x "$HOME/.bun/bin/bun" ]; then
-            echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
-            "$HOME/.bun/bin/bun" --version
-          else
-            bun --version
-          fi
       - name: Install root dependencies
         run: bun install --frozen-lockfile
 
@@ -698,25 +614,9 @@ jobs:
           fi
 
       - name: Measure shared-host load factor
+        if: runner.environment == 'self-hosted'
         shell: bash
-        run: |
-          set -euo pipefail
-          cpu_count="$(nproc)"
-          runner_jobs="$(pgrep -fc 'Runner\.Worker' || true)"
-          read -r _ _ _ runnable _ < /proc/loadavg
-          runnable="${runnable%%/*}"
-          runner_jobs="${runner_jobs:-1}"
-          pressure="$runner_jobs"
-          if [ "$runnable" -gt "$pressure" ]; then pressure="$runnable"; fi
-          load_factor="$(awk -v pressure="$pressure" -v cpu_count="$cpu_count" '
-            BEGIN {
-              load_factor = 1 + pressure / cpu_count
-              if (load_factor > 4) load_factor = 4
-              printf "%.2f", load_factor
-            }
-          ')"
-          echo "CI_LOAD_FACTOR=$load_factor" >> "$GITHUB_ENV"
-          echo "Spawn-test load factor: $load_factor ($pressure runnable/jobs across $cpu_count CPUs)."
+        run: .github/scripts/load-factor.sh
 
       - name: Integration and spawn tests
         # event-runtime/lib runs in the separately rerunnable fast-unit job.
@@ -730,7 +630,7 @@ jobs:
           set -euo pipefail
           exclude="$(bun event-runtime/lib/test-helpers-timing.mjs exclude-pattern)"
           set +e
-          bun test --timeout 20000 --max-concurrency=4 --path-ignore-patterns='event-runtime/lib/**' --test-name-pattern "$exclude" | tee "$RUNNER_TEMP/bun-test.log"
+          bun test --timeout 30000 --max-concurrency=4 --path-ignore-patterns='event-runtime/lib/**' --test-name-pattern "$exclude" 2>&1 | tee "$RUNNER_TEMP/bun-test.log"
           status="${PIPESTATUS[0]}"
           set -e
           if [ "$status" -ne 0 ]; then
@@ -781,7 +681,7 @@ jobs:
 
       - name: E2E demo runtime seed and verify
         run: |
-          set -e
+          set -euo pipefail
           # Ask the OS for a free loopback port instead of sharing a fixed
           # one with concurrent Verify jobs on this self-hosted host.
           PORT="$(bun -e 'const probe = Bun.serve({ port: 0, fetch: () => new Response("") }); console.log(probe.port); probe.stop(true)')"
@@ -798,7 +698,7 @@ jobs:
           WORK_PID=$!
 
           cleanup() {
-            kill -9 $SERVE_PID $WORK_PID 2>/dev/null || true
+            kill -9 "$SERVE_PID" "$WORK_PID" 2>/dev/null || true
             rm -rf "$DIR"
           }
           trap cleanup EXIT

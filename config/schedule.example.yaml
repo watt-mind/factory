@@ -40,6 +40,28 @@ jobs: []
 # repeated_failures=N` and send at most one `factory notify` an hour — that is
 # what a stale FACTORY_CONTROL_API_TOKEN looks like from here.
 
+# Base-branch CI health (WM-1103). Nothing else in the factory watches the
+# trunk: `factory ci` measures CI as fourteen-day friction, the merge stage only
+# ever looks at one PR's checks, and a job that fails on every push is therefore
+# invisible. On 2026-09-15 legalease `develop` was red in one gate for ten hours
+# and six pushes while deploy and smoke stayed green. This job notifies once,
+# the second time the same job fails on a distinct head SHA. Copy it into
+# config/schedule.yaml to enable it:
+#
+# jobs:
+#   - name: ci-health
+#     every: 15m
+#     enabled: false
+#     dry_command: bun orchestrator/ci-health.mjs --repo {{repo}} --window 6 --dry-run
+#     command: bun orchestrator/ci-health.mjs --repo {{repo}} --window 6 --apply
+#
+# `enabled: false` keeps it out of launchd (see deploy/gen.mjs) while leaving it
+# runnable by name: `bun run ci-health <repo>`, or
+# `bun orchestrator/run.mjs --only ci-health --once --repo <repo>` for a preview.
+# It is dry unless --apply, and a dry pass deliberately writes no state — the
+# alarm memory in ~/.factory/state/ci-health.json is what keeps one outage to
+# one Telegram push, so a preview must not consume it.
+
 # Runtime schedule overlay (optional). `event-runtime/schedules.json` defines
 # tracked kernel defaults; these ignored, instance-specific values are merged
 # at runtime and do not change the registry digest. Existing loop names may
