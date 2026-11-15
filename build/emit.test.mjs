@@ -539,3 +539,101 @@ test("factory-merge uses Handoff/PR visual artifacts and an 8-suspect batch cap"
   expect(factoryMerge).toContain("at most 8 suspects");
   expect(factoryMerge).not.toContain("at most 5 suspects");
 });
+
+test("curated principle-* skills and principles index are emitted and guardrailed", () => {
+  const expectedPrinciples = [
+    "principle-attack-the-premise",
+    "principle-boundary-discipline",
+    "principle-build-the-lever",
+    "principle-encode-lessons-in-structure",
+    "principle-exhaust-the-design-space",
+    "principle-experience-first",
+    "principle-explain-the-number",
+    "principle-fix-root-causes",
+    "principle-foundational-thinking",
+    "principle-laziness-protocol",
+    "principle-make-operations-idempotent",
+    "principle-minimize-reader-load",
+    "principle-model-the-domain",
+    "principle-proceed-with-gates",
+    "principle-redesign-from-first-principles",
+    "principle-separate-before-serializing-shared-state",
+    "principle-subtract-before-you-add",
+    "principle-test-behavior-not-implementation",
+    "principle-type-system-discipline",
+  ];
+
+  expect(
+    existsSync(
+      path.join(ROOT, "shared", "skills", "principle-never-block-on-the-human"),
+    ),
+  ).toBe(false);
+
+  const indexPath = path.join(
+    ROOT,
+    "shared",
+    "skills",
+    "principles",
+    "SKILL.md",
+  );
+  expect(existsSync(indexPath)).toBe(true);
+  const indexText = readFileSync(indexPath, "utf8");
+
+  for (const name of expectedPrinciples) {
+    expect(indexText).toContain(name);
+    const skillPath = path.join(ROOT, "shared", "skills", name, "SKILL.md");
+    expect(existsSync(skillPath)).toBe(true);
+    const raw = readFileSync(skillPath, "utf8");
+    const fmMatch = raw.match(/^---\n([\s\S]*?)\n---\n/);
+    expect(fmMatch).not.toBeNull();
+    const parsed = Bun.YAML.parse(fmMatch[1]);
+    expect(parsed.name).toBe(name);
+    expect(parsed["disable-model-invocation"]).toBe(true);
+
+    for (const dest of [
+      path.join(ROOT, "plugins", "core", "skills", name, "SKILL.md"),
+      path.join(ROOT, "dist", "cursor", "skills", name, "SKILL.md"),
+      path.join(ROOT, "dist", "codex", "skills", name, "SKILL.md"),
+      path.join(ROOT, "dist", "gemini", "skills", name, "SKILL.md"),
+    ]) {
+      expect(existsSync(dest)).toBe(true);
+    }
+  }
+
+  const proceed = readFileSync(
+    path.join(
+      ROOT,
+      "shared",
+      "skills",
+      "principle-proceed-with-gates",
+      "SKILL.md",
+    ),
+    "utf8",
+  );
+  expect(proceed).toMatch(/Never auto-merge|editorial|security/i);
+
+  const redesign = readFileSync(
+    path.join(
+      ROOT,
+      "shared",
+      "skills",
+      "principle-redesign-from-first-principles",
+      "SKILL.md",
+    ),
+    "utf8",
+  );
+  expect(redesign).toContain("Owned Paths");
+  expect(redesign).toContain("Triage");
+
+  const exhaust = readFileSync(
+    path.join(
+      ROOT,
+      "shared",
+      "skills",
+      "principle-exhaust-the-design-space",
+      "SKILL.md",
+    ),
+    "utf8",
+  );
+  expect(exhaust).toMatch(/bugfix|explicitly/i);
+});
