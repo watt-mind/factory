@@ -12,6 +12,8 @@ Non-negotiable for every agent in this repo, in any harness. Full protocol: `$FA
 
 **Event-runtime code follows the documented house conventions.** For module shape, dependency injection, adapter contracts, fail-closed boundaries, and tests, read [`docs/event-runtime-conventions.md`](https://github.com/watt-mind/factory/blob/develop/docs/event-runtime-conventions.md) before changing `event-runtime/`.
 
+**The operator is AFK by default.** Assume no human will read your session output for hours; never pause mid-run for routine confirmation when a safe, reversible, evidence-backed default exists — decide, act, and record what you chose. Distinguish _autonomous default_ from _explicit interactive override_ (a direct human instruction in chat such as `"no ticket"`, an explicit bundle request, or passing `--include-escalated`). Resolve technical, architectural, and edge-case ambiguities within `Owned Paths` from `origin/<base>` conventions, sibling modules, git history, tests, and `docs/product-decisions.md`, noting non-obvious reversible assumptions in your ticket comment and `## Handoff` (`Risks`).
+
 **Work comes from the control plane, and only when it's ready.** A ticket is dispatchable only if it is `Todo` + `ai:agent-ready` + unassigned. `Triage` and `Backlog` are not queues to pull from.
 
 **An ad-hoc request gets a ticket too — file it, don't wait to be asked.** A request typed into a chat session is not exempt from the control plane; if it isn't tracked, it is invisible to every other agent and to tomorrow. **The trip wire is your first file edit:** before it, either find the issue that already covers this or create one, and say in one line which it is ("Tracking as OPS-91"). Commits still carry their `(ISSUE-ID)`. Skip the ticket only for ordinary questions, read-only lookups with no actionable finding, and inconsequential edits — and the human can always say "no ticket", which settles it. Sessions drift: one that began as a question and turned into a change trips the wire at that moment, not at the end.
@@ -52,7 +54,7 @@ Non-negotiable for every agent in this repo, in any harness. Full protocol: `$FA
 - Verification: `<the ticket's exact command>` — pass, <one-line result summary>
 - UX critique: required — SHIP | required — FIX-FIRST resolved in <n> round(s) | skipped — <reason>
 - Files: <n> changed, all within Owned Paths   (or: exceptions listed with why)
-- Risks: <what the reviewer should look at first, or "none known">
+- Risks: <what the reviewer should look at first, including any reversible engineering assumptions made without blocking, or "none known">
 ```
 
 Posting this structured comment is a mandatory prerequisite before advancing a ticket to `In Review`. The merge stage reviews directly from this comment; a vague Handoff slows review, and a missing or unformatted one is a protocol violation.
@@ -89,7 +91,9 @@ Same care for force-pushes: never `--force` onto a `base` or `deploy_branch`, an
 
 ### Stop and ask
 
-Move the ticket to `Blocked`, say specifically what you need in one answerable question, and notify. Never leave a stalled ticket sitting in `In Progress`.
+Reserve `Blocked` + `ai:blocked` + `factory notify` strictly for: (1) genuine unrecorded user-visible product-intent forks, (2) missing credentials, secrets, or external access, (3) inseparable `Owned Paths` gaps, or (4) pre-push `Never auto-merge` / `escalate_paths` boundaries. When one of those four applies, move the ticket to `Blocked` + `ai:blocked`, say specifically what you need in one answerable question, and notify. Never leave a stalled ticket sitting in `In Progress`.
+
+**Never block on derivable engineering decisions** — module shape, naming, data structures, error handling, test fixes, priority sizing, or cleanup are derived from `origin/<base>`, sibling tests, git history, `docs/product-decisions.md`, `docs/`, and the tracker project overview. If an agent fails to produce a valid fix with no concrete human question, unclaim the ticket back to `Todo` with a diagnostic comment rather than parking it in `Blocked`.
 
 **"Notify" means exactly this command** — a ticket comment, a `Blocked` state change, or a line in your final report does not reach the human in real time:
 

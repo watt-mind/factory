@@ -637,3 +637,92 @@ test("curated principle-* skills and principles index are emitted and guardraile
   );
   expect(exhaust).toMatch(/bugfix|explicitly/i);
 });
+
+test("emit packages /factory-garden across all five harnesses and lists it in README", () => {
+  const gardenSource = path.join(
+    ROOT,
+    "shared",
+    "commands",
+    "factory-garden.md",
+  );
+  expect(existsSync(gardenSource)).toBe(true);
+  const garden = readFileSync(gardenSource, "utf8");
+  expect(garden).toContain("Checkout freshness");
+  expect(garden).toContain("deterministic");
+  expect(garden).toContain("false positive");
+
+  for (const emitted of [
+    ["plugins", "core", "commands", "factory-garden.md"],
+    ["dist", "codex", "skills", "factory-garden", "SKILL.md"],
+    ["dist", "gemini", "skills", "factory-garden", "SKILL.md"],
+    ["dist", "cursor", "commands", "factory-garden.md"],
+    ["dist", "pi", "prompts", "factory-garden.md"],
+  ]) {
+    expect(existsSync(path.join(ROOT, ...emitted))).toBe(true);
+  }
+
+  const readme = readFileSync(path.join(ROOT, "README.md"), "utf8");
+  expect(readme).toContain("`/factory-garden`");
+  expect(readme).toContain("`~/.cursor/skills/`");
+});
+
+test("floor and stage prompts enforce AFK-by-default autonomy without mid-run confirmation stalls", () => {
+  const floor = readFileSync(
+    path.join(ROOT, "dist", "AGENTS.floor.md"),
+    "utf8",
+  );
+  expect(floor).toContain("The operator is AFK by default.");
+  expect(floor).toContain("Never block on derivable engineering decisions");
+
+  const triage = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-triage.md"),
+    "utf8",
+  );
+  expect(triage).not.toMatch(/Confirm with me before canceling/i);
+
+  const audit = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-audit.md"),
+    "utf8",
+  );
+  expect(audit).not.toMatch(/End by asking whether to fix/i);
+
+  const work = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-work.md"),
+    "utf8",
+  );
+  expect(work).not.toMatch(/~\/\.claude\/CLAUDE\.md/);
+
+  const merge = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-merge.md"),
+    "utf8",
+  );
+  expect(merge).not.toMatch(/notify me[\s\S]{0,120}and stop there/i);
+  expect(merge).toContain("continue to the next");
+
+  const ticketSpec = readFileSync(
+    path.join(ROOT, "shared", "skills", "ticket-spec", "SKILL.md"),
+    "utf8",
+  );
+  expect(ticketSpec).not.toContain("a priority call");
+});
+
+test("factory-ticket and factory-merge-reviewer enforce pragmatic root-cause and tier:strong guardrails", () => {
+  const ticket = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-ticket.md"),
+    "utf8",
+  );
+  expect(ticket).toContain("Fix root causes, not symptoms");
+  expect(ticket).toContain("Do not copy adjacent weeds");
+  expect(ticket).toContain("Boundary escape valve");
+  expect(ticket).toContain("Cold self-diff check");
+  expect(ticket).toMatch(/^6\. \*\*Push and open a PR\*\*/m);
+
+  const reviewer = readFileSync(
+    path.join(ROOT, "shared", "agents", "factory-merge-reviewer.md"),
+    "utf8",
+  );
+  expect(reviewer).toContain("suppression hygiene");
+  expect(reviewer).toContain("Boundary exception");
+  expect(reviewer).toContain("tier:strong");
+  expect(reviewer).toContain("Safety invariant:");
+});

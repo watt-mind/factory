@@ -144,8 +144,13 @@ columns / labels / project status.
 - **`In Review`** — PR is up (`ai:needs-review`). Merge stage owns it.
 - **`Done`** — merged **and** running: base-branch CI green after the merge,
   and the post-deploy smoke check green where the repo has one.
-- **`Blocked`** — a question the agent cannot answer (`ai:blocked`). Never
-  leave a stalled ticket in `In Progress`.
+- **`Blocked`** — waiting on an AFK human (`ai:blocked`), strictly for genuine
+  unrecorded product-intent forks, missing credentials or external access,
+  inseparable `Owned Paths` gaps, or pre-push `Never auto-merge` authorization.
+  Never move a ticket to `Blocked` for derivable engineering choices (resolve
+  from `origin/<base>` conventions and record in `## Handoff`) or for
+  implementation failures with no human question (unclaim back to `Todo` +
+  `ai:agent-ready`). Never leave a stalled ticket in `In Progress`.
 
 **Canceled** and **Duplicate** are tracker-native close states. They keep the
 ticket recoverable; an actual delete does not. Retire obsolete work with a
@@ -210,6 +215,13 @@ ticket; bundles never arrive there.
 
 **Work comes from the tracker, and only when it's ready.** Dispatchable means
 `Todo` + `ai:agent-ready` + unassigned. `Triage` is not a queue to pull from.
+
+**The operator is AFK by default.** Execute unattended to the stage's natural
+stop condition without pausing for routine confirmations when safe, reversible
+defaults exist. Resolve technical ambiguities from `origin/<base>` conventions
+and `docs/product-decisions.md` rather than stalling on a prompt, and record
+any reversible assumption in your approach comment and in `## Handoff` under
+`Risks`.
 
 **Claim before you code.** Assign yourself, move to `In Progress`, add
 `ai:in-progress` + `agent:<harness>`, drop `ai:agent-ready`, then **re-read
@@ -450,10 +462,13 @@ indefinitely. Individual forge calls may still supply their own `timeout`.
 ## 14. Loops
 
 The factory commands (`/factory-work`, `/factory-merge`, `/factory-ship`,
-and the rest under `shared/commands/`) are the loops. Notify during a run
-only for the six events in §10. A ticket blocked, a PR escalated, base CI
-or smoke red, or the circuit breaker tripping is an interrupt; a clean
-claim, PR, or merge is not.
+`/factory-garden`, and the rest under `shared/commands/`) run as autonomous
+loops for an AFK operator: each executes to its natural stop condition without
+mid-run confirmation prompts, isolating per-ticket or per-PR holds (`Blocked`,
+`ai:escalated`) while continuing unrelated work in scope. Notify during a run
+only for the six events in §10. A ticket blocked, a PR escalated, base CI or
+smoke red, or the circuit breaker tripping is an interrupt; a clean claim, PR,
+or merge is not.
 
 `Done` is merged and running, not "PR opened". The implementing agent
 stops at `In Review`; the merge stage lands the PR.

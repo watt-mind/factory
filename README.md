@@ -132,21 +132,22 @@ is the work, CI is the gate.
 Prefixed `factory-` so they are identifiable as ours and never collide with a
 repo-local or built-in command of the same name.
 
-| Command             | Does                                                                                           |
-| :------------------ | :--------------------------------------------------------------------------------------------- |
-| `/factory-work`     | Claims agent-ready tickets, dispatches them rolling, lands the PRs                             |
-| `/factory-ticket`   | Implements exactly one already-claimed ticket in the current worktree — what `tick.mjs` spawns |
-| `/factory-merge`    | Reviews open PRs, fixes what's mechanical, merges what qualifies                               |
-| `/factory-ship`     | Opens the `develop` → deploy-branch PR, waits for CI, merges, verifies the deploy              |
-| `/factory-triage`   | Turns `Triage` tickets into `ai:agent-ready` ones                                              |
-| `/factory-unblock`  | Re-examines `ai:blocked` holds and releases the ones new evidence resolved                     |
-| `/factory-sweep`    | Retires tickets overtaken by events — `Canceled`/`Duplicate` with evidence, never a delete     |
-| `/factory-audit`    | Grades a repo against project-conventions `PC-01`..`PC-20`, files the gaps                     |
-| `/factory-capture`  | Files an issue from the conversation — capture only, never implement                           |
-| `/factory-friction` | Files harness friction seen in an interactive session, where no transcript exists              |
-| `/factory-retro`    | Turns measured friction into harness changes                                                   |
-| `/factory-report`   | Read-only pipeline snapshot across the configured repos                                        |
-| `/factory-next`     | Picks the one next stage for this repo, and runs it only when asked                            |
+| Command             | Does                                                                                                  |
+| :------------------ | :---------------------------------------------------------------------------------------------------- |
+| `/factory-work`     | Claims agent-ready tickets, dispatches them rolling, lands the PRs                                    |
+| `/factory-ticket`   | Implements exactly one already-claimed ticket in the current worktree — what `tick.mjs` spawns        |
+| `/factory-merge`    | Reviews open PRs, fixes what's mechanical, merges what qualifies                                      |
+| `/factory-ship`     | Opens the `develop` → deploy-branch PR, waits for CI, merges, verifies the deploy                     |
+| `/factory-triage`   | Turns `Triage` tickets into `ai:agent-ready` ones                                                     |
+| `/factory-unblock`  | Re-examines `ai:blocked` holds and releases the ones new evidence resolved                            |
+| `/factory-sweep`    | Retires tickets overtaken by events — `Canceled`/`Duplicate` with evidence, never a delete            |
+| `/factory-audit`    | Grades a repo against project-conventions `PC-01`..`PC-20`, files the gaps                            |
+| `/factory-garden`   | Scans for spreading anti-patterns and suppressions; replaces prose warnings with deterministic checks |
+| `/factory-capture`  | Files an issue from the conversation — capture only, never implement                                  |
+| `/factory-friction` | Files harness friction seen in an interactive session, where no transcript exists                     |
+| `/factory-retro`    | Turns measured friction into harness changes                                                          |
+| `/factory-report`   | Read-only pipeline snapshot across the configured repos                                               |
+| `/factory-next`     | Picks the one next stage for this repo (diagnoses by default; runs it with `--apply`)                 |
 
 ### `factory status` — the everyday hub
 
@@ -184,7 +185,7 @@ native agent manifest.
 | Codex        | `AGENTS.md` (native)      | `~/.agents/skills/`   | — (use `@factory-*` skills) | `~/.codex/agents/`    |
 | Gemini CLI   | `GEMINI.md` → `AGENTS.md` | `~/.gemini/skills/`   | —                           | `~/.gemini/agents/`   |
 | Antigravity  | shares `~/.gemini/`       | via Gemini            | —                           | via Gemini            |
-| Cursor       | `.cursor/rules/`          | —                     | `~/.cursor/commands/`       | `~/.cursor/agents/`   |
+| Cursor       | `.cursor/rules/`          | `~/.cursor/skills/`   | `~/.cursor/commands/`       | `~/.cursor/agents/`   |
 | Pi           | `AGENTS.md` (native)      | `dist/pi/skills/`     | `dist/pi/prompts/`          | `~/.pi/agent/agents/` |
 | Hermes Agent | ACP v1; `AGENTS.md` floor | — (not yet supported) | `.hermes/commands/`         | `.hermes/agents/`     |
 
