@@ -1,6 +1,6 @@
 ---
 name: factory-capture
-description: File a Linear issue from this conversation, per the ai:agent-ready protocol — capture only, never implement
+description: "File a Linear issue from this conversation, per the ai:agent-ready protocol — capture only, never implement. Invoke only when the user explicitly asks to run /factory-capture or the factory-capture workflow."
 ---
 
 # factory-capture
@@ -11,7 +11,7 @@ Turn what just came up in this conversation into a Linear issue. This command **
 
 ## 1. Find what to file
 
-`$ARGUMENTS` names the finding if given; otherwise scan the conversation so far for the thing worth tracking — a bug, a missing requirement, tech debt, a follow-up idea, an operational finding. If more than one distinct thing surfaced, ask which one, or file each separately — don't merge unrelated findings into one issue.
+`$ARGUMENTS` names the finding if given; otherwise scan the conversation so far for the thing worth tracking — a bug, a missing requirement, tech debt, a follow-up idea, an operational finding. If more than one distinct actionable finding surfaced, file each separately rather than merging unrelated findings into one issue (ask only if a human is actively conversing and it is genuinely unclear whether an item was meant to be tracked).
 
 Confirm it clears the bar in `docs/protocol.md` §8 before filing anything: **meaningful, trackable work** (a code/config change, deployment, deliverable, or an investigation with an operational finding) — not an ordinary question, a read-only lookup with no actionable finding, or an inconsequential edit. If it doesn't clear the bar, say so and don't file.
 

@@ -103,6 +103,40 @@ export function factoryCommandLinkDiagnostic({
 }
 
 /**
+ * Report whether a repository declares a live post-deploy verification surface
+ * (`smoke_workflow`, `deployment.url`, `smoke_url`, or `post_release_checks`).
+ */
+export function repoSmokeDiagnostic(repo = {}) {
+  const label = "post-deploy smoke check";
+  if (repo.smoke_workflow) {
+    return { ok: true, label, detail: repo.smoke_workflow, fix: null };
+  }
+  if (repo.deployment?.url) {
+    return { ok: true, label, detail: repo.deployment.url, fix: null };
+  }
+  if (repo.smoke_url) {
+    return { ok: true, label, detail: repo.smoke_url, fix: null };
+  }
+  if (
+    Array.isArray(repo.post_release_checks) &&
+    repo.post_release_checks.length > 0
+  ) {
+    return {
+      ok: true,
+      label,
+      detail: `${repo.post_release_checks.length} post_release_checks`,
+      fix: null,
+    };
+  }
+  return {
+    ok: "warn",
+    label,
+    detail: "none",
+    fix: "without one, Done means merged rather than running",
+  };
+}
+
+/**
  * Report whether a repository's base branch has a healthy completed Actions
  * run. The reader is injectable so doctor tests never need GitHub access.
  */
@@ -1351,14 +1385,8 @@ if (import.meta.main) {
           ? "report_only repo — set `verify:` before flipping dispatch on"
           : "set `verify:` in repos.yaml — agents must never open a PR without clean output",
     );
-    check(
-      repo.smoke_workflow ? true : "warn",
-      "post-deploy smoke check",
-      repo.smoke_workflow ?? "none",
-      repo.smoke_workflow
-        ? null
-        : "without one, Done means merged rather than running",
-    );
+    const smoke = repoSmokeDiagnostic(repo);
+    check(smoke.ok, smoke.label, smoke.detail, smoke.fix);
   }
 
   {

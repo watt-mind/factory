@@ -24,7 +24,7 @@ repos:
     worktree_root: ~/Develop/.worktrees/factory # Optional root for ticket worktrees.
     # worktree_warm: bin/worktree-warm.sh # Optional script that warms a worktree template.
     max_in_flight: 20 # Optional positive per-repository dispatch cap.
-    verify: bun test event-runtime/lib --timeout 20000 && bun build/emit.mjs --check && bun run format:check # Optional local verification command.
+    verify: "bun test event-runtime/lib --timeout 20000 && bun build/emit.mjs --check && bun run format:check && bun run lint" # Optional local verification command.
     # smoke_workflow: smoke-prod.yml # Optional post-deploy GitHub Actions workflow.
     # smoke_url: https://factory.example.com/healthz # Optional post-deploy smoke endpoint.
     smoke_deadline_seconds: 420 # Optional positive deadline for smoke confirmation.
@@ -82,9 +82,10 @@ repos:
     merge_ci:
       # Fallback workflow when GitHub branch protection returns no contexts.
       workflow: CI
-      # Unique checks required from that fallback workflow.
+      # Unique checks required from that fallback workflow. Verify already
+      # gates Shadow runner fleet available on the self-hosted lane and expects
+      # it to be skipped on the cloud lane.
       required_checks:
-        - Shadow runner fleet available
         - Verify
     # Jobs that are red by design or by policy and must never raise an alarm
     # (WM-1103). `factory ci-health` ignores them when it looks for the same job
@@ -167,4 +168,4 @@ repos:
   #   team: EXAMPLE
   #   base: main
   #   report_only: true # Disable ticket dispatch until worktree lifecycle is proven.
-  #   verify: bun test
+  #   verify: bun run lint && bun run typecheck

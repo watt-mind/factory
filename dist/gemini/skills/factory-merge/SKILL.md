@@ -1,13 +1,13 @@
 ---
 name: factory-merge
-description: Review open PRs thoroughly, fix what's fixable, merge what's good
+description: "Review open PRs thoroughly, fix what's fixable, merge what's good. Invoke only when the user explicitly asks to run /factory-merge or the factory-merge workflow."
 ---
 
 # factory-merge
 
 The user's accompanying request is this workflow's argument string. Wherever these instructions refer to `$ARGUMENTS`, interpret it as that request.
 
-Review and land the open PRs for this repository. My invoking this command is the human merge decision for routine changes — but the review must be real, and sensitive changes still come back to me.
+Review and land the open PRs for this repository autonomously — assume the operator is AFK by default. Routine changes targeting the repo's configured integration branch (e.g. `develop` on `hdkiller`/`watt-mind` repos, per the floor's **Never auto-merge** rule) merge once reviewed and green without asking; PRs targeting `master`/`main` or touching `Never auto-merge` / `escalate_paths` surfaces escalate to a human.
 
 Interpret $ARGUMENTS as specific PR numbers or Linear issue IDs; default is every open PR in this repo (`gh pr list`, cross-checked against the team's `In Review` tickets so orphaned PRs and ticket-less PRs both surface).
 
@@ -21,7 +21,7 @@ Interpret $ARGUMENTS as specific PR numbers or Linear issue IDs; default is ever
 
 **Start from the ticket's `## Handoff` comment** — dispatch posts one per PR (PR link, verification result, UX critique verdict, files vs `Owned Paths`, risks). It tells you where to concentrate: a stated risk gets read first, a `FIX-FIRST resolved` critique means re-checking those fixes, an exceptions line on Files means the `Owned Paths` check below already has a suspect. A missing or vague Handoff is a (minor) protocol finding to note — and a reason to trust the diff less, not to skip the review.
 
-CI passing is not the bar. **Prefer spawning the `factory-merge-reviewer` agent for this step** — one per PR, with the ticket, Handoff comment, `Owned Paths`, and the repo's `escalate_paths` in its prompt — so the full diff never enters this session's context; act on its MERGE/FIX/ESCALATE report (it never merges or edits; you do). Where subagents are unavailable, read the full diff yourself. Either way the review covers:
+CI passing is not the bar. **Prefer spawning the `factory-merge-reviewer` agent for this step** — one per PR, with the ticket (including `tier:*` labels), Handoff comment, `Owned Paths`, and the repo's `escalate_paths` in its prompt — so the full diff never enters this session's context; act on its MERGE/FIX/ESCALATE report (it never merges or edits; you do). Where subagents are unavailable, read the full diff yourself. Either way the review covers:
 
 - **Correctness**: logic errors, edge cases, race conditions, broken assumptions about existing code it touches.
 - **Bugs the tests don't catch**: error handling, null/undefined paths, off-by-ones, state that survives navigation, platform differences (iOS/Android/web).
@@ -29,7 +29,7 @@ CI passing is not the bar. **Prefer spawning the `factory-merge-reviewer` agent 
 - **Protocol compliance**: does the diff stay inside the ticket's `Owned Paths`? Is the Handoff comment posted on the Linear ticket, and does its verification line reflect a real pass? Does the PR body have `Fixes <ISSUE-ID>`? Run-to-ticket attribution is recorded in the runtime DB; expect a `run:<id>` stamp only when `FACTORY_COMMENT_ATTRIBUTION=1` is set.
 - **Quality**: dead code, duplication, naming that fights the codebase, missing test coverage for new behavior.
 
-For user-facing PRs, open the Linear ticket's attached screenshots and judge the visual result too — layout, truncation, spacing, before/after coherence. A user-facing PR with no screenshots on its ticket is a (minor) protocol finding: note it, and if you fix the branch anyway, capture and attach them yourself.
+For user-facing visual PRs, inspect one representative, reviewable visual artifact from the Handoff or PR (such as the immutable `$FACTORY_WEB_URL/api/artifacts/<sha256>` link or an attached PR image) and judge layout, truncation, spacing, and before/after coherence — preferring a bounded mobile or element-scoped capture and never attaching screenshots to Linear or committing them to the repo. If neither an inspectable artifact nor a concrete, justified exception is stated in the Handoff or PR, treat it as the blocking protocol finding `visual_evidence_missing` (`FIX`, `fix-in-branch`) rather than `MERGE`.
 
 Then check CI for the reviewed head SHA: select only its CI workflow with `gh run list --workflow ci.yml --commit <sha> --json databaseId --limit 1`, wait with `gh run watch <run-id> --exit-status --interval 60`, and before merging assert every check run is complete and green with `gh api repos/<owner>/<repo>/commits/<sha>/check-runs`. The workflow run can lag the push, so retry the workflow-selected lookup for up to about two minutes when it is empty. **Never `sleep` and re-poll**: use only a bounded condition poll. Also check whether the branch is behind or conflicting with the base.
 
@@ -45,7 +45,7 @@ If a valid finding arrives after merge, file a linked follow-up and fix it throu
 
 - **MERGE** — CI green, no blocking findings. Minor/polish findings don't block: file them to Linear `Triage` per §8 and merge anyway.
 - **FIX** — CI red, merge conflicts, or blocking review findings that are mechanical to fix (a real bug, missing error handling, a failing test).
-- **ESCALATE** — never auto-merge, regardless of CI or review outcome: diffs touching auth/authz, payments/money, credentials/secrets handling, destructive DB migrations, prod infra config, or anything in a `CLNT` repo touching security. Also escalate when the fix would require changing the ticket's intent. Report these to me with the findings, add **`ai:escalated`** to the Linear ticket, **notify me** — `factory notify "ESCALATED PR#<n> (<TICKET>): <why, in one sentence>"` — rather than only writing it in the final report, and stop there.
+- **ESCALATE** — never auto-merge, regardless of CI or review outcome: diffs touching auth/authz, payments/money, credentials/secrets handling, destructive DB migrations, prod infra config, or anything in a `CLNT` repo touching security (plus PRs targeting `master`/`main`). Also escalate when the fix would require changing the ticket's intent. Apply atomic dual-labeling (`ai:escalated` on the Linear ticket and `escalated` on the GitHub PR), run `factory notify "ESCALATED PR#<n> (<TICKET>): <why, in one sentence>"` rather than only writing it in the final report, leave **this** PR open without merging (recording the findings for the final report), and **continue to the next non-overlapping open PR in the queue**.
 
   Exception: when `$ARGUMENTS` contains `--include-escalated`, the invoking human has explicitly cleared this escalation hold for this run. Review the PR just as thoroughly; if CI is green and there are no other blocking findings, classify it MERGE instead of holding it solely because it is escalated. This exception never overrides the normal MERGE prerequisites.
 
@@ -59,7 +59,7 @@ If a valid finding arrives after merge, file a linked follow-up and fix it throu
 
 ### 3. Fix loop (for FIX)
 
-For a red CI run, spawn `factory-ci-doctor` on it first — it returns TICKET / ENV / FLAKE with the culprit step and log lines, so the failed-job logs stay out of this session; a FLAKE verdict with evidence justifies `gh run rerun` instead of a code fix. Then check out the PR branch in its worktree (or a fresh one), fix the findings / CI failures / conflicts (rebase or merge base branch per repo convention), run the ticket's Verification Command until clean, push, wait for CI, and **re-review your own fix diff** before reclassifying. Maximum **2 fix rounds per PR** — still not mergeable after that: escalate with a summary of what was tried. Never weaken tests, skip checks, or expand scope to force a green build; if the test is what's wrong, that's a finding to report, not to silently edit around.
+For a red CI run, spawn `factory-ci-doctor` on it first — it returns TICKET / ENV / FLAKE with the culprit step and log lines, so the failed-job logs stay out of this session; a FLAKE verdict with evidence justifies `gh run rerun` instead of a code fix. Then check out the PR branch in its worktree (or a fresh one), fix the findings / CI failures / conflicts (rebase or merge base branch per repo convention), run the ticket's Verification Command until clean, push, wait for CI, and **re-review your own fix diff** before reclassifying. Maximum **2 fix rounds per PR** — still not mergeable after that: escalate **this** PR (atomic dual-label `ai:escalated` + `escalated` and `factory notify "ESCALATED PR#<n> (<TICKET>): <summary of what was tried>"`), leave it open, and continue to the remaining open PRs in the queue. Never weaken tests, skip checks, or expand scope to force a green build; if the test is what's wrong, that's a finding to report, not to silently edit around.
 
 ### 4. Merge (for MERGE)
 
@@ -83,8 +83,8 @@ So:
      ```
 
      A `gh run watch --exit-status` exit code is never a merge input — it only blocks until _one_ run finishes, and returns 0 for a run that was superseded before going green, not for a green run. A cancelled/superseded run on an **older** head is not a red — a later push superseded it — but a `failure` from **any** workflow on the **current** head (Security Scan, Escalated Gate, CI, …) is, even while another workflow on that same head reads green. If the head SHA has changed since review (an unreviewed push, or a fix added after approval), the condition above already fails closed — stop and re-review the diff before merging.
-4. Then wait **once** for base CI on the batch (`gh run watch <run> --exit-status`), plus the smoke check where the repo has one.
-5. Green: move every ticket in the batch to `Done` and clean up. Red: you have at most 5 suspects and their file sets are disjoint, so the failing job names the culprit. Revert that one merge (`git revert -m 1 <merge-sha>`, push, re-verify), keep the rest, and report what you reverted and why.
+4. Then wait **once** for base CI on the batch (`gh run list --workflow ci.yml --commit <batch-tip-sha> --json databaseId --limit 1` + `gh run watch <run-id> --exit-status --interval 60`), plus the smoke check where the repo has one — and when the repo auto-deploys `base` (declares a `base`-tracking `deployment.url`, `smoke_url`, or `smoke_workflow`) and the batch includes runtime UI or API changes, run `/factory-verify-deploy` (`--env staging --sha <batch-tip-sha>`) across the landed batch's changed flows (rollout SHA + zero console/network/server errors + live flow check).
+5. Green: move every ticket in the batch to `Done` and clean up. Red: you have at most 8 suspects and their file sets are disjoint, so the failing job names the culprit. Revert that one merge (`git revert -m 1 <merge-sha>`, push, re-verify), keep the rest, and report what you reverted and why.
 
 Cap the batch at 8 even when more are disjoint: a red base after 8 is still a diagnosable morning, and after 15+ it is an outage with a haystack.
 
@@ -94,7 +94,7 @@ Why this matters: a legalease run on 2026-08-04 landed 3 PRs in 15 minutes again
 
 If the repo has GitHub's native merge queue enabled, prefer it over any of this — it tests batches and drops the failures for you.
 
-After each batch: confirm base-branch CI passes **and the post-deploy smoke check is green** where the repo has one (per §7's `Done` condition — merged, base CI green, deployed and responding), then move the Linear ticket to `Done` (`factory ticket state <ID> Done --remove ai:needs-review --remove ai:escalated --remove ai:blocked`). Then clean up **in this order**: remove the ticket's worktree first (`bin/worktree-down.sh <ISSUE-ID>` where the repo provides it, so the ticket's database is dropped too), and only then delete the branch. Git refuses to delete a branch checked out in a worktree, so `gh pr merge --delete-branch` fails **every time** a ticket was worked in one — merge without that flag and delete the branch after teardown.
+After each batch: confirm base-branch CI passes **and the post-deploy smoke / `/factory-verify-deploy` (`--env staging`) check is green** where the repo auto-deploys `base` (per §7's `Done` condition — merged, base CI green, deployed with rollout SHA + zero runtime errors + changed flows verified), then move the Linear ticket to `Done` (`factory ticket state <ID> Done --remove ai:needs-review --remove ai:escalated --remove ai:blocked`). Then clean up **in this order**: remove the ticket's worktree first (`bin/worktree-down.sh <ISSUE-ID>` where the repo provides it, so the ticket's database is dropped too), and only then delete the branch. Git refuses to delete a branch checked out in a worktree, so `gh pr merge --delete-branch` fails **every time** a ticket was worked in one — merge without that flag and delete the branch after teardown.
 
 Resolve that branch from the PR you just merged; never from the ticket ID, and never from a name left over from an earlier PR in the batch — and before deleting it, run `factory branch-guard` to mechanically verify that the branch is not protected (`base` / `deploy_branch` / `develop` / `master` / `main`) and that no **other open PR** still has it as its head (WM-17, WM-51):
 
@@ -113,7 +113,7 @@ The same hold applies to the worktree teardown — `factory janitor` enforces it
 
 Per the floor's **Protected branches** rule, if `$HEAD_REF` comes back as the repo's `base` or `deploy_branch` (`develop`, `master`, `main`), stop — you are cleaning up the wrong PR. These repos have no branch protection to catch it for you.
 
-If base CI or the smoke check breaks after a batch, stop merging further batches immediately, notify me, and fix or revert first. On an auto-deploying branch a red smoke check means the environment is down right now, not that a test is flaky.
+If base CI or the smoke check breaks after a batch, stop merging further batches immediately, notify via `factory notify` (`CI RED <repo>: ...` or `SMOKE RED <repo>: ...`), and revert the culprit merge (per step 5 above) or fix forward autonomously without waiting for an AFK human reply before resuming. On an auto-deploying branch a red smoke check means the environment is down right now, not that a test is flaky.
 
 ## File what you find — every PR, every verdict
 

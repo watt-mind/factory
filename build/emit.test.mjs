@@ -201,6 +201,7 @@ test("emit purges orphaned commands, skills, and prompts from every output tree"
     "dist/codex/skills/orphaned-skill/SKILL.md",
     "dist/gemini/skills/orphaned-skill/SKILL.md",
     "dist/cursor/commands/orphaned-command.md",
+    "dist/cursor/skills/orphaned-skill/SKILL.md",
     "dist/pi/skills/orphaned-skill/SKILL.md",
     "dist/pi/prompts/orphaned-command.md",
   ].map((file) => path.join(ROOT, file));
@@ -423,4 +424,451 @@ test("sync-floor writes the running checkout, never the configured one", () => {
     rmSync(fixture, { recursive: true, force: true });
     rmSync(configured, { recursive: true, force: true });
   }
+});
+
+test("emit writes Cursor skills matching shared/skills/", () => {
+  for (const skill of ["ticket-spec", "factory-handoff"]) {
+    const sharedFile = path.join(ROOT, "shared", "skills", skill, "SKILL.md");
+    const cursorFile = path.join(
+      ROOT,
+      "dist",
+      "cursor",
+      "skills",
+      skill,
+      "SKILL.md",
+    );
+    expect(existsSync(cursorFile)).toBe(true);
+    expect(readFileSync(cursorFile, "utf8")).toBe(
+      readFileSync(sharedFile, "utf8"),
+    );
+  }
+});
+
+test("emit quotes and scopes command-skill descriptions for Codex and Gemini", () => {
+  for (const harness of ["codex", "gemini"]) {
+    const skillText = readFileSync(
+      path.join(ROOT, "dist", harness, "skills", "factory-ship", "SKILL.md"),
+      "utf8",
+    );
+    const fmMatch = skillText.match(/^---\n([\s\S]*?)\n---\n/);
+    expect(fmMatch).not.toBeNull();
+    expect(fmMatch[1]).toMatch(/^description:\s+".+"$/m);
+    const parsed = Bun.YAML.parse(fmMatch[1]);
+    expect(parsed.name).toBe("factory-ship");
+    expect(parsed.description).toContain(
+      "Invoke only when the user explicitly asks to run /factory-ship or the factory-ship workflow.",
+    );
+  }
+
+  const fixture = makeEmitFixture();
+  try {
+    writeFileSync(
+      path.join(fixture, "shared", "commands", "factory-colon-test.md"),
+      "---\ndescription: Release: open a PR and watch: checks\n---\n\nRun it.\n",
+    );
+    const result = Bun.spawnSync({
+      cmd: ["bun", "build/emit.mjs"],
+      cwd: fixture,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(0);
+    for (const harness of ["codex", "gemini"]) {
+      const generated = readFileSync(
+        path.join(
+          fixture,
+          "dist",
+          harness,
+          "skills",
+          "factory-colon-test",
+          "SKILL.md",
+        ),
+        "utf8",
+      );
+      const fmMatch = generated.match(/^---\n([\s\S]*?)\n---\n/);
+      expect(fmMatch).not.toBeNull();
+      const parsed = Bun.YAML.parse(fmMatch[1]);
+      expect(parsed.description).toBe(
+        "Release: open a PR and watch: checks. Invoke only when the user explicitly asks to run /factory-colon-test or the factory-colon-test workflow.",
+      );
+    }
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("ticket-spec and factory-handoff route human holds to Blocked + ai:blocked rather than Triage", () => {
+  const ticketSpec = readFileSync(
+    path.join(ROOT, "shared", "skills", "ticket-spec", "SKILL.md"),
+    "utf8",
+  );
+  const factoryHandoff = readFileSync(
+    path.join(ROOT, "shared", "skills", "factory-handoff", "SKILL.md"),
+    "utf8",
+  );
+  expect(ticketSpec).not.toMatch(/Leave in `Triage`/i);
+  expect(ticketSpec).toContain("`Blocked`");
+  expect(ticketSpec).toContain("`ai:blocked`");
+  expect(ticketSpec).toContain("`ai:agent-ready`");
+
+  expect(factoryHandoff).not.toMatch(
+    /remains\s+`?Triage`?|leave it in\s+`?Triage`?/i,
+  );
+  expect(factoryHandoff).toContain("`Blocked`");
+  expect(factoryHandoff).toContain("`ai:blocked`");
+});
+
+test("factory-work queries the queue through factory ticket rather than Linear MCP", () => {
+  const factoryWork = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-work.md"),
+    "utf8",
+  );
+  expect(factoryWork).not.toMatch(/Linear MCP|linear_common/);
+  expect(factoryWork).toContain("`factory ticket");
+});
+
+test("factory-merge uses Handoff/PR visual artifacts and an 8-suspect batch cap", () => {
+  const factoryMerge = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-merge.md"),
+    "utf8",
+  );
+  expect(factoryMerge).not.toMatch(
+    /ticket's attached screenshots|capture and attach them yourself/,
+  );
+  expect(factoryMerge).toContain("visual_evidence_missing");
+  expect(factoryMerge).toContain("at most 8 suspects");
+  expect(factoryMerge).not.toContain("at most 5 suspects");
+});
+
+test("curated principle-* skills and principles index are emitted and guardrailed", () => {
+  const expectedPrinciples = [
+    "principle-attack-the-premise",
+    "principle-boundary-discipline",
+    "principle-build-the-lever",
+    "principle-encode-lessons-in-structure",
+    "principle-exhaust-the-design-space",
+    "principle-experience-first",
+    "principle-explain-the-number",
+    "principle-fix-root-causes",
+    "principle-foundational-thinking",
+    "principle-laziness-protocol",
+    "principle-make-operations-idempotent",
+    "principle-minimize-reader-load",
+    "principle-model-the-domain",
+    "principle-proceed-with-gates",
+    "principle-redesign-from-first-principles",
+    "principle-separate-before-serializing-shared-state",
+    "principle-subtract-before-you-add",
+    "principle-test-behavior-not-implementation",
+    "principle-type-system-discipline",
+  ];
+
+  expect(
+    existsSync(
+      path.join(ROOT, "shared", "skills", "principle-never-block-on-the-human"),
+    ),
+  ).toBe(false);
+
+  const indexPath = path.join(
+    ROOT,
+    "shared",
+    "skills",
+    "principles",
+    "SKILL.md",
+  );
+  expect(existsSync(indexPath)).toBe(true);
+  const indexText = readFileSync(indexPath, "utf8");
+
+  for (const name of expectedPrinciples) {
+    expect(indexText).toContain(name);
+    const skillPath = path.join(ROOT, "shared", "skills", name, "SKILL.md");
+    expect(existsSync(skillPath)).toBe(true);
+    const raw = readFileSync(skillPath, "utf8");
+    const fmMatch = raw.match(/^---\n([\s\S]*?)\n---\n/);
+    expect(fmMatch).not.toBeNull();
+    const parsed = Bun.YAML.parse(fmMatch[1]);
+    expect(parsed.name).toBe(name);
+    expect(parsed["disable-model-invocation"]).toBe(true);
+
+    for (const dest of [
+      path.join(ROOT, "plugins", "core", "skills", name, "SKILL.md"),
+      path.join(ROOT, "dist", "cursor", "skills", name, "SKILL.md"),
+      path.join(ROOT, "dist", "codex", "skills", name, "SKILL.md"),
+      path.join(ROOT, "dist", "gemini", "skills", name, "SKILL.md"),
+    ]) {
+      expect(existsSync(dest)).toBe(true);
+    }
+  }
+
+  const proceed = readFileSync(
+    path.join(
+      ROOT,
+      "shared",
+      "skills",
+      "principle-proceed-with-gates",
+      "SKILL.md",
+    ),
+    "utf8",
+  );
+  expect(proceed).toMatch(/Never auto-merge|editorial|security/i);
+
+  const redesign = readFileSync(
+    path.join(
+      ROOT,
+      "shared",
+      "skills",
+      "principle-redesign-from-first-principles",
+      "SKILL.md",
+    ),
+    "utf8",
+  );
+  expect(redesign).toContain("Owned Paths");
+  expect(redesign).toContain("Triage");
+
+  const exhaust = readFileSync(
+    path.join(
+      ROOT,
+      "shared",
+      "skills",
+      "principle-exhaust-the-design-space",
+      "SKILL.md",
+    ),
+    "utf8",
+  );
+  expect(exhaust).toMatch(/bugfix|explicitly/i);
+});
+
+test("emit packages /factory-garden across all five harnesses and lists it in README", () => {
+  const gardenSource = path.join(
+    ROOT,
+    "shared",
+    "commands",
+    "factory-garden.md",
+  );
+  expect(existsSync(gardenSource)).toBe(true);
+  const garden = readFileSync(gardenSource, "utf8");
+  expect(garden).toContain("Checkout freshness");
+  expect(garden).toContain("deterministic");
+  expect(garden).toContain("false positive");
+
+  for (const emitted of [
+    ["plugins", "core", "commands", "factory-garden.md"],
+    ["dist", "codex", "skills", "factory-garden", "SKILL.md"],
+    ["dist", "gemini", "skills", "factory-garden", "SKILL.md"],
+    ["dist", "cursor", "commands", "factory-garden.md"],
+    ["dist", "pi", "prompts", "factory-garden.md"],
+  ]) {
+    expect(existsSync(path.join(ROOT, ...emitted))).toBe(true);
+  }
+
+  const readme = readFileSync(path.join(ROOT, "README.md"), "utf8");
+  expect(readme).toContain("`/factory-garden`");
+  expect(readme).toContain("`~/.cursor/skills/`");
+});
+
+test("floor and stage prompts enforce AFK-by-default autonomy without mid-run confirmation stalls", () => {
+  const floor = readFileSync(
+    path.join(ROOT, "dist", "AGENTS.floor.md"),
+    "utf8",
+  );
+  expect(floor).toContain("The operator is AFK by default.");
+  expect(floor).toContain("Never block on derivable engineering decisions");
+
+  const triage = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-triage.md"),
+    "utf8",
+  );
+  expect(triage).not.toMatch(/Confirm with me before canceling/i);
+
+  const audit = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-audit.md"),
+    "utf8",
+  );
+  expect(audit).not.toMatch(/End by asking whether to fix/i);
+
+  const work = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-work.md"),
+    "utf8",
+  );
+  expect(work).not.toMatch(/~\/\.claude\/CLAUDE\.md/);
+
+  const merge = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-merge.md"),
+    "utf8",
+  );
+  expect(merge).not.toMatch(/notify me[\s\S]{0,120}and stop there/i);
+  expect(merge).toContain("continue to the next");
+
+  const ticketSpec = readFileSync(
+    path.join(ROOT, "shared", "skills", "ticket-spec", "SKILL.md"),
+    "utf8",
+  );
+  expect(ticketSpec).not.toContain("a priority call");
+});
+
+test("factory-ticket and factory-merge-reviewer enforce pragmatic root-cause and tier:strong guardrails", () => {
+  const ticket = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-ticket.md"),
+    "utf8",
+  );
+  expect(ticket).toContain("Fix root causes, not symptoms");
+  expect(ticket).toContain("Do not copy adjacent weeds");
+  expect(ticket).toContain("Boundary escape valve");
+  expect(ticket).toContain("Cold self-diff check");
+  expect(ticket).toMatch(/^6\. \*\*Push and open a PR\*\*/m);
+
+  const reviewer = readFileSync(
+    path.join(ROOT, "shared", "agents", "factory-merge-reviewer.md"),
+    "utf8",
+  );
+  expect(reviewer).toContain("suppression hygiene");
+  expect(reviewer).toContain("Boundary exception");
+  expect(reviewer).toContain("tier:strong");
+  expect(reviewer).toContain("Safety invariant:");
+});
+
+test("floor, ticket-spec, and work/ticket prompts enforce targeted local tests and fast pre-push static gates", () => {
+  const floor = readFileSync(
+    path.join(ROOT, "dist", "AGENTS.floor.md"),
+    "utf8",
+  );
+  expect(floor).toContain(
+    "Targeted local tests; fast static checks before push.",
+  );
+  expect(floor).toContain("ai:escalated");
+
+  const ticketSpec = readFileSync(
+    path.join(ROOT, "shared", "skills", "ticket-spec", "SKILL.md"),
+    "utf8",
+  );
+  expect(ticketSpec).toContain(
+    "Scope `Verification Command` to targeted tests, never the full suite.",
+  );
+  expect(ticketSpec).toContain("Post-deploy:");
+
+  const work = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-work.md"),
+    "utf8",
+  );
+  expect(work).toMatch(/fast static gates|fast pre-push static gates/i);
+});
+
+test("UI prompts and principle skills enforce default screenshot surfacing, visual self-polish, and autonomous 2-3 option exploration", () => {
+  const floor = readFileSync(
+    path.join(ROOT, "dist", "AGENTS.floor.md"),
+    "utf8",
+  );
+  expect(floor).toContain("principle-experience-first");
+  expect(floor).toContain("principle-exhaust-the-design-space");
+  expect(floor).not.toContain(
+    "Screenshots are the single most expensive thing you can do.",
+  );
+
+  const ticket = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-ticket.md"),
+    "utf8",
+  );
+  expect(ticket).toContain("principle-experience-first");
+  expect(ticket).toContain("principle-exhaust-the-design-space");
+  expect(ticket).toMatch(/^6\. \*\*Push and open a PR\*\*/m);
+
+  const critic = readFileSync(
+    path.join(ROOT, "shared", "agents", "factory-ux-critic.md"),
+    "utf8",
+  );
+  expect(critic).toMatch(/even on `SHIP`/);
+  expect(critic).not.toContain(
+    "Screenshot only what you will actually cite in a finding",
+  );
+
+  const exhaust = readFileSync(
+    path.join(
+      ROOT,
+      "shared",
+      "skills",
+      "principle-exhaust-the-design-space",
+      "SKILL.md",
+    ),
+    "utf8",
+  );
+  expect(exhaust).not.toContain("single-ticket dispatch runs");
+  expect(exhaust).toMatch(/autonomously/i);
+});
+
+test("emit packages /factory-verify-deploy across all five harnesses and wires post-deploy E2E verification", () => {
+  const verifyDeploySource = path.join(
+    ROOT,
+    "shared",
+    "commands",
+    "factory-verify-deploy.md",
+  );
+  expect(existsSync(verifyDeploySource)).toBe(true);
+  const verifyDeploy = readFileSync(verifyDeploySource, "utf8");
+  expect(verifyDeploy).toContain("SMOKE RED");
+  expect(verifyDeploy).toMatch(/rollout|revision/i);
+  expect(verifyDeploy).toMatch(/read-only/i);
+
+  for (const emitted of [
+    ["plugins", "core", "commands", "factory-verify-deploy.md"],
+    ["dist", "codex", "skills", "factory-verify-deploy", "SKILL.md"],
+    ["dist", "gemini", "skills", "factory-verify-deploy", "SKILL.md"],
+    ["dist", "cursor", "commands", "factory-verify-deploy.md"],
+    ["dist", "pi", "prompts", "factory-verify-deploy.md"],
+  ]) {
+    expect(existsSync(path.join(ROOT, ...emitted))).toBe(true);
+  }
+
+  const readme = readFileSync(path.join(ROOT, "README.md"), "utf8");
+  expect(readme).toContain("`/factory-verify-deploy`");
+
+  const floor = readFileSync(
+    path.join(ROOT, "dist", "AGENTS.floor.md"),
+    "utf8",
+  );
+  expect(floor).toContain("/factory-verify-deploy");
+
+  const ship = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-ship.md"),
+    "utf8",
+  );
+  expect(ship).toContain("/factory-verify-deploy");
+});
+
+test("emit packages /factory-recap and /factory-recap-video across all five harnesses and lists them in README", () => {
+  for (const cmd of ["factory-recap", "factory-recap-video"]) {
+    const src = path.join(ROOT, "shared", "commands", `${cmd}.md`);
+    expect(existsSync(src)).toBe(true);
+    expect(existsSync(path.join(ROOT, "shared", "skills", cmd))).toBe(false);
+
+    for (const emitted of [
+      ["plugins", "core", "commands", `${cmd}.md`],
+      ["dist", "codex", "skills", cmd, "SKILL.md"],
+      ["dist", "gemini", "skills", cmd, "SKILL.md"],
+      ["dist", "cursor", "commands", `${cmd}.md`],
+      ["dist", "pi", "prompts", `${cmd}.md`],
+    ]) {
+      expect(existsSync(path.join(ROOT, ...emitted))).toBe(true);
+    }
+  }
+
+  const recap = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-recap.md"),
+    "utf8",
+  );
+  expect(recap).toContain("factory recap");
+  expect(recap).toContain("No screenshot yet");
+  expect(recap).toMatch(/read-only/i);
+  expect(recap).toMatch(/Calls waiting on you/i);
+
+  const recapVideo = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-recap-video.md"),
+    "utf8",
+  );
+  expect(recapVideo).toContain("factory recap-video");
+  expect(recapVideo).toMatch(/added_words\s*\/\s*3|addedWords\s*\/\s*3/i);
+  expect(recapVideo).toMatch(/subtitle/i);
+
+  const readme = readFileSync(path.join(ROOT, "README.md"), "utf8");
+  expect(readme).toContain("`/factory-recap`");
+  expect(readme).toContain("`/factory-recap-video`");
 });

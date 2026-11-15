@@ -387,6 +387,17 @@ const KNOWN_FACTORY_COMMANDS = new Set([
   "doctor",
   "sweep",
   "warm",
+  "garden",
+  "verify-deploy",
+  "ship",
+  "retro",
+  "audit",
+  "report",
+  "recap",
+  "recap-video",
+  "capture",
+  "friction",
+  "next",
 ]);
 
 /**

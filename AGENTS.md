@@ -18,6 +18,8 @@ Non-negotiable for every agent in this repo, in any harness. Full protocol: `$FA
 
 **Event-runtime code follows the documented house conventions.** For module shape, dependency injection, adapter contracts, fail-closed boundaries, and tests, read [`docs/event-runtime-conventions.md`](https://github.com/watt-mind/factory/blob/develop/docs/event-runtime-conventions.md) before changing `event-runtime/`.
 
+**The operator is AFK by default.** Assume no human will read your session output for hours; never pause mid-run for routine confirmation when a safe, reversible, evidence-backed default exists — decide, act, and record what you chose. Distinguish _autonomous default_ from _explicit interactive override_ (a direct human instruction in chat such as `"no ticket"`, an explicit bundle request, or passing `--include-escalated`). Resolve technical, architectural, and edge-case ambiguities within `Owned Paths` from `origin/<base>` conventions, sibling modules, git history, tests, and `docs/product-decisions.md`, noting non-obvious reversible assumptions in your ticket comment and `## Handoff` (`Risks`).
+
 **Work comes from the control plane, and only when it's ready.** A ticket is dispatchable only if it is `Todo` + `ai:agent-ready` + unassigned. `Triage` and `Backlog` are not queues to pull from.
 
 **An ad-hoc request gets a ticket too — file it, don't wait to be asked.** A request typed into a chat session is not exempt from the control plane; if it isn't tracked, it is invisible to every other agent and to tomorrow. **The trip wire is your first file edit:** before it, either find the issue that already covers this or create one, and say in one line which it is ("Tracking as OPS-91"). Commits still carry their `(ISSUE-ID)`. Skip the ticket only for ordinary questions, read-only lookups with no actionable finding, and inconsequential edits — and the human can always say "no ticket", which settles it. Sessions drift: one that began as a question and turned into a change trips the wire at that moment, not at the end.
@@ -48,6 +50,8 @@ Non-negotiable for every agent in this repo, in any harness. Full protocol: `$FA
 
 **Gate evidence must match the final relevant edits.** Run the ticket's verification and applicable checks before pushing; preserve the actual test/build/lint exit status when capturing output. Prefer redirecting output to a log and reading it afterward. If a pipeline is necessary, explicitly propagate failures from the gate command; success from `tee` or `tail` is not evidence. Follow the repository's supported test-selection and evidence-reuse policy rather than requiring duplicate broad suites for proven unchanged inputs. Missing or unavailable verification is never a pass.
 
+**Targeted local tests; fast static checks before push.** When CI already runs the repository's test suites, run **only** the targeted unit, integration, or E2E test files/cases covering your change locally (e.g. `bun test path/to/foo.test.mjs`, `uv run pytest tests/test_foo.py`, `cargo test -p crate test_name`, or a single Playwright spec) — never run full unit or E2E suites locally unless cross-cutting blast radius genuinely requires it or CI lacks test coverage; conversely, **always** run fast, low-CPU static gates (lint, format check, typecheck, generated-tree drift check, framework system check) locally before every `git push` so trivial static failures never burn a CI cycle.
+
 **PR base is explicit.** Resolve the repository's `base` from `config/repos.yaml` and always create ticket PRs with `gh pr create --base <configured-base> ...`; GitHub's default branch is not a fallback. Read the opened PR's `baseRefName` back before handoff and stop if it differs from the configured base.
 
 **Negative testing and falsifiability.** New regression tests must be observed failing before applying the fix to prove they test the actual failure mode and are not vacuous. Verify that tests distinguish correct implementations from plausible incorrect ones (without using `git stash`; use safe per-file reverts such as `git show <ref>:<path> > <path>`). A test that passes before the fix is applied tests nothing.
@@ -60,12 +64,12 @@ Non-negotiable for every agent in this repo, in any harness. Full protocol: `$FA
 - Verification: `<the ticket's exact command>` — pass, <one-line result summary>
 - UX critique: required — SHIP | required — FIX-FIRST resolved in <n> round(s) | skipped — <reason>
 - Files: <n> changed, all within Owned Paths   (or: exceptions listed with why)
-- Risks: <what the reviewer should look at first, or "none known">
+- Risks: <what the reviewer should look at first, including any reversible engineering assumptions made without blocking, or "none known">
 ```
 
 Posting this structured comment is a mandatory prerequisite before advancing a ticket to `In Review`. The merge stage reviews directly from this comment; a vague Handoff slows review, and a missing or unformatted one is a protocol violation.
 
-**`Done` means merged and running:** PR merged, base-branch CI green after the merge, and the post-deploy smoke check green where the repo has one.
+**`Done` means merged and running:** PR merged, base-branch CI green after the merge, and end-to-end post-deploy verification green whenever a task triggers or lands a deployment (via `/factory-merge` on an auto-deployed branch, `/factory-ship`, a deploy workflow, or an interactive/ad-hoc deploy): run `/factory-verify-deploy` without waiting to be asked — (1) prove rollout readiness and live commit/revision identity, (2) confirm zero new console, network, or server/container errors, and (3) exercise the changed user or API flow against the live URL (full flow on staging/dev; strictly read-only or designated canary checks on `-prod`/apex domains — never mutate real production data).
 
 ### Never auto-merge
 
@@ -97,7 +101,9 @@ Same care for force-pushes: never `--force` onto a `base` or `deploy_branch`, an
 
 ### Stop and ask
 
-Move the ticket to `Blocked`, say specifically what you need in one answerable question, and notify. Never leave a stalled ticket sitting in `In Progress`.
+Reserve `Blocked` + `ai:blocked` + `factory notify` strictly for: (1) genuine unrecorded user-visible product-intent forks, (2) missing credentials, secrets, or external access, (3) inseparable `Owned Paths` gaps, or (4) out-of-scope security entanglement or missing human authorisation in autonomous `dispatch@` gates. For in-scope `/factory-ticket` or `/factory-work` changes that touch `Never auto-merge` or `escalate_paths` surfaces, implement, verify, and open an escalated PR (`ai:escalated` on the ticket + `escalated` on the GitHub PR + `factory notify "ESCALATED ..."`) for human review without auto-merging; reserve pre-push `Blocked` + `ai:blocked` holds for out-of-scope security entanglement, missing human authorisation in autonomous `dispatch@` gates, unrecorded product intent, or missing credentials. When one of those four `Blocked` conditions applies, move the ticket to `Blocked` + `ai:blocked`, say specifically what you need in one answerable question, and notify. Never leave a stalled ticket sitting in `In Progress`.
+
+**Never block on derivable engineering decisions** — module shape, naming, data structures, error handling, test fixes, priority sizing, or cleanup are derived from `origin/<base>`, sibling tests, git history, `docs/product-decisions.md`, `docs/`, and the tracker project overview. If an agent fails to produce a valid fix with no concrete human question, unclaim the ticket back to `Todo` with a diagnostic comment rather than parking it in `Blocked`.
 
 **"Notify" means exactly this command** — a ticket comment, a `Blocked` state change, or a line in your final report does not reach the human in real time:
 
@@ -186,11 +192,14 @@ Dispatch is exempt — the worktree script branches from `origin/<base>`, so tic
 
 A tool result is not paid for once. It stays in the context window and is re-sent on every later turn, so a large payload early in a long run is charged dozens of times. Measured across 485 real runs: 193MB of tool output became **10.1GB** of re-sent context, and **74% of that was images**.
 
-**Screenshots are the single most expensive thing you can do.** A full-page PNG averages 199KB — roughly a hundred times a typical command's output, and it stays resident for the rest of the session.
+**Screenshots are expensive in context — capture boundedly, never blindly.** A full-page PNG averages 199KB — roughly a hundred times a typical command's output, and it stays resident for the rest of the session.
 
 - **Never `Read` an image you just captured.** The capture already put it in context; reading the file back doubles it for nothing. This was 572 payloads across the measured runs.
-- Use the **accessibility tree** (`take_snapshot`, `read_page`) for anything structural — labels, hierarchy, focus order, presence of an element. It averages 7KB against 199KB and is more precise for those questions. Screenshot only when the finding is genuinely _visual_: spacing, contrast, truncation, overlap.
-- When you do screenshot, prefer a **mobile viewport** and a **specific element** over a full desktop page.
+- Use the **accessibility tree** (`take_snapshot`, `read_page`) for structural DOM/label navigation — labels, hierarchy, focus order, presence of an element. It averages 7KB against 199KB and is more precise for those questions. Prefer a **mobile viewport** and a **specific element** over a full desktop page when capturing screenshots.
+- **Mandatory UI visual loop (`principle-experience-first` + `principle-exhaust-the-design-space`):**
+  1. On net-new UI surfaces, material layout redesigns, or explicit design-exploration requests (never routine bugfixes), explore 2–3 distinct layout/interaction options (`principle-exhaust-the-design-space`, using `$TMPDIR` patches, never `git stash`), autonomously select and commit only the winner without pausing on an AFK human, and record the options + rationale in the ticket comment / `## Handoff` (or interactive summary).
+  2. On **any** UI-affecting change, render the live UI, capture a bounded screenshot (prefer mobile viewport / element scope), critique visual hierarchy, spacing rhythm, alignment, contrast, truncation, and states coldly (`principle-experience-first`), and iterate **at least once** to polish rough first-draft UI (capping total captures to 2–4 bounded screenshots, `≤ 1 MB` each).
+  3. Surface screenshots by default (never commit to git or attach to Linear): in interactive sessions (`$FACTORY_RUN_ID` unset), save 1–3 post-polish screenshots to the session artifact/scratch dir and embed/link them in the response or walkthrough artifact without waiting to be asked; in dispatched runs (`$FACTORY_RUN_ID` set), publish 1–4 `ux-screenshot` artifacts and link `$FACTORY_WEB_URL/api/artifacts/<sha256>` in PR/Handoff (or state the concrete transport exception).
 
 **Don't re-read what you have already read.** 285 duplicate reads of an identical path inside a single run were measured. If you read a file, it is still in your context — scroll back rather than re-reading. For a large file, `offset`/`limit` the part you need instead of pulling all of it.
 
