@@ -84,6 +84,14 @@ Raising `--print-timeout` alone would trade a short hang for a long one: a wedge
 
 ## Fixed
 
+### F-15 · `/factory-merge`'s pre-merge gate accepted a false-green `gh run watch` — `fixed` (WM-1106)
+
+On 2026-09-15 the merge agent merged legalease PR #1170 while two check runs on its head were `failure`: `gh run watch --exit-status` on one workflow run had returned 0 (a run superseded by a newer push exits 0 without ever going green), and the merge one-liner asserted only that the head SHA matched the reviewed one — it never re-checked the check-run summary at merge time. Develop's unit job went red until PR #1171 fixed it forward.
+
+**Fix:** `.claude/commands/factory-merge.md` step 4.3 now states the pre-merge gate as one shell condition — head SHA match **and** a `check-runs` summary with no `failure`/`in_progress`/`queued`/`cancelled`/`timed_out`/`action_required` entries — with two rules spelled out: a `gh run watch` exit code is never a merge input, and a cancelled run on an older (superseded) head is not a red, but a `failure` from any workflow on the current head is. `/merge` shares the same bar; this repo has no `.claude/commands/merge.md` of its own, so the equivalent user-level command file needs the same block by hand.
+
+**Status:** fixed.
+
 ### F-1 · zsh glob-expands unquoted `--include=*.ts` — `fixed` (OPS-41)
 
 `(eval):1: no matches found: --include=*.ts` — zsh expands `*.ts` against the current directory and errors when nothing matches, killing the command before grep runs. Fixed as a floor rule (§Shell globs): quote glob arguments. The preferred fix — `NO_NOMATCH` for agent shells — isn't reachable from the runner: it's a zsh `setopt`, not an environment variable, and the harness's Bash tool starts shells from the user's own profile. If unquoted globs persist in transcripts, the next step is setting it in `~/.zshenv`.

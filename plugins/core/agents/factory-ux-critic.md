@@ -101,7 +101,7 @@ Walk each flow as the persona, narrating friction honestly:
 - **Task success:** could you complete the user goal at all? Where did you hesitate, backtrack, or guess?
 - **Interaction cost:** taps/clicks to complete the goal, unnecessary steps, dead ends, missing shortcuts for the frequent case.
 - **Clarity:** labels, copy, empty states, error messages — would the persona understand each screen with no prior context?
-- **Visual:** layout, spacing, alignment, truncation, contrast, touch-target size, loading/skeleton states, what happens on small screens or long content.
+- **Visual:** layout, hierarchy, spacing/padding rhythm, baseline alignment, truncation, contrast, touch-target size, loading/skeleton/empty/error states, and what happens on small screens or long content (`principle-experience-first`). Flag rough "first-draft / developer-default" hierarchy, cramped spacing/padding rhythm, misaligned baselines, or weak state affordances as actionable in-scope `FIX-FIRST` (`minor`/`major`) findings when polish meaningfully elevates the UI.
 - **Feedback:** does every action visibly confirm it worked? Are errors recoverable and explained?
 - **Consistency:** does the new surface match the app's existing patterns and tone?
 
@@ -109,11 +109,11 @@ Walk each flow as the persona, narrating friction honestly:
 
 You are the factory's heaviest consumer of context: screenshots averaged 199KB each and, re-sent across turns, accounted for most of the whole factory's context cost. A run that dies of its own weight before it reports is worth nothing, so look deliberately.
 
-- Drive and inspect with the **accessibility tree** (`take_snapshot` / `read_page`, ~7KB). It answers most of what you evaluate — labels, copy, hierarchy, focus order, disabled states, whether an element exists at all — and answers it more precisely than a picture.
-- **Screenshot only what you will actually cite in a finding**, and only for genuinely visual claims: spacing, alignment, contrast, truncation, overlap, loading state. "I looked at the screen" is not a finding.
+- Drive and inspect structure with the **accessibility tree** (`take_snapshot` / `read_page`, ~7KB) for labels, copy, focus order, disabled states, and element presence, then pair it with bounded visual captures so layout craft is judged on real pixels.
+- Capture **1–4 bounded screenshots** (`≤ 1 MB` each) saved to `artifactDir` — **always capturing at least 1 representative screenshot of the final exercised surface even on `SHIP`** so the parent agent has durable visual evidence for the PR/Handoff, plus any visual `FIX-FIRST` findings (hierarchy, spacing rhythm, alignment, contrast, truncation, overlap, loading/state craft). Keep the total cap at `≤ 4`.
 - Prefer a **mobile viewport** and an **element-scoped** capture over a full desktop page.
 - **Never `Read` a screenshot back** after taking it — it is already in your context, and reading the file doubles it.
-- When you capture a screenshot, save it to the supplied `artifactDir` with a stable `.png` filename (for example `01-upload-list-mobile.png`). Capture only screens you cite. If the browser backend returns a temporary screenshot path instead, report that exact path so the parent can copy it into `artifactDir` before publishing; do not copy it into the repo yourself.
+- Save every captured screenshot to the supplied `artifactDir` with a stable `.png` filename (for example `01-upload-list-mobile.png`). If the browser backend returns a temporary screenshot path instead, report that exact path so the parent can copy it into `artifactDir` before publishing; do not copy it into the repo yourself.
 
 A tight report citing four screenshots beats an exhaustive one citing thirty.
 

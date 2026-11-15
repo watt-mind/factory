@@ -51,7 +51,7 @@ jobs:
     name: Pinned tools forced-install smoke
     needs: github-paths-changed
     if: >-
-      ${{ always() && (github.event_name == 'workflow_dispatch' ||
+      ${{ !cancelled() && (github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'pull_request' && needs.github-paths-changed.outputs.github_changed == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -217,7 +217,7 @@ jobs:
           fi
           "$uvx_bin" --version
       - name: Semgrep scan
-        run: uvx --from semgrep==1.111.0 --with "setuptools<70" semgrep scan --config p/security-audit --error --metrics=off .
+        run: uvx --python 3.12 --from semgrep==1.111.0 --with "setuptools<70" semgrep scan --config p/security-audit --error --metrics=off .
 
   actionlint:
     name: Actionlint
@@ -259,14 +259,9 @@ jobs:
 
   codeql:
     name: CodeQL
-    # Keep CodeQL on the labeled self-hosted runner used by the previous
-    # GitHub-managed default setup. Its explicit resource cap prevents a scan
-    # from consuming every CPU and nearly all RAM on the shared host. This
-    # group spans PRs and branches because they share that one host.
-    concurrency:
-      group: codeql-shadow-host
-      cancel-in-progress: false
-    runs-on: shadow
+    # Run on ephemeral ubuntu-latest (16 GiB RAM, 4 vCPUs) so CodeQL never
+    # contends with self-hosted runners or leaks fork-PR context.
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
       actions: read

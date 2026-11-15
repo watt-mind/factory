@@ -6416,6 +6416,76 @@ export async function executeClaimed(
 }
 
 /**
+ * Locate and validate a worker's active lease for an operator recovery path.
+ * Both stalled-release and termination must make identical ownership checks so
+ * their safety boundary cannot drift.
+ */
+function operatorWorkerLease(
+  db,
+  { workerId, runId },
+  {
+    currentNow,
+    requireStale = false,
+    allowStoppedNoop = false,
+    allowTerminalNoop = false,
+  } = {},
+) {
+  const worker = db
+    .query(
+      `SELECT state, current_run, last_seen FROM workers WHERE worker_id = ?`,
+    )
+    .get(workerId);
+  if (!worker) throw new Error(`unknown worker ${workerId}`);
+  if (worker.state === "stopped" && allowStoppedNoop) {
+    return {
+      released: false,
+      runId: worker.current_run ?? runId ?? null,
+      reason: "already_terminal",
+    };
+  }
+  const stale =
+    worker.state !== "stopped" &&
+    currentNow - Date.parse(worker.last_seen) > HEARTBEAT_STALE_MS;
+  if (requireStale && (!stale || !worker.current_run))
+    throw new Error(`worker ${workerId} is not stalled with an active run`);
+  if (!worker.current_run)
+    throw new Error(`worker ${workerId} has no active run`);
+  if (runId && worker.current_run !== runId) {
+    throw new Error(
+      `worker ${workerId} holds ${worker.current_run}, not ${runId}`,
+    );
+  }
+
+  const heldRunId = worker.current_run;
+  const run = db
+    .query(`SELECT state, attempts, spec_json FROM runs WHERE run_id = ?`)
+    .get(heldRunId);
+  if (!run)
+    throw new Error(`worker ${workerId} references unknown run ${heldRunId}`);
+  if (!["LEASED", "RUNNING", "VERIFYING"].includes(run.state)) {
+    if (allowTerminalNoop) {
+      return {
+        released: false,
+        runId: heldRunId,
+        reason: "already_terminal",
+        state: run.state,
+      };
+    }
+    throw new Error(`run ${heldRunId} is ${run.state}, not actively leased`);
+  }
+  const attempt = db
+    .query(`SELECT lease_owner FROM attempts WHERE run_id = ? AND attempt = ?`)
+    .get(heldRunId, run.attempts);
+  if (!attempt) throw new Error(`run ${heldRunId} has no current attempt`);
+  if (attempt.lease_owner && attempt.lease_owner !== workerId) {
+    throw new Error(
+      `run ${heldRunId} is leased by ${attempt.lease_owner}, not ${workerId}`,
+    );
+  }
+  return { released: true, heldRunId, run };
+}
+
+/**
  * Explicit operator recovery for a worker that stopped heartbeating while it
  * still owned a run. This mirrors the lease reaper's retry/exhaustion rules,
  * but targets exactly the selected worker/run. When the run is retried it is
@@ -6434,43 +6504,15 @@ export function releaseStalledWorkerLease(
 ) {
   const currentNow = resolveNow(now);
   return txImmediate(db, () => {
-    const worker = db
-      .query(
-        `SELECT state, current_run, last_seen FROM workers WHERE worker_id = ?`,
-      )
-      .get(workerId);
-    if (!worker) throw new Error(`unknown worker ${workerId}`);
-    const stale =
-      worker.state !== "stopped" &&
-      currentNow - Date.parse(worker.last_seen) > HEARTBEAT_STALE_MS;
-    if (!stale || !worker.current_run)
-      throw new Error(`worker ${workerId} is not stalled with an active run`);
-    if (runId && worker.current_run !== runId) {
-      throw new Error(
-        `worker ${workerId} holds ${worker.current_run}, not ${runId}`,
-      );
-    }
-
-    const heldRunId = worker.current_run;
-    const run = db
-      .query(`SELECT state, attempts, spec_json FROM runs WHERE run_id = ?`)
-      .get(heldRunId);
-    if (!run)
-      throw new Error(`worker ${workerId} references unknown run ${heldRunId}`);
-    if (!["LEASED", "RUNNING", "VERIFYING"].includes(run.state)) {
-      throw new Error(`run ${heldRunId} is ${run.state}, not actively leased`);
-    }
-    const attempt = db
-      .query(
-        `SELECT lease_owner FROM attempts WHERE run_id = ? AND attempt = ?`,
-      )
-      .get(heldRunId, run.attempts);
-    if (!attempt) throw new Error(`run ${heldRunId} has no current attempt`);
-    if (attempt.lease_owner && attempt.lease_owner !== workerId) {
-      throw new Error(
-        `run ${heldRunId} is leased by ${attempt.lease_owner}, not ${workerId}`,
-      );
-    }
+    const lease = operatorWorkerLease(
+      db,
+      { workerId, runId },
+      {
+        currentNow,
+        requireStale: true,
+      },
+    );
+    const { heldRunId, run } = lease;
 
     const spec = JSON.parse(run.spec_json);
     db.query(
@@ -6562,53 +6604,17 @@ export function terminateLiveWorkerLease(
 ) {
   const currentNow = resolveNow(now);
   const fenced = txImmediate(db, () => {
-    const worker = db
-      .query(`SELECT state, current_run FROM workers WHERE worker_id = ?`)
-      .get(workerId);
-    if (!worker) throw new Error(`unknown worker ${workerId}`);
-    if (worker.state === "stopped") {
-      // A stopped worker has nothing left to terminate, even when its row
-      // still points at a run: never settle that run on its behalf here.
-      return {
-        released: false,
-        runId: worker.current_run ?? runId ?? null,
-        reason: "already_terminal",
-      };
-    }
-    if (!worker.current_run)
-      throw new Error(`worker ${workerId} has no active run`);
-    if (runId && worker.current_run !== runId) {
-      throw new Error(
-        `worker ${workerId} holds ${worker.current_run}, not ${runId}`,
-      );
-    }
-
-    const heldRunId = worker.current_run;
-    const run = db
-      .query(`SELECT state, attempts FROM runs WHERE run_id = ?`)
-      .get(heldRunId);
-    if (!run)
-      throw new Error(`worker ${workerId} references unknown run ${heldRunId}`);
-    if (!["LEASED", "RUNNING", "VERIFYING"].includes(run.state)) {
-      return {
-        released: false,
-        runId: heldRunId,
-        reason: "already_terminal",
-        state: run.state,
-      };
-    }
-
-    const attempt = db
-      .query(
-        `SELECT lease_owner FROM attempts WHERE run_id = ? AND attempt = ?`,
-      )
-      .get(heldRunId, run.attempts);
-    if (!attempt) throw new Error(`run ${heldRunId} has no current attempt`);
-    if (attempt.lease_owner && attempt.lease_owner !== workerId) {
-      throw new Error(
-        `run ${heldRunId} is leased by ${attempt.lease_owner}, not ${workerId}`,
-      );
-    }
+    const lease = operatorWorkerLease(
+      db,
+      { workerId, runId },
+      {
+        currentNow,
+        allowStoppedNoop: true,
+        allowTerminalNoop: true,
+      },
+    );
+    if (!lease.released) return lease;
+    const { heldRunId, run } = lease;
 
     // Revoking the current token fences a concurrent executor before it can
     // write a result. Keep the same attempt number: this operation settles it
@@ -6618,7 +6624,7 @@ export function terminateLiveWorkerLease(
       `UPDATE attempts
           SET fencing_token = ?, lease_owner = NULL, lease_expires_at = ?
         WHERE run_id = ? AND attempt = ?`,
-    ).run(fencingToken, iso(currentNow), heldRunId, run.attempts);
+    ).run(fencingToken, iso(currentNow - 1), heldRunId, run.attempts);
     db.query(
       `UPDATE workers SET state = 'stopped', current_run = NULL, stopped_at = ? WHERE worker_id = ?`,
     ).run(iso(currentNow), workerId);
@@ -6845,29 +6851,27 @@ export function cancelRun(
     const escalationRefused = escalation
       ? refuseTierEscalationClaim(db, escalation, reason)
       : false;
-    if (active) {
-      active.abort(reason);
-    }
     return {
       ...result,
       proposalClose,
       escalation,
       escalationRefused,
-      hadActiveExecution: Boolean(active),
+      activeExecution: active ?? null,
     };
   });
-  const {
-    escalation,
-    escalationRefused,
-    hadActiveExecution: active,
-    ...cancelledRun
-  } = outcome;
+  const { escalation, escalationRefused, activeExecution, ...cancelledRun } =
+    outcome;
+
+  // The state transition and attempt settlement above are durable before an
+  // adapter receives its abort signal. The executor snapshot was read inside
+  // the transaction so a registration racing for the write lock is not missed.
+  if (activeExecution) activeExecution.abort(reason);
 
   // An executing continuation owns its ticket/workspace cleanup and responds
   // to the abort above. An APPROVED/QUEUED continuation has no executor to do
   // that work, so cancellation must consume the durable ownership transfer.
   // Keep tracker/filesystem effects outside the SQLite write transaction.
-  if (!escalation || active) return cancelledRun;
+  if (!escalation || activeExecution) return cancelledRun;
 
   let claimReleased = false;
   let claimReleaseError = null;
@@ -6923,7 +6927,8 @@ export function forceFailRun(
   } = {},
 ) {
   const currentNow = resolveNow(now);
-  return txImmediate(db, () => {
+  const outcome = txImmediate(db, () => {
+    const activeExecution = ACTIVE_EXECUTIONS.get(runId) ?? null;
     const run = db
       .query(`SELECT state, attempts FROM runs WHERE run_id = ?`)
       .get(runId);
@@ -6975,12 +6980,10 @@ export function forceFailRun(
       throw new Error(`cannot force-fail run in terminal state ${run.state}`);
     }
     closeOpenProposalForRun(db, runId, { actor, now: currentNow });
-    if (run.state === "RUNNING" || run.state === "VERIFYING") {
-      const active = ACTIVE_EXECUTIONS.get(runId);
-      if (active) active.abort(reason);
-    }
-    return result;
+    return { result, activeExecution };
   });
+  if (outcome.activeExecution) outcome.activeExecution.abort(reason);
+  return outcome.result;
 }
 
 /**

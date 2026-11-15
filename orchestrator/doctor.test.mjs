@@ -44,6 +44,7 @@ import {
   ossOnboardingDiagnostics,
   parseCliVersion,
   repoToolchainDiagnostics,
+  repoSmokeDiagnostic,
   stackDaemonDiagnostics,
   factoryCommandLinkDiagnostic,
 } from "./doctor.mjs";
@@ -1255,5 +1256,44 @@ describe("Linear budget line (WM-878)", () => {
     expect(parsed.remaining).toBe(12);
     expect(parsed.limit).toBe(2500);
     expect(parsed.resetAt).toBe(new Date(1787150400 * 1000).toISOString());
+  });
+});
+
+describe("smokeCheck / repoSmokeDiagnostic (#2386)", () => {
+  test("passes when smoke_workflow, deployment.url, smoke_url, or post_release_checks is configured", () => {
+    expect(
+      repoSmokeDiagnostic({ smoke_workflow: "smoke-prod.yml" }),
+    ).toMatchObject({
+      ok: true,
+      label: "post-deploy smoke check",
+      detail: "smoke-prod.yml",
+    });
+    expect(
+      repoSmokeDiagnostic({ deployment: { url: "https://example.com" } }),
+    ).toMatchObject({
+      ok: true,
+      label: "post-deploy smoke check",
+      detail: "https://example.com",
+    });
+    expect(
+      repoSmokeDiagnostic({ smoke_url: "https://example.com/healthz" }),
+    ).toMatchObject({
+      ok: true,
+      label: "post-deploy smoke check",
+      detail: "https://example.com/healthz",
+    });
+    expect(
+      repoSmokeDiagnostic({ post_release_checks: ["curl -sf https://x"] }),
+    ).toMatchObject({
+      ok: true,
+      label: "post-deploy smoke check",
+      detail: "1 post_release_checks",
+    });
+    expect(repoSmokeDiagnostic({})).toEqual({
+      ok: "warn",
+      label: "post-deploy smoke check",
+      detail: "none",
+      fix: "without one, Done means merged rather than running",
+    });
   });
 });

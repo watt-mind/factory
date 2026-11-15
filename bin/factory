@@ -150,13 +150,19 @@ case "$cmd" in
   friction)     run_bun orchestrator/friction.mjs "$@" ;;
   economics)    run_bun orchestrator/economics.mjs "$@" ;;
   ci)           run_bun orchestrator/ci.mjs "$@" ;;
+  ci-health)    run_bun orchestrator/ci-health.mjs "$@" ;;
   actions-cache) run_bun orchestrator/actions-cache.mjs "$@" ;;
   label-guard)  run_bun orchestrator/label-guard.mjs "$@" ;;
   digest)       run_bun orchestrator/digest.mjs "$@" ;;
+  recap)        exec bun "$ROOT/orchestrator/recap.mjs" "$@" ;;
+  recap-video)  exec bun "$ROOT/orchestrator/recap-video.mjs" "$@" ;;
   doctor)       run_bun orchestrator/doctor.mjs "$@" ;;
   escalate)     run_bun orchestrator/escalate.mjs "$@" ;;
+  infra)        run_bun orchestrator/infra.mjs "$@" ;;
   branch-guard) run_bun orchestrator/branch-guard.mjs "$@" ;;
   reconcile)    run_bun orchestrator/reconcile.mjs "$@" ;;
+  ship-preflight) run_bun orchestrator/ship.mjs preflight "$@" ;;
+  ship-chain)   run_bun orchestrator/ship.mjs chain "$@" ;;
   reaper)       run_bun orchestrator/reaper.mjs "$@" ;;
   janitor)      run_bun orchestrator/janitor.mjs "$@" ;;
   warm)         run_bun orchestrator/warm.mjs "$@" ;;
@@ -427,13 +433,28 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   friction      orchestrator/friction.mjs
   economics     orchestrator/economics.mjs
   ci            orchestrator/ci.mjs
+  ci-health     orchestrator/ci-health.mjs (base-branch red-streak alarm;
+                dry unless --apply; --report prints remembered alarms)
   actions-cache Actions cache usage guard (exits non-zero at warning threshold)
   label-guard   orchestrator/label-guard.mjs
   digest        orchestrator/digest.mjs
+  recap         orchestrator/recap.mjs (read-only AFK/session delta, merged PR risks,
+                ux-screenshot artifacts, and operator calls; --repo --all --since --json)
+  recap-video   orchestrator/recap-video.mjs (silent subtitled 1280x720 MP4 recap
+                renderer + pixel-hold verifier; <spec.json> --out <mp4> --json)
   doctor        orchestrator/doctor.mjs
   escalate      orchestrator/escalate.mjs
+  infra         orchestrator/infra.mjs (audited legal-dev recovery verbs:
+                rotate-driver-digest, discard-unprepared-transaction,
+                sweep-evicted-pods; dry-run by default, --yes to act)
   branch-guard  orchestrator/branch-guard.mjs (mechanical open-PR and protected branch guard)
   reconcile     orchestrator/reconcile.mjs
+  ship-preflight orchestrator/ship.mjs (read-only release gate: base CI green for
+                the exact SHA, runtime pins fresh, publishers idle, no bot pin or
+                escalated PR, promotion journal clean; --repo <name> --json)
+  ship-chain    orchestrator/ship.mjs (publish -> reconcile -> pin -> release;
+                --repo <name> --until preflight|pin|release|post-release, dry run
+                without --apply; post-release runs only post_release_checks)
   reaper        orchestrator/reaper.mjs
   janitor       orchestrator/janitor.mjs
   warm          orchestrator/warm.mjs
@@ -471,6 +492,7 @@ FACTORY_CONTROL_API_ALLOW_INSECURE=1).
 
 Works from any cwd (worktrees included).
   factory notify "BLOCKED LAB-176: need approval"
+  factory infra sweep-evicted-pods            dry run; --yes to delete
   factory emit          regenerate + link harnesses, CLI, and repo commands
   factory emit --check  CI: verify dist matches shared/
 EOF
