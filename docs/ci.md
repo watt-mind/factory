@@ -4,9 +4,8 @@
 
 Factory CI uses a hybrid runner strategy designed for public open-source operation (WM-950):
 
-- **Internal trusted lanes**: Branches originating within `watt-mind/factory` (pushes to `develop`/`main` and internal pull requests) run on high-performance self-hosted runners. The `shadow` label maps to eight runner services (`watt-mind-runner-1` through `watt-mind-runner-8`) on one physical host, and the `smoke-test` runner checks fleet health.
-- **External untrusted fork PRs**: Pull requests from external repository forks run in isolated, ephemeral GitHub-hosted runners (`ubuntu-latest`). Untrusted contributor code has zero access to the host machine, filesystem, `/tmp`, or internal network.
-- **Security & utility workflows**: Workflows handling credentials or isolated scans (`security.yml`, `cla.yml`, `update-badge.yml`, `publish-extension.yml`) run unconditionally on `ubuntu-latest`.
+- **GitHub-hosted (`ubuntu-latest`)**: `Fast unit tests`, `Timing-bound tests`, `Full verification`, `Verify`, `Browser E2E`, `Build Starlight Site`, and all `security.yml` / utility workflows (`gitleaks`, `semgrep`, `actionlint`, `codeql`, `cla.yml`, `update-badge.yml`, `publish-extension.yml`, `publish-npm.yml`) run on ephemeral GitHub-hosted runners (`ubuntu-latest`), eliminating shared-host contention and `verify-lane` queueing.
+- **Self-hosted sandbox boundary**: Only `Shadow runner fleet available` (`[self-hosted, smoke-test]`) and `Sandboxed verify smoke` (`[self-hosted, verify-lane]`) run on the self-hosted fleet for internal branches/PRs, because GitHub-hosted runners cannot create the unprivileged user+mount namespaces the handoff sandbox exercises. Untrusted fork PRs, Dependabot PRs, and nightly/forced cloud runs skip both self-hosted jobs.
 
 Treat self-hosted runner names as parallel executors, not independent machines. CPU, memory, `/tmp`, and process scheduling are shared across all eight shadow services.
 
@@ -161,7 +160,7 @@ A failed or cancelled test job breaks the streak. Record the five develop run UR
 - **Gitleaks** — `gitleaks git --no-banner --redact` over the PR's base..head range (or the last commit on a branch push). Honours a repo-root `.gitleaks.toml` if one is added. Binary resolves from PATH, then `~/.local/bin/gitleaks`, then a GitHub Releases download (not a marketplace action) on first use per runner host.
 - **Semgrep** — `uvx semgrep scan --config p/security-audit --error --metrics=off .`, scoped by `.semgrepignore` (generated output, vendor trees, fixtures, lockfiles). `uv`/`uvx` installs from astral.sh if missing on the host.
 - **Actionlint** — `actionlint -color .github/workflows/*.yml`. `.github/actionlint.yaml` declares the repo's custom self-hosted runner labels (`shadow`, `smoke-test`, `verify-lane`) so they don't flag as unknown; real shellcheck findings on `run:` blocks get fixed or suppressed inline with a reason, never blanket-disabled.
-- **CodeQL** — runs `github/codeql-action/init@v4` and `analyze@v4` for `javascript-typescript` (`build-mode: none`, `threads: 4`, `ram: 8192`). Internal PRs and branch pushes run on `shadow` (serialized via `codeql-shadow-host` so scans don't starve the host); untrusted fork PRs run isolated on `ubuntu-latest`.
+- **CodeQL** — runs `github/codeql-action/init@v4` and `analyze@v4` for `javascript-typescript` (`build-mode: none`, `threads: 4`, `ram: 8192`) on `ubuntu-latest`.
 
 Run the same tools locally before pushing with `factory security` (Gitleaks + Semgrep + Actionlint, plus Ruff/pip-audit when a repo has adopted the Python tier) — see `lib/security-check.sh`. Local and CI use identical tool invocations and config files (`.gitleaks.toml`, `.semgrepignore`) so a clean local run predicts a clean CI run.
 
@@ -191,7 +190,5 @@ use Playwright's downloaded Chromium instead of system Chrome. The pinned
 `.github/workflows/e2e.yml` is deliberately opt-in while the suite proves
 stable. It runs for a pull request only when that PR has the `run-e2e` label,
 and it can always be started manually with `workflow_dispatch`. The workflow
-runs on `[self-hosted, verify-lane]` to serialize against every other heavy
-test job on the self-hosted runner, installs Playwright's Chromium build
-(cached in the runner's `~/.cache/ms-playwright`, keyed on the pinned version
-and guarded by `flock`), and runs the same `bun run test:e2e` command.
+runs on `ubuntu-latest`, installs Playwright's Chromium build, and runs the
+same `bun run test:e2e` command.
