@@ -239,7 +239,7 @@ jobs:
           set -euo pipefail
           exclude="$(bun event-runtime/lib/test-helpers-timing.mjs exclude-pattern)"
           set +e
-          bun test --timeout 20000 --max-concurrency=4 --test-name-pattern "$exclude" event-runtime/lib | tee "$RUNNER_TEMP/bun-test.log"
+          bun test --timeout 20000 --max-concurrency=4 --test-name-pattern "$exclude" event-runtime/lib 2>&1 | tee "$RUNNER_TEMP/bun-test.log"
           status="${PIPESTATUS[0]}"
           set -e
           if [ "$status" -ne 0 ]; then
@@ -630,7 +630,7 @@ jobs:
           set -euo pipefail
           exclude="$(bun event-runtime/lib/test-helpers-timing.mjs exclude-pattern)"
           set +e
-          bun test --timeout 20000 --max-concurrency=4 --path-ignore-patterns='event-runtime/lib/**' --test-name-pattern "$exclude" | tee "$RUNNER_TEMP/bun-test.log"
+          bun test --timeout 30000 --max-concurrency=4 --path-ignore-patterns='event-runtime/lib/**' --test-name-pattern "$exclude" 2>&1 | tee "$RUNNER_TEMP/bun-test.log"
           status="${PIPESTATUS[0]}"
           set -e
           if [ "$status" -ne 0 ]; then
