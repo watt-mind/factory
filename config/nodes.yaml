@@ -1,9 +1,9 @@
 # Remote worker nodes configuration (OPS-445)
-# Defines remote nodes available for distributed worker offloading via SSH.
+# Defines remote nodes available for distributed worker offloading and skill emission via SSH.
 
 nodes:
   mac-mini:
-    host: "mac-mini.local"
+    host: "mac-mini"
     user: "hdkiller"
     port: 22
     factory_root: "~/Develop/factory"
@@ -12,8 +12,45 @@ nodes:
       FACTORY_EVENT_PORT: 7381
     labels:
       node: "mac-mini"
-      arch: "arm64"
+      arch: "x86_64"
+      os: "darwin"
       can: "infra-exec"
+    adapters:
+      - "claude"
+      - "actions"
+      - "command"
+
+  shadow:
+    host: "shadow"
+    user: "hdkiller"
+    port: 22
+    factory_root: "~/Develop/factory"
+    branch: "develop"
+    env:
+      FACTORY_EVENT_PORT: 7381
+    labels:
+      node: "shadow"
+      arch: "x86_64"
+      os: "linux"
+      can: "infra-exec"
+    adapters:
+      - "claude"
+      - "actions"
+      - "command"
+
+  runners:
+    host: "runners"
+    user: "hdkiller"
+    port: 22
+    factory_root: "~/Develop/factory"
+    branch: "develop"
+    env:
+      FACTORY_EVENT_PORT: 7381
+    labels:
+      node: "runners"
+      arch: "x86_64"
+      os: "linux"
+      can: "ci-runner"
     adapters:
       - "claude"
       - "actions"
