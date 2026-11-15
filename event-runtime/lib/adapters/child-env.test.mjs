@@ -99,6 +99,7 @@ describe("shared child environment", () => {
     for (const key of RUNTIME_IDENTITY_ENV) {
       process.env[key] = `ambient-${key}`;
     }
+    process.env.CURSOR_API_KEY = "ambient-cursor-key";
     const supplied = Object.fromEntries(
       [
         ...PUSH_CREDENTIAL_ENV,
@@ -107,7 +108,6 @@ describe("shared child environment", () => {
         "ANTIGRAVITY_AGENT",
         "ANTIGRAVITY_LS_ADDRESS",
         "CURSOR_API_ENDPOINT",
-        "CURSOR_API_KEY",
         "CUSTOM_SETTING",
       ].map((key) => [key, `supplied-${key}`]),
     );
@@ -141,7 +141,7 @@ describe("shared child environment", () => {
         "CURSOR_API_KEY",
       ].sort(),
     );
-    expect(outputs.cursor.CURSOR_API_KEY).toBe("supplied-CURSOR_API_KEY");
+    expect(outputs.cursor.CURSOR_API_KEY).toBe("ambient-cursor-key");
     expect(outputs.claude.CURSOR_API_KEY).toBeUndefined();
     expect(keySet(outputs.pi)).toEqual(keySet(outputs.claude));
   });
