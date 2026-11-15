@@ -1,6 +1,6 @@
 ---
 name: factory-sweep
-description: Find Linear tickets that have gone obsolete (duplicate, already shipped, overtaken by events) and retire them with evidence
+description: "Find Linear tickets that have gone obsolete (duplicate, already shipped, overtaken by events) and retire them with evidence. Invoke only when the user explicitly asks to run /factory-sweep or the factory-sweep workflow."
 ---
 
 # factory-sweep

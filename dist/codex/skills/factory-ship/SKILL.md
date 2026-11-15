@@ -1,6 +1,6 @@
 ---
 name: factory-ship
-description: Release — open a develop → master PR, wait for CI, merge, verify the deploy
+description: "Release — open a develop → master PR, wait for CI, merge, verify the deploy. Invoke only when the user explicitly asks to run /factory-ship or the factory-ship workflow."
 ---
 
 # factory-ship
@@ -66,10 +66,10 @@ If CI is red: this is release CI on code that was already green on develop, so f
 
 The deploy branch usually auto-deploys, so the merge is not the finish line:
 
-- Watch the post-merge run on master to completion (`gh run watch <run> --exit-status`).
-- Where the repo has a prod smoke check or `smoke_url`, confirm it's green/responding after the deploy settles.
-- Run the repo's `post_release_checks` from `config/repos.yaml` — they are the verification trio an operator would otherwise remember by hand (health endpoint, deployment inventory, sidecar verify). `factory ship-chain --repo <name> --until post-release` runs exactly those against the live deploy and nothing else (no pre-flight, no PR, no merge), exits non-zero on the first red one, and with `--apply` also pushes a `SMOKE RED` notification. Use it here whether the merge was done by hand or by `--until release --apply`, which runs the same checks at the end of the chain.
-- **Red master CI or red smoke = live outage**: revert the release merge (`git revert -m 1 <merge-sha>` on master, push), notify immediately (`SMOKE RED` / `CI RED` via `factory notify`), and file the cause to Linear. Don't leave a broken deploy standing while investigating.
+- Watch the post-merge CI/deploy run on the deploy branch for `<merge-sha>` (`gh run list --workflow ci.yml --commit <merge-sha> --json databaseId --limit 1`, then `gh run watch <run-id> --exit-status --interval 60`).
+- Run the repo's `post_release_checks` from `config/repos.yaml` where configured — they are the verification trio an operator would otherwise remember by hand (health endpoint, deployment inventory, sidecar verify). `factory ship-chain --repo <name> --until post-release` runs exactly those against the live deploy and nothing else (no pre-flight, no PR, no merge), exits non-zero on the first red one, and with `--apply` also pushes a `SMOKE RED` notification. Use it here whether the merge was done by hand or by `--until release --apply`, which runs the same checks at the end of the chain.
+- Run `/factory-verify-deploy` (`--env prod --sha <merge-sha>`) to prove live rollout SHA convergence, zero container/console/network runtime errors, and safe read-only or canary prod E2E verification of shipped user and API surfaces before reporting success.
+- **Red master CI, red `post_release_checks`, or `BROKEN` `/factory-verify-deploy` = live outage**: revert the release merge (`git revert -m 1 <merge-sha>` on master, push), notify immediately (`SMOKE RED` / `CI RED` via `factory notify`), and file the cause to Linear. Don't leave a broken deploy standing while investigating.
 
 ## 7. Report
 

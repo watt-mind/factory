@@ -121,6 +121,30 @@ function codexAgent(agent) {
   ].join("\n");
 }
 
+function unquoteYamlScalar(value) {
+  if (typeof value !== "string") return "";
+  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value.slice(1, -1);
+    }
+  }
+  if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
+    return value.slice(1, -1).replace(/''/g, "'");
+  }
+  return value;
+}
+
+/** Render a command as a SKILL.md with YAML-safe quoted description and explicit invocation scope. */
+function commandSkillMarkdown(name, fm, body) {
+  const baseDescription = (
+    unquoteYamlScalar(fm.description) || `Run the ${name} Factory workflow.`
+  ).replace(/\.\s*$/, "");
+  const description = `${baseDescription}. Invoke only when the user explicitly asks to run /${name} or the ${name} workflow.`;
+  return `---\nname: ${name}\ndescription: ${JSON.stringify(description)}\n---\n\n# ${name}\n\nThe user's accompanying request is this workflow's argument string. Wherever these instructions refer to \`$ARGUMENTS\`, interpret it as that request.\n\n${body.trimStart()}`;
+}
+
 // ---------------------------------------------------------------- writing ---
 const written = new Map();
 function emit(file, content) {
@@ -248,6 +272,7 @@ cleanGenerated(
   path.join(GEMINI, "skills"),
   path.join(CURSOR, "agents"),
   path.join(CURSOR, "commands"),
+  path.join(CURSOR, "skills"),
   path.join(PI, "agents"),
   path.join(PI, "skills"),
   path.join(PI, "prompts"),
@@ -311,7 +336,7 @@ function emitPack({
     const name = commandSkillName(pack, f);
     emit(
       destJoin(pack, path.join(CODEX, "skills"), name, "SKILL.md"),
-      `---\nname: ${name}\ndescription: ${fm.description || `Run the ${name} Factory workflow.`}\n---\n\n# ${name}\n\nThe user's accompanying request is this workflow's argument string. Wherever these instructions refer to \`$ARGUMENTS\`, interpret it as that request.\n\n${body.trimStart()}`,
+      commandSkillMarkdown(name, fm, body),
     );
   }
 
@@ -336,7 +361,7 @@ function emitPack({
     const name = commandSkillName(pack, f);
     emit(
       destJoin(pack, path.join(GEMINI, "skills"), name, "SKILL.md"),
-      `---\nname: ${name}\ndescription: ${fm.description || `Run the ${name} Factory workflow.`}\n---\n\n# ${name}\n\nThe user's accompanying request is this workflow's argument string. Wherever these instructions refer to \`$ARGUMENTS\`, interpret it as that request.\n\n${body.trimStart()}`,
+      commandSkillMarkdown(name, fm, body),
     );
   }
 
@@ -345,6 +370,17 @@ function emitPack({
       destJoin(pack, path.join(CURSOR, "agents"), `${agent.name}.md`),
       markdownAgent(agent, { readonly: true }),
     );
+  for (const s of skillDirs)
+    for (const f of listFiles(path.join(skillsRoot, s)))
+      emit(
+        destJoin(
+          pack,
+          path.join(CURSOR, "skills"),
+          s,
+          path.relative(path.join(skillsRoot, s), f),
+        ),
+        read(f),
+      );
   for (const f of commands) {
     const { body } = splitFrontmatter(read(f));
     emit(
@@ -665,7 +701,7 @@ console.log(
   `  gemini  dist/gemini/   (${skillDirs.length + commands.length} skills, ${agents.length} agents)  — also Antigravity`,
 );
 console.log(
-  `  cursor  dist/cursor/   (${commands.length} commands, ${agents.length} agents)`,
+  `  cursor  dist/cursor/   (${commands.length} commands, ${skillDirs.length} skills, ${agents.length} agents)`,
 );
 console.log(
   `  pi      dist/pi/       (${skillDirs.length} skills, ${commands.length} prompts, ${agents.length} agents)`,
@@ -788,6 +824,10 @@ function packLinks(loaded) {
         path.join(homedir(), ".cursor/commands"),
         path.basename(f),
       ),
+    ]),
+    ...skillDirs.map((s) => [
+      destJoin(pack, path.join(CURSOR, "skills"), s),
+      destJoin(pack, path.join(homedir(), ".cursor/skills"), s),
     ]),
     ...commands.map((f) => [
       destFile(pack, path.join(PI, "prompts"), path.basename(f)),

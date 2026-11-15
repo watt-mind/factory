@@ -1,6 +1,6 @@
 ---
 name: factory-retro
-description: Find what is repeatedly wasting the factory's time and fix the harness, not the symptom
+description: "Find what is repeatedly wasting the factory's time and fix the harness, not the symptom. Invoke only when the user explicitly asks to run /factory-retro or the factory-retro workflow."
 ---
 
 # factory-retro

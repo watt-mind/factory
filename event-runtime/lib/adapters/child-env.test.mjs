@@ -95,10 +95,11 @@ describe("shared child environment", () => {
     }
   });
 
-  test("keeps adapter differences explicit while stripping all credentials", () => {
+  test("keeps adapter credential exceptions explicit", () => {
     for (const key of RUNTIME_IDENTITY_ENV) {
       process.env[key] = `ambient-${key}`;
     }
+    process.env.CURSOR_API_KEY = "ambient-cursor-key";
     const supplied = Object.fromEntries(
       [
         ...PUSH_CREDENTIAL_ENV,
@@ -133,8 +134,15 @@ describe("shared child environment", () => {
       keySet(outputs.claude).filter((key) => !key.startsWith("ANTIGRAVITY_")),
     );
     expect(keySet(outputs.cursor)).toEqual(
-      keySet(outputs.claude).filter((key) => key !== "CURSOR_API_ENDPOINT"),
+      [
+        ...keySet(outputs.claude).filter(
+          (key) => key !== "CURSOR_API_ENDPOINT",
+        ),
+        "CURSOR_API_KEY",
+      ].sort(),
     );
+    expect(outputs.cursor.CURSOR_API_KEY).toBe("ambient-cursor-key");
+    expect(outputs.claude.CURSOR_API_KEY).toBeUndefined();
     expect(keySet(outputs.pi)).toEqual(keySet(outputs.claude));
   });
 

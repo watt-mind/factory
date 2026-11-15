@@ -738,7 +738,9 @@ describe("execute with fake binary", () => {
       spec: {},
       def: { promptText: "Do task" },
       workspaceDir: tmp,
-      timeoutMs: 200,
+      // Allow the bash fixture to start and create its grandchild before
+      // exercising the timeout; the child itself waits for 30 seconds.
+      timeoutMs: 2_000,
       killGraceMs: 200,
       env: {
         PATH: `${binDir}:${process.env.PATH}`,

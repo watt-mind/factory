@@ -583,3 +583,15 @@ test("factory watchdog executes via CLI", () => {
   expect(json).toHaveProperty("issues");
   expect(json).toHaveProperty("metrics");
 }, 15_000);
+
+test("factory recap --help and factory recap-video --help execute via CLI", () => {
+  for (const sub of ["recap", "recap-video"]) {
+    const res = Bun.spawnSync({
+      cmd: ["bash", FACTORY, sub, "--help"],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout.toString()).toContain(`factory ${sub}`);
+  }
+});

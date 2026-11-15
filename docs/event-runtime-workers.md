@@ -306,14 +306,14 @@ The worker materializes that declaration **after** workspace create and
    | -------- | ------------------------------------------------ | ------------------------------ | ------------------------- |
    | `claude` | `.claude/skills/<n>/` from `plugins/core/skills` | `.claude/commands/<n>.md`      | `.claude/agents/<n>.md`   |
    | `acp`    | same as `claude` (experimental, WM-937)          | same as `claude`               | same as `claude`          |
-   | `cursor` | **unsupported** (emit has none)                  | `.cursor/commands/<n>.md`      | `.cursor/agents/<n>.md`   |
+   | `cursor` | `.cursor/skills/<n>/` from `dist/cursor/skills`  | `.cursor/commands/<n>.md`      | `.cursor/agents/<n>.md`   |
    | `pi`     | `.pi/agent/skills/<n>/` from `dist/pi/skills`    | `.pi/agent/prompts/<n>.md`     | `.pi/agent/agents/<n>.md` |
    | `agy`    | `.gemini/skills/<n>/` from `dist/gemini/skills`  | same (commands emit as skills) | `.gemini/agents/<n>.md`   |
 
 3. Refuse with a typed reason, never spawn:
 
    - `harness_unknown_skill` / `_command` / `_subagent` — name not in the catalog;
-   - `harness_unsupported` — the adapter has no layout for that kind (cursor
+   - `harness_unsupported` — the adapter has no layout for that kind (hermes
      skills; fake/command/actions when anything is named);
    - `harness_unmaterializable` — catalog hit but emit output is missing or
      the dest would escape the workspace.

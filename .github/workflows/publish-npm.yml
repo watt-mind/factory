@@ -20,11 +20,14 @@ jobs:
   publish:
     # GitHub-hosted so OIDC provenance works and no instance state is nearby.
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "latest"
+      - name: Setup bun (no action download)
+        shell: bash
+        run: |
+          set -euo pipefail
+          .github/scripts/install-pinned-tools.sh bun
       - uses: actions/setup-node@v7
         with:
           node-version: "22"

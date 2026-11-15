@@ -32,6 +32,6 @@ Every FAIL becomes a Linear issue in `Triage` per `docs/protocol.md` §8: correc
 
 Where a fix is small, mechanical, and unambiguous (adding `retention-days: 1`, aligning runner configuration with the repo's public/private isolation policy, adding a missing thin `CLAUDE.md`), write the issue to the full §5 AI-ready template, label it `ai:agent-ready`, and move it to `Todo` so the next `/factory-work` run picks it up without further human involvement. Anything needing a decision, a credential, or a plan upgrade stays in `Triage` with the specific question stated.
 
-## 4. Offer, don't assume
+## 4. Stop after filing — never implement in an audit
 
-End by asking whether to fix the agent-ready ones now. Do not start implementing during an audit — a run that both grades and rewrites the repo makes it impossible to tell what was found from what was changed.
+Do not start implementing during an audit — a run that both grades and rewrites the repo makes it impossible to tell what was found from what was changed. Do not pause to ask whether to fix the filed issues now: assume the operator is AFK, and any `Todo` + `ai:agent-ready` items you promoted are already queued for `/factory-work` or the supervisor.
