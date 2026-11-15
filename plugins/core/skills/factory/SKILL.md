@@ -22,12 +22,21 @@ Match the user's request to **one** mode below, read its playbook (or invoke the
 
 ### Interactive Coding & Verification Playbooks (`playbooks/`)
 
-- **Investigation** (`playbooks/investigation.md`) — Read-only question, architecture trace, code/principles audit, or empirical comparison (`how does X work`, `why`, `review`).
+- **Investigation** (`playbooks/investigation.md`) — Read-only question, architecture trace, code/principles audit, or empirical comparison (`how does X work`, `why`, `review`; pairs with `/factory-how`, `/factory-why`, `/factory-teach`).
 - **Bug fix** (`playbooks/bug-fix.md`) — Reproduce a defect, observe a failing test first, trace and fix the root cause.
 - **Feature** (`playbooks/feature.md`) — New or changed behavior, domain-first types, UI visual polish loop, and verification.
 - **Refactoring** (`playbooks/refactoring.md`) — Behavior-preserving structural cleanup, decomposition, or deduplication.
 - **Prototype** (`playbooks/prototype.md`) — Throwaway spike in `$TMPDIR` (never `git stash`) to settle an empirical or UI design fork.
 - **Formal verification** (`playbooks/formal-verify.md`) — Model-checking races/state machines or property-testing pure invariants via `/factory-formal-verify-create`, `/factory-formal-verify-maintain`, and `/factory-statechart`.
+
+### Understanding, Orchestration & Reflection Skills (`../factory-*/SKILL.md`)
+
+- **How (`../factory-how/SKILL.md`):** Trace how a subsystem works today (`origin/<base>` freshness, `codegraph_explore` / `rg`, bounded `file:line` flow).
+- **Why (`../factory-why/SKILL.md`):** Decision archaeology (`git log -S`/`-L`, PRs, Linear/GitHub issues, `docs/product-decisions.md`) before changing load-bearing code.
+- **Teach (`../factory-teach/SKILL.md`):** Layer `factory-how` + `factory-why` + `factory-unslop` into progressive explanations with incremental Mermaid diagrams for 3+ interacting parts.
+- **Unslop (`../factory-unslop/SKILL.md`):** Edit or write prose, PRs, docs, and skills with zero AI tells while preserving technical precision.
+- **Orchestrate (`../factory-orchestrate/SKILL.md`):** Interactive Swarm partitions, Arena bakeoffs in isolated sandboxes, or Producer -> Critic pipelines (distinct from `/factory-work` standing queue dispatch).
+- **Reflect (`../factory-reflect/SKILL.md`):** Mine the active session transcript via 3 read-only lenses + synthesizer into project-local `.claude/skills/`, `AGENTS.md`, or structural `Triage` tickets (distinct from harness `/factory-friction` and log metrics `/factory-retro`).
 
 ### Existing Factory Lifecycle Commands
 
