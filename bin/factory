@@ -154,6 +154,8 @@ case "$cmd" in
   actions-cache) run_bun orchestrator/actions-cache.mjs "$@" ;;
   label-guard)  run_bun orchestrator/label-guard.mjs "$@" ;;
   digest)       run_bun orchestrator/digest.mjs "$@" ;;
+  recap)        exec bun "$ROOT/orchestrator/recap.mjs" "$@" ;;
+  recap-video)  exec bun "$ROOT/orchestrator/recap-video.mjs" "$@" ;;
   doctor)       run_bun orchestrator/doctor.mjs "$@" ;;
   escalate)     run_bun orchestrator/escalate.mjs "$@" ;;
   infra)        run_bun orchestrator/infra.mjs "$@" ;;
@@ -436,6 +438,10 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   actions-cache Actions cache usage guard (exits non-zero at warning threshold)
   label-guard   orchestrator/label-guard.mjs
   digest        orchestrator/digest.mjs
+  recap         orchestrator/recap.mjs (read-only AFK/session delta, merged PR risks,
+                ux-screenshot artifacts, and operator calls; --repo --all --since --json)
+  recap-video   orchestrator/recap-video.mjs (silent subtitled 1280x720 MP4 recap
+                renderer + pixel-hold verifier; <spec.json> --out <mp4> --json)
   doctor        orchestrator/doctor.mjs
   escalate      orchestrator/escalate.mjs
   infra         orchestrator/infra.mjs (audited legal-dev recovery verbs:

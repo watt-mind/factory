@@ -502,3 +502,10 @@ tripping is an interrupt; a clean claim, PR, or merge is not.
 workflow lands a deployment (`/factory-merge` on an auto-deployed branch,
 `/factory-ship`, or an ad-hoc deploy), `/factory-verify-deploy` runs end-to-end
 post-deploy verification against the live environment before `Done` holds.
+
+When the operator returns from AFK, `/factory-recap` (read-only text + inline
+artifacts/diagrams) and `/factory-recap-video` (silent subtitled `1280x720` MP4
+walkthrough + decision cards) synthesize what landed, autonomous `## Handoff`
+assumptions, and every human-owned call (`ai:escalated`, `ai:blocked`, release
+gates), complementing `/factory-report` (live queue snapshot) and
+`/factory-retro` (harness friction loop).

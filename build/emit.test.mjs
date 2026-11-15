@@ -833,3 +833,42 @@ test("emit packages /factory-verify-deploy across all five harnesses and wires p
   );
   expect(ship).toContain("/factory-verify-deploy");
 });
+
+test("emit packages /factory-recap and /factory-recap-video across all five harnesses and lists them in README", () => {
+  for (const cmd of ["factory-recap", "factory-recap-video"]) {
+    const src = path.join(ROOT, "shared", "commands", `${cmd}.md`);
+    expect(existsSync(src)).toBe(true);
+    expect(existsSync(path.join(ROOT, "shared", "skills", cmd))).toBe(false);
+
+    for (const emitted of [
+      ["plugins", "core", "commands", `${cmd}.md`],
+      ["dist", "codex", "skills", cmd, "SKILL.md"],
+      ["dist", "gemini", "skills", cmd, "SKILL.md"],
+      ["dist", "cursor", "commands", `${cmd}.md`],
+      ["dist", "pi", "prompts", `${cmd}.md`],
+    ]) {
+      expect(existsSync(path.join(ROOT, ...emitted))).toBe(true);
+    }
+  }
+
+  const recap = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-recap.md"),
+    "utf8",
+  );
+  expect(recap).toContain("factory recap");
+  expect(recap).toContain("No screenshot yet");
+  expect(recap).toMatch(/read-only/i);
+  expect(recap).toMatch(/Calls waiting on you/i);
+
+  const recapVideo = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-recap-video.md"),
+    "utf8",
+  );
+  expect(recapVideo).toContain("factory recap-video");
+  expect(recapVideo).toMatch(/added_words\s*\/\s*3|addedWords\s*\/\s*3/i);
+  expect(recapVideo).toMatch(/subtitle/i);
+
+  const readme = readFileSync(path.join(ROOT, "README.md"), "utf8");
+  expect(readme).toContain("`/factory-recap`");
+  expect(readme).toContain("`/factory-recap-video`");
+});
