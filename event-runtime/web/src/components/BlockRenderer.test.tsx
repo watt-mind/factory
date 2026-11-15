@@ -7,6 +7,7 @@ import { BlockRenderer, PresentationPanel } from "./BlockRenderer";
 afterEach(() => {
   cleanup();
   localStorage.clear();
+  window.location.hash = "";
 });
 
 const presentation: Presentation = {
@@ -99,4 +100,8 @@ test("run chips preserve the active project context", () => {
   expect(
     view.getByText("run_12345678").closest("a")?.getAttribute("href"),
   ).toBe("#/runs/run_1234567890?project=factory");
+});
+
+test("afterEach resets window.location.hash so project query does not leak across tests", () => {
+  expect(window.location.hash).toBe("");
 });
