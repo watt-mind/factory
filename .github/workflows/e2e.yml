@@ -121,9 +121,21 @@ jobs:
           BROWSERS_PATH: ${{ steps.playwright.outputs.browsers_path }}
         run: |
           set -euo pipefail
-          cd event-runtime/web
-          bunx --bun "@playwright/test@$PLAYWRIGHT_VERSION" install chromium
-          touch "$BROWSERS_PATH/.factory-e2e-chromium-$PLAYWRIGHT_VERSION"
+          mkdir -p "$BROWSERS_PATH"
+          marker="$BROWSERS_PATH/.factory-e2e-chromium-$PLAYWRIGHT_VERSION"
+          # Multiple verify-lane runners share $HOME/.cache/ms-playwright on the
+          # self-hosted box; serialize installs and re-check the marker inside
+          # the lock so concurrent runs never corrupt the shared browser cache.
+          (
+            flock -x 9
+            if [ -f "$marker" ]; then
+              echo "Playwright $PLAYWRIGHT_VERSION Chromium already installed by concurrent runner"
+              exit 0
+            fi
+            cd event-runtime/web
+            bunx --bun "@playwright/test@$PLAYWRIGHT_VERSION" install chromium
+            touch "$marker"
+          ) 9>"$BROWSERS_PATH/.install.lock"
 
       - name: Run browser smoke journeys
         env:
