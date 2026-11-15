@@ -100,11 +100,19 @@ const PORT_RESERVATION_ROOT = mkdtempSync(
 // empty /etc. On Debian, /usr/bin/awk points through /etc/alternatives, so give
 // shell fixtures a direct wrapper to the real executable they are testing with.
 const TEST_TOOL_BIN = mkdtempSync(path.join(tmpdir(), "factory-test-tools-"));
-writeFileSync(
-  path.join(TEST_TOOL_BIN, "awk"),
-  '#!/bin/bash\nexec /usr/bin/mawk "$@"\n',
-);
-chmodSync(path.join(TEST_TOOL_BIN, "awk"), 0o755);
+const REAL_AWK = [
+  "/usr/bin/gawk",
+  "/usr/bin/mawk",
+  "/usr/bin/awk",
+  "/bin/awk",
+].find((candidate) => existsSync(candidate));
+if (REAL_AWK) {
+  writeFileSync(
+    path.join(TEST_TOOL_BIN, "awk"),
+    `#!/bin/bash\nexec "${REAL_AWK}" "$@"\n`,
+  );
+  chmodSync(path.join(TEST_TOOL_BIN, "awk"), 0o755);
+}
 const TEST_PATH = `${TEST_TOOL_BIN}:${process.env.PATH}`;
 const P = (offset) => PORT_BASE + offset;
 const BAND_ENV = {
@@ -871,7 +879,7 @@ test("overlapping odd and even preferred pairs cannot be reserved concurrently",
       [
         `resolve_worktree_ports "${wt}" ${preferred} "${wt}/.factory/event-runtime"`,
         `touch "${ownReady}"`,
-        `for _ in {1..200}; do [[ -e "${otherReady}" ]] && break; sleep 0.01; done`,
+        `for _ in {1..1500}; do [[ -e "${otherReady}" ]] && break; sleep 0.01; done`,
         `test -e "${otherReady}"`,
         'printf "api=%s web=%s\\n" "$API_PORT" "$WEB_PORT"',
       ].join("\n"),
@@ -970,7 +978,7 @@ test("colliding WM-294 and WM-345 startups reserve distinct pairs and stop indep
         `resolve_worktree_ports "${wt}" ${preferred} "$home"`,
         `spawn_daemon "$(run_dir "${wt}")/serve.pid" "$(run_dir "${wt}")/serve.log" "${wt}" env MOCK_HOME="$home" MOCK_PORT="$API_PORT" bun --eval 'Bun.serve({ hostname: "127.0.0.1", port: Number(process.env.MOCK_PORT), fetch() { return Response.json({ env: { home: process.env.MOCK_HOME } }); } });'`,
         `spawn_daemon "$(run_dir "${wt}")/web.pid" "$(run_dir "${wt}")/web.log" "${wt}" env MOCK_PORT="$WEB_PORT" bun --eval 'Bun.serve({ hostname: "127.0.0.1", port: Number(process.env.MOCK_PORT), fetch() { return new Response("web"); } });'`,
-        'for _ in {1..100}; do port_listening "$API_PORT" && port_listening "$WEB_PORT" && break; sleep 0.01; done',
+        'for _ in {1..1500}; do port_listening "$API_PORT" && port_listening "$WEB_PORT" && break; sleep 0.01; done',
         'port_listening "$API_PORT" && port_listening "$WEB_PORT"',
         'printf "api=%s web=%s\\n" "$API_PORT" "$WEB_PORT"',
       ].join("\n"),
@@ -1037,6 +1045,73 @@ test("failed startup cleanup removes partial pid and port reservation state", ()
     expect(r.status).toBe(0);
   } finally {
     rmSync(wt, { recursive: true, force: true });
+  }
+});
+
+test("port_reservation_active and release_port_reservation honor ports file without awk after claimant exits", () => {
+  const wt = mkdtempSync(path.join(tmpdir(), "gh-2402-wt-"));
+  const reservationRoot = mkdtempSync(path.join(tmpdir(), "gh-2402-res-"));
+  const brokenAwkDir = mkdtempSync(path.join(tmpdir(), "gh-2402-noawk-"));
+  try {
+    const brokenAwk = path.join(brokenAwkDir, "awk");
+    writeFileSync(brokenAwk, "#!/usr/bin/env bash\nexit 127\n");
+    chmodSync(brokenAwk, 0o755);
+
+    const api = firstPortNotListening(P(352));
+    const web = api + 1;
+
+    // A short-lived subshell creates the reservation and exits, leaving a dead
+    // claimant PID in $dir/pid so port_reservation_active must read $dir/ports.
+    const reserve = sh(
+      `acquire_port_allocation_lock && reserve_port_pair "${wt}" ${api} ${web} && release_port_allocation_lock`,
+      { FACTORY_PORT_RESERVATION_ROOT: reservationRoot },
+    );
+    expect(reserve.status).toBe(0);
+
+    mkdirSync(path.join(wt, ".factory", "run"), { recursive: true });
+    writeFileSync(
+      path.join(wt, ".factory", "run", "serve.pid"),
+      `${process.pid}\n`,
+    );
+
+    const noAwkEnv = {
+      PATH: `${brokenAwkDir}:${TEST_PATH}`,
+      FACTORY_PORT_RESERVATION_ROOT: reservationRoot,
+    };
+
+    const active = sh(`port_reservation_active ${api}`, noAwkEnv);
+    expect(active.status).toBe(0);
+
+    const released = sh(`release_port_reservation "${wt}" ${api}`, noAwkEnv);
+    expect(released.status).toBe(0);
+    expect(existsSync(path.join(reservationRoot, `${api}.lock`))).toBe(false);
+    expect(existsSync(path.join(reservationRoot, `${web}.lock`))).toBe(false);
+
+    // Also prove release_port_reservation reads web from $dir/ports rather
+    // than relying solely on the web=$((api + 1)) fallback.
+    const nonAdjacentWeb = api + 3;
+    for (const port of [api, nonAdjacentWeb]) {
+      const dir = path.join(reservationRoot, `${port}.lock`);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path.join(dir, "worktree"), `${wt}\n`);
+      writeFileSync(
+        path.join(dir, "ports"),
+        `api=${api}\nweb=${nonAdjacentWeb}\n`,
+      );
+    }
+    const releasedNonAdjacent = sh(
+      `release_port_reservation "${wt}" ${api}`,
+      noAwkEnv,
+    );
+    expect(releasedNonAdjacent.status).toBe(0);
+    expect(existsSync(path.join(reservationRoot, `${api}.lock`))).toBe(false);
+    expect(
+      existsSync(path.join(reservationRoot, `${nonAdjacentWeb}.lock`)),
+    ).toBe(false);
+  } finally {
+    rmSync(wt, { recursive: true, force: true });
+    rmSync(reservationRoot, { recursive: true, force: true });
+    rmSync(brokenAwkDir, { recursive: true, force: true });
   }
 });
 

@@ -685,6 +685,17 @@ release_port_allocation_lock() {
 # Otherwise it is stale residue from a failed or killed startup and can be
 # reclaimed under the allocator lock. Both API and web ports get reservation
 # directories so odd --here pairs cannot overlap an even ticket pair.
+reservation_port_field() { # <ports-file> <key>
+  local file="$1" key="$2" line
+  [[ -f "$file" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == "${key}="* ]]; then
+      printf '%s\n' "${line#"${key}="}"
+      return 0
+    fi
+  done <"$file"
+}
+
 port_reservation_active() { # <reserved-port>
   local port="$1" dir owner claimant api web rdir
   dir="$(port_reservation_dir "$port")"
@@ -694,8 +705,8 @@ port_reservation_active() { # <reserved-port>
     return 0
   fi
   owner=$(cat "$dir/worktree" 2>/dev/null || true)
-  api=$(awk -F= '$1 == "api" { print $2 }' "$dir/ports" 2>/dev/null || true)
-  web=$(awk -F= '$1 == "web" { print $2 }' "$dir/ports" 2>/dev/null || true)
+  api=$(reservation_port_field "$dir/ports" api)
+  web=$(reservation_port_field "$dir/ports" web)
   [[ -n "$owner" && -d "$owner" && "$api" =~ ^[0-9]+$ && "$web" =~ ^[0-9]+$ ]] || return 1
   rdir="$(run_dir "$owner")"
   if pid_alive "$rdir/serve.pid" || pid_alive "$rdir/web.pid" \
@@ -763,7 +774,7 @@ release_port_reservation() { # <worktree> [api-port]
   fi
   if [[ -z "$web" ]]; then
     dir="$(port_reservation_dir "$api")"
-    web=$(awk -F= '$1 == "web" { print $2 }' "$dir/ports" 2>/dev/null || true)
+    web=$(reservation_port_field "$dir/ports" web)
     [[ "$web" =~ ^[0-9]+$ ]] || web=$((api + 1))
   fi
   acquire_port_allocation_lock

@@ -19,7 +19,7 @@ jobs:
     name: Validate and publish
     # Cloud runner per OSS security policy (WM-950). Gets publish credentials
     # and OIDC tokens off the shared host.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Checkout (no action download)
