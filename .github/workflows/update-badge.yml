@@ -26,7 +26,7 @@ jobs:
   update-badge:
     name: Refresh README dogfood badge
     # Cloud runner per OSS security policy (WM-950).
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout develop (no action download)

@@ -4,23 +4,23 @@
 
 Factory CI uses a hybrid runner strategy designed for public open-source operation (WM-950):
 
-- **GitHub-hosted (`ubuntu-latest`)**: `Fast unit tests`, `Timing-bound tests`, `Full verification`, `Verify`, `Browser E2E`, `Build Starlight Site`, and all `security.yml` / utility workflows (`gitleaks`, `semgrep`, `actionlint`, `codeql`, `cla.yml`, `update-badge.yml`, `publish-extension.yml`, `publish-npm.yml`) run on ephemeral GitHub-hosted runners (`ubuntu-latest`), eliminating shared-host contention and `verify-lane` queueing.
-- **Self-hosted sandbox boundary**: Only `Shadow runner fleet available` (`[self-hosted, smoke-test]`) and `Sandboxed verify smoke` (`[self-hosted, verify-lane]`) run on the self-hosted fleet for internal branches/PRs, because GitHub-hosted runners cannot create the unprivileged user+mount namespaces the handoff sandbox exercises. Untrusted fork PRs, Dependabot PRs, and nightly/forced cloud runs skip both self-hosted jobs.
+- **GitHub-hosted (`ubuntu-24.04`)**: `Fast unit tests`, `Timing-bound tests`, `Full verification`, `Verify`, `Browser E2E`, `Build Starlight Site`, and all `security.yml` / utility workflows (`gitleaks`, `semgrep`, `actionlint`, `codeql`, `cla.yml`, `update-badge.yml`, `publish-extension.yml`, `publish-npm.yml`) run on ephemeral GitHub-hosted runners (`ubuntu-24.04`, pinned explicitly rather than a floating tag to avoid silent runner-image upgrades), eliminating shared-host contention and `verify-lane` queueing.
+- **Self-hosted sandbox boundary**: Only `Shadow runner fleet available` (`shadow-runner-health`, `[self-hosted, smoke-test]`) and `Sandboxed verify smoke` (`[self-hosted, verify-lane]`) run on the self-hosted fleet for internal branches/PRs, because GitHub-hosted runners cannot create the unprivileged user+mount namespaces the handoff sandbox exercises. `shadow-runner-health` verifies that at least one shadow runner (`1..8`) and at least one `verify-lane` runner (`watt-mind-runner-1..3`) are active alongside host temp space and memory headroom. Untrusted fork PRs, Dependabot PRs, and nightly/forced cloud runs skip both self-hosted jobs.
 
 Treat self-hosted runner names as parallel executors, not independent machines. CPU, memory, `/tmp`, and process scheduling are shared across all eight shadow services.
 
 ### Runner host dependencies
 
-Runner images must provide `unzip`, `curl`, `sha256sum` (from coreutils), and `tar` for the checksum-pinned tool installer. The `Pinned tools forced-install smoke` job on `ubuntu-latest` forces fresh bun, gitleaks, uv, and actionlint installs and verifies these dependencies whenever `.github/**` changes (and on manual dispatch).
+Runner images must provide `unzip`, `curl`, `sha256sum` (from coreutils), and `tar` for the checksum-pinned tool installer. The `Pinned tools forced-install smoke` job on `ubuntu-24.04` forces fresh bun, gitleaks, uv, and actionlint installs and verifies these dependencies whenever `.github/**` changes (and on manual dispatch).
 
 ## Fork PR sandboxing & dual routing
 
-In `ci.yml`, a lightweight initial `route` job runs on `ubuntu-latest` to determine the execution lane based on the event context:
+In `ci.yml`, a lightweight initial `route` job runs on `ubuntu-24.04` to determine the execution lane based on the event context:
 
-- Untrusted fork PRs (`github.event.pull_request.head.repo.full_name != github.repository`), Dependabot PRs, and nightly exercises route dynamically to `ubuntu-latest`.
-- Trusted internal PRs and branch pushes route to `[self-hosted, shadow]` and `[self-hosted, verify-lane]`.
-- Host-specific steps (`shadow-runner-health`, host `/tmp` sweep) execute only when `runner.environment == 'self-hosted'`.
-- Continuous exercise: A nightly schedule (`0 4 * * *`) and `workflow_dispatch` input `force_hosted` run the full CI suite on `ubuntu-latest` to prevent cloud lane regressions.
+- Untrusted fork PRs (`github.event.pull_request.head.repo.full_name != github.repository`), Dependabot PRs, and nightly exercises route dynamically to `ubuntu-24.04`.
+- Trusted internal PRs and branch pushes route `Sandboxed verify smoke` to `[self-hosted, verify-lane]`.
+- Self-hosted boundary jobs (`shadow-runner-health`, `sandboxed-verify-smoke`) execute only when `needs.route.outputs.self_hosted == 'true'`.
+- Continuous exercise: A nightly schedule (`0 4 * * *`) and `workflow_dispatch` input `force_hosted` run the full CI suite on `ubuntu-24.04` to prevent cloud lane regressions.
 
 ## Verify lane
 
@@ -155,12 +155,12 @@ A failed or cancelled test job breaks the streak. Record the five develop run UR
 
 ## Security scans
 
-`.github/workflows/security.yml` runs on `pull_request`, `push` to `develop`/`main`, and `workflow_dispatch`, on `ubuntu-latest` with the same no-`uses:` git-fetch checkout pattern as `ci.yml` (WM-573). Four jobs:
+`.github/workflows/security.yml` runs on `pull_request`, `push` to `develop`/`main`, and `workflow_dispatch`, on `ubuntu-24.04` with the same no-`uses:` git-fetch checkout pattern as `ci.yml` (WM-573). Four jobs:
 
 - **Gitleaks** — `gitleaks git --no-banner --redact` over the PR's base..head range (or the last commit on a branch push). Honours a repo-root `.gitleaks.toml` if one is added. Binary resolves from PATH, then `~/.local/bin/gitleaks`, then a GitHub Releases download (not a marketplace action) on first use per runner host.
 - **Semgrep** — `uvx semgrep scan --config p/security-audit --error --metrics=off .`, scoped by `.semgrepignore` (generated output, vendor trees, fixtures, lockfiles). `uv`/`uvx` installs from astral.sh if missing on the host.
 - **Actionlint** — `actionlint -color .github/workflows/*.yml`. `.github/actionlint.yaml` declares the repo's custom self-hosted runner labels (`shadow`, `smoke-test`, `verify-lane`) so they don't flag as unknown; real shellcheck findings on `run:` blocks get fixed or suppressed inline with a reason, never blanket-disabled.
-- **CodeQL** — runs `github/codeql-action/init@v4` and `analyze@v4` for `javascript-typescript` (`build-mode: none`, `threads: 4`, `ram: 8192`) on `ubuntu-latest`.
+- **CodeQL** — runs `github/codeql-action/init@v4` and `analyze@v4` for `javascript-typescript` (`build-mode: none`, `threads: 4`, `ram: 8192`) on `ubuntu-24.04`.
 
 Run the same tools locally before pushing with `factory security` (Gitleaks + Semgrep + Actionlint, plus Ruff/pip-audit when a repo has adopted the Python tier) — see `lib/security-check.sh`. Local and CI use identical tool invocations and config files (`.gitleaks.toml`, `.semgrepignore`) so a clean local run predicts a clean CI run.
 
@@ -190,5 +190,5 @@ use Playwright's downloaded Chromium instead of system Chrome. The pinned
 `.github/workflows/e2e.yml` is deliberately opt-in while the suite proves
 stable. It runs for a pull request only when that PR has the `run-e2e` label,
 and it can always be started manually with `workflow_dispatch`. The workflow
-runs on `ubuntu-latest`, installs Playwright's Chromium build, and runs the
+runs on `ubuntu-24.04`, installs Playwright's Chromium build, and runs the
 same `bun run test:e2e` command.
