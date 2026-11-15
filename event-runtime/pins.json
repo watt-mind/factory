@@ -20,21 +20,12 @@
       "commands/factory-retro.md": "sha256:644d6e3e6f4b6efed28a69dfa296bbf5189c9153c57d202fec11aff77b77a163",
       "commands/factory-ship.md": "sha256:4fad045e569d3e72e899d607c3eac4e1fbbe76904e524bd7c30fcea31cbf1c84",
       "commands/factory-sweep.md": "sha256:f7dc737e45bcce94442cd78aea01868c5d9cce3312da83d3cc51322ab0bef4b4",
-<<<<<<< HEAD
-      "commands/factory-ticket.md": "sha256:ab784ccc4b85046e4a264cc5347e824645be721606892d736cd1f41327eafd30",
-      "commands/factory-triage.md": "sha256:20d538ca3c7358b22ea2f263fa1ec8b75affbf222e58c77989b43d34750c0ff1",
-      "commands/factory-unblock.md": "sha256:496bffc002afea8eca9d6c1b80f38c6732eb2163f3e41f6d04f0357c4e2905cb",
-      "commands/factory-work.md": "sha256:a10ab4b0497d5fb8dcbeba44ce60c3a6c49931f8e8d8070add0eb7ee441f5890",
-      "floor.md": "sha256:42e76b5efc6cde0b0a06c309a2345123c1ce24b85aa5eea560bc12c17967389f",
-      "skills/factory-handoff/SKILL.md": "sha256:139b10c02c9425ce9fbd415d215f5d28042bb76e59850cf70b62242637e1a4c4",
-      "skills/ticket-spec/SKILL.md": "sha256:6cd7e613072a1f4bd360389b62f3482432cbeb167b1e34b27b4a6099d4685b23"
-=======
-      "commands/factory-ticket.md": "sha256:de53025789b31d019b711b1c69e25c7ce6f6a028bbb99a3fb9262b44b6325b29",
+      "commands/factory-ticket.md": "sha256:0fce950062a092e9a6623679bf3f11eb19a9737f13d381647b6adaa64c4a5aa3",
       "commands/factory-triage.md": "sha256:df2ad118d33c95dfd9db871fbd7dd97d996d1e73408a6dac7127b34fb58f9f74",
       "commands/factory-unblock.md": "sha256:ad23e193ba3ba72dff36574d571e3f768cd8874b15a07dd0cfe50213a86277fe",
       "commands/factory-verify-deploy.md": "sha256:4d23e07c53fe542b2df59d692deca339a47bb779987a8f7e772233db328cfdca",
       "commands/factory-work.md": "sha256:af1d380897cfb028ebae387ef094f0ba175d57c2b3a733717ffcb308993c2e0d",
-      "floor.md": "sha256:197fbba94e8bd7c432fe10c4b17466a31d5edd34768130ef59dc0e97d635002b",
+      "floor.md": "sha256:f6bbb5761ffb5519c1b025562712e1eec30cf6e4c038668db7056e2bc9c5014a",
       "skills/factory-handoff/SKILL.md": "sha256:c7163ec8c8f77b73fbdd7ce39e78e7264b9766121c483b77a58907b0da724957",
       "skills/principle-attack-the-premise/SKILL.md": "sha256:96c3d9cebb22252a04b89a585b3bf6010324305ea4d0effc115577fc94ab31d6",
       "skills/principle-boundary-discipline/SKILL.md": "sha256:404f45eaa34e044bff37bc54e31279b4dee974c3bcece1beb5931e025bb55661",
@@ -57,7 +48,6 @@
       "skills/principle-type-system-discipline/SKILL.md": "sha256:8d72e717d23203034f4ddce86c31b165c917998310a69f8b754c6fecc311feb5",
       "skills/principles/SKILL.md": "sha256:66a2ffec57b579765b8b4e724640c7de1b3d7c09947a6b932dbb778951b7db07",
       "skills/ticket-spec/SKILL.md": "sha256:b76c05ffae5339b250dc80d4d39a476296b4c537588035d562ba20fbd343df1e"
->>>>>>> origin/develop
     }
   }
 }
