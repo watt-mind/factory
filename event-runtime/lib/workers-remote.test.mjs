@@ -1,9 +1,11 @@
 import { test, expect, describe } from "bun:test";
+import path from "node:path";
 import {
   buildSshArgv,
   buildRsyncArgv,
   quoteRemotePath,
   executeSsh,
+  loadNodesConfig,
   probeRemoteNode,
   deployRemoteWorker,
   emitRemoteNode,
@@ -12,6 +14,9 @@ import {
   updateRemoteWorker,
   RemoteWorkerConfigError,
 } from "./workers-remote.mjs";
+
+const EXPECTED_PATH_EXPORT =
+  'export PATH="$HOME/.bun/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH";';
 
 describe("ssh argv builder", () => {
   test("buildSshArgv constructs correct arguments", () => {
@@ -295,7 +300,7 @@ describe("remote path quoting and harness emit sync", () => {
     );
   });
 
-  test("probeRemoteNode and deployRemoteWorker expand ~/ paths and deploy links harnesses", () => {
+  test("probeRemoteNode and deployRemoteWorker expand ~/ paths, export PATH, and deploy links harnesses", () => {
     let probeScript = null;
     probeRemoteNode(node, {
       spawnFn: (args) => {
@@ -307,6 +312,7 @@ describe("remote path quoting and harness emit sync", () => {
         };
       },
     });
+    expect(probeScript).toContain(EXPECTED_PATH_EXPORT);
     expect(probeScript).toContain("REMOTE_DIR=\"$HOME/\"'Develop/factory';");
 
     let deployScript = null;
@@ -316,6 +322,7 @@ describe("remote path quoting and harness emit sync", () => {
         return { exitCode: 0, stdout: "DEPLOY_SUCCESS\n", stderr: "" };
       },
     });
+    expect(deployScript).toContain(EXPECTED_PATH_EXPORT);
     expect(deployScript).toContain("mkdir -p \"$HOME/\"'Develop/factory';");
     expect(deployScript).toContain("cd \"$HOME/\"'Develop/factory';");
     expect(deployScript).toContain(
@@ -327,6 +334,15 @@ describe("remote path quoting and harness emit sync", () => {
     expect(deployScript).toContain(
       "bun build/emit.mjs --link --link-bin --link-repos 2>&1;",
     );
+
+    let startScript = null;
+    startRemoteWorker(node, {
+      spawnFn: (args) => {
+        startScript = args.at(-1);
+        return { exitCode: 0, stdout: "START_SUCCESS:42\n", stderr: "" };
+      },
+    });
+    expect(startScript).toContain(EXPECTED_PATH_EXPORT);
   });
 
   test("buildRsyncArgv constructs ssh-tunneled rsync flags and respects custom port", () => {
@@ -388,10 +404,20 @@ describe("remote path quoting and harness emit sync", () => {
     });
 
     const linkScript = calls[1].args.at(-1);
+    expect(linkScript).toContain(EXPECTED_PATH_EXPORT);
     expect(linkScript).toContain("cd \"$HOME/\"'Develop/factory';");
-    expect(linkScript).toContain(
-      "bun build/emit.mjs --link --link-bin --link-repos 2>&1;",
-    );
+    expect(linkScript).toContain("bun -e ");
+    expect(linkScript).not.toContain("bun build/emit.mjs --link");
+    expect(linkScript).toContain("EMIT_REMOTE_SUCCESS");
+  });
+
+  test("repo config/nodes.yaml defines mac-mini, shadow, and runners", () => {
+    const repoRoot = path.resolve(import.meta.dir, "../..");
+    const nodes = loadNodesConfig({ root: repoRoot });
+    expect(Array.from(nodes.keys())).toEqual(["mac-mini", "shadow", "runners"]);
+    expect(nodes.get("mac-mini")?.host).toBe("mac-mini");
+    expect(nodes.get("shadow")?.host).toBe("shadow");
+    expect(nodes.get("runners")?.host).toBe("runners");
   });
 
   test("emitRemoteNode reports rsync failure without invoking remote ssh link", () => {
