@@ -558,9 +558,19 @@ test("claude: extracts file and query tool parameters in parseLogLine", () => {
 test("activeAgents correctly classifies tickets starting with factory- as dispatch agents", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "watch-lib-"));
   writeFileSync(path.join(dir, "bj29-factory-100-20260804164848.jsonl"), "{}");
+  writeFileSync(
+    path.join(dir, "bj29-factory-verify-deploy-20260804164849.jsonl"),
+    "{}",
+  );
+  writeFileSync(
+    path.join(dir, "bj29-factory-garden-20260804164850.jsonl"),
+    "{}",
+  );
   const live = activeAgents(dir, "bj29");
-  expect(live.map((a) => [a.stage, a.label, a.identifier])).toEqual([
+  expect(live.map((a) => [a.stage, a.label, a.identifier]).sort()).toEqual([
     ["dispatch", "factory-100", "factory-100"],
+    ["garden", "garden", null],
+    ["verify-deploy", "verify-deploy", null],
   ]);
   rmSync(dir, { recursive: true, force: true });
 });

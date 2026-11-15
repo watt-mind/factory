@@ -59,6 +59,6 @@ test("factory branches are unchanged by OPS-463; verify is the fast lib-only gat
   // `--timeout 20000` (WM-651) lifts bun's 5 s per-test default so spawn/timing
   // tests don't go red under host load; explicit per-test timeouts still win.
   expect(factory.verify).toBe(
-    "bun test event-runtime/lib --timeout 20000 && bun build/emit.mjs --check && bun run format:check",
+    "bun test event-runtime/lib --timeout 20000 && bun build/emit.mjs --check && bun run format:check && bun run lint",
   );
 });

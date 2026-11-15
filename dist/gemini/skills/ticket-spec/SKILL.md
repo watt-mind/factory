@@ -33,6 +33,10 @@ If the ticket already carries a `tier:*` label, leave it — don't recompute or 
 
 It is fine for the verification command to _fail_ — that's the bug. It must not _error_: a wrong path, a missing script, a task name that doesn't exist.
 
+**Scope `Verification Command` to targeted tests, never the full suite.** Name the exact unit, integration, or E2E test file(s) or filter exercising the ticket's change rather than bare `bun test`, `npm test`, `uv run pytest`, `cargo test --workspace`, or full Playwright runs when CI covers the suite.
+
+**Specify a post-deploy check when runtime boundaries move.** When a ticket changes HTTP/API contracts, user-facing flows, SSR/routing, auth/middleware, DB migrations, Dockerfiles/workflows, or external integrations, include a `- [ ] Post-deploy: <observable live check on staging/prod; read-only on prod>` bullet inside `Acceptance Criteria` (keeping the five-section template intact).
+
 **`Owned Paths` is the concurrency key, so tight globs beat convenient ones.** It is the set the ticket may modify, and the dispatcher refuses to run two tickets whose sets intersect. `app/**` blocks every other ticket in the repo; `app/services/api.ts` + `app/services/__tests__/*` blocks almost nothing. Over-broad paths don't just risk scope creep — they serialize the factory.
 
 Include the test files and the docs the change will touch. A path the agent needs but doesn't own means it stops and blocks.

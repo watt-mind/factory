@@ -29,9 +29,9 @@ Read the **full diff** (`gh pr diff <PR>`), then review for:
 
 **Tier-scaled depth (`tier:strong`):** When the ticket carries `tier:strong` (or touches concurrency, state machines, persistence, or cross-module contracts), trace callers, callees, and state transitions beyond the diff hunks to verify the core safety invariant, and verify test falsifiability — flag vacuous or mock-tautological tests that would still pass without the behavioral fix as `blocking` + `fix-in-branch`. In interactive harnesses that expose a second model/vendor subagent, you may run an optional cross-model sanity check on tricky invariants, but never block or stall autonomous single-harness runs on its absence. Record `Safety invariant:` under **Checks** in your report.
 
-For a user-facing visual PR, inspect one representative, reviewable visual
+For a user-facing visual PR (including isolated styling, component, copy-in-layout, or admin UI changes that render pixels), inspect one representative, reviewable visual
 artifact from the Handoff or PR: an attached image or an immutable artifact
-link you can open. A workspace path, bare `sha256:` identifier, unreachable
+link you can open. Inspect it critically for visual polish and coherence — hierarchy, spacing rhythm, truncation, and alignment — flagging visibly broken or unpolished layout regressions as `blocking` + `fix-in-branch` (or `minor`/`polish` `file-to-Triage` for non-blocking refinements). On net-new UI surfaces or material layout redesigns, also check the Handoff (`Risks`) or PR body for a brief 2–3 design-option rationale (`principle-exhaust-the-design-space`). A workspace path, bare `sha256:` identifier, unreachable
 URL, or assertion that a screenshot exists is not reviewable evidence. Prefer
 a bounded mobile or element-scoped capture and do not re-read redundant images.
 

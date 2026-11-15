@@ -726,3 +726,110 @@ test("factory-ticket and factory-merge-reviewer enforce pragmatic root-cause and
   expect(reviewer).toContain("tier:strong");
   expect(reviewer).toContain("Safety invariant:");
 });
+
+test("floor, ticket-spec, and work/ticket prompts enforce targeted local tests and fast pre-push static gates", () => {
+  const floor = readFileSync(
+    path.join(ROOT, "dist", "AGENTS.floor.md"),
+    "utf8",
+  );
+  expect(floor).toContain(
+    "Targeted local tests; fast static checks before push.",
+  );
+  expect(floor).toContain("ai:escalated");
+
+  const ticketSpec = readFileSync(
+    path.join(ROOT, "shared", "skills", "ticket-spec", "SKILL.md"),
+    "utf8",
+  );
+  expect(ticketSpec).toContain(
+    "Scope `Verification Command` to targeted tests, never the full suite.",
+  );
+  expect(ticketSpec).toContain("Post-deploy:");
+
+  const work = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-work.md"),
+    "utf8",
+  );
+  expect(work).toMatch(/fast static gates|fast pre-push static gates/i);
+});
+
+test("UI prompts and principle skills enforce default screenshot surfacing, visual self-polish, and autonomous 2-3 option exploration", () => {
+  const floor = readFileSync(
+    path.join(ROOT, "dist", "AGENTS.floor.md"),
+    "utf8",
+  );
+  expect(floor).toContain("principle-experience-first");
+  expect(floor).toContain("principle-exhaust-the-design-space");
+  expect(floor).not.toContain(
+    "Screenshots are the single most expensive thing you can do.",
+  );
+
+  const ticket = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-ticket.md"),
+    "utf8",
+  );
+  expect(ticket).toContain("principle-experience-first");
+  expect(ticket).toContain("principle-exhaust-the-design-space");
+  expect(ticket).toMatch(/^6\. \*\*Push and open a PR\*\*/m);
+
+  const critic = readFileSync(
+    path.join(ROOT, "shared", "agents", "factory-ux-critic.md"),
+    "utf8",
+  );
+  expect(critic).toMatch(/even on `SHIP`/);
+  expect(critic).not.toContain(
+    "Screenshot only what you will actually cite in a finding",
+  );
+
+  const exhaust = readFileSync(
+    path.join(
+      ROOT,
+      "shared",
+      "skills",
+      "principle-exhaust-the-design-space",
+      "SKILL.md",
+    ),
+    "utf8",
+  );
+  expect(exhaust).not.toContain("single-ticket dispatch runs");
+  expect(exhaust).toMatch(/autonomously/i);
+});
+
+test("emit packages /factory-verify-deploy across all five harnesses and wires post-deploy E2E verification", () => {
+  const verifyDeploySource = path.join(
+    ROOT,
+    "shared",
+    "commands",
+    "factory-verify-deploy.md",
+  );
+  expect(existsSync(verifyDeploySource)).toBe(true);
+  const verifyDeploy = readFileSync(verifyDeploySource, "utf8");
+  expect(verifyDeploy).toContain("SMOKE RED");
+  expect(verifyDeploy).toMatch(/rollout|revision/i);
+  expect(verifyDeploy).toMatch(/read-only/i);
+
+  for (const emitted of [
+    ["plugins", "core", "commands", "factory-verify-deploy.md"],
+    ["dist", "codex", "skills", "factory-verify-deploy", "SKILL.md"],
+    ["dist", "gemini", "skills", "factory-verify-deploy", "SKILL.md"],
+    ["dist", "cursor", "commands", "factory-verify-deploy.md"],
+    ["dist", "pi", "prompts", "factory-verify-deploy.md"],
+  ]) {
+    expect(existsSync(path.join(ROOT, ...emitted))).toBe(true);
+  }
+
+  const readme = readFileSync(path.join(ROOT, "README.md"), "utf8");
+  expect(readme).toContain("`/factory-verify-deploy`");
+
+  const floor = readFileSync(
+    path.join(ROOT, "dist", "AGENTS.floor.md"),
+    "utf8",
+  );
+  expect(floor).toContain("/factory-verify-deploy");
+
+  const ship = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-ship.md"),
+    "utf8",
+  );
+  expect(ship).toContain("/factory-verify-deploy");
+});

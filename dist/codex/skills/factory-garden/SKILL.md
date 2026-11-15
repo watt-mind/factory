@@ -73,7 +73,7 @@ Otherwise, execute to completion without confirmation pauses:
 
 Skip this phase when `--tickets-only` is passed or when the repository sets `report_only: true` in `config/repos.yaml`. For up to **2** small, mechanical, high-leverage fixes whose touched paths stay strictly outside `escalate_paths` and `Never auto-merge` surfaces (auth/authz, payments, secrets, destructive DB migrations, production infra):
 
-1. **File and claim the ticket** via `factory ticket` (`source:agent`, `type:maintenance`, matching `area:*`, appropriate `tier:*`, and the full `docs/protocol.md` §5 five-section template with one repo-relative path or glob per bullet in `Owned Paths`). Claim it (`In Progress` + `ai:in-progress`) and re-read the assignee before coding.
+1. **File and claim the ticket** via `factory ticket` (`source:agent`, `type:maintenance`, matching `area:*`, appropriate `tier:*`, and the full `docs/protocol.md` §5 five-section template with one repo-relative path or glob per bullet in `Owned Paths` and a `Verification Command` targeting the specific rule/invariant test + fast lint check rather than full suites). Claim it (`In Progress` + `ai:in-progress`) and re-read the assignee before coding.
 2. **Isolate in a worktree** via `bin/worktree-up.sh <ISSUE-ID>` (where the repo provides it, otherwise a dedicated worktree branched from `origin/<base>`). Never use `git stash` or `--autostash`.
 3. **Prove falsifiability first:** run the new deterministic rule or invariant test against the unfixed weed (or, if the fix is already committed at `HEAD`, temporarily restore the pre-fix weed via `git show origin/<base>:<path> > <path>` and restore with `git checkout HEAD -- <path>`) and observe it fail with the expected teaching message before applying the fix or ratchet.
 4. **Fix and verify:** apply the root-cause fix or legacy ratchet strictly within `Owned Paths`, then pass both the ticket's exact `Verification Command` and the repo's `verify` command. Never weaken a test or check to get green.
@@ -84,7 +84,7 @@ Skip this phase when `--tickets-only` is passed or when the repository sets `rep
 
 File every remaining validated weed (including legacy ratchet burndown slices, larger refactors, and all findings when `--tickets-only` or `report_only: true` applies) as deduplicated issues via `factory ticket` (`source:agent`, `type:maintenance`, matching `area:*`, and `tier:*`):
 
-- Write unambiguous mechanical items to the full §5 template and set `Todo` + `ai:agent-ready` so `/factory-work` can dispatch them directly.
+- Write unambiguous mechanical items to the full §5 template (scoping each `Verification Command` to the specific rule/invariant test + fast lint check rather than full suites) and set `Todo` + `ai:agent-ready` so `/factory-work` can dispatch them directly.
 - Place an item in `Triage` _only_ when genuine unrecorded architectural or product intent must be settled before specifying `Owned Paths` and acceptance criteria.
 
 ## 5. Report & session friction
