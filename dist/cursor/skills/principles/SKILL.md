@@ -17,9 +17,9 @@ Read the matching leaf `SKILL.md` (`../principle-<name>/SKILL.md`) in full befor
 - **`principle-attack-the-premise`** — Two or more fixes sharing one premise have failed the same gate. Write the premise down and test it directly before writing another fix.
 - **`principle-subtract-before-you-add`** — Sequencing an addition or refactor. Remove dead weight and redundant stubs first while preserving security/boundary guards and required schema fields.
 - **`principle-minimize-reader-load`** — Reviewing or shaping code that is hard to trace. Collapse one-caller wrappers, shrink mutable scope, and reduce layers between question and answer.
-- **`principle-experience-first`** — Product, UX, or copy tradeoffs. Choose user clarity and polish over implementation convenience without weakening tenant or security invariants.
+- **`principle-experience-first`** — Product, UX, typography, or copy work. Render actual pixels, run ≥1 cold visual self-polish pass over rough first drafts, and surface 1–4 bounded screenshots by default without weakening tenant or security invariants.
 - **`principle-build-the-lever`** — Any non-trivial or repeated work (migrations, bulk edits, checks). Build a rerunnable tool or script rather than doing it by hand.
-- **`principle-exhaust-the-design-space`** — **Gated:** Only when explicitly requested or on greenfield design/prototype tasks (never on routine bugfix tickets). Compare 2–3 competing approaches before committing.
+- **`principle-exhaust-the-design-space`** — **Gated:** Net-new UI surfaces, material layout redesigns, greenfield architecture, or when explicitly requested (never routine bugfixes). Diverge into 2–3 distinct options, autonomously select and commit the winner, and record the rationale.
 
 ## Architecture
 

@@ -135,6 +135,7 @@ function recommendedCommand(plan, repoName) {
       "factory-triage",
       "factory-unblock",
       "factory-sweep",
+      "factory-verify-deploy",
     ]).has(plan.command);
     const readOnlyFlag = readOnly ? " --read-only" : "";
     return `factory run --repo ${quoteArg(repoName)} --command ${plan.command}${args}${readOnlyFlag}`.trim();
