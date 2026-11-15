@@ -405,9 +405,9 @@ case "$cmd" in
     exec bash "$ROOT/lib/security-check.sh" "$@"
     ;;
   emit)
-    # Swift default: regenerate dist/plugins and link every harness + repos.
+    # Swift default: regenerate dist/plugins, link every harness + repos, and sync configured nodes.
     if [[ $# -eq 0 ]]; then
-      run_bun build/emit.mjs --link --link-bin --link-repos
+      run_bun build/emit.mjs --link --link-bin --link-repos --nodes
     else
       run_bun build/emit.mjs "$@"
     fi
@@ -482,7 +482,7 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   run           runners/run-agent.sh
   notify        durable human inbox + notify.py projection (direct fallback when serve is offline or its push fails)
   security      lib/security-check.sh (gitleaks + semgrep + actionlint on cwd repo)
-  emit          build/emit.mjs (--link --link-bin --link-repos when called bare)
+  emit          build/emit.mjs (--link --link-bin --link-repos --nodes when called bare)
 
 Remote targeting (#2188): events, status, ps, inbox, approve, reject, inject,
 decide, and memos accept --host/--remote after the subcommand. A bare --host
@@ -493,7 +493,7 @@ FACTORY_CONTROL_API_ALLOW_INSECURE=1).
 Works from any cwd (worktrees included).
   factory notify "BLOCKED LAB-176: need approval"
   factory infra sweep-evicted-pods            dry run; --yes to delete
-  factory emit          regenerate + link harnesses, CLI, and repo commands
+  factory emit          regenerate + link harnesses, CLI, repo commands, and remote nodes
   factory emit --check  CI: verify dist matches shared/
 EOF
     ;;

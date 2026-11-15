@@ -36,6 +36,14 @@ export function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\"'\"'")}'`;
 }
 
+/** Quote a remote filesystem path while preserving `$HOME` expansion for leading `~`. */
+export function quoteRemotePath(value) {
+  const raw = String(value ?? "");
+  if (raw === "~") return '"$HOME"';
+  if (raw.startsWith("~/")) return `"$HOME/"${shellQuote(raw.slice(2))}`;
+  return shellQuote(raw);
+}
+
 function validateEnvironmentKey(key) {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
     throw new RemoteWorkerConfigError(
@@ -118,7 +126,7 @@ export function probeRemoteNode(
   const remotePath = node.factoryRoot;
   // Probe script: checks git sha, branch, arch, os, bun version, and running worker pid
   const probeScript = [
-    `REMOTE_DIR="${remotePath}";`,
+    `REMOTE_DIR=${quoteRemotePath(remotePath)};`,
     `if [ -d "$REMOTE_DIR" ]; then`,
     `  cd "$REMOTE_DIR" 2>/dev/null;`,
     `  HEAD_SHA=$(git rev-parse HEAD 2>/dev/null || echo "unknown");`,
@@ -217,23 +225,27 @@ export function probeRemoteNode(
  */
 export function deployRemoteWorker(node, { ref = null, spawnFn = null } = {}) {
   const targetBranch = ref || node.branch || "develop";
-  const remotePath = node.factoryRoot;
+  const remotePath = quoteRemotePath(node.factoryRoot);
   const repoUrl = node.repoUrl || DEFAULT_REMOTE_WORKER_REPO_URL;
 
   const deployScript = [
     `set -e;`,
-    `mkdir -p ${shellQuote(remotePath)};`,
-    `cd ${shellQuote(remotePath)};`,
+    `mkdir -p ${remotePath};`,
+    `cd ${remotePath};`,
     `if [ ! -d ".git" ]; then`,
     `  echo "Cloning repository...";`,
     `  git clone ${shellQuote(repoUrl)} . 2>&1;`,
     `fi;`,
     `echo "Updating branch...";`,
+    `git checkout -- shared plugins dist 2>/dev/null || true;`,
+    `git clean -fd shared plugins dist 2>/dev/null || true;`,
     `git fetch origin 2>&1;`,
     `git checkout ${shellQuote(targetBranch)} 2>&1;`,
     `git pull --ff-only origin ${shellQuote(targetBranch)} 2>&1;`,
     `echo "Installing dependencies...";`,
     `bun install --frozen-lockfile 2>&1;`,
+    `echo "Linking harnesses and skills...";`,
+    `bun build/emit.mjs --link --link-bin --link-repos 2>&1;`,
     `echo "DEPLOY_SUCCESS";`,
   ].join(" ");
 
@@ -268,7 +280,7 @@ export function startRemoteWorker(node, { spawnFn = null } = {}) {
   const adaptersArg = (node.adapters || []).join(",");
 
   const startScript = [
-    `cd ${shellQuote(remotePath)} 2>/dev/null || exit 1;`,
+    `cd ${quoteRemotePath(remotePath)} 2>/dev/null || exit 1;`,
     `mkdir -p .factory/run;`,
     `${envVars}`,
     `nohup bun event-runtime/cli.mjs work${labelsArg ? ` --labels ${shellQuote(labelsArg)}` : ""}${adaptersArg ? ` --adapters ${shellQuote(adaptersArg)}` : ""} >> .factory/run/worker.log 2>&1 &`,
@@ -302,7 +314,7 @@ export function stopRemoteWorker(
   const remotePath = node.factoryRoot;
 
   const stopScript = [
-    `cd "${remotePath}" 2>/dev/null;`,
+    `cd ${quoteRemotePath(remotePath)} 2>/dev/null;`,
     `PIDS=$(ps -axo pid,command 2>/dev/null | grep -E "bun.*event-runtime/cli\\.mjs work" | grep -v grep | awk '{print $1}');`,
     `if [ -z "$PIDS" ]; then`,
     `  echo "STOP_SUCCESS:0";`,
@@ -379,5 +391,113 @@ export function updateRemoteWorker(
     name: node.name,
     ok: true,
     pid: startRes.pid,
+  };
+}
+
+/**
+ * Build safe rsync argv array to mirror local paths to a remote node over SSH.
+ */
+export function buildRsyncArgv(
+  node,
+  sources = ["./shared", "./plugins", "./dist"],
+  { connectTimeout = 3 } = {},
+) {
+  const sshParts = ["ssh"];
+  if (node.port && node.port !== 22) {
+    sshParts.push("-p", String(node.port));
+  }
+  sshParts.push("-o", "BatchMode=yes");
+  if (connectTimeout) {
+    sshParts.push("-o", `ConnectTimeout=${connectTimeout}`);
+  }
+  const target = node.user ? `${node.user}@${node.host}` : node.host;
+  const remoteRoot = String(node.factoryRoot || "~/Develop/factory").replace(
+    /\/+$/,
+    "",
+  );
+  return [
+    "-az",
+    "--delete",
+    "--relative",
+    "-e",
+    sshParts.join(" "),
+    ...sources,
+    `${target}:${remoteRoot}/`,
+  ];
+}
+
+/**
+ * Sync emitted harness packs (`shared/`, `plugins/`, `dist/`) to a remote node
+ * and re-link its local harnesses, CLI binary, and configured repos.
+ */
+export function emitRemoteNode(
+  node,
+  { localRoot = FACTORY_ROOT, connectTimeout = 3, spawnFn = null } = {},
+) {
+  const rsyncArgs = buildRsyncArgv(node, ["./shared", "./plugins", "./dist"], {
+    connectTimeout,
+  });
+  const rsyncRunner =
+    spawnFn ||
+    ((cmd) => {
+      const proc = Bun.spawnSync({
+        cmd: ["rsync", ...cmd],
+        cwd: localRoot,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      return {
+        exitCode: proc.exitCode,
+        stdout: proc.stdout.toString(),
+        stderr: proc.stderr.toString(),
+      };
+    });
+
+  const rsyncRes = rsyncRunner(rsyncArgs, { cmd: "rsync", cwd: localRoot });
+  if (rsyncRes.exitCode !== 0) {
+    return {
+      name: node.name,
+      host: node.host,
+      ok: false,
+      linked: false,
+      step: "rsync",
+      stdout: rsyncRes.stdout ?? "",
+      stderr: rsyncRes.stderr ?? "",
+      error: (
+        rsyncRes.stderr ||
+        rsyncRes.stdout ||
+        "rsync transfer failed"
+      ).trim(),
+    };
+  }
+
+  const linkScript = [
+    `set -e;`,
+    `cd ${quoteRemotePath(node.factoryRoot)};`,
+    `bun build/emit.mjs --link --link-bin --link-repos 2>&1;`,
+    `echo "EMIT_REMOTE_SUCCESS";`,
+  ].join(" ");
+
+  const linkRes = executeSsh(node, linkScript, {
+    spawnFn,
+    connectTimeout: Math.max(connectTimeout, 5),
+  });
+  const ok = linkRes.ok && linkRes.stdout.includes("EMIT_REMOTE_SUCCESS");
+
+  return {
+    name: node.name,
+    host: node.host,
+    ok,
+    linked: ok,
+    step: ok ? "done" : "link",
+    stdout: linkRes.stdout,
+    stderr: linkRes.stderr,
+    error: ok
+      ? null
+      : (
+          linkRes.stderr ||
+          linkRes.stdout ||
+          "remote harness link failed"
+        ).trim(),
   };
 }
