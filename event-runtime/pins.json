@@ -7,7 +7,7 @@
       "agents/factory-ci-doctor.md": "sha256:62c6c8ed0d2a6f671f4f4d742e38804091c693a5fcdb31f9e580db4497690bd0",
       "agents/factory-infra-scout.md": "sha256:4025fa714189b0480a5e052746ce7d4949ed4f0d4d8519a4c25da843aa716987",
       "agents/factory-merge-reviewer.md": "sha256:cc76238fdc64a013f4776d68318864ff77d862ea638de7714740a983117d7339",
-      "agents/factory-ux-critic.md": "sha256:40a51abda000c6202eb9cad2860480747bd2d55797a08cccbe5d31d23c121b38",
+      "agents/factory-ux-critic.md": "sha256:873959b41145d1a949a95fdb4a0a827305bdd5b3637edeb75e59dd077c5c8022",
       "commands/factory-audit.md": "sha256:8490101a0b902fe0f39c032176d84af4f00b2be26267335351adc39ed3c78089",
       "commands/factory-capture.md": "sha256:1afaf35ce0b915f7636fdfb44f4fc2e1130d3953b7df5aaeb5ed5b2afdd1e216",
       "commands/factory-friction.md": "sha256:952b6573aad2e8cc8bbe3c7de2724336d0505e450c84b66abd0a5f028f2bd021",
