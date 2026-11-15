@@ -23,7 +23,7 @@ concurrency:
 jobs:
   build:
     name: Build Starlight Site
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout (no action download)
@@ -80,7 +80,7 @@ jobs:
     # deploy-pages is a tiny OIDC handshake; no self-hosted runner carries a
     # smoke-test label, so this job could never schedule there (first main
     # deploy failed with an unschedulable job). GitHub-hosted is correct here.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Deploy to GitHub Pages

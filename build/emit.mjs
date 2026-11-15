@@ -6,6 +6,8 @@
  *   bun build/emit.mjs --check   # CI: fail if the tree isn't reproducible
  *   bun build/emit.mjs --link    # symlink this machine's harnesses at shared/
  *   bun build/emit.mjs --link-bin # symlink bin/factory -> ~/.local/bin/factory
+ *   bun build/emit.mjs --nodes   # sync and link emitted packs to nodes.yaml
+ *   bun build/emit.mjs --node <name> # sync and link to one configured node
  *   bun run link-repos           # symlink plugins/core/commands/ into every
  *                                 # configured repo's .claude/commands/ — run
  *                                 # this whenever a /factory-* command is
@@ -54,12 +56,30 @@ import {
   collectHarnessRoots,
 } from "../event-runtime/lib/extensions.mjs";
 import { resolveConfigPath } from "../event-runtime/lib/config.mjs";
+import {
+  emitRemoteNode,
+  loadNodesConfig,
+} from "../event-runtime/lib/workers-remote.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SHARED = path.join(ROOT, "shared");
 const CHECK = process.argv.includes("--check");
 const LINK = process.argv.includes("--link");
 const LINK_BIN = process.argv.includes("--link-bin");
+const NODES = process.argv.includes("--nodes");
+const nodeFlagIndex = process.argv.indexOf("--node");
+const TARGET_NODE =
+  nodeFlagIndex !== -1 &&
+  nodeFlagIndex < process.argv.length - 1 &&
+  !process.argv[nodeFlagIndex + 1].startsWith("-")
+    ? process.argv[nodeFlagIndex + 1]
+    : null;
+const HAS_INVALID_NODE_FLAG = nodeFlagIndex !== -1 && !TARGET_NODE;
+
+if (HAS_INVALID_NODE_FLAG) {
+  console.error("error: --node requires a node name");
+  process.exit(2);
+}
 
 const rel = (p) => path.relative(ROOT, p);
 const read = (p) => readFileSync(p, "utf8");
@@ -909,4 +929,60 @@ if (LINK) {
     symlinkSync(src, dst);
     console.log(`  linked   ${dst.replace(homedir(), "~")}`);
   }
+}
+
+// ------------------------------------------------------------------ nodes ----
+/**
+ * Sync emitted harness packs (`shared/`, `plugins/`, `dist/`) to remote worker
+ * nodes configured in `config/nodes.yaml` and link their local harnesses.
+ */
+export function emitToNodes({
+  root = ROOT,
+  targetNode = null,
+  nodesMap = null,
+  emitNodeFn = emitRemoteNode,
+  log = console.log,
+  error = console.error,
+} = {}) {
+  const map = nodesMap ?? loadNodesConfig({ root });
+  if (map.size === 0) {
+    log("  skip     no remote nodes configured in config/nodes.yaml");
+    return { exitCode: 0, results: [] };
+  }
+
+  if (targetNode && !map.has(targetNode)) {
+    error(
+      `  error    unknown node "${targetNode}". Configured nodes: ${Array.from(map.keys()).join(", ")}`,
+    );
+    return { exitCode: 1, results: [] };
+  }
+
+  const selectedNodes = targetNode
+    ? [map.get(targetNode)]
+    : Array.from(map.values());
+  const results = [];
+  let exitCode = 0;
+
+  for (const node of selectedNodes) {
+    const res = emitNodeFn(node, { localRoot: root });
+    results.push(res);
+    if (res.ok) {
+      log(`  synced   ${node.name} (${node.host}) -> ${node.factoryRoot}`);
+    } else if (targetNode) {
+      error(`  failed   ${node.name} (${node.host}) — ${res.error}`);
+      exitCode = 1;
+    } else {
+      log(`  warn     ${node.name} (${node.host}) — ${res.error} (skipped)`);
+    }
+  }
+
+  return { exitCode, results };
+}
+
+if (!CHECK && (NODES || TARGET_NODE)) {
+  console.log(
+    "\nsyncing emitted harness packs (shared/, plugins/, dist/) to remote nodes:",
+  );
+  const { exitCode } = emitToNodes({ root: ROOT, targetNode: TARGET_NODE });
+  if (exitCode !== 0) process.exit(exitCode);
 }

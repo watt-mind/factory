@@ -19,7 +19,7 @@ concurrency:
 jobs:
   publish:
     # GitHub-hosted so OIDC provenance works and no instance state is nearby.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7

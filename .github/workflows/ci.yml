@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       force_hosted:
-        description: "Force execution on GitHub-hosted runner (ubuntu-latest)"
+        description: "Force execution on GitHub-hosted runner (ubuntu-24.04)"
         type: boolean
         default: false
 
@@ -33,11 +33,10 @@ concurrency:
 jobs:
   route:
     name: Route CI lane
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 2
     outputs:
       self_hosted: ${{ steps.detect.outputs.self_hosted }}
-      shadow_labels: ${{ steps.detect.outputs.shadow_labels }}
       verify_labels: ${{ steps.detect.outputs.verify_labels }}
     steps:
       - id: detect
@@ -49,24 +48,22 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$IS_FORK" = "true" ] || [ "$IS_BOT" = "true" ] || [ "$FORCE_HOSTED" = "true" ]; then
-            echo "Routing to GitHub-hosted runner (ubuntu-latest)"
+            echo "Routing to GitHub-hosted runner (ubuntu-24.04)"
             {
               echo "self_hosted=false"
-              echo 'shadow_labels=["ubuntu-latest"]'
-              echo 'verify_labels=["ubuntu-latest"]'
+              echo 'verify_labels=["ubuntu-24.04"]'
             } >> "$GITHUB_OUTPUT"
           else
             echo "Routing to self-hosted runner fleet"
             {
               echo "self_hosted=true"
-              echo 'shadow_labels=["self-hosted", "shadow"]'
               echo 'verify_labels=["self-hosted", "verify-lane"]'
             } >> "$GITHUB_OUTPUT"
           fi
 
   shadow-runner-health:
     name: Shadow runner fleet available
-    # Gated on self-hosted lane (WM-950). Cloud runners (ubuntu-latest) do not
+    # Gated on self-hosted lane (WM-950). Cloud runners (ubuntu-24.04) do not
     # have or require the local shadow fleet.
     needs: route
     if: needs.route.outputs.self_hosted == 'true'
@@ -84,6 +81,7 @@ jobs:
           set -euo pipefail
 
           active=0
+          verify_active=0
           states=()
           for index in $(seq 1 8); do
             unit="actions.runner.watt-mind.watt-mind-runner-${index}.service"
@@ -91,16 +89,23 @@ jobs:
             states+=("$unit=$state")
             if [ "$state" = "active" ]; then
               active=$((active + 1))
+              if [ "$index" -le 3 ]; then
+                verify_active=$((verify_active + 1))
+              fi
             fi
           done
 
           printf '%s\n' "${states[@]}"
           if [ "$active" -eq 0 ]; then
-            echo "::error::No shadow-labeled runner service is active on this host; Verify would queue indefinitely."
+            echo "::error::No shadow-labeled runner service is active on this host; self-hosted CI would queue indefinitely."
+            exit 1
+          fi
+          if [ "$verify_active" -eq 0 ]; then
+            echo "::error::No verify-lane runner service (watt-mind-runner-1..3) is active on this host; Sandboxed verify smoke would queue indefinitely."
             exit 1
           fi
           if [ "$active" -lt 8 ]; then
-            echo "::warning::Shadow runner fleet is degraded: $active/8 services active."
+            echo "::warning::Shadow runner fleet is degraded: $active/8 services active ($verify_active/3 verify-lane)."
           fi
 
       - name: Check host temp space and memory
@@ -162,12 +167,12 @@ jobs:
 
   fast-unit-tests:
     name: Fast unit tests
-    # Runs on GitHub-hosted ubuntu-latest for both internal and fork/Dependabot
+    # Runs on GitHub-hosted ubuntu-24.04 for both internal and fork/Dependabot
     # PRs: zero shared-host contention, and the handful of cases that need an
     # unprivileged user+mount namespace self-skip via `handoffSandboxAvailable`
     # while `sandboxed-verify-smoke` covers that boundary on self-hosted.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       # Every later step resolves the runtime home here, never the operator's
@@ -178,11 +183,6 @@ jobs:
       - name: Isolate the factory runtime home from the operator's ~/.factory
         shell: bash
         run: echo "FACTORY_EVENT_HOME=$RUNNER_TEMP/factory-event-home" >> "$GITHUB_ENV"
-      - name: Sweep stale shared-host temp directories
-        if: runner.environment == 'self-hosted'
-        shell: bash
-        run: |
-          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} + || true
 
       - name: Checkout (no action download)
         shell: bash
@@ -224,11 +224,6 @@ jobs:
           bin/factory init
           git diff --exit-code
 
-      - name: Measure shared-host load factor
-        if: runner.environment == 'self-hosted'
-        shell: bash
-        run: .github/scripts/load-factor.sh
-
       - name: Test event-runtime library
         # Spawn-heavy suites can exceed Bun's 5s default on the shared host.
         # Explicit liveness bounds declared by individual tests still win.
@@ -252,19 +247,13 @@ jobs:
         # credentials. --dry validates the bundled demo repo and prints the plan.
         run: bin/factory demo --dry
 
-      - name: Sweep stale shared-host temp directories
-        if: always() && runner.environment == 'self-hosted'
-        shell: bash
-        run: |
-          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} + || true
-
   timing-bound-tests:
     name: Timing-bound tests
     # WM-918: spawn-and-wait tests whose wall-clock ceilings previously flaked
-    # under shared-host contention. Runs on a dedicated ubuntu-latest VM; not a
+    # under shared-host contention. Runs on a dedicated ubuntu-24.04 VM; not a
     # required check.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       # Every later step resolves the runtime home here, never the operator's
@@ -275,11 +264,6 @@ jobs:
       - name: Isolate the factory runtime home from the operator's ~/.factory
         shell: bash
         run: echo "FACTORY_EVENT_HOME=$RUNNER_TEMP/factory-event-home" >> "$GITHUB_ENV"
-      - name: Sweep stale shared-host temp directories
-        if: runner.environment == 'self-hosted'
-        shell: bash
-        run: |
-          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} + || true
 
       - name: Checkout (no action download)
         shell: bash
@@ -321,18 +305,13 @@ jobs:
           bin/factory init
           git diff --exit-code
 
-      - name: Measure shared-host load factor
-        if: runner.environment == 'self-hosted'
-        shell: bash
-        run: .github/scripts/load-factor.sh
-
       - name: Run timing-group tests
         shell: bash
         run: |
           set -euo pipefail
           include="$(bun event-runtime/lib/test-helpers-timing.mjs include-pattern)"
           set +e
-          bun test --timeout 30000 --max-concurrency=2 --retry 2 --test-name-pattern "$include" | tee "$RUNNER_TEMP/bun-timing.log"
+          bun test --timeout 30000 --max-concurrency=2 --retry 2 --test-name-pattern "$include" 2>&1 | tee "$RUNNER_TEMP/bun-timing.log"
           status="${PIPESTATUS[0]}"
           set -e
           # bun 1.3.14 reports a zero-match --test-name-pattern as
@@ -347,12 +326,6 @@ jobs:
           fi
           bun event-runtime/lib/test-helpers-timing.mjs classify "$RUNNER_TEMP/bun-timing.log" || true
           exit "$status"
-
-      - name: Sweep stale shared-host temp directories
-        if: always() && runner.environment == 'self-hosted'
-        shell: bash
-        run: |
-          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} + || true
 
   sandboxed-verify-smoke:
     name: Sandboxed verify smoke
@@ -414,7 +387,8 @@ jobs:
         # `runHandoffCommand`, so unshare, env scrubbing, the worktree-only
         # mount, chroot, and HOME=/tmp/home all stay owned by production code.
         # WM-918: required lanes exclude the timing-bound group because its
-        # wall-clock ceilings are not reliable under shared-host contention.
+        # wall-clock ceilings are not reliable under shared-host contention, and
+        # --max-concurrency=4 caps Bun file concurrency on the shared host.
         env:
           FACTORY_HANDOFF_SMOKE_LANE: ${{ runner.environment }}
         shell: bash
@@ -422,7 +396,7 @@ jobs:
           set -euo pipefail
           pat="$(bun event-runtime/lib/test-helpers-timing.mjs exclude-pattern)"
           [ -n "$pat" ] || exit 1
-          export FACTORY_HANDOFF_SMOKE_COMMAND="bun test event-runtime/lib --timeout 20000 --test-name-pattern \"$pat\" && bun build/emit.mjs --check && bun run format:check && bun run lint"
+          export FACTORY_HANDOFF_SMOKE_COMMAND="bun test event-runtime/lib --timeout 20000 --max-concurrency=4 --test-name-pattern \"$pat\" && bun build/emit.mjs --check && bun run format:check && bun run lint"
           bun -e '
             import { mkdtempSync } from "node:fs";
             import { tmpdir } from "node:os";
@@ -463,7 +437,7 @@ jobs:
 
   verify:
     name: Full verification
-    # Runs on GitHub-hosted ubuntu-latest so full verification never queues on
+    # Runs on GitHub-hosted ubuntu-24.04 so full verification never queues on
     # the self-hosted verify-lane or contends with other PRs.
     if: >-
       ${{
@@ -472,7 +446,7 @@ jobs:
         needs.fast-unit-tests.result == 'success'
       }}
     needs: [fast-unit-tests]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       # Every later step resolves the runtime home here, never the operator's
@@ -483,11 +457,6 @@ jobs:
       - name: Isolate the factory runtime home from the operator's ~/.factory
         shell: bash
         run: echo "FACTORY_EVENT_HOME=$RUNNER_TEMP/factory-event-home" >> "$GITHUB_ENV"
-      - name: Sweep stale shared-host temp directories
-        if: runner.environment == 'self-hosted'
-        shell: bash
-        run: |
-          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} + || true
 
       # No `uses:` steps in this job on purpose (WM-573). Every marketplace
       # action is fetched from codeload.github.com at "Set up job", and the
@@ -560,14 +529,11 @@ jobs:
       - name: Formatting check (prettier)
         run: bun run format:check
 
-      # WM-1122: the shadow/verify self-hosted image ships ripgrep, but the
-      # GitHub-hosted ubuntu-latest cloud lane (nightly/fork/force_hosted) does
-      # not. Without it the guard below hits `rg: command not found` and
-      # misreports it as a stale search contract, failing Verify on every
-      # cloud-lane run. Install it only when missing so the self-hosted lane is
-      # untouched.
+      # WM-1122: GitHub-hosted ubuntu-24.04 runners do not ship ripgrep by
+      # default. Without it the guard below hits `rg: command not found` and
+      # misreports it as a stale search contract, failing Verify. Install it
+      # when missing before running the guard.
       - name: Ensure ripgrep is available
-        if: runner.environment != 'self-hosted'
         shell: bash
         run: |
           set -euo pipefail
@@ -612,11 +578,6 @@ jobs:
             printf '::error::Runtime-spawning test suite is outside a host-locked route: %s\n' "${unexpected[*]}"
             exit 1
           fi
-
-      - name: Measure shared-host load factor
-        if: runner.environment == 'self-hosted'
-        shell: bash
-        run: .github/scripts/load-factor.sh
 
       - name: Integration and spawn tests
         # event-runtime/lib runs in the separately rerunnable fast-unit job.
@@ -726,12 +687,6 @@ jobs:
           bun event-runtime/demo/seed.mjs --port "$PORT" --prefix "ci-demo"
           bun event-runtime/demo/verify.mjs --port "$PORT"
 
-      - name: Sweep stale shared-host temp directories
-        if: always() && runner.environment == 'self-hosted'
-        shell: bash
-        run: |
-          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} + || true
-
   required-verify:
     name: Verify
     if: always()
@@ -745,7 +700,7 @@ jobs:
       ]
     # Runs on cloud runner so required verification is decoupled from host fleet
     # health when executing cloud PR runs (WM-950).
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 2
     env:
       EVENT_NAME: ${{ github.event_name }}

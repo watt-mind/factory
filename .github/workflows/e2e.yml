@@ -32,7 +32,7 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository
         )
       }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - name: Isolate the factory runtime home from ~/.factory

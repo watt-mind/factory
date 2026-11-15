@@ -1,9 +1,12 @@
 import { test, expect, describe } from "bun:test";
 import {
   buildSshArgv,
+  buildRsyncArgv,
+  quoteRemotePath,
   executeSsh,
   probeRemoteNode,
   deployRemoteWorker,
+  emitRemoteNode,
   startRemoteWorker,
   stopRemoteWorker,
   updateRemoteWorker,
@@ -265,5 +268,166 @@ describe("remote lifecycle operations", () => {
     expect(res.ok).toBe(true);
     expect(res.pid).toBe(99201);
     expect(callCount).toBe(3);
+  });
+});
+
+describe("remote path quoting and harness emit sync", () => {
+  const node = {
+    name: "mini",
+    host: "mini.local",
+    user: "dev",
+    port: 22,
+    factoryRoot: "~/Develop/factory",
+    branch: "develop",
+    env: {},
+    labels: {},
+    adapters: ["claude"],
+  };
+
+  test("quoteRemotePath preserves $HOME expansion for tilde paths while shell-quoting", () => {
+    expect(quoteRemotePath("~/Develop/factory")).toBe(
+      "\"$HOME/\"'Develop/factory'",
+    );
+    expect(quoteRemotePath("~")).toBe('"$HOME"');
+    expect(quoteRemotePath("/opt/factory")).toBe("'/opt/factory'");
+    expect(quoteRemotePath("~/my 'factory' dir")).toBe(
+      "\"$HOME/\"'my '\"'\"'factory'\"'\"' dir'",
+    );
+  });
+
+  test("probeRemoteNode and deployRemoteWorker expand ~/ paths and deploy links harnesses", () => {
+    let probeScript = null;
+    probeRemoteNode(node, {
+      spawnFn: (args) => {
+        probeScript = args.at(-1);
+        return {
+          exitCode: 0,
+          stdout: "PROBE_RESULT:abc|develop|0|arm64|Darwin|1.4.4|",
+          stderr: "",
+        };
+      },
+    });
+    expect(probeScript).toContain("REMOTE_DIR=\"$HOME/\"'Develop/factory';");
+
+    let deployScript = null;
+    deployRemoteWorker(node, {
+      spawnFn: (args) => {
+        deployScript = args.at(-1);
+        return { exitCode: 0, stdout: "DEPLOY_SUCCESS\n", stderr: "" };
+      },
+    });
+    expect(deployScript).toContain("mkdir -p \"$HOME/\"'Develop/factory';");
+    expect(deployScript).toContain("cd \"$HOME/\"'Develop/factory';");
+    expect(deployScript).toContain(
+      "git checkout -- shared plugins dist 2>/dev/null || true;",
+    );
+    expect(deployScript).toContain(
+      "git clean -fd shared plugins dist 2>/dev/null || true;",
+    );
+    expect(deployScript).toContain(
+      "bun build/emit.mjs --link --link-bin --link-repos 2>&1;",
+    );
+  });
+
+  test("buildRsyncArgv constructs ssh-tunneled rsync flags and respects custom port", () => {
+    expect(buildRsyncArgv(node)).toEqual([
+      "-az",
+      "--delete",
+      "--relative",
+      "-e",
+      "ssh -o BatchMode=yes -o ConnectTimeout=3",
+      "./shared",
+      "./plugins",
+      "./dist",
+      "dev@mini.local:~/Develop/factory/",
+    ]);
+
+    expect(
+      buildRsyncArgv({ ...node, user: null, port: 2222 }, ["./shared"], {
+        connectTimeout: 7,
+      }),
+    ).toEqual([
+      "-az",
+      "--delete",
+      "--relative",
+      "-e",
+      "ssh -p 2222 -o BatchMode=yes -o ConnectTimeout=7",
+      "./shared",
+      "mini.local:~/Develop/factory/",
+    ]);
+  });
+
+  test("emitRemoteNode syncs harness packs via rsync and runs remote link", () => {
+    const calls = [];
+    const res = emitRemoteNode(node, {
+      localRoot: "/tmp/local-factory",
+      spawnFn: (args, meta) => {
+        calls.push({ args, meta });
+        if (calls.length === 1) {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        return {
+          exitCode: 0,
+          stdout: "linked ~/.agents/skills\nEMIT_REMOTE_SUCCESS\n",
+          stderr: "",
+        };
+      },
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.linked).toBe(true);
+    expect(res.step).toBe("done");
+    expect(calls).toHaveLength(2);
+    expect(calls[0].args).toContain("./shared");
+    expect(calls[0].args).toContain("./plugins");
+    expect(calls[0].args).toContain("./dist");
+    expect(calls[0].args).not.toContain("./skills");
+    expect(calls[0].meta).toEqual({
+      cmd: "rsync",
+      cwd: "/tmp/local-factory",
+    });
+
+    const linkScript = calls[1].args.at(-1);
+    expect(linkScript).toContain("cd \"$HOME/\"'Develop/factory';");
+    expect(linkScript).toContain(
+      "bun build/emit.mjs --link --link-bin --link-repos 2>&1;",
+    );
+  });
+
+  test("emitRemoteNode reports rsync failure without invoking remote ssh link", () => {
+    let calls = 0;
+    const res = emitRemoteNode(node, {
+      spawnFn: () => {
+        calls += 1;
+        return {
+          exitCode: 255,
+          stdout: "",
+          stderr: "ssh: connect to host mini.local: Connection refused",
+        };
+      },
+    });
+
+    expect(calls).toBe(1);
+    expect(res.ok).toBe(false);
+    expect(res.linked).toBe(false);
+    expect(res.step).toBe("rsync");
+    expect(res.error).toContain("Connection refused");
+  });
+
+  test("emitRemoteNode reports link failure when remote emit link exits non-zero", () => {
+    let calls = 0;
+    const res = emitRemoteNode(node, {
+      spawnFn: () => {
+        calls += 1;
+        if (calls === 1) return { exitCode: 0, stdout: "", stderr: "" };
+        return { exitCode: 1, stdout: "", stderr: "bun: command not found" };
+      },
+    });
+
+    expect(calls).toBe(2);
+    expect(res.ok).toBe(false);
+    expect(res.linked).toBe(false);
+    expect(res.step).toBe("link");
+    expect(res.error).toContain("bun: command not found");
   });
 });
