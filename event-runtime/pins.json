@@ -18,10 +18,10 @@
       "commands/factory-retro.md": "sha256:644d6e3e6f4b6efed28a69dfa296bbf5189c9153c57d202fec11aff77b77a163",
       "commands/factory-ship.md": "sha256:8456a2dfc3f75f66fb1e9a1a8c71fa07e33dabe5b67cfdfc2c101e5ed050bb03",
       "commands/factory-sweep.md": "sha256:f7dc737e45bcce94442cd78aea01868c5d9cce3312da83d3cc51322ab0bef4b4",
-      "commands/factory-ticket.md": "sha256:c05c5e85f388467cec740f9a04329f3e8c94583b8b43a6cef0089237ec46dd1d",
+      "commands/factory-ticket.md": "sha256:03ce098157010a47a24ed4baef2e099e4c507ad3e606e3f19cca176049ad9317",
       "commands/factory-triage.md": "sha256:dcc3e06a598ba9ba24e37f216b9ec8a89722d34499481955b29574c572fa9566",
       "commands/factory-unblock.md": "sha256:ad23e193ba3ba72dff36574d571e3f768cd8874b15a07dd0cfe50213a86277fe",
-      "commands/factory-work.md": "sha256:78fe13ca7f76bba0e442faab90a1e541c9ee17041bdf44f2bf66e79c16af2640",
+      "commands/factory-work.md": "sha256:b599e4c1d3fe357cc52cb134a73475ed962793aa6dc24ae890622c6bd2649029",
       "floor.md": "sha256:665b319c11293d33987e0f859585ed06f443e0fece20ce6435213dd669039ea0",
       "skills/factory-handoff/SKILL.md": "sha256:c7163ec8c8f77b73fbdd7ce39e78e7264b9766121c483b77a58907b0da724957",
       "skills/principle-attack-the-premise/SKILL.md": "sha256:96c3d9cebb22252a04b89a585b3bf6010324305ea4d0effc115577fc94ab31d6",
@@ -44,7 +44,7 @@
       "skills/principle-test-behavior-not-implementation/SKILL.md": "sha256:2e159d33249ea859ce8623b921c479bc4b8145b6f53f9473907059af8cd954a1",
       "skills/principle-type-system-discipline/SKILL.md": "sha256:8d72e717d23203034f4ddce86c31b165c917998310a69f8b754c6fecc311feb5",
       "skills/principles/SKILL.md": "sha256:6a7d9eb26427fd5a7024f259f1b3cb083011158093068d0297dede2413866d3c",
-      "skills/ticket-spec/SKILL.md": "sha256:177f7780478c2536d9e0febafdd4b48208501a4cfdefc6a2117a638f91e273dc"
+      "skills/ticket-spec/SKILL.md": "sha256:2a92cdcd0383a115304310d842d55adcda4e6da7fd00519ed87dfdb967058584"
     }
   }
 }
