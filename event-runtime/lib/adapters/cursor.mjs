@@ -63,11 +63,16 @@ const SANDBOX_REFUSAL_REASON =
   "the Cursor Agent CLI has no guest execution path yet — its binary and CURSOR_API_KEY transport have not been translated to the microVM";
 
 /**
- * Workspace-relative packaging of RunSpec.harness (WM-851). Cursor emit has
- * commands and agents, not skills — a spec that names skills is refused
- * `harness_unsupported` by the worker rather than silently dropped.
+ * Workspace-relative packaging of RunSpec.harness (WM-851, GH-2370). Cursor
+ * reads project skills from `.cursor/skills/<name>/SKILL.md`, commands from
+ * `.cursor/commands/<name>.md`, and subagents from `.cursor/agents/<name>.md`.
  */
 export const HARNESS_LAYOUT = Object.freeze({
+  skills: Object.freeze({
+    source: (name) => ["dist", "cursor", "skills", name],
+    dest: (name) => [".cursor", "skills", name],
+    type: "dir",
+  }),
   commands: Object.freeze({
     source: (name) => ["dist", "cursor", "commands", `${name}.md`],
     dest: (name) => [".cursor", "commands", `${name}.md`],

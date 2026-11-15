@@ -1,6 +1,6 @@
 ---
 name: factory-ticket
-description: Implement exactly one already-claimed Linear ticket in the current worktree
+description: "Implement exactly one already-claimed Linear ticket in the current worktree. Invoke only when the user explicitly asks to run /factory-ticket or the factory-ticket workflow."
 ---
 
 # factory-ticket

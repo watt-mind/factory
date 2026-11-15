@@ -1,6 +1,6 @@
 ---
 name: factory-ship
-description: Release — open a develop → master PR, wait for CI, merge, verify the deploy
+description: "Release — open a develop → master PR, wait for CI, merge, verify the deploy. Invoke only when the user explicitly asks to run /factory-ship or the factory-ship workflow."
 ---
 
 # factory-ship

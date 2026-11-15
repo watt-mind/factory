@@ -1,6 +1,6 @@
 ---
 name: factory-report
-description: Linear status report across configured repos — queue depth, triage backlog, ready-to-dispatch, blocked/held
+description: "Linear status report across configured repos — queue depth, triage backlog, ready-to-dispatch, blocked/held. Invoke only when the user explicitly asks to run /factory-report or the factory-report workflow."
 ---
 
 # factory-report

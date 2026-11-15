@@ -1,6 +1,6 @@
 ---
 name: factory-audit
-description: Audit this repo against the project-conventions baseline; file the gaps to Linear
+description: "Audit this repo against the project-conventions baseline; file the gaps to Linear. Invoke only when the user explicitly asks to run /factory-audit or the factory-audit workflow."
 ---
 
 # factory-audit

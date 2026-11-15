@@ -1,6 +1,6 @@
 ---
 name: factory-unblock
-description: Re-examine held (ai:blocked) tickets for new evidence and release the ones that no longer need a human
+description: "Re-examine held (ai:blocked) tickets for new evidence and release the ones that no longer need a human. Invoke only when the user explicitly asks to run /factory-unblock or the factory-unblock workflow."
 ---
 
 # factory-unblock

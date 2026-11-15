@@ -1,6 +1,6 @@
 ---
 name: factory-friction
-description: File harness friction observed in an interactive session — capture only, never implement
+description: "File harness friction observed in an interactive session — capture only, never implement. Invoke only when the user explicitly asks to run /factory-friction or the factory-friction workflow."
 ---
 
 # factory-friction
