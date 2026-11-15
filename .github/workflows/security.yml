@@ -259,14 +259,9 @@ jobs:
 
   codeql:
     name: CodeQL
-    # Keep CodeQL for internal branches/PRs on the labeled self-hosted runner
-    # with explicit resource caps, and isolate fork PRs on ubuntu-latest per OSS
-    # security policy (WM-950). The shadow concurrency group spans internal PRs
-    # and branches so only one scan runs at a time on the shared host.
-    concurrency:
-      group: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && format('codeql-fork-{0}', github.event.pull_request.number) || 'codeql-shadow-host' }}
-      cancel-in-progress: false
-    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'shadow' }}
+    # Run on ephemeral ubuntu-latest (16 GiB RAM, 4 vCPUs) so CodeQL never
+    # contends with self-hosted runners or leaks fork-PR context.
+    runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
       actions: read
