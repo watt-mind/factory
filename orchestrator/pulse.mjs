@@ -32,6 +32,71 @@ const c = {
 
 const LINEAR_SUPPLY_PAGE_SIZE = 100;
 const MAX_LINEAR_SUPPLY_PAGES = 5;
+const ONE_HOUR_MS = 3600_000;
+const QUEUED_RUN_STATUSES = new Set([
+  "queued",
+  "waiting",
+  "pending",
+  "requested",
+]);
+
+function toNonNegativeFinite(value, fallback = 0) {
+  if (
+    value === null ||
+    value === undefined ||
+    value === "" ||
+    typeof value === "boolean"
+  ) {
+    return fallback;
+  }
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(0, num);
+}
+
+/**
+ * Compute CI runner / merge-queue capacity verdict and headroom metrics.
+ */
+export function computeCapacity({
+  queuedRuns = 0,
+  activeRuns = 0,
+  runnerCap = 8,
+  openReadyPrs = 0,
+  mergedLastHour = 0,
+  mergeBatchSize = 8,
+} = {}) {
+  const safeQueuedRuns = toNonNegativeFinite(queuedRuns);
+  const safeActiveRuns = toNonNegativeFinite(activeRuns);
+  const safeRunnerCap = toNonNegativeFinite(runnerCap);
+  const safeOpenReadyPrs = toNonNegativeFinite(openReadyPrs);
+  const safeMergedLastHour = toNonNegativeFinite(mergedLastHour);
+  const safeMergeBatchSize = toNonNegativeFinite(mergeBatchSize);
+
+  const runnerHeadroom = Math.max(0, safeRunnerCap - safeActiveRuns);
+  const queuePressure = safeActiveRuns + safeQueuedRuns;
+
+  let verdict = "WIDEN";
+  let reason = `Runner headroom available (${runnerHeadroom} slots free) and open-PR queue (${safeOpenReadyPrs}/${safeMergeBatchSize}) allow widening or continuing dispatch`;
+  if (safeOpenReadyPrs >= safeMergeBatchSize) {
+    verdict = "DRAIN_MERGES_FIRST";
+    reason = `Open ready PRs (${safeOpenReadyPrs} >= ${safeMergeBatchSize} merge batch size); /factory-merge must drain before widening dispatch`;
+  } else if (safeQueuedRuns > 0 || safeActiveRuns >= safeRunnerCap) {
+    verdict = "HOLD_OR_BUNDLE";
+    reason = `CI runner pool pressure (${safeActiveRuns}/${safeRunnerCap} active, ${safeQueuedRuns} queued, ${queuePressure} total); hold new singles or coalesce cohesive tickets into bundles`;
+  }
+
+  return {
+    runnerCap: safeRunnerCap,
+    activeRuns: safeActiveRuns,
+    queuedRuns: safeQueuedRuns,
+    runnerHeadroom,
+    openReadyPrs: safeOpenReadyPrs,
+    mergeBatchSize: safeMergeBatchSize,
+    mergedLastHour: safeMergedLastHour,
+    verdict,
+    reason,
+  };
+}
 
 function sh(args, cwd = ROOT) {
   try {
@@ -77,6 +142,10 @@ export async function gatherPulse({
   repoName = "factory",
   fetchLinear = true,
   fetchGitHub = true,
+  forge = null,
+  runnerCap = 8,
+  mergeBatchSize = 8,
+  now = Date.now(),
   controlPlane,
   webFetch = globalThis.fetch,
   workspaceProbe = sh,
@@ -99,6 +168,10 @@ export async function gatherPulse({
       truncated: false,
     },
     prs: { total: 0, candidates: [] },
+    capacity: {
+      ...computeCapacity({ runnerCap, mergeBatchSize }),
+      available: false,
+    },
     workspace: {
       branch: "unknown",
       head: "unknown",
@@ -269,12 +342,30 @@ export async function gatherPulse({
     }
   }
 
-  // 5. Open GitHub PRs
-  if (fetchGitHub) {
+  // 5. Open GitHub PRs & Capacity / Flow Probe
+  let activeForge = forge;
+  let ciRunError = null;
+  if (!activeForge && fetchGitHub) {
     try {
-      const prs = loadForge().prList(null, {
+      activeForge = loadForge();
+    } catch (err) {
+      ciRunError = err?.message ?? String(err);
+    }
+  }
+
+  let openReadyPrs = 0;
+  let activeRuns = 0;
+  let queuedRuns = 0;
+  let mergedLastHour = 0;
+  let openPrError = null;
+  let mergedError = null;
+
+  if (activeForge) {
+    try {
+      const openLimit = Math.max(15, toNonNegativeFinite(mergeBatchSize, 8));
+      const prs = activeForge.prList(null, {
         state: "open",
-        limit: 15,
+        limit: openLimit,
         fields: [
           "number",
           "title",
@@ -306,10 +397,77 @@ export async function gatherPulse({
           ciStatus,
         };
       });
-    } catch {
-      // forge not available or errored
+      openReadyPrs = pulse.prs.candidates.filter(
+        (pr) => !pr.isDraft && pr.ciStatus !== "FAILING",
+      ).length;
+    } catch (err) {
+      openPrError = err?.message ?? String(err);
+      pulse.prs.error = openPrError;
+    }
+
+    try {
+      const ciRuns = activeForge.runList(null, {
+        limit: 40,
+        fields: ["databaseId", "status", "conclusion", "createdAt"],
+        cwd: ROOT,
+      });
+      for (const run of ciRuns ?? []) {
+        const status = String(run?.status ?? "").toLowerCase();
+        if (status === "in_progress") activeRuns += 1;
+        else if (QUEUED_RUN_STATUSES.has(status)) queuedRuns += 1;
+      }
+    } catch (err) {
+      ciRunError = err?.message ?? String(err);
+    }
+
+    try {
+      const mergedPrs = activeForge.prList(null, {
+        state: "merged",
+        limit: 20,
+        fields: ["number", "mergedAt"],
+        cwd: ROOT,
+      });
+      const parsedNow =
+        now instanceof Date
+          ? now.getTime()
+          : typeof now === "number"
+            ? now
+            : Date.parse(now);
+      const effectiveNow = Number.isFinite(parsedNow) ? parsedNow : Date.now();
+      const hourAgo = effectiveNow - ONE_HOUR_MS;
+      for (const pr of mergedPrs ?? []) {
+        const mergedAtMs = pr?.mergedAt ? Date.parse(pr.mergedAt) : Number.NaN;
+        if (
+          Number.isFinite(mergedAtMs) &&
+          mergedAtMs >= hourAgo &&
+          mergedAtMs <= effectiveNow
+        ) {
+          mergedLastHour += 1;
+        }
+      }
+    } catch (err) {
+      mergedError = err?.message ?? String(err);
     }
   }
+
+  const capacityErrors = [openPrError, ciRunError, mergedError].filter(Boolean);
+  if (capacityErrors.length > 0) {
+    pulse.errors = capacityErrors;
+  }
+  pulse.capacity = {
+    ...computeCapacity({
+      queuedRuns,
+      activeRuns,
+      runnerCap,
+      openReadyPrs,
+      mergedLastHour,
+      mergeBatchSize,
+    }),
+    available: Boolean(activeForge && !ciRunError),
+    ...(ciRunError ? { ciRunError } : {}),
+    ...(mergedError ? { mergedError } : {}),
+    ...(openPrError ? { openPrError } : {}),
+  };
 
   // 6. Workspace Freshness
   try {
@@ -448,6 +606,44 @@ export function formatPulse(pulse) {
         `  ${c.bold(`#${pr.number}`)} ${ciBadge} ${draftBadge}${pr.title.slice(0, 60)}`,
       );
     }
+  }
+  lines.push("");
+
+  // Capacity & Flow
+  lines.push(c.bold("CAPACITY & FLOW"));
+  if (!pulse.capacity) {
+    lines.push(c.dim("  Capacity telemetry unavailable"));
+  } else {
+    const cap = pulse.capacity;
+    const verdictColor =
+      cap.verdict === "WIDEN"
+        ? c.green
+        : cap.verdict === "HOLD_OR_BUNDLE"
+          ? c.yellow
+          : c.red;
+    if (cap.available === false) {
+      const errDetail = cap.ciRunError || cap.mergedError || cap.openPrError;
+      lines.push(
+        c.yellow(
+          errDetail
+            ? `  Status:          unavailable (${errDetail})`
+            : "  Status:          unavailable (GitHub offline)",
+        ),
+      );
+    } else if (cap.mergedError || cap.openPrError) {
+      const errDetail = cap.mergedError || cap.openPrError;
+      lines.push(c.yellow(`  Warning:         partial read (${errDetail})`));
+    }
+    lines.push(
+      `  CI Runs:         ${cap.activeRuns}/${cap.runnerCap} active, ${cap.queuedRuns} queued, ${cap.runnerHeadroom} headroom`,
+    );
+    lines.push(
+      `  Open Ready PRs:  ${cap.openReadyPrs}/${cap.mergeBatchSize} merge batch`,
+    );
+    lines.push(`  Merged (1h):     ${cap.mergedLastHour}`);
+    lines.push(
+      `  Verdict:         ${verdictColor(cap.verdict)} — ${cap.reason}`,
+    );
   }
   lines.push("");
 

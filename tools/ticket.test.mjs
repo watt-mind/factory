@@ -12,6 +12,7 @@ import {
   mkdirSync,
   existsSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -39,6 +40,7 @@ import {
   unclaimTicket,
   fileTicket,
   closureCheckMessages,
+  doneCheckMessages,
   descriptionReplacementRequest,
   replacementSucceeded,
   resolveRepoName,
@@ -1735,4 +1737,368 @@ test("detail --replace with an unchanged body issues no mutation", () => {
   expect(result.exitCode).toBe(0);
   expect(result.stdout).toContain("already matches");
   expect(result.ghStdin).not.toContain("mutation");
+});
+
+test("parsePositionalArgs treats --pr and --merge-sha as value flags", () => {
+  expect(
+    parsePositionalArgs([
+      "state",
+      "WM-123",
+      "Done",
+      "--pr",
+      "456",
+      "--merge-sha",
+      "abcdef1",
+      "--comment",
+      "Merged in #456",
+    ]),
+  ).toEqual(["WM-123", "Done"]);
+  expect(
+    parsePositionalArgs([
+      "state",
+      "watt-mind/factory#789",
+      "Done",
+      "--merge-sha",
+      "0123456789abcdef0123456789abcdef01234567",
+      "--pr",
+      "https://github.com/watt-mind/factory/pull/789",
+    ]),
+  ).toEqual(["watt-mind/factory#789", "Done"]);
+});
+
+test("doneCheckMessages preserves backwards compatibility and validates SHA and PR metadata", () => {
+  expect(doneCheckMessages()).toEqual([]);
+  expect(doneCheckMessages({ mergeSha: null, pr: null })).toEqual([]);
+
+  // Valid mergeSha alone
+  expect(doneCheckMessages({ mergeSha: "abcdef1" })).toEqual([]);
+  expect(
+    doneCheckMessages({
+      mergeSha: "  ABCDEF1234567890ABCDEF1234567890ABCDEF12  ",
+    }),
+  ).toEqual([]);
+
+  // Invalid mergeSha values
+  for (const bad of ["", "   ", "HEAD", "pending", "abc123", "zzzzzzz"]) {
+    const msgs = doneCheckMessages({ mergeSha: bad });
+    expect(msgs.length).toBeGreaterThan(0);
+  }
+
+  // prError / missing prInfo
+  expect(
+    doneCheckMessages({ pr: "123", prError: new Error("HTTP 404") })[0],
+  ).toContain("HTTP 404");
+  expect(doneCheckMessages({ pr: "123", prInfo: null }).length).toBeGreaterThan(
+    0,
+  );
+
+  // OPEN and CLOSED PR rejections
+  const openMsgs = doneCheckMessages({
+    pr: "123",
+    prInfo: { state: "OPEN", mergeCommitOid: "abcdef1234567890" },
+  });
+  expect(openMsgs.some((m) => m.includes("OPEN"))).toBe(true);
+
+  const closedMsgs = doneCheckMessages({
+    pr: "123",
+    prInfo: { state: "CLOSED", mergeCommitOid: null },
+  });
+  expect(closedMsgs.some((m) => m.includes("CLOSED"))).toBe(true);
+
+  // MERGED PR without a valid merge commit SHA
+  expect(
+    doneCheckMessages({
+      pr: "123",
+      prInfo: { state: "MERGED" },
+    }).length,
+  ).toBeGreaterThan(0);
+  expect(
+    doneCheckMessages({
+      pr: "123",
+      prInfo: { state: "MERGED", merge_commit_sha: "bad-sha" },
+    }).length,
+  ).toBeGreaterThan(0);
+
+  // SHA mismatch across mergeCommitOid, mergeCommit.oid, and merge_commit_sha
+  expect(
+    doneCheckMessages({
+      mergeSha: "deadbee",
+      pr: "123",
+      prInfo: {
+        state: "MERGED",
+        mergeCommitOid: "cafe1234567890abcdef",
+      },
+    }).length,
+  ).toBeGreaterThan(0);
+  expect(
+    doneCheckMessages({
+      mergeSha: "deadbee",
+      pr: "123",
+      prInfo: {
+        state: "MERGED",
+        mergeCommit: { oid: "cafe1234567890abcdef" },
+      },
+    }).length,
+  ).toBeGreaterThan(0);
+
+  // MERGED PR + matching SHA acceptance (full case-insensitive and >=7 char prefix)
+  expect(
+    doneCheckMessages({
+      mergeSha: "ABCDEF1",
+      pr: "123",
+      prInfo: {
+        state: "MERGED",
+        mergeCommitOid: "abcdef1234567890abcdef1234567890abcdef12",
+      },
+    }),
+  ).toEqual([]);
+  expect(
+    doneCheckMessages({
+      mergeSha: "abcdef1234567890abcdef1234567890abcdef12",
+      pr: "#123",
+      prInfo: {
+        state: "MERGED",
+        mergeCommit: { oid: "ABCDEF1234567890ABCDEF1234567890ABCDEF12" },
+      },
+    }),
+  ).toEqual([]);
+  expect(
+    doneCheckMessages({
+      mergeSha: "abcdef1",
+      pr: "https://github.com/watt-mind/factory/pull/123",
+      prInfo: {
+        state: "MERGED",
+        merge_commit_sha: "abcdef1234567890abcdef1234567890abcdef12",
+      },
+    }),
+  ).toEqual([]);
+  expect(
+    doneCheckMessages({
+      pr: "123",
+      prInfo: {
+        state: "MERGED",
+        merge_commit_sha: "abcdef1234567890abcdef1234567890abcdef12",
+      },
+    }),
+  ).toEqual([]);
+});
+
+function spawnStateAgainstStubGh(args, { pullJson }) {
+  const rawRoot = mkdtempSync(path.join(os.tmpdir(), "ticket-state-guard-"));
+  const root = realpathSync(rawRoot);
+  const repoDir = path.join(root, "repo");
+  const bin = path.join(root, "bin");
+  const ghLog = path.join(root, "gh.log");
+  const cliRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+  );
+  const issue = JSON.stringify({
+    number: 1564,
+    node_id: "I_1564",
+    title: "verify done guard",
+    body: "## Owned Paths\n\n- tools/ticket.mjs\n",
+    state: "open",
+    html_url: "https://github.com/watt-mind/factory/issues/1564",
+    labels: [],
+    user: { login: "owner" },
+    author_association: "OWNER",
+  });
+  const project = JSON.stringify({
+    data: {
+      repository: {
+        projectsV2: {
+          nodes: [
+            {
+              id: "P_1",
+              title: "Factory",
+              field: {
+                id: "F_1",
+                options: [
+                  { id: "o_todo", name: "Todo" },
+                  { id: "o_done", name: "Done" },
+                ],
+              },
+            },
+          ],
+        },
+      },
+    },
+  });
+  const projectItems = JSON.stringify({
+    data: {
+      node: {
+        items: {
+          nodes: [
+            {
+              id: "PVTI_1",
+              content: {
+                number: 1564,
+                repository: { nameWithOwner: "watt-mind/factory" },
+              },
+              fieldValueByName: { name: "In Review" },
+            },
+          ],
+          pageInfo: { hasNextPage: false, endCursor: null },
+        },
+      },
+    },
+  });
+  try {
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    mkdirSync(repoDir);
+    mkdirSync(bin);
+    writeFileSync(
+      path.join(bin, "gh"),
+      [
+        "#!/bin/sh",
+        'input=""',
+        'for a in "$@"; do [ "$a" = "-" ] && input=$(cat); done',
+        `printf '%s\\n' "$*" >> "${ghLog}"`,
+        'case "$*" in',
+        "  *graphql*)",
+        '    case "$input" in',
+        `      *FindRepoProject*) printf '%s\\n' '${project}' ;;`,
+        `      *ProjectItems*) printf '%s\\n' '${projectItems}' ;;`,
+        `      *updateProjectV2ItemFieldValue*) printf '%s\\n' '{"data":{"updateProjectV2ItemFieldValue":{"projectV2Item":{"id":"PVTI_1"}}}}' ;;`,
+        `      *) printf '%s\\n' '{"data":{}}' ;;`,
+        "    esac ;;",
+        `  *pulls/123*) printf '%s\\n' '${JSON.stringify(pullJson)}' ;;`,
+        `  *issues/1564/comments*) printf '%s\\n' '[]' ;;`,
+        `  *issues/1564*) printf '%s\\n' '${issue}' ;;`,
+        `  *) printf '%s\\n' '{}' ;;`,
+        "esac",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      path.join(root, "config", "policy.yaml"),
+      "controlPlane:\n  kind: github\nforge:\n  kind: github\n",
+    );
+    writeFileSync(
+      path.join(root, "config", "repos.yaml"),
+      `repos:\n  - name: factory\n    path: ${repoDir}\n    github: watt-mind/factory\n    control_plane: github\n    project: Factory\n`,
+    );
+    const env = { ...process.env, FACTORY_REPOS_ROOT: root, HOME: root };
+    env.PATH = `${bin}${path.delimiter}${env.PATH ?? ""}`;
+    for (const name of Object.keys(env)) {
+      if (
+        name === "LINEAR_API_KEY" ||
+        name === "GH_TOKEN" ||
+        name === "GITHUB_TOKEN" ||
+        name.startsWith("FACTORY_GH_APP_")
+      )
+        delete env[name];
+    }
+    const result = Bun.spawnSync({
+      cmd: ["bun", path.join(cliRoot, "tools", "ticket.mjs"), "state", ...args],
+      cwd: repoDir,
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return {
+      exitCode: result.exitCode,
+      stdout: result.stdout.toString(),
+      stderr: result.stderr.toString(),
+      ghCalls: existsSync(ghLog) ? readFileSync(ghLog, "utf8") : "",
+    };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("CLI state guard enforces --pr and --merge-sha on Done transitions", () => {
+  const mergedPull = {
+    number: 123,
+    state: "closed",
+    merged_at: "2026-11-15T19:00:00Z",
+    merge_commit_sha: "abcdef1234567890abcdef1234567890abcdef12",
+    html_url: "https://github.com/watt-mind/factory/pull/123",
+    head: { ref: "feat/1564", sha: "1111111111111111111111111111111111111111" },
+    base: { ref: "develop" },
+  };
+  const openPull = {
+    ...mergedPull,
+    state: "open",
+    merged_at: null,
+  };
+
+  // Non-Done transition rejects --pr and --merge-sha without touching tracker
+  const nonDone = spawnStateAgainstStubGh(
+    ["watt-mind/factory#1564", "In Review", "--pr", "123"],
+    { pullJson: mergedPull },
+  );
+  expect(nonDone.exitCode).toBe(1);
+  expect(nonDone.stderr).toContain('only valid on transitions to "Done"');
+  expect(nonDone.ghCalls).toBe("");
+
+  // Done with invalid --merge-sha rejects before tracker mutation
+  const badSha = spawnStateAgainstStubGh(
+    ["watt-mind/factory#1564", "Done", "--merge-sha", "HEAD"],
+    { pullJson: mergedPull },
+  );
+  expect(badSha.exitCode).toBe(1);
+  expect(badSha.stderr).toContain("--merge-sha");
+  expect(badSha.ghCalls).toBe("");
+
+  // Done with OPEN PR rejects before tracker mutation
+  const openPr = spawnStateAgainstStubGh(
+    ["watt-mind/factory#1564", "Done", "--pr", "123"],
+    { pullJson: openPull },
+  );
+  expect(openPr.exitCode).toBe(1);
+  expect(openPr.stderr).toContain("OPEN");
+  expect(openPr.ghCalls).not.toContain("issues/1564");
+
+  // Done with mismatched SHA rejects before tracker mutation
+  const mismatch = spawnStateAgainstStubGh(
+    [
+      "watt-mind/factory#1564",
+      "Done",
+      "--pr",
+      "#123",
+      "--merge-sha",
+      "deadbee",
+    ],
+    { pullJson: mergedPull },
+  );
+  expect(mismatch.exitCode).toBe(1);
+  expect(mismatch.stderr).toContain("does not match");
+  expect(mismatch.ghCalls).not.toContain("issues/1564");
+
+  // Done with merged PR URL + matching short SHA succeeds end-to-end
+  const accepted = spawnStateAgainstStubGh(
+    [
+      "watt-mind/factory#1564",
+      "Done",
+      "--pr",
+      "https://github.com/watt-mind/factory/pull/123",
+      "--merge-sha",
+      "abcdef1",
+    ],
+    { pullJson: mergedPull },
+  );
+  expect(accepted.stderr).toBe("");
+  expect(accepted.exitCode).toBe(0);
+  expect(accepted.stdout).toContain("watt-mind/factory#1564 -> Done");
+
+  // Backwards-compatible Done without --pr or --merge-sha also succeeds
+  const legacyDone = spawnStateAgainstStubGh(
+    ["watt-mind/factory#1564", "Done", "--repo", "factory"],
+    { pullJson: mergedPull },
+  );
+  expect(legacyDone.stderr).toBe("");
+  expect(legacyDone.exitCode).toBe(0);
+  expect(legacyDone.stdout).toContain("watt-mind/factory#1564 -> Done");
+
+  // Done with --repo factory and --pr 123 (resolving repo name to github slug) succeeds
+  const repoOptDone = spawnStateAgainstStubGh(
+    ["watt-mind/factory#1564", "Done", "--repo", "factory", "--pr", "123"],
+    { pullJson: mergedPull },
+  );
+  expect(repoOptDone.stderr).toBe("");
+  expect(repoOptDone.exitCode).toBe(0);
+  expect(repoOptDone.stdout).toContain("watt-mind/factory#1564 -> Done");
 });

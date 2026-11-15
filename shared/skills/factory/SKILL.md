@@ -14,6 +14,7 @@ Single entry point that pairs `AGENTS.md` (the Factory floor) with concrete exec
 - **Proceed vs. stop:** Load `../principle-proceed-with-gates/SKILL.md` when unsure. Proceed autonomously on reversible local work; stop only on `Blocked` conditions, `Never auto-merge`, `escalate_paths`, or genuine unrecorded product-intent forks.
 - **Empirical forks:** Before asking the user `"which approach?"` or `"how does X behave?"`, check if running a quick experiment (`playbooks/prototype.md`) or reading the code answers it objectively.
 - **On-demand principles:** Read only the `../principle-<name>/SKILL.md` files named by the active playbook. Never load all 19 into context at once.
+- **Non-blocking coordinator default:** Keep the main session unblocked for steering, cross-slice seams, and final gates. Delegate multi-file edits, independent reviews, and heavy checks to isolated subagents routed by difficulty tier (`tier:light`, `tier:standard`, `tier:strong`) with `reviewer != implementer` as a hard invariant. Check `bun orchestrator/pulse.mjs` (`CAPACITY & FLOW`) before widening parallel dispatch.
 - **Evidence-only reporting:** Cite exact file paths, symbol names, commit refs (`origin/<base>@<sha>`), and observed test/command output.
 
 ## Route the Task

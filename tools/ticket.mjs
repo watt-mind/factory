@@ -73,6 +73,7 @@ import {
 import { homedir } from "node:os";
 import path from "node:path";
 import { loadRepos } from "../event-runtime/lib/repos.mjs";
+import { loadForge } from "../lib/forge/index.mjs";
 import {
   loadControlPlane,
   ControlPlaneError,
@@ -1036,6 +1037,143 @@ export function closureCheckMessages(issue) {
   return formatOwnedPathClosureGaps(gaps);
 }
 
+const GIT_SHA_PATTERN = /^[0-9a-f]{7,40}$/i;
+
+function normalizeGitSha(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return GIT_SHA_PATTERN.test(trimmed) ? trimmed.toLowerCase() : null;
+}
+
+function parsePrRef(raw) {
+  if (raw == null) return null;
+  const trimmed = String(raw).trim();
+  if (!trimmed) return null;
+  const bare = /^#?([1-9]\d*)$/.exec(trimmed);
+  if (bare) return { number: Number(bare[1]), repo: null };
+  const slugged = /^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#([1-9]\d*)$/.exec(
+    trimmed,
+  );
+  if (slugged) return { number: Number(slugged[2]), repo: slugged[1] };
+  const url =
+    /^https?:\/\/[^/]+\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/pull\/([1-9]\d*)(?:[/?#].*)?$/i.exec(
+      trimmed,
+    );
+  if (url) return { number: Number(url[2]), repo: url[1] };
+  const pathOnly = /^\/?pull\/([1-9]\d*)(?:[/?#].*)?$/i.exec(trimmed);
+  if (pathOnly) return { number: Number(pathOnly[1]), repo: null };
+  return null;
+}
+
+function githubRepoFromUrl(url) {
+  if (typeof url !== "string") return null;
+  const match =
+    /^https?:\/\/[^/]+\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/pull\/\d+/i.exec(
+      url.trim(),
+    );
+  return match ? match[1] : null;
+}
+
+function resolvePrForgeContext({ repoOpt, parsedRepo, ticketKey }) {
+  let forgeRoot = null;
+  let repos = null;
+  try {
+    const root = instanceConfigRoot();
+    if (
+      existsSync(path.join(root, "config", "policy.yaml")) ||
+      existsSync(path.join(root, "config", "policy.example.yaml"))
+    ) {
+      forgeRoot = root;
+    }
+    repos = getRepos(root);
+  } catch {
+    // Allow synthetic callers/tests without instance config to fall back to cwd.
+  }
+
+  let forgeRepo = parsedRepo || null;
+  if (!forgeRepo && repoOpt) {
+    if (repoOpt.includes("/")) {
+      forgeRepo = repoOpt;
+    } else if (repos) {
+      const resolvedName = resolveRepoName({ repos, repoFlag: repoOpt });
+      forgeRepo = repos.get(resolvedName)?.github ?? repoOpt;
+    } else {
+      forgeRepo = repoOpt;
+    }
+  } else if (!forgeRepo && repos) {
+    const resolvedName =
+      resolveRepoNameFromTicket(ticketKey, repos) ??
+      resolveRepoName({ cwd: process.cwd(), repos, repoFlag: null });
+    forgeRepo = resolvedName ? (repos.get(resolvedName)?.github ?? null) : null;
+  }
+
+  return { forgeRoot, forgeRepo };
+}
+
+/**
+ * Validate write-read-verify metadata when transitioning a ticket to Done.
+ * Returns an empty array when neither `--merge-sha` nor `--pr` was provided
+ * so legacy callers remain backwards compatible.
+ */
+export function doneCheckMessages({
+  mergeSha = null,
+  pr = null,
+  prInfo = null,
+  prError = null,
+} = {}) {
+  if (mergeSha === null && pr === null) return [];
+  const errors = [];
+
+  let validMergeSha = null;
+  if (mergeSha !== null) {
+    validMergeSha = normalizeGitSha(mergeSha);
+    if (!validMergeSha) {
+      errors.push(
+        `invalid --merge-sha ${JSON.stringify(mergeSha)}: expected a 7-40 character hexadecimal git commit SHA`,
+      );
+    }
+  }
+
+  if (pr !== null) {
+    if (prError) {
+      const detail =
+        prError instanceof Error ? prError.message : String(prError);
+      errors.push(`could not inspect PR ${pr}: ${detail}`);
+    } else if (!prInfo || typeof prInfo !== "object") {
+      errors.push(`could not inspect PR ${pr}: missing PR metadata`);
+    } else {
+      const state = String(prInfo.state ?? "").toUpperCase();
+      if (state !== "MERGED") {
+        errors.push(
+          `PR ${pr} is ${state || "UNKNOWN"}, expected MERGED before transitioning to Done`,
+        );
+      }
+      const rawPrMergeSha =
+        prInfo.mergeCommitOid ??
+        prInfo.mergeCommit?.oid ??
+        prInfo.merge_commit_sha ??
+        null;
+      const validPrMergeSha = normalizeGitSha(rawPrMergeSha);
+      if (state === "MERGED" && !validPrMergeSha) {
+        errors.push(`merged PR ${pr} is missing a valid merge commit SHA`);
+      }
+      if (validMergeSha && validPrMergeSha) {
+        const matches =
+          validPrMergeSha === validMergeSha ||
+          validPrMergeSha.startsWith(validMergeSha) ||
+          validMergeSha.startsWith(validPrMergeSha);
+        if (!matches) {
+          errors.push(
+            `--merge-sha ${mergeSha.trim()} does not match PR ${pr} merge commit SHA ${rawPrMergeSha.trim()}`,
+          );
+        }
+      }
+    }
+  }
+
+  return errors;
+}
+
 /** A Linear issue key: team prefix, dash, number (`CLNT-616`, `WM-1007`). */
 const LINEAR_KEY = /^[A-Z][A-Z0-9]*-\d+$/;
 
@@ -1095,6 +1233,8 @@ const VALUE_FLAGS = new Set([
   "dedupe-key",
   "from",
   "label",
+  "merge-sha",
+  "pr",
   "project",
   "remove",
   "repo",
@@ -1295,16 +1435,96 @@ const VERBS = {
     const add = flagAll("add"),
       remove = flagAll("remove");
     const comment = flag("comment");
+    const mergeSha = has("merge-sha") ? (flag("merge-sha") ?? "") : null;
+    const pr = has("pr") ? (flag("pr") ?? "") : null;
+    const repoOpt = flag("repo");
     if (!positional[0])
       throw new Error(
-        `usage: state <ISSUE-ID> ["<State Name>"] [--add label] [--remove label] [--comment "<text>"]`,
+        `usage: state <ISSUE-ID> ["<State Name>"] [--add label] [--remove label] [--comment "<text>"] [--pr <number> --merge-sha <sha>]`,
       );
     if (!wanted && !add.length && !remove.length && !has("unassign")) {
       throw new Error(
-        `usage: state <ISSUE-ID> "<State Name>" [--add label] [--remove label] [--comment "<text>"]`,
+        `usage: state <ISSUE-ID> "<State Name>" [--add label] [--remove label] [--comment "<text>"] [--pr <number> --merge-sha <sha>]`,
+      );
+    }
+    if (
+      (mergeSha !== null || pr !== null) &&
+      wanted?.toLowerCase() !== "done"
+    ) {
+      throw new Error(
+        `--pr and --merge-sha are only valid on transitions to "Done"`,
       );
     }
     const key = normalizeTicketRef(positional[0]);
+
+    if (
+      wanted?.toLowerCase() === "done" &&
+      (mergeSha !== null || pr !== null)
+    ) {
+      let prInfo = null;
+      let prError = null;
+      if (pr !== null) {
+        const parsedPr = parsePrRef(pr);
+        if (!parsedPr) {
+          prError = new Error(
+            `invalid --pr value ${JSON.stringify(pr)}: expected <number>, #<number>, or GitHub PR URL`,
+          );
+        } else {
+          try {
+            const { forgeRoot, forgeRepo } = resolvePrForgeContext({
+              repoOpt,
+              parsedRepo: parsedPr.repo,
+              ticketKey: key,
+            });
+            const forge = forgeRoot
+              ? loadForge({ root: forgeRoot })
+              : loadForge();
+            prInfo = forge.prView(forgeRepo, parsedPr.number, {
+              cwd: process.cwd(),
+            });
+            // restPullToPr() in lib/forge/github.mjs omits merge_commit_sha, so
+            // fetch the raw pull payload when a merged PR lacks a merge SHA.
+            if (
+              prInfo &&
+              String(prInfo.state ?? "").toUpperCase() === "MERGED" &&
+              !(
+                prInfo.mergeCommitOid ??
+                prInfo.mergeCommit?.oid ??
+                prInfo.merge_commit_sha
+              ) &&
+              typeof forge.apiRaw === "function"
+            ) {
+              const apiRepo =
+                forgeRepo ?? githubRepoFromUrl(prInfo.url) ?? ":owner/:repo";
+              try {
+                const rawPull = JSON.parse(
+                  forge.apiRaw(`repos/${apiRepo}/pulls/${parsedPr.number}`, {
+                    cwd: process.cwd(),
+                  }),
+                );
+                if (rawPull?.merge_commit_sha) {
+                  prInfo = {
+                    ...prInfo,
+                    merge_commit_sha: rawPull.merge_commit_sha,
+                  };
+                }
+              } catch {
+                /* let doneCheckMessages report missing merge commit SHA */
+              }
+            }
+          } catch (err) {
+            prError = err;
+          }
+        }
+      }
+      const doneErrors = doneCheckMessages({ mergeSha, pr, prInfo, prError });
+      if (doneErrors.length > 0) {
+        throw new Error(
+          `Cannot transition ${key} to Done:\n${doneErrors.map((e) => `- ${e}`).join("\n")}`,
+        );
+      }
+    }
+
     const cp = controlPlane(key);
     const issue = await getTicketWithRetry(cp, key);
 

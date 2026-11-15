@@ -12,7 +12,7 @@
       "commands/factory-capture.md": "sha256:1afaf35ce0b915f7636fdfb44f4fc2e1130d3953b7df5aaeb5ed5b2afdd1e216",
       "commands/factory-friction.md": "sha256:952b6573aad2e8cc8bbe3c7de2724336d0505e450c84b66abd0a5f028f2bd021",
       "commands/factory-garden.md": "sha256:762f806d546bb5413bc8d5bcc94551a9700adbfac44e3ea561f0824df5e96f9a",
-      "commands/factory-merge.md": "sha256:b1ac060d3f3b207f65bdc22beefa310071441eff22a01ec9d7438d0aa93530e4",
+      "commands/factory-merge.md": "sha256:330dfa22da5df2c7c14bc227f97f2dddfd210ba0548da0d07c4bdf7ca5f805b3",
       "commands/factory-next.md": "sha256:c91f22c690c3930552eb3f1b46cd9566ef9549423f41fd59402c11aaa5ada06d",
       "commands/factory-recap-video.md": "sha256:dc8d7a6871dd9bb3bed6c8bb5d70d9a5627bcd29f1537e3e40b8f4ab0353995e",
       "commands/factory-recap.md": "sha256:23103bd74971e7b7e45d0013fae9fb1a3ae9f835edf20d631362a5850388d9dd",
@@ -20,17 +20,17 @@
       "commands/factory-retro.md": "sha256:644d6e3e6f4b6efed28a69dfa296bbf5189c9153c57d202fec11aff77b77a163",
       "commands/factory-ship.md": "sha256:4fad045e569d3e72e899d607c3eac4e1fbbe76904e524bd7c30fcea31cbf1c84",
       "commands/factory-sweep.md": "sha256:f7dc737e45bcce94442cd78aea01868c5d9cce3312da83d3cc51322ab0bef4b4",
-      "commands/factory-ticket.md": "sha256:312ddd4268a5ae9b3d463c801e3e3cf30229a7889ec22dd9f9936a13e1e06d28",
+      "commands/factory-ticket.md": "sha256:e15b2b582bbfef197e6dac98619a35bcf272ea03b04481e484ae4cfe1b53c326",
       "commands/factory-triage.md": "sha256:df2ad118d33c95dfd9db871fbd7dd97d996d1e73408a6dac7127b34fb58f9f74",
       "commands/factory-unblock.md": "sha256:ad23e193ba3ba72dff36574d571e3f768cd8874b15a07dd0cfe50213a86277fe",
       "commands/factory-verify-deploy.md": "sha256:4d23e07c53fe542b2df59d692deca339a47bb779987a8f7e772233db328cfdca",
-      "commands/factory-work.md": "sha256:af1d380897cfb028ebae387ef094f0ba175d57c2b3a733717ffcb308993c2e0d",
-      "floor.md": "sha256:462bb289195e3b774b469f4213bbed2ff7c6a218a7251211dede09e5b244962b",
+      "commands/factory-work.md": "sha256:bdb5d5604c95b34c768bcbf73aa2b3464032a3d4cca38967696ba1d9d75fecf2",
+      "floor.md": "sha256:49fe353dc87e7a72aa36873ccd30c50821cbe637cf1fc76b7f0fa462ec01230b",
       "skills/factory-formal-verify-create/SKILL.md": "sha256:760695b2a4db8c653fa2aede8734be58b118e965e42a25b60af891fdbb4cb11a",
       "skills/factory-formal-verify-maintain/SKILL.md": "sha256:70c3ff77a361bd2c76e6c13cb4558b0d7dfe7d70f59061d9f789402612f4e093",
       "skills/factory-handoff/SKILL.md": "sha256:c7163ec8c8f77b73fbdd7ce39e78e7264b9766121c483b77a58907b0da724957",
       "skills/factory-how/SKILL.md": "sha256:97cd43b1110fa665cc4729cb11420f2fe03bef390cd67035db62fe3afa462b54",
-      "skills/factory-orchestrate/SKILL.md": "sha256:4ad60a6a662be036e8c2fdb1e21db53d67012cfee913890024d778c972bee328",
+      "skills/factory-orchestrate/SKILL.md": "sha256:fe6d8c97b563c0077577f57b6ea782c99b1b59fec8b750c75d8948838d8d4c68",
       "skills/factory-reflect/SKILL.md": "sha256:1fe34f7b91d4dd0f4ee71d64c6bad33bbab6679cd33340fec872db67557b2003",
       "skills/factory-reflect/references/divergent-reviewer.md": "sha256:93a0cb603a89027d0561c423d8741a02928dbc3c00353aec71809ce5aef03c66",
       "skills/factory-reflect/references/judgment-reviewer.md": "sha256:cdd44cba1433a6cc0dfc931945d622c5036c9ca5adde05e667c55d103d2d1db9",
@@ -70,7 +70,7 @@
       "skills/factory-teach/SKILL.md": "sha256:c6bf6a9ff1b6019f80df6afd3eee71ad850e831a1f1372eb61c349996924e56b",
       "skills/factory-unslop/SKILL.md": "sha256:5b50f2e0d3c52c5dbed139c6e5b17b31783065e95ed01f5401ff2e13834656ab",
       "skills/factory-why/SKILL.md": "sha256:067d84d18252ea4baf40732e32ec398312283fc342d9f92a573bdd5536fda56a",
-      "skills/factory/SKILL.md": "sha256:f63057b160fa1e69a321cdf933578c272f0f264cdb5bd9353b606433c8d968cc",
+      "skills/factory/SKILL.md": "sha256:9d75e3845d82f39d2b3216ce099000fdaec1b40dcd17c6c7b51e4b2ae83fe910",
       "skills/factory/playbooks/bug-fix.md": "sha256:4b0f0e6cadb665955db8fd62fd609dbfc1850e95cd15fafde37f1fa0512f0486",
       "skills/factory/playbooks/feature.md": "sha256:d4369c03ccf564ff04f3f8a8e5deea3f6575b40d67ad14fc4b32abf346db04b2",
       "skills/factory/playbooks/formal-verify.md": "sha256:438666260ef0dbbcae287e9f60850b81838fce7f64b6c95a9e4dab6e2c935cf0",
@@ -97,7 +97,7 @@
       "skills/principle-test-behavior-not-implementation/SKILL.md": "sha256:2e159d33249ea859ce8623b921c479bc4b8145b6f53f9473907059af8cd954a1",
       "skills/principle-type-system-discipline/SKILL.md": "sha256:8d72e717d23203034f4ddce86c31b165c917998310a69f8b754c6fecc311feb5",
       "skills/principles/SKILL.md": "sha256:66a2ffec57b579765b8b4e724640c7de1b3d7c09947a6b932dbb778951b7db07",
-      "skills/ticket-spec/SKILL.md": "sha256:b76c05ffae5339b250dc80d4d39a476296b4c537588035d562ba20fbd343df1e"
+      "skills/ticket-spec/SKILL.md": "sha256:2f2e31b33f1c57e0e4374a16df680f00b93b31bf84625eae75aa667817cac859"
     }
   }
 }

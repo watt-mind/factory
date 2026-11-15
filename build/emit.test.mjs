@@ -872,3 +872,146 @@ test("emit packages /factory-recap and /factory-recap-video across all five harn
   expect(readme).toContain("`/factory-recap`");
   expect(readme).toContain("`/factory-recap-video`");
 });
+
+test("emit packages Phase 1 factory skills and support files across all five harnesses", () => {
+  const skills = [
+    "factory",
+    "factory-unslop",
+    "factory-why",
+    "factory-how",
+    "factory-teach",
+    "factory-orchestrate",
+    "factory-reflect",
+  ];
+  const harnessSkillDirs = [
+    ["plugins", "core", "skills"],
+    ["dist", "cursor", "skills"],
+    ["dist", "codex", "skills"],
+    ["dist", "gemini", "skills"],
+    ["dist", "pi", "skills"],
+  ];
+
+  for (const name of skills) {
+    const src = path.join(ROOT, "shared", "skills", name, "SKILL.md");
+    expect(existsSync(src)).toBe(true);
+    const raw = readFileSync(src, "utf8");
+    const fmMatch = raw.match(/^---\n([\s\S]*?)\n---\n/);
+    expect(fmMatch).not.toBeNull();
+    const parsed = Bun.YAML.parse(fmMatch[1]);
+    expect(parsed.name).toBe(name);
+    expect(typeof parsed.description).toBe("string");
+    expect(parsed.description.trim().length).toBeGreaterThan(0);
+
+    for (const dir of harnessSkillDirs) {
+      expect(existsSync(path.join(ROOT, ...dir, name, "SKILL.md"))).toBe(true);
+    }
+  }
+
+  const supportFiles = [
+    ["factory-reflect", "references", "judgment-reviewer.md"],
+    ["factory-reflect", "references", "tooling-reviewer.md"],
+    ["factory-reflect", "references", "divergent-reviewer.md"],
+    ["factory-reflect", "references", "synthesizer.md"],
+    ["factory", "playbooks", "investigation.md"],
+  ];
+  for (const relParts of supportFiles) {
+    const src = path.join(ROOT, "shared", "skills", ...relParts);
+    expect(existsSync(src)).toBe(true);
+    expect(readFileSync(src, "utf8").trim().length).toBeGreaterThan(0);
+    for (const dir of harnessSkillDirs) {
+      expect(existsSync(path.join(ROOT, ...dir, ...relParts))).toBe(true);
+    }
+  }
+});
+
+test("floor, command, and skill prompts enforce Phase 2 throughput, bundling, tier routing, bounded verification, and merge gates", () => {
+  const readShared = (...parts) =>
+    readFileSync(path.join(ROOT, "shared", ...parts), "utf8");
+
+  const floor = readShared("floor.md");
+  expect(floor).toMatch(/cohesive batch bundle/i);
+  expect(floor).toContain("Fixes <ISSUE-ID>");
+  expect(floor).toMatch(
+    /attribute full-suite runs and project-wide coverage thresholds to CI/i,
+  );
+  expect(floor).toContain("Risks");
+  expect(floor).toContain("Write-read-verify `Done`");
+  expect(floor).toContain("gh pr view <PR> --json state,mergeCommit");
+  expect(floor).toContain("--merge-sha");
+  expect(floor).toContain("### Non-blocking coordinator default");
+  expect(floor).toContain("reviewer != implementer");
+
+  const work = readShared("commands", "factory-work.md");
+  expect(work).toContain("bun orchestrator/pulse.mjs");
+  expect(work).toContain("CAPACITY & FLOW");
+  expect(work).toContain("DRAIN_MERGES_FIRST");
+  expect(work).toContain("HOLD_OR_BUNDLE");
+  expect(work).toContain("WIDEN");
+  expect(work).toContain("mergedLastHour");
+  expect(work).toMatch(/3–6 related low-risk tickets/i);
+  expect(work).toContain(
+    "counts bundles (worktree/PR slots), NOT raw ticket count",
+  );
+  expect(work).toContain("Difficulty tier × harness routing");
+  expect(work).toContain("`tier:light`");
+  expect(work).toContain("`tier:standard`");
+  expect(work).toContain("`tier:strong`");
+  expect(work).toContain("`muse-spark`");
+  expect(work).toContain("`sol`");
+  expect(work).toContain("`wonder`");
+  expect(work).toContain("`inherit`");
+  expect(work).toContain("reviewer != implementer");
+  expect(work).toContain("/factory-merge");
+  expect(work).not.toContain("Merge one PR at a time");
+  expect(work).toContain("## Standing loop prompt shape");
+  expect(work).toContain("Claim next");
+  expect(work).toContain("Gate list");
+  expect(work).toContain("Transition table");
+  expect(work).toContain("Feasibility valve");
+
+  const merge = readShared("commands", "factory-merge.md");
+  expect(merge).toContain("Two-stage bounded classification");
+  expect(merge).toContain("Stage A");
+  expect(merge).toContain("Stage B");
+  expect(merge).toContain("`MERGE` candidates");
+  expect(merge).toContain("Stale hold and `escalated` re-check");
+  expect(merge).toContain("--remove-label escalated");
+  expect(merge).toContain("write-read-verify");
+  expect(merge).toContain(
+    "gh pr view <PR> --repo <repo> --json state,mergeCommit",
+  );
+  expect(merge).toContain("--merge-sha");
+
+  const ticket = readShared("commands", "factory-ticket.md");
+  expect(ticket).toContain("targeted tests + fast static gates only");
+  expect(ticket).toMatch(
+    /Attribute full-suite runs and project-wide coverage thresholds to CI/i,
+  );
+  expect(ticket).toContain("residual risk under `Risks` in `## Handoff`");
+
+  const ticketSpec = readShared("skills", "ticket-spec", "SKILL.md");
+  expect(ticketSpec).toMatch(
+    /Attribute deferred full-suite runs and whole-project coverage thresholds to CI/i,
+  );
+  expect(ticketSpec).toContain("residual risk");
+  expect(ticketSpec).toContain("Difficulty tier × harness routing table");
+
+  const factorySkill = readShared("skills", "factory", "SKILL.md");
+  expect(factorySkill).toContain("Non-blocking coordinator default");
+  expect(factorySkill).toContain("reviewer != implementer");
+  expect(factorySkill).toContain("bun orchestrator/pulse.mjs");
+
+  const orchestrate = readShared("skills", "factory-orchestrate", "SKILL.md");
+  expect(orchestrate).toContain("## Non-blocking coordinator default");
+  expect(orchestrate).toContain("## Difficulty tier × harness routing");
+  expect(orchestrate).toContain("reviewer != implementer");
+  expect(orchestrate).toContain("`tier:light`");
+  expect(orchestrate).toContain("`tier:standard`");
+  expect(orchestrate).toContain("`tier:strong`");
+  expect(orchestrate).toContain("`inherit`");
+  expect(orchestrate).toContain(
+    "## Capacity-aware concurrency and bundle slots",
+  );
+  expect(orchestrate).toContain("bun orchestrator/pulse.mjs");
+  expect(orchestrate).toContain("bundle/PR slots");
+});

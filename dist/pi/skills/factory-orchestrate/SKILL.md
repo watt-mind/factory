@@ -24,6 +24,29 @@ Every topology obeys `shared/floor.md`:
 4. **Never poll with `sleep N`:** Wait on native turn/message notifications, process completion (`wait`), or bounded condition checks (`gh run watch <id> --exit-status --interval 60`).
 5. **Never trust a subagent summary blindly:** Check claims against the actual git diff, `origin/<base>@<sha>`, and real test/CI outputs in your own turn.
 
+## Non-blocking coordinator default
+
+Keep the main session unblocked for steering, cross-slice seams, and final verification gates. Delegate leaf implementation, read-only exploration, and slow test/build runs to isolated subagents with explicit `Owned Paths` and verification commands, reserving main context for integration and decisions.
+
+**Hard invariant (`reviewer != implementer`):** Review and critique must run in a separate agent conversation (and separate model or harness family where available). The implementing agent never self-approves its own diff.
+
+## Difficulty tier × harness routing
+
+Route subagents by difficulty tier (`tier:light`, `tier:standard`, `tier:strong`) and role:
+
+| Difficulty / Role | Claude Code                                 | Codex / Cursor                  | Pi                              |
+| :---------------- | :------------------------------------------ | :------------------------------ | :------------------------------ |
+| `tier:light`      | `haiku` / `sonnet`                          | fast (`sol` / fast)             | `muse-spark`                    |
+| `tier:standard`   | `sonnet` (or `opus` for multi-module seams) | `sol` / `wonder`                | `muse` / `wonder`               |
+| `tier:strong`     | `opus`                                      | `sol` / `opus`-class            | `wonder` / `opus`-class         |
+| `reviewer`        | separate `opus` (`factory-merge-reviewer`)  | separate `wonder` / cross-model | separate `wonder` / cross-model |
+
+**Fallback chain:** Fall back to the harness default (`inherit`) if a tier model is unavailable or quota-limited.
+
+## Capacity-aware concurrency and bundle slots
+
+Check `bun orchestrator/pulse.mjs` (or `factory pulse`) and read `CAPACITY & FLOW` (`DRAIN_MERGES_FIRST`, `HOLD_OR_BUNDLE`, `WIDEN`) before widening parallel lanes. Never widen on backlog depth alone — widen only on `mergedLastHour` flow and runner headroom. When CI or review capacity is the binding constraint (`HOLD_OR_BUNDLE`), coalesce 3–6 related low-risk tickets with disjoint `Owned Paths` into cohesive bundles: each bundle shares one worktree, branch, and PR, and the concurrency cap counts **bundle/PR slots** rather than raw ticket count.
+
 ## Choose one topology
 
 Pick the topology that fits the task rather than spawning agents for show:
