@@ -12,9 +12,16 @@
  * `@testing-library/react` (whose module-level `screen` binds to document.body
  * at import time). Use the queries returned by `render()`, not `screen`.
  */
+import { afterEach } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
 GlobalRegistrator.register();
+
+// Tests that mutate window.location.hash (e.g. ?project=...) otherwise leak
+// active route/project state across subsequent tests in the same bun process.
+afterEach(() => {
+  window.location.hash = "";
+});
 
 // happy-dom supplies a real fetch and defaults its document origin to
 // http://localhost/. An api method that a component test forgot to stub would
