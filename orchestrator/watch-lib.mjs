@@ -393,6 +393,8 @@ const KNOWN_FACTORY_COMMANDS = new Set([
   "retro",
   "audit",
   "report",
+  "recap",
+  "recap-video",
   "capture",
   "friction",
   "next",

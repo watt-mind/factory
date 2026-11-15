@@ -68,4 +68,4 @@ factory state record --type friction --repo <repo> --issues "OPS-123"
 6. Holds without answers → digest / unblock (alternate)
 7. Main loop idle + `--include-sweep` → sweep
 
-Retro, garden, ship, verify-deploy, audit, and friction capture are **not** auto-selected — run those on cadence or explicitly.
+Retro, garden, ship, verify-deploy, audit, friction capture, recap, and recap-video are **not** auto-selected — run those on cadence or explicitly.

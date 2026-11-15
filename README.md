@@ -148,6 +148,8 @@ repo-local or built-in command of the same name.
 | `/factory-friction`      | Files harness friction seen in an interactive session, where no transcript exists                                       |
 | `/factory-retro`         | Turns measured friction into harness changes                                                                            |
 | `/factory-report`        | Read-only pipeline snapshot across the configured repos                                                                 |
+| `/factory-recap`         | Read-only catch-up on what changed since check-in and every decision waiting on the operator                            |
+| `/factory-recap-video`   | Silent, subtitled landscape MP4 catch-up walkthrough paired with self-contained operator decision cards                 |
 | `/factory-next`          | Picks the one next stage for this repo (diagnoses by default; runs it with `--apply`)                                   |
 
 ### `factory status` — the everyday hub
