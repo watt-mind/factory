@@ -82,9 +82,10 @@ repos:
     merge_ci:
       # Fallback workflow when GitHub branch protection returns no contexts.
       workflow: CI
-      # Unique checks required from that fallback workflow.
+      # Unique checks required from that fallback workflow. Verify already
+      # gates Shadow runner fleet available on the self-hosted lane and expects
+      # it to be skipped on the cloud lane.
       required_checks:
-        - Shadow runner fleet available
         - Verify
     # Jobs that are red by design or by policy and must never raise an alarm
     # (WM-1103). `factory ci-health` ignores them when it looks for the same job

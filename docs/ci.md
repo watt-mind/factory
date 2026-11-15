@@ -77,7 +77,7 @@ GitHub's `ready_for_review` event starts a fresh workflow on the ready head. Bot
 
 ## Lint
 
-`Full verification` runs `bun run lint --max-warnings=621` (WM-607) right after installing
+`Full verification` runs `bun run lint --max-warnings=627` (WM-607) right after installing
 `event-runtime/web` deps and before the prettier check. `eslint.config.mjs` at
 repo root covers `**/*.{mjs,js,jsx}` with `@eslint/js` recommended, and
 `event-runtime/web/**/*.{ts,tsx}` with `typescript-eslint` recommended plus
@@ -150,7 +150,7 @@ After changing the workflow:
    gh run list --workflow CI --event pull_request --limit 20
    ```
 
-3. For each relevant run, inspect step timestamps with `gh run view <RUN_ID>` and confirm the interval from `Acquire host verify lock` completing through `Release host verify lock` does not overlap the equivalent `Full verification` or Browser E2E interval from another Factory workflow run. `Fast unit tests` is expected to overlap that interval.
+3. For each relevant run, inspect step timestamps with `gh run view <RUN_ID>` and confirm `Full verification` and `Browser E2E` jobs only run on the `verify-lane` runners and do not overlap more than the configured `verify-lane` capacity. `Fast unit tests` is expected to run concurrently on the general `shadow` pool.
 
 A failed or cancelled test job breaks the streak. Record the five develop run URLs in the validating ticket or merge handoff.
 
@@ -160,8 +160,8 @@ A failed or cancelled test job breaks the streak. Record the five develop run UR
 
 - **Gitleaks** — `gitleaks git --no-banner --redact` over the PR's base..head range (or the last commit on a branch push). Honours a repo-root `.gitleaks.toml` if one is added. Binary resolves from PATH, then `~/.local/bin/gitleaks`, then a GitHub Releases download (not a marketplace action) on first use per runner host.
 - **Semgrep** — `uvx semgrep scan --config p/security-audit --error --metrics=off .`, scoped by `.semgrepignore` (generated output, vendor trees, fixtures, lockfiles). `uv`/`uvx` installs from astral.sh if missing on the host.
-- **Actionlint** — `actionlint -color .github/workflows/*.yml`. `.github/actionlint.yaml` declares the repo's custom self-hosted runner labels (`shadow`, `smoke-test`) so they don't flag as unknown; real shellcheck findings on `run:` blocks get fixed or suppressed inline with a reason, never blanket-disabled.
-- **CodeQL** — gated behind `if: ${{ vars.CODEQL_ENABLED == 'true' }}` and currently a placeholder: this repo is private with no GitHub Advanced Security (`code-scanning/default-setup` returns 403). Flip the `CODEQL_ENABLED` repository variable and replace the placeholder step with `github/codeql-action` init/analyze once GHAS is available (project-conventions.md §3D).
+- **Actionlint** — `actionlint -color .github/workflows/*.yml`. `.github/actionlint.yaml` declares the repo's custom self-hosted runner labels (`shadow`, `smoke-test`, `verify-lane`) so they don't flag as unknown; real shellcheck findings on `run:` blocks get fixed or suppressed inline with a reason, never blanket-disabled.
+- **CodeQL** — runs `github/codeql-action/init@v4` and `analyze@v4` for `javascript-typescript` (`build-mode: none`, `threads: 4`, `ram: 8192`). Internal PRs and branch pushes run on `shadow` (serialized via `codeql-shadow-host` so scans don't starve the host); untrusted fork PRs run isolated on `ubuntu-latest`.
 
 Run the same tools locally before pushing with `factory security` (Gitleaks + Semgrep + Actionlint, plus Ruff/pip-audit when a repo has adopted the Python tier) — see `lib/security-check.sh`. Local and CI use identical tool invocations and config files (`.gitleaks.toml`, `.semgrepignore`) so a clean local run predicts a clean CI run.
 
@@ -191,7 +191,7 @@ use Playwright's downloaded Chromium instead of system Chrome. The pinned
 `.github/workflows/e2e.yml` is deliberately opt-in while the suite proves
 stable. It runs for a pull request only when that PR has the `run-e2e` label,
 and it can always be started manually with `workflow_dispatch`. The workflow
-uses the shared verify lock to serialize against every other test job on the
-self-hosted runner, installs Playwright's Chromium build (cached in the
-runner's `~/.cache/ms-playwright`, keyed on the pinned version), and runs the
-same `bun run test:e2e` command.
+runs on `[self-hosted, verify-lane]` to serialize against every other heavy
+test job on the self-hosted runner, installs Playwright's Chromium build
+(cached in the runner's `~/.cache/ms-playwright`, keyed on the pinned version
+and guarded by `flock`), and runs the same `bun run test:e2e` command.

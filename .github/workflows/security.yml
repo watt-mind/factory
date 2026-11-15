@@ -51,7 +51,7 @@ jobs:
     name: Pinned tools forced-install smoke
     needs: github-paths-changed
     if: >-
-      ${{ always() && (github.event_name == 'workflow_dispatch' ||
+      ${{ !cancelled() && (github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'pull_request' && needs.github-paths-changed.outputs.github_changed == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -259,14 +259,14 @@ jobs:
 
   codeql:
     name: CodeQL
-    # Keep CodeQL on the labeled self-hosted runner used by the previous
-    # GitHub-managed default setup. Its explicit resource cap prevents a scan
-    # from consuming every CPU and nearly all RAM on the shared host. This
-    # group spans PRs and branches because they share that one host.
+    # Keep CodeQL for internal branches/PRs on the labeled self-hosted runner
+    # with explicit resource caps, and isolate fork PRs on ubuntu-latest per OSS
+    # security policy (WM-950). The shadow concurrency group spans internal PRs
+    # and branches so only one scan runs at a time on the shared host.
     concurrency:
-      group: codeql-shadow-host
+      group: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && format('codeql-fork-{0}', github.event.pull_request.number) || 'codeql-shadow-host' }}
       cancel-in-progress: false
-    runs-on: shadow
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || 'shadow' }}
     timeout-minutes: 120
     permissions:
       actions: read

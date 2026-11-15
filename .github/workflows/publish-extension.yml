@@ -45,6 +45,10 @@ jobs:
           # Prepends the pinned bun to GITHUB_PATH; a runner bun of another
           # version is never reused (WM-1137).
           .github/scripts/install-pinned-tools.sh bun
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
       - name: Require NPM_TOKEN
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

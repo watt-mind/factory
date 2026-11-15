@@ -242,25 +242,9 @@ jobs:
           git diff --exit-code
 
       - name: Measure shared-host load factor
+        if: runner.environment == 'self-hosted'
         shell: bash
-        run: |
-          set -euo pipefail
-          cpu_count="$(nproc)"
-          runner_jobs="$(pgrep -fc 'Runner\.Worker' || true)"
-          read -r _ _ _ runnable _ < /proc/loadavg
-          runnable="${runnable%%/*}"
-          runner_jobs="${runner_jobs:-1}"
-          pressure="$runner_jobs"
-          if [ "$runnable" -gt "$pressure" ]; then pressure="$runnable"; fi
-          load_factor="$(awk -v pressure="$pressure" -v cpu_count="$cpu_count" '
-            BEGIN {
-              load_factor = 1 + pressure / cpu_count
-              if (load_factor > 4) load_factor = 4
-              printf "%.2f", load_factor
-            }
-          ')"
-          echo "CI_LOAD_FACTOR=$load_factor" >> "$GITHUB_ENV"
-          echo "Spawn-test load factor: $load_factor ($pressure runnable/jobs across $cpu_count CPUs)."
+        run: .github/scripts/load-factor.sh
 
       - name: Test event-runtime library
         # Spawn-heavy suites can exceed Bun's 5s default on the shared host.
@@ -367,25 +351,9 @@ jobs:
           git diff --exit-code
 
       - name: Measure shared-host load factor
+        if: runner.environment == 'self-hosted'
         shell: bash
-        run: |
-          set -euo pipefail
-          cpu_count="$(nproc)"
-          runner_jobs="$(pgrep -fc 'Runner\.Worker' || true)"
-          read -r _ _ _ runnable _ < /proc/loadavg
-          runnable="${runnable%%/*}"
-          runner_jobs="${runner_jobs:-1}"
-          pressure="$runner_jobs"
-          if [ "$runnable" -gt "$pressure" ]; then pressure="$runnable"; fi
-          load_factor="$(awk -v pressure="$pressure" -v cpu_count="$cpu_count" '
-            BEGIN {
-              load_factor = 1 + pressure / cpu_count
-              if (load_factor > 4) load_factor = 4
-              printf "%.2f", load_factor
-            }
-          ')"
-          echo "CI_LOAD_FACTOR=$load_factor" >> "$GITHUB_ENV"
-          echo "Spawn-test load factor: $load_factor ($pressure runnable/jobs across $cpu_count CPUs)."
+        run: .github/scripts/load-factor.sh
 
       - name: Run timing-group tests
         shell: bash
@@ -682,25 +650,9 @@ jobs:
           fi
 
       - name: Measure shared-host load factor
+        if: runner.environment == 'self-hosted'
         shell: bash
-        run: |
-          set -euo pipefail
-          cpu_count="$(nproc)"
-          runner_jobs="$(pgrep -fc 'Runner\.Worker' || true)"
-          read -r _ _ _ runnable _ < /proc/loadavg
-          runnable="${runnable%%/*}"
-          runner_jobs="${runner_jobs:-1}"
-          pressure="$runner_jobs"
-          if [ "$runnable" -gt "$pressure" ]; then pressure="$runnable"; fi
-          load_factor="$(awk -v pressure="$pressure" -v cpu_count="$cpu_count" '
-            BEGIN {
-              load_factor = 1 + pressure / cpu_count
-              if (load_factor > 4) load_factor = 4
-              printf "%.2f", load_factor
-            }
-          ')"
-          echo "CI_LOAD_FACTOR=$load_factor" >> "$GITHUB_ENV"
-          echo "Spawn-test load factor: $load_factor ($pressure runnable/jobs across $cpu_count CPUs)."
+        run: .github/scripts/load-factor.sh
 
       - name: Integration and spawn tests
         # event-runtime/lib runs in the separately rerunnable fast-unit job.
@@ -765,7 +717,7 @@ jobs:
 
       - name: E2E demo runtime seed and verify
         run: |
-          set -e
+          set -euo pipefail
           # Ask the OS for a free loopback port instead of sharing a fixed
           # one with concurrent Verify jobs on this self-hosted host.
           PORT="$(bun -e 'const probe = Bun.serve({ port: 0, fetch: () => new Response("") }); console.log(probe.port); probe.stop(true)')"
@@ -782,7 +734,7 @@ jobs:
           WORK_PID=$!
 
           cleanup() {
-            kill -9 $SERVE_PID $WORK_PID 2>/dev/null || true
+            kill -9 "$SERVE_PID" "$WORK_PID" 2>/dev/null || true
             rm -rf "$DIR"
           }
           trap cleanup EXIT
