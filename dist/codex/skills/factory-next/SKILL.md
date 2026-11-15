@@ -1,6 +1,6 @@
 ---
 name: factory-next
-description: Recommend and optionally run the next factory stage for this repo
+description: "Recommend and optionally run the next factory stage for this repo. Invoke only when the user explicitly asks to run /factory-next or the factory-next workflow."
 ---
 
 # factory-next

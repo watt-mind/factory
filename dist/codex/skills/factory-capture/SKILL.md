@@ -1,6 +1,6 @@
 ---
 name: factory-capture
-description: File a Linear issue from this conversation, per the ai:agent-ready protocol — capture only, never implement
+description: "File a Linear issue from this conversation, per the ai:agent-ready protocol — capture only, never implement. Invoke only when the user explicitly asks to run /factory-capture or the factory-capture workflow."
 ---
 
 # factory-capture

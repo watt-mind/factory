@@ -1,6 +1,6 @@
 ---
 name: factory-triage
-description: Find open Linear issues for this repo and triage them toward agent-ready
+description: "Find open Linear issues for this repo and triage them toward agent-ready. Invoke only when the user explicitly asks to run /factory-triage or the factory-triage workflow."
 ---
 
 # factory-triage

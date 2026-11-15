@@ -201,6 +201,7 @@ test("emit purges orphaned commands, skills, and prompts from every output tree"
     "dist/codex/skills/orphaned-skill/SKILL.md",
     "dist/gemini/skills/orphaned-skill/SKILL.md",
     "dist/cursor/commands/orphaned-command.md",
+    "dist/cursor/skills/orphaned-skill/SKILL.md",
     "dist/pi/skills/orphaned-skill/SKILL.md",
     "dist/pi/prompts/orphaned-command.md",
   ].map((file) => path.join(ROOT, file));
@@ -423,4 +424,118 @@ test("sync-floor writes the running checkout, never the configured one", () => {
     rmSync(fixture, { recursive: true, force: true });
     rmSync(configured, { recursive: true, force: true });
   }
+});
+
+test("emit writes Cursor skills matching shared/skills/", () => {
+  for (const skill of ["ticket-spec", "factory-handoff"]) {
+    const sharedFile = path.join(ROOT, "shared", "skills", skill, "SKILL.md");
+    const cursorFile = path.join(
+      ROOT,
+      "dist",
+      "cursor",
+      "skills",
+      skill,
+      "SKILL.md",
+    );
+    expect(existsSync(cursorFile)).toBe(true);
+    expect(readFileSync(cursorFile, "utf8")).toBe(
+      readFileSync(sharedFile, "utf8"),
+    );
+  }
+});
+
+test("emit quotes and scopes command-skill descriptions for Codex and Gemini", () => {
+  for (const harness of ["codex", "gemini"]) {
+    const skillText = readFileSync(
+      path.join(ROOT, "dist", harness, "skills", "factory-ship", "SKILL.md"),
+      "utf8",
+    );
+    const fmMatch = skillText.match(/^---\n([\s\S]*?)\n---\n/);
+    expect(fmMatch).not.toBeNull();
+    expect(fmMatch[1]).toMatch(/^description:\s+".+"$/m);
+    const parsed = Bun.YAML.parse(fmMatch[1]);
+    expect(parsed.name).toBe("factory-ship");
+    expect(parsed.description).toContain(
+      "Invoke only when the user explicitly asks to run /factory-ship or the factory-ship workflow.",
+    );
+  }
+
+  const fixture = makeEmitFixture();
+  try {
+    writeFileSync(
+      path.join(fixture, "shared", "commands", "factory-colon-test.md"),
+      "---\ndescription: Release: open a PR and watch: checks\n---\n\nRun it.\n",
+    );
+    const result = Bun.spawnSync({
+      cmd: ["bun", "build/emit.mjs"],
+      cwd: fixture,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(0);
+    for (const harness of ["codex", "gemini"]) {
+      const generated = readFileSync(
+        path.join(
+          fixture,
+          "dist",
+          harness,
+          "skills",
+          "factory-colon-test",
+          "SKILL.md",
+        ),
+        "utf8",
+      );
+      const fmMatch = generated.match(/^---\n([\s\S]*?)\n---\n/);
+      expect(fmMatch).not.toBeNull();
+      const parsed = Bun.YAML.parse(fmMatch[1]);
+      expect(parsed.description).toBe(
+        "Release: open a PR and watch: checks. Invoke only when the user explicitly asks to run /factory-colon-test or the factory-colon-test workflow.",
+      );
+    }
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("ticket-spec and factory-handoff route human holds to Blocked + ai:blocked rather than Triage", () => {
+  const ticketSpec = readFileSync(
+    path.join(ROOT, "shared", "skills", "ticket-spec", "SKILL.md"),
+    "utf8",
+  );
+  const factoryHandoff = readFileSync(
+    path.join(ROOT, "shared", "skills", "factory-handoff", "SKILL.md"),
+    "utf8",
+  );
+  expect(ticketSpec).not.toMatch(/Leave in `Triage`/i);
+  expect(ticketSpec).toContain("`Blocked`");
+  expect(ticketSpec).toContain("`ai:blocked`");
+  expect(ticketSpec).toContain("`ai:agent-ready`");
+
+  expect(factoryHandoff).not.toMatch(
+    /remains\s+`?Triage`?|leave it in\s+`?Triage`?/i,
+  );
+  expect(factoryHandoff).toContain("`Blocked`");
+  expect(factoryHandoff).toContain("`ai:blocked`");
+});
+
+test("factory-work queries the queue through factory ticket rather than Linear MCP", () => {
+  const factoryWork = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-work.md"),
+    "utf8",
+  );
+  expect(factoryWork).not.toMatch(/Linear MCP|linear_common/);
+  expect(factoryWork).toContain("`factory ticket");
+});
+
+test("factory-merge uses Handoff/PR visual artifacts and an 8-suspect batch cap", () => {
+  const factoryMerge = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-merge.md"),
+    "utf8",
+  );
+  expect(factoryMerge).not.toMatch(
+    /ticket's attached screenshots|capture and attach them yourself/,
+  );
+  expect(factoryMerge).toContain("visual_evidence_missing");
+  expect(factoryMerge).toContain("at most 8 suspects");
+  expect(factoryMerge).not.toContain("at most 5 suspects");
 });

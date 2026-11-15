@@ -20,6 +20,7 @@ import {
   describeToolCall,
   execute,
   extractUsage,
+  HARNESS_LAYOUT,
   isHarnessDenial,
   KILL_GRACE_MS,
   mapStreamEvent,
@@ -933,5 +934,46 @@ if (behavior === "emit_error_tool_result") {
     });
     expect(CliNotFoundError).toBeDefined();
     expect(KILL_GRACE_MS).toBe(30_000);
+  });
+});
+
+describe("HARNESS_LAYOUT", () => {
+  test("maps skills, commands, and subagents to Cursor workspace paths", () => {
+    expect(HARNESS_LAYOUT.skills.source("ticket-spec")).toEqual([
+      "dist",
+      "cursor",
+      "skills",
+      "ticket-spec",
+    ]);
+    expect(HARNESS_LAYOUT.skills.dest("ticket-spec")).toEqual([
+      ".cursor",
+      "skills",
+      "ticket-spec",
+    ]);
+    expect(HARNESS_LAYOUT.skills.type).toBe("dir");
+    expect(HARNESS_LAYOUT.commands.source("factory-work")).toEqual([
+      "dist",
+      "cursor",
+      "commands",
+      "factory-work.md",
+    ]);
+    expect(HARNESS_LAYOUT.commands.dest("factory-work")).toEqual([
+      ".cursor",
+      "commands",
+      "factory-work.md",
+    ]);
+    expect(HARNESS_LAYOUT.commands.type).toBe("file");
+    expect(HARNESS_LAYOUT.subagents.source("factory-ux-critic")).toEqual([
+      "dist",
+      "cursor",
+      "agents",
+      "factory-ux-critic.md",
+    ]);
+    expect(HARNESS_LAYOUT.subagents.dest("factory-ux-critic")).toEqual([
+      ".cursor",
+      "agents",
+      "factory-ux-critic.md",
+    ]);
+    expect(HARNESS_LAYOUT.subagents.type).toBe("file");
   });
 });

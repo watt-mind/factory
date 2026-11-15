@@ -25,7 +25,7 @@ If the ticket already carries a `tier:*` label, leave it — don't recompute or 
 
 **Answerable from written decisions** — intent is unclear but already recorded: the repo's `docs/product-decisions.md`, `docs/`, the Linear project Overview, or a prior ticket in the same area. Resolve it, **cite where you found it** in the ticket so the next agent doesn't re-litigate, then promote.
 
-**Genuinely needs a human** — a real product decision, a missing credential, a priority call. Leave in `Triage`, comment the specific question phrased so one reply unblocks it, and batch every such question into a single notification at the end of the run. Never a ping per ticket.
+**Genuinely needs a human** — a real product decision, a missing credential, a priority call. Move to `Blocked` + `ai:blocked`, strip `ai:agent-ready` if present (never leave an evaluated hold in `Triage`, where subsequent triage ticks will re-derive and re-comment it indefinitely), comment the specific question phrased so one reply unblocks it, and batch every such question into a single notification at the end of the run. Never a ping per ticket.
 
 ## Rules that keep this honest
 

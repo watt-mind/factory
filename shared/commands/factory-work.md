@@ -16,7 +16,7 @@ Interpret $ARGUMENTS as specific issue IDs, a total ticket cap, and/or an in-fli
 
 ## 1. Build the queue
 
-Resolve the team from this repo (§1 mapping). Query `state:Todo AND label:ai:agent-ready AND assignee:none`, sorted priority asc then createdAt asc (Linear MCP; on failure retry once, then `linear_common` GraphQL). Fetch each candidate's full description and confirm it has all five §5 sections — a ticket missing one goes back to `Triage` with a comment, not into the queue.
+Resolve the repo/team from this checkout (§1 mapping). Query the ready queue via `factory ticket queue` (`state:Todo`, `ai:agent-ready`, unassigned, sorted priority asc then createdAt asc; use `factory ticket get <ID>` to read each candidate's full description, falling back to `factory ticket raw` only where documented in the floor). Confirm every candidate has all five §5 sections — a ticket missing one goes back to `Triage` with a comment, not into the queue.
 
 Show me the queue (ticket, title, owned paths) before starting, then proceed without waiting for approval.
 
