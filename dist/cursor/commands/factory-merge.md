@@ -10,10 +10,12 @@ Interpret $ARGUMENTS as specific PR numbers or Linear issue IDs; default is ever
 
 ### 1. Review first — always, even when CI is green
 
+When the operator asks to review and live-verify open PRs **without merging** (or passes `--no-merge` / `--verify-only`), run `/factory-verify` instead (`gh pr merge` is forbidden there).
+
 **Two-stage bounded classification:** Run Stage A before any browser or deep exploration pass:
 
 - **Stage A — Cheap browser-free gate first:** Evaluate diff size and `Owned Paths`, `factory escalate --repo <name> --pr <PR>` predicates, CI check-runs, automated/human review state, and mergeability (behind/conflicting). Stop immediately without running Playwright or deep UI/code exploration when a PR resolves to `reviewable` (pending/unresolved review), `fixable` (`FIX`), or `ESCALATE`.
-- **Stage B — Full classifier only for `MERGE` candidates:** Run parallel Explore checks, Playwright UI verification, and deep visual/invariant inspection only on PRs that pass Stage A as `MERGE` candidates.
+- **Stage B — Full classifier only for `MERGE` candidates:** Run parallel Explore checks, Playwright UI verification, and deep visual/invariant inspection only on PRs that pass Stage A as `MERGE` candidates. If a PR already carries a `## Verification Receipt` (`Verdict: PASS (MERGE-READY)` or `PASS+NOTES`) whose recorded `git patch-id` matches the current head (`git diff origin/<base>...<sha> | git patch-id --stable`) and CI is green, skip redundant browser re-driving during Stage B.
 
 **Start from the ticket's `## Handoff` comment** — dispatch posts one per PR (PR link, verification result, UX critique verdict, files vs `Owned Paths`, risks). It tells you where to concentrate: a stated risk gets read first, a `FIX-FIRST resolved` critique means re-checking those fixes, an exceptions line on Files means the `Owned Paths` check below already has a suspect. A missing or vague Handoff is a (minor) protocol finding to note — and a reason to trust the diff less, not to skip the review.
 

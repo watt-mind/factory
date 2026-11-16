@@ -1127,3 +1127,91 @@ test("emitToNodes fails closed when an explicit --node is unknown or fails", () 
   expect(failRes.results).toHaveLength(1);
   expect(failErrors.join("\n")).toContain("failed   mac-mini (mac-mini.local)");
 });
+
+test("emit packages /factory-verify, factory-verify-create, and factory-verify-maintain across all five harnesses", () => {
+  const verifySrc = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-verify.md"),
+    "utf8",
+  );
+  expect(verifySrc).toContain("--report-only");
+  expect(verifySrc).toContain("--deploy");
+  expect(verifySrc).toContain("reviewer != implementer");
+  expect(verifySrc).toContain("git patch-id --stable");
+  expect(verifySrc).toContain("## Verification Receipt");
+  expect(verifySrc).toMatch(/2\s*rounds|max 2 rounds/i);
+  expect(verifySrc).toContain("Never merge");
+
+  const cmdOutputs = [
+    ["plugins", "core", "commands", "factory-verify.md"],
+    ["dist", "codex", "skills", "factory-verify", "SKILL.md"],
+    ["dist", "gemini", "skills", "factory-verify", "SKILL.md"],
+    ["dist", "cursor", "commands", "factory-verify.md"],
+    ["dist", "pi", "prompts", "factory-verify.md"],
+  ];
+  for (const rel of cmdOutputs) {
+    expect(existsSync(path.join(ROOT, ...rel))).toBe(true);
+  }
+
+  const harnessSkillDirs = [
+    ["plugins", "core", "skills"],
+    ["dist", "cursor", "skills"],
+    ["dist", "codex", "skills"],
+    ["dist", "gemini", "skills"],
+    ["dist", "pi", "skills"],
+  ];
+  for (const skill of ["factory-verify-create", "factory-verify-maintain"]) {
+    const src = path.join(ROOT, "shared", "skills", skill, "SKILL.md");
+    expect(existsSync(src)).toBe(true);
+    const fmMatch = readFileSync(src, "utf8").match(/^---\n([\s\S]*?)\n---\n/);
+    expect(fmMatch).not.toBeNull();
+    const parsed = Bun.YAML.parse(fmMatch[1]);
+    expect(parsed.name).toBe(skill);
+    expect(typeof parsed.description).toBe("string");
+    expect(parsed.description.trim().length).toBeGreaterThan(0);
+
+    for (const dir of harnessSkillDirs) {
+      expect(existsSync(path.join(ROOT, ...dir, skill, "SKILL.md"))).toBe(true);
+    }
+  }
+
+  for (const relParts of [
+    ["factory-verify-create", "references", "feature-map-example", "README.md"],
+    [
+      "factory-verify-create",
+      "references",
+      "feature-map-example",
+      "create-note.md",
+    ],
+  ]) {
+    expect(existsSync(path.join(ROOT, "shared", "skills", ...relParts))).toBe(
+      true,
+    );
+    for (const dir of harnessSkillDirs) {
+      expect(existsSync(path.join(ROOT, ...dir, ...relParts))).toBe(true);
+    }
+  }
+
+  const readme = readFileSync(path.join(ROOT, "README.md"), "utf8");
+  expect(readme).toContain("`/factory-verify`");
+
+  const factorySkill = readFileSync(
+    path.join(ROOT, "shared", "skills", "factory", "SKILL.md"),
+    "utf8",
+  );
+  expect(factorySkill).toContain("/factory-verify");
+  expect(factorySkill).toContain("factory-verify-create");
+  expect(factorySkill).toContain("factory-verify-maintain");
+
+  const merge = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-merge.md"),
+    "utf8",
+  );
+  expect(merge).toContain("/factory-verify");
+  expect(merge).toContain("## Verification Receipt");
+
+  const critic = readFileSync(
+    path.join(ROOT, "shared", "agents", "factory-ux-critic.md"),
+    "utf8",
+  );
+  expect(critic).toContain(".claude/skills/verify-*/SKILL.md");
+});

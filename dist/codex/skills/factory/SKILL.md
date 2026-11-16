@@ -38,11 +38,12 @@ Match the user's request to **one** mode below, read its playbook (or invoke the
 - **Unslop (`../factory-unslop/SKILL.md`):** Edit or write prose, PRs, docs, and skills with zero AI tells while preserving technical precision.
 - **Orchestrate (`../factory-orchestrate/SKILL.md`):** Interactive Swarm partitions, Arena bakeoffs in isolated sandboxes, or Producer -> Critic pipelines (distinct from `/factory-work` standing queue dispatch).
 - **Reflect (`../factory-reflect/SKILL.md`):** Mine the active session transcript via 3 read-only lenses + synthesizer into project-local `.claude/skills/`, `AGENTS.md`, or structural `Triage` tickets (distinct from harness `/factory-friction` and log metrics `/factory-retro`).
+- **Verify (`../factory-verify-create/SKILL.md`, `../factory-verify-maintain/SKILL.md`, `/factory-verify`):** Generate and maintain repo-local `.claude/skills/verify-<app>/` control skills and run pre-merge human-like E2E PR/branch verification.
 
 ### Existing Factory Lifecycle Commands
 
 If the request is a control-plane or release lifecycle operation, delegate directly to the dedicated command instead of duplicating it:
 
 - Ticket lifecycle: `/factory-ticket`, `/factory-work`, `/factory-capture`, `/factory-triage`, `/factory-unblock`
-- Review & landing: `/factory-merge`, `/factory-ship`, `/factory-verify-deploy`
+- Review & landing: `/factory-verify`, `/factory-merge`, `/factory-ship`, `/factory-verify-deploy`
 - Repo health & sweeps: `/factory-sweep`, `/factory-audit`, `/factory-garden`, `/factory-retro`, `/factory-friction`, `/factory-recap`
