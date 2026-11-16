@@ -31,6 +31,68 @@ export class RemoteWorkerConfigError extends Error {
   }
 }
 
+export const REMOTE_PATH_EXPORT =
+  'export PATH="$HOME/.bun/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH";';
+
+export const REMOTE_LINK_SCRIPT = [
+  'import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, symlinkSync, unlinkSync } from "node:fs";',
+  'import { homedir } from "node:os";',
+  'import path from "node:path";',
+  "const root = process.cwd();",
+  "const home = homedir();",
+  "const linkOne = (src, dst) => {",
+  "  mkdirSync(path.dirname(dst), { recursive: true });",
+  "  let existing = null;",
+  "  try { existing = lstatSync(dst); } catch {}",
+  "  if (existing) {",
+  "    if (!existing.isSymbolicLink()) return;",
+  "    unlinkSync(dst);",
+  "  }",
+  "  symlinkSync(src, dst);",
+  "};",
+  "const pairs = [",
+  '  ["dist/codex/skills", ".agents/skills"],',
+  '  ["dist/gemini/skills", ".gemini/skills"],',
+  '  ["dist/cursor/commands", ".cursor/commands"],',
+  '  ["dist/cursor/skills", ".cursor/skills"],',
+  '  ["dist/pi/prompts", ".pi/agent/prompts"],',
+  '  ["dist/pi/skills", ".pi/agent/skills"],',
+  '  ["dist/muse/skills", ".config/muse/skills"],',
+  '  ["dist/codex/agents", ".codex/agents"],',
+  '  ["dist/gemini/agents", ".gemini/agents"],',
+  '  ["dist/cursor/agents", ".cursor/agents"],',
+  '  ["dist/pi/agents", ".pi/agent/agents"],',
+  '  ["dist/muse/agents", ".config/muse/agents"],',
+  '  ["plugins/core/agents", ".claude/agents"],',
+  "];",
+  "let linked = 0;",
+  "for (const [srcRel, dstRel] of pairs) {",
+  "  const srcDir = path.join(root, srcRel);",
+  "  if (!existsSync(srcDir)) continue;",
+  "  for (const name of readdirSync(srcDir)) {",
+  "    linkOne(path.join(srcDir, name), path.join(home, dstRel, name));",
+  "    linked += 1;",
+  "  }",
+  "}",
+  'const binSrc = path.join(root, "bin/factory");',
+  'if (existsSync(binSrc)) { linkOne(binSrc, path.join(home, ".local/bin/factory")); linked += 1; }',
+  'const reposCfg = path.join(root, "config/repos.yaml");',
+  'const cmdsDir = path.join(root, "plugins/core/commands");',
+  "if (existsSync(reposCfg) && existsSync(cmdsDir)) {",
+  '  const cfg = Bun.YAML.parse(readFileSync(reposCfg, "utf8"));',
+  '  const cmdFiles = readdirSync(cmdsDir).filter((f) => f.endsWith(".md"));',
+  "  for (const repo of cfg?.repos ?? []) {",
+  '    const raw = String(repo?.path ?? "");',
+  "    if (!raw) continue;",
+  '    const repoPath = raw === "~" ? home : raw.startsWith("~/") ? path.join(home, raw.slice(2)) : raw;',
+  "    if (!existsSync(repoPath)) continue;",
+  '    const dst = path.join(repoPath, ".claude/commands");',
+  "    for (const f of cmdFiles) { linkOne(path.join(cmdsDir, f), path.join(dst, f)); linked += 1; }",
+  "  }",
+  "}",
+  "console.log(`linked ${linked} item(s)`);",
+].join(" ");
+
 /** Quote one value for a POSIX shell command. */
 export function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\"'\"'")}'`;
@@ -126,6 +188,7 @@ export function probeRemoteNode(
   const remotePath = node.factoryRoot;
   // Probe script: checks git sha, branch, arch, os, bun version, and running worker pid
   const probeScript = [
+    REMOTE_PATH_EXPORT,
     `REMOTE_DIR=${quoteRemotePath(remotePath)};`,
     `if [ -d "$REMOTE_DIR" ]; then`,
     `  cd "$REMOTE_DIR" 2>/dev/null;`,
@@ -230,6 +293,7 @@ export function deployRemoteWorker(node, { ref = null, spawnFn = null } = {}) {
 
   const deployScript = [
     `set -e;`,
+    REMOTE_PATH_EXPORT,
     `mkdir -p ${remotePath};`,
     `cd ${remotePath};`,
     `if [ ! -d ".git" ]; then`,
@@ -280,6 +344,7 @@ export function startRemoteWorker(node, { spawnFn = null } = {}) {
   const adaptersArg = (node.adapters || []).join(",");
 
   const startScript = [
+    REMOTE_PATH_EXPORT,
     `cd ${quoteRemotePath(remotePath)} 2>/dev/null || exit 1;`,
     `mkdir -p .factory/run;`,
     `${envVars}`,
@@ -473,8 +538,9 @@ export function emitRemoteNode(
 
   const linkScript = [
     `set -e;`,
+    REMOTE_PATH_EXPORT,
     `cd ${quoteRemotePath(node.factoryRoot)};`,
-    `bun build/emit.mjs --link --link-bin --link-repos 2>&1;`,
+    `bun -e ${shellQuote(REMOTE_LINK_SCRIPT)} 2>&1;`,
     `echo "EMIT_REMOTE_SUCCESS";`,
   ].join(" ");
 
