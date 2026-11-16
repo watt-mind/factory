@@ -582,6 +582,52 @@ export const MIGRATIONS = [
       `);
     },
   },
+  {
+    version: 20,
+    name: "github_intake_freshness_index",
+    up(db) {
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_events_source_admitted
+          ON events (source, admitted_at);
+      `);
+    },
+  },
+  {
+    version: 21,
+    name: "worker_skipped_run_diagnostics",
+    up(db) {
+      const columns = new Set(
+        db
+          .query(`PRAGMA table_info(workers)`)
+          .all()
+          .map((row) => row.name),
+      );
+      if (!columns.has("skipped_json")) {
+        db.exec(
+          `ALTER TABLE workers ADD COLUMN skipped_json TEXT NOT NULL DEFAULT '[]';`,
+        );
+      }
+    },
+  },
+  {
+    version: 22,
+    name: "events_subject_index",
+    up(db) {
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_events_subject ON events (subject);
+      `);
+    },
+  },
+  {
+    version: 23,
+    name: "merge_eligibility_event_type_index",
+    up(db) {
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_events_type_source
+          ON events (type, source);
+      `);
+    },
+  },
 ];
 
 export const CURRENT_SCHEMA_VERSION =

@@ -1,6 +1,6 @@
 import { tmpDir } from "../../test-support/tmp.mjs?file=event-runtime-lib-adapters-command-test-mjs";
-import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { FACTORY_ROOT } from "../config.mjs";
 import { openDb } from "../db.mjs";
@@ -186,6 +186,16 @@ describe("safeChildEnvironment", () => {
 });
 
 describe("execute", () => {
+  const originalControlApiToken = process.env.FACTORY_CONTROL_API_TOKEN;
+
+  afterEach(() => {
+    if (originalControlApiToken === undefined) {
+      delete process.env.FACTORY_CONTROL_API_TOKEN;
+    } else {
+      process.env.FACTORY_CONTROL_API_TOKEN = originalControlApiToken;
+    }
+  });
+
   test("exit 0 writes a factory.agent-result/v1 with the resolved command", async () => {
     const workspaceDir = ws();
     const outcome = await execute({
@@ -332,6 +342,32 @@ describe("execute", () => {
         else process.env[key] = value;
       }
     }
+  });
+
+  test("forwards the worker control bearer to a command child", async () => {
+    const workspaceDir = ws();
+    const binDir = tmpDir("evrt-command-factory-bin-");
+    const factory = path.join(binDir, "factory");
+    writeFileSync(
+      factory,
+      '#!/bin/sh\nprintf "%s\\n" "$FACTORY_CONTROL_API_TOKEN"\n',
+    );
+    chmodSync(factory, 0o755);
+    process.env.FACTORY_CONTROL_API_TOKEN = "worker-control-bearer";
+
+    const outcome = await execute({
+      spec: spec({}),
+      def: { ...def(["factory"]), mutating: false },
+      workspaceDir,
+      timeoutMs: 5000,
+      env: { PATH: `${binDir}${path.delimiter}${process.env.PATH}` },
+    });
+
+    expect(outcome).toEqual({ exitCode: 0, timedOut: false });
+    const result = JSON.parse(
+      readFileSync(path.join(workspaceDir, "result.json"), "utf8"),
+    );
+    expect(result.artifact.outputTail.trim()).toBe("worker-control-bearer");
   });
 
   test("writesResult leaves a command-authored result.json in place (WM-907)", async () => {

@@ -6,12 +6,17 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
 import {
+  ARTIFACT_TEMP_GRACE_MS,
   artifactPath,
+  artifactInventory,
+  artifactReferenceIndex,
   backfillResultArtifacts,
   findArtifact,
   hashFile,
@@ -51,6 +56,26 @@ describe("artifactPath", () => {
       /invalid artifact hash/,
     );
     expect(() => artifactPath("/store", null)).toThrow(/invalid artifact hash/);
+  });
+});
+
+describe("artifactInventory", () => {
+  test("skips an entry that vanishes after the directory is read", () => {
+    const storeRoot = tmp("evrt-inventory-store-");
+    mkdirSync(storeRoot, { recursive: true });
+    const survivingHash = "a".repeat(64);
+    const vanishedHash = "b".repeat(64);
+    writeFileSync(path.join(storeRoot, survivingHash), "survives");
+    // A dangling symlink gives statSync the same ENOENT result as a blob that
+    // a concurrent prune removed after readdirSync returned its name.
+    symlinkSync(
+      path.join(storeRoot, "no-longer-present"),
+      path.join(storeRoot, vanishedHash),
+    );
+
+    expect(artifactInventory(storeRoot).map(({ sha256 }) => sha256)).toEqual([
+      survivingHash,
+    ]);
   });
 });
 
@@ -195,6 +220,49 @@ describe("storeCollected (OPS-406)", () => {
     expect(stored[0].sizeBytes).toBe(Buffer.byteLength("identical content"));
   });
 
+  test("refreshes a stale deduplicated blob so pruning preserves it", () => {
+    const db = openDb(":memory:");
+    const storeRoot = tmp("evrt-store-");
+    const workspaceDir = tmp("evrt-ws-");
+    const file = path.join(workspaceDir, "valid.log");
+    const bytes = "identical content";
+    const hash = sha256Hex(Buffer.from(bytes));
+    const dest = path.join(storeRoot, hash);
+    const olderThanMs = 7 * 24 * 60 * 60 * 1000;
+    const staleAt = new Date(Date.now() - olderThanMs - 1);
+    writeFileSync(file, bytes);
+    mkdirSync(storeRoot, { recursive: true });
+    writeFileSync(dest, bytes);
+    utimesSync(dest, staleAt, staleAt);
+
+    storeCollected({
+      entries: [{ kind: "log", uri: `file://${file}`, sha256: hash }],
+      storeRoot,
+      workspaceDir,
+    });
+
+    expect(statSync(dest).mtimeMs).toBeGreaterThan(staleAt.getTime());
+    expect(pruneArtifacts(db, storeRoot, { olderThanMs })).toMatchObject({
+      deleted: 0,
+    });
+    expect(existsSync(dest)).toBe(true);
+
+    const untouched = makeStore(bytes);
+    utimesSync(
+      path.join(untouched.storeRoot, untouched.hash),
+      staleAt,
+      staleAt,
+    );
+    expect(
+      pruneArtifacts(db, untouched.storeRoot, { olderThanMs }),
+    ).toMatchObject({
+      deleted: 1,
+    });
+    expect(existsSync(path.join(untouched.storeRoot, untouched.hash))).toBe(
+      false,
+    );
+  });
+
   test("interrupted or failed write leaves no tmp files and no readable entry (OPS-439)", () => {
     const storeRoot = tmp("evrt-store-");
     const workspaceDir = tmp("evrt-ws-");
@@ -258,6 +326,27 @@ describe("result artifacts (WM-858)", () => {
     expect(storeResultArtifact({ artifact, artifactHash, storeRoot })).toEqual(
       stored,
     );
+  });
+
+  test("refreshes a stale deduplicated result blob so pruning preserves it", () => {
+    const db = openDb(":memory:");
+    const storeRoot = tmp("evrt-result-store-");
+    const artifact = { outcome: "UPDATED", pr: 669 };
+    const artifactHash = hashJson(artifact);
+    const hash = artifactHash.slice("sha256:".length);
+    const dest = path.join(storeRoot, hash);
+    const olderThanMs = 7 * 24 * 60 * 60 * 1000;
+    const staleAt = new Date(Date.now() - olderThanMs - 1);
+
+    storeResultArtifact({ artifact, artifactHash, storeRoot });
+    utimesSync(dest, staleAt, staleAt);
+    storeResultArtifact({ artifact, artifactHash, storeRoot });
+
+    expect(statSync(dest).mtimeMs).toBeGreaterThan(staleAt.getTime());
+    expect(pruneArtifacts(db, storeRoot, { olderThanMs })).toMatchObject({
+      deleted: 0,
+    });
+    expect(existsSync(dest)).toBe(true);
   });
 
   test("inventory and prune treat the singular result artifact as a live result reference", () => {
@@ -542,6 +631,125 @@ describe("store maintenance: referencedHashes, storeStats, pruneArtifacts, pinRu
     expect(pruned.deleted).toBe(1);
     expect(findArtifact(storeRoot, hash1)).not.toBeNull();
     expect(findArtifact(storeRoot, hash2)).toBeNull();
+  });
+
+  test("malformed result rows fail prune closed but do not hide valid catalogue rows", () => {
+    const db = openDb(":memory:");
+    const { storeRoot, hash: referencedHash } = makeStore("referenced");
+    const { hash: orphanHash } = makeStore("orphan", storeRoot);
+    const acceptedAt = new Date().toISOString();
+    db.query(
+      `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+       VALUES (?, 1, ?, 'sha256:x', '{}', '{}', ?)`,
+    ).run(
+      "run_valid",
+      JSON.stringify({
+        artifacts: [{ kind: "transcript", sha256: referencedHash }],
+      }),
+      acceptedAt,
+    );
+    db.query(
+      `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+       VALUES (?, 1, '{not json', 'sha256:x', '{}', '{}', ?)`,
+    ).run("run_invalid", acceptedAt);
+
+    const hashes = referencedHashes(db);
+    expect(hashes.has(referencedHash)).toBe(true);
+    expect(hashes.invalid).toBe(1);
+    expect(storeStats(db, storeRoot)).toMatchObject({
+      orphans: 1,
+      invalidResults: 1,
+    });
+    expect(artifactReferenceIndex(db).get(referencedHash)).toEqual([
+      expect.objectContaining({ runId: "run_valid", kind: "transcript" }),
+    ]);
+    expect(artifactInventory(storeRoot).map(({ sha256 }) => sha256)).toEqual(
+      expect.arrayContaining([referencedHash, orphanHash]),
+    );
+
+    expect(pruneArtifacts(db, storeRoot, { olderThanMs: -1 })).toEqual({
+      deleted: 0,
+      freedBytes: 0,
+      remainingOrphans: 1,
+      invalidResults: 1,
+    });
+    expect(findArtifact(storeRoot, orphanHash)).not.toBeNull();
+  });
+
+  test("prune reclaims only stale interrupted publish temp files and counts them in stats", () => {
+    const db = openDb(":memory:");
+    const storeRoot = tmp("evrt-store-");
+    mkdirSync(storeRoot, { recursive: true });
+    const now = Date.now();
+    const prefix = "a".repeat(64);
+    const oldTemp = path.join(storeRoot, `${prefix}.tmp.1.old`);
+    const freshTemp = path.join(storeRoot, `${prefix}.tmp.1.fresh`);
+    writeFileSync(oldTemp, "old");
+    writeFileSync(freshTemp, "fresh");
+    utimesSync(
+      oldTemp,
+      new Date(now - ARTIFACT_TEMP_GRACE_MS - 1),
+      new Date(now - ARTIFACT_TEMP_GRACE_MS - 1),
+    );
+    utimesSync(freshTemp, new Date(now), new Date(now));
+
+    expect(storeStats(db, storeRoot)).toMatchObject({
+      files: 0,
+      bytes: 0,
+      tempFiles: 2,
+      tempBytes: 8,
+    });
+    expect(pruneArtifacts(db, storeRoot, { now })).toEqual({
+      deleted: 1,
+      freedBytes: 3,
+      remainingOrphans: 0,
+    });
+    expect(existsSync(oldTemp)).toBe(false);
+    expect(existsSync(freshTemp)).toBe(true);
+  });
+
+  test("stale temp files are reclaimed even when a malformed result holds artifact deletion", () => {
+    const db = openDb(":memory:");
+    const { storeRoot, hash: orphanHash } = makeStore("orphan");
+    const now = Date.now();
+    const oldTemp = path.join(storeRoot, `${"b".repeat(64)}.tmp.1.old`);
+    writeFileSync(oldTemp, "old");
+    utimesSync(
+      oldTemp,
+      new Date(now - ARTIFACT_TEMP_GRACE_MS - 1),
+      new Date(now - ARTIFACT_TEMP_GRACE_MS - 1),
+    );
+    db.query(
+      `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+       VALUES (?, 1, '{not json', 'sha256:x', '{}', '{}', ?)`,
+    ).run("run_invalid", new Date().toISOString());
+
+    expect(pruneArtifacts(db, storeRoot, { now, olderThanMs: -1 })).toEqual({
+      deleted: 1,
+      freedBytes: 3,
+      remainingOrphans: 1,
+      invalidResults: 1,
+    });
+    expect(existsSync(oldTemp)).toBe(false);
+    expect(findArtifact(storeRoot, orphanHash)).not.toBeNull();
+  });
+
+  test("stats and prune skip entries that vanish between readdir and stat", () => {
+    const db = openDb(":memory:");
+    const { storeRoot, hash } = makeStore("stays");
+    // A dangling symlink stats like a blob a concurrent prune already removed:
+    // readdir lists it, stat reports ENOENT.
+    const vanished = path.join(storeRoot, "c".repeat(64));
+    symlinkSync(path.join(storeRoot, "never-written"), vanished);
+    expect(storeStats(db, storeRoot)).toMatchObject({
+      files: 1,
+      bytes: 5,
+      orphans: 1,
+    });
+    expect(
+      pruneArtifacts(db, storeRoot, { olderThanMs: -1, dryRun: true }),
+    ).toEqual({ deleted: 1, freedBytes: 5, remainingOrphans: 1 });
+    expect(findArtifact(storeRoot, hash)).not.toBeNull();
   });
 
   test("pinRunArtifact retrieves artifact hash by kind", () => {

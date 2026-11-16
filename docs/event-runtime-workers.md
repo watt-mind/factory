@@ -306,14 +306,14 @@ The worker materializes that declaration **after** workspace create and
    | -------- | ------------------------------------------------ | ------------------------------ | ------------------------- |
    | `claude` | `.claude/skills/<n>/` from `plugins/core/skills` | `.claude/commands/<n>.md`      | `.claude/agents/<n>.md`   |
    | `acp`    | same as `claude` (experimental, WM-937)          | same as `claude`               | same as `claude`          |
-   | `cursor` | **unsupported** (emit has none)                  | `.cursor/commands/<n>.md`      | `.cursor/agents/<n>.md`   |
+   | `cursor` | `.cursor/skills/<n>/` from `dist/cursor/skills`  | `.cursor/commands/<n>.md`      | `.cursor/agents/<n>.md`   |
    | `pi`     | `.pi/agent/skills/<n>/` from `dist/pi/skills`    | `.pi/agent/prompts/<n>.md`     | `.pi/agent/agents/<n>.md` |
    | `agy`    | `.gemini/skills/<n>/` from `dist/gemini/skills`  | same (commands emit as skills) | `.gemini/agents/<n>.md`   |
 
 3. Refuse with a typed reason, never spawn:
 
    - `harness_unknown_skill` / `_command` / `_subagent` — name not in the catalog;
-   - `harness_unsupported` — the adapter has no layout for that kind (cursor
+   - `harness_unsupported` — the adapter has no layout for that kind (hermes
      skills; fake/command/actions when anything is named);
    - `harness_unmaterializable` — catalog hit but emit output is missing or
      the dest would escape the workspace.
@@ -334,6 +334,23 @@ Auth stays in the real `$HOME`. Materialization adds the declared set to the
 workspace; it does not hide extra home-dir content the CLI may still load.
 
 ## 3. Stage 2 — workers on other nodes
+
+### Remote node checkout source
+
+Remote nodes are configured in `config/nodes.yaml`. A node may set `repo_url`
+to the clone URL the remote bootstrap uses, for example:
+
+```yaml
+nodes:
+  build-node:
+    host: build-node.example
+    factory_root: ~/Develop/factory
+    repo_url: ssh://git@example.com/engineering/factory.git
+```
+
+When omitted, `repo_url` defaults to
+`https://github.com/watt-mind/factory.git`. This permits forks, enterprise
+GitHub hosts, and SSH remotes without changing the worker deployment code.
 
 A `work` process on another machine talks to the authenticated `/worker/v1`
 control surface over HTTPS on the tailnet. It never opens SQLite or Postgres.

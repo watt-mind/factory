@@ -1,0 +1,26 @@
+{
+  "title": "celld-smoke input — cell coordinates and test payload",
+  "type": "object",
+  "required": ["cellId", "testKey", "testData"],
+  "additionalProperties": false,
+  "properties": {
+    "cellId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Identifier of the durable cell to connect to (e.g. article:01J... or smoke:test)"
+    },
+    "endpoint": {
+      "type": "string",
+      "description": "Optional custom celld daemon endpoint (defaults to http://127.0.0.1:9876)"
+    },
+    "testKey": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Entity ID key to write and verify in the cell"
+    },
+    "testData": {
+      "type": "object",
+      "description": "Payload to persist and verify in the cell"
+    }
+  }
+}

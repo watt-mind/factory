@@ -78,6 +78,30 @@ describe("human inbox API (WM-285)", () => {
           message: "limit must be an integer between 1 and 200",
         });
       }
+      for (const before of [
+        "garbage",
+        Buffer.from(
+          JSON.stringify({
+            createdAt: "2024-01-01T00:00:00.000Z",
+            rowid: 0,
+          }),
+        ).toString("base64url"),
+      ]) {
+        const response = await fetch(
+          s.url(`/inbox?before=${encodeURIComponent(before)}`),
+        );
+        expect(response.status).toBe(422);
+        expect(await response.json()).toMatchObject({
+          error: "invalid_before",
+          message: "before must be a valid cursor",
+        });
+      }
+      const invalidStatus = await fetch(s.url("/inbox?status=bogus"));
+      expect(invalidStatus.status).toBe(422);
+      expect(await invalidStatus.json()).toMatchObject({
+        error: "invalid_status",
+        message: "unknown inbox status: bogus",
+      });
     } finally {
       s.close();
     }

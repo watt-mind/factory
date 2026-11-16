@@ -32,23 +32,12 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository
         )
       }}
-    # Same dedicated lane as CI's Verify (WM-773): queue in GitHub, not flock.
-    runs-on: [self-hosted, verify-lane]
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      # Every later step resolves the runtime home here, never the operator's
-      # real ~/.factory/event-runtime: self-hosted CI runs on the operator box,
-      # and a migration-carrying branch once upgraded the live runtime.db from
-      # a test (2026-08-29). Steps that need their own home (E2E seed) still
-      # override it. (`runner.temp` is not available in job-level `env`.)
-      - name: Isolate the factory runtime home from the operator's ~/.factory
+      - name: Isolate the factory runtime home from ~/.factory
         shell: bash
         run: echo "FACTORY_EVENT_HOME=$RUNNER_TEMP/factory-event-home" >> "$GITHUB_ENV"
-      - name: Sweep stale shared-host temp directories
-        if: runner.environment == 'self-hosted'
-        shell: bash
-        run: |
-          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} + || true
 
       - name: Checkout (no action download)
         shell: bash
@@ -70,13 +59,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Prepends the pinned bun to GITHUB_PATH; a runner bun of another
+          # version is never reused (WM-1137).
           .github/scripts/install-pinned-tools.sh bun
-          if [ -x "$HOME/.bun/bin/bun" ]; then
-            echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
-            "$HOME/.bun/bin/bun" --version
-          else
-            bun --version
-          fi
       - name: Install dependencies
         run: |
           bun install --frozen-lockfile
@@ -125,6 +110,7 @@ jobs:
           BROWSERS_PATH: ${{ steps.playwright.outputs.browsers_path }}
         run: |
           set -euo pipefail
+          mkdir -p "$BROWSERS_PATH"
           cd event-runtime/web
           bunx --bun "@playwright/test@$PLAYWRIGHT_VERSION" install chromium
           touch "$BROWSERS_PATH/.factory-e2e-chromium-$PLAYWRIGHT_VERSION"
@@ -133,9 +119,3 @@ jobs:
         env:
           PLAYWRIGHT_CHANNEL: chromium
         run: cd event-runtime/web && bun run test:e2e
-
-      - name: Sweep stale shared-host temp directories
-        if: always() && runner.environment == 'self-hosted'
-        shell: bash
-        run: |
-          find /tmp -maxdepth 1 -mindepth 1 \( -name 'evrt-*' -o -name 'wm334-real-*' -o -name 'pi-chrome-devtools-*' -o -name 'puppeteer_dev_chrome_profile-*' -o -name 'factory-wt-*' \) -mmin +30 -exec rm -rf {} + || true

@@ -1,0 +1,90 @@
+{
+  "title": "factory.repo/v1 — portable repository-owned Factory configuration",
+  "description": "Repository-intrinsic settings read from .factory.yaml or .factory/config.yaml. Host identity, checkout paths, control-plane routing, concurrency, credentials, and every input to a host-executed command (verify, security scanner flags) are deliberately excluded: they stay host-owned in repos.yaml so a pull request cannot weaken its own verification or secret scan.",
+  "type": "object",
+  "required": ["schemaVersion"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": "factory.repo/v1" },
+    "base": { "type": "string", "pattern": "\\S" },
+    "deploy_branch": { "type": ["string", "null"], "pattern": "\\S" },
+    "toolchain": {
+      "type": ["object", "array", "null"],
+      "additionalProperties": { "type": "string", "pattern": "\\S" },
+      "items": {
+        "type": "object",
+        "required": ["executable", "constraint"],
+        "additionalProperties": false,
+        "properties": {
+          "executable": { "type": "string", "pattern": "\\S" },
+          "constraint": { "type": "string", "pattern": "\\S" }
+        }
+      }
+    },
+    "owned_paths_policy": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "direct": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["source", "requires"],
+            "additionalProperties": false,
+            "properties": {
+              "source": { "type": "string", "pattern": "\\S" },
+              "requires": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "pattern": "\\S" }
+              }
+            }
+          }
+        },
+        "pin_manifests": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "\\S" }
+        },
+        "registry_digest": {
+          "type": "object",
+          "required": ["inputs", "baseline"],
+          "additionalProperties": false,
+          "properties": {
+            "inputs": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string", "pattern": "\\S" }
+            },
+            "baseline": { "type": "string", "pattern": "\\S" }
+          }
+        }
+      }
+    },
+    "escalate_paths": {
+      "type": ["array", "null"],
+      "items": { "type": "string", "pattern": "\\S" }
+    },
+    "merge_ci": {
+      "type": ["object", "null"],
+      "required": ["workflow", "required_checks"],
+      "additionalProperties": false,
+      "properties": {
+        "workflow": { "type": "string", "pattern": "\\S" },
+        "required_checks": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "\\S" }
+        }
+      }
+    },
+    "worktree": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "up": { "type": ["string", "null"], "pattern": "\\S" },
+        "down": { "type": ["string", "null"], "pattern": "\\S" },
+        "warm": { "type": ["string", "null"], "pattern": "\\S" }
+      }
+    }
+  }
+}

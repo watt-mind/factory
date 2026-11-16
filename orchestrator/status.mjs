@@ -20,6 +20,7 @@ import {
   deployedRevision,
   deploymentState,
   metadataUrl,
+  resolveStatusBranches,
 } from "../lib/repo-status.mjs";
 import { latestReaperRunMs } from "./reaper.mjs";
 
@@ -134,6 +135,8 @@ function recommendedCommand(plan, repoName) {
       "factory-triage",
       "factory-unblock",
       "factory-sweep",
+      "factory-verify-deploy",
+      "factory-recap",
     ]).has(plan.command);
     const readOnlyFlag = readOnly ? " --read-only" : "";
     return `factory run --repo ${quoteArg(repoName)} --command ${plan.command}${args}${readOnlyFlag}`.trim();
@@ -172,17 +175,15 @@ if (!existsSync(repoPath)) {
   process.exit(2);
 }
 
-const deployBranch =
-  repoConfig.deploy_branch ?? (repoConfig.base === "main" ? "main" : "master");
-const baseBranch = repoConfig.base;
-const metadataBranch = repoConfig.deployment?.branch ?? deployBranch;
+const { baseBranch, deployBranch, metadataBranch } =
+  resolveStatusBranches(repoConfig);
 const fetchResult = sh(
   [
     "git",
     "fetch",
     "--quiet",
     "origin",
-    ...new Set([baseBranch, deployBranch, metadataBranch]),
+    ...new Set([baseBranch, deployBranch, metadataBranch].filter(Boolean)),
   ],
   repoPath,
 );
@@ -227,9 +228,9 @@ function remoteRef(name) {
   };
 }
 const base = remoteRef(baseBranch);
-const deploy = remoteRef(deployBranch);
+const deploy = deployBranch ? remoteRef(deployBranch) : null;
 const metadataRef =
-  metadataBranch === deployBranch
+  metadataBranch === deployBranch && deploy
     ? deploy
     : metadataBranch === baseBranch
       ? base
@@ -398,6 +399,10 @@ for (const [label, ref] of [
   ["Base", base],
   ["Deploy", deploy],
 ]) {
+  if (!ref) {
+    console.log(`${label.padEnd(10)} ${c.dim("not configured")}`);
+    continue;
+  }
   const delta =
     ref.checkoutAhead == null
       ? "unavailable"

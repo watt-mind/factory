@@ -22,7 +22,9 @@ import { loadForge } from "../lib/forge/index.mjs";
 export const WINDOW_DAYS = 30;
 export const DEFAULT_REPO = "watt-mind/factory";
 export const DEFAULT_README = "README.md";
-export const DEFAULT_PR_LIMIT = 1000;
+// The current repository can merge more than 1,000 PRs in a 30-day window.
+// Keep the default above that volume so the scheduled command can publish.
+export const DEFAULT_PR_LIMIT = 3000;
 export const BADGE_START = "<!-- factory-dogfood-badge -->";
 export const BADGE_END = "<!-- /factory-dogfood-badge -->";
 export const BADGE_COLOR = "0B6E4F";
@@ -36,8 +38,12 @@ export const PR_FIELDS = Object.freeze([
   "headRefName",
 ]);
 
-/** Factory protocol: `Fixes WM-958` / `Fixes CLNT-123` in the PR body. */
-export const FIXES_TICKET_RE = /\bFixes\s+[A-Z]{2,}-\d+\b/;
+/**
+ * Factory protocol: a closing keyword plus a Linear or GitHub issue reference
+ * in the PR body, for example `Fixes WM-958` or `Closes watt-mind/factory#1`.
+ */
+export const FIXES_TICKET_RE =
+  /\b(?:Fixes|Closes|Resolves)\s+(?:[A-Z]{2,}-\d+|#\d+|[A-Z0-9._-]+\/[A-Z0-9._-]+#\d+|https:\/\/github\.com\/[A-Z0-9._-]+\/[A-Z0-9._-]+\/issues\/\d+)\b/i;
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -165,7 +171,7 @@ export function collectMetrics(
   // count would under-state the trust signal.
   if (prs.length === limit && mergedInWindow.length === prs.length) {
     throw new Error(
-      `merged PR scan hit the --limit of ${limit} and every result is inside the ${windowDays}-day window; raise --limit (GitHub caps gh pr list at 1000) or the badge would under-count`,
+      `merged PR scan hit the --limit of ${limit} and every result is inside the ${windowDays}-day window; raise --limit or the badge would under-count`,
     );
   }
   return {

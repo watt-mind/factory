@@ -4,24 +4,23 @@
 
 Factory CI uses a hybrid runner strategy designed for public open-source operation (WM-950):
 
-- **Internal trusted lanes**: Branches originating within `watt-mind/factory` (pushes to `develop`/`main` and internal pull requests) run on high-performance self-hosted runners. The `shadow` label maps to eight runner services (`watt-mind-runner-1` through `watt-mind-runner-8`) on one physical host, and the `smoke-test` runner checks fleet health.
-- **External untrusted fork PRs**: Pull requests from external repository forks run in isolated, ephemeral GitHub-hosted runners (`ubuntu-latest`). Untrusted contributor code has zero access to the host machine, filesystem, `/tmp`, or internal network.
-- **Security & utility workflows**: Workflows handling credentials or isolated scans (`security.yml`, `cla.yml`, `update-badge.yml`, `publish-extension.yml`) run unconditionally on `ubuntu-latest`.
+- **GitHub-hosted (`ubuntu-24.04`)**: `Fast unit tests`, `Timing-bound tests`, `Full verification`, `Verify`, `Browser E2E`, `Build Starlight Site`, and all `security.yml` / utility workflows (`gitleaks`, `semgrep`, `actionlint`, `codeql`, `cla.yml`, `update-badge.yml`, `publish-extension.yml`, `publish-npm.yml`) run on ephemeral GitHub-hosted runners (`ubuntu-24.04`, pinned explicitly rather than a floating tag to avoid silent runner-image upgrades), eliminating shared-host contention and `verify-lane` queueing.
+- **Self-hosted sandbox boundary**: Only `Shadow runner fleet available` (`shadow-runner-health`, `[self-hosted, smoke-test]`) and `Sandboxed verify smoke` (`[self-hosted, verify-lane]`) run on the self-hosted fleet for internal branches/PRs, because GitHub-hosted runners cannot create the unprivileged user+mount namespaces the handoff sandbox exercises. `shadow-runner-health` verifies that at least one shadow runner (`1..8`) and at least one `verify-lane` runner (`watt-mind-runner-1..3`) are active alongside host temp space and memory headroom. Untrusted fork PRs, Dependabot PRs, and nightly/forced cloud runs skip both self-hosted jobs.
 
 Treat self-hosted runner names as parallel executors, not independent machines. CPU, memory, `/tmp`, and process scheduling are shared across all eight shadow services.
 
 ### Runner host dependencies
 
-Runner images must provide `unzip`, `curl`, `sha256sum` (from coreutils), and `tar` for the checksum-pinned tool installer. The `Pinned tools forced-install smoke` job on `ubuntu-latest` forces fresh bun, gitleaks, uv, and actionlint installs and verifies these dependencies whenever `.github/**` changes (and on manual dispatch).
+Runner images must provide `unzip`, `curl`, `sha256sum` (from coreutils), and `tar` for the checksum-pinned tool installer. The `Pinned tools forced-install smoke` job on `ubuntu-24.04` forces fresh bun, gitleaks, uv, and actionlint installs and verifies these dependencies whenever `.github/**` changes (and on manual dispatch).
 
 ## Fork PR sandboxing & dual routing
 
-In `ci.yml`, a lightweight initial `route` job runs on `ubuntu-latest` to determine the execution lane based on the event context:
+In `ci.yml`, a lightweight initial `route` job runs on `ubuntu-24.04` to determine the execution lane based on the event context:
 
-- Untrusted fork PRs (`github.event.pull_request.head.repo.full_name != github.repository`), Dependabot PRs, and nightly exercises route dynamically to `ubuntu-latest`.
-- Trusted internal PRs and branch pushes route to `[self-hosted, shadow]` and `[self-hosted, verify-lane]`.
-- Host-specific steps (`shadow-runner-health`, host `/tmp` sweep) execute only when `runner.environment == 'self-hosted'`.
-- Continuous exercise: A nightly schedule (`0 4 * * *`) and `workflow_dispatch` input `force_hosted` run the full CI suite on `ubuntu-latest` to prevent cloud lane regressions.
+- Untrusted fork PRs (`github.event.pull_request.head.repo.full_name != github.repository`), Dependabot PRs, and nightly exercises route dynamically to `ubuntu-24.04`.
+- Trusted internal PRs and branch pushes route `Sandboxed verify smoke` to `[self-hosted, verify-lane]`.
+- Self-hosted boundary jobs (`shadow-runner-health`, `sandboxed-verify-smoke`) execute only when `needs.route.outputs.self_hosted == 'true'`.
+- Continuous exercise: A nightly schedule (`0 4 * * *`) and `workflow_dispatch` input `force_hosted` run the full CI suite on `ubuntu-24.04` to prevent cloud lane regressions.
 
 ## Verify lane
 
@@ -77,7 +76,7 @@ GitHub's `ready_for_review` event starts a fresh workflow on the ready head. Bot
 
 ## Lint
 
-`Full verification` runs `bun run lint --max-warnings=621` (WM-607) right after installing
+`Full verification` runs `bun run lint --max-warnings=627` (WM-607) right after installing
 `event-runtime/web` deps and before the prettier check. `eslint.config.mjs` at
 repo root covers `**/*.{mjs,js,jsx}` with `@eslint/js` recommended, and
 `event-runtime/web/**/*.{ts,tsx}` with `typescript-eslint` recommended plus
@@ -107,6 +106,13 @@ When a required test step fails, `bun event-runtime/lib/test-helpers-timing.mjs 
 
 Both required test invocations use `--timeout 20000 --max-concurrency=4`. The 20-second default allows for scheduling delays on a busy self-hosted machine instead of failing unrelated tests at Bun's 5-second default. Tests that encode genuine liveness bounds continue to declare explicit, narrower timeouts; the CLI default does not replace those assertions. Only `Full verification` joins the verify-lane queue; the fast suite's 15-minute job timeout is a runaway guard rather than queue headroom. Timing-bound tests run on the general `shadow` pool.
 
+### Flake ledger
+
+| Test                                                                                                                  | Lane                         | Guard                                                                                                                                                                                                                                                                                                                                          | Regression signal                                                                                                                |
+| --------------------------------------------------------------------------------------------------------------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `api-runs.test.mjs` — `contended approvals and rejections yield to /health and return typed db_busy`                  | Fast unit tests (required)   | The real SQLite lock test has a `loadAdjustedTimeout(20_000)` ceiling (scaled by `CI_LOAD_FACTOR`); a 409 is accepted only when the lock child had already exited (`exitCode !== null`, sampled synchronously) at the moment the probe was issued; the 503 branch additionally asserts the probe spent the full `busy_timeout` budget (> 4 s). | A live lock that does not return `{ error: "db_busy", retryable: true }` still fails, as does an unresponsive `/health` request. |
+| `bin/worktree-common.test.mjs` — `colliding WM-294 and WM-345 startups reserve distinct pairs and stop independently` | Full verification (required) | After stopping the first worktree, the test polls the second API listener through the shared `until` helper, whose ceiling scales with `CI_LOAD_FACTOR`; it does not assume the asynchronous daemon is already listening.                                                                                                                      | A second worktree that fails to start still times out, and its API port must stop listening after teardown.                      |
+
 Do not add `describe.skipIf(process.env.CI_FAST)` in the unowned spawn suites from this ticket — the name-pattern split is the quarantine. Follow-up work that owns those files can add in-file tags that match the same list.
 
 ## Operational validation
@@ -116,8 +122,25 @@ After changing the workflow:
 1. Require all checks on the PR itself to pass:
 
    ```bash
-   gh pr checks <PR> --watch --fail-fast
+   # --workflow ci.yml: without it the newest run of ANY workflow (CLA,
+   # Security, Browser E2E) is returned and its verdict is not CI's. The run
+   # can lag the push, so retry briefly instead of failing on the first miss.
+   run_id=""
+   for i in $(seq 8); do
+     run_id="$(gh run list --workflow ci.yml --commit <sha> --json databaseId --limit 1 --jq '.[0].databaseId // empty')"
+     test -n "$run_id" && break
+     sleep 15
+   done
+   test -n "$run_id" || { echo "no CI workflow run found for this commit" >&2; exit 1; }
+   gh run watch "$run_id" --exit-status --interval 60
+   gh api "repos/{owner}/{repo}/commits/<sha>/check-runs" \
+     --jq '.check_runs[] | select(.status != "completed" or (.conclusion | IN("success","neutral","skipped") | not)) | .name' \
+     | grep -q . && { echo "not every check-run on <sha> is green" >&2; exit 1; }
    ```
+
+   This uses the REST API. `gh pr checks <PR> --watch --interval 60` is the
+   minimum only when its GraphQL-backed fallback is unavoidable; it otherwise
+   polls GraphQL every 10 seconds by default.
 
 2. After merge, inspect develop runs and confirm five consecutive green runs, including a period when at least three PR workflows were queued concurrently:
 
@@ -126,18 +149,18 @@ After changing the workflow:
    gh run list --workflow CI --event pull_request --limit 20
    ```
 
-3. For each relevant run, inspect step timestamps with `gh run view <RUN_ID>` and confirm the interval from `Acquire host verify lock` completing through `Release host verify lock` does not overlap the equivalent `Full verification` or Browser E2E interval from another Factory workflow run. `Fast unit tests` is expected to overlap that interval.
+3. For each relevant run, inspect step timestamps with `gh run view <RUN_ID>` and confirm `Full verification` and `Browser E2E` jobs only run on the `verify-lane` runners and do not overlap more than the configured `verify-lane` capacity. `Fast unit tests` is expected to run concurrently on the general `shadow` pool.
 
 A failed or cancelled test job breaks the streak. Record the five develop run URLs in the validating ticket or merge handoff.
 
 ## Security scans
 
-`.github/workflows/security.yml` runs on `pull_request`, `push` to `develop`/`main`, and `workflow_dispatch`, on `ubuntu-latest` with the same no-`uses:` git-fetch checkout pattern as `ci.yml` (WM-573). Four jobs:
+`.github/workflows/security.yml` runs on `pull_request`, `push` to `develop`/`main`, and `workflow_dispatch`, on `ubuntu-24.04` with the same no-`uses:` git-fetch checkout pattern as `ci.yml` (WM-573). Four jobs:
 
 - **Gitleaks** — `gitleaks git --no-banner --redact` over the PR's base..head range (or the last commit on a branch push). Honours a repo-root `.gitleaks.toml` if one is added. Binary resolves from PATH, then `~/.local/bin/gitleaks`, then a GitHub Releases download (not a marketplace action) on first use per runner host.
 - **Semgrep** — `uvx semgrep scan --config p/security-audit --error --metrics=off .`, scoped by `.semgrepignore` (generated output, vendor trees, fixtures, lockfiles). `uv`/`uvx` installs from astral.sh if missing on the host.
-- **Actionlint** — `actionlint -color .github/workflows/*.yml`. `.github/actionlint.yaml` declares the repo's custom self-hosted runner labels (`shadow`, `smoke-test`) so they don't flag as unknown; real shellcheck findings on `run:` blocks get fixed or suppressed inline with a reason, never blanket-disabled.
-- **CodeQL** — gated behind `if: ${{ vars.CODEQL_ENABLED == 'true' }}` and currently a placeholder: this repo is private with no GitHub Advanced Security (`code-scanning/default-setup` returns 403). Flip the `CODEQL_ENABLED` repository variable and replace the placeholder step with `github/codeql-action` init/analyze once GHAS is available (project-conventions.md §3D).
+- **Actionlint** — `actionlint -color .github/workflows/*.yml`. `.github/actionlint.yaml` declares the repo's custom self-hosted runner labels (`shadow`, `smoke-test`, `verify-lane`) so they don't flag as unknown; real shellcheck findings on `run:` blocks get fixed or suppressed inline with a reason, never blanket-disabled.
+- **CodeQL** — runs `github/codeql-action/init@v4` and `analyze@v4` for `javascript-typescript` (`build-mode: none`, `threads: 4`, `ram: 8192`) on `ubuntu-24.04`.
 
 Run the same tools locally before pushing with `factory security` (Gitleaks + Semgrep + Actionlint, plus Ruff/pip-audit when a repo has adopted the Python tier) — see `lib/security-check.sh`. Local and CI use identical tool invocations and config files (`.gitleaks.toml`, `.semgrepignore`) so a clean local run predicts a clean CI run.
 
@@ -167,7 +190,5 @@ use Playwright's downloaded Chromium instead of system Chrome. The pinned
 `.github/workflows/e2e.yml` is deliberately opt-in while the suite proves
 stable. It runs for a pull request only when that PR has the `run-e2e` label,
 and it can always be started manually with `workflow_dispatch`. The workflow
-uses the shared verify lock to serialize against every other test job on the
-self-hosted runner, installs Playwright's Chromium build (cached in the
-runner's `~/.cache/ms-playwright`, keyed on the pinned version), and runs the
+runs on `ubuntu-24.04`, installs Playwright's Chromium build, and runs the
 same `bun run test:e2e` command.

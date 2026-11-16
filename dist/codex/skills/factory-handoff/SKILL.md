@@ -11,7 +11,7 @@ Handoff means **capture/specify here, execute centrally**. Never claim the ticke
 
 1. Resolve the current repository through Factory's configured repo registry.
 2. Read the ticket and confirm it is dispatchable: `Todo`, `ai:agent-ready`, unassigned, and complete under the five-section protocol (Problem & Context, Acceptance Criteria, Source File Pointers, Owned Paths, Verification Command). Do not "repair" an ambiguous ticket by guessing.
-3. If it is not ready, apply the `ticket-spec` skill: explore read-only, complete only derivable sections, verify the command exists/runs, and promote only when the specification is falsifiable. A genuine product decision remains Triage and is not handed off.
+3. If it is not ready, apply the `ticket-spec` skill: explore read-only, complete only derivable sections, verify the command exists/runs, and promote only when the specification is falsifiable. If it genuinely needs a product decision or missing credentials, move it to `Blocked` + `ai:blocked` (stripping `ai:agent-ready` if present), comment the specific question, and do not hand it off.
 4. Run the mechanical client with the canonical ticket identifier:
 
    ```sh
@@ -28,8 +28,38 @@ Follow the existing capture and specification protocols before handoff:
 
 1. Search for duplicates and use the existing ticket when one covers the request.
 2. Otherwise file exactly one meaningful ticket with `source:human`, the correct repo/team/project and taxonomy, and the five complete sections only when supported by code evidence.
-3. Use `ticket-spec` to fill derivable gaps. If intent or credentials are missing, leave it in Triage and report what is needed; do not hand it off yet.
+3. Use `ticket-spec` to fill derivable gaps. If intent or credentials are missing, move the ticket to `Blocked` + `ai:blocked` (stripping `ai:agent-ready` if present) with the specific question commented and report what is needed; do not hand it off yet.
 4. Once the ticket is `Todo` + `ai:agent-ready` + unassigned, invoke `factory handoff` as above.
+
+## Checking run progress and traces
+
+When an operator asks for the status of a handed-off ticket or wants to inspect execution:
+
+1. **Query receipt state via request ID** (idempotent; returns event, proposal, and run status):
+
+   ```sh
+   factory handoff --request-id <requestId> [--repo <repo>] <ticket>
+   ```
+
+2. **Check the ticket on the control plane**:
+
+   ```sh
+   factory ticket get [--repo <repo>] <ticket>
+   ```
+
+3. **Inspect run details, token usage, and lifecycle history on the runner**:
+
+   ```sh
+   ssh runner "factory events inspect <runId>"
+   ```
+
+4. **Stream or view the agent execution trace**:
+
+   ```sh
+   ssh runner "factory events trace <runId> | tail -n 50"
+   ```
+
+5. **Web dashboard**: `https://factory.whale-pike.ts.net`
 
 ## Retry rule
 

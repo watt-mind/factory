@@ -1,5 +1,5 @@
 import { afterAll } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -25,7 +25,10 @@ export function cleanupTmpDirs() {
 
 /** Create a tracked temporary directory beneath the system temp directory. */
 export function tmpDir(prefix, baseDir = os.tmpdir()) {
-  const dir = mkdtempSync(path.join(baseDir, prefix));
+  // GH-1099: macOS reports TMPDIR beneath /var, whose canonical path is
+  // /private/var. Return the canonical spelling so workspace containment
+  // checks do not mistake two names for the same directory as an escape.
+  const dir = realpathSync(mkdtempSync(path.join(baseDir, prefix)));
   return trackTmpDir(dir);
 }
 

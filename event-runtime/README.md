@@ -241,7 +241,7 @@ First consumer: `factory.triage.requested` → `triage-scan@1` reads the pinned
 tree plus Linear and emits a typed plan (`TRIAGE` with per-issue actions from
 a closed set, or `NOOP`) → the chain proposes `triage-apply@1` → the operator
 approves the **concrete per-issue action list** → the actions adapter's
-item-list mode resolves each action id to one fixed `tools/linear.mjs`
+item-list mode resolves each action id to one fixed `tools/ticket.mjs`
 invocation. An unregistered action id refuses before applying anything,
 including the valid items beside it.
 

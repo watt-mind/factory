@@ -174,6 +174,7 @@ export async function main({
   evalsDir = EVALS_DIR,
   deps = null,
   policy: injectedPolicy = null,
+  loadPolicy = loadEvalPolicy,
   now = () => Date.now(),
   date = () => new Date(),
 } = {}) {
@@ -192,8 +193,9 @@ export async function main({
 
   let policy;
   try {
-    policy = injectedPolicy ?? loadEvalPolicy({ root: repoRoot });
+    policy = injectedPolicy ?? loadPolicy({ root: repoRoot });
   } catch (error) {
+    if (!(error instanceof EvalConfigError)) throw error;
     writeLine(stderr, `evals: ${error.message}`);
     return EXIT_USAGE;
   }
@@ -318,8 +320,12 @@ export async function main({
     writeLine(stdout, formatRun({ run, comparison, repoRoot }));
   }
 
+  // status is "pass" | "fail" only (see evals/lib/case-run.mjs), so a
+  // pass -> fail regression always increments totals.failed — one condition
+  // covers both. A removed case is reported in the comparison (and the JSON)
+  // but does not fail the run: case sets legitimately differ across branches,
+  // so a --compare against a run from a different branch must stay usable.
   if (run.totals.failed > 0) return EXIT_FAILED;
-  if (comparison && comparison.regressions.length > 0) return EXIT_FAILED;
   return EXIT_OK;
 }
 

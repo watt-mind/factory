@@ -6,6 +6,8 @@
  *   bun build/emit.mjs --check   # CI: fail if the tree isn't reproducible
  *   bun build/emit.mjs --link    # symlink this machine's harnesses at shared/
  *   bun build/emit.mjs --link-bin # symlink bin/factory -> ~/.local/bin/factory
+ *   bun build/emit.mjs --nodes   # sync and link emitted packs to nodes.yaml
+ *   bun build/emit.mjs --node <name> # sync and link to one configured node
  *   bun run link-repos           # symlink plugins/core/commands/ into every
  *                                 # configured repo's .claude/commands/ — run
  *                                 # this whenever a /factory-* command is
@@ -54,12 +56,30 @@ import {
   collectHarnessRoots,
 } from "../event-runtime/lib/extensions.mjs";
 import { resolveConfigPath } from "../event-runtime/lib/config.mjs";
+import {
+  emitRemoteNode,
+  loadNodesConfig,
+} from "../event-runtime/lib/workers-remote.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SHARED = path.join(ROOT, "shared");
 const CHECK = process.argv.includes("--check");
 const LINK = process.argv.includes("--link");
 const LINK_BIN = process.argv.includes("--link-bin");
+const NODES = process.argv.includes("--nodes");
+const nodeFlagIndex = process.argv.indexOf("--node");
+const TARGET_NODE =
+  nodeFlagIndex !== -1 &&
+  nodeFlagIndex < process.argv.length - 1 &&
+  !process.argv[nodeFlagIndex + 1].startsWith("-")
+    ? process.argv[nodeFlagIndex + 1]
+    : null;
+const HAS_INVALID_NODE_FLAG = nodeFlagIndex !== -1 && !TARGET_NODE;
+
+if (HAS_INVALID_NODE_FLAG) {
+  console.error("error: --node requires a node name");
+  process.exit(2);
+}
 
 const rel = (p) => path.relative(ROOT, p);
 const read = (p) => readFileSync(p, "utf8");
@@ -119,6 +139,30 @@ function codexAgent(agent) {
     `developer_instructions = ${JSON.stringify(agent.body.trim())}`,
     "",
   ].join("\n");
+}
+
+function unquoteYamlScalar(value) {
+  if (typeof value !== "string") return "";
+  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value.slice(1, -1);
+    }
+  }
+  if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
+    return value.slice(1, -1).replace(/''/g, "'");
+  }
+  return value;
+}
+
+/** Render a command as a SKILL.md with YAML-safe quoted description and explicit invocation scope. */
+function commandSkillMarkdown(name, fm, body) {
+  const baseDescription = (
+    unquoteYamlScalar(fm.description) || `Run the ${name} Factory workflow.`
+  ).replace(/\.\s*$/, "");
+  const description = `${baseDescription}. Invoke only when the user explicitly asks to run /${name} or the ${name} workflow.`;
+  return `---\nname: ${name}\ndescription: ${JSON.stringify(description)}\n---\n\n# ${name}\n\nThe user's accompanying request is this workflow's argument string. Wherever these instructions refer to \`$ARGUMENTS\`, interpret it as that request.\n\n${body.trimStart()}`;
 }
 
 // ---------------------------------------------------------------- writing ---
@@ -214,6 +258,7 @@ const CODEX = path.join(ROOT, "dist", "codex");
 const GEMINI = path.join(ROOT, "dist", "gemini");
 const CURSOR = path.join(ROOT, "dist", "cursor");
 const PI = path.join(ROOT, "dist", "pi");
+const MUSE = path.join(ROOT, "dist", "muse");
 const PI_DEFAULT_AGENT_TOOLS = "read, grep, find, ls, bash";
 
 if (!CHECK) {
@@ -248,9 +293,12 @@ cleanGenerated(
   path.join(GEMINI, "skills"),
   path.join(CURSOR, "agents"),
   path.join(CURSOR, "commands"),
+  path.join(CURSOR, "skills"),
   path.join(PI, "agents"),
   path.join(PI, "skills"),
   path.join(PI, "prompts"),
+  path.join(MUSE, "agents"),
+  path.join(MUSE, "skills"),
 );
 for (const pack of harnessPacks) {
   if (pack.builtin) continue;
@@ -311,7 +359,7 @@ function emitPack({
     const name = commandSkillName(pack, f);
     emit(
       destJoin(pack, path.join(CODEX, "skills"), name, "SKILL.md"),
-      `---\nname: ${name}\ndescription: ${fm.description || `Run the ${name} Factory workflow.`}\n---\n\n# ${name}\n\nThe user's accompanying request is this workflow's argument string. Wherever these instructions refer to \`$ARGUMENTS\`, interpret it as that request.\n\n${body.trimStart()}`,
+      commandSkillMarkdown(name, fm, body),
     );
   }
 
@@ -336,7 +384,7 @@ function emitPack({
     const name = commandSkillName(pack, f);
     emit(
       destJoin(pack, path.join(GEMINI, "skills"), name, "SKILL.md"),
-      `---\nname: ${name}\ndescription: ${fm.description || `Run the ${name} Factory workflow.`}\n---\n\n# ${name}\n\nThe user's accompanying request is this workflow's argument string. Wherever these instructions refer to \`$ARGUMENTS\`, interpret it as that request.\n\n${body.trimStart()}`,
+      commandSkillMarkdown(name, fm, body),
     );
   }
 
@@ -345,6 +393,17 @@ function emitPack({
       destJoin(pack, path.join(CURSOR, "agents"), `${agent.name}.md`),
       markdownAgent(agent, { readonly: true }),
     );
+  for (const s of skillDirs)
+    for (const f of listFiles(path.join(skillsRoot, s)))
+      emit(
+        destJoin(
+          pack,
+          path.join(CURSOR, "skills"),
+          s,
+          path.relative(path.join(skillsRoot, s), f),
+        ),
+        read(f),
+      );
   for (const f of commands) {
     const { body } = splitFrontmatter(read(f));
     emit(
@@ -383,6 +442,31 @@ function emitPack({
     emit(
       destFile(pack, path.join(PI, "prompts"), path.basename(f)),
       `# ${path.basename(f, ".md")}\n\n${fm.description ? `> ${fm.description}\n\n` : ""}${body.trimStart()}`,
+    );
+  }
+
+  for (const agent of agentDefinitions)
+    emit(
+      destJoin(pack, path.join(MUSE, "agents"), `${agent.name}.md`),
+      markdownAgent(agent),
+    );
+  for (const s of skillDirs)
+    for (const f of listFiles(path.join(skillsRoot, s)))
+      emit(
+        destJoin(
+          pack,
+          path.join(MUSE, "skills"),
+          s,
+          path.relative(path.join(skillsRoot, s), f),
+        ),
+        read(f),
+      );
+  for (const f of commands) {
+    const { fm, body } = splitFrontmatter(read(f));
+    const name = commandSkillName(pack, f);
+    emit(
+      destJoin(pack, path.join(MUSE, "skills"), name, "SKILL.md"),
+      commandSkillMarkdown(name, fm, body),
     );
   }
 
@@ -529,6 +613,19 @@ function floorStatus({ preferRunning = false } = {}) {
   });
 }
 
+/**
+ * The current checkout is CI's one hermetic floor-delivery target. Unlike the
+ * configured-repository report below, it never follows config/repos.yaml to a
+ * sibling or the operator's live checkout.
+ */
+function runningFloorStatus() {
+  const agents = path.join(ROOT, "AGENTS.md");
+  if (!existsSync(agents)) return { agents, state: "missing" };
+  const body = read(agents);
+  if (!body.includes(FLOOR_BEGIN)) return { agents, state: "missing" };
+  return { agents, state: floorIsCurrent(body, floor) ? "ok" : "stale" };
+}
+
 if (process.argv.includes("--sync-floor")) {
   console.log("\nsyncing the floor into each configured repo's AGENTS.md:");
   // Writes target the running checkout for this repository, never the
@@ -592,6 +689,24 @@ if (CHECK) {
   }
   console.log(`ok — ${expected.length} generated files match shared/`);
 
+  // CI must reject a factory commit whose own committed floor splice is stale.
+  // This is intentionally independent of config/repos.yaml: that file names
+  // operator-local sibling checkouts, which are useful to report but cannot
+  // make a hermetic factory CI run pass or fail.
+  const runningFloor = runningFloorStatus();
+  let checkExitCode = 0;
+  if (runningFloor.state !== "ok") {
+    console.error(
+      `Current checkout floor is ${runningFloor.state}: ${rel(runningFloor.agents)}`,
+    );
+    console.error(
+      "Run `bun build/emit.mjs --sync-floor` and commit AGENTS.md.",
+    );
+    checkExitCode = 1;
+  } else {
+    console.log("ok — current checkout AGENTS.md carries the current floor");
+  }
+
   // A reproducible dist/ proves the floor was WRITTEN, not that it was
   // DELIVERED. Checking only the former passed green on 2026-08-04 while all
   // four repos carried no floor at all — the check was measuring the half that
@@ -618,7 +733,7 @@ if (CHECK) {
       `floor delivery: ${repos.length} repo(s) carrying the current floor`,
     );
   }
-  process.exit(0);
+  process.exit(checkExitCode);
 }
 
 console.log(
@@ -634,10 +749,13 @@ console.log(
   `  gemini  dist/gemini/   (${skillDirs.length + commands.length} skills, ${agents.length} agents)  — also Antigravity`,
 );
 console.log(
-  `  cursor  dist/cursor/   (${commands.length} commands, ${agents.length} agents)`,
+  `  cursor  dist/cursor/   (${commands.length} commands, ${skillDirs.length} skills, ${agents.length} agents)`,
 );
 console.log(
   `  pi      dist/pi/       (${skillDirs.length} skills, ${commands.length} prompts, ${agents.length} agents)`,
+);
+console.log(
+  `  muse    dist/muse/     (${skillDirs.length + commands.length} skills, ${agents.length} agents)`,
 );
 console.log(`  floor   dist/AGENTS.floor.md`);
 for (const extra of loadedPacks.filter((p) => !p.pack.builtin)) {
@@ -758,6 +876,10 @@ function packLinks(loaded) {
         path.basename(f),
       ),
     ]),
+    ...skillDirs.map((s) => [
+      destJoin(pack, path.join(CURSOR, "skills"), s),
+      destJoin(pack, path.join(homedir(), ".cursor/skills"), s),
+    ]),
     ...commands.map((f) => [
       destFile(pack, path.join(PI, "prompts"), path.basename(f)),
       destFile(
@@ -769,6 +891,10 @@ function packLinks(loaded) {
     ...skillDirs.map((s) => [
       destJoin(pack, path.join(PI, "skills"), s),
       destJoin(pack, path.join(homedir(), ".pi/agent/skills"), s),
+    ]),
+    ...skillNames.map((s) => [
+      destJoin(pack, path.join(MUSE, "skills"), s),
+      destJoin(pack, path.join(homedir(), ".config/muse/skills"), s),
     ]),
     ...agentDefinitions.flatMap((agent) => {
       const file = pack.prefix ? `${pack.prefix}-${agent.name}` : agent.name;
@@ -809,6 +935,14 @@ function packLinks(loaded) {
             `${agent.name}.md`,
           ),
         ],
+        [
+          destJoin(pack, path.join(MUSE, "agents"), `${agent.name}.md`),
+          destFile(
+            pack,
+            path.join(homedir(), ".config/muse/agents"),
+            `${agent.name}.md`,
+          ),
+        ],
       ];
     }),
   ];
@@ -838,4 +972,60 @@ if (LINK) {
     symlinkSync(src, dst);
     console.log(`  linked   ${dst.replace(homedir(), "~")}`);
   }
+}
+
+// ------------------------------------------------------------------ nodes ----
+/**
+ * Sync emitted harness packs (`shared/`, `plugins/`, `dist/`) to remote worker
+ * nodes configured in `config/nodes.yaml` and link their local harnesses.
+ */
+export function emitToNodes({
+  root = ROOT,
+  targetNode = null,
+  nodesMap = null,
+  emitNodeFn = emitRemoteNode,
+  log = console.log,
+  error = console.error,
+} = {}) {
+  const map = nodesMap ?? loadNodesConfig({ root });
+  if (map.size === 0) {
+    log("  skip     no remote nodes configured in config/nodes.yaml");
+    return { exitCode: 0, results: [] };
+  }
+
+  if (targetNode && !map.has(targetNode)) {
+    error(
+      `  error    unknown node "${targetNode}". Configured nodes: ${Array.from(map.keys()).join(", ")}`,
+    );
+    return { exitCode: 1, results: [] };
+  }
+
+  const selectedNodes = targetNode
+    ? [map.get(targetNode)]
+    : Array.from(map.values());
+  const results = [];
+  let exitCode = 0;
+
+  for (const node of selectedNodes) {
+    const res = emitNodeFn(node, { localRoot: root });
+    results.push(res);
+    if (res.ok) {
+      log(`  synced   ${node.name} (${node.host}) -> ${node.factoryRoot}`);
+    } else if (targetNode) {
+      error(`  failed   ${node.name} (${node.host}) — ${res.error}`);
+      exitCode = 1;
+    } else {
+      log(`  warn     ${node.name} (${node.host}) — ${res.error} (skipped)`);
+    }
+  }
+
+  return { exitCode, results };
+}
+
+if (!CHECK && (NODES || TARGET_NODE)) {
+  console.log(
+    "\nsyncing emitted harness packs (shared/, plugins/, dist/) to remote nodes:",
+  );
+  const { exitCode } = emitToNodes({ root: ROOT, targetNode: TARGET_NODE });
+  if (exitCode !== 0) process.exit(exitCode);
 }

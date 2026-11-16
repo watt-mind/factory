@@ -8,12 +8,12 @@ Linear token, or machine-local configuration is required.
 
 Install these command-line tools before configuring a real repository:
 
-| Tool                 | Supported version                                     | Check                 |
-| :------------------- | :---------------------------------------------------- | :-------------------- |
-| Bun                  | Bun >= 1.3                                            | `bun --version`       |
-| Git                  | Git >= 2.40                                           | `git --version`       |
-| GitHub CLI           | Current stable release (tested with 2.70+)            | `gh --version`        |
-| Coding-agent harness | One of Claude Code, Codex, Gemini, Cursor, Pi, or Agy | `<harness> --version` |
+| Tool                 | Supported version                                                         | Check                 |
+| :------------------- | :------------------------------------------------------------------------ | :-------------------- |
+| Bun                  | Bun >= 1.3                                                                | `bun --version`       |
+| Git                  | Git >= 2.40                                                               | `git --version`       |
+| GitHub CLI           | Current stable release (tested with 2.70+)                                | `gh --version`        |
+| Coding-agent harness | One of Claude Code, Codex, Gemini, Cursor, Pi, Agy, or Hermes Agent (ACP) | `<harness> --version` |
 
 For a real GitHub-backed run, authenticate the GitHub CLI first. The command
 uses its own credential store; do not create or paste a token into Factory
@@ -41,8 +41,10 @@ claude setup-token
 Do this **before** loading any launchd job. A launchd process inherits no interactive session, so without a long-lived token the job fails on auth in a way that looks like a hang rather than an error.
 
 If you use another supported harness, complete that harness's own login flow
-instead. The GitHub CLI authentication above is still required for GitHub
-Issues and PRs.
+instead. Hermes Agent runs through the event runtime's ACP adapter; configure
+the `hermes-agent-acp` binary or an equivalent command before dispatching it.
+The GitHub CLI authentication above is still required for GitHub Issues and
+PRs.
 
 ## 3. Initialize a clean clone
 

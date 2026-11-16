@@ -22,7 +22,14 @@ import {
   poolCounts,
   poolDecision,
 } from "../lib/workers.mjs";
-import { CLI_PATH, fail, flagValue, log } from "./shared.mjs";
+import {
+  CLI_PATH,
+  fail,
+  flagValue,
+  log,
+  parseWorkerLabel,
+  validWorkerPollMs,
+} from "./shared.mjs";
 
 // ---------------------------------------------------------------------------
 // supervise — the worker pool supervisor (WM-226; workers doc §2a)
@@ -33,7 +40,7 @@ export function runDir() {
   return process.env.FACTORY_RUN_DIR || path.join(homedir(), ".factory", "run");
 }
 
-/** One pool slot's four files. The run dir IS the supervisor's durable state. */
+/** One pool slot's five files. The run dir IS the supervisor's durable state. */
 export function slotFiles(dir, n) {
   return {
     pid: path.join(dir, `worker-${n}.pid`),
@@ -41,6 +48,7 @@ export function slotFiles(dir, n) {
     log: path.join(dir, `worker-${n}.log`),
     id: path.join(dir, `worker-${n}.id`),
     crashLoop: path.join(dir, `worker-${n}.crash-loop.json`),
+    crashLoopFallback: path.join(dir, `worker-${n}.crash-loop.fallback.json`),
   };
 }
 
@@ -71,6 +79,13 @@ function writeCrashLoop(file, state) {
   const tmp = `${file}.${process.pid}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(state)}\n`);
   renameSync(tmp, file);
+}
+
+/** Prefer the durable fallback while an invalid primary crash-loop file heals. */
+function readCrashLoopState(files) {
+  return (
+    readCrashLoop(files.crashLoopFallback) ?? readCrashLoop(files.crashLoop)
+  );
 }
 
 export function crashBackoffMs(fastExits) {
@@ -124,7 +139,9 @@ export function readPool(dir = runDir()) {
   }
   const slotNumbers = new Set();
   for (const name of names) {
-    const m = /^worker-(\d+)\.(?:pid|crash-loop\.json)$/.exec(name);
+    const m = /^worker-(\d+)\.(?:pid|crash-loop(?:\.fallback)?\.json)$/.exec(
+      name,
+    );
     if (!m) continue;
     slotNumbers.add(Number(m[1]));
   }
@@ -132,7 +149,7 @@ export function readPool(dir = runDir()) {
   for (const n of slotNumbers) {
     const files = slotFiles(dir, n);
     const pid = readPidFile(files.pid);
-    const crashLoop = readCrashLoop(files.crashLoop);
+    const crashLoop = readCrashLoopState(files);
     slots.push({
       n,
       pid,
@@ -176,8 +193,8 @@ export function workerPassthroughArgs(args) {
   if (args.includes("--reload-on-change"))
     passthrough.push("--reload-on-change");
   for (let i = 0; i < args.length; i += 1) {
-    if (args[i] === "--label")
-      passthrough.push("--label", String(args[i + 1] ?? ""));
+    if (args[i] !== "--label") continue;
+    if (parseWorkerLabel(args[i + 1])) passthrough.push("--label", args[i + 1]);
   }
   return passthrough;
 }
@@ -239,7 +256,10 @@ export function spawnDetached(
  *
  *   bun event-runtime/cli.mjs supervise [--workers 1:3] [--interval-ms 2000] [--once]
  */
-export default async function supervise(args) {
+export default async function supervise(
+  args,
+  { writeCrashLoop: writeCrashLoopImpl = writeCrashLoop } = {},
+) {
   const dir = runDir();
   mkdirSync(dir, { recursive: true });
 
@@ -262,6 +282,14 @@ export default async function supervise(args) {
     return fail(
       "supervise: --interval-ms must be an integer between 100 and 60000",
     );
+  }
+  const pollMs = Number(flagValue(args, "--poll-ms") ?? 500);
+  if (!validWorkerPollMs(pollMs)) {
+    return fail("supervise: --poll-ms must be an integer between 25 and 5000");
+  }
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] === "--label" && !parseWorkerLabel(args[i + 1]))
+      return fail("supervise: --label expects key=value");
   }
   const drainTimeoutSeconds = Number(flagValue(args, "--drain-timeout") ?? 60);
   if (
@@ -306,6 +334,32 @@ export default async function supervise(args) {
   );
 
   const spawnedAt = new Map();
+  const crashLoopFallbacks = new Map();
+
+  function slotCrashLoop(n, files = slotFiles(dir, n)) {
+    return crashLoopFallbacks.get(n) ?? readCrashLoopState(files);
+  }
+
+  function saveCrashLoop(n, state, files = slotFiles(dir, n)) {
+    // Keep the state before releasing its pidfile. The in-memory copy covers
+    // ENOSPC, while the sibling file survives a later tick or restart when the
+    // primary path is a directory or otherwise individually unwritable.
+    crashLoopFallbacks.set(n, state);
+    try {
+      writeCrashLoopImpl(files.crashLoop, state);
+      crashLoopFallbacks.delete(n);
+      rmSync(files.crashLoopFallback, { force: true });
+    } catch (err) {
+      try {
+        writeCrashLoop(files.crashLoopFallback, state);
+      } catch {
+        // The in-memory fallback still protects this live supervisor.
+      }
+      log(
+        `crash-loop state for slot ${n} could not be saved: ${String(err?.message ?? err)}; using fallback`,
+      );
+    }
+  }
 
   function releaseSlot(n) {
     const files = slotFiles(dir, n);
@@ -316,7 +370,7 @@ export default async function supervise(args) {
 
   function resetCrashLoop(n, state) {
     if (state.fastExits === 0 && state.nextAttemptAt === null) return;
-    writeCrashLoop(slotFiles(dir, n).crashLoop, {
+    saveCrashLoop(n, {
       ...state,
       fastExits: 0,
       nextAttemptAt: null,
@@ -329,7 +383,7 @@ export default async function supervise(args) {
     for (const slot of readPool(dir).slots) {
       if (!slot.alive || !slot.workerId) continue;
       const files = slotFiles(dir, slot.n);
-      const state = readCrashLoop(files.crashLoop);
+      const state = slotCrashLoop(slot.n, files);
       if (
         !state ||
         state.fastExits === 0 ||
@@ -351,31 +405,37 @@ export default async function supervise(args) {
 
   function recordExit(slot, now) {
     const files = slotFiles(dir, slot.n);
-    const state = readCrashLoop(files.crashLoop);
+    const state = slotCrashLoop(slot.n, files);
     const startedAt = spawnedAt.get(slot.n) ?? state?.spawnedAt;
     const fastExit =
       !slot.draining &&
       Number.isFinite(startedAt) &&
       now - startedAt < spawnGraceMs;
-    releaseSlot(slot.n);
-
     if (!fastExit) {
+      releaseSlot(slot.n);
       rmSync(files.crashLoop, { force: true });
+      rmSync(files.crashLoopFallback, { force: true });
+      crashLoopFallbacks.delete(slot.n);
       return null;
     }
 
     const fastExits = (state?.fastExits ?? 0) + 1;
     const nextAttemptAt =
       fastExits >= CRASH_LOOP_LIMIT ? now + crashBackoffMs(fastExits) : null;
-    writeCrashLoop(files.crashLoop, {
-      fastExits,
-      spawnedAt: null,
-      lastExitedAt: now,
-      lastExitDurationMs: now - startedAt,
-      workerId: slot.workerId ?? state?.workerId ?? null,
-      nextAttemptAt,
-      loggedRetryAt: null,
-    });
+    saveCrashLoop(
+      slot.n,
+      {
+        fastExits,
+        spawnedAt: null,
+        lastExitedAt: now,
+        lastExitDurationMs: now - startedAt,
+        workerId: slot.workerId ?? state?.workerId ?? null,
+        nextAttemptAt,
+        loggedRetryAt: null,
+      },
+      files,
+    );
+    releaseSlot(slot.n);
     return { fastExits, nextAttemptAt };
   }
 
@@ -402,8 +462,8 @@ export default async function supervise(args) {
     writeFileSync(files.id, `${workerId}\n`);
     const startedAt = Date.now();
     spawnedAt.set(n, startedAt);
-    const previous = readCrashLoop(files.crashLoop);
-    writeCrashLoop(files.crashLoop, {
+    const previous = slotCrashLoop(n, files);
+    saveCrashLoop(n, {
       fastExits: previous?.fastExits ?? 0,
       spawnedAt: startedAt,
       lastExitedAt: previous?.lastExitedAt ?? null,
@@ -452,7 +512,7 @@ export default async function supervise(args) {
     const alive = readPool(dir).slots.filter((s) => s.alive);
     const observed = poolCounts(db, { now });
     const pending = alive.filter((s) => {
-      const state = readCrashLoop(slotFiles(dir, s.n).crashLoop);
+      const state = slotCrashLoop(s.n);
       const startedAt = spawnedAt.get(s.n) ?? state?.spawnedAt ?? 0;
       return now - startedAt < spawnGraceMs;
     }).length;
@@ -477,16 +537,20 @@ export default async function supervise(args) {
         return decision;
       }
       const files = slotFiles(dir, slot);
-      const crashLoop = readCrashLoop(files.crashLoop);
+      const crashLoop = slotCrashLoop(slot, files);
       if (crashLoop?.nextAttemptAt && crashLoop.nextAttemptAt > now) {
         if (crashLoop.loggedRetryAt !== crashLoop.nextAttemptAt) {
           log(
             `crash-loop slot ${slot}: ${crashLoop.fastExits} fast exits, next attempt in ${remainingSeconds(crashLoop.nextAttemptAt, now)}s [${counts}]`,
           );
-          writeCrashLoop(files.crashLoop, {
-            ...crashLoop,
-            loggedRetryAt: crashLoop.nextAttemptAt,
-          });
+          saveCrashLoop(
+            slot,
+            {
+              ...crashLoop,
+              loggedRetryAt: crashLoop.nextAttemptAt,
+            },
+            files,
+          );
         }
         return decision;
       }

@@ -7,29 +7,30 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit && vite build",
     "build:fast": "vite build",
+    "lint": "eslint src",
     "test": "bun test",
     "test:e2e": "bun add --no-save --exact \"@playwright/test@$(bun e2e/playwright-version.mjs)\" && bun playwright test --config playwright.config.ts"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.2.5",
     "@radix-ui/react-icons": "^1.3.2",
-    "@tanstack/react-query": "^5.62.0",
-    "@xyflow/react": "^12.11.3",
+    "@tanstack/react-query": "^5.107.1",
+    "@xyflow/react": "^12.12.1",
     "cmdk": "^1.0.4",
-    "elkjs": "^0.12.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "elkjs": "^0.12.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
     "@happy-dom/global-registrator": "20",
-    "@tailwindcss/vite": "^4.0.0",
+    "@tailwindcss/vite": "^4.3.5",
     "@testing-library/react": "16",
-    "@types/bun": "^1.3.14",
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
+    "@types/bun": "^1.4.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^4.3.4",
-    "tailwindcss": "^4.0.0",
+    "tailwindcss": "^4.3.5",
     "typescript": "^5.7.0",
-    "vite": "^6.0.0"
+    "vite": "^6.4.6"
   }
 }

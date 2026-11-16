@@ -104,7 +104,7 @@ A few shapes from the first weeks:
   pass. (F-11)
 - Agents reach for a third-party `linear` CLI and a bundled MCP, both of
   which fail in ways that look like "Linear is down." One in-repo client
-  (`tools/linear.mjs`) is the road. (F-12)
+  (`tools/ticket.mjs`) is the road. (F-12)
 - A correct Owned Paths list inside a fenced code block parsed as empty,
   so a well-specified ticket was undispatchable. The parser was the bug.
   (F-7)

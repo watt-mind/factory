@@ -46,14 +46,13 @@ import { homedir } from "node:os";
 import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { ROOT } from "../lib/schedule.mjs";
-import { todaysSpendUSD } from "../lib/spend.mjs";
+import { formatWatchSpend, todaysSpendBreakdown } from "../lib/spend.mjs";
 import {
   buildTicketRows,
   latestLogForTicket,
   tailEntries,
   entryTone,
   formatEntry,
-  formatSpend,
   formatIssueCounts,
   parseReaperOutput,
   linearDeepLink,
@@ -839,7 +838,7 @@ function App() {
   const [logEntries, setLogEntries] = useState([]);
   const [scrollOffset, setScrollOffset] = useState(0); // rows back from live; 0 = following
   const [logMode, setLogMode] = useState("messages");
-  const [spend, setSpend] = useState(0);
+  const [spend, setSpend] = useState({ usd: 0, skipped: 0 });
   const [lastPollMs, setLastPollMs] = useState(null);
   const [nowTick, setNowTick] = useState(Date.now());
   const [reaper, setReaper] = useState(null); // { phase, team, lines, stale }
@@ -892,10 +891,10 @@ function App() {
 
   useEffect(() => {
     const id = setInterval(
-      () => setSpend(todaysSpendUSD(LOG_DIR)),
+      () => setSpend(todaysSpendBreakdown(LOG_DIR)),
       LOG_POLL_MS,
     );
-    setSpend(todaysSpendUSD(LOG_DIR));
+    setSpend(todaysSpendBreakdown(LOG_DIR));
     return () => clearInterval(id);
   }, []);
 
@@ -958,7 +957,9 @@ function App() {
     return () => clearInterval(id);
   }, [summary]);
 
-  const budgetTone = spendTone(spend, PER_DAY_USD);
+  const spendUsd = spend?.error != null ? null : (spend?.usd ?? 0);
+  const budgetTone =
+    spendUsd == null ? undefined : spendTone(spendUsd, PER_DAY_USD);
   const quietTickets = rows.filter(
     (t) =>
       t.status === "running" &&
@@ -1314,7 +1315,7 @@ function App() {
     if (key.escape) process.exit(0);
     if (input === "r") {
       pollRef.current?.();
-      setSpend(todaysSpendUSD(LOG_DIR));
+      setSpend(todaysSpendBreakdown(LOG_DIR));
     }
     if (input === "v")
       setLogMode((mode) => (mode === "messages" ? "tools" : "messages"));
@@ -1478,8 +1479,13 @@ function App() {
       </Box>
       <Box justifyContent="space-between">
         <Text dimColor>
-          spend {formatSpend(spend, PER_DAY_USD)}
-          {spendPct(spend, PER_DAY_USD) != null && (
+          spend{" "}
+          {spend?.error ? (
+            <Text color="red">{formatWatchSpend(spend, PER_DAY_USD)}</Text>
+          ) : (
+            formatWatchSpend(spend, PER_DAY_USD)
+          )}
+          {spendUsd != null && spendPct(spendUsd, PER_DAY_USD) != null && (
             <Text
               color={
                 budgetTone === "bad"
@@ -1490,7 +1496,7 @@ function App() {
               }
             >
               {" "}
-              ({spendPct(spend, PER_DAY_USD)}%)
+              ({spendPct(spendUsd, PER_DAY_USD)}%)
             </Text>
           )}{" "}
           today

@@ -12,9 +12,107 @@ import {
   nodesConfigPath,
   expandHome,
   loadNodesConfig,
+  DEFAULT_REMOTE_WORKER_REPO_URL,
 } from "./nodes-config.mjs";
 
-export { NodeConfigError, nodesConfigPath, expandHome, loadNodesConfig };
+export {
+  NodeConfigError,
+  nodesConfigPath,
+  expandHome,
+  loadNodesConfig,
+  DEFAULT_REMOTE_WORKER_REPO_URL,
+};
+
+export class RemoteWorkerConfigError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "RemoteWorkerConfigError";
+    this.code = "remote_worker_config_invalid";
+  }
+}
+
+export const REMOTE_PATH_EXPORT =
+  'export PATH="$HOME/.bun/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH";';
+
+export const REMOTE_LINK_SCRIPT = [
+  'import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, symlinkSync, unlinkSync } from "node:fs";',
+  'import { homedir } from "node:os";',
+  'import path from "node:path";',
+  "const root = process.cwd();",
+  "const home = homedir();",
+  "const linkOne = (src, dst) => {",
+  "  mkdirSync(path.dirname(dst), { recursive: true });",
+  "  let existing = null;",
+  "  try { existing = lstatSync(dst); } catch {}",
+  "  if (existing) {",
+  "    if (!existing.isSymbolicLink()) return;",
+  "    unlinkSync(dst);",
+  "  }",
+  "  symlinkSync(src, dst);",
+  "};",
+  "const pairs = [",
+  '  ["dist/codex/skills", ".agents/skills"],',
+  '  ["dist/gemini/skills", ".gemini/skills"],',
+  '  ["dist/cursor/commands", ".cursor/commands"],',
+  '  ["dist/cursor/skills", ".cursor/skills"],',
+  '  ["dist/pi/prompts", ".pi/agent/prompts"],',
+  '  ["dist/pi/skills", ".pi/agent/skills"],',
+  '  ["dist/muse/skills", ".config/muse/skills"],',
+  '  ["dist/codex/agents", ".codex/agents"],',
+  '  ["dist/gemini/agents", ".gemini/agents"],',
+  '  ["dist/cursor/agents", ".cursor/agents"],',
+  '  ["dist/pi/agents", ".pi/agent/agents"],',
+  '  ["dist/muse/agents", ".config/muse/agents"],',
+  '  ["plugins/core/agents", ".claude/agents"],',
+  "];",
+  "let linked = 0;",
+  "for (const [srcRel, dstRel] of pairs) {",
+  "  const srcDir = path.join(root, srcRel);",
+  "  if (!existsSync(srcDir)) continue;",
+  "  for (const name of readdirSync(srcDir)) {",
+  "    linkOne(path.join(srcDir, name), path.join(home, dstRel, name));",
+  "    linked += 1;",
+  "  }",
+  "}",
+  'const binSrc = path.join(root, "bin/factory");',
+  'if (existsSync(binSrc)) { linkOne(binSrc, path.join(home, ".local/bin/factory")); linked += 1; }',
+  'const reposCfg = path.join(root, "config/repos.yaml");',
+  'const cmdsDir = path.join(root, "plugins/core/commands");',
+  "if (existsSync(reposCfg) && existsSync(cmdsDir)) {",
+  '  const cfg = Bun.YAML.parse(readFileSync(reposCfg, "utf8"));',
+  '  const cmdFiles = readdirSync(cmdsDir).filter((f) => f.endsWith(".md"));',
+  "  for (const repo of cfg?.repos ?? []) {",
+  '    const raw = String(repo?.path ?? "");',
+  "    if (!raw) continue;",
+  '    const repoPath = raw === "~" ? home : raw.startsWith("~/") ? path.join(home, raw.slice(2)) : raw;',
+  "    if (!existsSync(repoPath)) continue;",
+  '    const dst = path.join(repoPath, ".claude/commands");',
+  "    for (const f of cmdFiles) { linkOne(path.join(cmdsDir, f), path.join(dst, f)); linked += 1; }",
+  "  }",
+  "}",
+  "console.log(`linked ${linked} item(s)`);",
+].join(" ");
+
+/** Quote one value for a POSIX shell command. */
+export function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\"'\"'")}'`;
+}
+
+/** Quote a remote filesystem path while preserving `$HOME` expansion for leading `~`. */
+export function quoteRemotePath(value) {
+  const raw = String(value ?? "");
+  if (raw === "~") return '"$HOME"';
+  if (raw.startsWith("~/")) return `"$HOME/"${shellQuote(raw.slice(2))}`;
+  return shellQuote(raw);
+}
+
+function validateEnvironmentKey(key) {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+    throw new RemoteWorkerConfigError(
+      `Invalid remote worker environment variable name: ${key}`,
+    );
+  }
+}
 
 /**
  * Build safe ssh argv array for child process execution.
@@ -90,7 +188,8 @@ export function probeRemoteNode(
   const remotePath = node.factoryRoot;
   // Probe script: checks git sha, branch, arch, os, bun version, and running worker pid
   const probeScript = [
-    `REMOTE_DIR="${remotePath}";`,
+    REMOTE_PATH_EXPORT,
+    `REMOTE_DIR=${quoteRemotePath(remotePath)};`,
     `if [ -d "$REMOTE_DIR" ]; then`,
     `  cd "$REMOTE_DIR" 2>/dev/null;`,
     `  HEAD_SHA=$(git rev-parse HEAD 2>/dev/null || echo "unknown");`,
@@ -189,22 +288,28 @@ export function probeRemoteNode(
  */
 export function deployRemoteWorker(node, { ref = null, spawnFn = null } = {}) {
   const targetBranch = ref || node.branch || "develop";
-  const remotePath = node.factoryRoot;
+  const remotePath = quoteRemotePath(node.factoryRoot);
+  const repoUrl = node.repoUrl || DEFAULT_REMOTE_WORKER_REPO_URL;
 
   const deployScript = [
     `set -e;`,
-    `mkdir -p "${remotePath}";`,
-    `cd "${remotePath}";`,
+    REMOTE_PATH_EXPORT,
+    `mkdir -p ${remotePath};`,
+    `cd ${remotePath};`,
     `if [ ! -d ".git" ]; then`,
     `  echo "Cloning repository...";`,
-    `  git clone https://github.com/watt-mind/factory.git . 2>&1;`,
+    `  git clone ${shellQuote(repoUrl)} . 2>&1;`,
     `fi;`,
-    `echo "Updating branch ${targetBranch}...";`,
+    `echo "Updating branch...";`,
+    `git checkout -- shared plugins dist 2>/dev/null || true;`,
+    `git clean -fd shared plugins dist 2>/dev/null || true;`,
     `git fetch origin 2>&1;`,
-    `git checkout "${targetBranch}" 2>&1;`,
-    `git pull --ff-only origin "${targetBranch}" 2>&1;`,
+    `git checkout ${shellQuote(targetBranch)} 2>&1;`,
+    `git pull --ff-only origin ${shellQuote(targetBranch)} 2>&1;`,
     `echo "Installing dependencies...";`,
-    `bun install 2>&1;`,
+    `bun install --frozen-lockfile 2>&1;`,
+    `echo "Linking harnesses and skills...";`,
+    `bun build/emit.mjs --link --link-bin --link-repos 2>&1;`,
     `echo "DEPLOY_SUCCESS";`,
   ].join(" ");
 
@@ -226,7 +331,10 @@ export function deployRemoteWorker(node, { ref = null, spawnFn = null } = {}) {
 export function startRemoteWorker(node, { spawnFn = null } = {}) {
   const remotePath = node.factoryRoot;
   const envVars = Object.entries(node.env || {})
-    .map(([k, v]) => `export ${k}="${v}";`)
+    .map(([k, v]) => {
+      validateEnvironmentKey(k);
+      return `export ${k}=${shellQuote(v)};`;
+    })
     .join(" ");
 
   const labelsArg = Object.entries(node.labels || {})
@@ -236,13 +344,11 @@ export function startRemoteWorker(node, { spawnFn = null } = {}) {
   const adaptersArg = (node.adapters || []).join(",");
 
   const startScript = [
-    `cd "${remotePath}" 2>/dev/null || exit 1;`,
+    REMOTE_PATH_EXPORT,
+    `cd ${quoteRemotePath(remotePath)} 2>/dev/null || exit 1;`,
     `mkdir -p .factory/run;`,
     `${envVars}`,
-    `CMD="bun event-runtime/cli.mjs work";`,
-    labelsArg ? `CMD="$CMD --labels ${labelsArg}";` : ``,
-    adaptersArg ? `CMD="$CMD --adapters ${adaptersArg}";` : ``,
-    `nohup $CMD >> .factory/run/worker.log 2>&1 &`,
+    `nohup bun event-runtime/cli.mjs work${labelsArg ? ` --labels ${shellQuote(labelsArg)}` : ""}${adaptersArg ? ` --adapters ${shellQuote(adaptersArg)}` : ""} >> .factory/run/worker.log 2>&1 &`,
     `PID=$!;`,
     `echo $PID > .factory/run/worker.pid;`,
     `echo "START_SUCCESS:$PID"`,
@@ -273,7 +379,7 @@ export function stopRemoteWorker(
   const remotePath = node.factoryRoot;
 
   const stopScript = [
-    `cd "${remotePath}" 2>/dev/null;`,
+    `cd ${quoteRemotePath(remotePath)} 2>/dev/null;`,
     `PIDS=$(ps -axo pid,command 2>/dev/null | grep -E "bun.*event-runtime/cli\\.mjs work" | grep -v grep | awk '{print $1}');`,
     `if [ -z "$PIDS" ]; then`,
     `  echo "STOP_SUCCESS:0";`,
@@ -350,5 +456,114 @@ export function updateRemoteWorker(
     name: node.name,
     ok: true,
     pid: startRes.pid,
+  };
+}
+
+/**
+ * Build safe rsync argv array to mirror local paths to a remote node over SSH.
+ */
+export function buildRsyncArgv(
+  node,
+  sources = ["./shared", "./plugins", "./dist"],
+  { connectTimeout = 3 } = {},
+) {
+  const sshParts = ["ssh"];
+  if (node.port && node.port !== 22) {
+    sshParts.push("-p", String(node.port));
+  }
+  sshParts.push("-o", "BatchMode=yes");
+  if (connectTimeout) {
+    sshParts.push("-o", `ConnectTimeout=${connectTimeout}`);
+  }
+  const target = node.user ? `${node.user}@${node.host}` : node.host;
+  const remoteRoot = String(node.factoryRoot || "~/Develop/factory").replace(
+    /\/+$/,
+    "",
+  );
+  return [
+    "-az",
+    "--delete",
+    "--relative",
+    "-e",
+    sshParts.join(" "),
+    ...sources,
+    `${target}:${remoteRoot}/`,
+  ];
+}
+
+/**
+ * Sync emitted harness packs (`shared/`, `plugins/`, `dist/`) to a remote node
+ * and re-link its local harnesses, CLI binary, and configured repos.
+ */
+export function emitRemoteNode(
+  node,
+  { localRoot = FACTORY_ROOT, connectTimeout = 3, spawnFn = null } = {},
+) {
+  const rsyncArgs = buildRsyncArgv(node, ["./shared", "./plugins", "./dist"], {
+    connectTimeout,
+  });
+  const rsyncRunner =
+    spawnFn ||
+    ((cmd) => {
+      const proc = Bun.spawnSync({
+        cmd: ["rsync", ...cmd],
+        cwd: localRoot,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      return {
+        exitCode: proc.exitCode,
+        stdout: proc.stdout.toString(),
+        stderr: proc.stderr.toString(),
+      };
+    });
+
+  const rsyncRes = rsyncRunner(rsyncArgs, { cmd: "rsync", cwd: localRoot });
+  if (rsyncRes.exitCode !== 0) {
+    return {
+      name: node.name,
+      host: node.host,
+      ok: false,
+      linked: false,
+      step: "rsync",
+      stdout: rsyncRes.stdout ?? "",
+      stderr: rsyncRes.stderr ?? "",
+      error: (
+        rsyncRes.stderr ||
+        rsyncRes.stdout ||
+        "rsync transfer failed"
+      ).trim(),
+    };
+  }
+
+  const linkScript = [
+    `set -e;`,
+    REMOTE_PATH_EXPORT,
+    `cd ${quoteRemotePath(node.factoryRoot)};`,
+    `bun -e ${shellQuote(REMOTE_LINK_SCRIPT)} 2>&1;`,
+    `echo "EMIT_REMOTE_SUCCESS";`,
+  ].join(" ");
+
+  const linkRes = executeSsh(node, linkScript, {
+    spawnFn,
+    connectTimeout: Math.max(connectTimeout, 5),
+  });
+  const ok = linkRes.ok && linkRes.stdout.includes("EMIT_REMOTE_SUCCESS");
+
+  return {
+    name: node.name,
+    host: node.host,
+    ok,
+    linked: ok,
+    step: ok ? "done" : "link",
+    stdout: linkRes.stdout,
+    stderr: linkRes.stderr,
+    error: ok
+      ? null
+      : (
+          linkRes.stderr ||
+          linkRes.stdout ||
+          "remote harness link failed"
+        ).trim(),
   };
 }

@@ -25,6 +25,9 @@ const REASON_PLAIN = Object.freeze({
   "auto_approval_ineligible:capacity_full": "Repo at in-flight cap",
   "auto_approval_ineligible:evidence_changed_since_plan":
     "Ticket changed since planning",
+  owned_paths_not_closed:
+    "The ticket's allowed paths do not cover every required file.",
+  merge_barrier_unverified: "Merge barrier has not been verified.",
 });
 
 const PRIMARY_INPUT_KEYS = Object.freeze([
@@ -40,6 +43,18 @@ const PRIMARY_INPUT_KEYS = Object.freeze([
 export function agentFamily(agent) {
   if (typeof agent !== "string" || agent.trim() === "") return "";
   return agent.trim().replace(/@\d+$/, "");
+}
+
+/**
+ * Agent IDs whose runs hold a ticket lease and worktree, including their
+ * strong-tier escalation continuation. Keep this explicit: a dispatch-like
+ * name alone does not make an agent dispatch-class work.
+ */
+export const DISPATCH_CLASS_AGENT_IDS = new Set(["dispatch"]);
+
+/** Whether an agent id or versioned ref belongs to the dispatch class. */
+export function isDispatchClassAgent(agent) {
+  return DISPATCH_CLASS_AGENT_IDS.has(agentFamily(agent));
 }
 
 /** Title-case the agent family so it reads as a verb (`ci-doctor` → `Ci-doctor`). */
@@ -139,7 +154,14 @@ export function proposalReasonPlain(reason) {
   const prefixed = code.startsWith("auto_approval_ineligible:")
     ? code
     : `auto_approval_ineligible:${code}`;
-  return REASON_PLAIN[prefixed] ?? code;
+  if (REASON_PLAIN[prefixed]) return REASON_PLAIN[prefixed];
+
+  const barrier =
+    /^(?:auto_approval_ineligible:)?merge_barrier_unverified(?::.+)?$/.test(
+      code,
+    );
+  if (barrier) return REASON_PLAIN.merge_barrier_unverified;
+  return code;
 }
 
 /**

@@ -31,12 +31,15 @@
  *   Open watched proposals:
  *     - direct operator approvable (`run`)
  *     - merge-apply and ship-apply (human watched)
- *     - human_needed (empty repos fails schema minItems)
+ *     - human_needed (empty repos fails schema minItems), surfaced in the
+ *       Inbox as a `BLOCKED` item with the `parked` decision request
  *     - TTL-expired proposal
  *
  *   Admitted & anomaly events:
  *     - dead-lettered event (lastPlanError present)
  *     - duplicate delivery suppression
+ *     - malformed stored chain envelope (Chain returns envelope: null and
+ *       envelopeMalformed: true, so the degraded envelope UI is inspectable)
  *
  *   RUNNING     repos:["hang"] (approved LAST — single worker holds until 600s timeout)
  *
@@ -45,6 +48,7 @@
 import { apiClient } from "../lib/client.mjs";
 import { openDb } from "../lib/db.mjs";
 import { dbPath, runtimeHome } from "../lib/config.mjs";
+import { createInboxItem } from "../lib/inbox.mjs";
 import { createRun, transition } from "../lib/lifecycle.mjs";
 import { hashJson } from "../lib/canonical.mjs";
 
@@ -56,6 +60,8 @@ const flag = (name) => {
 const port = Number(flag("--port") ?? process.env.FACTORY_EVENT_PORT ?? 7381);
 const prefix = flag("--prefix") ?? "demo";
 const pollMs = Number(flag("--poll-ms") ?? 300);
+const adapterProbeTimeoutMs = 30_000;
+const ADAPTER_PROBE_TIMEOUT_EXIT_CODE = 78;
 if (!Number.isInteger(pollMs) || pollMs < 25 || pollMs > 5_000) {
   console.error("seed: --poll-ms must be an integer between 25 and 5000");
   process.exit(2);
@@ -155,28 +161,38 @@ async function until(what, fn, { timeoutMs = 30_000, everyMs = pollMs } = {}) {
     if (value) return value;
     await sleep(everyMs);
   }
-  throw new Error(`timed out waiting for ${what}`);
+  throw Object.assign(new Error(`timed out waiting for ${what}`), {
+    code: "SEED_TIMEOUT",
+    what,
+  });
 }
 
-async function proposalFor(eventId, { agent, status = "open" } = {}) {
-  return until(`proposal for ${agent ?? eventId}`, async () => {
-    const { proposals } = await client.proposals(
-      status === "open" ? undefined : "all",
-    );
-    return proposals.find((p) => {
-      if (status !== "all" && p.status !== status) return false;
-      const eventMatches =
-        p.spec?.idempotencyKey?.includes(eventId) ||
-        p.reason?.includes(eventId) ||
-        p.eventId === eventId ||
-        (p.spec?.input && JSON.stringify(p.spec.input).includes(eventId));
-      if (agent) {
-        const agentMatches = p.spec?.agent === agent || p.agent === agent;
-        return agentMatches && eventMatches;
-      }
-      return eventMatches;
-    });
-  });
+async function proposalFor(
+  eventId,
+  { agent, status = "open", timeoutMs } = {},
+) {
+  return until(
+    `proposal for ${agent ?? eventId}`,
+    async () => {
+      const { proposals } = await client.proposals(
+        status === "open" ? undefined : "all",
+      );
+      return proposals.find((p) => {
+        if (status !== "all" && p.status !== status) return false;
+        const eventMatches =
+          p.spec?.idempotencyKey?.includes(eventId) ||
+          p.reason?.includes(eventId) ||
+          p.eventId === eventId ||
+          (p.spec?.input && JSON.stringify(p.spec.input).includes(eventId));
+        if (agent) {
+          const agentMatches = p.spec?.agent === agent || p.agent === agent;
+          return agentMatches && eventMatches;
+        }
+        return eventMatches;
+      });
+    },
+    { timeoutMs },
+  );
 }
 
 async function openProposalFor(eventId, options = {}) {
@@ -247,7 +263,20 @@ try {
 // planning time, so probe with a throwaway event and inspect its proposal.
 const probeId = `${prefix}-adapter-probe`;
 await replay(envelope("adapter-probe", ["ok"]));
-const probe = await openProposalFor(probeId);
+let probe;
+try {
+  probe = await openProposalFor(probeId, {
+    timeoutMs: adapterProbeTimeoutMs,
+  });
+} catch (err) {
+  if (err?.code === "SEED_TIMEOUT") {
+    console.error(
+      `seed_probe_timeout: no proposal for ${probeId} within ${adapterProbeTimeoutMs}ms`,
+    );
+    process.exit(ADAPTER_PROBE_TIMEOUT_EXIT_CODE);
+  }
+  throw err;
+}
 if (probe.spec?.adapter !== "fake") {
   await client.reject(
     probe.id,
@@ -386,14 +415,29 @@ log(
   `${ciCaptureProposal.runId} → COMPLETED (ci-log-capture@1, emitted ci-log artifact)`,
 );
 
-// Hop 2: ci-doctor@2 (artifacts workspace type with $.artifactHash.ci-log)
-const ciDoctorProposal = await openProposalFor(ciEventId, {
+// Hop 2: ci-doctor@2 (artifacts workspace type with $.artifactHash.ci-log).
+// The chain policy may approve the diagnosis unattended (GH-1727): the
+// proposal is then already decided by the time we see it, so only click
+// through when it is still waiting for a human.
+const ciDoctorProposal = await proposalFor(ciEventId, {
   agent: "ci-doctor@2",
+  status: "all",
 });
-await client.approve(ciDoctorProposal.id);
+let ciDoctorAuto = ciDoctorProposal.status !== "open";
+if (!ciDoctorAuto) {
+  try {
+    await client.approve(ciDoctorProposal.id);
+  } catch (err) {
+    // The chain pass may win the race between our read and our click.
+    const { proposals } = await client.proposals("all");
+    const decided = proposals.find((p) => p.id === ciDoctorProposal.id);
+    if (decided?.status !== "approved") throw err;
+    ciDoctorAuto = true;
+  }
+}
 await runTerminal(ciDoctorProposal.runId, "COMPLETED");
 log(
-  `${ciDoctorProposal.runId} → COMPLETED (ci-doctor@2, verdict FLAKE, artifacts workspace)`,
+  `${ciDoctorProposal.runId} → COMPLETED (ci-doctor@2, verdict FLAKE, artifacts workspace${ciDoctorAuto ? ", auto-approved" : ""})`,
 );
 
 // Hop 3: ci-rerun@1 (command adapter follow-up with causationId)
@@ -803,6 +847,98 @@ try {
   );
   log(
     `${dispatchRunId} → COMPLETED (dispatch@1, simulated working PR workflow with PR_OPEN)`,
+  );
+
+  // A deliberately damaged historic chain envelope makes the Chain view's
+  // degraded state inspectable in every seeded worktree. `chainView` rejects
+  // this stored non-JSON value and safely exposes `envelope: null` with
+  // `envelopeMalformed: true`; it is not a malformed live intake event.
+  //
+  // This row knowingly violates the invariant every other seeded event upholds:
+  // a `factory.dispatch.requested` event normally carries a parseable envelope
+  // and owns a proposal (and, once approved, a run). This one has neither, so
+  // nothing downstream can plan or execute from it. It stays inert because its
+  // status is 'planned' rather than 'admitted' — planner scans only pick up
+  // admitted events — and because it is written straight to `events` rather
+  // than replayed through intake, no schema validation ever sees it. Read paths
+  // must therefore treat stored envelope JSON as untrusted: `chainView` guards
+  // via `chainEnvelope`, and `eventsView` via `parseObject` (#2301).
+  const malformedChainEventId = `chain-${dispatchRunId}-malformed-envelope`;
+  db.query(
+    `INSERT INTO events
+       (source, event_id, type, subject, occurred_at, received_at,
+        correlation_id, causation_id, envelope_json, payload_hash, status, admitted_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(source, event_id) DO UPDATE SET
+       correlation_id = excluded.correlation_id,
+       causation_id = excluded.causation_id,
+       envelope_json = excluded.envelope_json,
+       payload_hash = excluded.payload_hash,
+       status = excluded.status,
+       admitted_at = excluded.admitted_at`,
+  ).run(
+    "chain",
+    malformedChainEventId,
+    "factory.dispatch.requested",
+    dispatchTicket,
+    nowStr,
+    nowStr,
+    dispatchEventId,
+    dispatchRunId,
+    "{demo seed intentionally malformed chain envelope",
+    "demo-malformed-chain-envelope",
+    "planned",
+    nowStr,
+  );
+  log(
+    `${malformedChainEventId} inserted (malformed chain envelope; open #/chain/${dispatchEventId})`,
+  );
+
+  // A hand-authored open item gives web UX review a stable, information-rich
+  // detail pane. Runtime-generated items cover decisions and expiry, while
+  // this fixture deliberately exercises structured message rendering and every
+  // jump target without requiring an operator action.
+  // Use a non-live PR reference so inbox reconciliation cannot auto-resolve the
+  // review fixture when the historical dispatch's real pull request is merged.
+  const inboxPrUrl = `https://github.com/watt-mind/${primaryProject}/pull/999999`;
+  createInboxItem(
+    db,
+    {
+      kind: "ESCALATED",
+      severity: "normal",
+      title: "Review seeded dispatch handoff",
+      body: [
+        "## Handoff",
+        "",
+        "**Dispatch completed** and opened a review-ready pull request.",
+        "",
+        "## References",
+        "",
+        `- [Pull request](${inboxPrUrl})`,
+        `- Ticket \`DEMO-100\` in repository \`${primaryProject}\``,
+        "",
+        "Warning: this is fixture data for UX review; do not merge it.",
+        "",
+        "```",
+        "bun test event-runtime/demo/seed.test.mjs",
+        "```",
+      ].join("\n"),
+      refs: {
+        runId: dispatchRunId,
+        proposalId: human.id,
+        eventSource: "demo-seed",
+        eventId: `${prefix}-human-needed`,
+        // Keep an explicit ticket reference without coupling fixture lifetime
+        // to a live tracker issue that reconciliation may close.
+        issue: "DEMO-100",
+        pr: inboxPrUrl,
+        repo: primaryProject,
+      },
+    },
+    { id: `inbox_${prefix}_dispatch_detail`, now: Date.parse(nowStr) },
+  );
+  log(
+    `inbox_${prefix}_dispatch_detail left open (structured dispatch handoff)`,
   );
 
   db.close();

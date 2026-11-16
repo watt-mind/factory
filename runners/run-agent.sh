@@ -141,9 +141,9 @@ fi
 # runs draw on subscription allowances instead of API per-token billing.
 UNSET_KEYS=("-u" "ANTHROPIC_API_KEY" "-u" "GEMINI_API_KEY" "-u" "GOOGLE_API_KEY" "-u" "GOOGLE_GENAI_API_KEY" "-u" "OPENAI_API_KEY" "-u" "MISTRAL_API_KEY" "-u" "DEEPSEEK_API_KEY" "-u" "GROQ_API_KEY")
 
-# Stages run inside a repo, not inside this checkout, so `bun tools/linear.mjs`
+# Stages run inside a repo, not inside this checkout, so `bun tools/ticket.mjs`
 # does not resolve for them. The floor tells agents to use
-# "$FACTORY_ROOT/tools/linear.mjs"; this is what makes that path real. Without
+# "$FACTORY_ROOT/tools/ticket.mjs"; this is what makes that path real. Without
 # it, --strict-mcp-config removes the Linear MCP and leaves no replacement.
 export FACTORY_ROOT="$ROOT"
 
@@ -198,7 +198,7 @@ LOG="$LOG_DIR/${REPO}-${COMMAND}-$(date +%Y%m%d-%H%M%S).jsonl"
 
 # The run id IS the transcript basename — the rollup (metrics/runs.jsonl) is
 # already keyed by it, so a `run:<id>` stamp in a Linear comment or PR body
-# joins straight back to the transcript and its metrics row. tools/linear.mjs
+# joins straight back to the transcript and its metrics row. tools/ticket.mjs
 # stamps comments/issues mechanically when this is set; PR bodies rely on the
 # floor's rule. Complementary to OPS-40, not a replacement for a real assignee
 # lock (OPS-76).
@@ -294,7 +294,7 @@ if [[ "$HARNESS" == "claude" ]]; then
   # servers: no user scope, no project .mcp.json, no claude.ai connectors. What
   # an unattended agent can reach is now declared in git and moves by PR.
   #
-  # That deliberately drops the Linear MCP too — tools/linear.mjs replaces it,
+  # That deliberately drops the Linear MCP too — tools/ticket.mjs replaces it,
   # which is why FACTORY_ROOT above is load-bearing rather than a convenience.
   # It also drops what nobody chose to grant: sessions were loading a client law
   # firm's connector (51 tools) and Gmail (16) into agents running unattended

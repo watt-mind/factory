@@ -118,6 +118,20 @@ test("planning runs off the HTTP event loop: /health p95 < 500ms while 10 events
     }
 
     expect(plannedCount).toBe(10);
+
+    // 4. The worker posts a `planned` message back to its supervisor, which
+    // records lastPlannedAt — the /health staleness signal (gh-1903).
+    const stateDeadline = Date.now() + 5_000;
+    while (
+      Date.now() < stateDeadline &&
+      plannerWorker.state().lastPlannedAt == null
+    ) {
+      await Bun.sleep(50);
+    }
+    const state = plannerWorker.state({ queued: false });
+    expect(state.lastPlannedAt).not.toBeNull();
+    expect(state.ageMs).not.toBeNull();
+    expect(state.stale).toBe(false);
   } finally {
     if (plannerWorker) await plannerWorker.stop();
     await new Promise((resolve) => server.close(resolve));

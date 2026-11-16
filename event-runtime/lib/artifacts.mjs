@@ -21,15 +21,19 @@ import {
   renameSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalJson, hashJson } from "./canonical.mjs";
-import { confinedRegularFile } from "./workspace.mjs";
+import { confinedRegularFile } from "./workspace-paths.mjs";
 
 const HEX64 = /^[0-9a-f]{64}$/;
+const ARTIFACT_TEMP = /^[0-9a-f]{64}\.tmp\./;
 const SHA256 = /^sha256:([0-9a-f]{64})$/;
+/** Interrupted artifact publishes are eligible for reclamation after one hour. */
+export const ARTIFACT_TEMP_GRACE_MS = 60 * 60 * 1000;
 const TRUSTED_ROOTLESS_SOURCES = new Map([
   ["memo", null],
   ["transcript", ".transcript.json"],
@@ -40,12 +44,27 @@ function resultDigest(artifactHash) {
   return SHA256.exec(artifactHash ?? "")?.[1] ?? null;
 }
 
+/** Refresh a deduplicated blob's prune grace period without blocking publish. */
+function refreshArtifactMtime(dest) {
+  try {
+    const now = new Date();
+    utimesSync(dest, now, now);
+  } catch (err) {
+    console.warn(
+      `artifact store mtime refresh failed for ${dest}: ${err?.message ?? err}`,
+    );
+  }
+}
+
 /** Atomically persist bytes whose digest is already known. */
 function storeBytes({ bytes, sha256hex, storeRoot }) {
   mkdirSync(storeRoot, { recursive: true });
   const dest = artifactPath(storeRoot, sha256hex);
   if (existsSync(dest)) {
-    if (hashFile(dest) === sha256hex) return dest;
+    if (hashFile(dest) === sha256hex) {
+      refreshArtifactMtime(dest);
+      return dest;
+    }
     rmSync(dest, { force: true });
   }
 
@@ -150,6 +169,7 @@ export function storeCollected({ entries, storeRoot, workspaceDir = null }) {
     if (existsSync(dest)) {
       const destHash = hashFile(dest);
       if (destHash === entry.sha256) {
+        refreshArtifactMtime(dest);
         return {
           ...entry,
           uri: `file://${dest}`,
@@ -315,13 +335,28 @@ export function materializeArtifact({
   return { path: dest, sha256: sha256hex, sizeBytes: found.sizeBytes };
 }
 
-/** Every artifact hash any accepted result still points at. */
+/**
+ * Every artifact hash any accepted result still points at.
+ *
+ * A malformed historical result is counted in `hashes.invalid` rather than
+ * thrown. Callers that delete bytes must fail closed when it is non-zero;
+ * read-only callers can continue with the valid rows.
+ *
+ * @returns {Set<string> & { invalid: number }}
+ */
 export function referencedHashes(db) {
   const hashes = new Set();
+  hashes.invalid = 0;
   for (const row of db
     .query(`SELECT result_json, artifact_hash FROM results`)
     .all()) {
-    const result = JSON.parse(row.result_json);
+    let result;
+    try {
+      result = JSON.parse(row.result_json);
+    } catch {
+      hashes.invalid += 1;
+      continue;
+    }
     for (const entry of result.artifacts ?? []) {
       if (entry.sha256) hashes.add(entry.sha256);
     }
@@ -356,13 +391,22 @@ export function listArtifacts(
   }).artifacts;
 }
 
-/** Build the result-to-artifact reference index used by catalogue pages. */
-export function artifactReferenceIndex(db) {
+/**
+ * Build the result-to-artifact reference index used by catalogue pages.
+ *
+ * Supplying an inventory keeps the retained index bounded by the bytes that
+ * are actually in the store. Run state deliberately is not cached here: it
+ * changes independently of result rows and is resolved for each page read.
+ */
+export function artifactReferenceIndex(db, inventory = null) {
   const references = new Map();
+  const stored = inventory
+    ? new Set(inventory.map(({ sha256 }) => sha256))
+    : null;
   const rows = db
     .query(
       `SELECT results.run_id, results.attempt, results.result_json, results.artifact_hash,
-              runs.spec_json, runs.state, runs.created_at
+              runs.spec_json, runs.created_at
      FROM results
      LEFT JOIN runs ON runs.run_id = results.run_id`,
     )
@@ -374,29 +418,34 @@ export function artifactReferenceIndex(db) {
     } catch {
       // A catalogue read should still expose the bytes if an old spec is bad.
     }
-    const result = JSON.parse(row.result_json);
+    let result;
+    try {
+      result = JSON.parse(row.result_json);
+    } catch {
+      // A bad historical result must not make the whole catalogue unavailable.
+      continue;
+    }
     for (const entry of result.artifacts ?? []) {
       if (!HEX64.test(entry.sha256 ?? "")) continue;
+      if (stored && !stored.has(entry.sha256)) continue;
       const refs = references.get(entry.sha256) ?? [];
       refs.push({
         runId: row.run_id,
         kind: entry.kind ?? null,
         agent,
-        state: row.state ?? null,
         createdAt: row.created_at ?? null,
       });
       references.set(entry.sha256, refs);
     }
     if (result.artifact !== undefined) {
       const sha256 = resultDigest(result.artifactHash ?? row.artifact_hash);
-      if (sha256) {
+      if (sha256 && (!stored || stored.has(sha256))) {
         const refs = references.get(sha256) ?? [];
         refs.push({
           runId: row.run_id,
           attempt: row.attempt,
           kind: "result",
           agent,
-          state: row.state ?? null,
           createdAt: row.created_at ?? null,
         });
         references.set(sha256, refs);
@@ -406,6 +455,29 @@ export function artifactReferenceIndex(db) {
   return references;
 }
 
+/** Resolve mutable run states for the references shown by a catalogue page. */
+export function artifactReferenceStates(db, references) {
+  const runIds = [
+    ...new Set(
+      [...references.values()].flatMap((refs) =>
+        refs.map(({ runId }) => runId),
+      ),
+    ),
+  ];
+  const states = new Map();
+  // Keep below SQLite's default bound-variable limit for large stores.
+  for (let offset = 0; offset < runIds.length; offset += 500) {
+    const ids = runIds.slice(offset, offset + 500);
+    const placeholders = ids.map(() => "?").join(", ");
+    for (const row of db
+      .query(`SELECT run_id, state FROM runs WHERE run_id IN (${placeholders})`)
+      .all(...ids)) {
+      states.set(row.run_id, row.state);
+    }
+  }
+  return states;
+}
+
 /** Snapshot the artifact files that are currently present in the store. */
 export function artifactInventory(storeRoot) {
   if (!existsSync(storeRoot)) return [];
@@ -413,8 +485,11 @@ export function artifactInventory(storeRoot) {
   for (const sha256 of readdirSync(storeRoot).filter((name) =>
     HEX64.test(name),
   )) {
-    const stat = statSync(path.join(storeRoot, sha256));
-    if (!stat.isFile()) continue;
+    // A concurrent prune may remove the entry between readdir and stat.
+    const stat = statSync(path.join(storeRoot, sha256), {
+      throwIfNoEntry: false,
+    });
+    if (!stat?.isFile()) continue;
     inventory.push({
       sha256,
       sizeBytes: stat.size,
@@ -440,11 +515,15 @@ export function listArtifactPage(
 ) {
   const index = references ?? artifactReferenceIndex(db);
   const files = inventory ?? artifactInventory(storeRoot);
+  const states = artifactReferenceStates(db, index);
 
   const term = typeof search === "string" ? search.toLowerCase() : null;
   const catalogue = [];
   for (const file of files) {
-    const refs = index.get(file.sha256) ?? [];
+    const refs = (index.get(file.sha256) ?? []).map((ref) => ({
+      ...ref,
+      state: states.get(ref.runId) ?? null,
+    }));
     const referenced = refs.length > 0;
     if (orphan !== undefined && orphan === referenced) continue;
     if (kind !== undefined && !refs.some((ref) => ref.kind === kind)) continue;
@@ -495,18 +574,40 @@ export function listArtifactPage(
  * Store inventory: total bytes, and the orphans — files no accepted result
  * references. Orphans are normal (a failed attempt stores nothing, but a
  * superseded one can leave bytes behind); they are only a problem unattended.
+ * Interrupted publish temp files are separately reported in `tempFiles` and
+ * `tempBytes`; they are not content-addressed artifacts or orphan candidates.
  */
 export function storeStats(db, storeRoot, { now = Date.now() } = {}) {
-  if (!existsSync(storeRoot))
-    return { files: 0, bytes: 0, orphans: 0, orphanBytes: 0 };
   const referenced = referencedHashes(db);
+  if (!existsSync(storeRoot))
+    return {
+      files: 0,
+      bytes: 0,
+      orphans: 0,
+      orphanBytes: 0,
+      invalidResults: referenced.invalid,
+      tempFiles: 0,
+      tempBytes: 0,
+    };
   let files = 0;
   let bytes = 0;
   let orphans = 0;
   let orphanBytes = 0;
+  let tempFiles = 0;
+  let tempBytes = 0;
   for (const name of readdirSync(storeRoot)) {
+    // A concurrent prune may remove the entry between readdir and stat.
+    const stat = statSync(path.join(storeRoot, name), {
+      throwIfNoEntry: false,
+    });
+    if (!stat?.isFile()) continue;
+    if (ARTIFACT_TEMP.test(name)) {
+      tempFiles += 1;
+      tempBytes += stat.size;
+      continue;
+    }
     if (!HEX64.test(name)) continue;
-    const size = statSync(path.join(storeRoot, name)).size;
+    const size = stat.size;
     files += 1;
     bytes += size;
     if (!referenced.has(name)) {
@@ -519,6 +620,9 @@ export function storeStats(db, storeRoot, { now = Date.now() } = {}) {
     bytes,
     orphans,
     orphanBytes,
+    invalidResults: referenced.invalid,
+    tempFiles,
+    tempBytes,
     at: new Date(now).toISOString(),
   };
 }
@@ -526,13 +630,19 @@ export function storeStats(db, storeRoot, { now = Date.now() } = {}) {
 /**
  * Delete unreferenced artifacts older than `olderThanMs`. Referenced bytes are
  * never touched: a receipt that points at a deleted file is worse than a full
- * disk, because it turns the audit trail into a lie.
+ * disk, because it turns the audit trail into a lie. Interrupted publish temp
+ * files are also removed after `ARTIFACT_TEMP_GRACE_MS`, regardless of the
+ * result table's health — no result can reference a temp name. A malformed
+ * result fails closed for content-addressed files: none are removed, while
+ * dry-runs still report candidates. `remainingOrphans` counts only
+ * content-addressed orphans left behind; in-grace temp files are not orphans.
  */
 export function pruneArtifacts(
   db,
   storeRoot,
   {
     olderThanMs = 7 * 24 * 60 * 60 * 1000,
+    tempGraceMs = ARTIFACT_TEMP_GRACE_MS,
     now = Date.now(),
     dryRun = false,
   } = {},
@@ -540,27 +650,44 @@ export function pruneArtifacts(
   if (!existsSync(storeRoot))
     return { deleted: 0, freedBytes: 0, remainingOrphans: 0 };
   const referenced = referencedHashes(db);
+  const canDelete = dryRun || referenced.invalid === 0;
   let deleted = 0;
   let freedBytes = 0;
   let remainingOrphans = 0;
   for (const name of readdirSync(storeRoot)) {
-    if (!HEX64.test(name) || referenced.has(name)) continue;
     const file = path.join(storeRoot, name);
-    const stat = statSync(file);
-    if (!stat.isFile()) continue;
-    if (now - stat.mtimeMs < olderThanMs) {
+    // A concurrent prune may remove the entry between readdir and stat.
+    const stat = statSync(file, { throwIfNoEntry: false });
+    if (!stat?.isFile()) continue;
+    const isTemp = ARTIFACT_TEMP.test(name);
+    if (!isTemp && (!HEX64.test(name) || referenced.has(name))) continue;
+    const graceMs = isTemp ? tempGraceMs : olderThanMs;
+    if (now - stat.mtimeMs < graceMs) {
+      // An in-grace temp file is a publish still in flight, not an orphan.
+      if (!isTemp) remainingOrphans += 1;
+      continue;
+    }
+    // Temp files are never referenced by a result, so a malformed row does not
+    // make them ambiguous: reclaim them even when artifact deletion is held.
+    if (!isTemp && !canDelete) {
       remainingOrphans += 1;
       continue;
     }
     freedBytes += stat.size;
     deleted += 1;
     if (dryRun) {
-      remainingOrphans += 1;
+      if (!isTemp) remainingOrphans += 1;
     } else {
       rmSync(file, { force: true });
     }
   }
-  return { deleted, freedBytes, remainingOrphans };
+  const result = {
+    deleted,
+    freedBytes,
+    remainingOrphans,
+  };
+  if (referenced.invalid > 0) result.invalidResults = referenced.invalid;
+  return result;
 }
 
 /**

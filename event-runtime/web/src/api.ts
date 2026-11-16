@@ -9,7 +9,7 @@ import type {
   ChainView,
   ApproveOutcome,
   CancelOutcome,
-  EnvIdentity,
+  HealthView,
   DecisionEffect,
   DecisionResponseInput,
   InboxItem,
@@ -30,6 +30,7 @@ import type {
   TicketSummary,
   TraceView,
   Worker,
+  WorkerCapacity,
 } from "./types";
 
 // Same contract as lib/client.mjs: one function per endpoint, an Error with
@@ -440,13 +441,7 @@ export function fetchTickets(
 }
 
 export const api = {
-  health: () =>
-    call<{
-      ok: boolean;
-      policyVersion: string;
-      env: EnvIdentity;
-      tick?: { lastMs: number; overruns: number };
-    }>("GET", "/health"),
+  health: () => call<HealthView>("GET", "/health"),
   status: () => call<StatusView>("GET", "/status"),
   events: (status?: string, page: { limit?: number; before?: string } = {}) =>
     call<CursorPage<AdmittedEvent, "events">>(
@@ -540,6 +535,15 @@ export const api = {
       `/workers/${encodeURIComponent(workerId)}/release`,
       { runId },
     ),
+  // Deliberately cancel a live workspace. This is distinct from stale-lease
+  // recovery above, which refuses a live (still heartbeating) worker with a
+  // 409 and only requeues/fails the run held by a stale one.
+  terminateWorkspace: (workerId: string, runId: string) =>
+    call<{ released: boolean; runId: string; terminated: true }>(
+      "POST",
+      `/workers/${encodeURIComponent(workerId)}/release?terminate=true`,
+      { runId },
+    ),
   // The agent registry, fully readable: definitions, prompts, schemas, pins.
   // Effective adapter/tier include the runtime overlay (WM-887).
   agents: () => call<AgentsView>("GET", "/agents"),
@@ -603,7 +607,8 @@ export const api = {
       apply,
     }),
   // The worker registry: which processes are alive, where, and what they run.
-  workers: () => call<{ workers: Worker[] }>("GET", "/workers"),
+  workers: () =>
+    call<{ workers: Worker[]; capacity?: WorkerCapacity }>("GET", "/workers"),
   // Human inbox ledger (WM-285): everything waiting on the operator, by status.
   inbox: (
     status: InboxStatus = "open",

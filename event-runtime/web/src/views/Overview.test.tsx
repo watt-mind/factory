@@ -8,9 +8,14 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  QueryClient,
+  QueryClientProvider,
+  useQuery,
+} from "@tanstack/react-query";
 import {
   Overview,
+  outboxSummary,
   groupJournalEntries,
   formatActivityGroup,
   buildAnomalyRows,
@@ -21,9 +26,10 @@ import { shortId } from "../components/ui";
 import { api } from "../api";
 import type { OperatorContext } from "../context";
 import { scopedCount, scopedTally } from "../context";
-import { withApi } from "../test-render";
+import { restoreApi, withApi } from "../test-render";
 import type {
   AdmittedEvent,
+  AgentDef,
   EventFocus,
   InboxItem,
   JournalEntry,
@@ -36,6 +42,22 @@ afterEach(() => {
   cleanup();
 });
 
+// Bun restores its fetch mock when each test begins. Reassert the fail-closed
+// DOM-test contract in tests that intentionally exercise an unmocked request.
+function installFetchGuard() {
+  globalThis.fetch = (async (
+    input: Parameters<typeof fetch>[0],
+    init?: Parameters<typeof fetch>[1],
+  ) => {
+    const request = input instanceof Request ? input : null;
+    const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
+    const rawUrl = request?.url ?? String(input);
+    const url = new URL(rawUrl, "http://localhost/");
+    const path = `${url.pathname}${url.search}`.replace(/^\/api(?=\/)/, "");
+    throw new Error(`unmocked api call: ${method} ${path}`);
+  }) as unknown as typeof fetch;
+}
+
 function renderWithClient(ui: React.ReactElement) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -46,6 +68,16 @@ function renderWithClient(ui: React.ReactElement) {
 }
 
 const noop = () => {};
+
+function UnmockedApiProbe() {
+  const query = useQuery({
+    queryKey: ["unmocked-status"],
+    queryFn: api.status,
+  });
+  return (
+    <p>{query.error instanceof Error ? query.error.message : "pending"}</p>
+  );
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -221,6 +253,53 @@ function entry(
     ...overrides,
   };
 }
+
+describe("outboxSummary", () => {
+  const agents = [
+    {
+      eventTypes: [{ type: "factory.work.requested" }],
+      outputView: {
+        schemaVersion: "factory.artifact-view/v1",
+        input: {
+          status: { path: "/status", tone: {} },
+          summary: "/summary",
+          sections: [],
+        },
+      },
+    } as unknown as AgentDef,
+  ];
+
+  test("prefers a resolved event view header and uses the payload heuristic without one", () => {
+    const payload = {
+      status: "READY",
+      summary: "Ready for review",
+      outcome: "legacy outcome",
+    };
+
+    expect(outboxSummary("factory.work.requested", payload, agents)).toBe(
+      "READY",
+    );
+    expect(outboxSummary("factory.unrouted", payload, agents)).toBe(
+      "legacy outcome",
+    );
+  });
+
+  test("falls back to the payload heuristic when no view applies", () => {
+    expect(
+      outboxSummary("factory.work.requested", { outcome: "PR_OPEN" }, agents),
+    ).toBe("PR_OPEN");
+  });
+
+  test("uses the view summary when its status pointer resolves to nothing", () => {
+    expect(
+      outboxSummary(
+        "factory.work.requested",
+        { summary: "Ready for review" },
+        agents,
+      ),
+    ).toBe("Ready for review");
+  });
+});
 
 describe("groupJournalEntries (WM-100)", () => {
   test("collapses consecutive transitions of one run into a single row spanning first → last state", () => {
@@ -526,6 +605,28 @@ describe("Overview keyboard navigation (WM-292)", () => {
 });
 
 describe("Overview anomaly deck (WM-95, WM-979)", () => {
+  test("an incomplete api stub fails closed without reaching the network", async () => {
+    installFetchGuard();
+    const originalProposals = api.proposals;
+    api.proposals = async () => ({ proposals: [] });
+    try {
+      const view = renderWithClient(<UnmockedApiProbe />);
+      await waitFor(() =>
+        expect(view.getByText("unmocked api call: GET /status")).toBeTruthy(),
+      );
+    } finally {
+      api.proposals = originalProposals;
+      restoreApi();
+    }
+  });
+
+  test("the network guard reports mutating methods and normalized api paths", async () => {
+    installFetchGuard();
+    await expect(
+      globalThis.fetch("/api/events", { method: "POST" }),
+    ).rejects.toThrow("unmocked api call: POST /events");
+  });
+
   test("collapses expired-open proposals to one Review-expired row (WM-979)", async () => {
     const origStatus = api.status;
     const origProposals = api.proposals;
@@ -899,7 +1000,7 @@ describe("Overview needs you (WM-596)", () => {
     };
   }
 
-  test("leads with capped oldest-first inbox groups and opens the selected row", async () => {
+  test("leads with capped newest-first inbox groups and opens the selected row", async () => {
     const items = Array.from({ length: 6 }, (_, index) =>
       inboxItem(
         `blocked-${index}`,
@@ -922,13 +1023,46 @@ describe("Overview needs you (WM-596)", () => {
           .slice(0, 2),
       ).toEqual(["Overview", "Needs you"]);
       expect(view.getAllByTitle(/Attention blocked-/)).toHaveLength(5);
-      expect(view.queryByTitle("Attention blocked-5")).toBeNull();
+      expect(
+        view
+          .getAllByTitle(/Attention blocked-/)
+          .map((row) => row.getAttribute("title")),
+      ).toEqual([
+        "Attention blocked-5",
+        "Attention blocked-4",
+        "Attention blocked-3",
+        "Attention blocked-2",
+        "Attention blocked-1",
+      ]);
+      expect(view.queryByTitle("Attention blocked-0")).toBeNull();
 
       fireEvent.click(view.getByRole("button", { name: "1 more →" }));
       expect(onNavigate).toHaveBeenCalledWith("inbox");
 
       fireEvent.keyDown(document.body, { key: "Enter" });
-      expect(onNavigate).toHaveBeenCalledWith("inbox/blocked-0");
+      expect(onNavigate).toHaveBeenCalledWith("inbox/blocked-5");
+    } finally {
+      restore();
+    }
+  });
+
+  test("requests open inbox rows rather than a mixed-status ledger page", async () => {
+    const calls: string[] = [];
+    const restore = stubNeedsYou([]);
+    api.inbox = async (status) => {
+      calls.push(status ?? "open");
+      return {
+        items:
+          status === "open"
+            ? [inboxItem("open-only", "BLOCKED", "2026-08-17T00:00:00.000Z")]
+            : [],
+      };
+    };
+
+    try {
+      const view = renderOverview();
+      await waitFor(() => view.getByTitle("Attention open-only"));
+      expect(calls).toEqual(["open"]);
     } finally {
       restore();
     }

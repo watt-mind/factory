@@ -7,7 +7,7 @@
 
 <!-- factory-dogfood-badge -->
 
-[![Maintained by the factory](https://img.shields.io/static/v1?label=Maintained+by+the+factory&message=742+PRs+merged+autonomously+this+month&color=0B6E4F)](https://github.com/watt-mind/factory/pulls?q=is%3Apr+is%3Amerged)
+[![Maintained by the factory](https://img.shields.io/static/v1?label=Maintained+by+the+factory&message=4+PRs+merged+autonomously+this+month&color=0B6E4F)](https://github.com/watt-mind/factory/pulls?q=is%3Apr+is%3Amerged)
 
 <!-- /factory-dogfood-badge -->
 
@@ -21,10 +21,10 @@ hands one agent one ticket in one worktree, re-runs the verification command
 itself, and holds the merge until CI and a reviewer agree. That is this.
 
 factory drives the coding agents you already use — Claude Code, Codex, Gemini
-/ Antigravity, Cursor, Pi. The tracker is the control plane, GitHub is the
-source of truth, and CI is the reward signal. Nothing merges because an agent
-said it was done; it merges because the tests passed and a reviewer (agent or
-human) approved.
+/ Antigravity, Cursor, Pi, and Hermes Agent via ACP. The tracker is the control
+plane, GitHub is the source of truth, and CI is the reward signal. Nothing
+merges because an agent said it was done; it merges because the tests passed
+and a reviewer (agent or human) approved.
 
 [![The factory's Graph view: every registered event route and recommendation edge in a running instance, laid out as a directed graph.](docs/screenshots/15-graph.jpg)](docs/screenshots/15-graph.jpg)
 
@@ -56,7 +56,8 @@ bin/factory onboard --repo ~/Develop/yourapp | pbcopy
 ```
 
 Paste it into Claude Code, Codex, Gemini, Cursor, or Pi with your repository
-open. It surveys the repo, wires up the control plane, files the first
+open. Hermes Agent can run the same work through the event runtime's ACP
+adapter. It surveys the repo, wires up the control plane, files the first
 agent-ready ticket, and stops at a gate it cannot talk its way past:
 `factory doctor` and `factory queue` green.
 
@@ -103,11 +104,7 @@ including the choices that were wrong first.
 
 ## The loop
 
-```
-Triage ──①triage──▶ ai:agent-ready ──②dispatch──▶ PR ──③merge──▶ Done
-                                                             │
-                             reaper ◀── crashed claims ◀──────┘
-```
+[![The autonomous software loop](docs/media/autonomous-loop.png)](https://watt-mind.github.io/factory/concepts/the-loop/)
 
 Dispatch is rolling: the moment a ticket finishes, its slot refills. Commands
 are repo-agnostic verbs and `--repo` supplies the targets, so adding a
@@ -135,21 +132,26 @@ is the work, CI is the gate.
 Prefixed `factory-` so they are identifiable as ours and never collide with a
 repo-local or built-in command of the same name.
 
-| Command             | Does                                                                                           |
-| :------------------ | :--------------------------------------------------------------------------------------------- |
-| `/factory-work`     | Claims agent-ready tickets, dispatches them rolling, lands the PRs                             |
-| `/factory-ticket`   | Implements exactly one already-claimed ticket in the current worktree — what `tick.mjs` spawns |
-| `/factory-merge`    | Reviews open PRs, fixes what's mechanical, merges what qualifies                               |
-| `/factory-ship`     | Opens the `develop` → deploy-branch PR, waits for CI, merges, verifies the deploy              |
-| `/factory-triage`   | Turns `Triage` tickets into `ai:agent-ready` ones                                              |
-| `/factory-unblock`  | Re-examines `ai:blocked` holds and releases the ones new evidence resolved                     |
-| `/factory-sweep`    | Retires tickets overtaken by events — `Canceled`/`Duplicate` with evidence, never a delete     |
-| `/factory-audit`    | Grades a repo against project-conventions `PC-01`..`PC-20`, files the gaps                     |
-| `/factory-capture`  | Files an issue from the conversation — capture only, never implement                           |
-| `/factory-friction` | Files harness friction seen in an interactive session, where no transcript exists              |
-| `/factory-retro`    | Turns measured friction into harness changes                                                   |
-| `/factory-report`   | Read-only pipeline snapshot across the configured repos                                        |
-| `/factory-next`     | Picks the one next stage for this repo, and runs it only when asked                            |
+| Command                  | Does                                                                                                                                |
+| :----------------------- | :---------------------------------------------------------------------------------------------------------------------------------- |
+| `/factory-work`          | Claims agent-ready tickets, dispatches them rolling, lands the PRs                                                                  |
+| `/factory-ticket`        | Implements exactly one already-claimed ticket in the current worktree — what `tick.mjs` spawns                                      |
+| `/factory-merge`         | Reviews open PRs, fixes what's mechanical, merges what qualifies                                                                    |
+| `/factory-ship`          | Opens the `develop` → deploy-branch PR, waits for CI, merges, verifies the deploy                                                   |
+| `/factory-verify`        | Reviews and live-verifies open PRs or a branch end-to-end as a user (with in-branch auto-fix up to 2 rounds), stopping before merge |
+| `/factory-verify-deploy` | Verifies a live deploy end-to-end — rollout SHA, zero runtime/telemetry errors, and staging or read-only prod E2E flows             |
+| `/factory-triage`        | Turns `Triage` tickets into `ai:agent-ready` ones                                                                                   |
+| `/factory-unblock`       | Re-examines `ai:blocked` holds and releases the ones new evidence resolved                                                          |
+| `/factory-sweep`         | Retires tickets overtaken by events — `Canceled`/`Duplicate` with evidence, never a delete                                          |
+| `/factory-audit`         | Grades a repo against project-conventions `PC-01`..`PC-20`, files the gaps                                                          |
+| `/factory-garden`        | Scans for spreading anti-patterns and suppressions; replaces prose warnings with deterministic checks                               |
+| `/factory-capture`       | Files an issue from the conversation — capture only, never implement                                                                |
+| `/factory-friction`      | Files harness friction seen in an interactive session, where no transcript exists                                                   |
+| `/factory-retro`         | Turns measured friction into harness changes                                                                                        |
+| `/factory-report`        | Read-only pipeline snapshot across the configured repos                                                                             |
+| `/factory-recap`         | Read-only catch-up on what changed since check-in and every decision waiting on the operator                                        |
+| `/factory-recap-video`   | Silent, subtitled landscape MP4 catch-up walkthrough paired with self-contained operator decision cards                             |
+| `/factory-next`          | Picks the one next stage for this repo (diagnoses by default; runs it with `--apply`)                                               |
 
 ### `factory status` — the everyday hub
 
@@ -181,14 +183,16 @@ The **content** is portable; only the **packaging** is not. `SKILL.md` is a
 shared workflow format, command bodies are Markdown, and each harness gets its
 native agent manifest.
 
-| Harness     | Context                   | Skills              | Commands                    | Agents                |
-| :---------- | :------------------------ | :------------------ | :-------------------------- | :-------------------- |
-| Claude Code | `CLAUDE.md` → `AGENTS.md` | plugin `skills/`    | plugin `commands/`          | plugin `agents/`      |
-| Codex       | `AGENTS.md` (native)      | `~/.agents/skills/` | — (use `@factory-*` skills) | `~/.codex/agents/`    |
-| Gemini CLI  | `GEMINI.md` → `AGENTS.md` | `~/.gemini/skills/` | —                           | `~/.gemini/agents/`   |
-| Antigravity | shares `~/.gemini/`       | via Gemini          | —                           | via Gemini            |
-| Cursor      | `.cursor/rules/`          | —                   | `~/.cursor/commands/`       | `~/.cursor/agents/`   |
-| Pi          | `AGENTS.md` (native)      | `dist/pi/skills/`   | `dist/pi/prompts/`          | `~/.pi/agent/agents/` |
+| Harness      | Context                   | Skills                   | Commands                    | Agents                   |
+| :----------- | :------------------------ | :----------------------- | :-------------------------- | :----------------------- |
+| Claude Code  | `CLAUDE.md` → `AGENTS.md` | plugin `skills/`         | plugin `commands/`          | plugin `agents/`         |
+| Codex        | `AGENTS.md` (native)      | `~/.agents/skills/`      | — (use `@factory-*` skills) | `~/.codex/agents/`       |
+| Gemini CLI   | `GEMINI.md` → `AGENTS.md` | `~/.gemini/skills/`      | —                           | `~/.gemini/agents/`      |
+| Antigravity  | shares `~/.gemini/`       | via Gemini               | —                           | via Gemini               |
+| Cursor       | `.cursor/rules/`          | `~/.cursor/skills/`      | `~/.cursor/commands/`       | `~/.cursor/agents/`      |
+| Pi           | `AGENTS.md` (native)      | `dist/pi/skills/`        | `dist/pi/prompts/`          | `~/.pi/agent/agents/`    |
+| Muse Code    | `AGENTS.md` (native)      | `~/.config/muse/skills/` | — (use `/factory-*` skills) | `~/.config/muse/agents/` |
+| Hermes Agent | ACP v1; `AGENTS.md` floor | — (not yet supported)    | `.hermes/commands/`         | `.hermes/agents/`        |
 
 > [!IMPORTANT]
 > **The plugin is a convenience layer, not the safety floor.** It reaches
@@ -279,13 +283,13 @@ is added there in the future, it must carry explicit terms; placement under
 
 Complete guides, concepts, and API references are hosted at **[watt-mind.github.io/factory](https://watt-mind.github.io/factory/)**.
 
-| Guide                                                                              | What it covers                                                    |
-| :--------------------------------------------------------------------------------- | :---------------------------------------------------------------- |
-| [Getting Started](https://watt-mind.github.io/factory/getting-started/quickstart/) | Connect a repository, run the onboarding prompt, offline demo     |
-| [Core Concepts](https://watt-mind.github.io/factory/concepts/the-loop/)            | The loop, owned paths, verification model, and control planes     |
-| [Harnesses & Agents](https://watt-mind.github.io/factory/harnesses/overview/)      | Claude Code, Codex, Gemini, Cursor, Pi, and specialist agents     |
-| [Operator Guide](https://watt-mind.github.io/factory/operator/event-runtime/)      | Running the event-runtime sidecar, multi-repo fleets, web console |
-| [Reference & Protocol](https://watt-mind.github.io/factory/reference/protocol/)    | The non-negotiable agent operating contract and CLI reference     |
+| Guide                                                                              | What it covers                                                        |
+| :--------------------------------------------------------------------------------- | :-------------------------------------------------------------------- |
+| [Getting Started](https://watt-mind.github.io/factory/getting-started/quickstart/) | Connect a repository, run the onboarding prompt, offline demo         |
+| [Core Concepts](https://watt-mind.github.io/factory/concepts/the-loop/)            | The loop, owned paths, verification model, and control planes         |
+| [Harnesses & Agents](https://watt-mind.github.io/factory/harnesses/overview/)      | Claude Code, Codex, Gemini, Cursor, Pi, Hermes Agent, and specialists |
+| [Operator Guide](https://watt-mind.github.io/factory/operator/event-runtime/)      | Running the event-runtime sidecar, multi-repo fleets, web console     |
+| [Reference & Protocol](https://watt-mind.github.io/factory/reference/protocol/)    | The non-negotiable agent operating contract and CLI reference         |
 
 ## Contributing
 

@@ -19,7 +19,7 @@ jobs:
     name: Validate and publish
     # Cloud runner per OSS security policy (WM-950). Gets publish credentials
     # and OIDC tokens off the shared host.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Checkout (no action download)
@@ -42,13 +42,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Prepends the pinned bun to GITHUB_PATH; a runner bun of another
+          # version is never reused (WM-1137).
           .github/scripts/install-pinned-tools.sh bun
-          if [ -x "$HOME/.bun/bin/bun" ]; then
-            echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
-            "$HOME/.bun/bin/bun" --version
-          else
-            bun --version
-          fi
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
       - name: Require NPM_TOKEN
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

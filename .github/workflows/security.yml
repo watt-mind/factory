@@ -20,7 +20,7 @@ jobs:
   github-paths-changed:
     name: Detect GitHub configuration changes
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 2
     outputs:
       github_changed: ${{ steps.changed.outputs.github_changed }}
@@ -51,9 +51,9 @@ jobs:
     name: Pinned tools forced-install smoke
     needs: github-paths-changed
     if: >-
-      ${{ always() && (github.event_name == 'workflow_dispatch' ||
+      ${{ !cancelled() && (github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'pull_request' && needs.github-paths-changed.outputs.github_changed == 'true')) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Checkout (no action download)
@@ -88,7 +88,7 @@ jobs:
   gitleaks:
     name: Gitleaks
     # Cloud runner per OSS security policy (WM-950).
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Checkout (no action download)
@@ -181,7 +181,7 @@ jobs:
 
   semgrep:
     name: Semgrep
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Checkout (no action download)
@@ -217,11 +217,11 @@ jobs:
           fi
           "$uvx_bin" --version
       - name: Semgrep scan
-        run: uvx --from semgrep==1.111.0 --with "setuptools<70" semgrep scan --config p/security-audit --error --metrics=off .
+        run: uvx --python 3.12 --from semgrep==1.111.0 --with "setuptools<70" semgrep scan --config p/security-audit --error --metrics=off .
 
   actionlint:
     name: Actionlint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Checkout (no action download)
@@ -259,10 +259,9 @@ jobs:
 
   codeql:
     name: CodeQL
-    # Keep CodeQL on the labeled self-hosted runner used by the previous
-    # GitHub-managed default setup. Its explicit resource cap prevents a scan
-    # from consuming every CPU and nearly all RAM on the shared host.
-    runs-on: shadow
+    # Run on ephemeral ubuntu-24.04 (16 GiB RAM, 4 vCPUs) so CodeQL never
+    # contends with self-hosted runners or leaks fork-PR context.
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
       actions: read
@@ -293,9 +292,9 @@ jobs:
           build-mode: none
           # GitHub's default setup used all 32 host threads and 60 GiB RAM.
           # This repository is about 146K LOC, for which GitHub recommends
-          # 16 GiB and 4–8 cores on a self-hosted runner.
-          threads: 8
-          ram: 16384
+          # 8 GiB and four cores leave headroom for the dispatched CI lanes.
+          threads: 4
+          ram: 8192
 
       - name: Analyze with CodeQL
         uses: github/codeql-action/analyze@v4

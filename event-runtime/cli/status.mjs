@@ -1,5 +1,6 @@
 import { readPool } from "./supervise.mjs";
 import { pad, withClient } from "./shared.mjs";
+import { apiClient } from "../lib/client.mjs";
 
 function countLine(label, counts, order = Object.keys(counts)) {
   const parts = order.map((k) => `${k} ${counts[k] ?? 0}`);
@@ -47,8 +48,9 @@ export function getAnomalyLines(s) {
   if (a.unreferencedArtifacts > 0) {
     anomalyLines.push(`unreferenced artifacts: ${a.unreferencedArtifacts}`);
   } else if (s?.artifacts?.orphans > 0) {
+    const heldBy = s.artifacts.invalidResults ?? 0;
     anomalyLines.push(
-      `unreferenced artifacts: ${s.artifacts.orphans} (${s.artifacts.orphanBytes ?? 0}B)`,
+      `unreferenced artifacts: ${s.artifacts.orphans} (${s.artifacts.orphanBytes ?? 0}B)${heldBy > 0 ? ` — GC held by ${heldBy} unparsable result row(s)` : ""}`,
     );
   }
   if (Array.isArray(a.orphanedWorkspaces)) {
@@ -148,8 +150,28 @@ export function getPoolLines(pool, s) {
   return { line, anomalies };
 }
 
-export async function status(client) {
+export async function status(client, args = []) {
   const s = await client.status();
+  const pool = getPoolLines(readPool(), s);
+  const anomalyLines = [
+    ...getAnomalyLines(s),
+    ...(s?.policy?.dispatchPaused ? ["dispatch_paused"] : []),
+    ...pool.anomalies,
+  ];
+  if (args.includes("--json")) {
+    console.log(
+      JSON.stringify({
+        ...s,
+        inFlight: {
+          admittedNotPlanned: s.events?.admitted ?? 0,
+          queued: s.runs?.byState?.QUEUED ?? 0,
+          running: s.runs?.byState?.RUNNING ?? 0,
+        },
+        anomalies: anomalyLines,
+      }),
+    );
+    return anomalyLines;
+  }
   if (s.env) {
     console.log(
       `${pad("env", 11)}${s.env.name}${s.env.adapter ? `   (adapter override: ${s.env.adapter})` : ""}   ${s.env.home}`,
@@ -164,6 +186,11 @@ export async function status(client) {
       "dead_lettered",
     ]),
   );
+  if (s?.policy?.dispatchPaused) {
+    console.log(
+      `${pad("dispatch", 11)}PAUSED (config/policy.yaml dispatch.paused)`,
+    );
+  }
   console.log(countLine("proposals", s.proposals, ["open", "expired"]));
   if (s.inbox) console.log(countLine("inbox", s.inbox, ["open", "acked"]));
   const states = Object.keys(s.runs.byState);
@@ -180,9 +207,7 @@ export async function status(client) {
       console.log(spendLine(`  ${row.agent}`, row));
     }
   }
-  const pool = getPoolLines(readPool(), s);
   if (pool.line) console.log(pool.line);
-  const anomalyLines = [...getAnomalyLines(s), ...pool.anomalies];
   if (anomalyLines.length === 0) console.log(`${pad("anomalies", 11)}none`);
   else
     for (const line of anomalyLines)
@@ -190,6 +215,20 @@ export async function status(client) {
   return anomalyLines;
 }
 
-export default function statusCommand() {
-  return withClient(status);
+export default async function statusCommand(args = []) {
+  if (!args.includes("--json")) {
+    return withClient((client) => status(client, args));
+  }
+
+  const client = apiClient();
+  try {
+    return await status(client, args);
+  } catch (err) {
+    const error =
+      err.status === undefined
+        ? `control API not reachable on ${client.host}:${client.port} — start it with: bun event-runtime/cli.mjs serve`
+        : err.message;
+    console.error(JSON.stringify({ error }));
+    process.exit(1);
+  }
 }

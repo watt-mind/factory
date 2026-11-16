@@ -68,6 +68,7 @@ const PROPOSAL_STATUSES = [
   "open",
   "approved",
   "rejected",
+  "expired",
   "superseded",
   "resolved",
 ] as const;

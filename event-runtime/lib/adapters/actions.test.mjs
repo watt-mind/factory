@@ -10,7 +10,7 @@ import {
 } from "./actions.mjs";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { appendIssueDetail } from "../../../tools/linear.mjs";
+import { appendIssueDetail } from "../../../tools/ticket.mjs";
 
 const tmp = (p) => tmpDir(p);
 

@@ -12,6 +12,15 @@
  */
 import { canonicalJson } from "./canonical.mjs";
 import { admitEvent } from "./intake.mjs";
+import { rejectProposal } from "./proposals.mjs";
+import { getAgent, getEventType } from "./registry.mjs";
+import { parseCadence } from "./schedule-config.mjs";
+export {
+  APPROVAL_MODES,
+  CATCH_UP_MODES,
+  parseCadence,
+} from "./schedule-config.mjs";
+export { inFlightRunsForAgent } from "./in-flight-runs.mjs";
 
 export const SCHEDULE_SOURCE = "schedule";
 /** Fields emitDueTicks always stamps itself, overriding a static payload. */
@@ -21,19 +30,6 @@ const TICK_PAYLOAD_FIELDS = new Set([
   "cadenceSeconds",
   "skippedSlots",
 ]);
-export const CATCH_UP_MODES = ["none", "last", "all"];
-export const APPROVAL_MODES = ["watched", "auto"];
-
-/** "60m" / "30s" / "2h" / "1d" → seconds. Intervals only: no cron, no timezone. */
-export function parseCadence(every) {
-  const match = /^(\d+)([smhd])$/.exec(String(every ?? "").trim());
-  if (!match)
-    throw new Error(`unparseable cadence "${every}" — use 30s, 15m, 2h or 1d`);
-  const value = Number(match[1]);
-  if (value <= 0) throw new Error(`cadence "${every}" must be positive`);
-  return value * { s: 1, m: 60, h: 3600, d: 86400 }[match[2]];
-}
-
 /**
  * The slot a moment belongs to: the interval floor from the epoch. Identity
  * comes from the slot, never from the instant a tick was emitted — that is
@@ -207,28 +203,6 @@ export function emitDueTicks(db, registry, { now = Date.now() } = {}) {
   return { emitted, errors };
 }
 
-/**
- * Runs for an agent that are still in flight, oldest first. PROPOSED remains
- * excluded (OPS-436): an unapproved watched proposal must not silence later
- * schedule slots. Returning the rows lets singleton NOOPs identify the run
- * they deferred to instead of dropping that audit evidence.
- */
-export function inFlightRunsForAgent(db, agentRef) {
-  return db
-    .query(
-      `SELECT run_id, state, created_at FROM runs
-       WHERE state NOT IN ('PROPOSED','COMPLETED','REFUSED','FAILED','TIMED_OUT','CANCELLED')
-         AND json_extract(spec_json, '$.agent') = ?
-       ORDER BY created_at ASC, rowid ASC`,
-    )
-    .all(agentRef);
-}
-
-/** Is a run for this loop's agent still in flight? (§5 singleton) */
-export function loopInFlight(db, agentRef) {
-  return inFlightRunsForAgent(db, agentRef).length > 0;
-}
-
 /** The newest slot that successfully completed for a loop, or null if never completed (OPS-436). */
 export function lastCompletedSlot(db, loop) {
   const row = db
@@ -329,6 +303,18 @@ function matchesConfiguredTick(envelope, row, loop, schedule) {
   return true;
 }
 
+/** A missing event mapping or target definition has no valid re-plan path. */
+function cannotReplanScheduledDefinition(registry, eventType) {
+  const mapping = getEventType(registry, eventType);
+  if (!mapping) return true;
+  try {
+    getAgent(registry, mapping.agent);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 /**
  * Approve open proposals belonging to loops that declare `approval: auto`
  * (§6). Separate from planning on purpose: auto-approval is the step that
@@ -346,22 +332,39 @@ export function autoApproveScheduled(
   { now = Date.now(), policyVersion } = {},
 ) {
   const approved = [];
+  const expired = [];
   const errors = [];
   const autoLoops = new Map(
     Object.entries(registry.schedules ?? {}).filter(
       ([, s]) => s.enabled && (s.approval ?? "watched") === "auto",
     ),
   );
-  if (autoLoops.size === 0) return { approved, errors };
-
   const rows = db
     .query(
-      `SELECT p.id, e.event_id, e.type, e.envelope_json FROM proposals p
+      `SELECT p.id, p.run_id, e.event_id, e.type, e.envelope_json FROM proposals p
        JOIN events e ON e.source = p.event_source AND e.event_id = p.event_id
        WHERE p.status = 'open' AND p.decision = 'run' AND e.source = ?`,
     )
     .all(SCHEDULE_SOURCE);
   for (const row of rows) {
+    // A scheduler can outlive its mapped event or target definition across a
+    // registry deploy. Approving this row would only re-plan and throw, so
+    // resolve it once rather than reconsidering it on every serve tick.
+    if (cannotReplanScheduledDefinition(registry, row.type)) {
+      try {
+        rejectProposal(db, row.id, {
+          actor: SCHEDULE_SOURCE,
+          reason: "registry_stale",
+          now,
+          policyVersion,
+        });
+        expired.push({ proposalId: row.id, runId: row.run_id });
+      } catch (err) {
+        errors.push(`registry_stale ${row.id}: ${err.message}`);
+      }
+      continue;
+    }
+
     let envelope;
     try {
       envelope = JSON.parse(row.envelope_json);
@@ -388,7 +391,7 @@ export function autoApproveScheduled(
       errors.push(`${loop}: ${err.message}`);
     }
   }
-  return { approved, errors };
+  return { approved, expired, errors };
 }
 
 export const DEFAULT_PROPOSALS_PILING_THRESHOLD = 3;

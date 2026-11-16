@@ -33,6 +33,7 @@ import { FACTORY_ROOT, transcriptMaxBytes } from "../config.mjs";
 import { DEFAULT_MODEL } from "../registry.mjs";
 import { PROMPT_SUFFIX, verifiedPrompt } from "./claude.mjs";
 import {
+  KILL_GRACE_MS,
   PROVIDER_CREDENTIAL_ENV,
   PUSH_CREDENTIAL_ENV,
   RUNTIME_IDENTITY_ENV,
@@ -46,6 +47,7 @@ import {
 import { refuseSandbox } from "./sandboxed.mjs";
 
 export {
+  KILL_GRACE_MS,
   PROVIDER_CREDENTIAL_ENV,
   PROMPT_SUFFIX,
   PUSH_CREDENTIAL_ENV,
@@ -61,11 +63,16 @@ const SANDBOX_REFUSAL_REASON =
   "the Cursor Agent CLI has no guest execution path yet — its binary and CURSOR_API_KEY transport have not been translated to the microVM";
 
 /**
- * Workspace-relative packaging of RunSpec.harness (WM-851). Cursor emit has
- * commands and agents, not skills — a spec that names skills is refused
- * `harness_unsupported` by the worker rather than silently dropped.
+ * Workspace-relative packaging of RunSpec.harness (WM-851, GH-2370). Cursor
+ * reads project skills from `.cursor/skills/<name>/SKILL.md`, commands from
+ * `.cursor/commands/<name>.md`, and subagents from `.cursor/agents/<name>.md`.
  */
 export const HARNESS_LAYOUT = Object.freeze({
+  skills: Object.freeze({
+    source: (name) => ["dist", "cursor", "skills", name],
+    dest: (name) => [".cursor", "skills", name],
+    type: "dir",
+  }),
   commands: Object.freeze({
     source: (name) => ["dist", "cursor", "commands", `${name}.md`],
     dest: (name) => [".cursor", "commands", `${name}.md`],
@@ -77,8 +84,6 @@ export const HARNESS_LAYOUT = Object.freeze({
     type: "file",
   }),
 });
-
-export const KILL_GRACE_MS = 30_000;
 
 /** Terminate a detached CLI and every subprocess it started (WM-263). */
 export { killProcessGroup };

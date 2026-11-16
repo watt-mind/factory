@@ -1,88 +1,22 @@
 import { test, expect, describe } from "bun:test";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import {
-  loadNodesConfig,
   buildSshArgv,
+  buildRsyncArgv,
+  quoteRemotePath,
   executeSsh,
+  loadNodesConfig,
   probeRemoteNode,
   deployRemoteWorker,
+  emitRemoteNode,
   startRemoteWorker,
   stopRemoteWorker,
   updateRemoteWorker,
-  NodeConfigError,
+  RemoteWorkerConfigError,
 } from "./workers-remote.mjs";
 
-describe("nodes config loader", () => {
-  test("loadNodesConfig parses valid nodes.yaml correctly", () => {
-    const dir = path.join(tmpdir(), `test-nodes-${Date.now()}`);
-    mkdirSync(path.join(dir, "config"), { recursive: true });
-    writeFileSync(
-      path.join(dir, "config", "nodes.yaml"),
-      `
-nodes:
-  mac-mini:
-    host: "mac-mini.local"
-    user: "dev"
-    port: 2222
-    factory_root: "~/Develop/factory"
-    branch: "main"
-    env:
-      FACTORY_EVENT_PORT: 7381
-    labels:
-      node: "mac-mini"
-      arch: "arm64"
-    adapters:
-      - "claude"
-      - "command"
-`,
-    );
-
-    try {
-      const nodes = loadNodesConfig({ root: dir });
-      expect(nodes.size).toBe(1);
-      const node = nodes.get("mac-mini");
-      expect(node).toEqual({
-        name: "mac-mini",
-        host: "mac-mini.local",
-        user: "dev",
-        port: 2222,
-        factoryRoot: "~/Develop/factory",
-        branch: "main",
-        env: { FACTORY_EVENT_PORT: 7381 },
-        labels: { node: "mac-mini", arch: "arm64" },
-        adapters: ["claude", "command"],
-      });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("loadNodesConfig handles missing file gracefully", () => {
-    const nodes = loadNodesConfig({ configPath: "/nonexistent/nodes.yaml" });
-    expect(nodes.size).toBe(0);
-  });
-
-  test("loadNodesConfig rejects invalid node definitions", () => {
-    const dir = path.join(tmpdir(), `test-nodes-err-${Date.now()}`);
-    mkdirSync(path.join(dir, "config"), { recursive: true });
-    writeFileSync(
-      path.join(dir, "config", "nodes.yaml"),
-      `
-nodes:
-  bad-node:
-    port: "invalid"
-`,
-    );
-
-    try {
-      expect(() => loadNodesConfig({ root: dir })).toThrow(NodeConfigError);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-});
+const EXPECTED_PATH_EXPORT =
+  'export PATH="$HOME/.bun/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH";';
 
 describe("ssh argv builder", () => {
   test("buildSshArgv constructs correct arguments", () => {
@@ -233,6 +167,31 @@ describe("remote lifecycle operations", () => {
     expect(res.error).toBe(null);
   });
 
+  test("deployRemoteWorker freezes installs and shell-quotes configured values", () => {
+    let deployScript = null;
+    const ref = 'x"; echo pwned; "';
+    const repoUrl = "ssh://git@example.test/worker's-factory.git";
+    const res = deployRemoteWorker(
+      { ...node, repoUrl },
+      {
+        ref,
+        spawnFn: (args) => {
+          deployScript = args.at(-1);
+          return { exitCode: 0, stdout: "DEPLOY_SUCCESS\n", stderr: "" };
+        },
+      },
+    );
+
+    expect(res.ok).toBe(true);
+    expect(deployScript).toContain("bun install --frozen-lockfile");
+    expect(deployScript).toContain(`git checkout '${ref}'`);
+    expect(deployScript).toContain(`git pull --ff-only origin '${ref}'`);
+    expect(deployScript).toContain(
+      "git clone 'ssh://git@example.test/worker'\"'\"'s-factory.git' .",
+    );
+    expect(deployScript).not.toContain(`git checkout ${ref}`);
+  });
+
   test("startRemoteWorker parses launched PID", () => {
     const mockSpawn = () => ({
       exitCode: 0,
@@ -243,6 +202,47 @@ describe("remote lifecycle operations", () => {
     const res = startRemoteWorker(node, { spawnFn: mockSpawn });
     expect(res.ok).toBe(true);
     expect(res.pid).toBe(88123);
+  });
+
+  test("startRemoteWorker shell-quotes environment, labels, and adapters", () => {
+    let startScript = null;
+    const res = startRemoteWorker(
+      {
+        ...node,
+        env: { TOKEN: "cost$5 and 'quotes'" },
+        labels: { node: "mini; echo pwned" },
+        adapters: ["claude; echo pwned"],
+      },
+      {
+        spawnFn: (args) => {
+          startScript = args.at(-1);
+          return { exitCode: 0, stdout: "START_SUCCESS:88123\n", stderr: "" };
+        },
+      },
+    );
+
+    expect(res.ok).toBe(true);
+    expect(startScript).toContain(
+      "export TOKEN='cost$5 and '\"'\"'quotes'\"'\"'';",
+    );
+    expect(startScript).toContain("--labels 'node=mini; echo pwned'");
+    expect(startScript).toContain("--adapters 'claude; echo pwned'");
+  });
+
+  test("startRemoteWorker rejects an invalid environment key before SSH", () => {
+    let spawnCalls = 0;
+    expect(() =>
+      startRemoteWorker(
+        { ...node, env: { "NOT-VALID": "value" } },
+        {
+          spawnFn: () => {
+            spawnCalls += 1;
+            return { exitCode: 0, stdout: "START_SUCCESS:1", stderr: "" };
+          },
+        },
+      ),
+    ).toThrow(RemoteWorkerConfigError);
+    expect(spawnCalls).toBe(0);
   });
 
   test("stopRemoteWorker handles stop signal and drain", () => {
@@ -273,5 +273,189 @@ describe("remote lifecycle operations", () => {
     expect(res.ok).toBe(true);
     expect(res.pid).toBe(99201);
     expect(callCount).toBe(3);
+  });
+});
+
+describe("remote path quoting and harness emit sync", () => {
+  const node = {
+    name: "mini",
+    host: "mini.local",
+    user: "dev",
+    port: 22,
+    factoryRoot: "~/Develop/factory",
+    branch: "develop",
+    env: {},
+    labels: {},
+    adapters: ["claude"],
+  };
+
+  test("quoteRemotePath preserves $HOME expansion for tilde paths while shell-quoting", () => {
+    expect(quoteRemotePath("~/Develop/factory")).toBe(
+      "\"$HOME/\"'Develop/factory'",
+    );
+    expect(quoteRemotePath("~")).toBe('"$HOME"');
+    expect(quoteRemotePath("/opt/factory")).toBe("'/opt/factory'");
+    expect(quoteRemotePath("~/my 'factory' dir")).toBe(
+      "\"$HOME/\"'my '\"'\"'factory'\"'\"' dir'",
+    );
+  });
+
+  test("probeRemoteNode and deployRemoteWorker expand ~/ paths, export PATH, and deploy links harnesses", () => {
+    let probeScript = null;
+    probeRemoteNode(node, {
+      spawnFn: (args) => {
+        probeScript = args.at(-1);
+        return {
+          exitCode: 0,
+          stdout: "PROBE_RESULT:abc|develop|0|arm64|Darwin|1.4.4|",
+          stderr: "",
+        };
+      },
+    });
+    expect(probeScript).toContain(EXPECTED_PATH_EXPORT);
+    expect(probeScript).toContain("REMOTE_DIR=\"$HOME/\"'Develop/factory';");
+
+    let deployScript = null;
+    deployRemoteWorker(node, {
+      spawnFn: (args) => {
+        deployScript = args.at(-1);
+        return { exitCode: 0, stdout: "DEPLOY_SUCCESS\n", stderr: "" };
+      },
+    });
+    expect(deployScript).toContain(EXPECTED_PATH_EXPORT);
+    expect(deployScript).toContain("mkdir -p \"$HOME/\"'Develop/factory';");
+    expect(deployScript).toContain("cd \"$HOME/\"'Develop/factory';");
+    expect(deployScript).toContain(
+      "git checkout -- shared plugins dist 2>/dev/null || true;",
+    );
+    expect(deployScript).toContain(
+      "git clean -fd shared plugins dist 2>/dev/null || true;",
+    );
+    expect(deployScript).toContain(
+      "bun build/emit.mjs --link --link-bin --link-repos 2>&1;",
+    );
+
+    let startScript = null;
+    startRemoteWorker(node, {
+      spawnFn: (args) => {
+        startScript = args.at(-1);
+        return { exitCode: 0, stdout: "START_SUCCESS:42\n", stderr: "" };
+      },
+    });
+    expect(startScript).toContain(EXPECTED_PATH_EXPORT);
+  });
+
+  test("buildRsyncArgv constructs ssh-tunneled rsync flags and respects custom port", () => {
+    expect(buildRsyncArgv(node)).toEqual([
+      "-az",
+      "--delete",
+      "--relative",
+      "-e",
+      "ssh -o BatchMode=yes -o ConnectTimeout=3",
+      "./shared",
+      "./plugins",
+      "./dist",
+      "dev@mini.local:~/Develop/factory/",
+    ]);
+
+    expect(
+      buildRsyncArgv({ ...node, user: null, port: 2222 }, ["./shared"], {
+        connectTimeout: 7,
+      }),
+    ).toEqual([
+      "-az",
+      "--delete",
+      "--relative",
+      "-e",
+      "ssh -p 2222 -o BatchMode=yes -o ConnectTimeout=7",
+      "./shared",
+      "mini.local:~/Develop/factory/",
+    ]);
+  });
+
+  test("emitRemoteNode syncs harness packs via rsync and runs remote link", () => {
+    const calls = [];
+    const res = emitRemoteNode(node, {
+      localRoot: "/tmp/local-factory",
+      spawnFn: (args, meta) => {
+        calls.push({ args, meta });
+        if (calls.length === 1) {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        return {
+          exitCode: 0,
+          stdout: "linked ~/.agents/skills\nEMIT_REMOTE_SUCCESS\n",
+          stderr: "",
+        };
+      },
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.linked).toBe(true);
+    expect(res.step).toBe("done");
+    expect(calls).toHaveLength(2);
+    expect(calls[0].args).toContain("./shared");
+    expect(calls[0].args).toContain("./plugins");
+    expect(calls[0].args).toContain("./dist");
+    expect(calls[0].args).not.toContain("./skills");
+    expect(calls[0].meta).toEqual({
+      cmd: "rsync",
+      cwd: "/tmp/local-factory",
+    });
+
+    const linkScript = calls[1].args.at(-1);
+    expect(linkScript).toContain(EXPECTED_PATH_EXPORT);
+    expect(linkScript).toContain("cd \"$HOME/\"'Develop/factory';");
+    expect(linkScript).toContain("bun -e ");
+    expect(linkScript).toContain('["dist/muse/skills", ".config/muse/skills"]');
+    expect(linkScript).toContain('["dist/muse/agents", ".config/muse/agents"]');
+    expect(linkScript).not.toContain("bun build/emit.mjs --link");
+    expect(linkScript).toContain("EMIT_REMOTE_SUCCESS");
+  });
+
+  test("repo config/nodes.yaml defines mac-mini, shadow, and runners", () => {
+    const repoRoot = path.resolve(import.meta.dir, "../..");
+    const nodes = loadNodesConfig({ root: repoRoot });
+    expect(Array.from(nodes.keys())).toEqual(["mac-mini", "shadow", "runners"]);
+    expect(nodes.get("mac-mini")?.host).toBe("mac-mini");
+    expect(nodes.get("shadow")?.host).toBe("shadow");
+    expect(nodes.get("runners")?.host).toBe("runners");
+  });
+
+  test("emitRemoteNode reports rsync failure without invoking remote ssh link", () => {
+    let calls = 0;
+    const res = emitRemoteNode(node, {
+      spawnFn: () => {
+        calls += 1;
+        return {
+          exitCode: 255,
+          stdout: "",
+          stderr: "ssh: connect to host mini.local: Connection refused",
+        };
+      },
+    });
+
+    expect(calls).toBe(1);
+    expect(res.ok).toBe(false);
+    expect(res.linked).toBe(false);
+    expect(res.step).toBe("rsync");
+    expect(res.error).toContain("Connection refused");
+  });
+
+  test("emitRemoteNode reports link failure when remote emit link exits non-zero", () => {
+    let calls = 0;
+    const res = emitRemoteNode(node, {
+      spawnFn: () => {
+        calls += 1;
+        if (calls === 1) return { exitCode: 0, stdout: "", stderr: "" };
+        return { exitCode: 1, stdout: "", stderr: "bun: command not found" };
+      },
+    });
+
+    expect(calls).toBe(2);
+    expect(res.ok).toBe(false);
+    expect(res.linked).toBe(false);
+    expect(res.step).toBe("link");
+    expect(res.error).toContain("bun: command not found");
   });
 });

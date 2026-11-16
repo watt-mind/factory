@@ -4,8 +4,12 @@
  * The operator approves a specific immutable spec, not a summary of one — and
  * a proposal that sat past its TTL is never executed as-is. Approval after
  * expiry re-plans against current state: an identical fresh spec runs, a
- * different one supersedes the stale proposal with a new open one. Stale
- * intent can therefore never execute silently, which is the §15 exit
+ * different one supersedes the stale proposal with a new open one. The
+ * re-plan carries the stored approvalPolicy and modelTier, plus a model pin
+ * only when it belongs to the adapter selected for the fresh spec,
+ * configSnapshot (when present), and idempotencyKey, so expiry cannot shed
+ * plan-time dispatch authorization, model routing, or a run generation key.
+ * Stale intent can therefore never execute silently, which is the §15 exit
  * criterion this module owns.
  */
 import { canonicalJson, hashJson } from "./canonical.mjs";
@@ -13,8 +17,10 @@ import { DEFAULT_PROPOSAL_TTL_SECONDS } from "./config.mjs";
 import { txImmediate } from "./db.mjs";
 import { newProposalId } from "./ids.mjs";
 import { runState, transition } from "./lifecycle.mjs";
-import { buildRunSpec } from "./planner.mjs";
-import { getEventType } from "./registry.mjs";
+import { buildRunSpec, modelAdapterMismatch } from "./run-spec.mjs";
+import { plannedDef } from "./runtime-overrides.mjs";
+import { getAgent, getEventType } from "./registry.mjs";
+import { computeDefHash } from "./receipts.mjs";
 
 /**
  * The one human actor in the MVP (lib/api.mjs §14). An event type flagged
@@ -25,12 +31,85 @@ import { getEventType } from "./registry.mjs";
  */
 const HUMAN_ACTOR = "operator";
 
-function isExpired(proposal, now) {
-  return now - Date.parse(proposal.created_at) > proposal.ttl_seconds * 1000;
+/**
+ * TTL expiry applies only to runnable proposals. Parked human-needed and noop
+ * proposals remain actionable until their event moves on.
+ */
+export function proposalExpiresAt(proposal) {
+  return Date.parse(proposal.created_at) + Number(proposal.ttl_seconds) * 1000;
+}
+
+export function isProposalExpired(proposal, now = Date.now()) {
+  const expiresAt = proposalExpiresAt(proposal);
+  return (
+    proposal.decision === "run" && Number.isFinite(expiresAt) && expiresAt < now
+  );
+}
+
+/** A pin that can be compared. `"unknown"` is the no-registry sentinel, not a version. */
+function isKnownPolicyVersion(value) {
+  return typeof value === "string" && value !== "" && value !== "unknown";
+}
+
+function recordedSpecPinsVersion(spec) {
+  return (
+    spec != null &&
+    (isKnownPolicyVersion(spec.promptVersion) ||
+      isKnownPolicyVersion(spec.policyVersion))
+  );
+}
+
+/**
+ * A stored row whose JSON no longer parses as an object. Approval refuses
+ * such a row loudly: callers funnel a thrown error into their existing
+ * failure paths, whereas a success-shaped `{ approved: false }` return reads
+ * as a completed re-plan at every call site.
+ */
+export class MalformedStoredRowError extends Error {
+  constructor(proposalId, kind) {
+    super(`proposal ${proposalId}: ${kind}`);
+    this.name = "MalformedStoredRowError";
+    this.code = "malformed_stored_row";
+    this.proposalId = proposalId;
+    /** `malformed_event_envelope` | `malformed_proposal_spec` */
+    this.kind = kind;
+  }
+}
+
+/**
+ * Stored proposal JSON can outlive the writer that validated it. A non-object
+ * (array or scalar) is rejected deliberately: every caller reads named fields
+ * off the result, so a valid-JSON `[]` or `7` is as unusable as a parse error.
+ */
+function parseStoredObject(json, { field, id } = {}) {
+  let value;
+  try {
+    value = JSON.parse(json);
+  } catch (err) {
+    // A hand-repaired or legacy row must not take down the approval surface.
+    console.error(
+      `proposals_stored_json_unparsable: ${field ?? "json"} ${id ?? "?"}: ${String(err?.message ?? err)}`,
+    );
+    return null;
+  }
+  if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  console.error(
+    `proposals_stored_json_not_object: ${field ?? "json"} ${id ?? "?"}: parsed as ${Array.isArray(value) ? "array" : typeof value}`,
+  );
+  return null;
 }
 
 function withSpec(row) {
-  return { ...row, spec: row.spec_json ? JSON.parse(row.spec_json) : null };
+  const spec = row.spec_json
+    ? parseStoredObject(row.spec_json, { field: "spec_json", id: row.id })
+    : null;
+  return {
+    ...row,
+    spec,
+    // Read paths degrade to `spec: null`; the flag tells an inbox or CLI view
+    // apart from a proposal that legitimately records no spec.
+    ...(row.spec_json && !spec ? { specMalformed: true } : {}),
+  };
 }
 
 /** Open proposals, oldest first, annotated with `expired` and parsed `spec`. */
@@ -40,7 +119,54 @@ export function openProposals(db, { now = Date.now() } = {}) {
       `SELECT * FROM proposals WHERE status = 'open' ORDER BY created_at, rowid`,
     )
     .all()
-    .map((row) => ({ ...withSpec(row), expired: isExpired(row, now) }));
+    .map((row) => ({
+      ...withSpec(row),
+      expired: isProposalExpired(row, now),
+    }));
+}
+
+/**
+ * Retire parked refusals after their event has moved on. Unlike runnable
+ * proposals, human-needed and noop rows do not expire by TTL: they remain
+ * open while the event is still parked so the inbox can surface the decision.
+ */
+export function sweepOrphanedNonRunProposals(
+  db,
+  { now = Date.now(), limit = 200 } = {},
+) {
+  const result = db
+    .query(
+      `UPDATE proposals AS p
+       SET status = 'expired', decided_by = 'serve', reason = 'event_moved_on', decided_at = ?
+       WHERE p.rowid IN (
+         SELECT rowid FROM proposals AS candidate
+         WHERE candidate.status = 'open'
+           AND candidate.decision IN ('human_needed', 'noop')
+           AND NOT EXISTS (
+             SELECT 1 FROM events AS e
+             WHERE e.source = candidate.event_source
+               AND e.event_id = candidate.event_id
+               AND e.status IN ('human_needed', 'noop')
+           )
+         ORDER BY candidate.created_at, candidate.rowid
+         LIMIT ?
+       )`,
+    )
+    .run(new Date(now).toISOString(), limit);
+  const remaining = db
+    .query(
+      `SELECT COUNT(*) AS count FROM proposals AS p
+       WHERE p.status = 'open'
+         AND p.decision IN ('human_needed', 'noop')
+         AND NOT EXISTS (
+           SELECT 1 FROM events AS e
+           WHERE e.source = p.event_source
+             AND e.event_id = p.event_id
+             AND e.status IN ('human_needed', 'noop')
+         )`,
+    )
+    .get().count;
+  return { expired: result.changes, remaining };
 }
 
 /**
@@ -74,7 +200,67 @@ function loadEnvelope(db, proposal) {
     throw new Error(
       `proposal ${proposal.id} references missing event (${proposal.event_source}, ${proposal.event_id})`,
     );
-  return JSON.parse(event.envelope_json);
+  return parseStoredObject(event.envelope_json, {
+    field: "envelope_json",
+    id: `${proposal.event_source}/${proposal.event_id}`,
+  });
+}
+
+/**
+ * Plan-time-only values are not recoverable from the event envelope. Keep the
+ * values recorded in the approved proposal when a replan rebuilds its spec.
+ */
+function ttlReplanOptions(spec, adapter) {
+  return {
+    approvalPolicy: spec.approvalPolicy ?? null,
+    ...(Object.hasOwn(spec, "modelTier")
+      ? { modelTierOverride: spec.modelTier }
+      : {}),
+    // A concrete model is adapter-specific. Retaining a pi pin while the
+    // current registry routes the re-plan to cursor produces a RunSpec that
+    // the cursor CLI cannot execute. The tier is portable intent, so let the
+    // planner resolve it through the fresh adapter's policy map instead.
+    ...(spec.adapter === adapter && Object.hasOwn(spec, "model")
+      ? { modelOverride: spec.model }
+      : {}),
+    ...(Object.hasOwn(spec, "configSnapshot")
+      ? { configSnapshot: spec.configSnapshot }
+      : {}),
+  };
+}
+
+/**
+ * Refuse to queue a spec whose concrete model cannot run on its adapter (a
+ * pi model carried onto a cursor route). `explicitPin` is the provenance of
+ * the model when the caller knows it; see `modelAdapterMismatch`.
+ */
+function assertModelMatchesAdapter(spec, registry, adapter, options) {
+  const mismatch = modelAdapterMismatch(
+    spec,
+    registry.modelTiers,
+    adapter,
+    options,
+  );
+  if (!mismatch) return;
+  const err = new Error(mismatch);
+  err.code = "model_adapter_mismatch";
+  throw err;
+}
+
+/**
+ * A registry-version refresh changes the full spec hash even when the runnable
+ * intent is unchanged. Compare that intent after replacing only the two
+ * version pins — no authorization, routing, or other plan-time value may be
+ * normalized away.
+ */
+function matchesAfterRegistryVersionRefresh(storedSpec, freshSpec) {
+  return (
+    hashJson({
+      ...storedSpec,
+      promptVersion: freshSpec.promptVersion,
+      policyVersion: freshSpec.policyVersion,
+    }) === hashJson(freshSpec)
+  );
 }
 
 function approveRun(
@@ -103,13 +289,23 @@ function approveRun(
 
 /**
  * Approve an open 'run' proposal. Within TTL the recorded spec executes
- * as-is. After expiry the spec is rebuilt against current state under the
- * same runId: identical → approved (reason 'approved_after_ttl_replan');
- * different → the stale proposal is superseded, the still-PROPOSED run gets
- * the fresh spec, and a new open proposal is returned instead (§12).
+ * as-is only while its registry-version pins still match a *known* caller
+ * `policyVersion`. `"unknown"` (the parameter default) is treated as a
+ * mismatch when the recorded spec pins a version, so the spec is replanned
+ * rather than approved as-is. Specs that predate version pins remain
+ * approvable without a known policyVersion. After expiry or a stale
+ * registry pin, the spec is rebuilt against current state under the same
+ * runId: equivalent → approved; different → the stale proposal is
+ * superseded, the still-PROPOSED run gets the fresh spec, and a new open
+ * proposal is returned instead (§12).
+ *
+ * A row whose stored envelope or spec JSON no longer parses as an object
+ * throws {@link MalformedStoredRowError} rather than returning: corruption is
+ * an operator-visible failure, never a silent success-shaped outcome.
  *
  * @returns {{ approved: true, runId: string }
  *         | { approved: false, replanned: true, proposal: object }}
+ * @throws {MalformedStoredRowError} when spec_json or envelope_json is corrupt
  */
 export function approveProposal(
   db,
@@ -138,6 +334,8 @@ export function approveProposal(
       );
 
     const envelope = loadEnvelope(db, proposal);
+    if (!envelope)
+      throw new MalformedStoredRowError(id, "malformed_event_envelope");
     // Structural no-auto-approval (docs/event-runtime-dispatch.md §7, WM-111):
     // a humanApprovalOnly event type rejects every non-operator actor —
     // schedule auto-approval included — fail-closed, before any state moves.
@@ -152,7 +350,53 @@ export function approveProposal(
       err.code = "human_approval_only";
       throw err;
     }
-    if (!isExpired(proposal, now)) {
+    const recordedSpec = proposal.spec_json
+      ? parseStoredObject(proposal.spec_json, { field: "spec_json", id })
+      : null;
+    if (proposal.spec_json && !recordedSpec)
+      throw new MalformedStoredRowError(id, "malformed_proposal_spec");
+    // Fail-closed: an unknown/omitted caller version is *not equal* to a
+    // recorded pin. Skipping the comparison here used to approve the
+    // recorded spec as-is whenever a caller forwarded the default.
+    const registryVersionMismatch =
+      recordedSpecPinsVersion(recordedSpec) &&
+      (!isKnownPolicyVersion(policyVersion) ||
+        recordedSpec.promptVersion !== policyVersion ||
+        recordedSpec.policyVersion !== policyVersion);
+    let registryReloadMismatch = false;
+    if (recordedSpec?.defHash) {
+      try {
+        registryReloadMismatch =
+          computeDefHash(getAgent(registry, recordedSpec.agent)) !==
+          recordedSpec.defHash;
+      } catch {
+        registryReloadMismatch = true;
+      }
+    }
+    if (
+      !registryReloadMismatch &&
+      !registryVersionMismatch &&
+      !isProposalExpired(proposal, now)
+    ) {
+      // The recorded spec queues as-is, so its model is checked against the
+      // adapter it was planned for: the spec's own adapter — not the
+      // mapping's, which an overlay may have set differently at plan time
+      // (overlays live in the db, not in `registry`). The one exception is a
+      // process-wide `--adapter-override`, which substitutes execution only:
+      // the model was still resolved for the registered route. defHash
+      // matched above, so the current definition is the one that planned it:
+      // a definition `model:` is a known explicit pin; an overlay pin at plan
+      // time is unknowable.
+      const plannedFor =
+        adapterOverride != null && recordedSpec?.adapter === adapterOverride
+          ? mapping?.adapter
+          : (recordedSpec?.adapter ?? mapping?.adapter);
+      assertModelMatchesAdapter(recordedSpec, registry, plannedFor, {
+        explicitPin:
+          registry.agents.get(recordedSpec?.agent)?.model !== undefined
+            ? true
+            : undefined,
+      });
       return approveRun(db, proposal, envelope, {
         actor,
         now,
@@ -161,24 +405,82 @@ export function approveProposal(
       });
     }
 
-    // Expired: re-plan against current registry state, reusing the runId.
+    // Expired, version-stale, or definition-stale: re-plan against current
+    // registry state, reusing the runId. A defHash mismatch is checked even
+    // inside the TTL: approval names an immutable definition, not merely an
+    // unexpired row.
     if (!mapping)
       throw new Error(
-        `proposal ${id} expired and event type ${envelope.type} is no longer registered`,
+        `proposal ${id} requires re-planning but event type ${envelope.type} is no longer registered`,
       );
-    const fresh = buildRunSpec(registry, envelope, mapping, {
-      runId: proposal.run_id,
-      policyVersion,
-      adapterOverride,
-      now,
-    });
+    const replanOptions = ttlReplanOptions(recordedSpec, mapping.adapter);
+    const built = {
+      ...buildRunSpec(registry, envelope, mapping, {
+        runId: proposal.run_id,
+        policyVersion,
+        adapterOverride,
+        ...replanOptions,
+      }),
+      // configSnapshot can affect planning and is itself part of specs that
+      // explicitly pin it. Keep the pin in the rebuilt spec as well as
+      // supplying it to buildRunSpec above.
+      ...(Object.hasOwn(recordedSpec, "configSnapshot")
+        ? { configSnapshot: recordedSpec.configSnapshot }
+        : {}),
+      // A run is its existing idempotency generation, not a new family
+      // member. Reapply the stored key after buildRunSpec derives its normal
+      // declaration key.
+      idempotencyKey: recordedSpec.idempotencyKey,
+    };
+    // Preserve the definition-attestation generation of the recorded spec.
+    // Older rows without defHash remain byte-compatible; pinned rows always
+    // receive a fresh pin rather than losing the guard during re-planning.
+    const fresh = recordedSpec?.defHash
+      ? {
+          ...built,
+          defHash: computeDefHash(getAgent(registry, built.agent)),
+        }
+      : built;
     const freshHash = hashJson(fresh);
-    if (freshHash === proposal.spec_hash) {
+    assertModelMatchesAdapter(fresh, registry, mapping.adapter, {
+      explicitPin:
+        plannedDef(getAgent(registry, mapping.agent), {
+          modelOverride: replanOptions.modelOverride,
+        }).model !== undefined,
+    });
+    // Refresh-and-approve only when the caller named a real current version.
+    // Replanning with `"unknown"` must not stamp that sentinel onto the
+    // recorded spec and queue it.
+    const versionRefreshMatches =
+      registryVersionMismatch &&
+      isKnownPolicyVersion(policyVersion) &&
+      !registryReloadMismatch &&
+      matchesAfterRegistryVersionRefresh(recordedSpec, fresh);
+    if (
+      !registryReloadMismatch &&
+      (freshHash === proposal.spec_hash || versionRefreshMatches)
+    ) {
+      if (versionRefreshMatches) {
+        const freshJson = canonicalJson(fresh);
+        db.query(
+          `UPDATE runs SET spec_json = ?, spec_hash = ?, updated_at = ? WHERE run_id = ?`,
+        ).run(
+          freshJson,
+          freshHash,
+          new Date(now).toISOString(),
+          proposal.run_id,
+        );
+        db.query(
+          `UPDATE proposals SET spec_json = ?, spec_hash = ? WHERE id = ?`,
+        ).run(freshJson, freshHash, proposal.id);
+      }
       return approveRun(db, proposal, envelope, {
         actor,
         now,
         policyVersion,
-        reason: "approved_after_ttl_replan",
+        reason: versionRefreshMatches
+          ? "approved_after_registry_replan"
+          : "approved_after_ttl_replan",
       });
     }
 
@@ -190,7 +492,16 @@ export function approveProposal(
     const at = new Date(now).toISOString();
     db.query(
       `UPDATE proposals SET status = 'superseded', decided_at = ?, decided_by = ?, reason = ? WHERE id = ?`,
-    ).run(at, actor, "superseded_by_ttl_replan", id);
+    ).run(
+      at,
+      actor,
+      registryReloadMismatch
+        ? "superseded_by_registry_reload"
+        : registryVersionMismatch
+          ? "superseded_by_registry_replan"
+          : "superseded_by_ttl_replan",
+      id,
+    );
     const freshJson = canonicalJson(fresh);
     db.query(
       `UPDATE runs SET spec_json = ?, spec_hash = ?, updated_at = ? WHERE run_id = ?`,
@@ -200,7 +511,7 @@ export function approveProposal(
       `INSERT INTO proposals
          (id, event_source, event_id, run_id, decision, spec_json, spec_hash,
           idempotency_key, status, reason, created_at, ttl_seconds)
-       VALUES (?, ?, ?, ?, 'run', ?, ?, ?, 'open', 'replanned_after_ttl', ?, ?)`,
+       VALUES (?, ?, ?, ?, 'run', ?, ?, ?, 'open', ?, ?, ?)`,
     ).run(
       newId,
       proposal.event_source,
@@ -209,12 +520,18 @@ export function approveProposal(
       freshJson,
       freshHash,
       fresh.idempotencyKey,
+      registryReloadMismatch
+        ? "replanned_after_registry_reload"
+        : registryVersionMismatch
+          ? "replanned_after_registry_replan"
+          : "replanned_after_ttl",
       at,
       mapping.proposalTtlSeconds ?? DEFAULT_PROPOSAL_TTL_SECONDS,
     );
     return {
       approved: false,
       replanned: true,
+      ...(registryReloadMismatch ? { registryReloaded: true } : {}),
       proposal: getProposal(db, newId),
     };
   });

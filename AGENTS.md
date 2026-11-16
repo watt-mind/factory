@@ -18,6 +18,8 @@ Non-negotiable for every agent in this repo, in any harness. Full protocol: `$FA
 
 **Event-runtime code follows the documented house conventions.** For module shape, dependency injection, adapter contracts, fail-closed boundaries, and tests, read [`docs/event-runtime-conventions.md`](https://github.com/watt-mind/factory/blob/develop/docs/event-runtime-conventions.md) before changing `event-runtime/`.
 
+**The operator is AFK by default.** Assume no human will read your session output for hours; never pause mid-run for routine confirmation when a safe, reversible, evidence-backed default exists — decide, act, and record what you chose. Distinguish _autonomous default_ from _explicit interactive override_ (a direct human instruction in chat such as `"no ticket"`, an explicit bundle request, or passing `--include-escalated`). Resolve technical, architectural, and edge-case ambiguities within `Owned Paths` from `origin/<base>` conventions, sibling modules, git history, tests, and `docs/product-decisions.md`, noting non-obvious reversible assumptions in your ticket comment and `## Handoff` (`Risks`).
+
 **Work comes from the control plane, and only when it's ready.** A ticket is dispatchable only if it is `Todo` + `ai:agent-ready` + unassigned. `Triage` and `Backlog` are not queues to pull from.
 
 **An ad-hoc request gets a ticket too — file it, don't wait to be asked.** A request typed into a chat session is not exempt from the control plane; if it isn't tracked, it is invisible to every other agent and to tomorrow. **The trip wire is your first file edit:** before it, either find the issue that already covers this or create one, and say in one line which it is ("Tracking as OPS-91"). Commits still carry their `(ISSUE-ID)`. Skip the ticket only for ordinary questions, read-only lookups with no actionable finding, and inconsequential edits — and the human can always say "no ticket", which settles it. Sessions drift: one that began as a question and turned into a change trips the wire at that moment, not at the end.
@@ -30,7 +32,7 @@ Non-negotiable for every agent in this repo, in any harness. Full protocol: `$FA
 
 **One ticket, one worktree.** Never share a checkout between concurrent tickets. **If the repo ships a worktree script (`bin/worktree-up.sh` or equivalent), it is mandatory** — git isolates branches, not ports or databases, and a migration against a shared dev database destroys another agent's work silently.
 
-**Bundling several tickets into one worktree is the human's call, never yours.** When the human explicitly asks for a set of tickets to be done together, they share one worktree, one branch (named after the lead ticket) and one PR: claim _every_ ticket in the bundle and heartbeat all of them, keep one commit per ticket, scope the work to the union of their `Owned Paths`, and give the PR body a `Fixes <ISSUE-ID>` line per ticket. If one of them turns out to be bigger than it looked or gets blocked, unassign it back to `Todo` and ship the rest — never stall the others behind it. Absent that explicit instruction it is one ticket, one worktree; noticing that two tickets are related is a reason to say so, not to merge them yourself.
+**Bundling several tickets into one worktree requires an explicit bundle decision.** Ad-hoc and single-ticket work stays one ticket per worktree unless the human explicitly requests a bundle or `/factory-work` forms a cohesive batch bundle of low-risk tickets on disjoint `Owned Paths` when downstream CI or review capacity is the constraint. Bundled tickets share one worktree, one branch (named after the lead ticket), and one PR/CI slot: claim _every_ ticket in the bundle and heartbeat all of them, keep one commit per ticket, scope edits to the union of their `Owned Paths`, and include one `Fixes <ISSUE-ID>` line per ticket in the PR body. If one ticket in the bundle turns out to be bigger than it looked or gets blocked, unassign it back to `Todo` and ship the rest instead of stalling the others behind it. Outside an explicit human bundle or `/factory-work` batch, noticing that two tickets are related is a reason to note it, not to bundle them yourself.
 
 **Never use `git stash` or `git rebase --autostash` in worktrees.** The `git stash` stack is repository-global, not isolated per worktree (`.git/refs/stash`). Running `git stash`, `git stash pop`, or `git rebase --autostash` in one worktree will push to or pop from a stack shared across all concurrent agent worktrees. If `git stash push <path>` runs on clean/committed files, it is a no-op that exits 0 without creating a stash entry, and a subsequent `git stash pop` silently pops another agent's stashed uncommitted changes into your worktree, causing silent cross-session data loss and corruption. Strictly avoid `git stash` and `--autostash` in agent worktrees. Use safe alternatives instead:
 
@@ -46,6 +48,10 @@ Non-negotiable for every agent in this repo, in any harness. Full protocol: `$FA
 
 **Verification is a gate, not a formality.** Run the ticket's exact Verification Command. Never advance state, open a PR, or report success on failing output. Never weaken a test or skip a check to get green — if the test is wrong, that's a finding to report, not to edit around.
 
+**Gate evidence must match the final relevant edits.** Run the ticket's verification and applicable checks before pushing; preserve the actual test/build/lint exit status when capturing output. Prefer redirecting output to a log and reading it afterward. If a pipeline is necessary, explicitly propagate failures from the gate command; success from `tee` or `tail` is not evidence. Follow the repository's supported test-selection and evidence-reuse policy rather than requiring duplicate broad suites for proven unchanged inputs. Missing or unavailable verification is never a pass.
+
+**Targeted local tests; fast static checks before push.** When CI already runs the repository's test suites, run **only** the targeted unit, integration, or E2E test files/cases covering your change locally (e.g. `bun test path/to/foo.test.mjs`, `uv run pytest tests/test_foo.py`, `cargo test -p crate test_name`, or a single Playwright spec) — never run full unit or E2E suites locally unless cross-cutting blast radius genuinely requires it or CI lacks test coverage; conversely, **always** run fast, low-CPU static gates (lint, format check, typecheck, generated-tree drift check, framework system check) locally before every `git push` so trivial static failures never burn a CI cycle. Ticket-level verification runs focused test commands only: attribute full-suite runs and project-wide coverage thresholds to CI, and record deferred full-suite checks explicitly under `Risks` in `## Handoff` rather than omitting them or running full suites locally unless cross-cutting blast radius demands it.
+
 **PR base is explicit.** Resolve the repository's `base` from `config/repos.yaml` and always create ticket PRs with `gh pr create --base <configured-base> ...`; GitHub's default branch is not a fallback. Read the opened PR's `baseRefName` back before handoff and stop if it differs from the configured base.
 
 **Negative testing and falsifiability.** New regression tests must be observed failing before applying the fix to prove they test the actual failure mode and are not vacuous. Verify that tests distinguish correct implementations from plausible incorrect ones (without using `git stash`; use safe per-file reverts such as `git show <ref>:<path> > <path>`). A test that passes before the fix is applied tests nothing.
@@ -58,12 +64,14 @@ Non-negotiable for every agent in this repo, in any harness. Full protocol: `$FA
 - Verification: `<the ticket's exact command>` — pass, <one-line result summary>
 - UX critique: required — SHIP | required — FIX-FIRST resolved in <n> round(s) | skipped — <reason>
 - Files: <n> changed, all within Owned Paths   (or: exceptions listed with why)
-- Risks: <what the reviewer should look at first, or "none known">
+- Risks: <what the reviewer should look at first, including any reversible engineering assumptions made without blocking, or "none known">
 ```
 
 Posting this structured comment is a mandatory prerequisite before advancing a ticket to `In Review`. The merge stage reviews directly from this comment; a vague Handoff slows review, and a missing or unformatted one is a protocol violation.
 
-**`Done` means merged and running:** PR merged, base-branch CI green after the merge, and the post-deploy smoke check green where the repo has one.
+**`Done` means merged and running:** PR merged, base-branch CI green after the merge, and end-to-end post-deploy verification green whenever a task triggers or lands a deployment (via `/factory-merge` on an auto-deployed branch, `/factory-ship`, a deploy workflow, or an interactive/ad-hoc deploy): run `/factory-verify-deploy` without waiting to be asked — (1) prove rollout readiness and live commit/revision identity, (2) confirm zero new console, network, or server/container errors, and (3) exercise the changed user or API flow against the live URL (full flow on staging/dev; strictly read-only or designated canary checks on `-prod`/apex domains — never mutate real production data).
+
+**Write-read-verify `Done`:** Marking a ticket `Done` requires an observed merge commit SHA read back from the merged PR (`gh pr view <PR> --json state,mergeCommit` confirming `state === "MERGED"` and capturing `merge_sha`, then `factory ticket state <ISSUE-ID> Done --pr <PR> --merge-sha "$merge_sha"`), never granted by the same unverified call that requested the merge.
 
 ### Never auto-merge
 
@@ -95,7 +103,9 @@ Same care for force-pushes: never `--force` onto a `base` or `deploy_branch`, an
 
 ### Stop and ask
 
-Move the ticket to `Blocked`, say specifically what you need in one answerable question, and notify. Never leave a stalled ticket sitting in `In Progress`.
+Reserve `Blocked` + `ai:blocked` + `factory notify` strictly for: (1) genuine unrecorded user-visible product-intent forks, (2) missing credentials, secrets, or external access, (3) inseparable `Owned Paths` gaps, or (4) out-of-scope security entanglement or missing human authorisation in autonomous `dispatch@` gates. For in-scope `/factory-ticket` or `/factory-work` changes that touch `Never auto-merge` or `escalate_paths` surfaces, implement, verify, and open an escalated PR (`ai:escalated` on the ticket + `escalated` on the GitHub PR + `factory notify "ESCALATED ..."`) for human review without auto-merging; reserve pre-push `Blocked` + `ai:blocked` holds for out-of-scope security entanglement, missing human authorisation in autonomous `dispatch@` gates, unrecorded product intent, or missing credentials. When one of those four `Blocked` conditions applies, move the ticket to `Blocked` + `ai:blocked`, say specifically what you need in one answerable question, and notify. Never leave a stalled ticket sitting in `In Progress`.
+
+**Never block on derivable engineering decisions** — module shape, naming, data structures, error handling, test fixes, priority sizing, or cleanup are derived from `origin/<base>`, sibling tests, git history, `docs/product-decisions.md`, `docs/`, and the tracker project overview. If an agent fails to produce a valid fix with no concrete human question, unclaim the ticket back to `Todo` with a diagnostic comment rather than parking it in `Blocked`.
 
 **"Notify" means exactly this command** — a ticket comment, a `Blocked` state change, or a line in your final report does not reach the human in real time:
 
@@ -107,6 +117,10 @@ Event prefix is one of `BLOCKED`, `ESCALATED`, `CI RED`, `SMOKE RED`, `CIRCUIT B
 
 Before blocking on product intent, check whether it's already written down — the repo's `docs/product-decisions.md`, `docs/`, or the tracker project overview. If you resolve a decision that wasn't recorded, record it.
 
+### Non-blocking coordinator default
+
+For multi-file edits, multi-perspective reviews, or slow test and build runs, keep the main session unblocked as coordinator. Delegate leaf implementation, codebase exploration, and checks to isolated subagents routed by difficulty tier (`tier:light`, `tier:standard`, `tier:strong`) with explicit `Owned Paths` and verification commands, reserving main context for steering, cross-slice seams, and final gates. Enforce `reviewer != implementer` as a hard invariant: the implementing agent never silently self-approves its own diff; review runs in a separate agent conversation (and a separate model or harness family where available). Subagents complete their foreground checks before reporting back; coordinators wait on native subagent completion rather than polling or spinning in `sleep`.
+
 ### Waiting
 
 **Never `sleep N` and hope.** A fixed sleep is either too long (dead wall-clock in a process that is holding a slot) or too short (a flaky check that then gets retried). Wait on the actual condition instead.
@@ -114,8 +128,27 @@ Before blocking on product intent, check whether it's already written down — t
 **For CI:**
 
 ```bash
-gh pr checks <PR> --watch --fail-fast     # returns the moment checks settle
+# Select the CI workflow's run for this exact commit. Without --workflow,
+# `gh run list` returns the newest run of ANY workflow (CLA, Security, ...)
+# and its verdict is not the CI verdict. The run can lag the push by a
+# minute or two, so retry (bounded) instead of failing on the first miss.
+run_id=""
+for i in $(seq 8); do
+  run_id="$(gh run list --workflow ci.yml --commit <sha> --json databaseId --limit 1 --jq '.[0].databaseId // empty')"
+  test -n "$run_id" && break
+  sleep 15
+done
+test -n "$run_id" || { echo "no CI workflow run found for this commit" >&2; exit 1; }
+gh run watch "$run_id" --exit-status --interval 60
 ```
+
+`gh run list` and `gh run watch` use GitHub's REST API. Do not default to the
+GraphQL-backed `gh pr checks` waiter: it polls every 10 seconds by default and
+can exhaust the shared GraphQL budget. If that fallback is unavoidable, use an
+interval of at least 60 seconds. A green `gh run watch` covers one
+workflow; before a merge that must be fully green, assert every check-run on
+the commit is completed and successful via REST
+(`gh api repos/<owner>/<repo>/commits/<sha>/check-runs`).
 
 **For a dev server, migration, or anything with an observable ready state** — poll the condition on a short interval with a bounded ceiling, so it returns as soon as it is up and still terminates if it never is:
 
@@ -125,9 +158,23 @@ for i in $(seq 60); do curl -sf localhost:4222 >/dev/null && break; sleep 2; don
 
 **For a background job you started**, wait on the process (`wait`, or the harness's own background-task mechanism) rather than guessing how long it takes.
 
-**Never end your turn while background jobs are running.** Subagents must not park mid-flow or yield prematurely while waiting for slow commands, test suites, or background sub-processes. When an agent yields without active foreground execution, the orchestrator cannot distinguish between an agent legitimately waiting on slow work, an agent stalled needing a nudge, or an agent finished but under-reporting. Block on readiness (e.g. `gh pr checks --watch`, `wait <pid>`, or bounded polling) until the work is complete before completing your turn.
+**Never end your turn while background jobs are running.** Subagents must not park mid-flow or yield prematurely while waiting for slow commands, test suites, or background sub-processes. When an agent yields without active foreground execution, the orchestrator cannot distinguish between an agent legitimately waiting on slow work, an agent stalled needing a nudge, or an agent finished but under-reporting. Block on readiness (e.g. `gh run watch <run-id> --exit-status --interval 60`, `wait <pid>`, or bounded polling) until the work is complete before completing your turn.
 
-**GitHub Actions secondary rate limits.** Avoid rapid, unthrottled polling of GitHub's Actions and jobs APIs (e.g. tight loops calling `gh run view` or `gh api`). Aggressive polling triggers GitHub's secondary rate limits and blocks the harness. Use `gh pr checks <PR> --watch --fail-fast` or bounded polling intervals with backoff.
+**Long-running verify commands: use the status-file idiom.** The Bash tool auto-backgrounds any foreground command that outlives its `timeout` (max 600000ms) — even one launched with `run_in_background` left false and an explicit large timeout. The auto-backgrounded call's framing exit code is not the command's exit code, so a `0` there proves nothing. For any verify command expected to exceed ~10 minutes, never trust the framing exit code; run the command so its own exit code is written to a status file, with output directed to a log file, then poll for the status file with repeated short Bash calls:
+
+```bash
+<verify-cmd> >verify.log 2>&1; echo $? >verify.status
+```
+
+```bash
+test -f verify.status && cat verify.status || echo "still running"
+```
+
+Once the status file exists, its content is the command's real exit code — read the log file (`tail -30 verify.log`) for the summary. Each poll is a separate short call that returns immediately; never put a `sleep` loop in a single blocked call to wait one out.
+
+Do not judge a long test run through `| tail -N` pipe framing either: piped stdout is fully buffered while the test runner's progress and summary on stderr are not, so the buffered stdout flushes at process exit and pushes the real summary out of the tail window — and the pipeline's exit code is the last command's (`tail`'s, always 0), not the test run's. That is a false-pass trap. Direct output to a log file and read the status file instead.
+
+**GitHub Actions secondary rate limits.** Avoid rapid, unthrottled polling of GitHub's Actions and jobs APIs (e.g. tight loops calling `gh run view` or `gh api`). Aggressive polling triggers GitHub's secondary rate limits and blocks the harness. Prefer the REST-backed `gh run watch <run-id> --exit-status --interval 60`; the GraphQL-backed PR-check fallback must use an interval of at least 60 seconds when unavoidable.
 
 **Session scratchpad isolation.** Never use generic shared filenames (such as `pr-body.md` or `scratch/critique.json`) across concurrent tasks. Reviewer, implementer, and critic agents operating in shared session scratchpads must namespace all temporary files by ticket ID or session identifier (e.g. `pr-body-<TICKET-ID>.md`, `<TICKET-ID>-critique.json`) to prevent cross-agent collisions and silent overwrites.
 
@@ -165,11 +212,14 @@ Dispatch is exempt — the worktree script branches from `origin/<base>`, so tic
 
 A tool result is not paid for once. It stays in the context window and is re-sent on every later turn, so a large payload early in a long run is charged dozens of times. Measured across 485 real runs: 193MB of tool output became **10.1GB** of re-sent context, and **74% of that was images**.
 
-**Screenshots are the single most expensive thing you can do.** A full-page PNG averages 199KB — roughly a hundred times a typical command's output, and it stays resident for the rest of the session.
+**Screenshots are expensive in context — capture boundedly, never blindly.** A full-page PNG averages 199KB — roughly a hundred times a typical command's output, and it stays resident for the rest of the session.
 
 - **Never `Read` an image you just captured.** The capture already put it in context; reading the file back doubles it for nothing. This was 572 payloads across the measured runs.
-- Use the **accessibility tree** (`take_snapshot`, `read_page`) for anything structural — labels, hierarchy, focus order, presence of an element. It averages 7KB against 199KB and is more precise for those questions. Screenshot only when the finding is genuinely _visual_: spacing, contrast, truncation, overlap.
-- When you do screenshot, prefer a **mobile viewport** and a **specific element** over a full desktop page.
+- Use the **accessibility tree** (`take_snapshot`, `read_page`) for structural DOM/label navigation — labels, hierarchy, focus order, presence of an element. It averages 7KB against 199KB and is more precise for those questions. Prefer a **mobile viewport** and a **specific element** over a full desktop page when capturing screenshots.
+- **Mandatory UI visual loop (`principle-experience-first` + `principle-exhaust-the-design-space`):**
+  1. On net-new UI surfaces, material layout redesigns, or explicit design-exploration requests (never routine bugfixes), explore 2–3 distinct layout/interaction options (`principle-exhaust-the-design-space`, using `$TMPDIR` patches, never `git stash`), autonomously select and commit only the winner without pausing on an AFK human, and record the options + rationale in the ticket comment / `## Handoff` (or interactive summary).
+  2. On **any** UI-affecting change, render the live UI, capture a bounded screenshot (prefer mobile viewport / element scope), critique visual hierarchy, spacing rhythm, alignment, contrast, truncation, and states coldly (`principle-experience-first`), and iterate **at least once** to polish rough first-draft UI (capping total captures to 2–4 bounded screenshots, `≤ 1 MB` each).
+  3. Surface screenshots by default (never commit to git or attach to Linear): in interactive sessions (`$FACTORY_RUN_ID` unset), save 1–3 post-polish screenshots to the session artifact/scratch dir and embed/link them in the response or walkthrough artifact without waiting to be asked; in dispatched runs (`$FACTORY_RUN_ID` set), publish 1–4 `ux-screenshot` artifacts and link `$FACTORY_WEB_URL/api/artifacts/<sha256>` in PR/Handoff (or state the concrete transport exception).
 
 **Don't re-read what you have already read.** 285 duplicate reads of an identical path inside a single run were measured. If you read a file, it is still in your context — scroll back rather than re-reading. For a large file, `offset`/`limit` the part you need instead of pulling all of it.
 
@@ -180,6 +230,13 @@ A tool result is not paid for once. It stays in the context window and is re-sen
 ### Browsers
 
 Factory-spawned sessions get their **own isolated headless Chrome** (via `--mcp-config`, `config/mcp/claude.json` in the factory repo) — a temp profile per session, screenshots served as capped webp. There is nothing to share and nothing to fight over.
+
+**Tab routing across concurrent subagents.** In harnesses sharing a browser pane (e.g. Claude Browser pane), all subagents in a session share a single flat tab pool and one global fronted tab. Calls omitting `tabId` race on whatever tab a sibling fronted, silently reading or writing another ticket's app (misdiagnosed as product or auth bugs).
+
+- **Pass `tabId` explicitly on every browser call** — `navigate`, `get_page_text`, `read_page`, `computer`, `javascript_tool`. Explicit `tabId` routes correctly; omitting it targets the fronted tab, which any sibling can steal.
+- **Own a tab from `tabs_create`** and never rely on the fronted tab — fronting is global mutable state.
+- **Assert origin before trusting a read** — verify the host/port in the page output matches your ticket's app before acting on page text or screenshots.
+- **Re-read after reload** — reading immediately after `location.reload()` can return the pre-reload DOM; take a second read before concluding a session or auth state is invalid.
 
 If an IDE browser tool reports a stale/missing tab, its tab listing disagrees with navigation, or a call deadlocks, use **one bounded recovery**: record the backend/tool/URL and exact error (or the harness timeout with no result), call `list_pages`/`tabs` once, discard every cached tab ID, select or create a page from the fresh result, and navigate once. If listing and navigation still disagree or either call times out, that browser backend is unavailable — never retry it in a loop.
 
@@ -234,7 +291,7 @@ factory ticket queue --team CLNT                         # what is dispatchable
 
 `claim` **exits non-zero when another agent won the race** — that is not a retry, it means take the next ticket. For anything the verbs do not cover, `raw '<graphql>' --var k=v` beats inventing a new flag.
 
-**Attribution.** Factory runs set `$FACTORY_RUN_ID`. Comments and issues filed through `tools/ticket.mjs` are stamped with it automatically; the one surface the tool cannot reach is GitHub, so **end every PR body with a final line `run:$FACTORY_RUN_ID`** (after `Fixes <ISSUE-ID>`). That one line is what joins the PR back to its transcript and metrics row when someone asks "which run produced this?". Unset (interactive session) — omit it.
+**Attribution.** Factory runs set `$FACTORY_RUN_ID`. Comments and issues filed through `tools/ticket.mjs` are stamped with it automatically; the one surface the tool cannot reach is GitHub, so end every PR body with a concrete final `run:<run-id>` line (after `Fixes <ISSUE-ID>`): append it with `printf 'run:%s\n' "$FACTORY_RUN_ID"`, never paste the literal variable reference. That line joins the PR back to its transcript and metrics row when someone asks "which run produced this?". Unset (interactive session) — omit it.
 
 **Labels are replaced wholesale, never merged.** Always go through `--add` / `--remove` via `factory ticket state` or `factory ticket claim`; a hand-written mutation or `linear issue update -l` that passes only the labels you want added silently replaces the entire label set, stripping `type:*`, `area:*`, `source:*`, and other existing taxonomy labels from the ticket. `type:*` has exactly eight values: `bug feature ui-ux security performance maintenance docs a11y` — `type:chore` fails. `area:*` is per-team; copy an existing ticket in the project rather than inventing one. Every new issue carries exactly one `source:*`: `source:agent` for work you discover yourself, `source:human` for a direct request, `source:sentry` / `source:client-support` for those intake paths.
 

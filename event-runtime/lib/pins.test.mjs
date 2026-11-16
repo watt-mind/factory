@@ -9,6 +9,8 @@ import {
   updateHarnessPins,
   verifyHarnessPins,
 } from "./pins.mjs";
+import { FACTORY_ROOT } from "./config.mjs";
+import { collectHarnessRoots } from "./extensions.mjs";
 
 function makeRoot(dir, { plugin = "core", origin = "builtin" } = {}) {
   mkdirSync(path.join(dir, "commands"), { recursive: true });
@@ -49,6 +51,21 @@ describe("hashHarnessRoots", () => {
 });
 
 describe("updateHarnessPins / verifyHarnessPins", () => {
+  test("accepts the current built-in shared harness pins", () => {
+    const { roots, anomalies } = collectHarnessRoots({
+      root: FACTORY_ROOT,
+      builtin: path.join(FACTORY_ROOT, "shared"),
+      // Keep this regression test hermetic: local extension packs must not
+      // affect the committed built-in harness manifest.
+      policy: { extensions: [] },
+    });
+
+    expect(anomalies).toEqual([]);
+    expect(roots).toHaveLength(1);
+    expect(() => verifyHarnessPins(roots)).not.toThrow();
+    expect(updateHarnessPins({ roots, check: true })).toEqual([]);
+  });
+
   test("writes pins, then a second update reports no change", () => {
     withTmpDir("pins-update-", (dir) => {
       const root = makeRoot(dir);

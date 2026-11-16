@@ -1,0 +1,24 @@
+{
+  "id": "topic-scan",
+  "version": 1,
+  "prompt": "agents/topic-scan.md",
+  "input_schema": "schemas/topic-scan.input.json",
+  "output_schema": "schemas/topic-scan.output.json",
+  "output_contract": "factory.editorial-topic-scan/v1",
+  "model_tier": "strong",
+  "effort": "medium",
+  "workspace": { "type": "ephemeral", "retainOnFailure": true },
+  "capabilities": {
+    "filesystem": "workspace-only",
+    "services": [],
+    "cells": [
+      {
+        "binding": "SITE_CELL",
+        "access": "read-write",
+        "description": "Editorial policy, content pillars, and topic backlog"
+      }
+    ]
+  },
+  "limits": { "timeout_seconds": 180, "attempts": 1 },
+  "mutating": false
+}

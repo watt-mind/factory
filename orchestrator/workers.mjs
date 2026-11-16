@@ -5,6 +5,7 @@
  * Usage:
  *   factory workers [list]            inspect remote worker nodes and version skew
  *   factory workers deploy            deploy/bootstrap factory code on remote nodes
+ *   factory workers emit              sync and link emitted harness packs to remote nodes
  *   factory workers update            pull latest code, install deps, restart remote workers
  *   factory workers start             start worker daemons on remote nodes
  *   factory workers stop              stop worker daemons on remote nodes
@@ -20,6 +21,7 @@ import {
   loadNodesConfig,
   probeRemoteNode,
   deployRemoteWorker,
+  emitRemoteNode,
   updateRemoteWorker,
   startRemoteWorker,
   stopRemoteWorker,
@@ -56,6 +58,7 @@ ${c.bold("factory workers")} — remote worker node orchestration and version sk
 ${c.bold("USAGE")}
   factory workers [list]             inspect configured nodes and version skew
   factory workers deploy             deploy/clone factory and install dependencies
+  factory workers emit               sync and link emitted harness packs to remote nodes
   factory workers update             pull latest code and restart remote workers
   factory workers start              start worker daemon on remote nodes
   factory workers stop               stop worker daemon on remote nodes
@@ -248,6 +251,35 @@ try {
           console.log(c.green(`✓ Node ${node.name} deployed successfully`));
         } else {
           console.log(c.red(`✗ Node ${node.name} deploy failed: ${res.error}`));
+        }
+      }
+    }
+    if (JSON_OUT) console.log(JSON.stringify(results, null, 2));
+    process.exit(results.every((r) => r.ok) ? 0 : 1);
+  }
+
+  if (command === "emit") {
+    const results = [];
+    for (const node of selectedNodes) {
+      if (!JSON_OUT)
+        console.log(
+          c.cyan(
+            `Syncing and linking harnesses on ${node.name} (${node.host})...`,
+          ),
+        );
+      const res = emitRemoteNode(node, { localRoot: FACTORY_ROOT });
+      results.push(res);
+      if (!JSON_OUT) {
+        if (res.ok) {
+          console.log(
+            c.green(`✓ Node ${node.name} harnesses synced and linked`),
+          );
+        } else {
+          console.log(
+            c.red(
+              `✗ Node ${node.name} emit failed (${res.step}): ${res.error}`,
+            ),
+          );
         }
       }
     }

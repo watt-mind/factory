@@ -23,25 +23,30 @@ concurrency:
 jobs:
   build:
     name: Build Starlight Site
-    # Fork pull requests never reach the persistent [self-hosted, shadow] fleet:
-    # this job-level gate is evaluated before scheduling, so no fork-controlled
-    # code (checkout, bun install, build) executes on a shared runner. Pushes
-    # and workflow_dispatch are trusted; pull requests must originate from a
-    # branch of this repository. Deliberately not pull_request_target — that
-    # would run fork code with repository-scoped credentials.
-    if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, shadow]
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout (no action download)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          rm -rf "${GITHUB_WORKSPACE:?}"/* "${GITHUB_WORKSPACE:?}"/.[!.]* 2>/dev/null || true
+          git init -q "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          git fetch -q --depth 1 origin "$SHA"
+          git checkout -q FETCH_HEAD
+          git log -1 --oneline
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "latest"
+      - name: Setup bun (no action download)
+        shell: bash
+        run: |
+          set -euo pipefail
+          .github/scripts/install-pinned-tools.sh bun
 
       - name: Install dependencies
         run: |
@@ -55,10 +60,10 @@ jobs:
 
       - name: Configure GitHub Pages
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: site/dist
 
@@ -75,9 +80,9 @@ jobs:
     # deploy-pages is a tiny OIDC handshake; no self-hosted runner carries a
     # smoke-test label, so this job could never schedule there (first main
     # deploy failed with an unschedulable job). GitHub-hosted is correct here.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

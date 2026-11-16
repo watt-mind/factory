@@ -3,9 +3,13 @@ import {
   trackTmpDir,
 } from "../test-support/tmp.mjs?file=event-runtime-lib-api-artifacts-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { symlinkSync } from "node:fs";
+import { Readable, Writable } from "node:stream";
+import { streamArtifact } from "./api-artifacts.mjs";
 import { artifactReferenceIndex } from "./artifacts.mjs";
 import { canonicalJson, sha256Hex } from "./canonical.mjs";
 import {
+  CONTROL_TOKEN,
   GH_SECRET,
   PV,
   SECRET,
@@ -46,12 +50,49 @@ const makeServer = async (...args) => {
 };
 
 describe("artifact store and agent registry surfacing (OPS-212)", () => {
+  test("GET /artifacts ignores an entry that vanishes during inventory", async () => {
+    const home = tmpDir("evrt-artifact-page-race-");
+    const store = path.join(home, "artifacts");
+    mkdirSync(store, { recursive: true });
+    const survivingHash = "a".repeat(64);
+    const vanishedHash = "b".repeat(64);
+    writeFileSync(path.join(store, survivingHash), "survives", "utf8");
+    // statSync follows this dangling link and observes it as absent, matching
+    // a blob deleted by a concurrent prune after readdirSync.
+    symlinkSync(
+      path.join(store, "no-longer-present"),
+      path.join(store, vanishedHash),
+    );
+
+    const db = openDb(path.join(home, "runtime.db"));
+    const server = startApi({
+      db,
+      registry,
+      secret: SECRET,
+      policyVersion: PV,
+      port: 0,
+      env: { name: "test", home, adapter: "fake" },
+    });
+    await new Promise((resolve) => server.on("listening", resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const response = await fetch(`${base}/artifacts`);
+      expect(response.status).toBe(200);
+      expect(
+        (await response.json()).artifacts.map(({ sha256 }) => sha256),
+      ).toEqual([survivingHash]);
+    } finally {
+      server.close();
+    }
+  });
+
   test("GET /artifacts reuses its index until a new result arrives", async () => {
     const home = tmpDir("evrt-artifact-page-cache-");
     const store = path.join(home, "artifacts");
     mkdirSync(store, { recursive: true });
     const firstHash = "a".repeat(64);
     const secondHash = "b".repeat(64);
+    const missingHash = "c".repeat(64);
     writeFileSync(path.join(store, firstHash), "first", "utf8");
 
     const db = openDb(path.join(home, "runtime.db"));
@@ -75,8 +116,31 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       JSON.stringify({ artifacts: [{ kind: "report", sha256: firstHash }] }),
       createdAt,
     );
+    db.query(
+      `INSERT INTO runs (run_id, idempotency_key, spec_json, spec_hash, state, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'COMPLETED', ?, ?)`,
+    ).run(
+      "run_missing",
+      "idem-missing",
+      JSON.stringify({ agent: "cache-agent@1" }),
+      "spec-hash",
+      createdAt,
+      createdAt,
+    );
+    db.query(
+      `INSERT INTO results (run_id, attempt, result_json, artifact_hash, verification_json, receipt_json, accepted_at)
+       VALUES (?, 1, ?, 'sha256:result', '{}', '{}', ?)`,
+    ).run(
+      "run_missing",
+      JSON.stringify({ artifacts: [{ kind: "report", sha256: missingHash }] }),
+      createdAt,
+    );
 
     let indexBuilds = 0;
+    const indexedHashes = [];
+    // Frozen clock: the 10 s inventory TTL must not lapse mid-test on a
+    // loaded runner, or the rebuild count below would drift.
+    const frozenNowMs = Date.parse("2026-01-02T03:04:05.000Z");
     const server = startApi({
       db,
       registry,
@@ -84,9 +148,12 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       policyVersion: PV,
       port: 0,
       env: { name: "test", home, adapter: "fake" },
-      buildArtifactReferenceIndex(currentDb) {
+      now: () => frozenNowMs,
+      buildArtifactReferenceIndex(currentDb, inventory) {
         indexBuilds += 1;
-        return artifactReferenceIndex(currentDb);
+        const index = artifactReferenceIndex(currentDb, inventory);
+        indexedHashes.push([...index.keys()]);
+        return index;
       },
     });
     await new Promise((resolve) => server.on("listening", resolve));
@@ -94,6 +161,33 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
     try {
       await fetch(`${base}/artifacts`);
       await fetch(`${base}/artifacts`);
+      expect(indexBuilds).toBe(1);
+      expect(indexedHashes[0]).not.toContain(missingHash);
+
+      // Lease bookkeeping must not invalidate the result-derived cache.
+      db.query(`UPDATE runs SET updated_at = ? WHERE run_id = ?`).run(
+        "2026-01-02T03:05:05.000Z",
+        "run_first",
+      );
+      await fetch(`${base}/artifacts`);
+      expect(indexBuilds).toBe(1);
+
+      // State is not result-derived: it must be fresh without rebuilding.
+      db.query(`UPDATE runs SET state = ? WHERE run_id = ?`).run(
+        "CANCELLED",
+        "run_first",
+      );
+      const cancelled = await (
+        await fetch(`${base}/artifacts?search=CANCELLED`)
+      ).json();
+      expect(cancelled.artifacts.map((artifact) => artifact.sha256)).toEqual([
+        firstHash,
+      ]);
+      expect(cancelled.artifacts[0].references[0].state).toBe("CANCELLED");
+      expect(
+        (await (await fetch(`${base}/artifacts?search=COMPLETED`)).json())
+          .artifacts,
+      ).toEqual([]);
       expect(indexBuilds).toBe(1);
 
       writeFileSync(path.join(store, secondHash), "second", "utf8");
@@ -122,6 +216,9 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       expect(refreshed.artifacts.map((artifact) => artifact.sha256)).toContain(
         secondHash,
       );
+      expect(
+        refreshed.artifacts.find((artifact) => artifact.sha256 === firstHash),
+      ).toEqual(expect.objectContaining({ referenced: true }));
     } finally {
       server.close();
       db.close();
@@ -230,7 +327,37 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       ).json();
       expect(secondPage.artifacts).toHaveLength(1);
       expect(secondPage.nextBefore).toBeNull();
-      expect((await fetch(`${base}/artifacts?orphan=maybe`)).status).toBe(422);
+      for (const before of [
+        "%",
+        Buffer.from("not JSON").toString("base64url"),
+        Buffer.from(
+          JSON.stringify({
+            mtime: old.toISOString(),
+            sha256: "not-a-sha256",
+          }),
+        ).toString("base64url"),
+        Buffer.from(
+          JSON.stringify({
+            mtime: "January 1, 2026",
+            sha256: reportHash,
+          }),
+        ).toString("base64url"),
+      ]) {
+        const response = await fetch(
+          `${base}/artifacts?before=${encodeURIComponent(before)}`,
+        );
+        expect(response.status).toBe(422);
+        expect(await response.json()).toEqual({
+          error: "invalid_before",
+          message: "before must be a valid cursor",
+        });
+      }
+      const invalidOrphan = await fetch(`${base}/artifacts?orphan=maybe`);
+      expect(invalidOrphan.status).toBe(422);
+      expect(await invalidOrphan.json()).toEqual({
+        error: "invalid_orphan",
+        message: "orphan must be true or false",
+      });
       for (const limit of ["abc", "0", "501"]) {
         const response = await fetch(`${base}/artifacts?limit=${limit}`);
         expect(response.status).toBe(422);
@@ -238,6 +365,37 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
           error: "invalid_limit",
           message: "limit must be an integer between 1 and 500",
         });
+      }
+
+      for (const { body, error, message } of [
+        {
+          body: null,
+          error: "invalid_body",
+          message: "body must be an object",
+        },
+        {
+          body: { dryRun: "true" },
+          error: "invalid_dry_run",
+          message: "dryRun must be a boolean",
+        },
+        {
+          body: { apply: "true" },
+          error: "invalid_apply",
+          message: "apply must be a boolean",
+        },
+        {
+          body: { apply: true, dryRun: true },
+          error: "conflicting_flags",
+          message: "apply and dryRun cannot both be true",
+        },
+      ]) {
+        const response = await fetch(`${base}/artifacts/prune`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        expect(response.status).toBe(422);
+        expect(await response.json()).toEqual({ error, message });
       }
 
       const dry = await fetch(`${base}/artifacts/prune`, {
@@ -266,6 +424,11 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
       });
       expect(existsSync(path.join(store, orphanHash))).toBe(false);
       expect(existsSync(path.join(store, reportHash))).toBe(true);
+      expect(
+        (await (await fetch(`${base}/artifacts`)).json()).artifacts.map(
+          (artifact) => artifact.sha256,
+        ),
+      ).not.toContain(orphanHash);
     } finally {
       server.close();
       db.close();
@@ -274,7 +437,7 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
 
   test("declared artifacts and the transcript survive the workspace and stream from the API", async () => {
     const { db, server, port } = await makeServer();
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     const home = tmpDir("evrt-home-");
     try {
       await client.replay(
@@ -325,7 +488,7 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
     });
     await new Promise((resolve) => server.on("listening", resolve));
     const port = server.address().port;
-    const client = apiClient({ port });
+    const client = apiClient({ port, token: CONTROL_TOKEN });
     try {
       await client.replay(
         envelope({ eventId: "art-2", payload: { repos: ["with-artifact"] } }),
@@ -358,6 +521,8 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
         canonicalJson(view.result.artifact),
       );
 
+      const corruptHash = sha256Hex("expected bytes");
+      writeFileSync(path.join(home, "artifacts", corruptHash), "corrupt");
       const inventory = await (
         await fetch(`http://127.0.0.1:${port}/artifacts`)
       ).json();
@@ -410,15 +575,121 @@ describe("artifact store and agent registry surfacing (OPS-212)", () => {
         (await fetch(`http://127.0.0.1:${port}/artifacts/not-a-hash`)).status,
       ).toBe(404);
 
-      const corruptHash = sha256Hex("expected bytes");
-      writeFileSync(path.join(home, "artifacts", corruptHash), "corrupt");
       expect(
         (await fetch(`http://127.0.0.1:${port}/artifacts/${corruptHash}`))
           .status,
       ).toBe(404);
       expect(existsSync(path.join(home, "artifacts", corruptHash))).toBe(false);
+      expect(
+        (
+          await (await fetch(`http://127.0.0.1:${port}/artifacts`)).json()
+        ).artifacts.map((artifact) => artifact.sha256),
+      ).not.toContain(corruptHash);
     } finally {
       server.close();
+    }
+  });
+
+  test("artifact stream failures destroy the response without leaking an error", async () => {
+    const source = new Readable({
+      read() {
+        this.destroy(new Error("simulated read failure"));
+      },
+    });
+    const response = new Writable({
+      write(_chunk, _encoding, done) {
+        done();
+      },
+    });
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      await expect(streamArtifact(source, response)).resolves.toBeUndefined();
+    } finally {
+      console.warn = warn;
+    }
+    expect(response.destroyed).toBe(true);
+  });
+
+  test("artifact stream client aborts log debug while source failures warn", async () => {
+    const warnings = [];
+    const debugLogs = [];
+    const warn = console.warn;
+    const debug = console.debug;
+    console.warn = (message) => warnings.push(message);
+    console.debug = (message) => debugLogs.push(message);
+    try {
+      const clientAbort = async (
+        error,
+        response = new Writable({
+          write(_chunk, _encoding, done) {
+            done();
+          },
+        }),
+      ) => {
+        const source = new Readable({
+          read() {
+            this.destroy(error);
+          },
+        });
+        await streamArtifact(source, response);
+        expect(response.destroyed).toBe(true);
+      };
+
+      for (const code of [
+        "ERR_STREAM_PREMATURE_CLOSE",
+        "ECONNRESET",
+        "EPIPE",
+        "ERR_STREAM_DESTROYED",
+      ]) {
+        const error = new Error("client closed download");
+        error.code = code;
+        await clientAbort(error);
+      }
+      await clientAbort(new Error("aborted"));
+      expect(warnings).toEqual([]);
+      expect(debugLogs).toEqual([
+        "artifact download client aborted",
+        "artifact download client aborted",
+        "artifact download client aborted",
+        "artifact download client aborted",
+        "artifact download client aborted",
+      ]);
+
+      const alreadyClosedSource = new Readable({
+        read() {
+          this.destroy(new Error("client closed download"));
+        },
+      });
+      const alreadyClosedResponse = new Writable({
+        write(_chunk, _encoding, done) {
+          done();
+        },
+      });
+      alreadyClosedResponse.destroy();
+      await streamArtifact(alreadyClosedSource, alreadyClosedResponse);
+      expect(warnings).toEqual([]);
+      expect(debugLogs).toHaveLength(6);
+
+      const failedSource = new Readable({
+        read() {
+          this.destroy(new Error("artifact blob was pruned"));
+        },
+      });
+      const failedResponse = new Writable({
+        write(_chunk, _encoding, done) {
+          done();
+        },
+      });
+      await streamArtifact(failedSource, failedResponse);
+      expect(failedResponse.destroyed).toBe(true);
+      expect(warnings).toEqual([
+        "artifact download stream failed: artifact blob was pruned",
+      ]);
+      expect(debugLogs).toHaveLength(6);
+    } finally {
+      console.warn = warn;
+      console.debug = debug;
     }
   });
 

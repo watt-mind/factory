@@ -11,7 +11,7 @@ import { gql as defaultGql } from "../../orchestrator/reaper.mjs";
 import {
   installLinearBudgetCapture,
   loadLinearBudget,
-} from "../../tools/linear.mjs";
+} from "../../tools/ticket.mjs";
 
 export const TICKET_SUPPLY_CACHE_TTL_MS = 45_000;
 export const STALE_SCAN_MS = 60 * 60 * 1000;

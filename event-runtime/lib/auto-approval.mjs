@@ -5,182 +5,81 @@
  * approval and failures stay open with a typed reason for an operator.
  */
 import { existsSync, readFileSync } from "node:fs";
-import path from "node:path";
 
 import { budgetExhausted } from "../../lib/spend.mjs";
 import { buildChainInput } from "./chain.mjs";
 import { hashJson } from "./canonical.mjs";
-import { resolveConfigPath } from "./config.mjs";
+import { policyVersion as factoryPolicyVersion } from "./config.mjs";
 import { defaultHookRegistry } from "./hooks.mjs";
 import { approveProposal } from "./proposals.mjs";
 import { getAgent, getEventType } from "./registry.mjs";
 import { reposRoot } from "./repos.mjs";
 import { validate } from "./schema.mjs";
 import {
+  CHAIN_APPROVAL_MODE_AUTO,
+  CHAIN_APPROVAL_MODE_WATCHED,
+  CHAIN_APPROVAL_SOURCE,
+  CHAIN_AUTO_APPROVAL_ACTOR,
+  CHAIN_AUTO_APPROVAL_REASON,
+  DEFAULT_MAX_CHAIN_AUTO_APPROVALS_PER_TICK,
+  DEFAULT_STALE_CHAIN_REVISIT_MS,
+  HANDOFF_APPROVAL_SOURCE,
+  HANDOFF_AUTO_APPROVAL_ACTOR,
+  HANDOFF_AUTO_APPROVAL_REASON,
+  MERGE_EVENT_TYPES,
+  chainApprovalPolicyPath,
+  clipReason,
+  loadChainAutoApprovalPolicy,
+  stableChainApprovalPolicyForHash,
+} from "./chain-approval-policy.mjs";
+export {
+  buildChainApprovalPolicy,
+  CHAIN_APPROVAL_MODE_AUTO,
+  CHAIN_APPROVAL_MODE_WATCHED,
+  CHAIN_APPROVAL_SOURCE,
+  CHAIN_AUTO_APPROVAL_ACTOR,
+  CHAIN_AUTO_APPROVAL_EVENT_TYPES,
+  CHAIN_AUTO_APPROVAL_REASON,
+  DEFAULT_MAX_CHAIN_AUTO_APPROVALS_PER_TICK,
+  DEFAULT_STALE_CHAIN_REVISIT_MS,
+  HANDOFF_APPROVAL_SOURCE,
+  HANDOFF_AUTO_APPROVAL_ACTOR,
+  HANDOFF_AUTO_APPROVAL_REASON,
+  loadChainAutoApprovalPolicy,
+  stableChainApprovalPolicyForHash,
+} from "./chain-approval-policy.mjs";
+import {
   isLinearRateLimited,
   isLinearRateLimitMessage,
-} from "../../tools/linear.mjs";
-
-export const CHAIN_APPROVAL_SOURCE = "chain";
-export const HANDOFF_APPROVAL_SOURCE = "handoff";
-export const CHAIN_APPROVAL_MODE_AUTO = "auto";
-export const CHAIN_APPROVAL_MODE_WATCHED = "watched";
-export const CHAIN_AUTO_APPROVAL_EVENT_TYPES = new Set([
-  "factory.work.requested",
-  "factory.triage.requested",
-  "factory.triage-apply.requested",
-  "factory.dispatch.requested",
-  "factory.merge.requested",
-  "factory.merge-review.requested",
-  "factory.merge-fix.requested",
-  "factory.merge-plan.requested",
-  "factory.merge-apply.requested",
-  "factory.merge-landed",
-  "factory.merge-verify.requested",
-  "factory.merge-escalate.requested",
-]);
-
-const MERGE_EVENT_TYPES = new Set([
-  "factory.merge.requested",
-  "factory.merge-review.requested",
-  "factory.merge-fix.requested",
-  "factory.merge-plan.requested",
-  "factory.merge-apply.requested",
-  "factory.merge-landed",
-  "factory.merge-verify.requested",
-  "factory.merge-escalate.requested",
-]);
-export const CHAIN_AUTO_APPROVAL_REASON = "auto_approved:chain-policy@1";
-export const CHAIN_AUTO_APPROVAL_ACTOR = "chain-auto-approval";
-export const HANDOFF_AUTO_APPROVAL_REASON =
-  "auto_approved:handoff-dispatch-policy@1";
-export const HANDOFF_AUTO_APPROVAL_ACTOR = "handoff-auto-approval";
-const NEVER_AUTO_APPROVE = new Set(["factory.ship-apply.requested"]);
-
-function policyPath(root = reposRoot()) {
-  return resolveConfigPath("policy", { root });
-}
-
-/** Missing or malformed policy is no approval, never an implicit default. */
-export function loadChainAutoApprovalPolicy({ root = reposRoot() } = {}) {
-  const file = policyPath(root);
-  if (!existsSync(file))
-    return { allowed: new Set(), reason: "policy_missing" };
-  try {
-    const parsed = Bun.YAML.parse(readFileSync(file, "utf8"));
-    const allowed = parsed?.chain_auto_approval?.allowed_event_types;
-    if (
-      !Array.isArray(allowed) ||
-      !allowed.every((value) => typeof value === "string")
-    ) {
-      return { allowed: new Set(), reason: "policy_invalid" };
-    }
-    if (
-      allowed.some(
-        (eventType) =>
-          NEVER_AUTO_APPROVE.has(eventType) ||
-          !CHAIN_AUTO_APPROVAL_EVENT_TYPES.has(eventType),
-      )
-    ) {
-      return { allowed: new Set(), reason: "policy_contains_forbidden_event" };
-    }
-    const merge = parsed?.merge;
-    const escalation = parsed?.escalation;
-    const mergeAllowed = allowed.some((eventType) =>
-      MERGE_EVENT_TYPES.has(eventType),
-    );
-    const maxFixRounds = merge?.max_fix_rounds ?? 0;
-    const autoMergeBase = escalation?.auto_merge_base ?? [];
-    const autoMergeOwners = escalation?.auto_merge_owners ?? [];
-    if (
-      (mergeAllowed && (!Number.isInteger(maxFixRounds) || maxFixRounds < 0)) ||
-      !Array.isArray(autoMergeBase) ||
-      !autoMergeBase.every((value) => typeof value === "string") ||
-      !Array.isArray(autoMergeOwners) ||
-      !autoMergeOwners.every((value) => typeof value === "string")
-    ) {
-      return {
-        allowed: new Set(),
-        reason: "merge_policy_invalid",
-        maxFixRounds: 0,
-        autoMergeBase: new Set(),
-        autoMergeOwners: new Set(),
-      };
-    }
-    const mergeBatchSize =
-      Number.isInteger(merge?.batch_size) && merge.batch_size > 0
-        ? merge.batch_size
-        : 4;
-    return {
-      allowed: new Set(allowed),
-      reason: null,
-      maxFixRounds,
-      mergeBatchSize,
-      autoMergeBase: new Set(autoMergeBase),
-      autoMergeOwners: new Set(autoMergeOwners),
-    };
-  } catch {
-    return { allowed: new Set(), reason: "policy_invalid" };
-  }
-}
-
-/**
- * Build the immutable unattended approval policy embedded in a run spec.
- * Chain keeps its full closed allowlist. Handoff may reuse it for exactly one
- * event type: factory.dispatch.requested.
- */
-export function buildChainApprovalPolicy(
-  eventType,
-  { source = "operator", policy = loadChainAutoApprovalPolicy() } = {},
-) {
-  const chain = source === CHAIN_APPROVAL_SOURCE;
-  const handoffDispatch =
-    source === HANDOFF_APPROVAL_SOURCE &&
-    eventType === "factory.dispatch.requested";
-  if (!chain && !handoffDispatch) return null;
-  if (policy.allowed.has(eventType)) {
-    return {
-      source,
-      mode: CHAIN_APPROVAL_MODE_AUTO,
-      eventType,
-    };
-  }
-  return {
-    source,
-    mode: CHAIN_APPROVAL_MODE_WATCHED,
-    eventType,
-    reason: policy.reason ?? "event_type_not_allowlisted",
-  };
-}
-
-export function stableChainApprovalPolicyForHash(policy) {
-  if (!policy) return null;
-  const { checkedAt, ...dispatchEvidence } = policy.dispatchEvidence ?? {};
-  return {
-    source: policy.source,
-    mode: policy.mode,
-    eventType: policy.eventType,
-    reason: policy.reason,
-    dispatchEvidenceHash: policy.dispatchEvidence
-      ? hashJson(dispatchEvidence)
-      : null,
-  };
-}
+} from "../../tools/ticket.mjs";
 
 const ENVIRONMENT_FAILURE_REASONS = new Set([
   "adapter_error",
   "cli_not_found",
   "unknown_adapter",
 ]);
+const RUNTIME_POLICY_LOAD_ERROR = Symbol("runtime_policy_load_error");
+
+/** Leave the remainder of a one-second serve cadence to local tick work. */
+export const DEFAULT_CHAIN_AUTO_APPROVAL_DEADLINE_MS = 2_000;
+
+function chainAutoApprovalDeadlineMs() {
+  const value = Number(process.env.FACTORY_CHAIN_AUTO_APPROVAL_DEADLINE_MS);
+  return Number.isFinite(value) && value > 0
+    ? value
+    : DEFAULT_CHAIN_AUTO_APPROVAL_DEADLINE_MS;
+}
 
 function loadRuntimePolicy(root = reposRoot()) {
-  const file = policyPath(root);
+  const file = chainApprovalPolicyPath(root);
   if (!existsSync(file)) return null;
   try {
     const parsed = Bun.YAML.parse(readFileSync(file, "utf8"));
     return parsed && typeof parsed === "object" ? parsed : null;
-  } catch {
-    return null;
+  } catch (err) {
+    const message = String(err?.message ?? err);
+    console.error(`runtime_policy_unavailable: ${message}`);
+    return { [RUNTIME_POLICY_LOAD_ERROR]: message };
   }
 }
 
@@ -197,6 +96,11 @@ export function chainRuntimeGuard(
   } = {},
 ) {
   if (!runtimePolicy) return "runtime_policy_unavailable";
+  if (runtimePolicy[RUNTIME_POLICY_LOAD_ERROR]) {
+    return `runtime_policy_unavailable:${clipReason(
+      runtimePolicy[RUNTIME_POLICY_LOAD_ERROR],
+    )}`;
+  }
 
   try {
     if (budgetCheck(runtimePolicy)) return "budget_exhausted";
@@ -340,13 +244,6 @@ function proposalIntegrity(candidate, mapping, envelope) {
   return null;
 }
 
-function clipReason(message, max = 180) {
-  return String(message ?? "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, max);
-}
-
 function dispatchSafe(
   envelope,
   approvalPolicy,
@@ -369,10 +266,7 @@ function dispatchSafe(
     return "dispatch_recheck_deferred";
   }
 
-  let result;
-  try {
-    result = dispatchEligibility(envelope.payload, dispatch);
-  } catch (err) {
+  const failed = (err) => {
     const message = String(err?.message ?? err);
     console.error(`dispatch_recheck_failed: ${message}`);
     if (isLinearRateLimited(err) || isLinearRateLimitMessage(message)) {
@@ -385,33 +279,44 @@ function dispatchSafe(
       return "dispatch_recheck_deferred";
     }
     return `dispatch_recheck_failed:${clipReason(message)}`;
+  };
+  const checked = (result) => {
+    if (!result?.ok)
+      return `dispatch_ineligible:${result?.refusal?.reason ?? "unknown"}`;
+
+    const expectedEvidenceHash =
+      stableChainApprovalPolicyForHash(approvalPolicy)?.dispatchEvidenceHash;
+    if (!expectedEvidenceHash)
+      return "dispatch_ineligible:approval_policy_missing_evidence";
+    const { checkedAt, ...currentEvidence } = result.evidence ?? {};
+    if (expectedEvidenceHash !== hashJson(currentEvidence)) {
+      return "dispatch_ineligible:evidence_changed_since_plan";
+    }
+
+    // The escalated/security-label refusal ran inline here before WM-842; it is
+    // now the built-in `factory:escalation-labels` hook, first in the waterfall,
+    // and every hook deny keeps the `dispatch_ineligible:<reason>` shape.
+    return after(
+      approveBeforeHooks(hookCtx.hooks, hookCtx, { evidence: result.evidence }),
+      (verdict) => {
+        if (verdict.decision === "deny")
+          return `dispatch_ineligible:${verdict.reason}`;
+        if ((result.evidence?.escalatePathIntersections ?? []).length > 0)
+          return "dispatch_ineligible:escalate_paths_intersect";
+        return null;
+      },
+    );
+  };
+
+  let result;
+  try {
+    result = dispatchEligibility(envelope.payload, dispatch);
+  } catch (err) {
+    return failed(err);
   }
-
-  if (!result?.ok)
-    return `dispatch_ineligible:${result?.refusal?.reason ?? "unknown"}`;
-
-  const expectedEvidenceHash =
-    stableChainApprovalPolicyForHash(approvalPolicy)?.dispatchEvidenceHash;
-  if (!expectedEvidenceHash)
-    return "dispatch_ineligible:approval_policy_missing_evidence";
-  const { checkedAt, ...currentEvidence } = result.evidence ?? {};
-  if (expectedEvidenceHash !== hashJson(currentEvidence)) {
-    return "dispatch_ineligible:evidence_changed_since_plan";
-  }
-
-  // The escalated/security-label refusal ran inline here before WM-842; it is
-  // now the built-in `factory:escalation-labels` hook, first in the waterfall,
-  // and every hook deny keeps the `dispatch_ineligible:<reason>` shape.
-  return after(
-    approveBeforeHooks(hookCtx.hooks, hookCtx, { evidence: result.evidence }),
-    (verdict) => {
-      if (verdict.decision === "deny")
-        return `dispatch_ineligible:${verdict.reason}`;
-      if ((result.evidence?.escalatePathIntersections ?? []).length > 0)
-        return "dispatch_ineligible:escalate_paths_intersect";
-      return null;
-    },
-  );
+  return isThenable(result)
+    ? Promise.resolve(result).then(checked, failed)
+    : checked(result);
 }
 
 function mergeBarrierReason(db, registry, candidate, now) {
@@ -657,6 +562,10 @@ function chainPredecessorReason(db, registry, candidate, envelope) {
   return null;
 }
 
+// Malformed history envelopes are permanent rows: warn about each event_id
+// once per process instead of on every approval tick.
+const warnedMalformedMergeFixEvents = new Set();
+
 function durableFixRoundReason(db, candidate, input, policy) {
   const cap = policy.maxFixRounds ?? 0;
   // A fix round is "spent" only when a merge-fix run for this PR actually
@@ -664,6 +573,45 @@ function durableFixRoundReason(db, candidate, input, policy) {
   // re-emits every tick), REFUSED execute-time refusals (pr moved, ticket
   // state) and CANCELLED stale-pinned runs do not consume the budget
   // (2026-08-18: counting them exhausted max_fix_rounds before any fix ran).
+  // Do not decode every historical merge-fix envelope on each approval tick.
+  // The indexed event type/source predicate and payload prefilter leave JS to
+  // parse only entries for this exact PR, and the cap means a full history
+  // cannot make this lookup unbounded.
+  // Cheap indexed existence probe first: in the common all-valid history the
+  // per-tick cost stops here, and the detail scan below runs only when a
+  // malformed envelope is actually present.
+  const hasMalformed = db
+    .query(
+      `SELECT EXISTS(
+         SELECT 1 FROM events e
+         WHERE e.source = 'chain'
+           AND e.type = 'factory.merge-fix.requested'
+           AND e.event_id != ?
+           AND json_valid(e.envelope_json) = 0
+       ) AS present`,
+    )
+    .get(candidate.event_id).present;
+  if (hasMalformed) {
+    const malformed = db
+      .query(
+        `SELECT e.event_id FROM events e
+         WHERE e.source = 'chain'
+           AND e.type = 'factory.merge-fix.requested'
+           AND e.event_id != ?
+           AND json_valid(e.envelope_json) = 0
+         ORDER BY e.rowid DESC
+         LIMIT ?`,
+      )
+      .all(candidate.event_id, cap);
+    for (const row of malformed) {
+      if (warnedMalformedMergeFixEvents.has(row.event_id)) continue;
+      warnedMalformedMergeFixEvents.add(row.event_id);
+      console.warn(
+        `Skipping malformed merge-fix history envelope for event ${row.event_id}`,
+      );
+    }
+  }
+
   const rows = db
     .query(
       `SELECT e.event_id, e.envelope_json, r.state FROM events e
@@ -673,16 +621,30 @@ function durableFixRoundReason(db, candidate, input, policy) {
          AND e.type = 'factory.merge-fix.requested'
          AND p.decision = 'run'
          AND r.state IN ('QUEUED','LEASED','RUNNING','VERIFYING','COMPLETED','FAILED')
-         AND e.event_id != ?`,
+         AND e.event_id != ?
+         AND CASE WHEN json_valid(e.envelope_json)
+                  THEN json_extract(e.envelope_json, '$.payload.repo') END = ?
+         AND CASE WHEN json_valid(e.envelope_json)
+                  THEN json_extract(e.envelope_json, '$.payload.github') END = ?
+         AND CASE WHEN json_valid(e.envelope_json)
+                  THEN json_extract(e.envelope_json, '$.payload.pr') END = ?
+       ORDER BY e.rowid DESC
+       LIMIT ?`,
     )
-    .all(candidate.event_id);
+    .all(candidate.event_id, input.repo, input.github, input.pr, cap);
   let executed = 0;
   for (const row of rows) {
     let payload;
     try {
       payload = JSON.parse(row.envelope_json)?.payload;
     } catch {
-      return "merge_fix_history_unparseable";
+      // json_valid above makes this defensive path exceptional (for example,
+      // a driver decode failure), but one corrupt history row must not block
+      // every later merge-fix candidate.
+      console.warn(
+        `Skipping unreadable merge-fix history envelope for event ${row.event_id}`,
+      );
+      continue;
     }
     if (
       payload?.repo === input.repo &&
@@ -927,6 +889,61 @@ function noteOpenReason(db, id, reason) {
 
 /** One pass at a time per database: a floating pass and an awaited one must not interleave. */
 const PASSES = new WeakMap();
+/** Per database: `${run_id}\0${registryVersion}` → held verdict for a registry-stale row (#1706). */
+const STALE_VERDICTS = new WeakMap();
+/** Per database: the next open proposal id from which a pass starts. */
+const ROUND_ROBIN_CURSORS = new WeakMap();
+
+function staleVerdictsFor(db) {
+  let memo = STALE_VERDICTS.get(db);
+  if (!memo) {
+    memo = new Map();
+    STALE_VERDICTS.set(db, memo);
+  }
+  return memo;
+}
+
+function roundRobinCursorFor(db) {
+  let cursor = ROUND_ROBIN_CURSORS.get(db);
+  if (!cursor) {
+    cursor = { nextProposalId: null };
+    ROUND_ROBIN_CURSORS.set(db, cursor);
+  }
+  return cursor;
+}
+
+/** The registry version a recorded proposal spec pins, or null when unpinned. */
+function pinnedRegistryVersion(specJson) {
+  let spec;
+  try {
+    spec = JSON.parse(specJson);
+  } catch {
+    return null;
+  }
+  for (const value of [spec?.policyVersion, spec?.promptVersion]) {
+    if (typeof value === "string" && value !== "" && value !== "unknown")
+      return value;
+  }
+  return null;
+}
+
+/** True when the row's recorded spec pins a registry version other than serve's. */
+function pinnedToOlderRegistry(row, registryVersion) {
+  const pinned = pinnedRegistryVersion(row.proposal_spec_json);
+  return pinned !== null && pinned !== registryVersion;
+}
+
+function staleRevisitJitter(row, revisitMs) {
+  // Stable, bounded jitter is deterministic across a restart while ensuring a
+  // batch that became stale together does not become due together again.
+  const window = Math.floor(revisitMs / 10);
+  if (window < 1) return 0;
+  const key = `${row.run_id}\0${row.id}`;
+  let hash = 0;
+  for (let index = 0; index < key.length; index += 1)
+    hash = (hash * 31 + key.charCodeAt(index)) >>> 0;
+  return hash % (window + 1);
+}
 
 /**
  * Recheck and approve the currently open, eligible chain proposals once.
@@ -939,7 +956,16 @@ const PASSES = new WeakMap();
  * the rest of the pass; `serve` awaits it. The Promise never rejects — every
  * fault is a typed reason on the proposal or an `errors` entry.
  *
- * @returns {Promise<{ approved: Array<{ proposalId: string, runId: string }>, open: Array<{ proposalId: string, reason: string }>, errors: Array<{ proposalId: string|null, reason: string, message: string }> }>}
+ * Per tick the pass evaluates at most `maxRows` rows; the rest are counted in
+ * `skipped`; `deadlineSkipped` is the subset truncated by the pass deadline.
+ * Rows begin at the proposal after the previous pass stopped, so a slow open
+ * row cannot repeatedly starve the rest of the backlog. A registry-stale row
+ * whose evaluation left it open is memoised per
+ * (run_id, registryVersion) and skipped — without touching the control plane —
+ * until `staleRevisitMs` elapses, the registry version changes, or the row is
+ * re-planned into a fresh proposal (#1706). `memoised` counts those skips.
+ *
+ * @returns {Promise<{ approved: Array<{ proposalId: string, runId: string }>, open: Array<{ proposalId: string, reason: string }>, errors: Array<{ proposalId: string|null, reason: string, message: string }>, skipped: number, deadlineSkipped: number, memoised: number }>}
  */
 export function autoApproveChains(db, registry, options = {}) {
   const state = PASSES.get(db) ?? { tail: null };
@@ -960,6 +986,12 @@ export function autoApproveChains(db, registry, options = {}) {
   return pass;
 }
 
+function resolvePolicyVersion(value) {
+  return typeof value === "string" && value !== "" && value !== "unknown"
+    ? value
+    : factoryPolicyVersion();
+}
+
 /**
  * The pass itself. `marker.settled` is set in a `finally` inside this async
  * frame: if no `await` was reached (every hook answered synchronously) it is
@@ -978,13 +1010,36 @@ async function runPass(
     runtimeGuardOptions = {},
     hooks = defaultHookRegistry(),
     hookTimeoutMs,
+    maxRows = DEFAULT_MAX_CHAIN_AUTO_APPROVALS_PER_TICK,
+    staleRevisitMs = DEFAULT_STALE_CHAIN_REVISIT_MS,
+    deadlineMs = chainAutoApprovalDeadlineMs(),
   } = {},
   marker = { settled: false },
 ) {
+  const resolvedPolicyVersion = resolvePolicyVersion(policyVersion);
   try {
     const approved = [];
     const open = [];
     const errors = [];
+    const limit =
+      Number.isInteger(maxRows) && maxRows > 0
+        ? maxRows
+        : DEFAULT_MAX_CHAIN_AUTO_APPROVALS_PER_TICK;
+    const revisitMs =
+      Number.isFinite(staleRevisitMs) && staleRevisitMs >= 0
+        ? staleRevisitMs
+        : DEFAULT_STALE_CHAIN_REVISIT_MS;
+    const passDeadlineMs =
+      Number.isFinite(deadlineMs) && deadlineMs > 0
+        ? deadlineMs
+        : DEFAULT_CHAIN_AUTO_APPROVAL_DEADLINE_MS;
+    const passStartedAt = Date.now();
+    const memo = staleVerdictsFor(db);
+    const cursor = roundRobinCursorFor(db);
+    let skipped = 0;
+    let deadlineSkipped = 0;
+    let memoised = 0;
+    let evaluated = 0;
     // One in-flight read per repo for the whole pass, shared across every
     // proposal's eligibility recheck (#1064).
     const passDispatch = withPassInFlightCache(dispatch);
@@ -1009,10 +1064,79 @@ async function runPass(
         reason: "pass_failed",
         message: String(err?.message ?? err),
       });
-      return { approved, open, errors };
+      return { approved, open, errors, skipped, deadlineSkipped, memoised };
+    }
+    if (rows.length === 0)
+      return { approved, open, errors, skipped, deadlineSkipped, memoised };
+
+    const cursorIndex = rows.findIndex(
+      (row) => row.id === cursor.nextProposalId,
+    );
+    const orderedRows =
+      cursorIndex > 0
+        ? [...rows.slice(cursorIndex), ...rows.slice(0, cursorIndex)]
+        : rows;
+    // A complete pass wraps back to its starting point. Resource-truncated
+    // passes replace this with the first row they could not evaluate.
+    let nextProposalId = null;
+
+    // Read this once per pass, rather than once per row. Passing the same
+    // snapshot to the guard avoids a second policy read; the next pass reads
+    // again, so clearing a pause resumes approvals without a restart.
+    const runtimePolicy =
+      runtimeGuardOptions.runtimePolicy ??
+      loadRuntimePolicy(runtimeGuardOptions.root ?? reposRoot());
+    const paused = runtimePolicy?.dispatch?.paused === true;
+    const passRuntimeGuardOptions = { ...runtimeGuardOptions, runtimePolicy };
+
+    // Verdicts for rows that are no longer pending (decided, superseded,
+    // re-planned under a new proposal id) or that were held under another
+    // registry version are dead; drop them so the memo tracks the backlog.
+    const live = new Map(
+      rows.map((row) => [`${row.run_id}\0${resolvedPolicyVersion}`, row.id]),
+    );
+    for (const [key, held] of memo) {
+      if (live.get(key) !== held.proposalId) memo.delete(key);
     }
 
-    for (const row of rows) {
+    for (const row of orderedRows) {
+      if (paused) {
+        noteOpenReason(db, row.id, "dispatch_paused");
+        skipped += 1;
+        continue;
+      }
+      const memoKey = `${row.run_id}\0${resolvedPolicyVersion}`;
+      const stale = pinnedToOlderRegistry(row, resolvedPolicyVersion);
+      const held = stale ? memo.get(memoKey) : undefined;
+      if (held && held.proposalId === row.id && held.until > now) {
+        skipped += 1;
+        memoised += 1;
+        continue;
+      }
+      if (evaluated >= limit) {
+        skipped += 1;
+        nextProposalId ??= row.id;
+        continue;
+      }
+      // Check immediately before the potentially remote eligibility read. A
+      // slow row may finish, but it cannot start another backlog row in the
+      // same pass.
+      if (Date.now() - passStartedAt >= passDeadlineMs) {
+        skipped += 1;
+        deadlineSkipped += 1;
+        nextProposalId ??= row.id;
+        continue;
+      }
+      evaluated += 1;
+      const hold = (reason) => {
+        if (stale)
+          memo.set(memoKey, {
+            proposalId: row.id,
+            reason,
+            until: now + revisitMs + staleRevisitJitter(row, revisitMs),
+          });
+        else memo.delete(memoKey);
+      };
       try {
         const age = now - Date.parse(row.created_at);
         let reason;
@@ -1027,24 +1151,31 @@ async function runPass(
               hookTimeoutMs,
             });
             if (isThenable(reason)) reason = await reason;
-          } catch {
-            reason = "approve_hooks_failed";
+          } catch (err) {
+            const message = String(err?.message ?? err);
+            console.error(`approve_hooks_failed: ${message}`);
+            reason = `approve_hooks_failed:${clipReason(message)}`;
           }
         }
         if (reason) {
           noteOpenReason(db, row.id, reason);
           open.push({ proposalId: row.id, reason });
+          hold(reason);
           continue;
         }
         let guardReason;
         try {
-          guardReason = runtimeGuard(db, runtimeGuardOptions);
-        } catch {
-          guardReason = "runtime_guard_failed";
+          guardReason = runtimeGuard(db, passRuntimeGuardOptions);
+        } catch (err) {
+          const message = String(err?.message ?? err);
+          console.error(`runtime_guard_failed: ${message}`);
+          guardReason = `runtime_guard_failed:${clipReason(message)}`;
         }
         if (guardReason) {
           noteOpenReason(db, row.id, guardReason);
           open.push({ proposalId: row.id, reason: guardReason });
+          // The guard is a live-capacity answer, not a property of the row.
+          memo.delete(memoKey);
           continue;
         }
         try {
@@ -1057,7 +1188,7 @@ async function runPass(
               ? HANDOFF_AUTO_APPROVAL_REASON
               : CHAIN_AUTO_APPROVAL_REASON,
             now,
-            policyVersion,
+            policyVersion: resolvedPolicyVersion,
           });
           if (outcome.approved)
             approved.push({ proposalId: row.id, runId: outcome.runId });
@@ -1065,6 +1196,8 @@ async function runPass(
             noteOpenReason(db, row.id, "replanned");
             open.push({ proposalId: row.id, reason: "replanned" });
           }
+          // Approved, or re-planned into a fresh proposal id: nothing to hold.
+          memo.delete(memoKey);
         } catch (err) {
           const message = String(err?.message ?? err);
           noteOpenReason(db, row.id, "approval_error");
@@ -1073,6 +1206,7 @@ async function runPass(
             reason: "approval_error",
             message,
           });
+          hold("approval_error");
         }
       } catch (err) {
         errors.push({
@@ -1080,9 +1214,11 @@ async function runPass(
           reason: "pass_row_failed",
           message: String(err?.message ?? err),
         });
+        hold("pass_row_failed");
       }
     }
-    return { approved, open, errors };
+    cursor.nextProposalId = nextProposalId ?? orderedRows[0].id;
+    return { approved, open, errors, skipped, deadlineSkipped, memoised };
   } finally {
     marker.settled = true;
   }

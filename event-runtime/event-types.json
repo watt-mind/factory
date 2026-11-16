@@ -227,5 +227,11 @@
     "adapter": "cursor",
     "idempotencyScope": ["inputHash"],
     "proposalTtlSeconds": 1800
+  },
+  "factory.celld-smoke.requested": {
+    "agent": "celld-smoke@1",
+    "adapter": "claude",
+    "idempotencyScope": ["inputHash"],
+    "proposalTtlSeconds": 1800
   }
 }

@@ -121,7 +121,14 @@ function vendorChunk(id: string): string | undefined {
 // the WM-332 note) tipped CI over the line while a local build stayed just
 // under it. Vendor split verified unchanged: xyflow still 197.04 kB, elk
 // still its own chunk. Slack ~25 kB (4%), back in line with prior raises.
-const ENTRY_CHUNK_BUDGET_BYTES = 650 * 1000;
+//
+// GH-2399 re-baselined to 700 kB on 2026-11-15. The minor-and-patch web
+// dependency bump (react/react-dom 19.3.1, @tanstack/react-query 5.107.1,
+// cmdk 1.1.1, etc.) took the entry to 673.88 kB. Vendor split verified
+// healthy: xyflow is 198.94 kB and elk is 1473.99 kB, so no @xyflow/react
+// dep escaped into the entry chunk. Slack ~26 kB (3.7%), in line with prior
+// raises.
+const ENTRY_CHUNK_BUDGET_BYTES = 700 * 1000;
 
 function entryChunkBudget(): Plugin {
   return {
