@@ -2,10 +2,12 @@ import { expect, test } from "bun:test";
 import {
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -203,6 +205,8 @@ test("emit purges orphaned commands, skills, and prompts from every output tree"
     "dist/gemini/skills/orphaned-skill/SKILL.md",
     "dist/cursor/commands/orphaned-command.md",
     "dist/cursor/skills/orphaned-skill/SKILL.md",
+    "dist/muse/skills/orphaned-skill/SKILL.md",
+    "dist/muse/agents/orphaned-agent.md",
     "dist/pi/skills/orphaned-skill/SKILL.md",
     "dist/pi/prompts/orphaned-command.md",
   ].map((file) => path.join(ROOT, file));
@@ -446,7 +450,7 @@ test("emit writes Cursor skills matching shared/skills/", () => {
 });
 
 test("emit quotes and scopes command-skill descriptions for Codex and Gemini", () => {
-  for (const harness of ["codex", "gemini"]) {
+  for (const harness of ["codex", "gemini", "muse"]) {
     const skillText = readFileSync(
       path.join(ROOT, "dist", harness, "skills", "factory-ship", "SKILL.md"),
       "utf8",
@@ -474,7 +478,7 @@ test("emit quotes and scopes command-skill descriptions for Codex and Gemini", (
       stderr: "pipe",
     });
     expect(result.exitCode).toBe(0);
-    for (const harness of ["codex", "gemini"]) {
+    for (const harness of ["codex", "gemini", "muse"]) {
       const generated = readFileSync(
         path.join(
           fixture,
@@ -596,6 +600,7 @@ test("curated principle-* skills and principles index are emitted and guardraile
       path.join(ROOT, "dist", "cursor", "skills", name, "SKILL.md"),
       path.join(ROOT, "dist", "codex", "skills", name, "SKILL.md"),
       path.join(ROOT, "dist", "gemini", "skills", name, "SKILL.md"),
+      path.join(ROOT, "dist", "muse", "skills", name, "SKILL.md"),
     ]) {
       expect(existsSync(dest)).toBe(true);
     }
@@ -656,6 +661,7 @@ test("emit packages /factory-garden across all five harnesses and lists it in RE
     ["plugins", "core", "commands", "factory-garden.md"],
     ["dist", "codex", "skills", "factory-garden", "SKILL.md"],
     ["dist", "gemini", "skills", "factory-garden", "SKILL.md"],
+    ["dist", "muse", "skills", "factory-garden", "SKILL.md"],
     ["dist", "cursor", "commands", "factory-garden.md"],
     ["dist", "pi", "prompts", "factory-garden.md"],
   ]) {
@@ -813,6 +819,7 @@ test("emit packages /factory-verify-deploy across all five harnesses and wires p
     ["plugins", "core", "commands", "factory-verify-deploy.md"],
     ["dist", "codex", "skills", "factory-verify-deploy", "SKILL.md"],
     ["dist", "gemini", "skills", "factory-verify-deploy", "SKILL.md"],
+    ["dist", "muse", "skills", "factory-verify-deploy", "SKILL.md"],
     ["dist", "cursor", "commands", "factory-verify-deploy.md"],
     ["dist", "pi", "prompts", "factory-verify-deploy.md"],
   ]) {
@@ -845,6 +852,7 @@ test("emit packages /factory-recap and /factory-recap-video across all five harn
       ["plugins", "core", "commands", `${cmd}.md`],
       ["dist", "codex", "skills", cmd, "SKILL.md"],
       ["dist", "gemini", "skills", cmd, "SKILL.md"],
+      ["dist", "muse", "skills", cmd, "SKILL.md"],
       ["dist", "cursor", "commands", `${cmd}.md`],
       ["dist", "pi", "prompts", `${cmd}.md`],
     ]) {
@@ -983,4 +991,75 @@ test("emitToNodes fails closed when an explicit --node is unknown or fails", () 
   expect(failRes.exitCode).toBe(1);
   expect(failRes.results).toHaveLength(1);
   expect(failErrors.join("\n")).toContain("failed   mac-mini (mac-mini.local)");
+});
+
+test("emit packages Muse Code skills and agents into dist/muse and links ~/.config/muse", () => {
+  for (const rel of [
+    ["dist", "muse", "skills", "ticket-spec", "SKILL.md"],
+    ["dist", "muse", "skills", "factory", "SKILL.md"],
+    ["dist", "muse", "skills", "factory-work", "SKILL.md"],
+    ["dist", "muse", "skills", "factory-recap", "SKILL.md"],
+  ]) {
+    expect(existsSync(path.join(ROOT, ...rel))).toBe(true);
+  }
+
+  for (const agentName of [
+    "factory-ci-doctor",
+    "factory-infra-scout",
+    "factory-merge-reviewer",
+    "factory-ux-critic",
+  ]) {
+    const agentFile = path.join(
+      ROOT,
+      "dist",
+      "muse",
+      "agents",
+      `${agentName}.md`,
+    );
+    expect(existsSync(agentFile)).toBe(true);
+    const fmMatch = readFileSync(agentFile, "utf8").match(
+      /^---\n([\s\S]*?)\n---\n/,
+    );
+    expect(fmMatch).not.toBeNull();
+    const parsed = Bun.YAML.parse(fmMatch[1]);
+    expect(Object.keys(parsed).sort()).toEqual(["description", "name"]);
+    expect(parsed.name).toBe(agentName);
+  }
+
+  const readme = readFileSync(path.join(ROOT, "README.md"), "utf8");
+  expect(readme).toContain("Muse Code");
+  expect(readme).toContain("`~/.config/muse/skills/`");
+  expect(readme).toContain("`~/.config/muse/agents/`");
+
+  const fixture = makeEmitFixture();
+  const tempHome = mkdtempSync(path.join(tmpdir(), "emit-muse-home-"));
+  try {
+    const result = Bun.spawnSync({
+      cmd: ["bun", "build/emit.mjs", "--link"],
+      cwd: fixture,
+      env: { ...process.env, HOME: tempHome },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(0);
+
+    for (const [linkRel, targetRel] of [
+      [".config/muse/skills/ticket-spec", "dist/muse/skills/ticket-spec"],
+      [".config/muse/skills/factory-work", "dist/muse/skills/factory-work"],
+      [
+        ".config/muse/agents/factory-ci-doctor.md",
+        "dist/muse/agents/factory-ci-doctor.md",
+      ],
+    ]) {
+      const linkPath = path.join(tempHome, linkRel);
+      expect(lstatSync(linkPath).isSymbolicLink()).toBe(true);
+      expect(readlinkSync(linkPath)).toContain(targetRel);
+      expect(realpathSync(linkPath)).toBe(
+        realpathSync(path.join(fixture, targetRel)),
+      );
+    }
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+    rmSync(tempHome, { recursive: true, force: true });
+  }
 });

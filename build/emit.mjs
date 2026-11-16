@@ -258,6 +258,7 @@ const CODEX = path.join(ROOT, "dist", "codex");
 const GEMINI = path.join(ROOT, "dist", "gemini");
 const CURSOR = path.join(ROOT, "dist", "cursor");
 const PI = path.join(ROOT, "dist", "pi");
+const MUSE = path.join(ROOT, "dist", "muse");
 const PI_DEFAULT_AGENT_TOOLS = "read, grep, find, ls, bash";
 
 if (!CHECK) {
@@ -296,6 +297,8 @@ cleanGenerated(
   path.join(PI, "agents"),
   path.join(PI, "skills"),
   path.join(PI, "prompts"),
+  path.join(MUSE, "agents"),
+  path.join(MUSE, "skills"),
 );
 for (const pack of harnessPacks) {
   if (pack.builtin) continue;
@@ -439,6 +442,31 @@ function emitPack({
     emit(
       destFile(pack, path.join(PI, "prompts"), path.basename(f)),
       `# ${path.basename(f, ".md")}\n\n${fm.description ? `> ${fm.description}\n\n` : ""}${body.trimStart()}`,
+    );
+  }
+
+  for (const agent of agentDefinitions)
+    emit(
+      destJoin(pack, path.join(MUSE, "agents"), `${agent.name}.md`),
+      markdownAgent(agent),
+    );
+  for (const s of skillDirs)
+    for (const f of listFiles(path.join(skillsRoot, s)))
+      emit(
+        destJoin(
+          pack,
+          path.join(MUSE, "skills"),
+          s,
+          path.relative(path.join(skillsRoot, s), f),
+        ),
+        read(f),
+      );
+  for (const f of commands) {
+    const { fm, body } = splitFrontmatter(read(f));
+    const name = commandSkillName(pack, f);
+    emit(
+      destJoin(pack, path.join(MUSE, "skills"), name, "SKILL.md"),
+      commandSkillMarkdown(name, fm, body),
     );
   }
 
@@ -726,6 +754,9 @@ console.log(
 console.log(
   `  pi      dist/pi/       (${skillDirs.length} skills, ${commands.length} prompts, ${agents.length} agents)`,
 );
+console.log(
+  `  muse    dist/muse/     (${skillDirs.length + commands.length} skills, ${agents.length} agents)`,
+);
 console.log(`  floor   dist/AGENTS.floor.md`);
 for (const extra of loadedPacks.filter((p) => !p.pack.builtin)) {
   console.log(
@@ -861,6 +892,10 @@ function packLinks(loaded) {
       destJoin(pack, path.join(PI, "skills"), s),
       destJoin(pack, path.join(homedir(), ".pi/agent/skills"), s),
     ]),
+    ...skillNames.map((s) => [
+      destJoin(pack, path.join(MUSE, "skills"), s),
+      destJoin(pack, path.join(homedir(), ".config/muse/skills"), s),
+    ]),
     ...agentDefinitions.flatMap((agent) => {
       const file = pack.prefix ? `${pack.prefix}-${agent.name}` : agent.name;
       return [
@@ -897,6 +932,14 @@ function packLinks(loaded) {
           destFile(
             pack,
             path.join(homedir(), ".pi/agent/agents"),
+            `${agent.name}.md`,
+          ),
+        ],
+        [
+          destJoin(pack, path.join(MUSE, "agents"), `${agent.name}.md`),
+          destFile(
+            pack,
+            path.join(homedir(), ".config/muse/agents"),
             `${agent.name}.md`,
           ),
         ],
