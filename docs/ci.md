@@ -2,55 +2,31 @@
 
 ## Runner topology
 
-Factory CI uses a hybrid runner strategy designed for public open-source operation (WM-950):
+Every Factory CI job runs on ephemeral GitHub-hosted runners (`ubuntu-24.04`, pinned explicitly rather than a floating tag to avoid silent runner-image upgrades): `Fast unit tests`, `Timing-bound tests`, `Full verification`, `Verify`, `Browser E2E`, `Build Starlight Site`, and all `security.yml` / utility workflows (`gitleaks`, `semgrep`, `actionlint`, `codeql`, `cla.yml`, `update-badge.yml`, `publish-extension.yml`, `publish-npm.yml`). Fork, Dependabot, and internal PRs all take the same lane, so no routing step exists.
 
-- **GitHub-hosted (`ubuntu-24.04`)**: `Fast unit tests`, `Timing-bound tests`, `Full verification`, `Verify`, `Browser E2E`, `Build Starlight Site`, and all `security.yml` / utility workflows (`gitleaks`, `semgrep`, `actionlint`, `codeql`, `cla.yml`, `update-badge.yml`, `publish-extension.yml`, `publish-npm.yml`) run on ephemeral GitHub-hosted runners (`ubuntu-24.04`, pinned explicitly rather than a floating tag to avoid silent runner-image upgrades), eliminating shared-host contention and `verify-lane` queueing.
-- **Self-hosted sandbox boundary**: Only `Shadow runner fleet available` (`shadow-runner-health`, `[self-hosted, smoke-test]`) and `Sandboxed verify smoke` (`[self-hosted, verify-lane]`) run on the self-hosted fleet for internal branches/PRs, because GitHub-hosted runners cannot create the unprivileged user+mount namespaces the handoff sandbox exercises. `shadow-runner-health` verifies that at least one shadow runner (`1..8`) and at least one `verify-lane` runner (`watt-mind-runner-1..3`) are active alongside host temp space and memory headroom. Untrusted fork PRs, Dependabot PRs, and nightly/forced cloud runs skip both self-hosted jobs.
-
-Treat self-hosted runner names as parallel executors, not independent machines. CPU, memory, `/tmp`, and process scheduling are shared across all eight shadow services.
+The self-hosted lane (WM-950's `route` / `Shadow runner fleet available` / `Sandboxed verify smoke` jobs) was retired in WM-1145. Consequence, accepted deliberately: **the handoff sandbox boundary is no longer exercised anywhere in CI** — GitHub-hosted runners cannot create the unprivileged user+mount namespaces `runHandoffVerifySmoke` needs, and the tests that need them self-skip via `handoffSandboxAvailable`. Sandbox regressions therefore surface only at real handoff time on the operator host, not as a red PR check.
 
 ### Runner host dependencies
 
 Runner images must provide `unzip`, `curl`, `sha256sum` (from coreutils), and `tar` for the checksum-pinned tool installer. The `Pinned tools forced-install smoke` job on `ubuntu-24.04` forces fresh bun, gitleaks, uv, and actionlint installs and verifies these dependencies whenever `.github/**` changes (and on manual dispatch).
 
-## Fork PR sandboxing & dual routing
-
-In `ci.yml`, a lightweight initial `route` job runs on `ubuntu-24.04` to determine the execution lane based on the event context:
-
-- Untrusted fork PRs (`github.event.pull_request.head.repo.full_name != github.repository`), Dependabot PRs, and nightly exercises route dynamically to `ubuntu-24.04`.
-- Trusted internal PRs and branch pushes route `Sandboxed verify smoke` to `[self-hosted, verify-lane]`.
-- Self-hosted boundary jobs (`shadow-runner-health`, `sandboxed-verify-smoke`) execute only when `needs.route.outputs.self_hosted == 'true'`.
-- Continuous exercise: A nightly schedule (`0 4 * * *`) and `workflow_dispatch` input `force_hosted` run the full CI suite on `ubuntu-24.04` to prevent cloud lane regressions.
-
-## Verify lane
-
-The `Full verification` job and Browser E2E run on `runs-on: [self-hosted, verify-lane]`. `verify-lane` is an extra label carried by a small, fixed number of shadow runner services (`watt-mind-runner-1`, `-2` and, since 2026-08-19, `-3`; added through the GitHub API: `gh api -X POST orgs/watt-mind/actions/runners/<id>/labels -f 'labels[]=verify-lane'`). GitHub queues those jobs FIFO for a free lane runner; nothing is cancelled and no other runner is occupied while a job waits. The rest of the fleet stays free for `Fast unit tests`, lint, Security scans and other repositories.
-
-This replaces the earlier host-local `flock` on `/tmp/factory-verify-host.lock` (WM-300/WM-600/WM-776), which serialized correctly but parked every waiting shadow runner inside the lock — GitHub counted them all as busy, so a deep factory queue starved the whole fleet, and a crashed worker could leave an orphaned guardian holding the lock for the host (WM-776).
-
-Capacity is a runner-config knob, not a workflow change: **lanes = number of runners with the `verify-lane` label**. Three lanes means at most three spawn-heavy suites run concurrently on the host; if that proves flaky under contention, remove the label from one runner (`gh api -X DELETE orgs/watt-mind/actions/runners/<id>/labels/verify-lane`). Do not add lanes beyond what the host's measurements support (WM-773 item 5).
-
-Operating rule used by the orchestrator: when `verify-lane` jobs have been queued (`gh api 'repos/watt-mind/factory/actions/runs?status=queued'`) for more than a full 30-minute tick with more than four waiting, add one more runner to the label; when more than a third of lane runs fail on the timing-bound group, drop one. The 2026-08-19 pile-up (22 PRs opened by dispatch in three hours against a one-PR-per-cycle merge lane) is what motivated runner-3 and the merge-lane redesign in WM-906.
-
 ## Merge lane throughput
 
 The event-runtime merge lane is being split into parallel per-PR review with a ledger keyed by head SHA and batched landing (WM-906: WM-907 review ledger + `merge-review@1` fan-out, WM-908 `merge-plan@1` + batched `merge-apply`/`merge-verify`, WM-909 trigger + `/merge` view). See `docs/merge-lane.md` once WM-907 has landed. Until WM-908 lands, landing is still one PR per verify cycle by design (`config/policy.yaml` `concurrency.max_concurrent_merges: 1`), so a dispatch burst shows up as a growing pile of green PRs; that is the lane's throughput limit, not a CI problem.
 
-`Fast unit tests` deliberately runs on the general `shadow` pool, outside the lane. Five shadow-runner measurements made while another verification job held the lock are recorded in the WM-773 handoff; all five were green and below the three-minute stability threshold. The first ready-head measurement was [job 95742407011](https://github.com/watt-mind/factory/actions/runs/32146787946/job/95742407011): 36 seconds job wall time and 30 seconds for the test step. Keep its command bounded to `event-runtime/lib`, `--timeout 20000`, and `--max-concurrency=4`; broadening that job requires repeating the overlap measurements before assuming it is safe.
+`Fast unit tests` deliberately runs as its own job, separate from `Full verification`, so the cheap signal lands first and reruns stay cheap. Keep its command bounded to `event-runtime/lib`, `--timeout 20000`, and `--max-concurrency=4`.
 
 ## Run coalescing
 
-CI and Security use `concurrency.group` keyed by PR number for pull requests and by ref for pushes, with `cancel-in-progress` for both. A newer push to `develop` cancels the older develop run — only the latest develop head is verified — and a newer PR push cancels that PR's older run. Runs never wait in a concurrency group for a _different_ PR, so nothing is dropped across PRs; queueing across PRs happens in GitHub's runner queue for the `verify-lane` label.
+CI and Security use `concurrency.group` keyed by PR number for pull requests and by ref for pushes, with `cancel-in-progress` for both. A newer push to `develop` cancels the older develop run — only the latest develop head is verified — and a newer PR push cancels that PR's older run. Runs never wait in a concurrency group for a _different_ PR, so nothing is dropped across PRs.
 
 ### Required Verify umbrella
 
 `Verify` is the required umbrella for the CI test lanes. It uses `if: always()`
 so GitHub evaluates it after every dependency result rather than silently
-skipping it behind the default success gate. Except for `Shadow runner fleet
-available`, which is intentionally `skipped` on the cloud lane, every gating
-dependency (`Route CI lane`, shadow health on self-hosted, `Fast unit tests`,
-and `Full verification`) must conclude `success`. A `cancelled`, `skipped`,
-or `failure` result makes `Verify` fail.
+skipping it behind the default success gate. Every gating dependency
+(`Fast unit tests` and `Full verification`) must conclude `success`. A
+`cancelled`, `skipped`, or `failure` result makes `Verify` fail.
 
 This matters because concurrency cancellation can leave a historical
 `Verify=success` check-run visible for a superseded workflow. The
@@ -70,7 +46,7 @@ Dependabot security updates, including major security fixes, remain enabled.
 
 ## Draft pull requests
 
-Draft pull requests run `Shadow runner fleet available`, but skip `Fast unit tests`, `Full verification`, `Timing-bound tests`, and Browser E2E so held work does not consume the verify lane. The required `Verify` check is a lightweight aggregate on the smoke-test runner: it succeeds explicitly for a draft, and for every other event it succeeds only when fleet health and both CI test jobs succeeded. This prevents a failed prerequisite from turning a skipped downstream job into a misleading successful required check.
+Draft pull requests skip `Fast unit tests`, `Full verification`, `Timing-bound tests`, and Browser E2E so held work does not consume runner minutes. The required `Verify` check is a lightweight aggregate: it succeeds explicitly for a draft, and for every other event it succeeds only when both CI test jobs succeeded. This prevents a failed prerequisite from turning a skipped downstream job into a misleading successful required check.
 
 GitHub's `ready_for_review` event starts a fresh workflow on the ready head. Both workflows name readiness and draft-conversion events explicitly; converting a ready PR back to draft cancels its in-flight CI run through the PR concurrency group. Keep the job-level draft guards when editing either trigger.
 
@@ -104,7 +80,7 @@ CI splits tests into separately rerunnable jobs:
 
 When a required test step fails, `bun event-runtime/lib/test-helpers-timing.mjs classify <log>` prints the failing names and emits a GitHub `::error title=timing-flake::` annotation if every parsed failure is in that group. Merge-scan should treat a required job whose only failures are that group as a flake (`rerun_ci_at_head`), never ESCALATE — the required lane is supposed to have already excluded them, so the annotation is the miss detector.
 
-Both required test invocations use `--timeout 20000 --max-concurrency=4`. The 20-second default allows for scheduling delays on a busy self-hosted machine instead of failing unrelated tests at Bun's 5-second default. Tests that encode genuine liveness bounds continue to declare explicit, narrower timeouts; the CLI default does not replace those assertions. Only `Full verification` joins the verify-lane queue; the fast suite's 15-minute job timeout is a runaway guard rather than queue headroom. Timing-bound tests run on the general `shadow` pool.
+Both required test invocations use `--timeout 20000 --max-concurrency=4`. The 20-second default allows for scheduling delays on a busy runner instead of failing unrelated tests at Bun's 5-second default. Tests that encode genuine liveness bounds continue to declare explicit, narrower timeouts; the CLI default does not replace those assertions. The fast suite's 15-minute job timeout is a runaway guard.
 
 ### Flake ledger
 
@@ -149,7 +125,7 @@ After changing the workflow:
    gh run list --workflow CI --event pull_request --limit 20
    ```
 
-3. For each relevant run, inspect step timestamps with `gh run view <RUN_ID>` and confirm `Full verification` and `Browser E2E` jobs only run on the `verify-lane` runners and do not overlap more than the configured `verify-lane` capacity. `Fast unit tests` is expected to run concurrently on the general `shadow` pool.
+3. For each relevant run, inspect `gh run view <RUN_ID>` and confirm every job ran on a GitHub-hosted `ubuntu-24.04` runner; no job may target `self-hosted` labels.
 
 A failed or cancelled test job breaks the streak. Record the five develop run URLs in the validating ticket or merge handoff.
 
@@ -159,7 +135,7 @@ A failed or cancelled test job breaks the streak. Record the five develop run UR
 
 - **Gitleaks** — `gitleaks git --no-banner --redact` over the PR's base..head range (or the last commit on a branch push). Honours a repo-root `.gitleaks.toml` if one is added. Binary resolves from PATH, then `~/.local/bin/gitleaks`, then a GitHub Releases download (not a marketplace action) on first use per runner host.
 - **Semgrep** — `uvx semgrep scan --config p/security-audit --error --metrics=off .`, scoped by `.semgrepignore` (generated output, vendor trees, fixtures, lockfiles). `uv`/`uvx` installs from astral.sh if missing on the host.
-- **Actionlint** — `actionlint -color .github/workflows/*.yml`. `.github/actionlint.yaml` declares the repo's custom self-hosted runner labels (`shadow`, `smoke-test`, `verify-lane`) so they don't flag as unknown; real shellcheck findings on `run:` blocks get fixed or suppressed inline with a reason, never blanket-disabled.
+- **Actionlint** — `actionlint -color .github/workflows/*.yml`. Real shellcheck findings on `run:` blocks get fixed or suppressed inline with a reason, never blanket-disabled.
 - **CodeQL** — runs `github/codeql-action/init@v4` and `analyze@v4` for `javascript-typescript` (`build-mode: none`, `threads: 4`, `ram: 8192`) on `ubuntu-24.04`.
 
 Run the same tools locally before pushing with `factory security` (Gitleaks + Semgrep + Actionlint, plus Ruff/pip-audit when a repo has adopted the Python tier) — see `lib/security-check.sh`. Local and CI use identical tool invocations and config files (`.gitleaks.toml`, `.semgrepignore`) so a clean local run predicts a clean CI run.

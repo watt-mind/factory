@@ -82,9 +82,8 @@ repos:
     merge_ci:
       # Fallback workflow when GitHub branch protection returns no contexts.
       workflow: CI
-      # Unique checks required from that fallback workflow. Verify already
-      # gates Shadow runner fleet available on the self-hosted lane and expects
-      # it to be skipped on the cloud lane.
+      # Unique checks required from that fallback workflow. Verify is the
+      # umbrella job gating the CI test lanes.
       required_checks:
         - Verify
     # Jobs that are red by design or by policy and must never raise an alarm
