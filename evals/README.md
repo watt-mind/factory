@@ -82,3 +82,19 @@ Two runs of the same cases on the same models can disagree, so an absolute score
 `evals/run.test.mjs` covers discovery, the exit contract, `--skill` filtering, the timeout and cap paths, and `--compare` detecting a regression. **No test makes a model call**: `main()` takes the two model functions as a parameter and the tests pass fakes. A suite that needed a live grader to prove the gate works could never be the gate.
 
 Cases are written first deliberately: they're the specification of what the skill is for, and writing them has already surfaced disagreements about what "agent-ready" means.
+
+## Static quality & deduplication (`SkillEvaluator`)
+
+Alongside the behavioral regression cases above, you can run [NVIDIA SkillEvaluator](https://github.com/NVIDIA/SkillEvaluator) against the emitted skill tree (`dist/gemini/skills/`, which covers both `shared/skills/*` and `shared/commands/*`) using the repo's custom quality configuration in `evals/skillevaluator-quality.yaml`:
+
+```sh
+# Tier 1: deterministic static quality check (no LLM key required)
+uvx --python 3.13 --from "git+https://github.com/NVIDIA/SkillEvaluator.git" \
+  skillevaluator quality-check dist/gemini/skills/factory-work \
+  --quality-config evals/skillevaluator-quality.yaml -r cli
+
+# Tier 2: trigger-description & full-body deduplication check across the catalog
+SKILL_EVAL_LLM_PROVIDER=openai uvx --python 3.13 \
+  --with "skillevaluator[tier2] @ git+https://github.com/NVIDIA/SkillEvaluator.git" \
+  skillevaluator similarity-check dist/gemini/skills --type skill -r cli
+```
