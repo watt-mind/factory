@@ -182,15 +182,16 @@ The **content** is portable; only the **packaging** is not. `SKILL.md` is a
 shared workflow format, command bodies are Markdown, and each harness gets its
 native agent manifest.
 
-| Harness      | Context                   | Skills                | Commands                    | Agents                |
-| :----------- | :------------------------ | :-------------------- | :-------------------------- | :-------------------- |
-| Claude Code  | `CLAUDE.md` → `AGENTS.md` | plugin `skills/`      | plugin `commands/`          | plugin `agents/`      |
-| Codex        | `AGENTS.md` (native)      | `~/.agents/skills/`   | — (use `@factory-*` skills) | `~/.codex/agents/`    |
-| Gemini CLI   | `GEMINI.md` → `AGENTS.md` | `~/.gemini/skills/`   | —                           | `~/.gemini/agents/`   |
-| Antigravity  | shares `~/.gemini/`       | via Gemini            | —                           | via Gemini            |
-| Cursor       | `.cursor/rules/`          | `~/.cursor/skills/`   | `~/.cursor/commands/`       | `~/.cursor/agents/`   |
-| Pi           | `AGENTS.md` (native)      | `dist/pi/skills/`     | `dist/pi/prompts/`          | `~/.pi/agent/agents/` |
-| Hermes Agent | ACP v1; `AGENTS.md` floor | — (not yet supported) | `.hermes/commands/`         | `.hermes/agents/`     |
+| Harness      | Context                   | Skills                   | Commands                    | Agents                   |
+| :----------- | :------------------------ | :----------------------- | :-------------------------- | :----------------------- |
+| Claude Code  | `CLAUDE.md` → `AGENTS.md` | plugin `skills/`         | plugin `commands/`          | plugin `agents/`         |
+| Codex        | `AGENTS.md` (native)      | `~/.agents/skills/`      | — (use `@factory-*` skills) | `~/.codex/agents/`       |
+| Gemini CLI   | `GEMINI.md` → `AGENTS.md` | `~/.gemini/skills/`      | —                           | `~/.gemini/agents/`      |
+| Antigravity  | shares `~/.gemini/`       | via Gemini               | —                           | via Gemini               |
+| Cursor       | `.cursor/rules/`          | `~/.cursor/skills/`      | `~/.cursor/commands/`       | `~/.cursor/agents/`      |
+| Pi           | `AGENTS.md` (native)      | `dist/pi/skills/`        | `dist/pi/prompts/`          | `~/.pi/agent/agents/`    |
+| Muse Code    | `AGENTS.md` (native)      | `~/.config/muse/skills/` | — (use `/factory-*` skills) | `~/.config/muse/agents/` |
+| Hermes Agent | ACP v1; `AGENTS.md` floor | — (not yet supported)    | `.hermes/commands/`         | `.hermes/agents/`        |
 
 > [!IMPORTANT]
 > **The plugin is a convenience layer, not the safety floor.** It reaches

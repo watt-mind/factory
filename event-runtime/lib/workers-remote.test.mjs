@@ -407,6 +407,8 @@ describe("remote path quoting and harness emit sync", () => {
     expect(linkScript).toContain(EXPECTED_PATH_EXPORT);
     expect(linkScript).toContain("cd \"$HOME/\"'Develop/factory';");
     expect(linkScript).toContain("bun -e ");
+    expect(linkScript).toContain('["dist/muse/skills", ".config/muse/skills"]');
+    expect(linkScript).toContain('["dist/muse/agents", ".config/muse/agents"]');
     expect(linkScript).not.toContain("bun build/emit.mjs --link");
     expect(linkScript).toContain("EMIT_REMOTE_SUCCESS");
   });
