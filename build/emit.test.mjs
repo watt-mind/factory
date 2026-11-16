@@ -882,6 +882,150 @@ test("emit packages /factory-recap and /factory-recap-video across all five harn
   expect(readme).toContain("`/factory-recap-video`");
 });
 
+test("emit packages Phase 1 factory skills and support files across all five harnesses", () => {
+  const skills = [
+    "factory",
+    "factory-unslop",
+    "factory-why",
+    "factory-how",
+    "factory-teach",
+    "factory-orchestrate",
+    "factory-reflect",
+  ];
+  const harnessSkillDirs = [
+    ["plugins", "core", "skills"],
+    ["dist", "cursor", "skills"],
+    ["dist", "codex", "skills"],
+    ["dist", "gemini", "skills"],
+    ["dist", "muse", "skills"],
+    ["dist", "pi", "skills"],
+  ];
+
+  for (const name of skills) {
+    const src = path.join(ROOT, "shared", "skills", name, "SKILL.md");
+    expect(existsSync(src)).toBe(true);
+    const raw = readFileSync(src, "utf8");
+    const fmMatch = raw.match(/^---\n([\s\S]*?)\n---\n/);
+    expect(fmMatch).not.toBeNull();
+    const parsed = Bun.YAML.parse(fmMatch[1]);
+    expect(parsed.name).toBe(name);
+    expect(typeof parsed.description).toBe("string");
+    expect(parsed.description.trim().length).toBeGreaterThan(0);
+
+    for (const dir of harnessSkillDirs) {
+      expect(existsSync(path.join(ROOT, ...dir, name, "SKILL.md"))).toBe(true);
+    }
+  }
+
+  const supportFiles = [
+    ["factory-reflect", "references", "judgment-reviewer.md"],
+    ["factory-reflect", "references", "tooling-reviewer.md"],
+    ["factory-reflect", "references", "divergent-reviewer.md"],
+    ["factory-reflect", "references", "synthesizer.md"],
+    ["factory", "playbooks", "investigation.md"],
+  ];
+  for (const relParts of supportFiles) {
+    const src = path.join(ROOT, "shared", "skills", ...relParts);
+    expect(existsSync(src)).toBe(true);
+    expect(readFileSync(src, "utf8").trim().length).toBeGreaterThan(0);
+    for (const dir of harnessSkillDirs) {
+      expect(existsSync(path.join(ROOT, ...dir, ...relParts))).toBe(true);
+    }
+  }
+});
+
+test("floor, command, and skill prompts enforce Phase 2 throughput, bundling, tier routing, bounded verification, and merge gates", () => {
+  const readShared = (...parts) =>
+    readFileSync(path.join(ROOT, "shared", ...parts), "utf8");
+
+  const floor = readShared("floor.md");
+  expect(floor).toMatch(/cohesive batch bundle/i);
+  expect(floor).toContain("Fixes <ISSUE-ID>");
+  expect(floor).toMatch(
+    /attribute full-suite runs and project-wide coverage thresholds to CI/i,
+  );
+  expect(floor).toContain("Risks");
+  expect(floor).toContain("Write-read-verify `Done`");
+  expect(floor).toContain("gh pr view <PR> --json state,mergeCommit");
+  expect(floor).toContain("--merge-sha");
+  expect(floor).toContain("### Non-blocking coordinator default");
+  expect(floor).toContain("reviewer != implementer");
+
+  const work = readShared("commands", "factory-work.md");
+  expect(work).toContain("bun orchestrator/pulse.mjs");
+  expect(work).toContain("CAPACITY & FLOW");
+  expect(work).toContain("DRAIN_MERGES_FIRST");
+  expect(work).toContain("HOLD_OR_BUNDLE");
+  expect(work).toContain("WIDEN");
+  expect(work).toContain("mergedLastHour");
+  expect(work).toMatch(/3–6 related low-risk tickets/i);
+  expect(work).toContain(
+    "counts bundles (worktree/PR slots), NOT raw ticket count",
+  );
+  expect(work).toContain("Difficulty tier × harness routing");
+  expect(work).toContain("`tier:light`");
+  expect(work).toContain("`tier:standard`");
+  expect(work).toContain("`tier:strong`");
+  expect(work).toContain("`muse-spark`");
+  expect(work).toContain("`sol`");
+  expect(work).toContain("`wonder`");
+  expect(work).toContain("`inherit`");
+  expect(work).toContain("reviewer != implementer");
+  expect(work).toContain("/factory-merge");
+  expect(work).not.toContain("Merge one PR at a time");
+  expect(work).toContain("## Standing loop prompt shape");
+  expect(work).toContain("Claim next");
+  expect(work).toContain("Gate list");
+  expect(work).toContain("Transition table");
+  expect(work).toContain("Feasibility valve");
+
+  const merge = readShared("commands", "factory-merge.md");
+  expect(merge).toContain("Two-stage bounded classification");
+  expect(merge).toContain("Stage A");
+  expect(merge).toContain("Stage B");
+  expect(merge).toContain("`MERGE` candidates");
+  expect(merge).toContain("Stale hold and `escalated` re-check");
+  expect(merge).toContain("--remove-label escalated");
+  expect(merge).toContain("write-read-verify");
+  expect(merge).toContain(
+    "gh pr view <PR> --repo <repo> --json state,mergeCommit",
+  );
+  expect(merge).toContain("--merge-sha");
+
+  const ticket = readShared("commands", "factory-ticket.md");
+  expect(ticket).toContain("targeted tests + fast static gates only");
+  expect(ticket).toMatch(
+    /Attribute full-suite runs and project-wide coverage thresholds to CI/i,
+  );
+  expect(ticket).toContain("residual risk under `Risks` in `## Handoff`");
+
+  const ticketSpec = readShared("skills", "ticket-spec", "SKILL.md");
+  expect(ticketSpec).toMatch(
+    /Attribute deferred full-suite runs and whole-project coverage thresholds to CI/i,
+  );
+  expect(ticketSpec).toContain("residual risk");
+  expect(ticketSpec).toContain("Difficulty tier × harness routing table");
+
+  const factorySkill = readShared("skills", "factory", "SKILL.md");
+  expect(factorySkill).toContain("Non-blocking coordinator default");
+  expect(factorySkill).toContain("reviewer != implementer");
+  expect(factorySkill).toContain("bun orchestrator/pulse.mjs");
+
+  const orchestrate = readShared("skills", "factory-orchestrate", "SKILL.md");
+  expect(orchestrate).toContain("## Non-blocking coordinator default");
+  expect(orchestrate).toContain("## Difficulty tier × harness routing");
+  expect(orchestrate).toContain("reviewer != implementer");
+  expect(orchestrate).toContain("`tier:light`");
+  expect(orchestrate).toContain("`tier:standard`");
+  expect(orchestrate).toContain("`tier:strong`");
+  expect(orchestrate).toContain("`inherit`");
+  expect(orchestrate).toContain(
+    "## Capacity-aware concurrency and bundle slots",
+  );
+  expect(orchestrate).toContain("bun orchestrator/pulse.mjs");
+  expect(orchestrate).toContain("bundle/PR slots");
+});
+
 test("emitToNodes skips cleanly when no remote nodes are configured", () => {
   const logs = [];
   const errors = [];
@@ -991,6 +1135,96 @@ test("emitToNodes fails closed when an explicit --node is unknown or fails", () 
   expect(failRes.exitCode).toBe(1);
   expect(failRes.results).toHaveLength(1);
   expect(failErrors.join("\n")).toContain("failed   mac-mini (mac-mini.local)");
+});
+
+test("emit packages /factory-verify, factory-verify-create, and factory-verify-maintain across all harnesses", () => {
+  const verifySrc = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-verify.md"),
+    "utf8",
+  );
+  expect(verifySrc).toContain("--report-only");
+  expect(verifySrc).toContain("--deploy");
+  expect(verifySrc).toContain("reviewer != implementer");
+  expect(verifySrc).toContain("git patch-id --stable");
+  expect(verifySrc).toContain("## Verification Receipt");
+  expect(verifySrc).toMatch(/2\s*rounds|max 2 rounds/i);
+  expect(verifySrc).toContain("Never merge");
+
+  const cmdOutputs = [
+    ["plugins", "core", "commands", "factory-verify.md"],
+    ["dist", "codex", "skills", "factory-verify", "SKILL.md"],
+    ["dist", "gemini", "skills", "factory-verify", "SKILL.md"],
+    ["dist", "muse", "skills", "factory-verify", "SKILL.md"],
+    ["dist", "cursor", "commands", "factory-verify.md"],
+    ["dist", "pi", "prompts", "factory-verify.md"],
+  ];
+  for (const rel of cmdOutputs) {
+    expect(existsSync(path.join(ROOT, ...rel))).toBe(true);
+  }
+
+  const harnessSkillDirs = [
+    ["plugins", "core", "skills"],
+    ["dist", "cursor", "skills"],
+    ["dist", "codex", "skills"],
+    ["dist", "gemini", "skills"],
+    ["dist", "muse", "skills"],
+    ["dist", "pi", "skills"],
+  ];
+  for (const skill of ["factory-verify-create", "factory-verify-maintain"]) {
+    const src = path.join(ROOT, "shared", "skills", skill, "SKILL.md");
+    expect(existsSync(src)).toBe(true);
+    const fmMatch = readFileSync(src, "utf8").match(/^---\n([\s\S]*?)\n---\n/);
+    expect(fmMatch).not.toBeNull();
+    const parsed = Bun.YAML.parse(fmMatch[1]);
+    expect(parsed.name).toBe(skill);
+    expect(typeof parsed.description).toBe("string");
+    expect(parsed.description.trim().length).toBeGreaterThan(0);
+
+    for (const dir of harnessSkillDirs) {
+      expect(existsSync(path.join(ROOT, ...dir, skill, "SKILL.md"))).toBe(true);
+    }
+  }
+
+  for (const relParts of [
+    ["factory-verify-create", "references", "feature-map-example", "README.md"],
+    [
+      "factory-verify-create",
+      "references",
+      "feature-map-example",
+      "create-note.md",
+    ],
+  ]) {
+    expect(existsSync(path.join(ROOT, "shared", "skills", ...relParts))).toBe(
+      true,
+    );
+    for (const dir of harnessSkillDirs) {
+      expect(existsSync(path.join(ROOT, ...dir, ...relParts))).toBe(true);
+    }
+  }
+
+  const readme = readFileSync(path.join(ROOT, "README.md"), "utf8");
+  expect(readme).toContain("`/factory-verify`");
+
+  const factorySkill = readFileSync(
+    path.join(ROOT, "shared", "skills", "factory", "SKILL.md"),
+    "utf8",
+  );
+  expect(factorySkill).toContain("/factory-verify");
+  expect(factorySkill).toContain("factory-verify-create");
+  expect(factorySkill).toContain("factory-verify-maintain");
+
+  const merge = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-merge.md"),
+    "utf8",
+  );
+  expect(merge).toContain("/factory-verify");
+  expect(merge).toContain("## Verification Receipt");
+
+  const critic = readFileSync(
+    path.join(ROOT, "shared", "agents", "factory-ux-critic.md"),
+    "utf8",
+  );
+  expect(critic).toContain(".claude/skills/verify-*/SKILL.md");
 });
 
 test("emit packages Muse Code skills and agents into dist/muse and links ~/.config/muse", () => {

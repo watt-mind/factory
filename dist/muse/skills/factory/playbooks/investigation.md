@@ -2,6 +2,14 @@
 
 Read-only analysis: architecture trace, root-cause diagnosis without editing, or principles/code review.
 
+## Companion Skills (As Needed)
+
+- `../../factory-how/SKILL.md` (trace live architecture and end-to-end control/data flow)
+- `../../factory-why/SKILL.md` (decision archaeology via git history, PRs, issues, and ADRs)
+- `../../factory-teach/SKILL.md` (progressive explanations and incremental Mermaid diagrams)
+- `../../factory-orchestrate/SKILL.md` (parallel Swarm fan-out across independent modules)
+- `../../factory-unslop/SKILL.md` (crisp technical prose without AI-writing tells)
+
 ## Principles to Load (As Needed)
 
 - `../../principle-minimize-reader-load/SKILL.md`

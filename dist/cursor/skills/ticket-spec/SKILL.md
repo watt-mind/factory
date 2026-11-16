@@ -21,7 +21,7 @@ Closed vocabulary, at most one per ticket: `tier:light`, `tier:standard`, `tier:
 - `tier:strong` — any path under `escalate_paths` (auth, payments, migrations, prod infra), `type:security`, cross-package or architecture work (`area:architecture`), anything whose acceptance criteria say "design"/"decide" or list open questions, or a ticket that previously failed verification.
 - `tier:standard` — everything else (the default).
 
-If the ticket already carries a `tier:*` label, leave it — don't recompute or overwrite an existing tier decision. State the tier and why in the promotion comment.
+If the ticket already carries a `tier:*` label, leave it — don't recompute or overwrite an existing tier decision. State the tier and why in the promotion comment. `tier:light`, `tier:standard`, and `tier:strong` drive `/factory-work`'s Difficulty tier × harness routing table (and `factory-merge-reviewer` review depth).
 
 **Answerable from written decisions or codebase precedent** — intent looks unclear at first glance, but is already answered by the repo's `docs/product-decisions.md`, `docs/`, the Linear project Overview, prior tickets in the same area, or `origin/<base>` sibling conventions. Resolve it, **cite where you found it** in the ticket so the next agent doesn't re-litigate, then promote.
 
@@ -33,7 +33,7 @@ If the ticket already carries a `tier:*` label, leave it — don't recompute or 
 
 It is fine for the verification command to _fail_ — that's the bug. It must not _error_: a wrong path, a missing script, a task name that doesn't exist.
 
-**Scope `Verification Command` to targeted tests, never the full suite.** Name the exact unit, integration, or E2E test file(s) or filter exercising the ticket's change rather than bare `bun test`, `npm test`, `uv run pytest`, `cargo test --workspace`, or full Playwright runs when CI covers the suite.
+**Scope `Verification Command` to targeted tests, never the full suite.** Name the exact unit, integration, or E2E test file(s) or filter exercising the ticket's change rather than bare `bun test`, `npm test`, `uv run pytest`, `cargo test --workspace`, or full Playwright runs when CI covers the suite. Attribute deferred full-suite runs and whole-project coverage thresholds to CI, and require the implementing PR's `## Handoff` (`Risks`) to list any deferred full-suite or coverage check explicitly as residual risk.
 
 **Specify a post-deploy check when runtime boundaries move.** When a ticket changes HTTP/API contracts, user-facing flows, SSR/routing, auth/middleware, DB migrations, Dockerfiles/workflows, or external integrations, include a `- [ ] Post-deploy: <observable live check on staging/prod; read-only on prod>` bullet inside `Acceptance Criteria` (keeping the five-section template intact).
 
