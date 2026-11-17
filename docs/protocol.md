@@ -279,23 +279,20 @@ well (the root `bun run check` runs it too, once `event-runtime/web` has had
 ticket commands. Never advance state, open a PR, or report success on
 failing output. Never weaken a test to get green.
 
-### Sandboxed verify smoke
+### Sandbox hermeticity
 
-CI's **Sandboxed verify smoke** job runs the factory `verify:` command through
-`runHandoffVerifySmoke` → `runHandoffCommand`, the same production seam the
-worker uses before accepting a dispatch handoff. It is merge-blocking via
-`Verify`, unlike the explicitly non-blocking **Timing-bound tests** quarantine
-lane. The job prints the sandbox facts — scrubbed environment, `HOME=/tmp/home`,
-worktree mounted at `/workspace`, and namespaces — before the command output.
+CI no longer runs the self-hosted **Sandboxed verify smoke** job (retired in
+WM-1145 along with the self-hosted lane): GitHub-hosted runners cannot create
+the unprivileged user+mount namespaces `runHandoffVerifySmoke` →
+`runHandoffCommand` needs, so the handoff sandbox boundary is exercised only at
+real handoff time on the operator host.
 
-Therefore **host/CI green + sandbox red is a hermeticity bug, not a branch
-bug**. First inspect tests that read ambient homes or an operator checkout.
-Use `event-runtime/lib/worker-test-helpers.mjs` helpers such as
+Therefore **CI green + a sandbox-time failure is a hermeticity bug, not a
+branch bug**. First inspect tests that read ambient homes or an operator
+checkout. Use `event-runtime/lib/worker-test-helpers.mjs` helpers such as
 `dispatchConfigSnapshot()` to point registry-dependent tests at the checkout
 under test, and use the repository's test-home helpers instead of inheriting
-`FACTORY_EVENT_HOME`. Do not add an unsandboxed fallback or weaken the smoke;
-if a timing-only flake needs quarantine, document its visible non-blocking
-policy in `.github/workflows/ci.yml`.
+`FACTORY_EVENT_HOME`. Do not add an unsandboxed fallback.
 
 **Mandatory `## Handoff` comment** before moving to `In Review`:
 
