@@ -39,7 +39,8 @@ const c = {
   red: (s) => `\x1b[31m${s}\x1b[0m`,
 };
 const expand = (p) => p?.replace(/^~/, homedir());
-const quoteArg = (value) => `"${String(value).replace(/"/g, '\\"')}"`;
+const quoteArg = (value) =>
+  `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 const sh = (args, cwd) => {
   const result = Bun.spawnSync({
     cmd: args,

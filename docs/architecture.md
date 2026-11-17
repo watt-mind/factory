@@ -63,7 +63,7 @@ The Linear read-back after claiming is the only concurrency control that exists;
 
 ### 2.5 Worktrees are industrialized, never hand-rolled
 
-Git isolates branches. It does not isolate **ports** or **databases** — and `migrate-dev` against a shared dev database destroys another agent's work silently, cross-agent. Each repo owns `worktree-{up,down,warm}.sh` meeting `W-1`…`W-12` in [project-conventions §3E](file:///Users/hdkiller/Develop/hdkiller/docs/guides/project-conventions.md).
+Git isolates branches. It does not isolate **ports** or **databases** — and `migrate-dev` against a shared dev database destroys another agent's work silently, cross-agent. Each repo owns `worktree-{up,down,warm}.sh` meeting `W-1`…`W-13` in [project-conventions §3E](./project-conventions.md).
 
 A repo without those scripts has a safe concurrency of **one agent**, whatever the dispatcher believes. Such repos are marked `report_only: true` in `config/repos.yaml`: the janitor can see their orphans, dispatch refuses them.
 
@@ -203,4 +203,5 @@ The tracker-neutral verb contract and the agent operating protocol live in [`pro
 - [`protocol.md`](protocol.md) — tracker-neutral operating protocol and ControlPlane adapter contract
 - [`README.md`](../README.md) — how to run it
 - [`SETUP.md`](../SETUP.md) — first-time setup and known gaps
-- [project-conventions.md](file:///Users/hdkiller/Develop/hdkiller/docs/guides/project-conventions.md) — quality baseline, `PC-*` audit, `W-*` worktree spec
+- [`project-conventions.md`](./project-conventions.md) — portable quality baseline, `PC-01`…`PC-23` audit, `W-1`…`W-13` worktree spec
+- [`code-security.md`](./code-security.md) — SAST, secret scanning, and Git hook security baseline

@@ -143,7 +143,8 @@ repo-local or built-in command of the same name.
 | `/factory-triage`        | Turns `Triage` tickets into `ai:agent-ready` ones                                                                                   |
 | `/factory-unblock`       | Re-examines `ai:blocked` holds and releases the ones new evidence resolved                                                          |
 | `/factory-sweep`         | Retires tickets overtaken by events — `Canceled`/`Duplicate` with evidence, never a delete                                          |
-| `/factory-audit`         | Grades a repo against project-conventions `PC-01`..`PC-20`, files the gaps                                                          |
+| `/factory-audit`         | Grades a repo against project-conventions `PC-01`..`PC-23`, files the gaps (or runs `/factory-baseline` with `--fix`)               |
+| `/factory-baseline`      | Bootstraps or aligns a repo to Factory's `PC-01`..`PC-23` CI, lint, security, worktree, and `AGENTS.md` baseline in one PR          |
 | `/factory-garden`        | Scans for spreading anti-patterns and suppressions; replaces prose warnings with deterministic checks                               |
 | `/factory-capture`       | Files an issue from the conversation — capture only, never implement                                                                |
 | `/factory-friction`      | Files harness friction seen in an interactive session, where no transcript exists                                                   |
