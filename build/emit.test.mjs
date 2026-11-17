@@ -1297,3 +1297,69 @@ test("emit packages Muse Code skills and agents into dist/muse and links ~/.conf
     rmSync(tempHome, { recursive: true, force: true });
   }
 });
+
+test("emit packages /factory-baseline, bundled project-conventions/code-security docs, and updated audit links across all harnesses", () => {
+  for (const doc of ["project-conventions.md", "code-security.md"]) {
+    const repoDoc = path.join(ROOT, "docs", doc);
+    const refDoc = path.join(
+      ROOT,
+      "shared",
+      "skills",
+      "factory-baseline",
+      "references",
+      doc,
+    );
+    expect(existsSync(repoDoc)).toBe(true);
+    expect(existsSync(refDoc)).toBe(true);
+    expect(readFileSync(repoDoc, "utf8")).toBe(readFileSync(refDoc, "utf8"));
+  }
+
+  const conventions = readFileSync(
+    path.join(ROOT, "docs", "project-conventions.md"),
+    "utf8",
+  );
+  for (const marker of ["PC-01", "PC-23", "W-13", "H-8", "R-6"]) {
+    expect(conventions).toContain(marker);
+  }
+
+  for (const rel of [
+    ["plugins", "core", "commands", "factory-baseline.md"],
+    ["dist", "codex", "skills", "factory-baseline", "SKILL.md"],
+    ["dist", "gemini", "skills", "factory-baseline", "SKILL.md"],
+    ["dist", "muse", "skills", "factory-baseline", "SKILL.md"],
+    ["dist", "cursor", "commands", "factory-baseline.md"],
+    ["dist", "pi", "prompts", "factory-baseline.md"],
+  ]) {
+    expect(existsSync(path.join(ROOT, ...rel))).toBe(true);
+  }
+
+  for (const dir of [
+    ["plugins", "core", "skills"],
+    ["dist", "cursor", "skills"],
+    ["dist", "codex", "skills"],
+    ["dist", "gemini", "skills"],
+    ["dist", "muse", "skills"],
+    ["dist", "pi", "skills"],
+  ]) {
+    const baseDir = path.join(ROOT, ...dir, "factory-baseline");
+    expect(existsSync(path.join(baseDir, "SKILL.md"))).toBe(true);
+    expect(
+      existsSync(path.join(baseDir, "references", "project-conventions.md")),
+    ).toBe(true);
+    expect(
+      existsSync(path.join(baseDir, "references", "code-security.md")),
+    ).toBe(true);
+  }
+
+  const audit = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-audit.md"),
+    "utf8",
+  );
+  expect(audit).toContain("docs/project-conventions.md");
+  expect(audit).toContain("PC-23");
+  expect(audit).toContain("/factory-baseline");
+
+  const readme = readFileSync(path.join(ROOT, "README.md"), "utf8");
+  expect(readme).toContain("`/factory-baseline`");
+  expect(readme).toContain("PC-01`..`PC-23");
+});

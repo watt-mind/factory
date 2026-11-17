@@ -1,19 +1,19 @@
 ---
 name: factory-audit
-description: "Audit this repo against the project-conventions baseline; file the gaps to Linear. Invoke only when the user explicitly asks to run /factory-audit or the factory-audit workflow."
+description: "Audit this repo against the project-conventions baseline (PC-01..PC-23); file gaps or apply with --fix. Invoke only when the user explicitly asks to run /factory-audit or the factory-audit workflow."
 ---
 
 # factory-audit
 
 The user's accompanying request is this workflow's argument string. Wherever these instructions refer to `$ARGUMENTS`, interpret it as that request.
 
-Audit a repository against the conventions baseline in `~/Develop/hdkiller/docs/guides/project-conventions.md` and turn the gaps into tracked work.
+Audit a repository against Factory's conventions baseline in `docs/project-conventions.md` (`shared/skills/factory-baseline/references/project-conventions.md`) and `docs/code-security.md` (overlaying `~/Develop/hdkiller/docs/guides/project-conventions.md` when present locally), and turn gaps into tracked work.
 
-Default target is the repo I'm currently in. Interpret $ARGUMENTS as a different repo path, specific check IDs to run in isolation, or `all` (every repo in `config/repos.yaml` that exists locally — audit each and report a matrix).
+Default target is the repo I'm currently in. Interpret $ARGUMENTS as a different repo path, specific check IDs to run in isolation, `--fix` / `--bootstrap` (which delegates directly to `/factory-baseline` to implement the missing baseline in one PR instead of filing tickets), or `all` (every repo in `config/repos.yaml` that exists locally — audit each and report a matrix).
 
 ## 1. Grade every check
 
-Work through the **§7 conformance table** — `PC-01` … `PC-20` — in order. That table is the source of truth for what's required; read it fresh each run rather than from memory, since it changes as the baseline grows.
+Work through the **conformance table** — `PC-01` … `PC-23` — in order. That table is the source of truth for what's required; read it fresh each run rather than from memory, since it changes as the baseline grows.
 
 For each check, record **PASS / FAIL / N/A** plus the evidence you actually observed: the command you ran and its relevant output, or the file and line. An unverified PASS is worse than a FAIL — it certifies something nobody checked.
 
