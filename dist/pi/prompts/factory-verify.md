@@ -18,8 +18,8 @@ Interpret `$ARGUMENTS`:
 
 ## Coordinator and independent verifier (`reviewer != implementer`)
 
-- **Non-blocking coordinator:** When verifying multiple PRs (`--open` or a list), stay unblocked in the main session. Spawn one isolated verifier subagent per PR using `/factory-work`'s **Difficulty tier × harness routing** table (always honoring **`reviewer != implementer`** — never let the implementing agent verify its own PR).
-- **Isolated workspaces:** Give each PR its own worktree (`bin/worktree-up.sh <ISSUE-ID>` when shipped, otherwise `git worktree add`). Never share a writable checkout or use `git stash` / `git rebase --autostash`.
+- **Non-blocking coordinator:** When verifying multiple PRs (`--open` or a list), stay unblocked in the main session (`<30s` turns; never edit or run test suites on the root checkout). Spawn one isolated verifier subagent per PR using `/factory-work`'s **Difficulty tier × harness routing** table (preferring T3Code `delegate_task` with `mode: "async"` after calling `orchestrator_capabilities` once per thread, ending turn for reactive wakeup, and always honoring **`reviewer != implementer`** — never let the implementing agent verify its own PR).
+- **Isolated workspaces:** Give each PR its own worktree (`bin/worktree-up.sh <ISSUE-ID>` when shipped — run sequentially in the coordinator and pass `isolation: "shared"` with `worktree: <abs-path>` in `task`, or initialize per-worktree ports/DB inside `isolation: "worktree"`; otherwise `git worktree add`). Never share a writable checkout or use `git stash` / `git rebase --autostash`.
 - **`git patch-id` verdict survival:** Before booting a live instance for a PR, check its comments/reviews for a prior `## Verification Receipt` matching `Verdict: PASS (MERGE-READY)` or `PASS+NOTES`. Compare:
   - `git diff origin/<base>...<verified-sha> | git patch-id --stable`
   - `git diff origin/<base>...<current-head-sha> | git patch-id --stable`

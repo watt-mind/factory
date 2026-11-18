@@ -37,7 +37,12 @@ factory arena config
 
 Choose the execution backend based on the active session's tools:
 
-1. **T3Code-native (preferred when inside T3Code):** If T3Code Orchestrator MCP tools (`orchestrator_capabilities`, `delegate_task`, `create_threads`, `thread_wait`, `thread_read`) are available in the session, spawn the contenders and read-only cross-judge directly as T3Code child tasks/threads (using `isolation: 'worktree'` for repo edits) so each contender appears live in T3Code's UI. Query `orchestrator_capabilities` first to resolve the node's configured models (`gpt-6.2-sol`, `claude-fable-5-2`, `claude-opus-5-5`, `gemini-4-carbon-high`, `gemini-4-argon-high`) matching `~/.factory/arena.yaml`.
+1. **T3Code-native (preferred when inside T3Code):** If T3Code Orchestrator MCP tools (`orchestrator_capabilities`, `delegate_task`, `task_cancel`, `t3_thread_wait`, `t3_thread_read`) are available in the session:
+   - Call `orchestrator_capabilities` **once per thread** before the first `delegate_task` to resolve the node's configured models (`gpt-6.2-sol`, `claude-fable-5-2`, `claude-opus-5-5`, `gemini-4-carbon-high`, `gemini-4-argon-high`) matching `~/.factory/arena.yaml`.
+   - Spawn all contenders and the read-only cross-judge via **`delegate_task` (`mode: "async"`)** — **never** use `create_threads` or `t3_thread_launch` for worker/arena fan-out (those create top-level threads, reserved for explicit user requests).
+   - Follow `delegate_task`'s `next` behavior (end your turn for reactive wakeup; never poll `task_status` or loop on `t3_thread_wait`).
+   - Every new review or re-check is a fresh `delegate_task`, never `t3_thread_send` to a finished child; cancel replaced or extra delegates with `task_cancel` (never `t3_thread_interrupt`).
+   - `delegate_task` only accepts `isolation: "shared" | "worktree"` (no `worktreePath` param). For repos with `bin/worktree-up.sh`, run `bin/worktree-up.sh <ISSUE-ID>` sequentially in the coordinator and pass `isolation: "shared"` with `worktree: <abs-path>` spelled out in `task`, or initialize per-worktree ports/DB inside an `isolation: "worktree"` checkout.
 2. **CLI runner fallback (terminal / headless harnesses):** Otherwise, use `factory arena run` and `factory arena judge` below.
 
 ## Phase B: Fan out (`factory arena run` or T3Code `delegate_task`)

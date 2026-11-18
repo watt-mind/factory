@@ -28,18 +28,30 @@ Every topology obeys `shared/floor.md`:
 
 Keep the main session unblocked for steering, cross-slice seams, and final verification gates. Delegate leaf implementation, read-only exploration, and slow test/build runs to isolated subagents with explicit `Owned Paths` and verification commands, reserving main context for integration and decisions.
 
+**Zero local work on root (`<30s` turns):** When managing `>= 3` parallel async lanes, the coordinator session **never** edits repo files, checks out PR branches, or runs test/typecheck/build suites on the root checkout — delegate implementation, `MERGE-FIX` rounds, and verifications to isolated worktree subagents so coordinator turns stay under ~30 seconds.
+
 **Hard invariant (`reviewer != implementer`):** Review and critique must run in a separate agent conversation (and separate model or harness family where available). The implementing agent never self-approves its own diff.
 
 ## Difficulty tier × harness routing
 
 Route subagents by difficulty tier (`tier:light`, `tier:standard`, `tier:strong`) and role:
 
-| Difficulty / Role | Claude Code                                 | Codex / Cursor                  | Pi                              |
-| :---------------- | :------------------------------------------ | :------------------------------ | :------------------------------ |
-| `tier:light`      | `haiku` / `sonnet`                          | fast (`sol` / fast)             | `muse-spark`                    |
-| `tier:standard`   | `sonnet` (or `opus` for multi-module seams) | `sol` / `wonder`                | `muse` / `wonder`               |
-| `tier:strong`     | `opus`                                      | `sol` / `opus`-class            | `wonder` / `opus`-class         |
-| `reviewer`        | separate `opus` (`factory-merge-reviewer`)  | separate `wonder` / cross-model | separate `wonder` / cross-model |
+| Difficulty / Role | Claude Code                                 | Codex / Cursor                  | Pi                              | T3Code (`delegate_task` / `orchestrator_capabilities`) |
+| :---------------- | :------------------------------------------ | :------------------------------ | :------------------------------ | :----------------------------------------------------- |
+| `tier:light`      | `haiku` / `sonnet`                          | fast (`sol` / fast)             | `muse-spark`                    | fast model from `orchestrator_capabilities`            |
+| `tier:standard`   | `sonnet` (or `opus` for multi-module seams) | `sol` / `wonder`                | `muse` / `wonder`               | standard model (`sol` / `fable` / `carbon`)            |
+| `tier:strong`     | `opus`                                      | `sol` / `opus`-class            | `wonder` / `opus`-class         | strong model (`opus` / `gpt-sol` / `fable`)            |
+| `reviewer`        | separate `opus` (`factory-merge-reviewer`)  | separate `wonder` / cross-model | separate `wonder` / cross-model | separate cross-vendor `delegate_task` thread           |
+
+**Domain/risk routing floor:** High-risk domains — **RAG / retrieval / ranking / citation / evals, auth / security, and concurrency** — promote to **`tier:strong`** (`opus` / `gpt-sol`, Fast mode OFF) regardless of a `tier:light` label, while honoring any stricter repo `AGENTS.md` overrides.
+
+**T3Code backend & delegation lifecycle:** When T3Code Orchestrator MCP tools (`orchestrator_capabilities`, `delegate_task`, `task_cancel`, `t3_thread_wait`, `t3_thread_read`) are available in the active session:
+
+- Call `orchestrator_capabilities` **once per thread** before the first `delegate_task`.
+- Spawn all workers, reviewers, swarm, and arena child runs via **`delegate_task` (`mode: "async"`)** — **never** use `create_threads` or `t3_thread_launch` for subagent/worker fan-out (those create top-level threads, reserved for explicit user requests).
+- Follow `delegate_task`'s `next` behavior: end your turn for reactive wakeup; never poll `task_status` or loop on `t3_thread_wait`.
+- Every new review or re-check is a fresh `delegate_task`, never `t3_thread_send` to a finished child; cancel replaced or extra delegates with `task_cancel` (never `t3_thread_interrupt`).
+- **Worktree interaction:** `delegate_task` only accepts `isolation: "shared" | "worktree"` (no `worktreePath` param). Either run `bin/worktree-up.sh <ISSUE-ID>` sequentially in the coordinator and pass `isolation: "shared"` with `worktree: <abs-path>` spelled out in `task`, or initialize per-worktree ports/DB inside a `delegate_task` `isolation: "worktree"` checkout.
 
 **Fallback chain:** Fall back to the harness default (`inherit`) if a tier model is unavailable or quota-limited.
 
