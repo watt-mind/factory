@@ -33,7 +33,14 @@ factory arena config
    - `sandbox` (default): `$TMPDIR/factory-arena-*/candidate-<name>/` for designs, specs, audits, or standalone files.
    - `worktree`: detached git worktrees (`--mode worktree --repo-dir <repo> --base origin/<base>`) for multi-file code changes. Never share a writable checkout or touch `git stash`.
 
-## Phase B: Fan out (`factory arena run`)
+## Backend Selection (T3Code-native vs. CLI Runner)
+
+Choose the execution backend based on the active session's tools:
+
+1. **T3Code-native (preferred when inside T3Code):** If T3Code Orchestrator MCP tools (`orchestrator_capabilities`, `delegate_task`, `create_threads`, `thread_wait`, `thread_read`) are available in the session, spawn the contenders and read-only cross-judge directly as T3Code child tasks/threads (using `isolation: 'worktree'` for repo edits) so each contender appears live in T3Code's UI. Query `orchestrator_capabilities` first to resolve the node's configured models (`gpt-6.2-sol`, `claude-fable-5-2`, `claude-opus-5-5`, `gemini-4-carbon-high`, `gemini-4-argon-high`) matching `~/.factory/arena.yaml`.
+2. **CLI runner fallback (terminal / headless harnesses):** Otherwise, use `factory arena run` and `factory arena judge` below.
+
+## Phase B: Fan out (`factory arena run` or T3Code `delegate_task`)
 
 ```bash
 factory arena run \
