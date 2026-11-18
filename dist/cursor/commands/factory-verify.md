@@ -34,7 +34,7 @@ Apply the cold `factory-merge-reviewer` rubric (`shared/agents/factory-merge-rev
 
 ### Gate 2 — Live end-to-end human drive (Browser / CLI / API)
 
-Verify the real running app rather than trusting tests or diffs (`principle-prove-it-works`).
+Verify the real running app rather than trusting tests or diffs (per `shared/floor.md` verification discipline).
 
 1. **Use the repo's verification skill first:** Check the worktree for `.claude/skills/verify-*/SKILL.md` (or `.cursor/skills/verify-*/SKILL.md`) created by `/factory-verify-create`. Follow its `Launch`, `Doctor`, `Drive`, `Evidence`, and `Cleanup` sections and execute the `features/*.md` recipes touched by the PR.
 2. **Fallback when no `verify-*` skill exists:**

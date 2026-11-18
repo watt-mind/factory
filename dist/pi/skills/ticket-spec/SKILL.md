@@ -1,6 +1,6 @@
 ---
 name: ticket-spec
-description: Turn a raw Linear Triage ticket into a fully specified ai:agent-ready one by exploring the codebase. Use when specifying, refining, or promoting tickets, or when asked why a ticket isn't dispatchable.
+description: "Turn a raw Triage ticket (Linear or GitHub Issues) into a fully specified ai:agent-ready one by exploring the codebase. Use when specifying, refining, or promoting tickets, or when asked why a ticket isn't dispatchable."
 ---
 
 # Specifying a ticket
@@ -23,7 +23,7 @@ Closed vocabulary, at most one per ticket: `tier:light`, `tier:standard`, `tier:
 
 If the ticket already carries a `tier:*` label, leave it — don't recompute or overwrite an existing tier decision. State the tier and why in the promotion comment. `tier:light`, `tier:standard`, and `tier:strong` drive `/factory-work`'s Difficulty tier × harness routing table (and `factory-merge-reviewer` review depth).
 
-**Answerable from written decisions or codebase precedent** — intent looks unclear at first glance, but is already answered by the repo's `docs/product-decisions.md`, `docs/`, the Linear project Overview, prior tickets in the same area, or `origin/<base>` sibling conventions. Resolve it, **cite where you found it** in the ticket so the next agent doesn't re-litigate, then promote.
+**Answerable from written decisions or codebase precedent** — intent looks unclear at first glance, but is already answered by the repo's `docs/product-decisions.md`, `docs/`, the tracker project Overview, prior tickets in the same area, or `origin/<base>` sibling conventions. Resolve it, **cite where you found it** in the ticket so the next agent doesn't re-litigate, then promote.
 
 **Genuinely needs a human** — an unrecorded user-visible product-intent fork, missing credentials/external access, or irreconcilable product scope (never derivable engineering choices or priority — priority is always set from severity/frequency/blast-radius evidence). Move to `Blocked` + `ai:blocked`, strip `ai:agent-ready` if present (never leave an evaluated hold in `Triage`, where subsequent triage ticks will re-derive and re-comment it indefinitely), comment the specific question phrased so one reply unblocks it, and batch every such question into a single notification at the end of the run. Never a ping per ticket.
 
@@ -39,9 +39,9 @@ It is fine for the verification command to _fail_ — that's the bug. It must no
 
 **`Owned Paths` is the concurrency key, so tight globs beat convenient ones.** It is the set the ticket may modify, and the dispatcher refuses to run two tickets whose sets intersect. `app/**` blocks every other ticket in the repo; `app/services/api.ts` + `app/services/__tests__/*` blocks almost nothing. Over-broad paths don't just risk scope creep — they serialize the factory.
 
-Include the test files and the docs the change will touch. A path the agent needs but doesn't own means it stops and blocks.
+Include the test files and the docs the change will touch. A path the agent needs but doesn't own means it stops and blocks. Author `Owned Paths` as parser-safe bullets — one repo-relative path or glob per bullet; never use comma-separated lists, which are silently dropped.
 
-**Generated outputs must be owned with their source.** When a source path has generated copies, every ticket that may edit that source must include those generated outputs in `Owned Paths`; otherwise verification can require changes the implementing agent is forbidden to make. In this repo, owning any path under `shared/` therefore also requires owning `dist/**`, `plugins/core/**`, and `event-runtime/pins.json`, because `bun build/emit.mjs --check` and the runtime pin check verify both generated trees and the harness pins. Apply the same rule to any other source-to-generated-output relationship you discover while specifying a ticket.
+**Generated outputs must be owned with their source.** When a source path has generated copies, every ticket that may edit that source must include those generated outputs in `Owned Paths`; otherwise verification can require changes the implementing agent is forbidden to make. In this repo, owning any path under `shared/` therefore also requires owning `dist/**`, `plugins/core/**`, and `event-runtime/pins.json`, because `bun build/emit.mjs --check` and the runtime pin check verify both generated trees and the harness pins; similarly, `agents/X.md` pairs with `X.json`, and `agents/*.json|*.view.json` pairs with `event-runtime/lib/registry.test.mjs`. Apply the same rule to any other source-to-generated-output relationship you discover while specifying a ticket.
 
 WM-289 is the worked failure: its spec owned `shared/` but omitted `dist/AGENTS.floor.md`. The agent correctly edited the source, then had to block because regenerating the stale emitted copy would have exceeded its Owned Paths. The correct spec would have included the relevant `shared/**` source plus `dist/**`, `plugins/core/**`, and `event-runtime/pins.json`, allowing `bun build/emit.mjs`, `bun event-runtime/cli.mjs update-pins`, and the declared verification to complete in scope.
 

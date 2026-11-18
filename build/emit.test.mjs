@@ -10,6 +10,7 @@ import {
   readlinkSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -21,6 +22,7 @@ import {
   emitToNodes,
   remoteGithubSlug,
   resolveFloorCheckouts,
+  splitFrontmatter,
 } from "./emit.mjs";
 
 const ROOT = path.resolve(import.meta.dir, "..");
@@ -1009,7 +1011,7 @@ test("floor, command, and skill prompts enforce Phase 2 throughput, bundling, ti
   const factorySkill = readShared("skills", "factory", "SKILL.md");
   expect(factorySkill).toContain("Non-blocking coordinator default");
   expect(factorySkill).toContain("reviewer != implementer");
-  expect(factorySkill).toContain("bun orchestrator/pulse.mjs");
+  expect(factorySkill).toContain("factory pulse");
 
   const orchestrate = readShared("skills", "factory-orchestrate", "SKILL.md");
   expect(orchestrate).toContain("## Non-blocking coordinator default");
@@ -1022,7 +1024,7 @@ test("floor, command, and skill prompts enforce Phase 2 throughput, bundling, ti
   expect(orchestrate).toContain(
     "## Capacity-aware concurrency and bundle slots",
   );
-  expect(orchestrate).toContain("bun orchestrator/pulse.mjs");
+  expect(orchestrate).toContain("factory pulse");
   expect(orchestrate).toContain("bundle/PR slots");
 });
 
@@ -1404,4 +1406,69 @@ test("SkillEvaluator quality config, proceed-with-gates trigger, and factory-wor
   expect(work).not.toContain(
     "This pull request has UX-review screenshot evidence",
   );
+});
+
+test("skill-only targets preserve full SKILL.md on command/skill name collisions", () => {
+  for (const name of ["factory-arena", "factory-baseline", "factory-swarm"]) {
+    const source = readFileSync(
+      path.join(ROOT, "shared", "skills", name, "SKILL.md"),
+      "utf8",
+    );
+    for (const harness of ["codex", "gemini", "muse"]) {
+      const emitted = readFileSync(
+        path.join(ROOT, "dist", harness, "skills", name, "SKILL.md"),
+        "utf8",
+      );
+      expect(emitted).toBe(source);
+    }
+  }
+});
+
+test("emit preserves executable mode bits on bundled skill scripts", () => {
+  const srcScript = path.join(
+    ROOT,
+    "shared",
+    "skills",
+    "factory-statechart",
+    "scripts",
+    "statechart",
+  );
+  expect((statSync(srcScript).mode & 0o111) !== 0).toBe(true);
+
+  for (const dir of [
+    ["plugins", "core", "skills"],
+    ["dist", "codex", "skills"],
+    ["dist", "gemini", "skills"],
+    ["dist", "cursor", "skills"],
+    ["dist", "pi", "skills"],
+    ["dist", "muse", "skills"],
+  ]) {
+    const dest = path.join(
+      ROOT,
+      ...dir,
+      "factory-statechart",
+      "scripts",
+      "statechart",
+    );
+    expect(existsSync(dest)).toBe(true);
+    expect((statSync(dest).mode & 0o111) !== 0).toBe(true);
+  }
+});
+
+test("splitFrontmatter parses Prettier-wrapped multi-line YAML scalars", () => {
+  const md = [
+    "---",
+    "description:",
+    '  "Run the wrapped workflow safely."',
+    "argument-hint:",
+    '  "[--dry-run] [--limit N]"',
+    "---",
+    "",
+    "Body line.",
+    "",
+  ].join("\n");
+  const { fm, body } = splitFrontmatter(md);
+  expect(fm.description).toBe("Run the wrapped workflow safely.");
+  expect(fm["argument-hint"]).toBe("[--dry-run] [--limit N]");
+  expect(body.trim()).toBe("Body line.");
 });

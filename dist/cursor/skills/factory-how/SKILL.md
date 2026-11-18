@@ -1,6 +1,6 @@
 ---
 name: factory-how
-description: "Map and explain how a system, module, or end-to-end flow works today with concrete file paths, line numbers, and observed control/data flow. Use for /factory-how, /how, 'how does X work', or architecture traces."
+description: "Map and explain how a system, module, or end-to-end flow works today with concrete file paths, line numbers, and observed control/data flow. Use for /factory-how, 'how does X work', or architecture traces."
 ---
 
 # How (architecture & flow trace)
@@ -23,7 +23,7 @@ Run `git fetch --quiet` and check `HEAD` against `origin/<base>`. If the checkou
 
 ### 3. Fan out multi-module traces cleanly
 
-If a flow spans 3+ subsystems (for example, UI trigger -> API boundary -> background queue -> state store), delegate read-only slices to parallel `research` subagents partitioned by layer or directory, then verify their `file:line` claims before synthesizing.
+If a flow spans 3+ subsystems (for example, UI trigger -> API boundary -> background queue -> state store), delegate read-only slices to parallel read-only exploration subagents partitioned by layer or directory, then verify their `file:line` claims before synthesizing.
 
 ### 4. Trace concrete behavior
 

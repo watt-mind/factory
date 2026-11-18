@@ -1,6 +1,6 @@
 ---
 name: principle-type-system-discipline
-description: "Apply when designing types, schemas, or function signatures. Make illegal states unrepresentable, brand semantic primitives, parse external data at boundaries, and exhaust variants."
+description: "Apply when designing types, schemas, or function signatures. Make illegal states unrepresentable, brand semantic primitives, and exhaust variants."
 disable-model-invocation: true
 ---
 

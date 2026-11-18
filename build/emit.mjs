@@ -33,6 +33,7 @@
  * Runs on bun (see lib/schedule.mjs); no npm dependencies.
  */
 import {
+  chmodSync,
   readFileSync,
   writeFileSync,
   mkdirSync,
@@ -83,6 +84,7 @@ if (HAS_INVALID_NODE_FLAG) {
 
 const rel = (p) => path.relative(ROOT, p);
 const read = (p) => readFileSync(p, "utf8");
+const isExecutable = (p) => (statSync(p).mode & 0o111) !== 0;
 const listFiles = (dir) =>
   existsSync(dir)
     ? readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
@@ -93,15 +95,30 @@ const listFiles = (dir) =>
     : [];
 
 /** Split `---` frontmatter from a markdown body. */
-function splitFrontmatter(text) {
+export function splitFrontmatter(text) {
   const m = text.match(/^---\n([\s\S]*?)\n---\n?/);
   if (!m) return { fm: {}, body: text };
+  const body = text.slice(m[0].length);
+  try {
+    const parsed = Bun.YAML.parse(m[1]);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const fm = {};
+      for (const [k, v] of Object.entries(parsed)) {
+        if (v == null) fm[k] = "";
+        else if (typeof v === "string") fm[k] = v.trim();
+        else fm[k] = String(v);
+      }
+      return { fm, body };
+    }
+  } catch {
+    /* fall through to line parser for non-strict frontmatter */
+  }
   const fm = {};
   for (const line of m[1].split("\n")) {
     const kv = line.match(/^([\w-]+):\s*(.*)$/);
     if (kv) fm[kv[1]] = kv[2].trim();
   }
-  return { fm, body: text.slice(m[0].length) };
+  return { fm, body };
 }
 
 /** Remove another harness's namespaced fields while preserving source bytes. */
@@ -167,11 +184,15 @@ function commandSkillMarkdown(name, fm, body) {
 
 // ---------------------------------------------------------------- writing ---
 const written = new Map();
-function emit(file, content) {
-  written.set(path.resolve(file), content);
+const writtenModes = new Map();
+function emit(file, content, { executable = false } = {}) {
+  const resolved = path.resolve(file);
+  written.set(resolved, content);
+  writtenModes.set(resolved, executable);
   if (CHECK) return;
   mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, content);
+  if (executable) chmodSync(file, 0o755);
 }
 
 /** Purge generated subtrees before writing so renamed or deleted sources cannot linger. */
@@ -319,6 +340,7 @@ function emitPack({
   floor: packFloor,
 }) {
   const plugin = path.join(ROOT, "plugins", pack.plugin);
+  const skillDirSet = new Set(skillDirs);
   for (const f of commands)
     emit(path.join(plugin, "commands", path.basename(f)), read(f));
   for (const s of skillDirs)
@@ -331,6 +353,7 @@ function emitPack({
           path.relative(path.join(skillsRoot, s), f),
         ),
         read(f),
+        { executable: isExecutable(f) },
       );
   for (const agent of agentDefinitions)
     emit(
@@ -353,10 +376,12 @@ function emitPack({
           path.relative(path.join(skillsRoot, s), f),
         ),
         read(f),
+        { executable: isExecutable(f) },
       );
   for (const f of commands) {
-    const { fm, body } = splitFrontmatter(read(f));
     const name = commandSkillName(pack, f);
+    if (skillDirSet.has(name)) continue;
+    const { fm, body } = splitFrontmatter(read(f));
     emit(
       destJoin(pack, path.join(CODEX, "skills"), name, "SKILL.md"),
       commandSkillMarkdown(name, fm, body),
@@ -378,10 +403,12 @@ function emitPack({
           path.relative(path.join(skillsRoot, s), f),
         ),
         read(f),
+        { executable: isExecutable(f) },
       );
   for (const f of commands) {
-    const { fm, body } = splitFrontmatter(read(f));
     const name = commandSkillName(pack, f);
+    if (skillDirSet.has(name)) continue;
+    const { fm, body } = splitFrontmatter(read(f));
     emit(
       destJoin(pack, path.join(GEMINI, "skills"), name, "SKILL.md"),
       commandSkillMarkdown(name, fm, body),
@@ -403,6 +430,7 @@ function emitPack({
           path.relative(path.join(skillsRoot, s), f),
         ),
         read(f),
+        { executable: isExecutable(f) },
       );
   for (const f of commands) {
     const { body } = splitFrontmatter(read(f));
@@ -436,6 +464,7 @@ function emitPack({
           path.relative(path.join(skillsRoot, s), f),
         ),
         read(f),
+        { executable: isExecutable(f) },
       );
   for (const f of commands) {
     const { fm, body } = splitFrontmatter(read(f));
@@ -460,10 +489,12 @@ function emitPack({
           path.relative(path.join(skillsRoot, s), f),
         ),
         read(f),
+        { executable: isExecutable(f) },
       );
   for (const f of commands) {
-    const { fm, body } = splitFrontmatter(read(f));
     const name = commandSkillName(pack, f);
+    if (skillDirSet.has(name)) continue;
+    const { fm, body } = splitFrontmatter(read(f));
     emit(
       destJoin(pack, path.join(MUSE, "skills"), name, "SKILL.md"),
       commandSkillMarkdown(name, fm, body),
@@ -671,6 +702,8 @@ if (CHECK) {
   for (const [file, content] of written) {
     if (!existsSync(file)) problems.push(`missing:   ${rel(file)}`);
     else if (read(file) !== content) problems.push(`stale:     ${rel(file)}`);
+    else if (isExecutable(file) !== (writtenModes.get(file) ?? false))
+      problems.push(`mode:      ${rel(file)}`);
   }
   for (const file of actual)
     if (!expected.includes(file)) problems.push(`orphaned:  ${rel(file)}`);
@@ -736,6 +769,12 @@ if (CHECK) {
   process.exit(checkExitCode);
 }
 
+const coreSkillDirSet = new Set(skillDirs);
+const uniqueSkillCount =
+  skillDirs.length +
+  commands.filter(
+    (f) => !coreSkillDirSet.has(commandSkillName(corePack.pack, f)),
+  ).length;
 console.log(
   `emitted ${written.size} files from ${harnessPacks.length} harness pack(s)`,
 );
@@ -743,10 +782,10 @@ console.log(
   `  claude  plugins/core/  (${commands.length} commands, ${skillDirs.length} skills, ${agents.length} agents)`,
 );
 console.log(
-  `  codex   dist/codex/    (${skillDirs.length + commands.length} skills, ${agents.length} agents)`,
+  `  codex   dist/codex/    (${uniqueSkillCount} skills, ${agents.length} agents)`,
 );
 console.log(
-  `  gemini  dist/gemini/   (${skillDirs.length + commands.length} skills, ${agents.length} agents)  — also Antigravity`,
+  `  gemini  dist/gemini/   (${uniqueSkillCount} skills, ${agents.length} agents)  — also Antigravity`,
 );
 console.log(
   `  cursor  dist/cursor/   (${commands.length} commands, ${skillDirs.length} skills, ${agents.length} agents)`,
@@ -755,7 +794,7 @@ console.log(
   `  pi      dist/pi/       (${skillDirs.length} skills, ${commands.length} prompts, ${agents.length} agents)`,
 );
 console.log(
-  `  muse    dist/muse/     (${skillDirs.length + commands.length} skills, ${agents.length} agents)`,
+  `  muse    dist/muse/     (${uniqueSkillCount} skills, ${agents.length} agents)`,
 );
 console.log(`  floor   dist/AGENTS.floor.md`);
 for (const extra of loadedPacks.filter((p) => !p.pack.builtin)) {
@@ -855,9 +894,12 @@ if (LINK_BIN || LINK) linkFactoryBin();
 function packLinks(loaded) {
   const { pack, commands, skillDirs, agentDefinitions } = loaded;
   const plugin = path.join(ROOT, "plugins", pack.plugin);
+  const skillDirSet = new Set(skillDirs);
   const skillNames = [
     ...skillDirs,
-    ...commands.map((f) => commandSkillName(pack, f)),
+    ...commands
+      .map((f) => commandSkillName(pack, f))
+      .filter((name) => !skillDirSet.has(name)),
   ];
   return [
     ...skillNames.map((s) => [

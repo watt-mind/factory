@@ -11,10 +11,10 @@ Single entry point that pairs `AGENTS.md` (the Factory floor) with concrete exec
 
 - **Floor precedence:** `AGENTS.md` / `shared/floor.md` always wins (`Owned Paths`, `Never auto-merge`, `escalate_paths`, `Blocked` + `factory notify`, no `git stash` in worktrees, `## Handoff`).
 - **Ticket tripwire:** Before the first file edit on meaningful trackable work, find or file the ticket and work in a dedicated worktree (`bin/worktree-up.sh`). Skip only for read-only investigations and inconsequential edits (or when the user says `"no ticket"`).
-- **Proceed vs. stop:** Load `../principle-proceed-with-gates/SKILL.md` when unsure. Proceed autonomously on reversible local work; stop only on `Blocked` conditions, `Never auto-merge`, `escalate_paths`, or genuine unrecorded product-intent forks.
+- **Proceed vs. stop:** Load `../principle-proceed-with-gates/SKILL.md` when unsure. Proceed autonomously on reversible local work; stop pre-push only on `Blocked` conditions (out-of-scope security entanglement, missing credentials, inseparable `Owned Paths` gaps, or genuine unrecorded product-intent forks). For in-scope changes touching `Never auto-merge` or `escalate_paths`, implement, verify, and open an escalated PR without auto-merging.
 - **Empirical forks:** Before asking the user `"which approach?"` or `"how does X behave?"`, check if running a quick experiment (`playbooks/prototype.md`) or reading the code answers it objectively.
-- **On-demand principles:** Read only the `../principle-<name>/SKILL.md` files named by the active playbook. Never load all 19 into context at once.
-- **Non-blocking coordinator default:** Keep the main session unblocked for steering, cross-slice seams, and final gates. Delegate multi-file edits, independent reviews, and heavy checks to isolated subagents routed by difficulty tier (`tier:light`, `tier:standard`, `tier:strong`) with `reviewer != implementer` as a hard invariant. Check `bun orchestrator/pulse.mjs` (`CAPACITY & FLOW`) before widening parallel dispatch.
+- **On-demand principles:** Read only the `../principle-<name>/SKILL.md` files named by the active playbook (see `../principles/SKILL.md` for the full index). Never load every principle into context at once.
+- **Non-blocking coordinator default:** Keep the main session unblocked for steering, cross-slice seams, and final gates. Delegate multi-file edits, independent reviews, and heavy checks to isolated subagents routed by difficulty tier (`tier:light`, `tier:standard`, `tier:strong`) with `reviewer != implementer` as a hard invariant. Check `factory pulse` (`CAPACITY & FLOW`) before widening parallel dispatch.
 - **Evidence-only reporting:** Cite exact file paths, symbol names, commit refs (`origin/<base>@<sha>`), and observed test/command output.
 
 ## Route the Task
@@ -40,6 +40,8 @@ Match the user's request to **one** mode below, read its playbook (or invoke the
 - **Reflect (`../factory-reflect/SKILL.md`):** Mine the active session transcript via 3 read-only lenses + synthesizer into project-local `.claude/skills/`, `AGENTS.md`, or structural `Triage` tickets (distinct from harness `/factory-friction` and log metrics `/factory-retro`).
 - **Verify (`../factory-verify-create/SKILL.md`, `../factory-verify-maintain/SKILL.md`, `/factory-verify`):** Generate and maintain repo-local `.claude/skills/verify-<app>/` control skills and run pre-merge human-like E2E PR/branch verification.
 - **Baseline (`../factory-baseline/SKILL.md`, `/factory-baseline`):** Bootstrap or align a repository to Factory's `PC-01`…`PC-23` CI, security (`code-security.md`), worktree, and `AGENTS.md` baseline in one PR.
+- **Ticket Spec (`../ticket-spec/SKILL.md`):** Turn a raw `Triage` ticket (Linear or GitHub Issues) into a self-contained, `ai:agent-ready` specification with `Owned Paths` and a Verification Command.
+- **Remote Handoff (`../factory-handoff/SKILL.md`):** Spec, file, and hand off an implementation task to the remote Factory runtime (`factory handoff`) instead of coding locally.
 
 ### Existing Factory Lifecycle Commands
 

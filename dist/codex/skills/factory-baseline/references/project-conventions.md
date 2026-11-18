@@ -2,7 +2,7 @@
 
 Portable GitHub quality, CI, security, worktree, and agent-entry baseline for Factory-managed repositories (`PC-01`…`PC-23`).
 
-When an operator workspace maintains local org-specific overlays (for example, team/project mappings or private runner labels in `~/Develop/hdkiller/docs/guides/project-conventions.md`), those overlay this baseline without duplicating it.
+When an operator workspace maintains local org-specific overlays (for example, team/project mappings or private runner labels via `$FACTORY_CONVENTIONS_OVERLAY` or your org's infra docs), those overlay this baseline without duplicating it.
 
 Related baseline: [`code-security.md`](./code-security.md).
 
@@ -26,14 +26,14 @@ Every long-lived repository should enforce:
 
 ## 2. Reference CI & Workflow Architecture
 
-| Layer                             | Standard pattern                                                                                              |
-| :-------------------------------- | :------------------------------------------------------------------------------------------------------------ |
-| **CI (`ci.yml`)**                 | Parallel lint, typecheck, format check, and unit test jobs on PRs and branch pushes                           |
-| **Concurrency (`PC-05`)**         | `group: ci-${{ github.event_name }}-${{ github.event.pull_request.number                                      |     | github.sha }}`with`cancel-in-progress: ${{ github.event_name == 'pull_request' }}` |
-| **Security (`security.yml`)**     | CodeQL (gated on `vars.CODEQL_ENABLED == 'true'` where needed, `ram: 8192`) + Semgrep + Gitleaks + Actionlint |
-| **E2E (`e2e.yml`)**               | Browser/end-to-end suite with explicit per-run project/port isolation (`H-1`…`H-8`)                           |
-| **Dependabot (`dependabot.yml`)** | Weekly package ecosystem + monthly `github-actions` updates targeting the integration branch (`develop`)      |
-| **Actions permissions (`PC-09`)** | Default `GITHUB_TOKEN` workflow permission set to `read`; `can_approve_pull_request_reviews=false`            |
+| Layer                             | Standard pattern                                                                                                                                                   |
+| :-------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **CI (`ci.yml`)**                 | Parallel lint, typecheck, format check, and unit test jobs on PRs and branch pushes                                                                                |
+| **Concurrency (`PC-05`)**         | `group: ci-${{ github.event_name }}-${{ github.event.pull_request.number \|\| github.sha }}` with `cancel-in-progress: ${{ github.event_name == 'pull_request' }}` |
+| **Security (`security.yml`)**     | CodeQL (gated on `vars.CODEQL_ENABLED == 'true'` where needed, `ram: 8192`) + Semgrep + Gitleaks + Actionlint                                                      |
+| **E2E (`e2e.yml`)**               | Browser/end-to-end suite with explicit per-run project/port isolation (`H-1`…`H-8`)                                                                                |
+| **Dependabot (`dependabot.yml`)** | Weekly package ecosystem + monthly `github-actions` updates targeting the integration branch (`develop`)                                                           |
+| **Actions permissions (`PC-09`)** | Default `GITHUB_TOKEN` workflow permission set to `read`; `can_approve_pull_request_reviews=false`                                                                 |
 
 ---
 

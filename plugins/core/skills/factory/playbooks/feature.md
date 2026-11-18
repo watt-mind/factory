@@ -8,6 +8,8 @@ Build new or changed behavior from a clean domain model and verified boundaries.
 - `../../principle-model-the-domain/SKILL.md`
 - `../../principle-type-system-discipline/SKILL.md`
 - `../../principle-boundary-discipline/SKILL.md`
+- `../../principle-make-operations-idempotent/SKILL.md` (if retryable jobs, webhooks, migrations, or state writes)
+- `../../principle-separate-before-serializing-shared-state/SKILL.md` (if concurrent workers, worktrees, or shared mutable state)
 - `../../principle-experience-first/SKILL.md` (if UI-affecting)
 - `../../principle-exhaust-the-design-space/SKILL.md` (only if net-new UI surface or material layout redesign)
 

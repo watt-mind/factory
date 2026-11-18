@@ -8,6 +8,7 @@ Behavior-preserving structural improvement: remove dead weight, shrink mutable s
 - `../../principle-minimize-reader-load/SKILL.md`
 - `../../principle-laziness-protocol/SKILL.md`
 - `../../principle-test-behavior-not-implementation/SKILL.md`
+- `../../principle-redesign-from-first-principles/SKILL.md` (when incremental patching no longer fits and the ticket permits structural redesign)
 
 ## Steps
 

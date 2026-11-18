@@ -8,7 +8,7 @@ Pele ignores Mermaid `theme` and `themeVariables`. Set its `--pele-*` CSS variab
 
 The `.mmd` file has a `classDef` line for `breaks` and for `mayBreak`, so that any Mermaid viewer shows the bug marks. It has no `classDef` for the group colors, `bugPath`, or `repeats`. Pele writes each `classDef` color as a `style` attribute on the node, and a `style` attribute wins over a normal CSS rule. So the rules for the marks below use `!important`. Without it, a dark theme keeps the light mark colors. A bug mark sets the fill and the text, and `bugPath` and `repeats` set the border. Put the mark rules after the group colors, so that a mark shows over the group color.
 
-These colors are suggestions. They are the colors of the old skill. Put them in a `<style>` element at the start of each SVG. Each SVG then follows the light or dark setting of the viewer.
+These colors are suggestions. Put them in a `<style>` element at the start of each SVG. Each SVG then follows the light or dark setting of the viewer.
 
 ```css
 .pele {
