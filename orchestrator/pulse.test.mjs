@@ -571,3 +571,81 @@ test("formatPulse renders CAPACITY & FLOW before WORKSPACE", () => {
   expect(output).toContain("2");
   expect(output).toContain("HOLD_OR_BUNDLE");
 });
+
+test("computeCapacity flags low disk as DRAIN_OR_CLEANUP and separates escalated PRs", () => {
+  const lowDisk = computeCapacity({
+    activeRuns: 1,
+    runnerCap: 8,
+    openMergeablePrs: 2,
+    openEscalatedPrs: 10,
+    diskFreeGb: 3.2,
+    worktreeCount: 14,
+  });
+  expect(lowDisk.verdict).toBe("DRAIN_OR_CLEANUP");
+  expect(lowDisk.openReadyPrs).toBe(2);
+  expect(lowDisk.openMergeablePrs).toBe(2);
+  expect(lowDisk.openEscalatedPrs).toBe(10);
+  expect(lowDisk.diskFreeGb).toBe(3.2);
+  expect(lowDisk.worktreeCount).toBe(14);
+});
+
+test("gatherPulse excludes escalated PRs from openReadyPrs and probes disk/worktrees", async () => {
+  const fakeForge = {
+    prList: (_repo, opts) => {
+      if (opts?.state === "merged") return [];
+      return [
+        {
+          number: 1,
+          title: "Ready PR",
+          headRefName: "feat/a",
+          isDraft: false,
+          labels: [{ name: "ai:needs-review" }],
+          statusCheckRollup: [{ status: "COMPLETED", conclusion: "SUCCESS" }],
+        },
+        {
+          number: 2,
+          title: "Held security PR",
+          headRefName: "feat/sec",
+          isDraft: false,
+          labels: [{ name: "escalated" }],
+          statusCheckRollup: [{ status: "COMPLETED", conclusion: "SUCCESS" }],
+        },
+      ];
+    },
+    runList: () => [],
+  };
+  const fakeWorkspaceProbe = (args) => {
+    if (args[0] === "df") {
+      return {
+        ok: true,
+        out: "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/disk3s1 100000000 80000000 10485760 89% /\n",
+        err: "",
+      };
+    }
+    if (args[0] === "git" && args[1] === "worktree") {
+      return {
+        ok: true,
+        out: "worktree /repo\nHEAD abc\n\nworktree /wt/1\nHEAD def\n",
+        err: "",
+      };
+    }
+    return { ok: true, out: "", err: "" };
+  };
+
+  const pulse = await gatherPulse({
+    repo: "factory",
+    forge: fakeForge,
+    workspaceProbe: fakeWorkspaceProbe,
+    controlPlane: null,
+    fetchFn: async () => {
+      throw new Error("offline");
+    },
+    execFn: () => ({ ok: false, out: "", err: "" }),
+  });
+
+  expect(pulse.capacity.openReadyPrs).toBe(1);
+  expect(pulse.capacity.openMergeablePrs).toBe(1);
+  expect(pulse.capacity.openEscalatedPrs).toBe(1);
+  expect(pulse.capacity.diskFreeGb).toBe(10);
+  expect(pulse.capacity.worktreeCount).toBe(2);
+});

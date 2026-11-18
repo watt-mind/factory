@@ -62,24 +62,43 @@ export function computeCapacity({
   activeRuns = 0,
   runnerCap = 8,
   openReadyPrs = 0,
+  openMergeablePrs,
+  openEscalatedPrs = 0,
   mergedLastHour = 0,
   mergeBatchSize = 8,
+  diskFreeGb = null,
+  worktreeCount = null,
+  minDiskFreeGb = 5,
 } = {}) {
   const safeQueuedRuns = toNonNegativeFinite(queuedRuns);
   const safeActiveRuns = toNonNegativeFinite(activeRuns);
   const safeRunnerCap = toNonNegativeFinite(runnerCap);
-  const safeOpenReadyPrs = toNonNegativeFinite(openReadyPrs);
+  const safeOpenMergeablePrs = toNonNegativeFinite(
+    openMergeablePrs !== undefined ? openMergeablePrs : openReadyPrs,
+  );
+  const safeOpenEscalatedPrs = toNonNegativeFinite(openEscalatedPrs);
   const safeMergedLastHour = toNonNegativeFinite(mergedLastHour);
   const safeMergeBatchSize = toNonNegativeFinite(mergeBatchSize);
+  const safeDiskFreeGb =
+    diskFreeGb === null || diskFreeGb === undefined
+      ? null
+      : toNonNegativeFinite(diskFreeGb);
+  const safeWorktreeCount =
+    worktreeCount === null || worktreeCount === undefined
+      ? null
+      : toNonNegativeFinite(worktreeCount);
 
   const runnerHeadroom = Math.max(0, safeRunnerCap - safeActiveRuns);
   const queuePressure = safeActiveRuns + safeQueuedRuns;
 
   let verdict = "WIDEN";
-  let reason = `Runner headroom available (${runnerHeadroom} slots free) and open-PR queue (${safeOpenReadyPrs}/${safeMergeBatchSize}) allow widening or continuing dispatch`;
-  if (safeOpenReadyPrs >= safeMergeBatchSize) {
+  let reason = `Runner headroom available (${runnerHeadroom} slots free) and open-PR queue (${safeOpenMergeablePrs}/${safeMergeBatchSize}) allow widening or continuing dispatch`;
+  if (safeDiskFreeGb !== null && safeDiskFreeGb < minDiskFreeGb) {
+    verdict = "DRAIN_OR_CLEANUP";
+    reason = `Low disk space (${safeDiskFreeGb.toFixed(1)} GiB free < ${minDiskFreeGb} GiB; ${safeWorktreeCount ?? "?"} worktrees) — prune merged worktrees before creating new ones`;
+  } else if (safeOpenMergeablePrs >= safeMergeBatchSize) {
     verdict = "DRAIN_MERGES_FIRST";
-    reason = `Open ready PRs (${safeOpenReadyPrs} >= ${safeMergeBatchSize} merge batch size); /factory-merge must drain before widening dispatch`;
+    reason = `Open ready PRs (${safeOpenMergeablePrs} >= ${safeMergeBatchSize} merge batch size); /factory-merge must drain before widening dispatch`;
   } else if (safeQueuedRuns > 0 || safeActiveRuns >= safeRunnerCap) {
     verdict = "HOLD_OR_BUNDLE";
     reason = `CI runner pool pressure (${safeActiveRuns}/${safeRunnerCap} active, ${safeQueuedRuns} queued, ${queuePressure} total); hold new singles or coalesce cohesive tickets into bundles`;
@@ -90,9 +109,13 @@ export function computeCapacity({
     activeRuns: safeActiveRuns,
     queuedRuns: safeQueuedRuns,
     runnerHeadroom,
-    openReadyPrs: safeOpenReadyPrs,
+    openReadyPrs: safeOpenMergeablePrs,
+    openMergeablePrs: safeOpenMergeablePrs,
+    openEscalatedPrs: safeOpenEscalatedPrs,
     mergeBatchSize: safeMergeBatchSize,
     mergedLastHour: safeMergedLastHour,
+    diskFreeGb: safeDiskFreeGb,
+    worktreeCount: safeWorktreeCount,
     verdict,
     reason,
   };
@@ -354,6 +377,8 @@ export async function gatherPulse({
   }
 
   let openReadyPrs = 0;
+  let openMergeablePrs = 0;
+  let openEscalatedPrs = 0;
   let activeRuns = 0;
   let queuedRuns = 0;
   let mergedLastHour = 0;
@@ -371,6 +396,7 @@ export async function gatherPulse({
           "title",
           "headRefName",
           "isDraft",
+          "labels",
           "statusCheckRollup",
         ],
         cwd: ROOT,
@@ -378,6 +404,12 @@ export async function gatherPulse({
       pulse.prs.total = prs.length;
       pulse.prs.candidates = prs.map((pr) => {
         const checks = pr.statusCheckRollup ?? [];
+        const labels = Array.isArray(pr.labels)
+          ? pr.labels
+              .map((l) => (typeof l === "string" ? l : l?.name))
+              .filter(Boolean)
+          : [];
+        const isEscalated = labels.includes("escalated");
         let ciStatus = "NONE";
         if (checks.length > 0) {
           const hasFailure = checks.some((c) => c.conclusion === "FAILURE");
@@ -394,12 +426,18 @@ export async function gatherPulse({
           title: pr.title,
           headRefName: pr.headRefName,
           isDraft: pr.isDraft,
+          labels,
+          isEscalated,
           ciStatus,
         };
       });
-      openReadyPrs = pulse.prs.candidates.filter(
-        (pr) => !pr.isDraft && pr.ciStatus !== "FAILING",
+      openEscalatedPrs = pulse.prs.candidates.filter(
+        (pr) => !pr.isDraft && pr.isEscalated,
       ).length;
+      openMergeablePrs = pulse.prs.candidates.filter(
+        (pr) => !pr.isDraft && !pr.isEscalated && pr.ciStatus !== "FAILING",
+      ).length;
+      openReadyPrs = openMergeablePrs;
     } catch (err) {
       openPrError = err?.message ?? String(err);
       pulse.prs.error = openPrError;
@@ -450,6 +488,31 @@ export async function gatherPulse({
     }
   }
 
+  let diskFreeGb = null;
+  let worktreeCount = null;
+  try {
+    const dfRes = workspaceProbe(["df", "-Pk", ROOT], ROOT);
+    if (dfRes?.ok && dfRes.out) {
+      const lines = dfRes.out.trim().split("\n");
+      const cols = (lines[lines.length - 1] || "").trim().split(/\s+/);
+      const availKb = Number(cols[3]);
+      if (Number.isFinite(availKb) && availKb >= 0) {
+        diskFreeGb = Math.round((availKb / (1024 * 1024)) * 10) / 10;
+      }
+    }
+    const wtRes = workspaceProbe(
+      ["git", "worktree", "list", "--porcelain"],
+      ROOT,
+    );
+    if (wtRes?.ok && wtRes.out) {
+      worktreeCount = wtRes.out
+        .split("\n")
+        .filter((line) => line.startsWith("worktree ")).length;
+    }
+  } catch {
+    // Non-fatal: leave diskFreeGb / worktreeCount null when probe fails.
+  }
+
   const capacityErrors = [openPrError, ciRunError, mergedError].filter(Boolean);
   if (capacityErrors.length > 0) {
     pulse.errors = capacityErrors;
@@ -460,8 +523,12 @@ export async function gatherPulse({
       activeRuns,
       runnerCap,
       openReadyPrs,
+      openMergeablePrs,
+      openEscalatedPrs,
       mergedLastHour,
       mergeBatchSize,
+      diskFreeGb,
+      worktreeCount,
     }),
     available: Boolean(activeForge && !ciRunError),
     ...(ciRunError ? { ciRunError } : {}),
@@ -638,8 +705,13 @@ export function formatPulse(pulse) {
       `  CI Runs:         ${cap.activeRuns}/${cap.runnerCap} active, ${cap.queuedRuns} queued, ${cap.runnerHeadroom} headroom`,
     );
     lines.push(
-      `  Open Ready PRs:  ${cap.openReadyPrs}/${cap.mergeBatchSize} merge batch`,
+      `  Open Ready PRs:  ${cap.openReadyPrs}/${cap.mergeBatchSize} merge batch${cap.openEscalatedPrs > 0 ? ` (${cap.openEscalatedPrs} escalated)` : ""}`,
     );
+    if (cap.diskFreeGb !== null || cap.worktreeCount !== null) {
+      lines.push(
+        `  Disk/Worktrees:  ${cap.diskFreeGb ?? "?"} GiB free, ${cap.worktreeCount ?? "?"} worktrees`,
+      );
+    }
     lines.push(`  Merged (1h):     ${cap.mergedLastHour}`);
     lines.push(
       `  Verdict:         ${verdictColor(cap.verdict)} — ${cap.reason}`,
