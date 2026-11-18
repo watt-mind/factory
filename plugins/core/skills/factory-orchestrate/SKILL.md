@@ -53,7 +53,7 @@ Pick the topology that fits the task rather than spawning agents for show:
 
 ### 1. Swarm (partitioned parallel tracks)
 
-Use when work splits cleanly into independent slices with little coordination overhead:
+Pairs with `../factory-swarm/SKILL.md`. Use `/factory-swarm` (`factory swarm` or T3Code `delegate_task`) when work splits cleanly into independent slices or cross-harness races (`partition` | `race` | `mixed`):
 
 - Multi-module codebase audits or principles reviews (one `research` reviewer per directory/layer).
 - Independent tickets whose `Owned Paths` do not intersect (one implementer + worktree per ticket).
