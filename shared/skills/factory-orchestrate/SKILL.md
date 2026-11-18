@@ -68,14 +68,14 @@ Use when work splits cleanly into independent slices with little coordination ov
 
 ### 2. Arena (competitive bakeoff and grafting)
 
-Pairs with `../principle-exhaust-the-design-space/SKILL.md` (gated: use on net-new UI surfaces, material layout/architecture forks, or explicit user comparison requests — never routine bugfixes).
+Pairs with `../principle-exhaust-the-design-space/SKILL.md` and `../factory-arena/SKILL.md` (gated: use on net-new UI surfaces, material layout/architecture forks, or explicit user comparison requests — never routine bugfixes). For cross-harness multi-model bakeoffs (`codex` / `claude` / `agy`), invoke `/factory-arena` (`factory arena`).
 
 **Steps:**
 
 1. **Write the rubric first:** Before spawning contenders, lock 3-5 concrete evaluation criteria (for example: correctness under concurrency, diff/bundle minimality, reader load, UI visual hierarchy, testability).
-2. **Enforce genuine diversity:** Spawn 2-3 workers with distinct architectural hypotheses or layout constraints in separate isolated workspaces or `$TMPDIR/<id>-opt-*.patch` sandboxes. Never run two slightly tweaked copies of the same prompt.
-3. **Judge coldly against artifacts:** Run benchmarks, render live UIs, or inspect actual diffs against the rubric. Optionally graft one standout helper or boundary check from a runner-up into the winning design.
-4. **Land only the winner:** Discard losing sandboxes cleanly (`git worktree remove` or delete `$TMPDIR` patches; never `git stash`), commit only the winner on the ticket branch, and record the options + rubric rationale in the PR/Handoff or response.
+2. **Enforce genuine diversity:** Spawn 2-3 workers (or run `factory arena run --profile default|full`) with distinct models/hypotheses in separate isolated worktrees or `$TMPDIR` sandboxes. Never run two slightly tweaked copies of the same prompt.
+3. **Judge coldly against artifacts:** Run a read-only cross-vendor judge (`factory arena judge`), benchmarks, or live UI/diff checks against the rubric. Optionally graft one standout helper or boundary check from a runner-up into the winning design.
+4. **Land only the winner:** Discard losing sandboxes cleanly (`factory arena cleanup`, `git worktree remove`, or delete `$TMPDIR` patches; never `git stash`), commit only the winner on the ticket branch, and record the options + rubric rationale in the PR/Handoff or response.
 
 ### 3. Staged pipeline (map -> build -> adversarial review -> verify)
 
