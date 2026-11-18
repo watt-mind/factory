@@ -50,16 +50,16 @@ When an operator asks for the status of a handed-off ticket or wants to inspect 
 3. **Inspect run details, token usage, and lifecycle history on the runner**:
 
    ```sh
-   ssh runner "factory events inspect <runId>"
+   factory events inspect <runId> --host <runner-host>
    ```
 
 4. **Stream or view the agent execution trace**:
 
    ```sh
-   ssh runner "factory events trace <runId> | tail -n 50"
+   factory events trace <runId> --host <runner-host> | tail -n 50
    ```
 
-5. **Web dashboard**: `https://factory.whale-pike.ts.net`
+5. **Web dashboard**: open the `dashboardUrl` returned in the handoff receipt (or `$FACTORY_DASHBOARD_URL` when configured).
 
 ## Retry rule
 

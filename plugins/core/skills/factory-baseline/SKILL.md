@@ -14,7 +14,7 @@ Read both bundled references in full before touching files:
 - [`references/project-conventions.md`](references/project-conventions.md) — `PC-01`…`PC-23`, `W-1`…`W-13`, `H-1`…`H-8`, `R-1`…`R-6`, concurrency, branch protection, agent entry files.
 - [`references/code-security.md`](references/code-security.md) — Semgrep, Gitleaks, Actionlint, ESLint security rules, Ruff `S` rules, `pip-audit`, `npm audit --audit-level=high`, Lefthook/Husky hooks.
 
-If `~/Develop/hdkiller/docs/guides/project-conventions.md` exists on this machine, also read it as an optional local overlay for org-specific runner labels and Linear team/project mappings.
+If an org-local conventions overlay exists on this machine (for example via `$FACTORY_CONVENTIONS_OVERLAY` or your org's infra docs), also read it for org-specific runner labels and tracker team/project mappings.
 
 ## 2. Survey and Grade (`PC-01`…`PC-23`)
 
@@ -51,7 +51,7 @@ Apply only the missing or drifting items cleanly within the target stack (respec
 - **`PC-10` (Local Git hooks):**
   - Prefer `lefthook.yml` (staged `gitleaks git --pre-commit --staged`, commit-msg format gate, staged `ruff`/linter) or Husky + `lint-staged` + `@commitlint/cli` matching repo conventions.
 - **`PC-12`–`PC-14`, `PC-19`–`PC-20` (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `docs/product-decisions.md`):**
-  - Ensure `AGENTS.md` documents the stack, commands, tracker/branch pointer, worktree workflow (`W-12`), and current `<!-- FACTORY:FLOOR:BEGIN -->` block (sync via `bun build/emit.mjs --sync-floor` when registered in `config/repos.yaml`).
+  - Ensure `AGENTS.md` documents the stack, commands, tracker/branch pointer, worktree workflow (`W-12`), and current `<!-- FACTORY:FLOOR:BEGIN -->` block (sync from `$FACTORY_ROOT` via `bun build/emit.mjs --sync-floor` when registered in `config/repos.yaml`).
   - Create/align thin `CLAUDE.md` and `GEMINI.md` entry pointers without duplicating protocols or vendor skill dumps.
   - Seed `docs/product-decisions.md` if absent (`PC-19`) and demote any competing `todo.md`/`issues.md` file (`PC-14`).
 - **`PC-15` (Worktree isolation):**

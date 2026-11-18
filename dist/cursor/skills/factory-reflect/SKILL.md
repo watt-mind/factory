@@ -1,6 +1,6 @@
 ---
 name: factory-reflect
-description: "Analyze the current session transcript using three parallel read-only lenses (judgment, tooling, divergent) and a synthesizer to harvest durable project-specific skills, repo rules, or structural lint/check tickets. Contrasts with /factory-friction (Factory harness bugs) and /factory-retro (orchestrator logs/CI metrics). Use for /factory-reflect, /reflect, or 'what should we teach the repo from this session'."
+description: "Analyze the current session transcript using three parallel read-only lenses (judgment, tooling, divergent) and a synthesizer to harvest durable project-specific skills, repo rules, or structural lint/check tickets. Contrasts with /factory-friction (Factory harness bugs) and /factory-retro (orchestrator logs/CI metrics). Use for /factory-reflect or 'what should we teach the repo from this session'."
 ---
 
 # Reflect (project-specific session learning)
@@ -21,7 +21,7 @@ If a reflection finding is purely a Factory harness defect (`bin/worktree-*`, `s
 
 Route every accepted finding to the **narrowest durable home** that matches its scope:
 
-1. **Structural check first (`Backlog` -> `Triage`):** Per `../principle-encode-lessons-in-structure/SKILL.md`, if a mistake can be prevented mechanically (lint rule, AST check, CSS token check, JSON schema, bundle ratchet, pre-commit hook), prefer filing a concrete `Triage` ticket over writing another prose warning.
+1. **Structural check first (synthesizer `## Backlog` -> tracker `Triage`):** Per `../principle-encode-lessons-in-structure/SKILL.md`, if a mistake can be prevented mechanically (lint rule, AST check, CSS token check, JSON schema, bundle ratchet, pre-commit hook), prefer filing a concrete `Triage` ticket over writing another prose warning.
 2. **Existing project skill (`<repo>/.claude/skills/<name>/SKILL.md`):** Domain invariants, verification recipes, API/SDK quirks, build budgets, or formal-verify helpers scoped to this repository. Update existing sections or tune `description` before creating a new skill.
 3. **New project skill (`<repo>/.claude/skills/<kebab-name>/SKILL.md`):** Only when no existing skill owns the domain and the workflow will genuinely recur across future sessions.
 4. **Repo docs (`<repo>/AGENTS.md` or `<repo>/docs/product-decisions.md`):** Repo-wide commands, layout contracts, or human product decisions recorded cleanly under `origin/<base>`.
@@ -67,4 +67,4 @@ Present the synthesized `## Accepted`, `## Rejected`, and `## Backlog` lists dir
 1. Obey the repository's ticket/worktree protocol before editing tracked files (claim or file a ticket when required; create an isolated worktree via `bin/worktree-up.sh`).
 2. Keep edits concise, timeless (no transient commit SHAs, byte counts, or fragile line numbers in skill prose unless writing a formal-verification sync anchor), and consistent with sibling skills.
 3. When creating a new project skill under `<repo>/.claude/skills/<name>/SKILL.md`, write clear frontmatter (`name`, `description` with concrete trigger phrases so future sessions load it accurately).
-4. If applying an approved change to **`$FACTORY_ROOT/shared/skills/`**, also emit generated targets and update harness pins (`npx prettier --write shared/skills/ && bun build/emit.mjs && bun event-runtime/cli.mjs update-pins && bun run check`).
+4. If applying an approved change to **`$FACTORY_ROOT/shared/skills/`**, also emit generated targets and update harness pins (`bun run format && bun build/emit.mjs && bun event-runtime/cli.mjs update-pins && bun run check`).

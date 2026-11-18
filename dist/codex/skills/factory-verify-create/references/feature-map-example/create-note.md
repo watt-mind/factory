@@ -25,10 +25,10 @@ Preconditions:
 
 - **Open editor:** Activate button `New note` (by ARIA role/name). Verify form `Note editor` renders with focus in `Title`.
 - **Enter content:** Fill `Title` with `"Release checklist"` and `Body` with `"Tag and publish"`. Verify `Save note` becomes enabled.
-- **Save note:** Click `Save note`. Verify confirmation renders and heading shows `Release checklist`, with zero console or `5xx` errors in network/console logs.
+- **Save note:** Click `Save note`. Verify confirmation renders and heading shows `Release checklist`, with zero console errors or unexpected `4xx`/`5xx` responses in network/console logs.
 - **Confirm persistence:** Navigate away to `All notes`, reload the page (`location.reload()`), and reopen `Release checklist`. Verify both `Title` and `Body` persist intact.
 - **Cancel edge path:** Click `New note`, fill `Title` with `"Discard me"`, and click `Cancel`. Return to `All notes` and verify `"Discard me"` is absent.
-- **Proof:** Capture a bounded mobile/element screenshot (`≤ 1 MB`) of the persisted state outside the repo (`$FACTORY_ARTIFACT_DIR` / `ux-screenshots/`).
+- **Proof:** Capture a bounded mobile/element screenshot (`≤ 1 MB`) of the persisted state outside the repo (`${FACTORY_ARTIFACT_DIR:-$TMPDIR}/ux-screenshots/`).
 
 ## Gotchas
 

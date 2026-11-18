@@ -1,6 +1,6 @@
 ---
 name: factory-teach
-description: "Explain a complex subsystem, design pattern, or architecture progressively: plain definition first, layered follow-ups, incremental Mermaid diagrams for 3+ part flows, and zero AI slop. Use for /factory-teach, /teach, or 'explain X so I really understand it'."
+description: "Explain a complex subsystem, design pattern, or architecture progressively: plain definition first, layered follow-ups, incremental Mermaid diagrams for 3+ part flows, and zero AI slop. Use for /factory-teach or 'explain X so I really understand it'."
 ---
 
 # Teach

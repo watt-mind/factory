@@ -1,6 +1,6 @@
 ---
 name: principle-experience-first
-description: "Apply on product, UX, typography, or copy work. Render actual pixels, run at least one cold visual self-polish pass over rough first drafts, and surface 1-4 bounded screenshots by default."
+description: "Apply on product, UX, typography, or copy work. Render actual pixels, run at least one cold visual self-polish pass over rough first drafts, and surface 2-4 bounded screenshots by default."
 disable-model-invocation: true
 ---
 
@@ -10,7 +10,7 @@ Choose user clarity, legibility, and visual craft over implementation convenienc
 
 - **Render pixels, not just DOM:** Accessibility snapshots and component tests prove structure, not visual craft. On any UI-affecting change (including isolated styling, copy-in-layout, or admin views), render the live surface and inspect real pixels — plus target-language copy and accents (such as Hungarian diacritics and domain terminology).
 - **Cold visual self-polish (≥1 pass):** Treat the first working layout as a rough draft. Critique hierarchy, spacing/padding rhythm, baseline alignment, contrast, truncation, touch targets, and empty/loading/error states coldly, then iterate **at least once** before verification so developer-default scaffolding never ships unpolished.
-- **Show, don't pad — and surface visual proof by default:** Fewer clear, accurate controls beat crowded dashboards or noisy placeholders. Retain **1–4 bounded screenshots** (`≤ 1 MB` each, preferring mobile or element-scoped captures outside the repo; never `Read` captures back into context): embed/link 1–3 in interactive replies or walkthrough artifacts by default, and publish `ux-screenshot` artifacts + `## UX screenshots` links in autonomous PRs.
+- **Show, don't pad — and surface visual proof by default:** Fewer clear, accurate controls beat crowded dashboards or noisy placeholders. Retain **2–4 bounded screenshots** (`≤ 1 MB` each, preferring mobile or element-scoped captures outside the repo; never read image bytes back into context): embed/link 1–3 in interactive replies or walkthrough artifacts by default, and publish `ux-screenshot` artifacts + `## UX screenshots` links in autonomous PRs.
 
 ## Guardrails
 

@@ -1,6 +1,6 @@
 ---
 name: factory-why
-description: "Trace the historical rationale and decision archaeology behind existing code, config, or architecture before changing it. Use for /factory-why, /why, 'why was this built this way', or before refactoring load-bearing design choices."
+description: "Trace the historical rationale and decision archaeology behind existing code, config, or architecture before changing it. Use for /factory-why, 'why was this built this way', or before refactoring load-bearing design choices."
 ---
 
 # Why (decision archaeology)
@@ -35,7 +35,7 @@ Skip formatting-only or pure rename commits (`--follow`, `-w`) when tracing beha
 Commits tell _what_ changed; external records usually hold _why_:
 
 - **Linked PRs and reviews:** `gh pr list --search "<sha>" --state all --json number,title,url` and `gh pr view <num> --comments`
-- **Issue trackers:** Look up referenced `ISSUE-ID` / `#N` in Linear (`linear issue view <ID>` / `factory ticket view <ID>`) or GitHub (`gh issue view <N>`)
+- **Issue trackers:** Look up referenced `ISSUE-ID` / `#N` via `factory ticket get <ID>` (for Linear or GitHub Issues) or `gh issue view <N>`
 - **Repo decision logs & docs:** Check `docs/product-decisions.md`, `docs/`, ADRs, inline `WHY:` / `HACK:` comments, and regression tests added in the introducing commit (tests often preserve the exact failure scenario).
 
 ### 5. Report cleanly

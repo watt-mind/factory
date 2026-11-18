@@ -1,6 +1,6 @@
 ---
 name: factory-orchestrate
-description: "Coordinate multiple agents interactively on complex work using Swarm (partitioned parallel tracks), Arena (competitive bakeoff + synthesis), or Staged Pipeline (research -> implement -> verify -> review) with worktree isolation. Use for /factory-orchestrate, /orchestrate, or multi-agent execution within a session (distinct from /factory-work queue dispatch)."
+description: "Coordinate multiple agents interactively on complex work using Swarm (partitioned parallel tracks), Arena (competitive bakeoff + synthesis), or Staged Pipeline (research -> implement -> verify -> review) with worktree isolation. Use for /factory-orchestrate or multi-agent execution within a session (distinct from /factory-work queue dispatch)."
 ---
 
 # Orchestrate (interactive multi-agent execution)
@@ -57,7 +57,7 @@ Route subagents by difficulty tier (`tier:light`, `tier:standard`, `tier:strong`
 
 ## Capacity-aware concurrency and bundle slots
 
-Check `bun orchestrator/pulse.mjs` (or `factory pulse`) and read `CAPACITY & FLOW` (`DRAIN_MERGES_FIRST`, `HOLD_OR_BUNDLE`, `WIDEN`) before widening parallel lanes. Never widen on backlog depth alone — widen only on `mergedLastHour` flow and runner headroom. When CI or review capacity is the binding constraint (`HOLD_OR_BUNDLE`), coalesce 3–6 related low-risk tickets with disjoint `Owned Paths` into cohesive bundles: each bundle shares one worktree, branch, and PR, and the concurrency cap counts **bundle/PR slots** rather than raw ticket count.
+Check `factory pulse` and read `CAPACITY & FLOW` (`DRAIN_MERGES_FIRST`, `HOLD_OR_BUNDLE`, `WIDEN`) before widening parallel lanes. Never widen on backlog depth alone — widen only on `mergedLastHour` flow and runner headroom. When CI or review capacity is the binding constraint (`HOLD_OR_BUNDLE`), coalesce 3–6 related low-risk tickets with disjoint `Owned Paths` into cohesive bundles: each bundle shares one worktree, branch, and PR, and the concurrency cap counts **bundle/PR slots** rather than raw ticket count.
 
 ## Choose one topology
 

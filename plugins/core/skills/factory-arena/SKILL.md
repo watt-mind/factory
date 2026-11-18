@@ -11,7 +11,7 @@ Open a checklist with one entry per phase (**Frame**, **Fan out**, **Cross-judge
 
 ## Per-Node Configuration (`~/.factory/arena.yaml`)
 
-`factory arena` reads `~/.factory/arena.yaml` on the active node (falling back to [`config/arena.example.yaml`](../../../config/arena.example.yaml)):
+`factory arena` reads `~/.factory/arena.yaml` on the active node (falling back to `$FACTORY_ROOT/config/arena.example.yaml`):
 
 - **`default` profile (3 runners across OpenAI / Anthropic / Google):** `gpt-sol` (`codex`, `gpt-6.2-sol`), `fable` (`claude`, `claude-fable-5-2`), `carbon` (`agy`, `gemini-4-carbon-high`).
 - **`full` profile (all 5 contenders):** adds `opus` (`claude`, `claude-opus-5-5`) and `argon` (`agy`, `gemini-4-argon-high`).

@@ -16,7 +16,7 @@ Open a checklist with one entry per phase before launching anything:
 
 ## Per-Node Configuration (`~/.factory/swarm.yaml`)
 
-`factory swarm` reads `~/.factory/swarm.yaml` on the active node (falling back to [`config/swarm.example.yaml`](../../../config/swarm.example.yaml)):
+`factory swarm` reads `~/.factory/swarm.yaml` on the active node (falling back to `$FACTORY_ROOT/config/swarm.example.yaml`):
 
 - **`defaults.worker`:** default worker profile (`opus` -> `claude-opus-5-5`) used for partitioned slices unless overridden.
 - **`profiles.race`:** cross-harness race arms (`gpt-sol` via `codex`, `fable` via `claude`, `carbon` via `agy`), with `argon` and `pi` fallback available.
@@ -57,7 +57,7 @@ CLI invocation example (partitioned slices JSON or race):
 ```bash
 factory swarm run \
   --shape partition \
-  --tasks-file "$TMPDIR/swarm-tasks.json" \
+  --tasks-file "$TMPDIR/swarm-<id>/tasks.json" \
   --mode sandbox \
   --json
 ```
@@ -69,7 +69,7 @@ factory swarm run \
   --shape race \
   --rule best-of \
   --profile race \
-  --prompt-file "$TMPDIR/swarm-prompt.md" \
+  --prompt-file "$TMPDIR/swarm-<id>/prompt.md" \
   --json
 ```
 

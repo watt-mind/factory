@@ -1,7 +1,6 @@
 ---
 name: factory-statechart
 description: "Check a TLA+ model of a system that moves between states, such as a product flow, a protocol, or a service, and draw it as a Mermaid statechart. The report gives the shortest path to each state that breaks a rule. Use for /factory-statechart, or to show a bug as a path through states."
-disable-model-invocation: true
 ---
 
 # Statechart
@@ -10,15 +9,15 @@ The chart shows how a system moves between states, in the words of the person wh
 
 ## Run
 
-Work in a scratch folder outside the repo. Write a TLA+ spec and its config. Then run:
+Work in a namespaced scratch folder outside the repo (for example `$TMPDIR/statechart-<ticket-or-session>/`). Write a TLA+ spec and its config. Then run:
 
 ```sh
 <skill dir>/scripts/statechart SPEC.tla [--config FILE] [--view FILE] [--out DIR]
 ```
 
-`scripts/statechart.ts` is TypeScript, so run it with a runtime that can execute TypeScript.
+`<skill dir>/scripts/statechart` is an executable wrapper that picks an available TypeScript-capable runtime (`bun`, `node`, or `deno`) to run `scripts/statechart.ts`.
 
-The first run installs TLC and Java with mise and needs the network.
+The first run installs TLC and Java with mise and needs the network (or uses `TLA2TOOLS` / `JAVA` env vars when preinstalled).
 
 ## Write the spec
 
