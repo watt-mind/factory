@@ -14,8 +14,8 @@ Interpret `$ARGUMENTS`:
 
 ## Coordinator and independent verifier (`reviewer != implementer`)
 
-- **Non-blocking coordinator:** When verifying multiple PRs (`--open` or a list), stay unblocked in the main session. Spawn one isolated verifier subagent per PR using `/factory-work`'s **Difficulty tier × harness routing** table (always honoring **`reviewer != implementer`** — never let the implementing agent verify its own PR).
-- **Isolated workspaces:** Give each PR its own worktree (`bin/worktree-up.sh <ISSUE-ID>` when shipped, otherwise `git worktree add`). Never share a writable checkout or use `git stash` / `git rebase --autostash`.
+- **Non-blocking coordinator:** When verifying multiple PRs (`--open` or a list), stay unblocked in the main session. Spawn one isolated verifier subagent per PR using `/factory-work`'s **Difficulty tier × harness routing** table (preferring T3Code `delegate_task` + `thread_wait`/`thread_read` when inside T3Code, and always honoring **`reviewer != implementer`** — never let the implementing agent verify its own PR).
+- **Isolated workspaces:** Give each PR its own worktree (`bin/worktree-up.sh <ISSUE-ID>` when shipped — required for port/DB isolation even inside T3Code rather than bare `isolation: 'worktree'`, otherwise `git worktree add`). Never share a writable checkout or use `git stash` / `git rebase --autostash`.
 - **`git patch-id` verdict survival:** Before booting a live instance for a PR, check its comments/reviews for a prior `## Verification Receipt` matching `Verdict: PASS (MERGE-READY)` or `PASS+NOTES`. Compare:
   - `git diff origin/<base>...<verified-sha> | git patch-id --stable`
   - `git diff origin/<base>...<current-head-sha> | git patch-id --stable`

@@ -39,13 +39,14 @@ For each ticket or bundle you start:
 2. **Create the worktree using the repo's own script if it has one** (`bin/worktree-up.sh <ISSUE-ID>` in BJ29 and any repo following that pattern, using the lead ticket ID for a bundle) — it assigns non-colliding ports and a per-ticket database that a hand-rolled `git worktree add` does not. Only where no script exists: `git worktree add ~/Develop/.worktrees/<repo>/<ISSUE-ID> -b <type>/<ISSUE-ID>-<slug>`. The repo's `AGENTS.md` overrides this command on anything worktree- or environment-related.
 3. Spawn a subagent (general-purpose, run in background) using the **Difficulty tier × harness routing** table below (keyed by the ticket's `tier:*` label, or the highest tier in a bundle).
 
-   | Difficulty / Role | Claude Code                                 | Codex / Cursor                  | Pi                              |
-   | :---------------- | :------------------------------------------ | :------------------------------ | :------------------------------ |
-   | `tier:light`      | `haiku` / `sonnet`                          | fast (`sol` / fast)             | `muse-spark`                    |
-   | `tier:standard`   | `sonnet` (or `opus` for multi-module seams) | `sol` / `wonder`                | `muse` / `wonder`               |
-   | `tier:strong`     | `opus`                                      | `sol` / `opus`-class            | `wonder` / `opus`-class         |
-   | `reviewer`        | separate `opus` (`factory-merge-reviewer`)  | separate `wonder` / cross-model | separate `wonder` / cross-model |
+   | Difficulty / Role | Claude Code                                 | Codex / Cursor                  | Pi                              | T3Code (`delegate_task` / `orchestrator_capabilities`) |
+   | :---------------- | :------------------------------------------ | :------------------------------ | :------------------------------ | :----------------------------------------------------- |
+   | `tier:light`      | `haiku` / `sonnet`                          | fast (`sol` / fast)             | `muse-spark`                    | fast model from `orchestrator_capabilities`            |
+   | `tier:standard`   | `sonnet` (or `opus` for multi-module seams) | `sol` / `wonder`                | `muse` / `wonder`               | standard model (`sol` / `fable` / `carbon`)            |
+   | `tier:strong`     | `opus`                                      | `sol` / `opus`-class            | `wonder` / `opus`-class         | strong model (`opus` / `gpt-sol` / `fable`)            |
+   | `reviewer`        | separate `opus` (`factory-merge-reviewer`)  | separate `wonder` / cross-model | separate `wonder` / cross-model | separate cross-vendor `delegate_task` thread           |
 
+   **T3Code backend:** When T3Code Orchestrator MCP tools (`orchestrator_capabilities`, `delegate_task`, `thread_wait`, `thread_read`) are available, dispatch each claimed ticket/bundle to a `delegate_task` thread pointing at the `bin/worktree-up.sh` worktree path (do not rely on bare `isolation: 'worktree'` alone for repos that need `bin/worktree-up.sh` port/DB isolation).
    **Fallback chain:** Fall back to the harness default (`inherit`) when a tier model is unavailable or quota-limited.
    **Hard invariant (`reviewer != implementer`):** Review and critique must run in a separate agent conversation (and a separate model or harness family where available). Self-approval is forbidden.
 

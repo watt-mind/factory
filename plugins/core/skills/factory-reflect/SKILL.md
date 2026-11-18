@@ -41,7 +41,7 @@ Do not write files or edit anything yet. Gather read-only inputs:
 
 ### Step 2: Launch three parallel read-only reviewers
 
-Spawn three parallel read-only subagents (`research` or equivalent non-writing agent) in one turn, filling in `<TRANSCRIPT_PATH>` (or `<DIGEST>`), `<REPO_ROOT>`, and the repo/shared skill catalog list:
+Spawn three parallel read-only subagents (`research` or equivalent non-writing agent; or parallel read-only T3Code `delegate_task` threads across models from `orchestrator_capabilities` when inside T3Code) in one turn, filling in `<TRANSCRIPT_PATH>` (or `<DIGEST>`), `<REPO_ROOT>`, and the repo/shared skill catalog list:
 
 1. **Judgment reviewer** — Read and pass `references/judgment-reviewer.md`. Extracts mistakes, user corrections, repo/API gotchas, architectural rationale, and skill execution gaps.
 2. **Tooling reviewer** — Read and pass `references/tooling-reviewer.md`. Extracts wasted search/read loops, subagent routing errors, repeatable scripts (`principle-build-the-lever`), and missing structural checks (`principle-encode-lessons-in-structure`).

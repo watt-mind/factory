@@ -34,12 +34,14 @@ Keep the main session unblocked for steering, cross-slice seams, and final verif
 
 Route subagents by difficulty tier (`tier:light`, `tier:standard`, `tier:strong`) and role:
 
-| Difficulty / Role | Claude Code                                 | Codex / Cursor                  | Pi                              |
-| :---------------- | :------------------------------------------ | :------------------------------ | :------------------------------ |
-| `tier:light`      | `haiku` / `sonnet`                          | fast (`sol` / fast)             | `muse-spark`                    |
-| `tier:standard`   | `sonnet` (or `opus` for multi-module seams) | `sol` / `wonder`                | `muse` / `wonder`               |
-| `tier:strong`     | `opus`                                      | `sol` / `opus`-class            | `wonder` / `opus`-class         |
-| `reviewer`        | separate `opus` (`factory-merge-reviewer`)  | separate `wonder` / cross-model | separate `wonder` / cross-model |
+| Difficulty / Role | Claude Code                                 | Codex / Cursor                  | Pi                              | T3Code (`delegate_task` / `orchestrator_capabilities`) |
+| :---------------- | :------------------------------------------ | :------------------------------ | :------------------------------ | :----------------------------------------------------- |
+| `tier:light`      | `haiku` / `sonnet`                          | fast (`sol` / fast)             | `muse-spark`                    | fast model from `orchestrator_capabilities`            |
+| `tier:standard`   | `sonnet` (or `opus` for multi-module seams) | `sol` / `wonder`                | `muse` / `wonder`               | standard model (`sol` / `fable` / `carbon`)            |
+| `tier:strong`     | `opus`                                      | `sol` / `opus`-class            | `wonder` / `opus`-class         | strong model (`opus` / `gpt-sol` / `fable`)            |
+| `reviewer`        | separate `opus` (`factory-merge-reviewer`)  | separate `wonder` / cross-model | separate `wonder` / cross-model | separate cross-vendor `delegate_task` thread           |
+
+**T3Code backend & worktree guardrail:** When T3Code Orchestrator MCP tools (`orchestrator_capabilities`, `delegate_task`, `create_threads`, `thread_wait`, `thread_read`) are available in the active session, prefer `delegate_task` (or `create_threads`) so workers and reviewers run as live child threads with cross-vendor `reviewer != implementer` isolation. Note that T3Code `isolation: 'worktree'` isolates **git branches only**, not ports or databases — for repos with `bin/worktree-up.sh`, still allocate the worktree via `bin/worktree-up.sh <ISSUE-ID>` rather than relying on bare `isolation: 'worktree'` alone.
 
 **Fallback chain:** Fall back to the harness default (`inherit`) if a tier model is unavailable or quota-limited.
 
