@@ -13,21 +13,24 @@ Interpret $ARGUMENTS as specific issue IDs, a total ticket cap, and/or an in-fli
 
 ## 1. Check capacity and build the queue
 
-Run `bun orchestrator/pulse.mjs` (or `factory pulse`) before building or widening dispatch. Read `CAPACITY & FLOW` (`runnerCap`, `activeRuns`, `queuedRuns`, `openReadyPrs`, `mergedLastHour`, `verdict`):
+Run `bun orchestrator/pulse.mjs` (or `factory pulse`) before building or widening dispatch. Read `CAPACITY & FLOW` (`runnerCap`, `activeRuns`, `queuedRuns`, `openReadyPrs`, `openMergeablePrs`, `openEscalatedPrs`, `diskFreeGb`, `worktreeCount`, `mergedLastHour`, `verdict`):
 
-- `DRAIN_MERGES_FIRST`: stop dispatching new work and run `/factory-merge` first to drain open ready PRs.
-- `HOLD_OR_BUNDLE`: do not widen single-PR concurrency while CI runners are saturated or queued (`queuedRuns > 0` or `activeRuns >= runnerCap`); hold current slots or coalesce cohesive tickets into bundles.
+- `DRAIN_MERGES_FIRST`: stop dispatching new work and run `/factory-merge` first to drain open mergeable PRs (held `escalated` PRs do not trigger this).
+- `DRAIN_OR_CLEANUP`: when `diskFreeGb < 5`, prune merged/stale worktrees (`bin/worktree-down.sh` / `git worktree prune`) before creating new worktrees.
+- `HOLD_OR_BUNDLE`: do not widen single-PR concurrency while CI runners are saturated or queued (`queuedRuns > 0` or `activeRuns >= runnerCap`); **keep target implementation lanes full** (for example, 10 implementation lanes — counted separately from reviewer, merge, and triage/spec subagents which run on top) by coalescing work into 3–6 ticket bundles or staging local branches for bulk merge rather than shrinking active implementation lanes. Only `Owned Paths` overlap, disk/port/DB exhaustion, or tracker quota may reduce implementation concurrency (and must be surfaced via the Feasibility valve).
 - `WIDEN`: runner headroom and low open-PR backlog support widening up to target slots.
 
 Never widen based on backlog depth alone; widen only on observed `mergedLastHour` flow and runner headroom.
 
 Resolve the repo/team from this checkout (§1 mapping). Query the ready queue via `factory ticket queue` (`state:Todo`, `ai:agent-ready`, unassigned, sorted priority asc then createdAt asc; use `factory ticket get <ID>` to read each candidate's full description, falling back to `factory ticket raw` only where documented in the floor). Confirm every candidate has all five §5 sections — a ticket missing one goes back to `Triage` with a comment, not into the queue.
 
+**Triage feeder:** When `readyQueue < 2 * concurrencyCap` and `Triage` is non-empty, fan out parallel read-only spec-validation subagents (`10–15` `Triage` issues per batch) to populate `ticket-spec` sections and keep the ready queue fed.
+
 Log the queue (ticket, title, owned paths) and start immediately without waiting for approval — assume the operator is AFK.
 
 ## 2. Dispatch — rolling, bundle-aware, non-blocking
 
-Keep the main session unblocked as coordinator for steering, cross-slice seams, and queue decisions while subagents execute isolated ticket or bundle tracks. Keep up to the concurrency cap in flight. **The in-flight concurrency cap counts bundles (worktree/PR slots), NOT raw ticket count.**
+Keep the main session unblocked as coordinator (`<30s` turns) for steering, cross-slice seams, and queue decisions while subagents execute isolated ticket or bundle tracks. **Zero local work on root:** when managing `>= 3` parallel async lanes, the coordinator session **never** edits repo files, checks out PR branches, or runs test/typecheck/build suites on the root checkout — delegate all implementation, `MERGE-FIX` rounds, and verifications to isolated worktree subagents. Keep up to the concurrency cap in flight (counted separately from reviewer, merge, and triage/spec subagents). **The in-flight concurrency cap counts bundles (worktree/PR slots), NOT raw ticket count.**
 
 **Bundling as a first-class dispatch decision:** When CI or review capacity is the binding constraint (such as `HOLD_OR_BUNDLE` or growing `openReadyPrs`), form cohesive bundles of 3–6 related low-risk tickets with disjoint `Owned Paths`. A bundle occupies one `worktree-up.sh <LEAD-ISSUE-ID>` worktree, one branch named after the lead ticket, one commit per ticket, and one `Fixes <ISSUE-ID>` line per ticket in the PR body. Claim and heartbeat _every_ ticket in the bundle; if one ticket balloons or blocks, unassign it back to `Todo` and ship the rest.
 
@@ -35,8 +38,8 @@ Keep the main session unblocked as coordinator for steering, cross-slice seams, 
 
 For each ticket or bundle you start:
 
-1. **Claim it yourself first** (main agent, before spawning): set `assignee = self`, state `In Progress`, add `ai:in-progress` + `agent:claude-code`; then **re-read the ticket** — if the assignee isn't us, another agent won the race: skip it and take the next queue item. For a bundle, claim every ticket in the bundle before spawning.
-2. **Create the worktree using the repo's own script if it has one** (`bin/worktree-up.sh <ISSUE-ID>` in BJ29 and any repo following that pattern, using the lead ticket ID for a bundle) — it assigns non-colliding ports and a per-ticket database that a hand-rolled `git worktree add` does not. Only where no script exists: `git worktree add ~/Develop/.worktrees/<repo>/<ISSUE-ID> -b <type>/<ISSUE-ID>-<slug>`. The repo's `AGENTS.md` overrides this command on anything worktree- or environment-related.
+1. **Claim it yourself first** (main agent, before spawning): set `assignee = self`, state `In Progress`, add `ai:in-progress` + the active harness's `agent:*` label (or let `factory ticket claim`'s harness detection set it — never hardcode `agent:claude-code`); then **re-read the ticket** — if the assignee isn't us, another agent won the race: skip it and take the next queue item. For a bundle, claim every ticket in the bundle before spawning.
+2. **Create the worktree using the repo's own script if it has one** (`bin/worktree-up.sh <ISSUE-ID>` in BJ29 and any repo following that pattern, using the lead ticket ID for a bundle) — it assigns non-colliding ports and a per-ticket database that a hand-rolled `git worktree add` does not. **Serialize `bin/worktree-up.sh` execution** (or guard `.git/config` + port allocation with `flock`) to prevent parallel startup stampedes, and prune merged worktrees before dispatch when `diskFreeGb` is tight. Only where no script exists: `git worktree add ~/Develop/.worktrees/<repo>/<ISSUE-ID> -b <type>/<ISSUE-ID>-<slug>`. The repo's `AGENTS.md` overrides this command on anything worktree- or environment-related.
 3. Spawn a subagent (general-purpose, run in background) using the **Difficulty tier × harness routing** table below (keyed by the ticket's `tier:*` label, or the highest tier in a bundle).
 
    | Difficulty / Role | Claude Code                                 | Codex / Cursor                  | Pi                              | T3Code (`delegate_task` / `orchestrator_capabilities`) |
@@ -46,11 +49,19 @@ For each ticket or bundle you start:
    | `tier:strong`     | `opus`                                      | `sol` / `opus`-class            | `wonder` / `opus`-class         | strong model (`opus` / `gpt-sol` / `fable`)            |
    | `reviewer`        | separate `opus` (`factory-merge-reviewer`)  | separate `wonder` / cross-model | separate `wonder` / cross-model | separate cross-vendor `delegate_task` thread           |
 
-   **T3Code backend:** When T3Code Orchestrator MCP tools (`orchestrator_capabilities`, `delegate_task`, `thread_wait`, `thread_read`) are available, dispatch each claimed ticket/bundle to a `delegate_task` thread pointing at the `bin/worktree-up.sh` worktree path (do not rely on bare `isolation: 'worktree'` alone for repos that need `bin/worktree-up.sh` port/DB isolation).
+   **Domain/risk routing floor:** High-risk domains — **RAG / retrieval / ranking / citation / evals, auth / security, and concurrency** — promote to **`tier:strong`** (`opus` / `gpt-sol`, Fast mode OFF) regardless of a `tier:light` label, while honoring any stricter repo `AGENTS.md` overrides.
+
+   **T3Code backend & delegation lifecycle:** When T3Code Orchestrator MCP tools (`orchestrator_capabilities`, `delegate_task`, `task_cancel`, `t3_thread_wait`, `t3_thread_read`) are available:
+   - Call `orchestrator_capabilities` **once per thread** before the first `delegate_task`.
+   - Spawn workers and reviewers via **`delegate_task` (`mode: "async"`)** — **never** use `create_threads` or `t3_thread_launch` for worker fan-out (reserved for explicit user requests for new top-level threads).
+   - Follow `delegate_task`'s `next` behavior (end turn for reactive wakeup; never poll `task_status` or loop on `t3_thread_wait`).
+   - Every new review or re-check is a fresh `delegate_task`, never `t3_thread_send` to a finished child; cancel replaced/extra delegates with `task_cancel` (never `t3_thread_interrupt`).
+   - `delegate_task` only accepts `isolation: "shared" | "worktree"` (no `worktreePath` param). Run `bin/worktree-up.sh <ISSUE-ID>` sequentially in the coordinator and pass `isolation: "shared"` with `worktree: <abs-path>` spelled out in `task`, or initialize per-worktree ports/DB inside an `isolation: "worktree"` checkout.
+
    **Fallback chain:** Fall back to the harness default (`inherit`) when a tier model is unavailable or quota-limited.
    **Hard invariant (`reviewer != implementer`):** Review and critique must run in a separate agent conversation (and a separate model or harness family where available). Self-approval is forbidden.
 
-   Give the implementer subagent a **self-contained prompt** containing the full ticket (or bundle tickets: IDs, descriptions, all five sections), the worktree path and its ports/database, and these standing orders:
+   Give the implementer subagent a **self-contained prompt** containing the **full ticket bodies** (IDs, descriptions, all five sections — passing full bodies upfront conserves the 2,500/hr Linear quota), the worktree path and its ports/database, and these standing orders:
    - Work **only** inside the worktree and only on files matching `Owned Paths`. Assume the operator is AFK — resolve open implementation details (module structure, naming, internal data/error shape, edge-case defaults consistent with acceptance criteria) from `origin/<base>` conventions, sibling modules, tests, git history, and `docs/product-decisions.md` without pausing, and record any non-obvious reversible engineering assumptions in `## Handoff` (`Risks`).
    - Follow `/factory-ticket` Step 2 discipline: fix root causes (no timer/retry/catch-and-swallow symptom patches), do not copy adjacent tech debt, add no unnarrowed lint/type suppressions or workaround-alibi comments (single-line boundary exceptions require a concrete upstream or `Triage` citation), explore 2–3 distinct options inside `Owned Paths` on net-new UI surfaces, material layout/flow redesigns, or explicit exploration requests (`principle-exhaust-the-design-space` — never routine bugfixes; prototype with `$TMPDIR/<ISSUE-ID>-*.patch`, never `git stash`, autonomously commit only the winner, and record explored options + winner rationale in the ticket comment and `## Handoff` `Risks`), visually render and run ≥1 cold self-polish pass on any UI-affecting change (`principle-experience-first` — retaining 1–4 post-polish PNGs `≤ 1 MB` in `ux-screenshots/` outside the worktree even when Step 4's `factory-ux-critic` is skipped on isolated styling, copy-in-layout, or admin UI, without `Read`ing captures back), and cold-read `git diff` before verification.
    - Heartbeat the Linear ticket at each phase change and at least every 20 minutes, saying what changed since the last one.

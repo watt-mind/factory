@@ -28,6 +28,8 @@ Every topology obeys `shared/floor.md`:
 
 Keep the main session unblocked for steering, cross-slice seams, and final verification gates. Delegate leaf implementation, read-only exploration, and slow test/build runs to isolated subagents with explicit `Owned Paths` and verification commands, reserving main context for integration and decisions.
 
+**Zero local work on root (`<30s` turns):** When managing `>= 3` parallel async lanes, the coordinator session **never** edits repo files, checks out PR branches, or runs test/typecheck/build suites on the root checkout — delegate implementation, `MERGE-FIX` rounds, and verifications to isolated worktree subagents so coordinator turns stay under ~30 seconds.
+
 **Hard invariant (`reviewer != implementer`):** Review and critique must run in a separate agent conversation (and separate model or harness family where available). The implementing agent never self-approves its own diff.
 
 ## Difficulty tier × harness routing
@@ -41,7 +43,15 @@ Route subagents by difficulty tier (`tier:light`, `tier:standard`, `tier:strong`
 | `tier:strong`     | `opus`                                      | `sol` / `opus`-class            | `wonder` / `opus`-class         | strong model (`opus` / `gpt-sol` / `fable`)            |
 | `reviewer`        | separate `opus` (`factory-merge-reviewer`)  | separate `wonder` / cross-model | separate `wonder` / cross-model | separate cross-vendor `delegate_task` thread           |
 
-**T3Code backend & worktree guardrail:** When T3Code Orchestrator MCP tools (`orchestrator_capabilities`, `delegate_task`, `create_threads`, `thread_wait`, `thread_read`) are available in the active session, prefer `delegate_task` (or `create_threads`) so workers and reviewers run as live child threads with cross-vendor `reviewer != implementer` isolation. Note that T3Code `isolation: 'worktree'` isolates **git branches only**, not ports or databases — for repos with `bin/worktree-up.sh`, still allocate the worktree via `bin/worktree-up.sh <ISSUE-ID>` rather than relying on bare `isolation: 'worktree'` alone.
+**Domain/risk routing floor:** High-risk domains — **RAG / retrieval / ranking / citation / evals, auth / security, and concurrency** — promote to **`tier:strong`** (`opus` / `gpt-sol`, Fast mode OFF) regardless of a `tier:light` label, while honoring any stricter repo `AGENTS.md` overrides.
+
+**T3Code backend & delegation lifecycle:** When T3Code Orchestrator MCP tools (`orchestrator_capabilities`, `delegate_task`, `task_cancel`, `t3_thread_wait`, `t3_thread_read`) are available in the active session:
+
+- Call `orchestrator_capabilities` **once per thread** before the first `delegate_task`.
+- Spawn all workers, reviewers, swarm, and arena child runs via **`delegate_task` (`mode: "async"`)** — **never** use `create_threads` or `t3_thread_launch` for subagent/worker fan-out (those create top-level threads, reserved for explicit user requests).
+- Follow `delegate_task`'s `next` behavior: end your turn for reactive wakeup; never poll `task_status` or loop on `t3_thread_wait`.
+- Every new review or re-check is a fresh `delegate_task`, never `t3_thread_send` to a finished child; cancel replaced or extra delegates with `task_cancel` (never `t3_thread_interrupt`).
+- **Worktree interaction:** `delegate_task` only accepts `isolation: "shared" | "worktree"` (no `worktreePath` param). Either run `bin/worktree-up.sh <ISSUE-ID>` sequentially in the coordinator and pass `isolation: "shared"` with `worktree: <abs-path>` spelled out in `task`, or initialize per-worktree ports/DB inside a `delegate_task` `isolation: "worktree"` checkout.
 
 **Fallback chain:** Fall back to the harness default (`inherit`) if a tier model is unavailable or quota-limited.
 
@@ -70,14 +80,14 @@ Use when work splits cleanly into independent slices with little coordination ov
 
 ### 2. Arena (competitive bakeoff and grafting)
 
-Pairs with `../principle-exhaust-the-design-space/SKILL.md` (gated: use on net-new UI surfaces, material layout/architecture forks, or explicit user comparison requests — never routine bugfixes).
+Pairs with `../principle-exhaust-the-design-space/SKILL.md` and `../factory-arena/SKILL.md` (gated: use on net-new UI surfaces, material layout/architecture forks, or explicit user comparison requests — never routine bugfixes). For cross-harness multi-model bakeoffs (`codex` / `claude` / `agy`), invoke `/factory-arena` (`factory arena`).
 
 **Steps:**
 
 1. **Write the rubric first:** Before spawning contenders, lock 3-5 concrete evaluation criteria (for example: correctness under concurrency, diff/bundle minimality, reader load, UI visual hierarchy, testability).
-2. **Enforce genuine diversity:** Spawn 2-3 workers with distinct architectural hypotheses or layout constraints in separate isolated workspaces or `$TMPDIR/<id>-opt-*.patch` sandboxes. Never run two slightly tweaked copies of the same prompt.
-3. **Judge coldly against artifacts:** Run benchmarks, render live UIs, or inspect actual diffs against the rubric. Optionally graft one standout helper or boundary check from a runner-up into the winning design.
-4. **Land only the winner:** Discard losing sandboxes cleanly (`git worktree remove` or delete `$TMPDIR` patches; never `git stash`), commit only the winner on the ticket branch, and record the options + rubric rationale in the PR/Handoff or response.
+2. **Enforce genuine diversity:** Spawn 2-3 workers (or run `factory arena run --profile default|full`) with distinct models/hypotheses in separate isolated worktrees or `$TMPDIR` sandboxes. Never run two slightly tweaked copies of the same prompt.
+3. **Judge coldly against artifacts:** Run a read-only cross-vendor judge (`factory arena judge`), benchmarks, or live UI/diff checks against the rubric. Optionally graft one standout helper or boundary check from a runner-up into the winning design.
+4. **Land only the winner:** Discard losing sandboxes cleanly (`factory arena cleanup`, `git worktree remove`, or delete `$TMPDIR` patches; never `git stash`), commit only the winner on the ticket branch, and record the options + rubric rationale in the PR/Handoff or response.
 
 ### 3. Staged pipeline (map -> build -> adversarial review -> verify)
 
