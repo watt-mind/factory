@@ -1,0 +1,49 @@
+# Custom NVIDIA SkillEvaluator deterministic quality configuration for Factory skills.
+# Usage:
+#   uvx --python 3.13 --from "git+https://github.com/NVIDIA/SkillEvaluator.git" \
+#     skillevaluator quality-check dist/gemini/skills/<skill> \
+#     --quality-config evals/skillevaluator-quality.yaml
+
+# Factory skills (especially concise `principle-*` rules) omit boilerplate
+# `## Prerequisites`, `## Limitations`, and `## Troubleshooting` headings to
+# minimize context-window reader load.
+expected_headers: []
+
+# Include Factory's control-plane and verification error/failure vocabulary in
+# addition to the default error-handling terms.
+error_handling:
+  mentioned:
+    points: 10
+    message: "No mention of error handling, verification, or gate boundaries"
+    suggestion: "Document failure modes, verification gates, or Blocked/Triage routing"
+    terms:
+      - error
+      - errors
+      - exception
+      - exceptions
+      - invalid
+      - fail
+      - fails
+      - failed
+      - failure
+      - failures
+      - failing
+      - validate
+      - validates
+      - validated
+      - validating
+      - validation
+      - validations
+      - verify
+      - verified
+      - verification
+      - blocked
+      - triage
+      - escalate
+      - escalated
+      - unclaim
+      - revert
+      - reject
+      - guard
+      - invariant
+      - illegal

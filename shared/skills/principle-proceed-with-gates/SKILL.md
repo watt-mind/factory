@@ -1,6 +1,6 @@
 ---
 name: principle-proceed-with-gates
-description: "Proceed autonomously on reversible local work and present the result; always stop and escalate on human, editorial, security, Never-auto-merge, or data-honesty gates."
+description: "Apply when choosing autonomous action vs. human approval: proceed on reversible work; stop on editorial, security, or Never-auto-merge gates."
 disable-model-invocation: true
 ---
 

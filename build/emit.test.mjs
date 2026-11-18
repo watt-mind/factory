@@ -1363,3 +1363,45 @@ test("emit packages /factory-baseline, bundled project-conventions/code-security
   expect(readme).toContain("`/factory-baseline`");
   expect(readme).toContain("PC-01`..`PC-23");
 });
+
+test("SkillEvaluator quality config, proceed-with-gates trigger, and factory-work command delegation stay aligned", () => {
+  const qualityConfigPath = path.join(
+    ROOT,
+    "evals",
+    "skillevaluator-quality.yaml",
+  );
+  expect(existsSync(qualityConfigPath)).toBe(true);
+  const qualityConfig = Bun.YAML.parse(readFileSync(qualityConfigPath, "utf8"));
+  expect(qualityConfig.expected_headers).toEqual([]);
+  expect(qualityConfig.error_handling.mentioned.terms).toContain("blocked");
+  expect(qualityConfig.error_handling.mentioned.terms).toContain("triage");
+
+  const evalsReadme = readFileSync(
+    path.join(ROOT, "evals", "README.md"),
+    "utf8",
+  );
+  expect(evalsReadme).toContain("evals/skillevaluator-quality.yaml");
+
+  const proceed = readFileSync(
+    path.join(
+      ROOT,
+      "shared",
+      "skills",
+      "principle-proceed-with-gates",
+      "SKILL.md",
+    ),
+    "utf8",
+  );
+  const proceedFm = Bun.YAML.parse(proceed.match(/^---\n([\s\S]*?)\n---\n/)[1]);
+  expect(proceedFm.description).toMatch(/^Apply when /);
+
+  const work = readFileSync(
+    path.join(ROOT, "shared", "commands", "factory-work.md"),
+    "utf8",
+  );
+  expect(work).toContain("shared/commands/factory-ticket.md");
+  expect(work).toContain("shared/commands/factory-merge.md");
+  expect(work).not.toContain(
+    "This pull request has UX-review screenshot evidence",
+  );
+});
