@@ -162,6 +162,7 @@ case "$cmd" in
   branch-guard) run_bun orchestrator/branch-guard.mjs "$@" ;;
   reconcile)    run_bun orchestrator/reconcile.mjs "$@" ;;
   arena)        run_bun orchestrator/arena.mjs "$@" ;;
+  swarm)        run_bun orchestrator/swarm.mjs "$@" ;;
   ship-preflight) run_bun orchestrator/ship.mjs preflight "$@" ;;
   ship-chain)   run_bun orchestrator/ship.mjs chain "$@" ;;
   reaper)       run_bun orchestrator/reaper.mjs "$@" ;;
@@ -451,6 +452,7 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   branch-guard  orchestrator/branch-guard.mjs (mechanical open-PR and protected branch guard)
   reconcile     orchestrator/reconcile.mjs
   arena         orchestrator/arena.mjs (multi-harness competitive bakeoff runner: config, run, judge, cleanup)
+  swarm         orchestrator/swarm.mjs (multi-harness parallel worker runner: config, run, cleanup)
   ship-preflight orchestrator/ship.mjs (read-only release gate: base CI green for
                 the exact SHA, runtime pins fresh, publishers idle, no bot pin or
                 escalated PR, promotion journal clean; --repo <name> --json)
