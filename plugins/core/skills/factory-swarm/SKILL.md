@@ -29,7 +29,12 @@ factory swarm config
 
 ## Backend Selection (T3Code-native vs. Harness Subagents vs. CLI Runner)
 
-1. **T3Code-native (preferred when inside T3Code):** If T3Code Orchestrator MCP tools (`orchestrator_capabilities`, `delegate_task`, `create_threads`, `thread_wait`, `thread_read`) are available in the session, fan out all N workers in parallel via T3Code (`isolation: 'worktree'` when writing) so every slice/arm runs as a live child thread in T3Code's UI.
+1. **T3Code-native (preferred when inside T3Code):** If T3Code Orchestrator MCP tools (`orchestrator_capabilities`, `delegate_task`, `task_cancel`, `t3_thread_wait`, `t3_thread_read`) are available in the session:
+   - Call `orchestrator_capabilities` **once per thread** before your first `delegate_task`.
+   - Fan out all N workers via **`delegate_task` (`mode: "async"`)** — **never** use `create_threads` or `t3_thread_launch` for worker fan-out (those create top-level threads, reserved for explicit user requests).
+   - Follow `delegate_task`'s `next` behavior: end your turn for reactive wakeup rather than polling `task_status` or looping on `t3_thread_wait`.
+   - Each new review or re-check is a fresh `delegate_task`, never `t3_thread_send` to a finished child; cancel replaced or extra delegates with `task_cancel` (never `t3_thread_interrupt`).
+   - **Worktree interaction:** `delegate_task` only accepts `isolation: "shared" | "worktree"` (no `worktreePath` param). For repos with `bin/worktree-up.sh`, run `bin/worktree-up.sh <ISSUE-ID>` sequentially in the coordinator and pass `isolation: "shared"` with `worktree: <abs-path>` spelled out in `task`, or initialize per-worktree ports/DB inside an `isolation: "worktree"` checkout.
 2. **Harness-native subagents (same-harness interactive):** When running partitioned slices inside a single harness (`claude`, `codex`, `agy`, `cursor`) without cross-vendor race arms, you may use the harness's native `swarm` / `invoke_subagent` / `run_workflow` tools with isolated worktrees (`workspace:"share"` or `bin/worktree-up.sh`).
 3. **CLI runner (`factory swarm run`):** For cross-harness races or headless/terminal fan-outs across `codex`, `claude`, `agy`, and `pi`, run `factory swarm run`.
 
