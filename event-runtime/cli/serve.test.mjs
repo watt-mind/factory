@@ -216,6 +216,13 @@ export default async function start() {
 }
 `;
 
+// HARD_EXIT_MS is the child's in-process backstop, so the parent-side wait
+// must leave room for signal delivery and process teardown on top of it.
+// Whether the graceful path beat the backstop is asserted from the child's
+// own log ("shutdown exceeded" is absent), not from the parent's wall clock,
+// which a loaded CI runner stretches (WM-1147).
+const SIGTERM_EXIT_WAIT_MS = HARD_EXIT_MS + 2_500;
+
 describe("serve command", () => {
   test("registry ref swaps atomically and keeps last-good on invalid edits", async () => {
     const { createRegistryRef } = await import("./serve.mjs");
@@ -508,8 +515,8 @@ describe("serve command", () => {
       expect(await waitFor(box, "control API on", 8000)).toBe(true);
       const started = Date.now();
       child.kill("SIGTERM");
-      expect((await exitOf(child, HARD_EXIT_MS)).code).toBe(0);
-      expect(Date.now() - started).toBeLessThan(HARD_EXIT_MS);
+      expect((await exitOf(child, SIGTERM_EXIT_WAIT_MS)).code).toBe(0);
+      expect(Date.now() - started).toBeLessThan(SIGTERM_EXIT_WAIT_MS);
       expect(box.out).toContain(
         `connector stop: timed out after ${CONNECTOR_STOP_TIMEOUT_MS}ms`,
       );
@@ -541,10 +548,10 @@ describe("serve command", () => {
       socket = await openKeepAlive(port);
       const started = Date.now();
       child.kill("SIGTERM");
-      const exit = await exitOf(child, HARD_EXIT_MS);
+      const exit = await exitOf(child, SIGTERM_EXIT_WAIT_MS);
       const elapsed = Date.now() - started;
       expect(exit).toEqual({ code: 0, signal: null });
-      expect(elapsed).toBeLessThan(HARD_EXIT_MS);
+      expect(elapsed).toBeLessThan(SIGTERM_EXIT_WAIT_MS);
       // The graceful path ran to completion: close called back, so the lock
       // went after the socket — not through the hard-exit backstop.
       expect(box.out).not.toContain("shutdown exceeded");
