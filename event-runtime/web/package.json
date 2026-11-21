@@ -14,7 +14,7 @@
   "dependencies": {
     "@fontsource-variable/inter": "^5.2.5",
     "@radix-ui/react-icons": "^1.3.2",
-    "@tanstack/react-query": "^5.107.1",
+    "@tanstack/react-query": "^5.108.0",
     "@xyflow/react": "^12.12.1",
     "cmdk": "^1.0.4",
     "elkjs": "^0.12.1",
