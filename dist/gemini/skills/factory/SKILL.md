@@ -36,6 +36,7 @@ Match the user's request to **one** mode below, read its playbook (or invoke the
 - **Why (`../factory-why/SKILL.md`):** Decision archaeology (`git log -S`/`-L`, PRs, Linear/GitHub issues, `docs/product-decisions.md`) before changing load-bearing code.
 - **Teach (`../factory-teach/SKILL.md`):** Layer `factory-how` + `factory-why` + `factory-unslop` into progressive explanations with incremental Mermaid diagrams for 3+ interacting parts.
 - **Unslop (`../factory-unslop/SKILL.md`):** Edit or write prose, PRs, docs, and skills with zero AI tells while preserving technical precision.
+- **No Comments (`../factory-no-comments/SKILL.md`, `/factory-no-comments`):** Spawn the read-only `factory-comment-sicko` reviewer on a diff or scoped module, strip non-keep-list comments, fix accepted `MUST KILL` workarounds/suppressions, and offer structural encodings for claimed constraints.
 - **Orchestrate (`../factory-orchestrate/SKILL.md`):** Interactive Swarm partitions, Arena bakeoffs in isolated sandboxes, or Producer -> Critic pipelines (distinct from `/factory-work` standing queue dispatch).
 - **Reflect (`../factory-reflect/SKILL.md`):** Mine the active session transcript via 3 read-only lenses + synthesizer into project-local `.claude/skills/`, `AGENTS.md`, or structural `Triage` tickets (distinct from harness `/factory-friction` and log metrics `/factory-retro`).
 - **Verify (`../factory-verify-create/SKILL.md`, `../factory-verify-maintain/SKILL.md`, `/factory-verify`):** Generate and maintain repo-local `.claude/skills/verify-<app>/` control skills and run pre-merge human-like E2E PR/branch verification.
@@ -49,4 +50,4 @@ If the request is a control-plane or release lifecycle operation, delegate direc
 
 - Ticket lifecycle: `/factory-ticket`, `/factory-work`, `/factory-capture`, `/factory-triage`, `/factory-unblock`
 - Review & landing: `/factory-verify`, `/factory-merge`, `/factory-ship`, `/factory-verify-deploy`
-- Repo health & sweeps: `/factory-baseline`, `/factory-sweep`, `/factory-audit`, `/factory-garden`, `/factory-retro`, `/factory-friction`, `/factory-recap`
+- Repo health & sweeps: `/factory-baseline`, `/factory-no-comments`, `/factory-sweep`, `/factory-audit`, `/factory-garden`, `/factory-retro`, `/factory-friction`, `/factory-recap`
