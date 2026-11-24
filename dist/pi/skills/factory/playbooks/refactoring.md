@@ -17,5 +17,5 @@ Behavior-preserving structural improvement: remove dead weight, shrink mutable s
 3. **Subtract first:** Delete dead code, unused branches, and one-caller wrappers before extracting new modules or hooks. Preserve security/boundary guards and required schema fields.
 4. **Shrink state & reader load:** Collapse scattered boolean/optional bags into reducers or discriminated unions; keep modules focused and shallow.
 5. **Verify:** Re-run targeted tests + static checks (lint/typecheck/format) with zero skipped/relaxed assertions.
-6. **Sync formal verification:** If covered files changed, run `/factory-formal-verify-maintain` to keep `.claude/skills/verify-*/` and its sync commit accurate.
+6. **Sync formal verification & comment hygiene:** If covered files changed, run `/factory-formal-verify-maintain` to keep `.claude/skills/verify-*/` and its sync commit accurate. If the diff adds lint/type suppressions or `>= 5` comment lines / ticket-ID narration, run `/factory-no-comments` (`factory-comment-sicko`) and re-verify touched files.
 7. **Hand off:** Open PR targeting `config/repos.yaml`'s `base` with `Fixes <ISSUE-ID>` and post the `## Handoff` comment.

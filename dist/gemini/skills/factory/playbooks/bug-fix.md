@@ -15,5 +15,5 @@ Reproduce the defect, prove the test fails first, fix the root cause, and verify
 3. **Negative test first:** Write a regression test asserting user-observable behavior and **observe it fail** before applying the fix.
 4. **Apply minimal fix** within `Owned Paths`. If the change touches `Never auto-merge` or `escalate_paths` surfaces, flag for escalation without auto-merging.
 5. **Verify:** Run the ticket's Verification Command, targeted tests covering the changed surface, and fast static checks (lint/typecheck/format) — leave full suites to CI unless cross-cutting blast radius requires them.
-6. **Check formal specs:** If the bug touched code covered by a `.claude/skills/verify-*/SKILL.md`, run `/factory-formal-verify-maintain` (or `/factory-statechart`).
+6. **Check formal specs & comment hygiene:** If the bug touched code covered by a `.claude/skills/verify-*/SKILL.md`, run `/factory-formal-verify-maintain` (or `/factory-statechart`). If the diff adds lint/type suppressions or `>= 5` comment lines / ticket-ID narration, run `/factory-no-comments` (`factory-comment-sicko`) and re-verify touched files.
 7. **Hand off:** Open PR targeting `config/repos.yaml`'s `base` with `Fixes <ISSUE-ID>` and post the `## Handoff` comment.
