@@ -343,6 +343,56 @@ export function checkRunsGreen(checkRuns) {
   };
 }
 
+const workflowFilePath = (workflow) =>
+  String(workflow).startsWith(".github/workflows/")
+    ? String(workflow)
+    : `.github/workflows/${workflow}`;
+
+/**
+ * Extract `on.push.paths` from a GitHub Actions workflow YAML document.
+ * Handles both YAML 1.2 (`"on"`) and YAML 1.1 (`true`) key forms; returns
+ * `null` when `on.push.paths` is absent or empty.
+ */
+export function extractWorkflowPushPaths(yamlText) {
+  const doc = Bun.YAML.parse(yamlText);
+  if (!doc || typeof doc !== "object") return null;
+  const on = doc.on ?? doc.true;
+  if (!on || typeof on !== "object" || Array.isArray(on)) return null;
+  const push = on.push;
+  if (!push || typeof push !== "object" || Array.isArray(push)) return null;
+  const paths = push.paths;
+  if (
+    !Array.isArray(paths) ||
+    !paths.length ||
+    paths.some((p) => typeof p !== "string" || !p)
+  )
+    return null;
+  return [...paths];
+}
+
+/**
+ * Compare configured `runtime_roles[].paths` against the publisher workflow's
+ * `on.push.paths`. Set-equality suffices for plain paths; when either list
+ * contains `!` negations, order is significant in Actions and must match too.
+ */
+function pathsDrifted(configPaths, workflowPaths) {
+  const configSet = new Set(configPaths);
+  const workflowSet = new Set(workflowPaths);
+  const missing = workflowPaths.filter((p) => !configSet.has(p));
+  const extra = configPaths.filter((p) => !workflowSet.has(p));
+  if (missing.length || extra.length) return true;
+  const hasNegation =
+    configPaths.some((p) => p.startsWith("!")) ||
+    workflowPaths.some((p) => p.startsWith("!"));
+  if (hasNegation) {
+    return (
+      configPaths.length !== workflowPaths.length ||
+      configPaths.some((p, i) => p !== workflowPaths[i])
+    );
+  }
+  return false;
+}
+
 /**
  * The source commit a manifest role is pinned to. `provenance.commit_sha` is
  * the publisher's own receipt and wins; `reviewed_commit` and a `tag` that
@@ -689,6 +739,44 @@ export function checkRuntimeRole(cfg, tip, role, { forge, git, readManifest }) {
         title,
         `pinned ${pinned.slice(0, 8)} is an ancestor, but the role has no paths — staleness cannot be proven, so this is not a pass`,
         `add runtime_roles[${role.role}].paths mirroring ${role.publisherWorkflow}'s on.push.paths`,
+      );
+    // Drift-check config paths against the publisher workflow's actual
+    // `on.push.paths` at the tip being shipped so adding a path to the
+    // workflow without updating config/repos.yaml cannot silently produce a
+    // false PASS.
+    const wfPath = workflowFilePath(role.publisherWorkflow);
+    const wfShow = git(["show", `${tip}:${wfPath}`]);
+    if (wfShow.status !== 0)
+      return fail(
+        id,
+        title,
+        `could not read ${wfPath} at ${tip.slice(0, 8)} to verify on.push.paths: ${(wfShow.stderr || wfShow.stdout).trim()}`,
+        `git show ${tip}:${wfPath}`,
+      );
+    let workflowPaths;
+    try {
+      workflowPaths = extractWorkflowPushPaths(wfShow.stdout);
+    } catch (err) {
+      return fail(
+        id,
+        title,
+        `could not parse ${wfPath} at ${tip.slice(0, 8)}: ${err.message}`,
+        `git show ${tip}:${wfPath}`,
+      );
+    }
+    if (!workflowPaths)
+      return fail(
+        id,
+        title,
+        `${wfPath} at ${tip.slice(0, 8)} has no on.push.paths — staleness cannot be verified against the publisher`,
+        `add on.push.paths to ${wfPath}`,
+      );
+    if (pathsDrifted(role.paths, workflowPaths))
+      return fail(
+        id,
+        title,
+        `runtime_roles[${role.role}].paths [${role.paths.join(", ")}] drifted from ${wfPath} on.push.paths [${workflowPaths.join(", ")}]`,
+        `update runtime_roles[${role.role}].paths in config/repos.yaml to match ${wfPath}'s on.push.paths`,
       );
     const diff = git([
       "diff",

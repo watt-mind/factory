@@ -194,7 +194,12 @@ runtime_roles:
 `paths` must mirror the publisher workflow's own `on.push.paths`. That is not a
 convention, it is the definition of stale being used: the publisher rebuilds
 when those paths move, so a pin older than a change to one of them is a pin the
-publisher itself would consider out of date.
+publisher itself would consider out of date. **`ship-preflight` drift-checks
+this list against `.github/workflows/<publisher_workflow>` at the tip being
+shipped** (`git show <tip>:.github/workflows/<publisher_workflow>`): if the
+workflow's `on.push.paths` diverges from `config/repos.yaml` or is missing
+altogether, `runtime-pin:<role>` FAILs with both lists rather than silently
+evaluating a stale copy.
 
 **`paths` is required for a role built in this repo** and the config is
 rejected without it. A role with no paths has no definition of stale, so its

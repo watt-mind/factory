@@ -226,8 +226,23 @@ function fakeForge(state = {}) {
   return forge;
 }
 
-/** `git` answering the three questions ship.mjs asks. */
-function fakeGit({ ancestor = true, changed = [], tip = TIP } = {}) {
+const DEFAULT_WORKFLOW_YAML = `name: Publish Case Agent Image
+on:
+  push:
+    branches: [develop]
+    paths:
+      - docker/agent/**
+      - .github/workflows/case-agent-image.yml
+`;
+
+/** `git` answering the questions ship.mjs asks. */
+function fakeGit({
+  ancestor = true,
+  changed = [],
+  tip = TIP,
+  workflowYaml = DEFAULT_WORKFLOW_YAML,
+  showStatus = 0,
+} = {}) {
   const calls = [];
   const git = (args) => {
     calls.push(args);
@@ -240,6 +255,12 @@ function fakeGit({ ancestor = true, changed = [], tip = TIP } = {}) {
       };
     if (args[0] === "merge-base")
       return { status: ancestor ? 0 : 1, stdout: "", stderr: "" };
+    if (args[0] === "show")
+      return {
+        status: showStatus,
+        stdout: showStatus === 0 ? workflowYaml : "",
+        stderr: showStatus === 0 ? "" : "fatal: path does not exist",
+      };
     if (args[0] === "diff")
       return { status: 0, stdout: changed.join("\n"), stderr: "" };
     return {
@@ -1555,5 +1576,70 @@ describe("pagination and truncation fail-closed (GH-2340)", () => {
     const check = checkById(preflight(cfg(), deps({ forge })), "base-green");
     expect(check.status).toBe("fail");
     expect(check.detail).toContain("truncated");
+  });
+});
+
+// --------------------------------------------------- workflow path drift (GH-2341)
+
+describe("publisher workflow on.push.paths drift check (GH-2341)", () => {
+  test("adding a path to the publisher workflow without updating config FAILs with both lists", () => {
+    const driftedYaml = `name: Publish Case Agent Image
+on:
+  push:
+    paths:
+      - docker/agent/**
+      - .github/workflows/case-agent-image.yml
+      - docker/shared/**
+`;
+    const report = preflight(
+      cfg(),
+      deps({ git: fakeGit({ workflowYaml: driftedYaml }) }),
+    );
+    const check = checkById(report, "runtime-pin:case_agent");
+    expect(report.ok).toBe(false);
+    expect(check.status).toBe("fail");
+    expect(check.detail).toContain("drifted");
+    expect(check.detail).toContain("docker/agent/**");
+    expect(check.detail).toContain("docker/shared/**");
+  });
+
+  test("removing a path from the publisher workflow without updating config FAILs with both lists", () => {
+    const driftedYaml = `name: Publish Case Agent Image
+on:
+  push:
+    paths:
+      - docker/agent/**
+`;
+    const report = preflight(
+      cfg(),
+      deps({ git: fakeGit({ workflowYaml: driftedYaml }) }),
+    );
+    const check = checkById(report, "runtime-pin:case_agent");
+    expect(check.status).toBe("fail");
+    expect(check.detail).toContain("drifted");
+    expect(check.detail).toContain(".github/workflows/case-agent-image.yml");
+  });
+
+  test("a publisher workflow with no on.push.paths is a FAIL, never SKIP or PASS", () => {
+    const noPathsYaml = `name: Publish Case Agent Image
+on:
+  workflow_dispatch: {}
+`;
+    const report = preflight(
+      cfg(),
+      deps({ git: fakeGit({ workflowYaml: noPathsYaml }) }),
+    );
+    const check = checkById(report, "runtime-pin:case_agent");
+    expect(report.ok).toBe(false);
+    expect(check.status).toBe("fail");
+    expect(check.detail).toContain("has no on.push.paths");
+  });
+
+  test("an unreadable publisher workflow at tip fails closed", () => {
+    const report = preflight(cfg(), deps({ git: fakeGit({ showStatus: 1 }) }));
+    const check = checkById(report, "runtime-pin:case_agent");
+    expect(report.ok).toBe(false);
+    expect(check.status).toBe("fail");
+    expect(check.detail).toContain("could not read");
   });
 });
