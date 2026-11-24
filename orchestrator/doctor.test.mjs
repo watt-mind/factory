@@ -47,6 +47,8 @@ import {
   repoSmokeDiagnostic,
   stackDaemonDiagnostics,
   factoryCommandLinkDiagnostic,
+  ZSH_SHELL_OPTIONS_FIX,
+  zshShellOptionsCheck,
 } from "./doctor.mjs";
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -1295,5 +1297,149 @@ describe("smokeCheck / repoSmokeDiagnostic (#2386)", () => {
       detail: "none",
       fix: "without one, Done means merged rather than running",
     });
+  });
+});
+
+describe("zshShellOptionsCheck (GH-2456)", () => {
+  test.each([
+    ["setopt NO_NOMATCH NO_EQUALS\n"],
+    ["unsetopt nomatch equals\n"],
+    ["setopt nonomatch\nunsetopt EQUALS\n"],
+    ["setopt No_NoMatch no_equals # inline comment\n"],
+    ["set -o nonomatch -o noequals\n"],
+    ["set +o nomatch +o equals\n"],
+  ])("passes when both options are enabled (%j)", (content) => {
+    const dir = scratch();
+    const zshenvPath = path.join(dir, ".zshenv");
+    writeFileSync(zshenvPath, content);
+    try {
+      expect(
+        zshShellOptionsCheck({
+          zshenvPath,
+          env: { SHELL: "/bin/zsh" },
+        }),
+      ).toEqual({
+        ok: true,
+        label: "zsh shell options (~/.zshenv)",
+        detail: "NO_NOMATCH and NO_EQUALS enabled in ~/.zshenv",
+        fix: null,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("warns naming both options when setopt line is commented out", () => {
+    const dir = scratch();
+    const zshenvPath = path.join(dir, ".zshenv");
+    writeFileSync(zshenvPath, "# setopt NO_NOMATCH NO_EQUALS\n");
+    try {
+      const result = zshShellOptionsCheck({
+        zshenvPath,
+        env: { SHELL: "/bin/zsh" },
+      });
+      expect(result).toEqual({
+        ok: "warn",
+        label: "zsh shell options (~/.zshenv)",
+        detail: "missing NO_NOMATCH, NO_EQUALS in ~/.zshenv",
+        fix: ZSH_SHELL_OPTIONS_FIX,
+      });
+      expect(result.fix).toBe('Add "setopt NO_NOMATCH NO_EQUALS" to ~/.zshenv');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("warns naming only the missing option when one is absent", () => {
+    const dir = scratch();
+    const zshenvPath = path.join(dir, ".zshenv");
+    try {
+      writeFileSync(zshenvPath, "setopt NO_NOMATCH\n");
+      expect(
+        zshShellOptionsCheck({ zshenvPath, env: { SHELL: "/bin/zsh" } }),
+      ).toEqual({
+        ok: "warn",
+        label: "zsh shell options (~/.zshenv)",
+        detail: "missing NO_EQUALS in ~/.zshenv",
+        fix: ZSH_SHELL_OPTIONS_FIX,
+      });
+
+      writeFileSync(zshenvPath, "unsetopt equals\n");
+      expect(
+        zshShellOptionsCheck({ zshenvPath, env: { SHELL: "/bin/zsh" } }),
+      ).toEqual({
+        ok: "warn",
+        label: "zsh shell options (~/.zshenv)",
+        detail: "missing NO_NOMATCH in ~/.zshenv",
+        fix: ZSH_SHELL_OPTIONS_FIX,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("warns on missing ~/.zshenv when $SHELL is zsh and skips cleanly for non-zsh", () => {
+    const dir = scratch();
+    const zshenvPath = path.join(dir, ".zshenv");
+    try {
+      expect(
+        zshShellOptionsCheck({
+          zshenvPath,
+          env: { SHELL: "/opt/homebrew/bin/zsh" },
+        }),
+      ).toEqual({
+        ok: "warn",
+        label: "zsh shell options (~/.zshenv)",
+        detail: `${zshenvPath} not found (missing NO_NOMATCH, NO_EQUALS)`,
+        fix: ZSH_SHELL_OPTIONS_FIX,
+      });
+
+      expect(
+        zshShellOptionsCheck({
+          zshenvPath,
+          env: { SHELL: "/bin/bash" },
+        }),
+      ).toEqual({
+        ok: "info",
+        label: "zsh shell options (~/.zshenv)",
+        detail: "skipped — $SHELL is /bin/bash and no ~/.zshenv found",
+        fix: null,
+      });
+
+      expect(
+        zshShellOptionsCheck({
+          zshenvPath,
+          env: {},
+        }),
+      ).toEqual({
+        ok: "info",
+        label: "zsh shell options (~/.zshenv)",
+        detail: "skipped — $SHELL is unset and no ~/.zshenv found",
+        fix: null,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("still inspects ~/.zshenv if it exists even when $SHELL is not zsh", () => {
+    const dir = scratch();
+    const zshenvPath = path.join(dir, ".zshenv");
+    writeFileSync(zshenvPath, "setopt NO_NOMATCH\n");
+    try {
+      expect(
+        zshShellOptionsCheck({
+          zshenvPath,
+          env: { SHELL: "/bin/bash" },
+        }),
+      ).toEqual({
+        ok: "warn",
+        label: "zsh shell options (~/.zshenv)",
+        detail: "missing NO_EQUALS in ~/.zshenv",
+        fix: ZSH_SHELL_OPTIONS_FIX,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

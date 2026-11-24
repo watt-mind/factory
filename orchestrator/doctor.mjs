@@ -62,6 +62,110 @@ export const BASE_BRANCH_CI_TIMEOUT_MS = 10_000;
 // slow read fail in isolation instead of starving every repository after it.
 export const BASE_BRANCH_CI_AGGREGATE_TIMEOUT_MS = 60_000;
 export const BASE_BRANCH_CI_RUN_LIMIT = 20;
+export const ZSH_SHELL_OPTIONS_FIX =
+  'Add "setopt NO_NOMATCH NO_EQUALS" to ~/.zshenv';
+
+/**
+ * Inspect ~/.zshenv for NO_NOMATCH and NO_EQUALS so agent shell commands don't
+ * trip zsh's `=` expansion (`echo ====`) or unmatched glob errors. Advisory
+ * warning only so non-zsh CI and environments are never blocked.
+ */
+export function zshShellOptionsCheck({
+  zshenvPath,
+  env = process.env,
+  home = env.HOME || homedir(),
+} = {}) {
+  const label = "zsh shell options (~/.zshenv)";
+  const shell = String(env.SHELL ?? "").trim();
+  const isZsh = /(?:^|\/)zsh$/i.test(shell);
+  const targetPath =
+    zshenvPath ?? env.FACTORY_ZSHENV_PATH ?? path.join(home, ".zshenv");
+
+  if (!existsSync(targetPath)) {
+    if (!isZsh) {
+      return {
+        ok: "info",
+        label,
+        detail: `skipped — $SHELL is ${shell || "unset"} and no ~/.zshenv found`,
+        fix: null,
+      };
+    }
+    return {
+      ok: "warn",
+      label,
+      detail: `${targetPath} not found (missing NO_NOMATCH, NO_EQUALS)`,
+      fix: ZSH_SHELL_OPTIONS_FIX,
+    };
+  }
+
+  let content;
+  try {
+    content = readFileSync(targetPath, "utf8");
+  } catch (error) {
+    return {
+      ok: "warn",
+      label,
+      detail: `cannot read ${targetPath} — ${error?.message ?? String(error)}`,
+      fix: ZSH_SHELL_OPTIONS_FIX,
+    };
+  }
+
+  let noNomatch = false;
+  let noEquals = false;
+  const applyOption = (rawOption, isUnset) => {
+    const norm = rawOption.toLowerCase().replaceAll("_", "");
+    if (norm === "nonomatch") noNomatch = !isUnset;
+    else if (norm === "nomatch") noNomatch = isUnset;
+    else if (norm === "noequals") noEquals = !isUnset;
+    else if (norm === "equals") noEquals = isUnset;
+  };
+
+  for (const rawLine of content.split(/\r?\n/)) {
+    const withoutComment = rawLine.replace(/#.*$/, "");
+    for (const segment of withoutComment.split(/;|&&|\|\|/)) {
+      const tokens = segment.trim().split(/\s+/).filter(Boolean);
+      if (tokens.length < 2) continue;
+      const cmd = tokens[0];
+      if (cmd === "setopt" || cmd === "unsetopt") {
+        const isUnset = cmd === "unsetopt";
+        for (const token of tokens.slice(1)) {
+          if (token.startsWith("-") || token.startsWith("+")) continue;
+          applyOption(token, isUnset);
+        }
+      } else if (cmd === "set") {
+        for (let i = 1; i < tokens.length - 1; i++) {
+          if (tokens[i] === "-o") {
+            applyOption(tokens[i + 1], false);
+            i++;
+          } else if (tokens[i] === "+o") {
+            applyOption(tokens[i + 1], true);
+            i++;
+          }
+        }
+      }
+    }
+  }
+
+  const missing = [];
+  if (!noNomatch) missing.push("NO_NOMATCH");
+  if (!noEquals) missing.push("NO_EQUALS");
+
+  if (missing.length === 0) {
+    return {
+      ok: true,
+      label,
+      detail: "NO_NOMATCH and NO_EQUALS enabled in ~/.zshenv",
+      fix: null,
+    };
+  }
+
+  return {
+    ok: "warn",
+    label,
+    detail: `missing ${missing.join(", ")} in ~/.zshenv`,
+    fix: ZSH_SHELL_OPTIONS_FIX,
+  };
+}
 
 const defaultWorkflowRunList = (repo, options) =>
   readWorkflowRuns({ repo, ...options });
@@ -1087,6 +1191,11 @@ if (import.meta.main) {
 
   {
     const diagnostic = chainAutoApprovalPolicyDiagnostic();
+    check(diagnostic.ok, diagnostic.label, diagnostic.detail, diagnostic.fix);
+  }
+
+  {
+    const diagnostic = zshShellOptionsCheck();
     check(diagnostic.ok, diagnostic.label, diagnostic.detail, diagnostic.fix);
   }
 
