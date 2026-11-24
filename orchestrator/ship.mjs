@@ -106,6 +106,68 @@ const asList = (value, what) => {
   return [...value];
 };
 
+const UNTRANSLATABLE_GLOB_CHARS = /[?[\]{}\\]/;
+
+/**
+ * Translate one GitHub Actions `on.push.paths` entry into a git pathspec,
+ * refusing syntax whose semantics differ from git (`?`, `[]`, `{}`, `\`,
+ * git pathspec magic `:...`, leading `/`, empty or stacked `!`/`+`).
+ */
+export function translateActionsGlob(entry, { role = "(unknown)" } = {}) {
+  if (typeof entry !== "string" || !entry)
+    throw new ShipConfigError(
+      `runtime_roles[${role}].paths entry ${JSON.stringify(entry)} must be a non-empty string`,
+    );
+  let negated = false;
+  let pattern = entry;
+  if (pattern.startsWith("!")) {
+    negated = true;
+    pattern = pattern.slice(1);
+  } else if (pattern.startsWith("+")) {
+    pattern = pattern.slice(1);
+  }
+  if (!pattern)
+    throw new ShipConfigError(
+      `runtime_roles[${role}].paths entry ${JSON.stringify(entry)} is empty after prefix`,
+    );
+  if (pattern.startsWith("!") || pattern.startsWith("+"))
+    throw new ShipConfigError(
+      `runtime_roles[${role}].paths entry ${JSON.stringify(entry)} has stacked prefix characters`,
+    );
+  if (pattern.startsWith(":"))
+    throw new ShipConfigError(
+      `runtime_roles[${role}].paths entry ${JSON.stringify(entry)} uses git pathspec syntax; write GitHub Actions globs instead`,
+    );
+  if (pattern.startsWith("/"))
+    throw new ShipConfigError(
+      `runtime_roles[${role}].paths entry ${JSON.stringify(entry)} must be repo-relative (no leading "/")`,
+    );
+  if (UNTRANSLATABLE_GLOB_CHARS.test(pattern))
+    throw new ShipConfigError(
+      `runtime_roles[${role}].paths entry ${JSON.stringify(entry)} uses glob syntax (?, [], {}, \\) that cannot be safely translated to a git pathspec`,
+    );
+  return negated ? `:(exclude)${pattern}` : pattern;
+}
+
+/**
+ * Translate a role's GitHub Actions `paths` list into git pathspecs.
+ * Refuses negation-only lists, which would match nothing in `git diff` and
+ * silently report a stale pin as fresh.
+ */
+export function translateActionsPaths(paths, { role = "(unknown)" } = {}) {
+  const translated = paths.map((entry) =>
+    translateActionsGlob(entry, { role }),
+  );
+  if (
+    translated.length > 0 &&
+    translated.every((spec) => spec.startsWith(":(exclude)"))
+  )
+    throw new ShipConfigError(
+      `runtime_roles[${role}].paths contains only negations (${paths.join(", ")}) — at least one positive path pattern is required`,
+    );
+  return translated;
+}
+
 /**
  * Read one repo's ship configuration out of `config/repos.yaml` (falling back
  * to the tracked example, as every other config reader does). `config` lets a
@@ -142,6 +204,7 @@ export function loadShipConfig(name, { root = ROOT, config } = {}) {
       throw new ShipConfigError(
         `${where} needs a non-empty paths list mirroring ${role.publisher_workflow}'s on.push.paths — without it the pin's freshness cannot be proven (set source_repo if the role is built in another repository)`,
       );
+    if (paths.length) translateActionsPaths(paths, { role: role.role });
     return {
       role: role.role,
       manifest: role.manifest,
@@ -343,6 +406,56 @@ export function checkRunsGreen(checkRuns) {
   };
 }
 
+const workflowFilePath = (workflow) =>
+  String(workflow).startsWith(".github/workflows/")
+    ? String(workflow)
+    : `.github/workflows/${workflow}`;
+
+/**
+ * Extract `on.push.paths` from a GitHub Actions workflow YAML document.
+ * Handles both YAML 1.2 (`"on"`) and YAML 1.1 (`true`) key forms; returns
+ * `null` when `on.push.paths` is absent or empty.
+ */
+export function extractWorkflowPushPaths(yamlText) {
+  const doc = Bun.YAML.parse(yamlText);
+  if (!doc || typeof doc !== "object") return null;
+  const on = doc.on ?? doc.true;
+  if (!on || typeof on !== "object" || Array.isArray(on)) return null;
+  const push = on.push;
+  if (!push || typeof push !== "object" || Array.isArray(push)) return null;
+  const paths = push.paths;
+  if (
+    !Array.isArray(paths) ||
+    !paths.length ||
+    paths.some((p) => typeof p !== "string" || !p)
+  )
+    return null;
+  return [...paths];
+}
+
+/**
+ * Compare configured `runtime_roles[].paths` against the publisher workflow's
+ * `on.push.paths`. Set-equality suffices for plain paths; when either list
+ * contains `!` negations, order is significant in Actions and must match too.
+ */
+function pathsDrifted(configPaths, workflowPaths) {
+  const configSet = new Set(configPaths);
+  const workflowSet = new Set(workflowPaths);
+  const missing = workflowPaths.filter((p) => !configSet.has(p));
+  const extra = configPaths.filter((p) => !workflowSet.has(p));
+  if (missing.length || extra.length) return true;
+  const hasNegation =
+    configPaths.some((p) => p.startsWith("!")) ||
+    workflowPaths.some((p) => p.startsWith("!"));
+  if (hasNegation) {
+    return (
+      configPaths.length !== workflowPaths.length ||
+      configPaths.some((p, i) => p !== workflowPaths[i])
+    );
+  }
+  return false;
+}
+
 /**
  * The source commit a manifest role is pinned to. `provenance.commit_sha` is
  * the publisher's own receipt and wins; `reviewed_commit` and a `tag` that
@@ -397,19 +510,62 @@ export function defaultDeps({ cwd } = {}) {
   };
 }
 
+const REST_PAGE_SIZE = 100;
+const MAX_REST_PAGES = 50;
+const OPEN_PR_LIMIT = 1000;
+
 const json = (forge, apiPath) => JSON.parse(forge.apiRaw(apiPath));
 
+/**
+ * Walk a paginated GitHub REST list endpoint (`?page=1, 2, ...`) until every
+ * item has been read, and fail closed if the response indicates truncation or
+ * hits the page ceiling. Truncating a release-gate read biases toward green
+ * (a red job, red check run, or newer CI run past item 100 would vanish).
+ */
+function jsonPages(
+  forge,
+  apiPath,
+  field,
+  { perPage = REST_PAGE_SIZE, maxPages = MAX_REST_PAGES } = {},
+) {
+  const sep = apiPath.includes("?") ? "&" : "?";
+  const items = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const response = json(
+      forge,
+      `${apiPath}${sep}per_page=${perPage}&page=${page}`,
+    );
+    const rows = response?.[field];
+    if (!Array.isArray(rows))
+      throw new Error(`${apiPath} page ${page} did not return ${field} array`);
+    items.push(...rows);
+    const total = response?.total_count;
+    if (Number.isFinite(total) && items.length >= total) return items;
+    if (rows.length < perPage) {
+      if (Number.isFinite(total) && items.length < total)
+        throw new Error(
+          `${apiPath} truncated at ${items.length}/${total} ${field} on page ${page}`,
+        );
+      return items;
+    }
+  }
+  throw new Error(
+    `${apiPath} exceeded pagination limit (${maxPages} pages / ${items.length} ${field}) — refusing truncated read`,
+  );
+}
+
 const runsForSha = (forge, repo, sha) =>
-  json(forge, `repos/${repo}/actions/runs?head_sha=${sha}&per_page=100`)
-    ?.workflow_runs ?? [];
+  jsonPages(
+    forge,
+    `repos/${repo}/actions/runs?head_sha=${sha}`,
+    "workflow_runs",
+  );
 
 const jobsForRun = (forge, repo, runId) =>
-  json(forge, `repos/${repo}/actions/runs/${runId}/jobs?per_page=100`)?.jobs ??
-  [];
+  jsonPages(forge, `repos/${repo}/actions/runs/${runId}/jobs`, "jobs");
 
 const checkRunsForSha = (forge, repo, sha) =>
-  json(forge, `repos/${repo}/commits/${sha}/check-runs?per_page=100`)
-    ?.check_runs ?? [];
+  jsonPages(forge, `repos/${repo}/commits/${sha}/check-runs`, "check_runs");
 
 /**
  * A workflow's own runs, newest first.
@@ -447,8 +603,20 @@ const runStartedAtLeast = (run, at) => {
   return !Number.isFinite(created) || created >= at - DISPATCH_CLOCK_SKEW_MS;
 };
 
-const openPrs = (forge, repo) =>
-  forge.prList(repo, { state: "open", limit: 100, fields: PR_FIELDS });
+const openPrs = (forge, repo) => {
+  const prs = forge.prList(repo, {
+    state: "open",
+    limit: OPEN_PR_LIMIT,
+    fields: PR_FIELDS,
+  });
+  if (!Array.isArray(prs))
+    throw new Error(`prList(${repo}) did not return an array`);
+  if (prs.length >= OPEN_PR_LIMIT)
+    throw new Error(
+      `open PR list hit the ${OPEN_PR_LIMIT}-PR limit (${prs.length} returned) — refusing truncated read`,
+    );
+  return prs;
+};
 
 /** Resolve the base tip. A failed fetch is reported, never assumed clean. */
 export function resolveTip(cfg, { git, fetch = true }) {
@@ -635,12 +803,51 @@ export function checkRuntimeRole(cfg, tip, role, { forge, git, readManifest }) {
         `pinned ${pinned.slice(0, 8)} is an ancestor, but the role has no paths — staleness cannot be proven, so this is not a pass`,
         `add runtime_roles[${role.role}].paths mirroring ${role.publisherWorkflow}'s on.push.paths`,
       );
+    // Drift-check config paths against the publisher workflow's actual
+    // `on.push.paths` at the tip being shipped so adding a path to the
+    // workflow without updating config/repos.yaml cannot silently produce a
+    // false PASS.
+    const wfPath = workflowFilePath(role.publisherWorkflow);
+    const wfShow = git(["show", `${tip}:${wfPath}`]);
+    if (wfShow.status !== 0)
+      return fail(
+        id,
+        title,
+        `could not read ${wfPath} at ${tip.slice(0, 8)} to verify on.push.paths: ${(wfShow.stderr || wfShow.stdout).trim()}`,
+        `git show ${tip}:${wfPath}`,
+      );
+    let workflowPaths;
+    try {
+      workflowPaths = extractWorkflowPushPaths(wfShow.stdout);
+    } catch (err) {
+      return fail(
+        id,
+        title,
+        `could not parse ${wfPath} at ${tip.slice(0, 8)}: ${err.message}`,
+        `git show ${tip}:${wfPath}`,
+      );
+    }
+    if (!workflowPaths)
+      return fail(
+        id,
+        title,
+        `${wfPath} at ${tip.slice(0, 8)} has no on.push.paths — staleness cannot be verified against the publisher`,
+        `add on.push.paths to ${wfPath}`,
+      );
+    if (pathsDrifted(role.paths, workflowPaths))
+      return fail(
+        id,
+        title,
+        `runtime_roles[${role.role}].paths [${role.paths.join(", ")}] drifted from ${wfPath} on.push.paths [${workflowPaths.join(", ")}]`,
+        `update runtime_roles[${role.role}].paths in config/repos.yaml to match ${wfPath}'s on.push.paths`,
+      );
+    const pathspecs = translateActionsPaths(role.paths, { role: role.role });
     const diff = git([
       "diff",
       "--name-only",
       `${pinned}..${tip}`,
       "--",
-      ...role.paths,
+      ...pathspecs,
     ]);
     if (diff.status !== 0)
       return fail(

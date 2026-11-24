@@ -55,6 +55,11 @@ green because nothing looked at them:
   repo-wide run list by `in_progress` and `queued` missed `waiting` (an
   environment approval), `requested` and `pending`; the workflow's own run list
   is asked instead, and anything that is not `completed` counts as active.
+- **Paginated reads fail closed on truncation.** Workflow runs, run jobs, commit
+  check runs, and open PR lists walk every page rather than stopping at 100
+  items; a truncated response or one that hits the pagination ceiling is
+  reported as a FAIL rather than silently dropping red jobs, red checks, or
+  escalated PRs past the first page.
 
 Three deliberate refinements over a literal reading of the checks:
 
@@ -189,7 +194,24 @@ runtime_roles:
 `paths` must mirror the publisher workflow's own `on.push.paths`. That is not a
 convention, it is the definition of stale being used: the publisher rebuilds
 when those paths move, so a pin older than a change to one of them is a pin the
-publisher itself would consider out of date.
+publisher itself would consider out of date. **`ship-preflight` drift-checks
+this list against `.github/workflows/<publisher_workflow>` at the tip being
+shipped** (`git show <tip>:.github/workflows/<publisher_workflow>`): if the
+workflow's `on.push.paths` diverges from `config/repos.yaml` or is missing
+altogether, `runtime-pin:<role>` FAILs with both lists rather than silently
+evaluating a stale copy.
+
+`paths` is written in **GitHub Actions `on.push.paths` glob syntax** (not git
+pathspec syntax) and translated before calling `git diff`:
+
+- `!<glob>` becomes `:(exclude)<glob>` (git treats a bare leading `!` as a
+  literal character, so passing it through verbatim would silently fail to
+  exclude anything),
+- a leading `+` is stripped,
+- literal paths, `*`, and `**` pass through,
+- untranslatable constructs (`?`, `[]`, `{}`, `\`, leading `/`, git `:...`
+  magic, stacked prefixes, or negation-only lists with no positive pattern) are
+  rejected at config load with `ShipConfigError` naming the entry and role.
 
 **`paths` is required for a role built in this repo** and the config is
 rejected without it. A role with no paths has no definition of stale, so its

@@ -139,9 +139,12 @@ repos:
   #     # `paths` mirrors the publisher workflow's own `on.push.paths`: if one
   #     # of them moved since the pinned commit, the pin is stale by the
   #     # publisher's own definition, and the release would ship source the
-  #     # runtime image does not contain. It is REQUIRED for a role built in
-  #     # this repo — without it the check has no definition of stale and so
-  #     # can never fail, and a misspelled key would silently disable it.
+  #     # runtime image does not contain. `ship-preflight` reads
+  #     # `.github/workflows/<publisher_workflow>` at the tip and drift-checks
+  #     # this list against `on.push.paths`, failing pre-flight if they diverge
+  #     # or if the workflow has no `on.push.paths`. It is REQUIRED for a role
+  #     # built in this repo — without it the check has no definition of stale
+  #     # and a misspelled key would silently disable it.
   #     - role: case_agent
   #       manifest: config/runtime-images.json
   #       publisher_workflow: case-agent-image.yml

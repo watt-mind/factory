@@ -5,6 +5,10 @@
  * network, no clock, no checkout — the point of the injected effects.
  */
 import { describe, test, expect } from "bun:test";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import {
   DEFAULT_PIN_PR,
   ShipChainError,
@@ -152,20 +156,34 @@ function fakeForge(state = {}) {
         const perPage = Number(/per_page=(\d+)/.exec(query)?.[1] ?? 30);
         return JSON.stringify({ workflow_runs: list.slice(0, perPage) });
       }
-      const headSha = /\/actions\/runs\?head_sha=([0-9a-f]+)/.exec(apiPath);
-      if (headSha)
+      const paginate = (list, query, field) => {
+        const perPage = Number(/(?:^|&)per_page=(\d+)/.exec(query)?.[1] ?? 30);
+        const page = Number(/(?:^|&)page=(\d+)/.exec(query)?.[1] ?? 1);
+        const start = (page - 1) * perPage;
         return JSON.stringify({
-          workflow_runs: world.runsBySha[headSha[1]] ?? world.runs,
+          total_count: list.length,
+          [field]: list.slice(start, start + perPage),
         });
-      if (/\/actions\/runs\/\d+\/jobs/.test(apiPath))
-        return JSON.stringify({ jobs: world.jobs });
-      if (/\/check-runs/.test(apiPath))
-        return JSON.stringify({ check_runs: world.checkRuns });
+      };
+      const headSha = /\/actions\/runs\?head_sha=([0-9a-f]+)(?:&(.*))?$/.exec(
+        apiPath,
+      );
+      if (headSha)
+        return paginate(
+          world.runsBySha[headSha[1]] ?? world.runs,
+          headSha[2] ?? "",
+          "workflow_runs",
+        );
+      const runJobs = /\/actions\/runs\/\d+\/jobs(?:\?(.*))?$/.exec(apiPath);
+      if (runJobs) return paginate(world.jobs, runJobs[1] ?? "", "jobs");
+      const checkRunsMatch = /\/check-runs(?:\?(.*))?$/.exec(apiPath);
+      if (checkRunsMatch)
+        return paginate(world.checkRuns, checkRunsMatch[1] ?? "", "check_runs");
       throw new Error(`unseeded api path ${apiPath}`);
     },
-    prList() {
-      calls.push({ op: "prList" });
-      return world.prs;
+    prList(repo, opts = {}) {
+      calls.push({ op: "prList", repo, opts });
+      return opts.limit == null ? world.prs : world.prs.slice(0, opts.limit);
     },
     workflowDispatch(repo, workflow, opts) {
       calls.push({ op: "workflowDispatch", repo, workflow, opts });
@@ -208,8 +226,23 @@ function fakeForge(state = {}) {
   return forge;
 }
 
-/** `git` answering the three questions ship.mjs asks. */
-function fakeGit({ ancestor = true, changed = [], tip = TIP } = {}) {
+const DEFAULT_WORKFLOW_YAML = `name: Publish Case Agent Image
+on:
+  push:
+    branches: [develop]
+    paths:
+      - docker/agent/**
+      - .github/workflows/case-agent-image.yml
+`;
+
+/** `git` answering the questions ship.mjs asks. */
+function fakeGit({
+  ancestor = true,
+  changed = [],
+  tip = TIP,
+  workflowYaml = DEFAULT_WORKFLOW_YAML,
+  showStatus = 0,
+} = {}) {
   const calls = [];
   const git = (args) => {
     calls.push(args);
@@ -222,6 +255,12 @@ function fakeGit({ ancestor = true, changed = [], tip = TIP } = {}) {
       };
     if (args[0] === "merge-base")
       return { status: ancestor ? 0 : 1, stdout: "", stderr: "" };
+    if (args[0] === "show")
+      return {
+        status: showStatus,
+        stdout: showStatus === 0 ? workflowYaml : "",
+        stderr: showStatus === 0 ? "" : "fatal: path does not exist",
+      };
     if (args[0] === "diff")
       return { status: 0, stdout: changed.join("\n"), stderr: "" };
     return {
@@ -1423,5 +1462,333 @@ describe("shipChain --until post-release", () => {
     await expect(
       shipChain(bare, { until: "post-release" }, deps()),
     ).rejects.toThrow(/no post_release_checks/);
+  });
+});
+
+// --------------------------------------------------------------- pagination (GH-2340)
+
+describe("pagination and truncation fail-closed (GH-2340)", () => {
+  test("150 jobs with a failure on page 2 makes base-green FAIL", () => {
+    const jobs = Array.from({ length: 150 }, (_, i) =>
+      job(`Job ${i + 1}`, i === 130 ? "failure" : "success"),
+    );
+    const forge = fakeForge({ jobs });
+    const check = checkById(preflight(cfg(), deps({ forge })), "base-green");
+    expect(check.status).toBe("fail");
+    expect(check.detail).toContain("Job 131 (failure)");
+  });
+
+  test("150 workflow runs with the newest CI run on page 2 selects page 2", () => {
+    const runs = [
+      ...Array.from({ length: 149 }, (_, i) => ({
+        id: i + 1,
+        name: "Other Workflow",
+        status: "completed",
+        conclusion: "success",
+        run_number: i + 1,
+      })),
+      {
+        id: 999,
+        name: "CI",
+        status: "completed",
+        conclusion: "failure",
+        run_number: 200,
+      },
+    ];
+    const forge = fakeForge({ runs });
+    const check = checkById(preflight(cfg(), deps({ forge })), "base-green");
+    expect(check.status).toBe("fail");
+    expect(check.detail).toContain("run 999 concluded failure");
+  });
+
+  test("150 check runs with a red check on page 2 makes mergeWhenGreen refuse", async () => {
+    const checkRuns = Array.from({ length: 150 }, (_, i) => ({
+      name: `Check ${i + 1}`,
+      status: "completed",
+      conclusion: i === 125 ? "failure" : "success",
+    }));
+    const forge = fakeForge({
+      checkRuns,
+      prs: [
+        {
+          number: 42,
+          title: "chore(runtime): adopt reviewed runtime images",
+          author: { login: "watt-mind-factory[bot]" },
+          labels: [],
+          isDraft: false,
+          baseRefName: "develop",
+          headRefOid: PIN_PR_HEAD,
+        },
+      ],
+    });
+    await expect(
+      shipChain(
+        cfg(),
+        { until: "pin", apply: true },
+        deps({ forge, git: fakeGit({ changed: ["docker/agent/x"] }) }),
+      ),
+    ).rejects.toThrow(/red check runs: Check 126 \(failure\)/);
+    expect(forge.calls.some((call) => call.op === "prMerge")).toBe(false);
+  });
+
+  test("150 open PRs with an escalated PR past 100 makes escalated-pr FAIL", () => {
+    const prs = Array.from({ length: 150 }, (_, i) => ({
+      number: i + 1,
+      title: `PR #${i + 1}`,
+      author: { login: "hdkiller" },
+      labels: i === 140 ? [{ name: "escalated" }] : [],
+      baseRefName: "develop",
+    }));
+    const forge = fakeForge({ prs });
+    const check = checkById(preflight(cfg(), deps({ forge })), "escalated-pr");
+    expect(check.status).toBe("fail");
+    expect(check.detail).toContain("#141");
+  });
+
+  test("open PR list hitting the hard limit fails closed instead of accepting truncation", () => {
+    const prs = Array.from({ length: 1000 }, (_, i) => ({
+      number: i + 1,
+      title: `PR #${i + 1}`,
+      author: { login: "hdkiller" },
+      labels: [],
+      baseRefName: "develop",
+    }));
+    const forge = fakeForge({ prs });
+    const report = preflight(cfg(), deps({ forge }));
+    expect(report.ok).toBe(false);
+    expect(checkById(report, "pin-pr").status).toBe("fail");
+    expect(checkById(report, "pin-pr").detail).toContain("truncated");
+    expect(checkById(report, "escalated-pr").status).toBe("fail");
+  });
+
+  test("a short page whose total_count indicates truncation fails closed", () => {
+    const forge = fakeForge();
+    const originalApi = forge.apiRaw;
+    forge.apiRaw = (apiPath) => {
+      if (/\/actions\/runs\/\d+\/jobs/.test(apiPath)) {
+        return JSON.stringify({
+          total_count: 150,
+          jobs: [job("Django Check", "success")],
+        });
+      }
+      return originalApi(apiPath);
+    };
+    const check = checkById(preflight(cfg(), deps({ forge })), "base-green");
+    expect(check.status).toBe("fail");
+    expect(check.detail).toContain("truncated");
+  });
+});
+
+// --------------------------------------------------- workflow path drift (GH-2341)
+
+describe("publisher workflow on.push.paths drift check (GH-2341)", () => {
+  test("adding a path to the publisher workflow without updating config FAILs with both lists", () => {
+    const driftedYaml = `name: Publish Case Agent Image
+on:
+  push:
+    paths:
+      - docker/agent/**
+      - .github/workflows/case-agent-image.yml
+      - docker/shared/**
+`;
+    const report = preflight(
+      cfg(),
+      deps({ git: fakeGit({ workflowYaml: driftedYaml }) }),
+    );
+    const check = checkById(report, "runtime-pin:case_agent");
+    expect(report.ok).toBe(false);
+    expect(check.status).toBe("fail");
+    expect(check.detail).toContain("drifted");
+    expect(check.detail).toContain("docker/agent/**");
+    expect(check.detail).toContain("docker/shared/**");
+  });
+
+  test("removing a path from the publisher workflow without updating config FAILs with both lists", () => {
+    const driftedYaml = `name: Publish Case Agent Image
+on:
+  push:
+    paths:
+      - docker/agent/**
+`;
+    const report = preflight(
+      cfg(),
+      deps({ git: fakeGit({ workflowYaml: driftedYaml }) }),
+    );
+    const check = checkById(report, "runtime-pin:case_agent");
+    expect(check.status).toBe("fail");
+    expect(check.detail).toContain("drifted");
+    expect(check.detail).toContain(".github/workflows/case-agent-image.yml");
+  });
+
+  test("a publisher workflow with no on.push.paths is a FAIL, never SKIP or PASS", () => {
+    const noPathsYaml = `name: Publish Case Agent Image
+on:
+  workflow_dispatch: {}
+`;
+    const report = preflight(
+      cfg(),
+      deps({ git: fakeGit({ workflowYaml: noPathsYaml }) }),
+    );
+    const check = checkById(report, "runtime-pin:case_agent");
+    expect(report.ok).toBe(false);
+    expect(check.status).toBe("fail");
+    expect(check.detail).toContain("has no on.push.paths");
+  });
+
+  test("an unreadable publisher workflow at tip fails closed", () => {
+    const report = preflight(cfg(), deps({ git: fakeGit({ showStatus: 1 }) }));
+    const check = checkById(report, "runtime-pin:case_agent");
+    expect(report.ok).toBe(false);
+    expect(check.status).toBe("fail");
+    expect(check.detail).toContain("could not read");
+  });
+});
+
+// ------------------------------------------- Actions glob translation (GH-2342)
+
+describe("GitHub Actions glob to git pathspec translation (GH-2342)", () => {
+  test("translates !glob to :(exclude)glob and strips leading + in git diff", () => {
+    const config = cfgWith(null, {
+      role: "case_agent",
+      paths: ["+docker/agent/**", "!docker/agent/README.md"],
+    });
+    const wfYaml = `name: Publish Case Agent Image
+on:
+  push:
+    paths:
+      - "+docker/agent/**"
+      - "!docker/agent/README.md"
+`;
+    const git = fakeGit({ workflowYaml: wfYaml });
+    const report = preflight(config, deps({ git }));
+    expect(checkById(report, "runtime-pin:case_agent").status).toBe("pass");
+    const diffCall = git.calls.find((args) => args[0] === "diff");
+    expect(diffCall).toEqual([
+      "diff",
+      "--name-only",
+      `${PINNED}..${TIP}`,
+      "--",
+      "docker/agent/**",
+      ":(exclude)docker/agent/README.md",
+    ]);
+  });
+
+  test("real git: a change to an excluded !path alone does not make the pin stale", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "ship-glob-test-"));
+    try {
+      const runGit = (args) => {
+        const r = spawnSync("git", args, {
+          cwd: dir,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "Test",
+            GIT_AUTHOR_EMAIL: "test@example.com",
+            GIT_COMMITTER_NAME: "Test",
+            GIT_COMMITTER_EMAIL: "test@example.com",
+          },
+        });
+        return {
+          status: r.status ?? null,
+          stdout: String(r.stdout ?? ""),
+          stderr: String(r.stderr ?? ""),
+        };
+      };
+      expect(runGit(["init", "-q"]).status).toBe(0);
+      mkdirSync(path.join(dir, "docker/agent"), { recursive: true });
+      mkdirSync(path.join(dir, ".github/workflows"), { recursive: true });
+      writeFileSync(
+        path.join(dir, "docker/agent/Dockerfile"),
+        "FROM scratch\n",
+      );
+      writeFileSync(path.join(dir, "docker/agent/README.md"), "# v1\n");
+      writeFileSync(
+        path.join(dir, ".github/workflows/case-agent-image.yml"),
+        `name: Publish Case Agent Image
+on:
+  push:
+    paths:
+      - docker/agent/**
+      - "!docker/agent/README.md"
+`,
+      );
+      expect(runGit(["add", "."]).status).toBe(0);
+      expect(runGit(["commit", "-q", "-m", "initial"]).status).toBe(0);
+      const pinnedSha = runGit(["rev-parse", "HEAD"]).stdout.trim();
+
+      // Commit 2: only README.md changes -> excluded, pin must remain fresh.
+      writeFileSync(path.join(dir, "docker/agent/README.md"), "# v2\n");
+      expect(runGit(["commit", "-q", "-am", "docs only"]).status).toBe(0);
+      const docsTip = runGit(["rev-parse", "HEAD"]).stdout.trim();
+
+      const config = cfgWith(null, {
+        role: "case_agent",
+        paths: ["docker/agent/**", "!docker/agent/README.md"],
+      });
+      const role = config.runtimeRoles[0];
+      const manifest = {
+        case_agent: { provenance: { commit_sha: pinnedSha } },
+      };
+
+      const docsCheck = checkRuntimeRole(
+        config,
+        docsTip,
+        role,
+        deps({ git: runGit, readManifest: () => manifest }),
+      );
+      expect(docsCheck.status).toBe("pass");
+
+      // Commit 3: Dockerfile changes -> included, pin must be stale.
+      writeFileSync(
+        path.join(dir, "docker/agent/Dockerfile"),
+        "FROM scratch\nLABEL v=2\n",
+      );
+      expect(runGit(["commit", "-q", "-am", "dockerfile"]).status).toBe(0);
+      const codeTip = runGit(["rev-parse", "HEAD"]).stdout.trim();
+
+      const codeCheck = checkRuntimeRole(
+        config,
+        codeTip,
+        role,
+        deps({ git: runGit, readManifest: () => manifest }),
+      );
+      expect(codeCheck.status).toBe("fail");
+      expect(codeCheck.detail).toContain("docker/agent/Dockerfile");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    ["docker/agent/?.txt", "single-char wildcard ?"],
+    ["docker/agent/[ab].txt", "character class []"],
+    ["docker/agent/{a,b}.txt", "brace expansion {}"],
+    ["docker\\agent\\Dockerfile", "backslash"],
+    [":(exclude)docker/agent/README.md", "git pathspec magic"],
+    ["/docker/agent/**", "leading slash"],
+    ["!", "empty negation"],
+    ["!!docker/agent/README.md", "double negation"],
+  ])(
+    "untranslatable entry %s (%s) is a ShipConfigError naming entry and role",
+    (badEntry) => {
+      const load = () =>
+        cfgWith(null, {
+          role: "case_agent",
+          paths: ["docker/agent/**", badEntry],
+        });
+      expect(load).toThrow(ShipConfigError);
+      expect(load).toThrow(/case_agent/);
+      expect(load).toThrow(JSON.stringify(badEntry));
+    },
+  );
+
+  test("a negation-only paths list is refused as ShipConfigError naming the role", () => {
+    const load = () =>
+      cfgWith(null, {
+        role: "case_agent",
+        paths: ["!docker/agent/README.md"],
+      });
+    expect(load).toThrow(ShipConfigError);
+    expect(load).toThrow(/case_agent/);
   });
 });
