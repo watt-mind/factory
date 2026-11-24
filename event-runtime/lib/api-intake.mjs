@@ -8,6 +8,7 @@ import {
   verifyGitHubWebhook,
   verifyWebhook,
 } from "./intake.mjs";
+import { extractPrWatchEvents } from "./pr-watch.mjs";
 import { RepoError } from "./repos.mjs";
 
 function repoForGitHubSlug(repos, slug) {
@@ -403,6 +404,7 @@ export async function handleIntakeApiRoute({
   readBody,
   parseJson,
   registryHealth,
+  prWatch = null,
 }) {
   if (route === "GET /health") {
     const tickStats =
@@ -482,6 +484,23 @@ export async function handleIntakeApiRoute({
     }
     const parsed = parseJson(raw);
     if (parsed.error) return send(422, { errors: [parsed.error] });
+    if (prWatch) {
+      const watchEvents = extractPrWatchEvents(
+        req.headers["x-github-event"],
+        parsed.value,
+        {
+          deliveryId: req.headers["x-github-delivery"],
+          at: new Date(nowMs).toISOString(),
+        },
+      );
+      for (const watchEvent of watchEvents) {
+        try {
+          prWatch.publish(watchEvent);
+        } catch {
+          // Observe-only fan-out must never disrupt webhook intake.
+        }
+      }
+    }
     let repoRegistry;
     try {
       repoRegistry = repos();

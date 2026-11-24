@@ -38,7 +38,10 @@ import {
   writeFileSync,
 } from "./api-test-helpers.mjs";
 import { cpSync } from "node:fs";
+import { createHmac } from "node:crypto";
 import { MAX_BODY_BYTES, PayloadTooLargeError, readBody } from "./api-http.mjs";
+import { createApi } from "./api.mjs";
+import { createPrWatchHub } from "./pr-watch.mjs";
 import { emitDueTicks } from "./schedules.mjs";
 import { createInboxItem } from "./inbox.mjs";
 import { decisionRequestHash } from "./decision.mjs";
@@ -1306,6 +1309,315 @@ describe("serve PID lock (OPS-458)", () => {
     } finally {
       serve3.kill("SIGTERM");
       await new Promise((resolve) => serve3.on("exit", resolve));
+    }
+  });
+});
+
+describe("PR-watch read-only and SSE endpoints (GH-2465)", () => {
+  const TOKEN = "pr-watch-token";
+  const SHA_1 = "aaaa111122223333444455556666777788889999";
+  const SHA_2 = "bbbb111122223333444455556666777788889999";
+
+  test("enforces control API auth on /pr-watch/recent and /events/pr-watch", async () => {
+    const unset = await makeServer({
+      controlApiToken: null,
+      autoAuthorize: false,
+    });
+    try {
+      for (const pathname of ["/pr-watch/recent", "/events/pr-watch"]) {
+        const res = await fetch(unset.url(pathname));
+        expect(res.status, pathname).toBe(503);
+        expect(await res.json()).toEqual({ error: "control_api_token_unset" });
+      }
+    } finally {
+      unset.close();
+    }
+
+    const secured = await makeServer({
+      controlApiToken: TOKEN,
+      autoAuthorize: false,
+    });
+    try {
+      for (const pathname of ["/pr-watch/recent", "/events/pr-watch"]) {
+        const missing = await fetch(secured.url(pathname));
+        expect(missing.status, `${pathname} missing`).toBe(401);
+        expect(await missing.json()).toEqual({ error: "unauthorized" });
+
+        const wrong = await fetch(secured.url(pathname), {
+          headers: { authorization: "Bearer wrong-token" },
+        });
+        expect(wrong.status, `${pathname} wrong`).toBe(401);
+        expect(await wrong.json()).toEqual({ error: "unauthorized" });
+      }
+    } finally {
+      secured.close();
+    }
+  });
+
+  test("GET /pr-watch/recent filters by repo, repeatable pr, sha, and limit", async () => {
+    const prWatch = createPrWatchHub();
+    prWatch.publish({
+      repo: "watt-mind/factory",
+      pr: 10,
+      headSha: SHA_1,
+      githubEvent: "check_run",
+      action: "completed",
+      conclusion: "success",
+      deliveryId: "d-1",
+      at: "2026-11-24T22:00:01.000Z",
+    });
+    prWatch.publish({
+      repo: "watt-mind/factory",
+      pr: 20,
+      headSha: SHA_1,
+      githubEvent: "check_suite",
+      action: "completed",
+      conclusion: "success",
+      deliveryId: "d-2",
+      at: "2026-11-24T22:00:02.000Z",
+    });
+    prWatch.publish({
+      repo: "other/repo",
+      pr: 10,
+      headSha: SHA_2,
+      githubEvent: "workflow_run",
+      action: "completed",
+      conclusion: "failure",
+      deliveryId: "d-3",
+      at: "2026-11-24T22:00:03.000Z",
+    });
+
+    const s = await makeServer({ prWatch });
+    try {
+      const all = await s.request("/pr-watch/recent");
+      expect(all.status).toBe(200);
+      const allBody = await all.json();
+      expect(allBody).toMatchObject({
+        ok: true,
+        count: 3,
+        subscribers: 0,
+      });
+      expect(allBody.events.map((e) => e.deliveryId)).toEqual([
+        "d-3",
+        "d-2",
+        "d-1",
+      ]);
+
+      const filtered = await s.request(
+        "/pr-watch/recent?repo=WATT-MIND/FACTORY&pr=10&pr=20&sha=aaaa1111&limit=1",
+      );
+      expect(filtered.status).toBe(200);
+      const filteredBody = await filtered.json();
+      expect(filteredBody.count).toBe(1);
+      expect(filteredBody.events.map((e) => e.deliveryId)).toEqual(["d-2"]);
+
+      const badPr = await s.request("/pr-watch/recent?pr=notanumber");
+      expect(badPr.status).toBe(400);
+      expect((await badPr.json()).error).toBe("invalid_pr");
+
+      const badLimit = await s.request("/pr-watch/recent?limit=999");
+      expect(badLimit.status).toBe(400);
+      expect((await badLimit.json()).error).toBe("invalid_limit");
+    } finally {
+      s.close();
+    }
+  });
+
+  test("GET /events/pr-watch streams ready, matching pr_watch events, keepalive, 503 on cap, and cleans up on disconnect", async () => {
+    const prWatch = createPrWatchHub({ maxSubscribers: 1 });
+    const s = await makeServer({
+      prWatch,
+      prWatchKeepaliveMs: 40,
+      controlApiToken: TOKEN,
+      autoAuthorize: false,
+    });
+    const controller = new AbortController();
+    let reader;
+    try {
+      const res = await fetch(
+        s.url("/events/pr-watch?repo=watt-mind/factory&pr=77"),
+        {
+          headers: { authorization: `Bearer ${TOKEN}` },
+          signal: controller.signal,
+        },
+      );
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("text/event-stream");
+      expect(res.headers.get("cache-control")).toBe("no-cache");
+      expect(res.headers.get("connection")).toBe("keep-alive");
+
+      // Subscriber cap (maxSubscribers: 1) rejects a second connection with 503.
+      const overflow = await fetch(s.url("/events/pr-watch"), {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      });
+      expect(overflow.status).toBe(503);
+      expect((await overflow.json()).error).toBe("pr_watch_subscriber_limit");
+
+      reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      const readUntil = async (predicate) => {
+        const deadline = Date.now() + 3000;
+        while (!predicate(buffer)) {
+          if (Date.now() > deadline) {
+            throw new Error(`timed out waiting for SSE data; got:\n${buffer}`);
+          }
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+        }
+      };
+
+      await readUntil((text) => text.includes("event: ready\n"));
+      const readyLine = buffer
+        .split("\n")
+        .find((line) => line.startsWith("data: "));
+      expect(JSON.parse(readyLine.slice("data: ".length))).toMatchObject({
+        ok: true,
+        repo: "watt-mind/factory",
+        prs: [77],
+        subscribers: 1,
+      });
+
+      // Publish one non-matching event and one matching webhook end-to-end.
+      prWatch.publish({
+        repo: "watt-mind/factory",
+        pr: 88,
+        headSha: SHA_2,
+        githubEvent: "check_run",
+        action: "completed",
+        conclusion: "success",
+        deliveryId: "d-other-pr",
+        at: "2026-11-24T22:01:00.000Z",
+      });
+
+      const webhookBody = JSON.stringify({
+        action: "completed",
+        repository: { full_name: "watt-mind/factory" },
+        check_suite: {
+          head_sha: SHA_1,
+          conclusion: "success",
+          pull_requests: [{ number: 77 }],
+        },
+      });
+      const hookRes = await fetch(s.url("/webhooks/github"), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-github-event": "check_suite",
+          "x-github-delivery": "d-sse-live",
+          "x-hub-signature-256": `sha256=${createHmac("sha256", GH_SECRET).update(webhookBody).digest("hex")}`,
+        },
+        body: webhookBody,
+      });
+      expect(hookRes.status).toBe(200);
+
+      await readUntil(
+        (text) =>
+          text.includes("event: pr_watch\n") &&
+          text.includes(": keepalive\n\n"),
+      );
+      expect(buffer).not.toContain("d-other-pr");
+      const prWatchFrame = buffer
+        .split("\n\n")
+        .find((frame) => frame.startsWith("event: pr_watch\n"));
+      expect(prWatchFrame).toBeDefined();
+      const dataLine = prWatchFrame
+        .split("\n")
+        .find((line) => line.startsWith("data: "));
+      expect(JSON.parse(dataLine.slice("data: ".length))).toMatchObject({
+        repo: "watt-mind/factory",
+        pr: 77,
+        headSha: SHA_1,
+        githubEvent: "check_suite",
+        action: "completed",
+        conclusion: "success",
+        deliveryId: "d-sse-live",
+      });
+
+      // Disconnect cleans up the subscriber slot.
+      controller.abort();
+      await reader.cancel().catch(() => {});
+      await until(
+        "SSE subscriber cleanup on disconnect",
+        () => prWatch.stats().subscribers === 0,
+        { timeoutMs: 2_000, everyMs: 20 },
+      );
+      expect(prWatch.stats().subscribers).toBe(0);
+    } finally {
+      controller.abort();
+      await reader?.cancel?.().catch(() => {});
+      s.close();
+    }
+  });
+
+  test("GET /events/pr-watch cleans up subscriber and skips keepalive timer on early writeHead/ready failure", async () => {
+    const dir = tmpDir("evrt-pr-watch-cleanup-");
+    const db = openDb(path.join(dir, "runtime.db"));
+    const prWatch = createPrWatchHub({ maxSubscribers: 1 });
+    try {
+      const handle = createApi({
+        db,
+        registry,
+        secret: SECRET,
+        githubSecret: GH_SECRET,
+        policyVersion: PV,
+        controlApiToken: TOKEN,
+        prWatch,
+        prWatchKeepaliveMs: 15,
+      });
+
+      const makeReq = () => ({
+        method: "GET",
+        url: "/events/pr-watch",
+        headers: {
+          host: "127.0.0.1:7381",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        on() {},
+      });
+
+      // Case 1: writeHead throws -> subscriber slot must be released.
+      let writeHeadCalls = 0;
+      const throwingRes = {
+        headersSent: false,
+        writeHead() {
+          writeHeadCalls += 1;
+          if (writeHeadCalls === 1) throw new Error("socket gone");
+          this.headersSent = true;
+        },
+        end() {},
+        on() {},
+      };
+      await handle(makeReq(), throwingRes);
+      expect(prWatch.stats().subscribers).toBe(0);
+
+      // Case 2: initial ready write hits a destroyed response -> subscriber
+      // released and no keepalive timer is armed afterward.
+      let writesAfterReady = 0;
+      let listenerAttached = false;
+      const destroyedRes = {
+        headersSent: false,
+        destroyed: true,
+        writableEnded: false,
+        writeHead() {
+          this.headersSent = true;
+        },
+        write() {
+          writesAfterReady += 1;
+        },
+        end() {},
+        on() {
+          listenerAttached = true;
+        },
+      };
+      await handle(makeReq(), destroyedRes);
+      expect(prWatch.stats().subscribers).toBe(0);
+      expect(listenerAttached).toBe(false);
+      await Bun.sleep(50);
+      expect(writesAfterReady).toBe(0);
+    } finally {
+      db.close();
     }
   });
 });
