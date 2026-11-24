@@ -1526,56 +1526,61 @@ test("worktree_add prunes stale worktree registration and emits actionable hints
   }
 });
 
-t("worktree-up attaches cleanly to an existing unattached GH branch and recovers after deleted worktree dir (GH-2338)", () => {
-  if (handoffSandbox) return;
-  const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-wt-existing-br-"));
-  const ticketId = `GH-${(Date.now() % 1_000_000) + process.pid}`;
-  const branch = `feat/${ticketId}`;
-  const expectedPath = path.join(tempWtRoot, ticketId);
-  const repo = path.resolve(import.meta.dir, "..");
+t(
+  "worktree-up attaches cleanly to an existing unattached GH branch and recovers after deleted worktree dir (GH-2338)",
+  () => {
+    if (handoffSandbox) return;
+    const tempWtRoot = mkdtempSync(
+      path.join(tmpdir(), "factory-wt-existing-br-"),
+    );
+    const ticketId = `GH-${(Date.now() % 1_000_000) + process.pid}`;
+    const branch = `feat/${ticketId}`;
+    const expectedPath = path.join(tempWtRoot, ticketId);
+    const repo = path.resolve(import.meta.dir, "..");
 
-  try {
-    // Pre-create an unattached local branch at origin/develop (simulating an
-    // aborted bring-up that left the branch behind with no worktree).
-    expect(
-      Bun.spawnSync({
-        cmd: ["git", "branch", branch, "origin/develop"],
-        cwd: repo,
+    try {
+      // Pre-create an unattached local branch at origin/develop (simulating an
+      // aborted bring-up that left the branch behind with no worktree).
+      expect(
+        Bun.spawnSync({
+          cmd: ["git", "branch", branch, "origin/develop"],
+          cwd: repo,
+          stdout: "pipe",
+          stderr: "pipe",
+        }).exitCode,
+      ).toBe(0);
+
+      const upRes = Bun.spawnSync({
+        cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
         stdout: "pipe",
         stderr: "pipe",
-      }).exitCode,
-    ).toBe(0);
+        env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+      });
+      expect(upRes.exitCode).toBe(0);
+      expect(upRes.stdout.toString().trim()).toBe(expectedPath);
+      expect(existsSync(expectedPath)).toBe(true);
 
-    const upRes = Bun.spawnSync({
-      cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
-    });
-    expect(upRes.exitCode).toBe(0);
-    expect(upRes.stdout.toString().trim()).toBe(expectedPath);
-    expect(existsSync(expectedPath)).toBe(true);
-
-    // Delete the worktree directory manually without `git worktree remove`
-    // (leaving a stale registration in .git/worktrees/) and re-run worktree-up.
-    rmSync(expectedPath, { recursive: true, force: true });
-    const recoverRes = Bun.spawnSync({
-      cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
-    });
-    expect(recoverRes.exitCode).toBe(0);
-    expect(existsSync(expectedPath)).toBe(true);
-  } finally {
-    Bun.spawnSync({
-      cmd: ["bash", DOWN, ticketId, "--force"],
-      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
-    });
-    rmSync(tempWtRoot, { recursive: true, force: true });
-    Bun.spawnSync({ cmd: ["git", "branch", "-D", branch], cwd: repo });
-  }
-});
+      // Delete the worktree directory manually without `git worktree remove`
+      // (leaving a stale registration in .git/worktrees/) and re-run worktree-up.
+      rmSync(expectedPath, { recursive: true, force: true });
+      const recoverRes = Bun.spawnSync({
+        cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+      });
+      expect(recoverRes.exitCode).toBe(0);
+      expect(existsSync(expectedPath)).toBe(true);
+    } finally {
+      Bun.spawnSync({
+        cmd: ["bash", DOWN, ticketId, "--force"],
+        env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+      });
+      rmSync(tempWtRoot, { recursive: true, force: true });
+      Bun.spawnSync({ cmd: ["git", "branch", "-D", branch], cwd: repo });
+    }
+  },
+);
 
 // prettier-ignore
 t("high concurrency worktree-up --checkout-only with 4 parallel bring-ups succeeds", async () => {
