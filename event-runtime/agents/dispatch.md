@@ -76,7 +76,9 @@ new ticket.
    output; never weaken a test to get green. For the factory repo, the
    configured gate ends with `bun run format:check` after the unit and emit
    checks; run `bun run format` before verification when needed so Prettier
-   cannot turn a handoff green locally but red in CI.
+   cannot turn a handoff green locally but red in CI. Never stop or restart the
+   operator's live stack (`bin/live-stack.sh down`/`up`, `factory down`/`up`) as
+   part of verifying a ticket.
    **The worker verifies the handoff mechanically after you return:** it
    re-runs the repo's declared verify command and the ticket's exact
    `Verification Command`, runs `cd event-runtime/web && bun run build` when

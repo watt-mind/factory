@@ -3496,8 +3496,10 @@ describe("buildRunSpec", () => {
     });
     // Regenerated (#2170): dispatch's absolute result-path contract changes
     // the pinned definition hash carried by planned specs.
+    // Regenerated (#828): dispatch brief forbids live-stack restarts during
+    // verification and dispatch.json was re-pinned.
     expect(canonicalJson(spec)).toBe(
-      '{"adapter":"cursor","agent":"dispatch@1","capabilities":["tracker:write","repo:write","github:write"],"defHash":"sha256:8e8b4b99c6cd953977ed193d22b682b93bf7efd921ea514ae866d729d7442ab9","idempotencyKey":"dispatch@1:factory.dispatch-result/v1:sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59:dispatch-baseline","input":{"repo":"factory","ticket":"WM-694"},"inputHash":"sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59","maxAttempts":1,"model":"cursor-grok-4.6-high","modelTier":"strong","outputContract":"factory.dispatch-result/v1","policyVersion":"git:test","promptVersion":"git:test","runId":"run_baseline","schemaVersion":"factory.run-spec/v1","timeoutSeconds":5400,"workspace":{"checkoutDir":"repo","retainOnFailure":true,"type":"worktree"}}',
+      '{"adapter":"cursor","agent":"dispatch@1","capabilities":["tracker:write","repo:write","github:write"],"defHash":"sha256:e6ae0f1a98a4e0742c1bfd278dc41113d7829b718ac4bfd78236683944b058bd","idempotencyKey":"dispatch@1:factory.dispatch-result/v1:sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59:dispatch-baseline","input":{"repo":"factory","ticket":"WM-694"},"inputHash":"sha256:4381f987d301384843e8cf651c969e06c3d9dba79b947f3c07b5c3852926cf59","maxAttempts":1,"model":"cursor-grok-4.6-high","modelTier":"strong","outputContract":"factory.dispatch-result/v1","policyVersion":"git:test","promptVersion":"git:test","runId":"run_baseline","schemaVersion":"factory.run-spec/v1","timeoutSeconds":5400,"workspace":{"checkoutDir":"repo","retainOnFailure":true,"type":"worktree"}}',
     );
   });
 

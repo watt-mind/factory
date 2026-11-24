@@ -1079,13 +1079,27 @@ adapter_banner() { # <adapter from /health>
 # Teardown is two-phase so the waits overlap: term_daemon every pidfile first,
 # then await_daemon each — total cost is the slowest daemon's exit, not the
 # sum of three sequential timeouts.
-term_daemon() { # <pidfile> <label>
-  if pid_alive "$1"; then
-    local pid
-    pid="$(cat "$1")"
-    info "stopping $2 (pid $pid)"
-    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+# Verifies process identity when an expected command substring is supplied and
+# clears stale pidfiles rather than signalling a recycled PID (GH-828).
+term_daemon() { # <pidfile> <label> [expected-cmd-substring]
+  local pidfile="$1" label="$2" expected="${3:-}" pid cmd
+  [[ -f "$pidfile" ]] || return 0
+  pid="$(cat "$pidfile" 2>/dev/null || true)"
+  if [[ ! "$pid" =~ ^[0-9]+$ ]] || ! kill -0 "$pid" 2>/dev/null; then
+    warn "stale pidfile for $label ($pidfile, pid ${pid:-empty}) — removing"
+    rm -f "$pidfile"
+    return 0
   fi
+  if [[ -n "$expected" ]]; then
+    cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
+    if [[ -n "$cmd" && "$cmd" != *"$expected"* ]]; then
+      warn "refusing to signal recycled pid $pid for $label (expected '$expected', got '$cmd') — removing stale pidfile"
+      rm -f "$pidfile"
+      return 0
+    fi
+  fi
+  info "stopping $label (pid $pid)"
+  kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
 }
 
 await_daemon() { # <pidfile> <label>

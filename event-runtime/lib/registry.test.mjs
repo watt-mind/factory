@@ -472,8 +472,10 @@ describe("registry", () => {
     // Regenerated (#2219): merge-review requires one reviewable visual
     // artifact or a concrete exception for user-facing visual PRs, and the
     // prompt was re-pinned.
+    // Regenerated (#828): dispatch brief forbids live-stack restarts during
+    // verification and dispatch.json was re-pinned.
     const expected =
-      "sha256:dfbde9727dbe25d189af86936a1db647c843427f96a8423e8896ef188e49a9eb";
+      "sha256:d8a3dfed8726f42d3db4dcbe20429a08fd5bb2e88b94908866adf3597c662055";
     expect(registryDigest(loadRegistry({ packRoots: [] }))).toBe(expected);
   });
 
@@ -776,8 +778,10 @@ describe("registry", () => {
     // only, `pack` remains non-enumerable.
     // Regenerated (#2170): dispatch writes result envelopes through the
     // worker-supplied absolute result path.
+    // Regenerated (#828): dispatch brief forbids live-stack restarts during
+    // verification and dispatch.json was re-pinned.
     expect(computeDefHash(def)).toBe(
-      "sha256:8e8b4b99c6cd953977ed193d22b682b93bf7efd921ea514ae866d729d7442ab9",
+      "sha256:e6ae0f1a98a4e0742c1bfd278dc41113d7829b718ac4bfd78236683944b058bd",
     );
   });
 

@@ -197,8 +197,17 @@ print_daemon_command() { # <label> <cmd...>
 ACTION="${1:-up}"
 shift || true
 
+REPO="$(repo_root)"
 HOME_DIR="${FACTORY_EVENT_HOME:-$HOME/.factory/event-runtime}"
-RUN_DIR="${FACTORY_RUN_DIR:-$HOME/.factory/run}"
+if [[ -n "${FACTORY_RUN_DIR:-}" ]]; then
+  RUN_DIR="$FACTORY_RUN_DIR"
+elif [[ -f "$REPO/.git" ]]; then
+  # Linked git worktree: isolate run dir to this worktree so `down` never
+  # touches the operator's shared ~/.factory/run stack (GH-828).
+  RUN_DIR="$REPO/.factory/run"
+else
+  RUN_DIR="$HOME/.factory/run"
+fi
 API_PORT="${FACTORY_EVENT_PORT:-7381}"
 WEB_PORT="${FACTORY_EVENT_WEB_PORT:-7382}"
 LOG_ROTATE_BYTES="${FACTORY_LOG_ROTATE_BYTES:-52428800}"
@@ -300,9 +309,8 @@ wait_for_worker_ready() {
 # creates these itself once `--dry-run` has had its chance to exit.
 if [[ "$ACTION" != "up" ]]; then
   validate_timing_knobs
-  mkdir -p "$RUN_DIR" "$HOME_DIR"
+  mkdir -p -m 700 "$RUN_DIR" "$HOME_DIR"
 fi
-REPO="$(repo_root)"
 
 gh_app_release_root() {
   if [[ -n "${FACTORY_HOME:-}" ]]; then
@@ -624,6 +632,10 @@ case "$ACTION" in
       [[ -d "$RUN_DIR" && ! -L "$RUN_DIR" ]] && chmod 700 "$RUN_DIR" 2>/dev/null || true
       [[ -d "$HOME_DIR" && ! -L "$HOME_DIR" ]] && chmod 700 "$HOME_DIR" 2>/dev/null || true
     fi
+    # Record the owning checkout root so another checkout's `down` refuses
+    # instead of silently stopping this stack (GH-828).
+    OWNER_REPO_REAL="$(cd "$REPO" && pwd -P)"
+    printf '%s\n' "$OWNER_REPO_REAL" >"$RUN_DIR/owner-repo"
     validate_log_knobs
     # This happens before any daemon is spawned. Existing live owners keep
     # their inode and are copy-truncated; stopped daemons get a cheap rename.
@@ -984,6 +996,14 @@ case "$ACTION" in
     ;;
 
   down)
+    # Refuse to stop a stack owned by a different checkout (GH-828).
+    if [[ -f "$RUN_DIR/owner-repo" ]]; then
+      RECORDED_OWNER="$(cat "$RUN_DIR/owner-repo" 2>/dev/null || true)"
+      CURRENT_OWNER="$(cd "$REPO" && pwd -P)"
+      if [[ -n "$RECORDED_OWNER" && "$RECORDED_OWNER" != "$CURRENT_OWNER" ]]; then
+        die "stack-owner-mismatch: run dir $RUN_DIR is owned by $RECORDED_OWNER, refusing to stop from $CURRENT_OWNER"
+      fi
+    fi
     info "stopping live factory stack..."
     # A supervised pool (WM-226) needs its own wait: await_daemon gives a daemon
     # three seconds and then SIGKILLs it, which is right for a web server and
