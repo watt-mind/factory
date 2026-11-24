@@ -1062,7 +1062,7 @@ describe("browserLaunchCheck", () => {
       env: {
         HOME: process.env.HOME,
         PATH: "/usr/bin:/bin",
-        CHROME_BIN: path.join(scratch(), "missing-chrome"),
+        CHROME_BIN: "",
       },
     });
     expect(r.status).toBe("skip");
