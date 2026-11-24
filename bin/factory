@@ -153,6 +153,7 @@ case "$cmd" in
   economics)    run_bun orchestrator/economics.mjs "$@" ;;
   ci)           run_bun orchestrator/ci.mjs "$@" ;;
   ci-health)    run_bun orchestrator/ci-health.mjs "$@" ;;
+  wait-ci)      run_bun tools/wait-ci.mjs "$@" ;;
   actions-cache) run_bun orchestrator/actions-cache.mjs "$@" ;;
   label-guard)  run_bun orchestrator/label-guard.mjs "$@" ;;
   digest)       run_bun orchestrator/digest.mjs "$@" ;;
@@ -441,6 +442,7 @@ factory — control plane (FACTORY_ROOT=$ROOT)
   ci            orchestrator/ci.mjs
   ci-health     orchestrator/ci-health.mjs (base-branch red-streak alarm;
                 dry unless --apply; --report prints remembered alarms)
+  wait-ci       tools/wait-ci.mjs (wait for CI workflow run + REST check-runs gate)
   actions-cache Actions cache usage guard (exits non-zero at warning threshold)
   label-guard   orchestrator/label-guard.mjs
   digest        orchestrator/digest.mjs
