@@ -310,7 +310,18 @@ export async function unclaimTicket(cp, key) {
  */
 export async function fileTicket(
   cp,
-  { team, title, body, labels, state, projectId, dedupeKey },
+  {
+    team,
+    title,
+    body,
+    labels,
+    state,
+    projectId,
+    project,
+    parent,
+    priority,
+    dedupeKey,
+  },
   { emit = out, setExitCode = (code) => (process.exitCode = code) } = {},
 ) {
   const key = typeof dedupeKey === "string" ? dedupeKey.trim() : "";
@@ -321,6 +332,9 @@ export async function fileTicket(
     labels,
     state,
     projectId,
+    ...(project ? { project } : {}),
+    ...(parent ? { parent } : {}),
+    ...(priority !== undefined && priority !== null ? { priority } : {}),
     ...(key ? { dedupeKey: key, matchTitle: true } : {}),
   });
   const warnings = Array.isArray(created.warnings)
@@ -883,11 +897,73 @@ function configuredGithubTicketRef(ticketArg, registry) {
   return null;
 }
 
+/** GitHub shorthand (`GH-2426`, case-insensitive) for the current GitHub repo. */
+const GH_SHORTHAND = /^GH-(\d+)$/i;
+
+/** A Linear issue key: team prefix, dash, number (`CLNT-616`, `WM-1007`). */
+const LINEAR_KEY = /^[A-Z][A-Z0-9]*-\d+$/;
+
+/** True when `ticketArg` looks like a Linear issue key (and not `GH-<N>`). */
+export function isLinearIssueKey(ticketArg) {
+  if (typeof ticketArg !== "string") return false;
+  const trimmed = ticketArg.trim();
+  return LINEAR_KEY.test(trimmed) && !GH_SHORTHAND.test(trimmed);
+}
+
+/** Extract `owner/repo` from a GitHub git remote URL, or null. */
+export function parseGithubRemoteSlug(remoteUrl) {
+  if (typeof remoteUrl !== "string") return null;
+  const trimmed = remoteUrl.trim();
+  const match =
+    /^(?:https?:\/\/(?:[^/@]+@)?github\.com\/|ssh:\/\/(?:[^/@]+@)?github\.com\/|git@github\.com:)([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/i.exec(
+      trimmed,
+    );
+  return match ? match[1] : null;
+}
+
+function githubSlugFromGitRemote(cwd) {
+  const proc = Bun.spawnSync({
+    cmd: ["git", "remote", "get-url", "origin"],
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (proc.exitCode !== 0) return null;
+  return parseGithubRemoteSlug(proc.stdout.toString());
+}
+
 /** Return the full GitHub slug, or reject a miss before fallback routing. */
-export function normalizeTicketRef(ticketArg, repos) {
+export function normalizeTicketRef(
+  ticketArg,
+  repos,
+  { cwd = process.cwd(), repoFlag = flag("repo"), gitOrigin } = {},
+) {
   // Same registry `controlPlane()` binds to, so the ref that passes here is
   // the ref the adapter is built for.
   const registry = repos ?? getRepos(instanceConfigRoot());
+  if (typeof ticketArg === "string") {
+    const ghShort = GH_SHORTHAND.exec(ticketArg.trim());
+    if (ghShort) {
+      const number = ghShort[1];
+      let slug = null;
+      const repoName = resolveRepoName({ cwd, repos: registry, repoFlag });
+      if (repoName) slug = registry.get(repoName)?.github ?? null;
+      if (!slug) {
+        slug =
+          gitOrigin !== undefined
+            ? parseGithubRemoteSlug(gitOrigin)
+            : githubSlugFromGitRemote(cwd);
+      }
+      if (!slug) {
+        const err = new Error(
+          `cannot resolve ${JSON.stringify(ticketArg)}: not inside a configured GitHub repository and no GitHub git origin found; pass <owner>/<repo>#${number} or --repo <name>`,
+        );
+        err.exitCode = 2;
+        throw err;
+      }
+      return `${slug}#${number}`;
+    }
+  }
   const ref = configuredGithubTicketRef(ticketArg, registry);
   if (ref) return ref.identifier;
   if (typeof ticketArg === "string" && /^[^#\s]+#[0-9]+$/.test(ticketArg)) {
@@ -898,6 +974,63 @@ export function normalizeTicketRef(ticketArg, repos) {
     throw err;
   }
   return ticketArg;
+}
+
+const FULL_GITHUB_REF = /^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#([0-9]+)$/;
+
+/**
+ * Resolve the control-plane target for a ticket verb.
+ *
+ * A Linear-shaped key (`OPS-164`, `CLNT-9693`, excluding `GH-<N>`) routes to
+ * the Linear plane even when cwd is inside a GitHub-backed repository, unless
+ * an explicit `--repo` forces that repository's plane. Conversely, an explicit
+ * `owner/repo#N` ref (including resolved `GH-<N>` shorthand) routes to GitHub
+ * even when `policy.yaml` or cwd defaults to Linear.
+ */
+export function resolveControlPlaneTarget({
+  ticketArg,
+  cwd = process.cwd(),
+  repos,
+  repoFlag = flag("repo"),
+} = {}) {
+  if (!repoFlag && isLinearIssueKey(ticketArg)) {
+    return { kind: "linear", repoName: null };
+  }
+  let repoName = null;
+  try {
+    repoName = resolveRepoName({ cwd, repos, repoFlag });
+  } catch (err) {
+    // An explicit bad --repo is the operator's mistake; surface it.
+    if (repoFlag) throw err;
+  }
+  if (!repoName) {
+    try {
+      repoName = resolveRepoNameFromTicket(ticketArg, repos);
+    } catch {
+      // registry unreadable — same fallback as before
+    }
+  }
+  if (
+    !repoFlag &&
+    typeof ticketArg === "string" &&
+    FULL_GITHUB_REF.test(ticketArg.trim())
+  ) {
+    const matched = repoName ? repos?.get?.(repoName) : null;
+    if (!matched || matched.controlPlane !== "github") {
+      let ticketRepoName = null;
+      try {
+        ticketRepoName = resolveRepoNameFromTicket(ticketArg, repos);
+      } catch {
+        // registry unreadable — fall through to bare GitHub plane
+      }
+      const ticketRepo = ticketRepoName ? repos?.get?.(ticketRepoName) : null;
+      if (ticketRepo?.controlPlane === "github") {
+        return { kind: null, repoName: ticketRepoName };
+      }
+      return { kind: "github", repoName: null };
+    }
+  }
+  return { kind: null, repoName };
 }
 
 /**
@@ -933,30 +1066,33 @@ function controlPlane(
   const repos = getRepos(root);
   // Absent a resolvable repo, fall back to the workspace default exactly as
   // before — a CLI run from /tmp must still work.
-  let repoName = null;
   if (forFile) {
-    repoName = resolveRepoNameForFile({ repos });
+    const repoFlag = flag("repo");
+    const fromFlag = flag("from");
+    const fromRepo = fromFlag
+      ? resolveRepoNameFromTicket(fromFlag, repos)
+      : null;
+    const repoName = resolveRepoNameForFile({ repos, repoFlag, fromFlag });
+    if (team && !repoFlag && !fromRepo) {
+      const cwdRepo = repoName ? repos.get(repoName) : null;
+      const matchesGithubTeam =
+        cwdRepo?.controlPlane === "github" &&
+        typeof cwdRepo.team === "string" &&
+        cwdRepo.team.toUpperCase() === String(team).toUpperCase();
+      if (!matchesGithubTeam) {
+        return loadControlPlane({ root, kind: "linear" });
+      }
+    }
     if (repoName) return loadControlPlane({ root, repoName });
     // An explicit --team is the Linear route and needs no repository; refuse
     // only when nothing at all says where the finding belongs.
-    if (team) return loadControlPlane({ root });
+    if (team) return loadControlPlane({ root, kind: "linear" });
     throw new Error(
       "file cannot resolve a control plane outside a configured repository; pass --repo <name> or --from <owner/repo#N> (or --team <KEY> for a Linear team)",
     );
   }
-  try {
-    repoName = resolveRepoName({ repos });
-  } catch (err) {
-    // An explicit bad --repo is the operator's mistake; surface it.
-    if (flag("repo")) throw err;
-  }
-  if (!repoName) {
-    try {
-      repoName = resolveRepoNameFromTicket(ticketArg, repos);
-    } catch {
-      // registry unreadable — same fallback as before
-    }
-  }
+  const { kind, repoName } = resolveControlPlaneTarget({ ticketArg, repos });
+  if (kind) return loadControlPlane({ root, kind });
   return loadControlPlane(repoName ? { root, repoName } : { root });
 }
 
@@ -1174,9 +1310,6 @@ export function doneCheckMessages({
   return errors;
 }
 
-/** A Linear issue key: team prefix, dash, number (`CLNT-616`, `WM-1007`). */
-const LINEAR_KEY = /^[A-Z][A-Z0-9]*-\d+$/;
-
 /**
  * Build the tracker-native escape-hatch mutation for `detail --replace`.
  *
@@ -1234,7 +1367,10 @@ const VALUE_FLAGS = new Set([
   "from",
   "label",
   "merge-sha",
+  "minutes",
+  "parent",
   "pr",
+  "priority",
   "project",
   "remove",
   "repo",
@@ -1244,6 +1380,9 @@ const VALUE_FLAGS = new Set([
   "type",
   "var",
 ]);
+
+const SHORT_VALUE_FLAGS = new Set(["b"]);
+const SHORT_BOOL_FLAGS = new Set(["h"]);
 
 const BODY_VERBS = new Set(["answer", "comment", "detail"]);
 
@@ -1280,32 +1419,348 @@ export function parsePositionalArgs(argv) {
       if (VALUE_FLAGS.has(arg.slice(2))) i += 1;
       continue;
     }
+    if (arg.startsWith("-") && arg.length === 2) {
+      const shortName = arg.slice(1);
+      if (SHORT_VALUE_FLAGS.has(shortName)) {
+        i += 1;
+        continue;
+      }
+      if (SHORT_BOOL_FLAGS.has(shortName)) continue;
+    }
     positional.push(arg);
   }
   return positional;
 }
 
+function optionTokens(args) {
+  const end = args.indexOf("--");
+  return end === -1 ? args : args.slice(0, end);
+}
+
 const argv = process.argv.slice(2);
+const optArgv = optionTokens(argv);
 const verb = argv[0];
 const positional = parsePositionalArgs(argv);
 const flag = (name, dflt = null) => {
-  const i = argv.indexOf(`--${name}`);
-  return i === -1 ? dflt : argv[i + 1];
+  const i = optArgv.indexOf(`--${name}`);
+  return i === -1 ? dflt : (optArgv[i + 1] ?? dflt);
+};
+const shortFlag = (ch, dflt = null) => {
+  const i = optArgv.indexOf(`-${ch}`);
+  return i === -1 ? dflt : (optArgv[i + 1] ?? dflt);
 };
 const flagAll = (name) =>
-  argv
-    .flatMap((a, i) => (a === `--${name}` ? [argv[i + 1]] : []))
+  optArgv
+    .flatMap((a, i) => (a === `--${name}` ? [optArgv[i + 1]] : []))
     .filter(Boolean);
-const has = (name) => argv.includes(`--${name}`);
+const has = (name) => optArgv.includes(`--${name}`);
+export function hasHelpFlag(args = argv) {
+  const tokens = optionTokens(args);
+  for (let i = 1; i < tokens.length; i += 1) {
+    const arg = tokens[i];
+    if (arg === "--help" || arg === "-h") return true;
+    if (arg.startsWith("--")) {
+      if (VALUE_FLAGS.has(arg.slice(2))) i += 1;
+      continue;
+    }
+    if (arg.startsWith("-") && arg.length === 2) {
+      if (SHORT_VALUE_FLAGS.has(arg.slice(1))) i += 1;
+    }
+  }
+  return false;
+}
 const JSON_OUT = has("json");
 const out = (obj, text) =>
   console.log(JSON_OUT ? JSON.stringify(obj, null, 2) : text);
+
+const VERB_ALIASES = {
+  show: "get",
+  view: "get",
+  create: "file",
+  label: "labels",
+};
+
+const VERB_HELP = {
+  get: {
+    aliases: ["show", "view"],
+    summary: "Show ticket state, assignee, labels, URL, and description",
+    usage: "factory ticket get <ISSUE-ID> [--repo <name>] [--json]",
+    flags: [
+      "--repo <name>   Force a configured repository's control plane",
+      "--json          Print raw JSON output",
+    ],
+    examples: [
+      "factory ticket get CLNT-616",
+      "factory ticket get GH-2426",
+      "factory ticket show watt-mind/factory#2426",
+    ],
+  },
+  comments: {
+    summary: "List comments on a ticket",
+    usage: "factory ticket comments <ISSUE-ID> [--repo <name>] [--json]",
+    flags: [
+      "--repo <name>   Force a configured repository's control plane",
+      "--json          Print raw JSON output",
+    ],
+    examples: [
+      "factory ticket comments CLNT-616",
+      "factory ticket comments GH-2426",
+    ],
+  },
+  claim: {
+    summary: "Claim a ticket (In Progress, assign, swap claim labels)",
+    usage:
+      "factory ticket claim <ISSUE-ID> [--agent <claude|codex|gemini>] [--repo <name>] [--json]",
+    flags: [
+      "--agent <name>  Agent harness label (default: claude)",
+      "--repo <name>   Force a configured repository's control plane",
+      "--json          Print raw JSON output",
+    ],
+    examples: [
+      "factory ticket claim CLNT-616 --agent claude",
+      "factory ticket claim GH-2426",
+    ],
+  },
+  unclaim: {
+    summary: "Release a claimed ticket back to Todo",
+    usage: "factory ticket unclaim <ISSUE-ID> [--repo <name>] [--json]",
+    flags: [
+      "--repo <name>   Force a configured repository's control plane",
+      "--json          Print raw JSON output",
+    ],
+    examples: ["factory ticket unclaim CLNT-616"],
+  },
+  comment: {
+    summary: "Post a comment on a ticket",
+    usage:
+      'factory ticket comment <ISSUE-ID> [--body|-b "<text>" | [--] "<text>"]',
+    flags: [
+      '--body, -b "<text>"  Comment body (alternative to positional text)',
+      "--repo <name>        Force a configured repository's control plane",
+      "--json               Print raw JSON output",
+    ],
+    examples: [
+      'factory ticket comment CLNT-616 "verified: 42 tests pass"',
+      'factory ticket comment GH-2426 -b "PR opened"',
+      'factory ticket comment OPS-164 --body "Investigating"',
+    ],
+  },
+  triage: {
+    summary: "Move a ticket to Triage and post a rationale comment",
+    usage: 'factory ticket triage <ISSUE-ID> --comment "<text>"',
+    flags: [
+      '--comment "<text>"  Required rationale comment',
+      "--repo <name>       Force a configured repository's control plane",
+      "--json              Print raw JSON output",
+    ],
+    examples: [
+      'factory ticket triage CLNT-616 --comment "Owned Paths need revision"',
+    ],
+  },
+  answer: {
+    summary:
+      "Answer a Blocked ticket (moves Blocked -> Todo) and post a comment",
+    usage: 'factory ticket answer <ISSUE-ID> [--] "<text>"',
+    flags: [
+      "--repo <name>   Force a configured repository's control plane",
+      "--json          Print raw JSON output",
+    ],
+    examples: ['factory ticket answer CLNT-616 "Use the existing token cache"'],
+  },
+  detail: {
+    summary: "Append or replace Markdown in a ticket description",
+    usage: 'factory ticket detail <ISSUE-ID> [--replace] [--] "<markdown>"',
+    flags: [
+      "--replace       Replace the entire description instead of appending",
+      "--repo <name>   Force a configured repository's control plane",
+      "--json          Print raw JSON output",
+    ],
+    examples: [
+      'factory ticket detail CLNT-616 -- "## Acceptance criteria\\n- [ ] ..."',
+      'factory ticket detail GH-2426 --replace -- "## Owned Paths\\n- tools/ticket.mjs"',
+    ],
+  },
+  labels: {
+    aliases: ["label"],
+    summary: "Read or update labels on a ticket",
+    usage:
+      "factory ticket labels <ISSUE-ID> [--add <label>]... [--remove <label>]...",
+    flags: [
+      "--add <label>     Add a label (repeatable)",
+      "--remove <label>  Remove a label (repeatable)",
+      "--repo <name>     Force a configured repository's control plane",
+      "--json            Print raw JSON output",
+    ],
+    examples: [
+      "factory ticket labels CLNT-616",
+      "factory ticket labels CLNT-616 --add ai:needs-review --remove ai:in-progress",
+    ],
+  },
+  state: {
+    summary: "Transition ticket state and/or update labels",
+    usage:
+      'factory ticket state <ISSUE-ID> ["<State>"] [--add <label>] [--remove <label>] [--unassign] [--comment "<text>"] [--pr <ref>] [--merge-sha <sha>]',
+    flags: [
+      "--add <label>       Add a label (repeatable)",
+      "--remove <label>    Remove a label (repeatable)",
+      "--unassign          Clear the ticket assignee",
+      '--comment "<text>"  Post a comment after the transition succeeds',
+      "--pr <ref>          PR number, #N, or URL (Done transitions only)",
+      "--merge-sha <sha>   Merged commit SHA (Done transitions only)",
+      "--repo <name>       Force a configured repository's control plane",
+      "--json              Print raw JSON output",
+    ],
+    examples: [
+      'factory ticket state CLNT-616 "In Review" --add ai:needs-review',
+      "factory ticket state GH-2426 Done --pr 2450 --merge-sha abcdef1",
+    ],
+  },
+  file: {
+    aliases: ["create"],
+    summary: "File a new ticket in Triage (or Todo with --todo)",
+    usage:
+      'factory ticket file --title "<title>" [--team <KEY>] [--repo <name>] [--from <ref>] [--body "<md>"] [--type <type>] [--area <area>] [--source <src>] [--label <label>] [--project <name>] [--parent <ISSUE-ID>] [--priority <0-4>] [--todo] [--dedupe-key "<key>"]',
+    flags: [
+      '--title "<title>"       Required issue title',
+      "--team <KEY>            Linear team key (required on Linear)",
+      "--repo <name>           Target repository from config/repos.yaml",
+      "--from <ref>            Source ticket ref (e.g. owner/repo#123)",
+      '--body "<md>"           Issue description markdown',
+      "--type <type>           Adds type:<type> label (bug, feature, maintenance, ...)",
+      "--area <area>           Adds area:<area> label (repeatable)",
+      "--source <src>          Adds source:<src> label (default: agent)",
+      "--label <label>         Additional label (repeatable)",
+      "--project <name>        Linear project name (or UUID)",
+      "--parent <ISSUE-ID>     Linear parent issue ID for sub-issues",
+      "--priority <0-4>        Linear priority (0=none, 1=urgent, 2=high, 3=medium, 4=low)",
+      "--todo                  Create in Todo with ai:agent-ready instead of Triage",
+      '--dedupe-key "<key>"    Idempotency key to reuse a matching open issue',
+      "--json                  Print raw JSON output",
+    ],
+    examples: [
+      'factory ticket file --team OPS --title "Fix cron" --type bug --project Ops --priority 2',
+      'factory ticket create --team WM --title "Sub-task" --parent WM-100 --body "Details"',
+      'factory ticket file --from watt-mind/factory#123 --title "Follow-up" --type maintenance',
+    ],
+  },
+  inflight: {
+    summary: "List In Progress tickets for a team/project",
+    usage:
+      "factory ticket inflight --team <KEY> [--project <name>] [--repo <name>] [--json]",
+    flags: [
+      "--team <KEY>      Team key",
+      "--project <name>  Filter by project name",
+      "--repo <name>     Force a configured repository's control plane",
+      "--json            Print raw JSON output",
+    ],
+    examples: ["factory ticket inflight --team WM --project Factory"],
+  },
+  queue: {
+    summary: "List agent-ready dispatchable tickets",
+    usage:
+      "factory ticket queue (--repo <name> | --team <KEY>) [--project <name>] [--json]",
+    flags: [
+      "--repo <name>     Configured repository name",
+      "--team <KEY>      Team key",
+      "--project <name>  Filter by project name",
+      "--json            Print raw JSON output",
+    ],
+    examples: [
+      "factory ticket queue --repo factory",
+      "factory ticket queue --team CLNT",
+    ],
+  },
+  budget: {
+    summary: "Show cached Linear API rate-limit budget",
+    usage: "factory ticket budget [--json]",
+    flags: ["--json            Print raw JSON output"],
+    examples: ["factory ticket budget"],
+  },
+  "linear-summary": {
+    summary: "Summarize recent Linear API requests from local telemetry",
+    usage: "factory ticket linear-summary [--minutes <N>] [--json]",
+    flags: [
+      "--minutes <N>     Lookback window in minutes (default: 60)",
+      "--json            Print raw JSON output",
+    ],
+    examples: ["factory ticket linear-summary --minutes 60"],
+  },
+  raw: {
+    summary:
+      "Execute a raw GraphQL query or mutation against the control plane",
+    usage:
+      "factory ticket raw '<graphql>' [--var key=value]... [--repo <name>]",
+    flags: [
+      "--var key=value   GraphQL variable (repeatable)",
+      "--repo <name>     Force a configured repository's control plane",
+    ],
+    examples: ["factory ticket raw 'query { viewer { id name } }'"],
+  },
+};
+
+/** Format top-level or per-verb CLI usage text. Returns null for unknown verbs. */
+export function formatHelp(verbName = null) {
+  if (verbName) {
+    const canonical = VERB_ALIASES[verbName] ?? verbName;
+    const spec = VERB_HELP[canonical];
+    if (!spec) return null;
+    const lines = [`Usage: ${spec.usage}`, "", spec.summary];
+    if (spec.aliases?.length) {
+      lines.push(`Aliases: ${spec.aliases.join(", ")}`);
+    }
+    if (spec.flags?.length) {
+      lines.push("", "Flags:", ...spec.flags.map((f) => `  ${f}`));
+    }
+    if (spec.examples?.length) {
+      lines.push("", "Examples:", ...spec.examples.map((e) => `  ${e}`));
+    }
+    return lines.join("\n");
+  }
+
+  const verbLines = Object.entries(VERB_HELP).map(([name, spec]) => {
+    const label = spec.aliases?.length
+      ? `${name} (${spec.aliases.join(", ")})`
+      : name;
+    return `  ${label.padEnd(24)} ${spec.summary}`;
+  });
+  return [
+    "Usage: factory ticket <verb> [args] [flags]",
+    "       factory ticket <verb> --help",
+    "",
+    "Identifiers:",
+    "  CLNT-616, OPS-164        Linear issue key (routes to Linear unless --repo is set)",
+    "  GH-2426, gh-2426         Current repository's GitHub issue #2426",
+    "  owner/repo#123, repo#123 Explicit GitHub issue ref",
+    "",
+    "Verbs:",
+    ...verbLines,
+    "",
+    "Global flags:",
+    "  --repo <name>            Override repository / control-plane selection",
+    "  --json                   Output structured JSON",
+    "  -h, --help               Show help (top-level or for a specific verb)",
+    "",
+    "Examples:",
+    "  factory ticket get GH-2426",
+    "  factory ticket get OPS-164",
+    '  factory ticket comment GH-2426 -b "Verified locally"',
+    '  factory ticket file --team OPS --title "Fix cron" --project Ops --priority 2',
+  ].join("\n");
+}
 
 const VERBS = {
   async get() {
     const key = normalizeTicketRef(positional[0]);
     const issue = await controlPlane(key).getTicket(key);
     out(issue, formatTicket(issue));
+  },
+
+  async show() {
+    return VERBS.get();
+  },
+
+  async view() {
+    return VERBS.get();
   },
 
   async comments() {
@@ -1342,9 +1797,12 @@ const VERBS = {
   },
 
   async comment() {
+    const body = flag("body") ?? shortFlag("b") ?? positional[1];
+    if (!positional[0] || !body)
+      throw new Error(
+        `usage: comment <ISSUE-ID> [--body|-b "<text>" | [--] "<text>"]`,
+      );
     const key = normalizeTicketRef(positional[0]);
-    const body = positional[1];
-    if (!body) throw new Error(`usage: comment <ISSUE-ID> [--] "<text>"`);
     await controlPlane(key).comment(key, body);
     out({ ok: true, identifier: key }, `commented on ${key}`);
   },
@@ -1555,7 +2013,20 @@ const VERBS = {
     const team = flag("team");
     const title = flag("title");
     const dedupeKey = flag("dedupe-key")?.trim() || undefined;
-    const usage = `usage: file --title "..." [--from owner/repo#N | --repo name] [--team CLNT] [--body "..."] [--type bug] [--area x] [--source agent] [--todo] [--dedupe-key "..."]`;
+    const project = flag("project")?.trim() || undefined;
+    const parent = flag("parent")?.trim() || undefined;
+    const rawPriority = flag("priority");
+    let priority;
+    if (rawPriority !== null) {
+      const trimmed = String(rawPriority).trim();
+      if (!/^[0-4]$/.test(trimmed)) {
+        throw new Error(
+          `invalid --priority ${JSON.stringify(rawPriority)}: expected an integer 0-4 (0=none, 1=urgent, 2=high, 3=medium, 4=low)`,
+        );
+      }
+      priority = Number(trimmed);
+    }
+    const usage = `usage: file --title "..." [--from owner/repo#N | --repo name] [--team CLNT] [--body "..."] [--type bug] [--area x] [--source agent] [--label x] [--project <name>] [--parent <ISSUE-ID>] [--priority <0-4>] [--todo] [--dedupe-key "..."]`;
     // Argument shape first: a missing title is a usage error, not a routing one.
     if (!title) throw new Error(usage);
     const cp = controlPlane(undefined, { forFile: true, team });
@@ -1576,9 +2047,15 @@ const VERBS = {
       body: flag("body", ""),
       labels: wanted,
       state: stateName,
-      projectId: flag("project") || undefined,
+      project,
+      parent,
+      priority,
       dedupeKey,
     });
+  },
+
+  async create() {
+    return VERBS.file();
   },
 
   async inflight() {
@@ -1683,12 +2160,35 @@ const VERBS = {
  */
 export async function main() {
   installLinearBudgetCapture();
-  if (!verb || has("help") || !VERBS[verb]) {
-    console.log(`verbs: ${Object.keys(VERBS).join(", ")}\n`);
-    console.log(
-      import.meta.file ? "see the header of tools/ticket.mjs for usage" : "",
+  if (
+    !verb ||
+    verb === "--help" ||
+    verb === "-h" ||
+    (verb === "help" && !positional[0])
+  ) {
+    console.log(formatHelp());
+    process.exit(0);
+  }
+  if (verb === "help") {
+    const text = formatHelp(positional[0]);
+    if (text) {
+      console.log(text);
+      process.exit(0);
+    }
+    console.error(
+      `ticket help: unknown verb ${JSON.stringify(positional[0])}\n`,
     );
-    process.exit(verb && !VERBS[verb] ? 2 : 0);
+    console.log(formatHelp());
+    process.exit(2);
+  }
+  if (!VERBS[verb]) {
+    console.error(`ticket: unknown verb ${JSON.stringify(verb)}\n`);
+    console.log(formatHelp());
+    process.exit(2);
+  }
+  if (hasHelpFlag(argv)) {
+    console.log(formatHelp(verb));
+    process.exit(0);
   }
   try {
     await VERBS[verb]();
