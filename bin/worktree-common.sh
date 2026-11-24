@@ -64,6 +64,13 @@ worktree_add() { # <worktree> <branch> <base-ref> [repo]
       return 0
     fi
     if [[ $attempt -lt $max_attempts ]] \
+      && grep -qiE 'missing but already registered worktree' <<<"$err"; then
+      warn "git worktree add found stale registration — pruning and retrying (attempt $attempt/$max_attempts)"
+      git -C "$repo" worktree prune 2>/dev/null || true
+      attempt=$((attempt + 1))
+      continue
+    fi
+    if [[ $attempt -lt $max_attempts ]] \
       && grep -qiE '\.lock|could not lock|cannot lock|unable to create|another git process|temporarily unavailable|resource deadlock|resource temporarily unavailable|device or resource busy|already exists|failed to read .*\.git/worktrees|commondir' <<<"$err"; then
       local delay_idx=$((attempt - 1))
       [[ $delay_idx -ge ${#delays[@]} ]] && delay_idx=$((${#delays[@]} - 1))
@@ -71,6 +78,12 @@ worktree_add() { # <worktree> <branch> <base-ref> [repo]
       sleep "${delays[$delay_idx]}"
       attempt=$((attempt + 1))
       continue
+    fi
+    if grep -qiE 'already used by worktree|already checked out at' <<<"$err"; then
+      die "git worktree add failed: $err — remove that worktree first or pass a slug to use a distinct branch"
+    fi
+    if grep -qiE 'already exists' <<<"$err"; then
+      die "git worktree add failed: $err — re-run with --resume to reuse it, or delete the stale branch with 'git branch -D $branch'"
     fi
     die "git worktree add failed: $err"
   done
@@ -310,7 +323,7 @@ ticket_number() {
   [[ "$1" =~ ^[A-Z]+-([0-9]+) ]] && { printf '%s' "${BASH_REMATCH[1]}"; return; }
   [[ "$1" =~ \#([0-9]+)$ ]] && { printf '%s' "${BASH_REMATCH[1]}"; return; }
   [[ "$1" =~ ^gh-([0-9]+)$ ]] && { printf '%s' "${BASH_REMATCH[1]}"; return; }
-  die "ticket must look like OPS-123 or owner/repo#123 (got '$1')"
+  die "ticket must look like OPS-123, GH-123, or owner/repo#123 (got '$1')"
 }
 
 # Filesystem- and git-ref-safe name for a ticket id.
@@ -1093,6 +1106,8 @@ run_bun_install_trap() { # <trap-definition>
 rename_dir_atomic() { # <src> <dst>
   if mv --version >/dev/null 2>&1; then
     mv -T "$1" "$2" 2>/dev/null
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' -- "$1" "$2" 2>/dev/null
   else
     bun -e 'require("node:fs").renameSync(process.argv[1], process.argv[2])' "$1" "$2" 2>/dev/null
   fi
@@ -1136,7 +1151,8 @@ write_bun_lock_stamp() { # <dir>
     return 1
   fi
   digest=${digest%% *}
-  if [[ -z "$digest" ]] || ! printf '%s\n' "${digest,,}" > "$stamp" 2>/dev/null; then
+  digest=$(printf '%s' "$digest" | tr '[:upper:]' '[:lower:]') || { rm -f "$stamp"; return 1; }
+  if [[ -z "$digest" ]] || ! printf '%s\n' "$digest" > "$stamp" 2>/dev/null; then
     rm -f "$stamp"
     return 1
   fi

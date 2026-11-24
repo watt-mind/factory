@@ -164,7 +164,7 @@ else
   fi
   # Accepts ABC-123 and owner/repo#123 (#881). The directory and
   # branch use the slug, since `/` and `#` are not usable in either.
-  ticket_is_valid "$TICKET" || die "ticket must look like OPS-123 or owner/repo#123 (got '$TICKET')"
+  ticket_is_valid "$TICKET" || die "ticket must look like OPS-123, GH-123, or owner/repo#123 (got '$TICKET')"
   TICKET_SLUG="$(ticket_slug "$TICKET")"
   WT="$WT_ROOT/$TICKET_SLUG"
   LABEL="$TICKET_SLUG"
