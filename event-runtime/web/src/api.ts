@@ -359,20 +359,25 @@ async function call<T>(
     throw new ApiError("HTTP 304 without a cached response", 304);
   }
   const text = await res.text();
-  let json: any = null;
+  let json: unknown = null;
   try {
     json = text ? JSON.parse(text) : null;
   } catch {
     json = null;
   }
   if (!res.ok) {
+    const bodyObj =
+      json && typeof json === "object"
+        ? (json as { error?: unknown; errors?: unknown })
+        : null;
     const message =
       res.status === 401 && mutating
         ? "control API token required — reopen this dashboard with a credentialed link"
-        : (json?.error ??
-          (Array.isArray(json?.errors)
-            ? json.errors.join("; ")
-            : `HTTP ${res.status}`));
+        : typeof bodyObj?.error === "string"
+          ? bodyObj.error
+          : Array.isArray(bodyObj?.errors)
+            ? bodyObj.errors.join("; ")
+            : `HTTP ${res.status}`;
     throw new ApiError(message, res.status);
   }
   if (cacheKey) {
