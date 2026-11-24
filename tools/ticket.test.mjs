@@ -47,6 +47,11 @@ import {
   resolveRepoNameFromTicket,
   normalizeTicketRef,
   resolveRepoNameForFile,
+  isLinearIssueKey,
+  parseGithubRemoteSlug,
+  resolveControlPlaneTarget,
+  formatHelp,
+  hasHelpFlag,
   instanceConfigRoot,
   InstanceConfigMissingError,
   __resetLinearReposCache,
@@ -2101,4 +2106,455 @@ test("CLI state guard enforces --pr and --merge-sha on Done transitions", () => 
   expect(repoOptDone.stderr).toBe("");
   expect(repoOptDone.exitCode).toBe(0);
   expect(repoOptDone.stdout).toContain("watt-mind/factory#1564 -> Done");
+});
+
+// ------------------------------------------------ CLI ergonomics (GH-2446) ---
+function spawnTicketInGithubRepo(args, { extraGhScript = "" } = {}) {
+  const root = realpathSync(
+    mkdtempSync(path.join(os.tmpdir(), "ticket-gh2446-")),
+  );
+  const repoDir = path.join(root, "repo");
+  const bin = path.join(root, "bin");
+  const ghLog = path.join(root, "gh.log");
+  const stdinLog = path.join(root, "gh-stdin.log");
+  const cliRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+  );
+  try {
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    mkdirSync(repoDir);
+    mkdirSync(bin);
+    writeFileSync(
+      path.join(bin, "gh"),
+      [
+        "#!/bin/sh",
+        'input=""',
+        'for a in "$@"; do [ "$a" = "-" ] && input=$(cat); done',
+        `printf '%s\\n' "$*" >> "${ghLog}"`,
+        `printf '%s\\n' "$input" >> "${stdinLog}"`,
+        extraGhScript || 'echo "stub gh: offline" >&2; exit 1',
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      path.join(root, "config", "policy.yaml"),
+      "controlPlane:\n  kind: github\n",
+    );
+    writeFileSync(
+      path.join(root, "config", "repos.yaml"),
+      `repos:\n  - name: factory\n    path: ${repoDir}\n    github: watt-mind/factory\n    control_plane: github\n    project: Factory\n`,
+    );
+    const env = { ...process.env, FACTORY_REPOS_ROOT: root, HOME: root };
+    env.PATH = `${bin}${path.delimiter}${env.PATH ?? ""}`;
+    for (const name of Object.keys(env)) {
+      if (
+        name === "LINEAR_API_KEY" ||
+        name === "GH_TOKEN" ||
+        name === "GITHUB_TOKEN" ||
+        name.startsWith("FACTORY_GH_APP_")
+      )
+        delete env[name];
+    }
+    const result = Bun.spawnSync({
+      cmd: ["bun", path.join(cliRoot, "tools", "ticket.mjs"), ...args],
+      cwd: repoDir,
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return {
+      exitCode: result.exitCode,
+      stdout: result.stdout.toString(),
+      stderr: result.stderr.toString(),
+      ghCalls: existsSync(ghLog) ? readFileSync(ghLog, "utf8") : "",
+      ghStdin: existsSync(stdinLog) ? readFileSync(stdinLog, "utf8") : "",
+    };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("--help, -h, and help print real usage and exit 0 (GH-2446)", () => {
+  for (const args of [["--help"], ["-h"], ["help"]]) {
+    const result = spawnTicketInGithubRepo(args);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Usage:");
+    expect(result.stdout).toContain("get");
+    expect(result.stdout).toContain("file");
+    expect(result.stdout).toContain("comment");
+    expect(result.stdout).not.toContain(
+      "see the header of tools/ticket.mjs for usage",
+    );
+  }
+});
+
+test("per-verb --help / -h / help <verb> print verb usage and exit 0 (GH-2446)", () => {
+  for (const args of [
+    ["file", "--help"],
+    ["file", "-h"],
+    ["help", "file"],
+    ["create", "--help"],
+  ]) {
+    const result = spawnTicketInGithubRepo(args);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("--project");
+    expect(result.stdout).toContain("--parent");
+    expect(result.stdout).toContain("--priority");
+    expect(result.stdout).not.toContain(
+      "see the header of tools/ticket.mjs for usage",
+    );
+  }
+
+  for (const args of [
+    ["comment", "--help"],
+    ["comment", "-h"],
+    ["help", "comment"],
+  ]) {
+    const result = spawnTicketInGithubRepo(args);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("--body");
+    expect(result.stdout).toContain("-b");
+  }
+
+  for (const alias of ["show", "view"]) {
+    const result = spawnTicketInGithubRepo([alias, "--help"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("get");
+  }
+
+  const bogus = spawnTicketInGithubRepo(["not-a-verb"]);
+  expect(bogus.exitCode).toBe(2);
+  const bogusHelp = spawnTicketInGithubRepo(["help", "not-a-verb"]);
+  expect(bogusHelp.exitCode).toBe(2);
+});
+
+test("Linear issue keys route to Linear even from a GitHub-backed repo unless --repo forces GitHub (GH-2446)", () => {
+  const routed = spawnTicketInGithubRepo(["get", "OPS-164"]);
+  expect(routed.exitCode).toBe(LINEAR_OFFLINE_GUARD_EXIT);
+  expect(routed.stderr).toContain("linear_offline_guard:");
+  expect(routed.stderr).not.toContain("not a GitHub issue identifier");
+  expect(routed.ghCalls).toBe("");
+
+  const forced = spawnTicketInGithubRepo([
+    "get",
+    "OPS-164",
+    "--repo",
+    "factory",
+  ]);
+  expect(forced.exitCode).toBe(1);
+  expect(forced.stderr).toContain("not a GitHub issue identifier");
+});
+
+test("GH-N shorthand resolves case-insensitively to the current GitHub repo (GH-2446)", () => {
+  for (const ref of ["GH-2426", "gh-2426"]) {
+    const result = spawnTicketInGithubRepo(["get", ref]);
+    expect(result.exitCode).toBe(1);
+    expect(result.ghCalls).toContain("repos/watt-mind/factory/issues/2426");
+  }
+});
+
+test("comment accepts --body and -b flags in addition to positional text (GH-2446)", () => {
+  expect(
+    parsePositionalArgs(["comment", "WM-123", "--body", "hello world"]),
+  ).toEqual(["WM-123"]);
+  expect(
+    parsePositionalArgs(["comment", "WM-123", "-b", "hello world"]),
+  ).toEqual(["WM-123"]);
+  expect(
+    parsePositionalArgs(["comment", "-b", "hello world", "WM-123"]),
+  ).toEqual(["WM-123"]);
+
+  const issueJson = JSON.stringify({
+    number: 2426,
+    node_id: "I_2426",
+    title: "comment test",
+    body: "",
+    state: "open",
+    html_url: "https://github.com/watt-mind/factory/issues/2426",
+    labels: [],
+    user: { login: "owner" },
+    author_association: "OWNER",
+  });
+  const projectJson = JSON.stringify({
+    data: {
+      repository: {
+        projectsV2: {
+          nodes: [
+            {
+              id: "P_1",
+              title: "Factory",
+              field: { id: "F_1", options: [{ id: "o_todo", name: "Todo" }] },
+            },
+          ],
+        },
+      },
+    },
+  });
+  for (const [flagArgs, expectedBody] of [
+    [["--body", "hello from body flag"], "hello from body flag"],
+    [["-b", "hello from short flag"], "hello from short flag"],
+  ]) {
+    const result = spawnTicketInGithubRepo(
+      ["comment", "GH-2426", ...flagArgs],
+      {
+        extraGhScript: [
+          'case "$*" in',
+          "  *graphql*)",
+          '    case "$input" in',
+          `      *FindRepoProject*) printf '%s\\n' '${projectJson}' ;;`,
+          `      *ProjectItems*) printf '%s\\n' '{"data":{"node":{"items":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}' ;;`,
+          `      *) printf '%s\\n' '{"data":{}}' ;;`,
+          "    esac ;;",
+          `  *issues/2426/comments*) printf '%s\\n' '{"id":1}' ;;`,
+          `  *issues/2426*) printf '%s\\n' '${issueJson}' ;;`,
+          `  *) printf '%s\\n' '{}' ;;`,
+          "esac",
+        ].join("\n"),
+      },
+    );
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("commented on watt-mind/factory#2426");
+    expect(result.ghCalls).toContain(
+      "repos/watt-mind/factory/issues/2426/comments",
+    );
+    expect(result.ghStdin).toContain(expectedBody);
+  }
+});
+
+test("verb aliases show/view -> get and create -> file work (GH-2446)", () => {
+  for (const alias of ["show", "view"]) {
+    const result = spawnTicketInGithubRepo([alias, "GH-2426"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.ghCalls).toContain("repos/watt-mind/factory/issues/2426");
+  }
+
+  const createNoTitle = spawnTicketInGithubRepo(["create", "--body", "x"]);
+  expect(createNoTitle.exitCode).toBe(1);
+  expect(createNoTitle.stderr).toContain("usage: file --title");
+});
+
+test("file forwards --project, --parent, and --priority and validates --priority range (GH-2446)", async () => {
+  expect(
+    parsePositionalArgs([
+      "file",
+      "--team",
+      "WM",
+      "--title",
+      "t",
+      "--project",
+      "Factory",
+      "--parent",
+      "WM-10",
+      "--priority",
+      "2",
+    ]),
+  ).toEqual([]);
+
+  const { cp, calls, io } = fileHarness({ identifier: "WM-9", url: "u" });
+  await fileTicket(
+    cp,
+    {
+      team: "WM",
+      title: "t",
+      body: "b",
+      labels: [],
+      state: "Triage",
+      project: "Factory",
+      parent: "WM-10",
+      priority: 0,
+    },
+    io,
+  );
+  expect(calls[0]).toMatchObject({
+    team: "WM",
+    title: "t",
+    project: "Factory",
+    parent: "WM-10",
+    priority: 0,
+  });
+
+  for (const bad of ["5", "-1", "high", "2.5"]) {
+    const res = spawnTicketInGithubRepo([
+      "file",
+      "--team",
+      "WM",
+      "--title",
+      "t",
+      "--priority",
+      bad,
+    ]);
+    expect(res.exitCode).toBe(1);
+    expect(res.stderr).toContain("invalid --priority");
+    expect(res.ghCalls).toBe("");
+  }
+});
+
+test("unit helpers: isLinearIssueKey, parseGithubRemoteSlug, normalizeTicketRef GH-N, resolveControlPlaneTarget, formatHelp (GH-2446)", () => {
+  expect(isLinearIssueKey("OPS-164")).toBe(true);
+  expect(isLinearIssueKey("CLNT-9693")).toBe(true);
+  expect(isLinearIssueKey("GH-2426")).toBe(false);
+  expect(isLinearIssueKey("gh-2426")).toBe(false);
+  expect(isLinearIssueKey("watt-mind/factory#1")).toBe(false);
+  expect(isLinearIssueKey("123")).toBe(false);
+
+  expect(
+    parseGithubRemoteSlug("https://github.com/watt-mind/factory.git"),
+  ).toBe("watt-mind/factory");
+  expect(parseGithubRemoteSlug("git@github.com:watt-mind/factory.git")).toBe(
+    "watt-mind/factory",
+  );
+  expect(parseGithubRemoteSlug("ssh://git@github.com/acme/widget")).toBe(
+    "acme/widget",
+  );
+  expect(
+    parseGithubRemoteSlug("https://gitlab.com/acme/widget.git"),
+  ).toBeNull();
+
+  const repos = new Map([
+    [
+      "factory",
+      { name: "factory", path: "/srv/factory", github: "watt-mind/factory" },
+    ],
+  ]);
+  expect(
+    normalizeTicketRef("GH-2426", repos, {
+      cwd: "/srv/factory",
+      repoFlag: null,
+    }),
+  ).toBe("watt-mind/factory#2426");
+  expect(
+    normalizeTicketRef("gh-2426", repos, {
+      cwd: "/srv/factory/tools",
+      repoFlag: null,
+    }),
+  ).toBe("watt-mind/factory#2426");
+  expect(
+    normalizeTicketRef("GH-42", new Map(), {
+      cwd: os.tmpdir(),
+      repoFlag: null,
+      gitOrigin: "git@github.com:acme/widget.git",
+    }),
+  ).toBe("acme/widget#42");
+  expect(() =>
+    normalizeTicketRef("GH-42", new Map(), {
+      cwd: os.tmpdir(),
+      repoFlag: null,
+      gitOrigin: "",
+    }),
+  ).toThrow(/cannot resolve "GH-42"/);
+
+  expect(
+    resolveControlPlaneTarget({
+      ticketArg: "OPS-164",
+      cwd: "/srv/factory",
+      repos,
+      repoFlag: null,
+    }),
+  ).toEqual({ kind: "linear", repoName: null });
+  expect(
+    resolveControlPlaneTarget({
+      ticketArg: "OPS-164",
+      cwd: "/srv/factory",
+      repos,
+      repoFlag: "factory",
+    }),
+  ).toEqual({ kind: null, repoName: "factory" });
+
+  expect(formatHelp()).toContain("Usage: factory ticket");
+  expect(formatHelp("file")).toContain("--project");
+  expect(formatHelp("show")).toContain("factory ticket get");
+  expect(formatHelp("unknown-verb")).toBeNull();
+
+  // hasHelpFlag ignores --help / -h when consumed as a flag value or after --
+  expect(hasHelpFlag(["file", "--title", "--help"])).toBe(false);
+  expect(hasHelpFlag(["comment", "WM-1", "-b", "-h"])).toBe(false);
+  expect(hasHelpFlag(["comment", "WM-1", "--", "--help"])).toBe(false);
+  expect(hasHelpFlag(["file", "--title", "ok", "--help"])).toBe(true);
+  expect(hasHelpFlag(["comment", "-h"])).toBe(true);
+});
+
+test("file --team <KEY> from a GitHub-backed repo routes to Linear (GH-2446)", () => {
+  const result = spawnTicketInGithubRepo([
+    "file",
+    "--team",
+    "OPS",
+    "--title",
+    "Cross-tracker Linear issue",
+  ]);
+  expect(result.exitCode).toBe(LINEAR_OFFLINE_GUARD_EXIT);
+  expect(result.stderr).toContain("linear_offline_guard:");
+  expect(result.ghCalls).toBe("");
+});
+
+test("GH-N resolved via git remote fallback routes to GitHub even when policy defaults to Linear (GH-2446)", () => {
+  const root = realpathSync(
+    mkdtempSync(path.join(os.tmpdir(), "ticket-gh2446-git-origin-")),
+  );
+  const gitDir = path.join(root, "unregistered-repo");
+  const bin = path.join(root, "bin");
+  const ghLog = path.join(root, "gh.log");
+  const cliRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+  );
+  try {
+    mkdirSync(path.join(root, "config"), { recursive: true });
+    mkdirSync(gitDir);
+    mkdirSync(bin);
+    Bun.spawnSync({
+      cmd: ["git", "init"],
+      cwd: gitDir,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    Bun.spawnSync({
+      cmd: ["git", "remote", "add", "origin", "git@github.com:acme/widget.git"],
+      cwd: gitDir,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    writeFileSync(
+      path.join(bin, "gh"),
+      [
+        "#!/bin/sh",
+        `printf '%s\\n' "$*" >> "${ghLog}"`,
+        'echo "stub gh: offline" >&2',
+        "exit 1",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      path.join(root, "config", "policy.yaml"),
+      "controlPlane:\n  kind: linear\n",
+    );
+    writeFileSync(path.join(root, "config", "repos.yaml"), "repos: []\n");
+    const env = { ...process.env, FACTORY_REPOS_ROOT: root, HOME: root };
+    env.PATH = `${bin}${path.delimiter}${env.PATH ?? ""}`;
+    for (const name of Object.keys(env)) {
+      if (
+        name === "LINEAR_API_KEY" ||
+        name === "GH_TOKEN" ||
+        name === "GITHUB_TOKEN" ||
+        name.startsWith("FACTORY_GH_APP_")
+      )
+        delete env[name];
+    }
+    const result = Bun.spawnSync({
+      cmd: ["bun", path.join(cliRoot, "tools", "ticket.mjs"), "get", "GH-42"],
+      cwd: gitDir,
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr.toString()).not.toContain("linear_offline_guard:");
+    const ghCalls = existsSync(ghLog) ? readFileSync(ghLog, "utf8") : "";
+    expect(ghCalls).toContain("repos/acme/widget/issues/42");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
