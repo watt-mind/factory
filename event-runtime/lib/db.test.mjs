@@ -6,8 +6,12 @@ import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import {
   appendFileSync,
+  chmodSync,
+  lstatSync,
   mkdirSync,
   rmSync,
+  statSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -1192,6 +1196,63 @@ describe("default runtime home guard (fail closed in tests/CI)", () => {
       );
     } finally {
       process.env.FACTORY_EVENT_HOME = saved;
+    }
+  });
+
+  test("ensureHome and openDb enforce owner-only permissions under permissive umask (GH-957)", () => {
+    if (process.platform === "win32") return; // POSIX mode bits not enforced on win32
+    const prevUmask = process.umask(0o022);
+    try {
+      const root = tmpDir("evrt-perms-");
+      const home = path.join(root, "home");
+      // Pre-create with broad 0755 to verify repair
+      mkdirSync(home, { mode: 0o755 });
+      chmodSync(home, 0o755);
+
+      const {
+        ensureHome,
+        workspacesRoot,
+        artifactsRoot,
+        mirrorsRoot,
+      } = require("./config.mjs");
+      ensureHome(home);
+
+      for (const dir of [
+        home,
+        workspacesRoot(home),
+        artifactsRoot(home),
+        mirrorsRoot(home),
+      ]) {
+        expect(lstatSync(dir).mode & 0o777).toBe(0o700);
+      }
+
+      // Symlink target must not be chmodded when ensurePrivateDir sees a symlink
+      const externalTarget = path.join(root, "external");
+      mkdirSync(externalTarget, { mode: 0o755 });
+      chmodSync(externalTarget, 0o755);
+      const linkPath = path.join(root, "symlink-dir");
+      symlinkSync(externalTarget, linkPath);
+      const { ensurePrivateDir } = require("./config.mjs");
+      ensurePrivateDir(linkPath);
+      expect(statSync(externalTarget).mode & 0o777).toBe(0o755);
+
+      // Database + WAL/SHM files are 0600
+      const dbFile = path.join(home, "runtime.db");
+      const db = openDb(dbFile);
+      try {
+        expect(lstatSync(dbFile).mode & 0o777).toBe(0o600);
+        for (const suffix of ["-wal", "-shm"]) {
+          try {
+            expect(lstatSync(`${dbFile}${suffix}`).mode & 0o777).toBe(0o600);
+          } catch {
+            /* WAL/SHM may be absent until first write */
+          }
+        }
+      } finally {
+        db.close();
+      }
+    } finally {
+      process.umask(prevUmask);
     }
   });
 });

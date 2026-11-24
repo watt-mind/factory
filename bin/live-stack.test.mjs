@@ -16,6 +16,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -1602,3 +1603,72 @@ test("SIGTERM to the supervisor drains the worker and stops — even if it exits
     f.cleanup();
   }
 }, 30_000);
+
+test("`up` enforces 0700 on RUN_DIR and HOME_DIR under permissive umask (GH-957)", () => {
+  if (process.platform === "win32") return; // POSIX mode bits not enforced on win32
+  const prevUmask = process.umask(0o022);
+  const f = makeFixture();
+  const homeDir = path.join(f.root, "home");
+  try {
+    mkdirSync(f.runDir, { recursive: true, mode: 0o755 });
+    mkdirSync(homeDir, { recursive: true, mode: 0o755 });
+    chmodSync(f.runDir, 0o755);
+    chmodSync(homeDir, 0o755);
+    const r = runStack(f, ["up"]);
+    expect(r.status).toBe(0);
+    expect(statSync(f.runDir).mode & 0o777).toBe(0o700);
+    expect(statSync(homeDir).mode & 0o777).toBe(0o700);
+  } finally {
+    process.umask(prevUmask);
+    f.cleanup();
+  }
+});
+
+test("linked git worktree isolates default RUN_DIR from shared ~/.factory/run (GH-828)", () => {
+  const f = makeFixture();
+  const fakeHome = path.join(f.root, "fake-home");
+  const sharedRun = path.join(fakeHome, ".factory", "run");
+  mkdirSync(sharedRun, { recursive: true });
+  writeFileSync(path.join(sharedRun, "serve.pid"), "999999\n");
+  // Linked worktrees have a regular `.git` file pointing to the gitdir.
+  writeFileSync(path.join(f.root, ".git"), "gitdir: /tmp/fake-gitdir\n");
+  try {
+    const result = Bun.spawnSync({
+      cmd: ["bash", path.join(f.root, "bin", "live-stack.sh"), "down"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        HOME: fakeHome,
+        FACTORY_RUN_DIR: "",
+        FACTORY_EVENT_HOME: path.join(f.root, "home"),
+        FAKE_REPO: f.root,
+        SPAWN_LOG: f.spawnLog,
+        BUILD_LOG: f.buildLog,
+        PATH: `${path.join(f.root, "stubs")}:${process.env.PATH}`,
+      },
+    });
+    expect(result.exitCode).toBe(0);
+    // Shared ~/.factory/run/serve.pid must remain completely untouched.
+    expect(existsSync(path.join(sharedRun, "serve.pid"))).toBe(true);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("`down` refuses with stack-owner-mismatch when RUN_DIR belongs to another checkout (GH-828)", () => {
+  const f = makeFixture();
+  try {
+    mkdirSync(f.runDir, { recursive: true });
+    writeFileSync(
+      path.join(f.runDir, "owner-repo"),
+      "/some/other/factory-checkout\n",
+    );
+    const r = runStack(f, ["down"]);
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("stack-owner-mismatch");
+    expect(r.stderr).toContain("/some/other/factory-checkout");
+  } finally {
+    f.cleanup();
+  }
+});

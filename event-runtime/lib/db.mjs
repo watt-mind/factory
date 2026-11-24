@@ -9,9 +9,8 @@
  * authoritative for event facts only; Linear stays authoritative for work.
  */
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
 import path from "node:path";
-import { dbPath } from "./config.mjs";
+import { dbPath, ensurePrivateDir, ensurePrivateFile } from "./config.mjs";
 
 export const SCHEMA_V1 = `
 CREATE TABLE IF NOT EXISTS events (
@@ -760,7 +759,7 @@ export const DB_BUSY_ATTEMPT_TIMEOUT_MS = 100;
 export const DB_BUSY_RETRY_TIMEOUT_MS = DB_BUSY_TIMEOUT_MS;
 
 export function openDb(file = dbPath()) {
-  if (file !== ":memory:") mkdirSync(path.dirname(file), { recursive: true });
+  if (file !== ":memory:") ensurePrivateDir(path.dirname(file));
   const db = new Database(file, { create: true });
   // busy_timeout FIRST: switching journal modes takes a brief exclusive lock,
   // and a second process opening the database concurrently must wait for it
@@ -777,6 +776,11 @@ export function openDb(file = dbPath()) {
   db.exec("PRAGMA foreign_keys = ON;");
   migrateDb(db);
   assertSchema(db);
+  if (file !== ":memory:") {
+    ensurePrivateFile(file);
+    ensurePrivateFile(`${file}-wal`);
+    ensurePrivateFile(`${file}-shm`);
+  }
   return db;
 }
 

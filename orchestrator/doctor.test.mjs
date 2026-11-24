@@ -414,6 +414,44 @@ describe("OSS onboarding diagnostics (WM-957)", () => {
       "warn",
     );
   });
+
+  test("checks runtime directory permissions: fails on 0755, passes on 0700 and missing (GH-957)", () => {
+    if (process.platform === "win32") return; // POSIX mode bits not enforced on win32
+    const root = mkdtempSync(path.join(tmpdir(), "doctor-perms-"));
+    try {
+      const missingDir = path.join(root, "not-yet-created");
+      const safeDir = path.join(root, "safe");
+      const unsafeDir = path.join(root, "unsafe");
+      mkdirSync(safeDir, { mode: 0o700 });
+      chmodSync(safeDir, 0o700);
+      mkdirSync(unsafeDir, { mode: 0o755 });
+      chmodSync(unsafeDir, 0o755);
+
+      const missingDiag = ossOnboardingDiagnostics({
+        run: () => ({ status: 1 }),
+        runtimeDirs: [missingDir],
+      }).find((d) => d.label === "runtime directory permissions");
+      expect(missingDiag).toMatchObject({
+        ok: true,
+        detail: "not yet initialized",
+      });
+
+      const safeDiag = ossOnboardingDiagnostics({
+        run: () => ({ status: 1 }),
+        runtimeDirs: [safeDir],
+      }).find((d) => d.label === "runtime directory permissions");
+      expect(safeDiag?.ok).toBe(true);
+
+      const unsafeDiag = ossOnboardingDiagnostics({
+        run: () => ({ status: 1 }),
+        runtimeDirs: [unsafeDir],
+      }).find((d) => d.label === "runtime directory permissions");
+      expect(unsafeDiag?.ok).toBe(false);
+      expect(unsafeDiag?.fix).toContain(`chmod 700 ${unsafeDir}`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("repo toolchain diagnostics (#1097)", () => {

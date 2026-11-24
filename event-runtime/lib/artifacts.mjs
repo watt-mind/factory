@@ -27,6 +27,11 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalJson, hashJson } from "./canonical.mjs";
+import {
+  PRIVATE_FILE_MODE,
+  ensurePrivateDir,
+  ensurePrivateFile,
+} from "./config.mjs";
 import { confinedRegularFile } from "./workspace-paths.mjs";
 
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -58,10 +63,11 @@ function refreshArtifactMtime(dest) {
 
 /** Atomically persist bytes whose digest is already known. */
 function storeBytes({ bytes, sha256hex, storeRoot }) {
-  mkdirSync(storeRoot, { recursive: true });
+  ensurePrivateDir(storeRoot);
   const dest = artifactPath(storeRoot, sha256hex);
   if (existsSync(dest)) {
     if (hashFile(dest) === sha256hex) {
+      ensurePrivateFile(dest);
       refreshArtifactMtime(dest);
       return dest;
     }
@@ -71,7 +77,8 @@ function storeBytes({ bytes, sha256hex, storeRoot }) {
   const tmpName = `${sha256hex}.tmp.${process.pid}.${Date.now()}.${randomBytes(6).toString("hex")}`;
   const tmpPath = path.join(storeRoot, tmpName);
   try {
-    writeFileSync(tmpPath, bytes);
+    writeFileSync(tmpPath, bytes, { mode: PRIVATE_FILE_MODE });
+    ensurePrivateFile(tmpPath);
     const tmpHash = hashFile(tmpPath);
     if (tmpHash !== sha256hex) {
       throw new Error(
@@ -79,6 +86,7 @@ function storeBytes({ bytes, sha256hex, storeRoot }) {
       );
     }
     renameSync(tmpPath, dest);
+    ensurePrivateFile(dest);
   } finally {
     if (existsSync(tmpPath)) rmSync(tmpPath, { force: true });
   }
@@ -121,7 +129,7 @@ export function artifactPath(storeRoot, sha256hex) {
  */
 export function storeCollected({ entries, storeRoot, workspaceDir = null }) {
   if (!entries?.length) return entries ?? [];
-  mkdirSync(storeRoot, { recursive: true });
+  ensurePrivateDir(storeRoot);
   return entries.map((entry) => {
     const dest = artifactPath(storeRoot, entry.sha256);
     const declaredSrc = fileURLToPath(entry.uri);
@@ -183,6 +191,7 @@ export function storeCollected({ entries, storeRoot, workspaceDir = null }) {
     const tmpPath = path.join(storeRoot, tmpName);
     try {
       copyFileSync(src, tmpPath);
+      ensurePrivateFile(tmpPath);
       const tmpHash = hashFile(tmpPath);
       if (tmpHash !== entry.sha256) {
         throw new Error(
@@ -190,6 +199,7 @@ export function storeCollected({ entries, storeRoot, workspaceDir = null }) {
         );
       }
       renameSync(tmpPath, dest);
+      ensurePrivateFile(dest);
     } finally {
       if (existsSync(tmpPath)) {
         rmSync(tmpPath, { force: true });
