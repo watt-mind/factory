@@ -49,8 +49,12 @@ describe("parseReviewArgs", () => {
   });
 
   test("omits default model for codex and agy unless --model is specified", () => {
-    expect(parseReviewArgs(["--pr", "10", "--harness", "codex"]).model).toBeNull();
-    expect(parseReviewArgs(["--pr", "10", "--harness", "agy"]).model).toBeNull();
+    expect(
+      parseReviewArgs(["--pr", "10", "--harness", "codex"]).model,
+    ).toBeNull();
+    expect(
+      parseReviewArgs(["--pr", "10", "--harness", "agy"]).model,
+    ).toBeNull();
     expect(
       parseReviewArgs(["--pr", "10", "--harness", "codex", "--model", "o3"])
         .model,
@@ -150,9 +154,9 @@ describe("argv builders", () => {
       "--json",
       "number,title,body,baseRefName,headRefName,url,author",
     ]);
-    expect(
-      buildGhViewArgs({ pr: 42, repo: "watt-mind/factory" }),
-    ).toContain("--repo");
+    expect(buildGhViewArgs({ pr: 42, repo: "watt-mind/factory" })).toContain(
+      "--repo",
+    );
     expect(
       buildGhViewArgs({ pr: 42, repo: "watt-mind/factory" }).slice(-2),
     ).toEqual(["--repo", "watt-mind/factory"]);

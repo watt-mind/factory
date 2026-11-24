@@ -139,7 +139,10 @@ export function parseReviewArgs(argv) {
  * Deletes ANTHROPIC_API_KEY (and other provider keys) by default so the CLI
  * uses subscription auth (F-5), unless `useApi` is true.
  */
-export function buildReviewerEnv(baseEnv = process.env, { useApi = false } = {}) {
+export function buildReviewerEnv(
+  baseEnv = process.env,
+  { useApi = false } = {},
+) {
   const env = { ...baseEnv };
   const scrubbed = [];
 
