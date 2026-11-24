@@ -20,5 +20,5 @@ Build new or changed behavior from a clean domain model and verified boundaries.
 3. **Design exploration (UI / novel architecture only):** If net-new UI or material redesign, prototype 2–3 distinct options using `$TMPDIR` patches (never `git stash`), select and commit the winner, and record rationale.
 4. **Implement cleanly:** Keep functions single-purpose with shallow nesting; avoid duplicating logic.
 5. **UI visual loop (if UI-affecting):** Render live UI, capture bounded screenshots (prefer mobile viewport / element scope), critique hierarchy/spacing/contrast/states coldly, and polish at least once.
-6. **Verify:** Write behavioral tests, run targeted suites + fast static checks (lint/typecheck/format), and run `/factory-statechart` if a state machine changed.
+6. **Verify & comment hygiene:** Write behavioral tests, run targeted suites + fast static checks (lint/typecheck/format), and run `/factory-statechart` if a state machine changed. If the diff adds lint/type suppressions or `>= 5` comment lines / ticket-ID narration, run `/factory-no-comments` (`factory-comment-sicko`) and re-verify touched files.
 7. **Hand off:** Open PR targeting `config/repos.yaml`'s `base` with `Fixes <ISSUE-ID>` and post the `## Handoff` comment.
