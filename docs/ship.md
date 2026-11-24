@@ -201,6 +201,18 @@ workflow's `on.push.paths` diverges from `config/repos.yaml` or is missing
 altogether, `runtime-pin:<role>` FAILs with both lists rather than silently
 evaluating a stale copy.
 
+`paths` is written in **GitHub Actions `on.push.paths` glob syntax** (not git
+pathspec syntax) and translated before calling `git diff`:
+
+- `!<glob>` becomes `:(exclude)<glob>` (git treats a bare leading `!` as a
+  literal character, so passing it through verbatim would silently fail to
+  exclude anything),
+- a leading `+` is stripped,
+- literal paths, `*`, and `**` pass through,
+- untranslatable constructs (`?`, `[]`, `{}`, `\`, leading `/`, git `:...`
+  magic, stacked prefixes, or negation-only lists with no positive pattern) are
+  rejected at config load with `ShipConfigError` naming the entry and role.
+
 **`paths` is required for a role built in this repo** and the config is
 rejected without it. A role with no paths has no definition of stale, so its
 check can never fail — and a misspelled key (`path:`) used to turn the whole

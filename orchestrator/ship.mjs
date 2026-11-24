@@ -106,6 +106,68 @@ const asList = (value, what) => {
   return [...value];
 };
 
+const UNTRANSLATABLE_GLOB_CHARS = /[?[\]{}\\]/;
+
+/**
+ * Translate one GitHub Actions `on.push.paths` entry into a git pathspec,
+ * refusing syntax whose semantics differ from git (`?`, `[]`, `{}`, `\`,
+ * git pathspec magic `:...`, leading `/`, empty or stacked `!`/`+`).
+ */
+export function translateActionsGlob(entry, { role = "(unknown)" } = {}) {
+  if (typeof entry !== "string" || !entry)
+    throw new ShipConfigError(
+      `runtime_roles[${role}].paths entry ${JSON.stringify(entry)} must be a non-empty string`,
+    );
+  let negated = false;
+  let pattern = entry;
+  if (pattern.startsWith("!")) {
+    negated = true;
+    pattern = pattern.slice(1);
+  } else if (pattern.startsWith("+")) {
+    pattern = pattern.slice(1);
+  }
+  if (!pattern)
+    throw new ShipConfigError(
+      `runtime_roles[${role}].paths entry ${JSON.stringify(entry)} is empty after prefix`,
+    );
+  if (pattern.startsWith("!") || pattern.startsWith("+"))
+    throw new ShipConfigError(
+      `runtime_roles[${role}].paths entry ${JSON.stringify(entry)} has stacked prefix characters`,
+    );
+  if (pattern.startsWith(":"))
+    throw new ShipConfigError(
+      `runtime_roles[${role}].paths entry ${JSON.stringify(entry)} uses git pathspec syntax; write GitHub Actions globs instead`,
+    );
+  if (pattern.startsWith("/"))
+    throw new ShipConfigError(
+      `runtime_roles[${role}].paths entry ${JSON.stringify(entry)} must be repo-relative (no leading "/")`,
+    );
+  if (UNTRANSLATABLE_GLOB_CHARS.test(pattern))
+    throw new ShipConfigError(
+      `runtime_roles[${role}].paths entry ${JSON.stringify(entry)} uses glob syntax (?, [], {}, \\) that cannot be safely translated to a git pathspec`,
+    );
+  return negated ? `:(exclude)${pattern}` : pattern;
+}
+
+/**
+ * Translate a role's GitHub Actions `paths` list into git pathspecs.
+ * Refuses negation-only lists, which would match nothing in `git diff` and
+ * silently report a stale pin as fresh.
+ */
+export function translateActionsPaths(paths, { role = "(unknown)" } = {}) {
+  const translated = paths.map((entry) =>
+    translateActionsGlob(entry, { role }),
+  );
+  if (
+    translated.length > 0 &&
+    translated.every((spec) => spec.startsWith(":(exclude)"))
+  )
+    throw new ShipConfigError(
+      `runtime_roles[${role}].paths contains only negations (${paths.join(", ")}) — at least one positive path pattern is required`,
+    );
+  return translated;
+}
+
 /**
  * Read one repo's ship configuration out of `config/repos.yaml` (falling back
  * to the tracked example, as every other config reader does). `config` lets a
@@ -142,6 +204,7 @@ export function loadShipConfig(name, { root = ROOT, config } = {}) {
       throw new ShipConfigError(
         `${where} needs a non-empty paths list mirroring ${role.publisher_workflow}'s on.push.paths — without it the pin's freshness cannot be proven (set source_repo if the role is built in another repository)`,
       );
+    if (paths.length) translateActionsPaths(paths, { role: role.role });
     return {
       role: role.role,
       manifest: role.manifest,
@@ -778,12 +841,13 @@ export function checkRuntimeRole(cfg, tip, role, { forge, git, readManifest }) {
         `runtime_roles[${role.role}].paths [${role.paths.join(", ")}] drifted from ${wfPath} on.push.paths [${workflowPaths.join(", ")}]`,
         `update runtime_roles[${role.role}].paths in config/repos.yaml to match ${wfPath}'s on.push.paths`,
       );
+    const pathspecs = translateActionsPaths(role.paths, { role: role.role });
     const diff = git([
       "diff",
       "--name-only",
       `${pinned}..${tip}`,
       "--",
-      ...role.paths,
+      ...pathspecs,
     ]);
     if (diff.status !== 0)
       return fail(

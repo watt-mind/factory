@@ -5,6 +5,10 @@
  * network, no clock, no checkout — the point of the injected effects.
  */
 import { describe, test, expect } from "bun:test";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import {
   DEFAULT_PIN_PR,
   ShipChainError,
@@ -174,11 +178,7 @@ function fakeForge(state = {}) {
       if (runJobs) return paginate(world.jobs, runJobs[1] ?? "", "jobs");
       const checkRunsMatch = /\/check-runs(?:\?(.*))?$/.exec(apiPath);
       if (checkRunsMatch)
-        return paginate(
-          world.checkRuns,
-          checkRunsMatch[1] ?? "",
-          "check_runs",
-        );
+        return paginate(world.checkRuns, checkRunsMatch[1] ?? "", "check_runs");
       throw new Error(`unseeded api path ${apiPath}`);
     },
     prList(repo, opts = {}) {
@@ -1641,5 +1641,154 @@ on:
     expect(report.ok).toBe(false);
     expect(check.status).toBe("fail");
     expect(check.detail).toContain("could not read");
+  });
+});
+
+// ------------------------------------------- Actions glob translation (GH-2342)
+
+describe("GitHub Actions glob to git pathspec translation (GH-2342)", () => {
+  test("translates !glob to :(exclude)glob and strips leading + in git diff", () => {
+    const config = cfgWith(null, {
+      role: "case_agent",
+      paths: ["+docker/agent/**", "!docker/agent/README.md"],
+    });
+    const wfYaml = `name: Publish Case Agent Image
+on:
+  push:
+    paths:
+      - "+docker/agent/**"
+      - "!docker/agent/README.md"
+`;
+    const git = fakeGit({ workflowYaml: wfYaml });
+    const report = preflight(config, deps({ git }));
+    expect(checkById(report, "runtime-pin:case_agent").status).toBe("pass");
+    const diffCall = git.calls.find((args) => args[0] === "diff");
+    expect(diffCall).toEqual([
+      "diff",
+      "--name-only",
+      `${PINNED}..${TIP}`,
+      "--",
+      "docker/agent/**",
+      ":(exclude)docker/agent/README.md",
+    ]);
+  });
+
+  test("real git: a change to an excluded !path alone does not make the pin stale", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "ship-glob-test-"));
+    try {
+      const runGit = (args) => {
+        const r = spawnSync("git", args, {
+          cwd: dir,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "Test",
+            GIT_AUTHOR_EMAIL: "test@example.com",
+            GIT_COMMITTER_NAME: "Test",
+            GIT_COMMITTER_EMAIL: "test@example.com",
+          },
+        });
+        return {
+          status: r.status ?? null,
+          stdout: String(r.stdout ?? ""),
+          stderr: String(r.stderr ?? ""),
+        };
+      };
+      expect(runGit(["init", "-q"]).status).toBe(0);
+      mkdirSync(path.join(dir, "docker/agent"), { recursive: true });
+      mkdirSync(path.join(dir, ".github/workflows"), { recursive: true });
+      writeFileSync(
+        path.join(dir, "docker/agent/Dockerfile"),
+        "FROM scratch\n",
+      );
+      writeFileSync(path.join(dir, "docker/agent/README.md"), "# v1\n");
+      writeFileSync(
+        path.join(dir, ".github/workflows/case-agent-image.yml"),
+        `name: Publish Case Agent Image
+on:
+  push:
+    paths:
+      - docker/agent/**
+      - "!docker/agent/README.md"
+`,
+      );
+      expect(runGit(["add", "."]).status).toBe(0);
+      expect(runGit(["commit", "-q", "-m", "initial"]).status).toBe(0);
+      const pinnedSha = runGit(["rev-parse", "HEAD"]).stdout.trim();
+
+      // Commit 2: only README.md changes -> excluded, pin must remain fresh.
+      writeFileSync(path.join(dir, "docker/agent/README.md"), "# v2\n");
+      expect(runGit(["commit", "-q", "-am", "docs only"]).status).toBe(0);
+      const docsTip = runGit(["rev-parse", "HEAD"]).stdout.trim();
+
+      const config = cfgWith(null, {
+        role: "case_agent",
+        paths: ["docker/agent/**", "!docker/agent/README.md"],
+      });
+      const role = config.runtimeRoles[0];
+      const manifest = {
+        case_agent: { provenance: { commit_sha: pinnedSha } },
+      };
+
+      const docsCheck = checkRuntimeRole(
+        config,
+        docsTip,
+        role,
+        deps({ git: runGit, readManifest: () => manifest }),
+      );
+      expect(docsCheck.status).toBe("pass");
+
+      // Commit 3: Dockerfile changes -> included, pin must be stale.
+      writeFileSync(
+        path.join(dir, "docker/agent/Dockerfile"),
+        "FROM scratch\nLABEL v=2\n",
+      );
+      expect(runGit(["commit", "-q", "-am", "dockerfile"]).status).toBe(0);
+      const codeTip = runGit(["rev-parse", "HEAD"]).stdout.trim();
+
+      const codeCheck = checkRuntimeRole(
+        config,
+        codeTip,
+        role,
+        deps({ git: runGit, readManifest: () => manifest }),
+      );
+      expect(codeCheck.status).toBe("fail");
+      expect(codeCheck.detail).toContain("docker/agent/Dockerfile");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    ["docker/agent/?.txt", "single-char wildcard ?"],
+    ["docker/agent/[ab].txt", "character class []"],
+    ["docker/agent/{a,b}.txt", "brace expansion {}"],
+    ["docker\\agent\\Dockerfile", "backslash"],
+    [":(exclude)docker/agent/README.md", "git pathspec magic"],
+    ["/docker/agent/**", "leading slash"],
+    ["!", "empty negation"],
+    ["!!docker/agent/README.md", "double negation"],
+  ])(
+    "untranslatable entry %s (%s) is a ShipConfigError naming entry and role",
+    (badEntry) => {
+      const load = () =>
+        cfgWith(null, {
+          role: "case_agent",
+          paths: ["docker/agent/**", badEntry],
+        });
+      expect(load).toThrow(ShipConfigError);
+      expect(load).toThrow(/case_agent/);
+      expect(load).toThrow(JSON.stringify(badEntry));
+    },
+  );
+
+  test("a negation-only paths list is refused as ShipConfigError naming the role", () => {
+    const load = () =>
+      cfgWith(null, {
+        role: "case_agent",
+        paths: ["!docker/agent/README.md"],
+      });
+    expect(load).toThrow(ShipConfigError);
+    expect(load).toThrow(/case_agent/);
   });
 });
