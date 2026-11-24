@@ -97,9 +97,7 @@ test("friction.mjs --brain-only --brain-dir <tmp> --json mines interactive brain
     expect(out.errors[0].count).toBe(2);
     expect(out.errors[0].runs).toBe(2);
 
-    expect(out.repeats).toEqual([
-      { cmd: "bun run lint", count: 2, runs: 1 },
-    ]);
+    expect(out.repeats).toEqual([{ cmd: "bun run lint", count: 2, runs: 1 }]);
 
     const filtered = Bun.spawnSync(
       [
