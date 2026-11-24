@@ -1,27 +1,31 @@
 #!/usr/bin/env bash
 # Tear down a worktree demo environment (OPS-217).
 #
-#   bin/worktree-down.sh OPS-123           # stop daemons, remove the worktree
-#   bin/worktree-down.sh OPS-123 --force   # ...even with uncommitted changes
-#   bin/worktree-down.sh --here            # stop the current checkout's demo
-#                                          # daemons and delete its demo state
-#   bin/worktree-down.sh --prune           # remove clean, inactive worktrees
-#                                          # whose ticket is Done or PR merged
+#   bin/worktree-down.sh OPS-123                  # stop daemons, remove the worktree
+#   bin/worktree-down.sh OPS-123 --force          # ...even with uncommitted changes
+#   bin/worktree-down.sh OPS-123 --delete-branch  # ...and delete the worktree's local branch (idempotent)
+#   bin/worktree-down.sh --here                   # stop the current checkout's demo
+#                                                 # daemons and delete its demo state
+#   bin/worktree-down.sh --prune                  # remove clean, inactive worktrees
+#                                                 # whose ticket is Done or PR merged
 #
-# Branches are never deleted here — merged branches are cleaned up by the
-# merge flow, unmerged ones are someone's work.
+# Branches are left in place by default — pass --delete-branch to remove the
+# worktree's local branch (protected branches develop/main/master are never
+# deleted, and already-deleted branches succeed idempotently).
 source "$(dirname "${BASH_SOURCE[0]}")/worktree-common.sh"
 
 TICKET=""
 HERE=0
 FORCE=0
 PRUNE=0
+DELETE_BRANCH=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --here) HERE=1 ;;
     --force) FORCE=1 ;;
     --prune) PRUNE=1 ;;
+    --delete-branch) DELETE_BRANCH=1 ;;
     -h | --help)
       sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
@@ -98,8 +102,8 @@ ticket_is_terminal() { # <ticket> <branch>
 }
 
 if [[ "$PRUNE" -eq 1 ]]; then
-  [[ "$HERE" -eq 0 && "$FORCE" -eq 0 && -z "$TICKET" ]] \
-    || die "--prune takes no ticket and cannot be combined with --here or --force"
+  [[ "$HERE" -eq 0 && "$FORCE" -eq 0 && "$DELETE_BRANCH" -eq 0 && -z "$TICKET" ]] \
+    || die "--prune takes no ticket and cannot be combined with --here, --force, or --delete-branch"
   pruned=0
   for WT in "$WT_ROOT"/*; do
     [[ -d "$WT" ]] || continue
@@ -162,12 +166,13 @@ fi
 
 if [[ "$HERE" -eq 1 ]]; then
   [[ -z "$TICKET" ]] || die "--here takes no ticket"
+  [[ "$DELETE_BRANCH" -eq 0 ]] || die "--here cannot be combined with --delete-branch"
   WT="$REPO"
 else
-  [[ -n "$TICKET" ]] || die "usage: worktree-down.sh <TICKET-ID> [--force] | --here | --prune"
+  [[ -n "$TICKET" ]] || die "usage: worktree-down.sh <TICKET-ID> [--force] [--delete-branch] | --here | --prune"
   # Same slug as worktree-up.sh, or a GitHub-id worktree can be created and
   # never torn down — which leaks disk and a port lease (#881).
-  ticket_is_valid "$TICKET" || die "ticket must look like OPS-123 or owner/repo#123 (got '$TICKET')"
+  ticket_is_valid "$TICKET" || die "ticket must look like OPS-123, GH-123, or owner/repo#123 (got '$TICKET')"
   TICKET="$(ticket_slug "$TICKET")"
   WT="$WT_ROOT/$TICKET"
   [[ -d "$WT" ]] || die "no worktree at $WT"
@@ -212,6 +217,18 @@ fi
 # there; nothing may be signalled unless the worktree is actually going away.
 kill_worktree_cwd_processes "$WT"
 
+is_protected_branch() { # <branch>
+  case "$1" in
+    develop | main | master | "$BASE_BRANCH") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+WT_BRANCH=""
+if [[ "$DELETE_BRANCH" -eq 1 ]]; then
+  WT_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+fi
+
 info "removing worktree $WT"
 # macOS bash 3.2: an empty array under `set -u` is an unbound variable, so
 # branch instead of expanding a maybe-empty args array.
@@ -221,4 +238,25 @@ else
   git -C "$REPO" worktree remove "$WT" || die "git worktree remove failed (git worktree list)"
 fi
 git -C "$REPO" worktree prune
-info "done — branch left in place for the merge flow"
+
+if [[ "$DELETE_BRANCH" -eq 1 ]]; then
+  if [[ -z "$WT_BRANCH" ]]; then
+    info "done — worktree was on detached HEAD; no local branch to delete"
+  elif is_protected_branch "$WT_BRANCH"; then
+    warn "refusing to delete protected branch '$WT_BRANCH'"
+    info "done — protected branch '$WT_BRANCH' left in place"
+  elif ! git -C "$REPO" show-ref --verify --quiet "refs/heads/$WT_BRANCH"; then
+    info "done — branch '$WT_BRANCH' already deleted"
+  else
+    delete_err=""
+    if delete_err=$(git -C "$REPO" branch -D "$WT_BRANCH" 2>&1); then
+      info "done — deleted local branch '$WT_BRANCH'"
+    elif ! git -C "$REPO" show-ref --verify --quiet "refs/heads/$WT_BRANCH"; then
+      info "done — branch '$WT_BRANCH' already deleted"
+    else
+      die "failed to delete branch '$WT_BRANCH': $delete_err"
+    fi
+  fi
+else
+  info "done — branch left in place for the merge flow"
+fi

@@ -1,3 +1,6 @@
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { test, expect } from "bun:test";
 import { computeCapacity, formatPulse, gatherPulse } from "./pulse.mjs";
 
@@ -648,4 +651,77 @@ test("gatherPulse excludes escalated PRs from openReadyPrs and probes disk/workt
   expect(pulse.capacity.openEscalatedPrs).toBe(1);
   expect(pulse.capacity.diskFreeGb).toBe(10);
   expect(pulse.capacity.worktreeCount).toBe(2);
+});
+
+test("gatherPulse probes ~/.t3/worktrees when absent and when populated", async () => {
+  const missingDir = path.join(
+    tmpdir(),
+    `pulse-t3-missing-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  );
+  const absentPulse = await gatherPulse({
+    port: deadPort(),
+    webPort: deadPort(),
+    fetchLinear: false,
+    fetchGitHub: false,
+    workspaceProbe: testWorkspaceProbe,
+    t3WorktreesDir: missingDir,
+  });
+  expect(absentPulse.capacity.t3WorktreeCount).toBeNull();
+  expect(absentPulse.capacity.t3WorktreeGb).toBeNull();
+  expect(formatPulse(absentPulse)).not.toContain("T3 worktrees");
+
+  const t3Dir = mkdtempSync(path.join(tmpdir(), "pulse-t3-worktrees-"));
+  try {
+    // 2-level T3 layout: <repo>/<worktree> plus a loose log file and empty repo dir
+    mkdirSync(path.join(t3Dir, "repo-a", "wt-1"), { recursive: true });
+    mkdirSync(path.join(t3Dir, "repo-a", "wt-2"), { recursive: true });
+    writeFileSync(path.join(t3Dir, "repo-a", "universal2.log"), "log\n");
+    mkdirSync(path.join(t3Dir, "repo-empty"), { recursive: true });
+    // 1-level worktree layout: <worktree>/.git
+    mkdirSync(path.join(t3Dir, "direct-wt"), { recursive: true });
+    writeFileSync(path.join(t3Dir, "direct-wt", ".git"), "gitdir: /tmp/x\n");
+
+    const duWorkspaceProbe = (args) => {
+      if (args[0] === "df") {
+        return {
+          ok: true,
+          out: "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/disk3s1 100000000 80000000 4194304 95% /\n",
+          err: "",
+        };
+      }
+      if (args[0] === "git" && args[1] === "worktree") {
+        return {
+          ok: true,
+          out: "worktree /repo\nHEAD abc\n",
+          err: "",
+        };
+      }
+      if (args[0] === "du" && args[1] === "-sk" && args[2] === t3Dir) {
+        // 15 GiB in 1024-byte blocks
+        return { ok: true, out: `15728640\t${t3Dir}\n`, err: "" };
+      }
+      return testWorkspaceProbe(args);
+    };
+
+    const populatedPulse = await gatherPulse({
+      port: deadPort(),
+      webPort: deadPort(),
+      fetchLinear: false,
+      fetchGitHub: false,
+      workspaceProbe: duWorkspaceProbe,
+      t3WorktreesDir: t3Dir,
+    });
+
+    expect(populatedPulse.capacity.t3WorktreeCount).toBe(3);
+    expect(populatedPulse.capacity.t3WorktreeGb).toBe(15);
+    expect(populatedPulse.capacity.verdict).toBe("DRAIN_OR_CLEANUP");
+    expect(populatedPulse.capacity.reason).toContain("3 T3 worktrees");
+    expect(populatedPulse.capacity.reason).toContain("15 GiB");
+
+    const rendered = formatPulse(populatedPulse);
+    expect(rendered).toContain("3 T3 worktrees (15 GiB)");
+    expect(rendered).toContain("~/.t3/worktrees has 3 worktrees (15 GiB)");
+  } finally {
+    rmSync(t3Dir, { recursive: true, force: true });
+  }
 });

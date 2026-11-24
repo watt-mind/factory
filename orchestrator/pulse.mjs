@@ -9,7 +9,7 @@
  * Gathers stack health, worker capacity, in-flight runs, Linear supply depth,
  * and open PR status in a single pass.
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { homedir } from "node:os";
 import { ROOT } from "../lib/schedule.mjs";
@@ -68,6 +68,8 @@ export function computeCapacity({
   mergeBatchSize = 8,
   diskFreeGb = null,
   worktreeCount = null,
+  t3WorktreeCount = null,
+  t3WorktreeGb = null,
   minDiskFreeGb = 5,
 } = {}) {
   const safeQueuedRuns = toNonNegativeFinite(queuedRuns);
@@ -87,6 +89,14 @@ export function computeCapacity({
     worktreeCount === null || worktreeCount === undefined
       ? null
       : toNonNegativeFinite(worktreeCount);
+  const safeT3WorktreeCount =
+    t3WorktreeCount === null || t3WorktreeCount === undefined
+      ? null
+      : toNonNegativeFinite(t3WorktreeCount);
+  const safeT3WorktreeGb =
+    t3WorktreeGb === null || t3WorktreeGb === undefined
+      ? null
+      : toNonNegativeFinite(t3WorktreeGb);
 
   const runnerHeadroom = Math.max(0, safeRunnerCap - safeActiveRuns);
   const queuePressure = safeActiveRuns + safeQueuedRuns;
@@ -95,7 +105,11 @@ export function computeCapacity({
   let reason = `Runner headroom available (${runnerHeadroom} slots free) and open-PR queue (${safeOpenMergeablePrs}/${safeMergeBatchSize}) allow widening or continuing dispatch`;
   if (safeDiskFreeGb !== null && safeDiskFreeGb < minDiskFreeGb) {
     verdict = "DRAIN_OR_CLEANUP";
-    reason = `Low disk space (${safeDiskFreeGb.toFixed(1)} GiB free < ${minDiskFreeGb} GiB; ${safeWorktreeCount ?? "?"} worktrees) — prune merged worktrees before creating new ones`;
+    const t3Suffix =
+      (safeT3WorktreeCount ?? 0) > 0 || (safeT3WorktreeGb ?? 0) > 0
+        ? `, ${safeT3WorktreeCount ?? "?"} T3 worktrees (${safeT3WorktreeGb ?? "?"} GiB in ~/.t3/worktrees)`
+        : "";
+    reason = `Low disk space (${safeDiskFreeGb.toFixed(1)} GiB free < ${minDiskFreeGb} GiB; ${safeWorktreeCount ?? "?"} worktrees${t3Suffix}) — prune merged worktrees before creating new ones`;
   } else if (safeOpenMergeablePrs >= safeMergeBatchSize) {
     verdict = "DRAIN_MERGES_FIRST";
     reason = `Open ready PRs (${safeOpenMergeablePrs} >= ${safeMergeBatchSize} merge batch size); /factory-merge must drain before widening dispatch`;
@@ -116,6 +130,8 @@ export function computeCapacity({
     mergedLastHour: safeMergedLastHour,
     diskFreeGb: safeDiskFreeGb,
     worktreeCount: safeWorktreeCount,
+    t3WorktreeCount: safeT3WorktreeCount,
+    t3WorktreeGb: safeT3WorktreeGb,
     verdict,
     reason,
   };
@@ -173,6 +189,8 @@ export async function gatherPulse({
   webFetch = globalThis.fetch,
   workspaceProbe = sh,
   workspaceCwd = ROOT,
+  t3WorktreesDir = process.env.FACTORY_T3_WORKTREES_DIR ??
+    path.join(homedir(), ".t3", "worktrees"),
 } = {}) {
   const pulse = {
     timestamp: new Date().toISOString(),
@@ -490,6 +508,8 @@ export async function gatherPulse({
 
   let diskFreeGb = null;
   let worktreeCount = null;
+  let t3WorktreeCount = null;
+  let t3WorktreeGb = null;
   try {
     const dfRes = workspaceProbe(["df", "-Pk", ROOT], ROOT);
     if (dfRes?.ok && dfRes.out) {
@@ -513,6 +533,38 @@ export async function gatherPulse({
     // Non-fatal: leave diskFreeGb / worktreeCount null when probe fails.
   }
 
+  try {
+    if (t3WorktreesDir && existsSync(t3WorktreesDir)) {
+      let count = 0;
+      for (const entry of readdirSync(t3WorktreesDir, {
+        withFileTypes: true,
+      })) {
+        if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+        const entryPath = path.join(t3WorktreesDir, entry.name);
+        if (existsSync(path.join(entryPath, ".git"))) {
+          count += 1;
+        } else {
+          for (const child of readdirSync(entryPath, { withFileTypes: true })) {
+            if (child.isDirectory() && !child.name.startsWith(".")) {
+              count += 1;
+            }
+          }
+        }
+      }
+      t3WorktreeCount = count;
+
+      const duRes = workspaceProbe(["du", "-sk", t3WorktreesDir], ROOT);
+      if (duRes?.ok && duRes.out) {
+        const kb = Number(duRes.out.trim().split(/\s+/)[0]);
+        if (Number.isFinite(kb) && kb >= 0) {
+          t3WorktreeGb = Math.round((kb / (1024 * 1024)) * 10) / 10;
+        }
+      }
+    }
+  } catch {
+    // Non-fatal: leave t3WorktreeCount / t3WorktreeGb null when probe fails.
+  }
+
   const capacityErrors = [openPrError, ciRunError, mergedError].filter(Boolean);
   if (capacityErrors.length > 0) {
     pulse.errors = capacityErrors;
@@ -529,6 +581,8 @@ export async function gatherPulse({
       mergeBatchSize,
       diskFreeGb,
       worktreeCount,
+      t3WorktreeCount,
+      t3WorktreeGb,
     }),
     available: Boolean(activeForge && !ciRunError),
     ...(ciRunError ? { ciRunError } : {}),
@@ -707,10 +761,26 @@ export function formatPulse(pulse) {
     lines.push(
       `  Open Ready PRs:  ${cap.openReadyPrs}/${cap.mergeBatchSize} merge batch${cap.openEscalatedPrs > 0 ? ` (${cap.openEscalatedPrs} escalated)` : ""}`,
     );
-    if (cap.diskFreeGb !== null || cap.worktreeCount !== null) {
+    const hasT3Worktrees =
+      (cap.t3WorktreeCount ?? 0) > 0 || (cap.t3WorktreeGb ?? 0) > 0;
+    if (
+      cap.diskFreeGb !== null ||
+      cap.worktreeCount !== null ||
+      hasT3Worktrees
+    ) {
+      const t3Detail = hasT3Worktrees
+        ? `, ${cap.t3WorktreeCount ?? "?"} T3 worktrees${cap.t3WorktreeGb !== null && cap.t3WorktreeGb !== undefined ? ` (${cap.t3WorktreeGb} GiB)` : ""}`
+        : "";
       lines.push(
-        `  Disk/Worktrees:  ${cap.diskFreeGb ?? "?"} GiB free, ${cap.worktreeCount ?? "?"} worktrees`,
+        `  Disk/Worktrees:  ${cap.diskFreeGb ?? "?"} GiB free, ${cap.worktreeCount ?? "?"} worktrees${t3Detail}`,
       );
+      if ((cap.t3WorktreeGb ?? 0) >= 10 || (cap.t3WorktreeCount ?? 0) >= 10) {
+        lines.push(
+          c.yellow(
+            `  Warning:         ~/.t3/worktrees has ${cap.t3WorktreeCount ?? "?"} worktrees (${cap.t3WorktreeGb ?? "?"} GiB) — consider pruning stale T3 worktrees`,
+          ),
+        );
+      }
     }
     lines.push(`  Merged (1h):     ${cap.mergedLastHour}`);
     lines.push(
