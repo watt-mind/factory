@@ -1,10 +1,11 @@
 #!/usr/bin/env bun
 /**
- * `factory wait-ci` — wait for a GitHub Actions workflow run on a commit SHA
- * and enforce the REST check-runs gate (F-8 + F-15).
+ * `factory wait-ci` — wait for CI on a PR (single or batch) or commit SHA
+ * via GitHub's REST API and enforce the check-runs gate (F-8 + F-15).
  *
- * Replaces ad-hoc `sleep` / `for i in $(seq 8)` shell loops and prevents a
- * superseded or false-green `gh run watch` from ever exiting 0 when any
+ * Replaces ad-hoc `sleep` / `for i in $(seq 8)` shell loops and GraphQL-heavy
+ * `gh pr checks` polling, follows superseded head pushes on PRs, and prevents
+ * a superseded or false-green `gh run watch` from ever exiting 0 when any
  * check run on `<sha>` is still running or failed.
  */
 import { parseArgs } from "node:util";
@@ -33,24 +34,32 @@ export const PASSING_CONCLUSIONS = Object.freeze([
 const FAILING_SET = new Set(FAILING_CONCLUSIONS);
 const PASSING_SET = new Set(PASSING_CONCLUSIONS);
 
-export const HELP = `factory wait-ci — wait for a CI workflow run and verify all REST check-runs
+export const HELP = `factory wait-ci — wait for CI via GitHub REST and verify all check-runs
 
 Usage:
   factory wait-ci [sha] [options]
+  factory wait-ci --pr <N|URL> [--pr <N|URL> ...] [options]
 
 Options:
-  --repo <owner/repo>          GitHub repository (default: auto-detected from gh/git)
-  --workflow <name>            Workflow file or name (default: ${DEFAULT_WORKFLOW})
-  --interval <seconds>         Poll interval for gh run watch (default: ${DEFAULT_INTERVAL_SECONDS}, min: ${MIN_INTERVAL_SECONDS})
-  --register-attempts <count>  Max polls waiting for the run to register (default: ${DEFAULT_REGISTER_ATTEMPTS})
+  --pr <N|URL>                 PR number or GitHub PR URL (repeatable for batch watching)
+  --no-wait                    One-shot REST snapshot (no polling); exit 0 only if all checks passed
+  --fail-fast                  In --pr wait mode, fail a PR as soon as any check-run fails
+  --max-wait <seconds>         Optional max wait ceiling in seconds (--pr wait mode)
+  --repo <owner/repo>          GitHub repository (default: auto-detected from gh/git or PR URL)
+  --workflow <name>            Workflow file or name for SHA mode (default: ${DEFAULT_WORKFLOW})
+  --interval <seconds>         Poll interval in seconds (default: ${DEFAULT_INTERVAL_SECONDS}, min: ${MIN_INTERVAL_SECONDS})
+  --register-attempts <count>  Max polls waiting for runs/checks to register (default: ${DEFAULT_REGISTER_ATTEMPTS})
   --register-delay <seconds>   Delay between registration polls (default: ${DEFAULT_REGISTER_DELAY_SECONDS})
-  --json                       Emit structured JSON result
+  --json                       Emit structured JSON result on stdout
   --help, -h                   Show this help
 
 Examples:
   factory wait-ci
   factory wait-ci abc1234 --workflow ci.yml --interval 60
-  factory wait-ci abc1234 --repo owner/repo --json
+  factory wait-ci --pr 2451
+  factory wait-ci --pr 2449 --pr 2450 --interval 60
+  factory wait-ci --pr https://github.com/watt-mind/factory/pull/2451 --no-wait
+  factory wait-ci --pr 2451 --json
 `;
 
 export function parseRepoFromRemoteUrl(url) {
@@ -70,6 +79,41 @@ export function parseRepoFromRemoteUrl(url) {
   if (httpOrSshUrl) return httpOrSshUrl[1];
 
   return null;
+}
+
+export function parsePrRef(raw) {
+  const trimmed = String(raw ?? "").trim();
+  if (!trimmed) {
+    throw new Error("--pr must be a PR number or GitHub pull request URL");
+  }
+
+  const numMatch = trimmed.match(/^#?([1-9]\d*)$/);
+  if (numMatch) {
+    const number = Number.parseInt(numMatch[1], 10);
+    if (!Number.isSafeInteger(number) || number < 1) {
+      throw new Error(
+        `--pr must be a positive PR number (got ${JSON.stringify(raw)})`,
+      );
+    }
+    return { number, repo: null };
+  }
+
+  const urlMatch = trimmed.match(
+    /^https?:\/\/[^/\s]+\/([^/\s]+\/[^/\s]+)\/pull\/([1-9]\d*)(?:[/?#].*)?$/i,
+  );
+  if (urlMatch) {
+    const number = Number.parseInt(urlMatch[2], 10);
+    if (!Number.isSafeInteger(number) || number < 1) {
+      throw new Error(
+        `--pr URL must contain a valid PR number (got ${JSON.stringify(raw)})`,
+      );
+    }
+    return { number, repo: urlMatch[1] };
+  }
+
+  throw new Error(
+    `--pr must be a PR number or GitHub pull request URL (got ${JSON.stringify(raw)})`,
+  );
 }
 
 function parseIntOption(raw, name, min) {
@@ -105,6 +149,10 @@ export function parseCliArgs(argv) {
     allowPositionals: true,
     strict: true,
     options: {
+      pr: { type: "string", multiple: true },
+      "no-wait": { type: "boolean", default: false },
+      "fail-fast": { type: "boolean", default: false },
+      "max-wait": { type: "string" },
       repo: { type: "string" },
       workflow: { type: "string" },
       interval: { type: "string" },
@@ -126,6 +174,23 @@ export function parseCliArgs(argv) {
   }
 
   const sha = positionals[0]?.trim() || null;
+
+  const prs = [];
+  const seenPrs = new Set();
+  for (const rawPr of values.pr ?? []) {
+    const parsedPr = parsePrRef(rawPr);
+    const key = `${parsedPr.repo ?? ""}:${parsedPr.number}`;
+    if (!seenPrs.has(key)) {
+      seenPrs.add(key);
+      prs.push(parsedPr);
+    }
+  }
+
+  if (sha && prs.length > 0) {
+    throw new Error(
+      "cannot combine positional <sha> with --pr; pass either a commit SHA or --pr <N|URL>",
+    );
+  }
 
   let repo = null;
   if (values.repo !== undefined) {
@@ -159,9 +224,18 @@ export function parseCliArgs(argv) {
       ? parseNumberOption(values["register-delay"], "--register-delay", 0)
       : DEFAULT_REGISTER_DELAY_SECONDS;
 
+  const maxWait =
+    values["max-wait"] !== undefined
+      ? parseIntOption(values["max-wait"], "--max-wait", 1)
+      : null;
+
   return {
     help: false,
     sha,
+    prs,
+    noWait: Boolean(values["no-wait"]),
+    failFast: Boolean(values["fail-fast"]),
+    maxWait,
     repo,
     workflow,
     interval,
@@ -197,6 +271,39 @@ export function parseCheckRunsPayload(stdout) {
   }
 
   throw new Error("unexpected check-runs JSON shape");
+}
+
+export function parsePrPayload(stdout) {
+  const text = String(stdout ?? "").trim();
+  if (!text) {
+    throw new Error("empty PR response payload");
+  }
+  const parsed = JSON.parse(text);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("unexpected PR JSON shape");
+  }
+  const headSha =
+    typeof parsed.head?.sha === "string" && parsed.head.sha.trim()
+      ? parsed.head.sha.trim()
+      : null;
+  if (!headSha) {
+    throw new Error("PR payload is missing head.sha");
+  }
+
+  return {
+    headSha,
+    state: typeof parsed.state === "string" ? parsed.state : null,
+    merged: Boolean(parsed.merged || parsed.merged_at),
+    draft: Boolean(parsed.draft),
+    mergeable: typeof parsed.mergeable === "boolean" ? parsed.mergeable : null,
+    mergeableState:
+      typeof parsed.mergeable_state === "string"
+        ? parsed.mergeable_state
+        : null,
+    title: typeof parsed.title === "string" ? parsed.title : null,
+    baseRef: typeof parsed.base?.ref === "string" ? parsed.base.ref : null,
+    headRef: typeof parsed.head?.ref === "string" ? parsed.head.ref : null,
+  };
 }
 
 function summarizeRun(run) {
@@ -349,11 +456,375 @@ async function resolveRepo(exec, cwd) {
   );
 }
 
+async function fetchCheckRunsRest(exec, cwd, repo, sha) {
+  const apiRes = await exec(
+    "gh",
+    ["api", "--paginate", "--slurp", `repos/${repo}/commits/${sha}/check-runs`],
+    { cwd },
+  );
+  if (apiRes.exitCode !== 0) {
+    const detail =
+      String(apiRes.stderr ?? "").trim() || `exit ${apiRes.exitCode}`;
+    return { ok: false, error: `gh api check-runs failed: ${detail}` };
+  }
+  try {
+    const checkRuns = parseCheckRunsPayload(apiRes.stdout);
+    return { ok: true, checkRuns };
+  } catch (err) {
+    return {
+      ok: false,
+      error: `failed to parse check-runs JSON: ${err.message}`,
+    };
+  }
+}
+
+async function fetchPrMetadataRest(exec, cwd, repo, prNumber) {
+  const apiRes = await exec("gh", ["api", `repos/${repo}/pulls/${prNumber}`], {
+    cwd,
+  });
+  if (apiRes.exitCode !== 0) {
+    const detail =
+      String(apiRes.stderr ?? "").trim() || `exit ${apiRes.exitCode}`;
+    return {
+      ok: false,
+      error: `gh api pulls/${prNumber} failed: ${detail}`,
+    };
+  }
+  try {
+    const meta = parsePrPayload(apiRes.stdout);
+    return { ok: true, meta };
+  } catch (err) {
+    return {
+      ok: false,
+      error: `failed to parse PR #${prNumber} JSON: ${err.message}`,
+    };
+  }
+}
+
+function makePrResultBase(repo, prNumber, noWait) {
+  return {
+    ok: false,
+    stage: "pending",
+    repo,
+    pr: prNumber,
+    sha: null,
+    title: null,
+    state: null,
+    merged: false,
+    draft: false,
+    mergeable: null,
+    mergeableState: null,
+    baseRef: null,
+    headRef: null,
+    headUpdates: 0,
+    noWait,
+    totalChecks: 0,
+    passedChecks: 0,
+    failedChecks: [],
+    pendingChecks: [],
+    error: null,
+  };
+}
+
+function applyPrMeta(entry, meta) {
+  entry.sha = meta.headSha;
+  entry.state = meta.state;
+  entry.merged = meta.merged;
+  entry.draft = meta.draft;
+  entry.mergeable = meta.mergeable;
+  entry.mergeableState = meta.mergeableState;
+  entry.title = meta.title;
+  entry.baseRef = meta.baseRef;
+  entry.headRef = meta.headRef;
+}
+
+function applyEvaluation(entry, evaluation) {
+  entry.totalChecks = evaluation.total;
+  entry.passedChecks = evaluation.passed.length;
+  entry.failedChecks = evaluation.failed;
+  entry.pendingChecks = evaluation.pending;
+}
+
+export function formatPrLine(result) {
+  const shortSha = result.sha ? result.sha.slice(0, 12) : "unknown";
+  const statusBits = [];
+  if (result.state) {
+    statusBits.push(result.merged ? "merged" : result.state);
+  }
+  if (result.draft) {
+    statusBits.push("draft");
+  }
+  if (
+    result.mergeableState &&
+    !(result.draft && result.mergeableState === "draft")
+  ) {
+    statusBits.push(result.mergeableState);
+  }
+  const metaSuffix = statusBits.length > 0 ? `, ${statusBits.join(", ")}` : "";
+  const refLabel = result.repo
+    ? `${result.repo}@${shortSha}${metaSuffix}`
+    : `${shortSha}${metaSuffix}`;
+
+  if (result.ok) {
+    return `PASS: PR #${result.pr} (${refLabel}) — ${result.passedChecks}/${result.totalChecks} check runs passed`;
+  }
+  return `FAIL: PR #${result.pr} (${refLabel}) — ${result.error}`;
+}
+
+function createProgressEmitter(options, deps) {
+  if (options.json) {
+    return () => {};
+  }
+  if (typeof deps.onProgress === "function") {
+    return deps.onProgress;
+  }
+  if (typeof deps.stdout === "function" || typeof deps.stderr === "function") {
+    return (line, { isError = false } = {}) => {
+      const writer = isError
+        ? (deps.stderr ?? deps.stdout)
+        : (deps.stdout ?? deps.stderr);
+      writer(`${line}\n`);
+    };
+  }
+  return () => {};
+}
+
+function normalizePrTargets(rawPrs) {
+  return rawPrs.map((item) => {
+    if (typeof item === "number" || typeof item === "string") {
+      return parsePrRef(item);
+    }
+    if (item && typeof item === "object" && Number.isSafeInteger(item.number)) {
+      return { number: item.number, repo: item.repo ?? null };
+    }
+    throw new Error(`invalid PR target: ${JSON.stringify(item)}`);
+  });
+}
+
+async function waitPrs(options, deps) {
+  const exec = deps.exec ?? defaultExec;
+  const sleep = deps.sleep ?? defaultSleep;
+  const cwd = deps.cwd;
+  const emit = createProgressEmitter(options, deps);
+
+  const noWait = Boolean(options.noWait);
+  const failFast = Boolean(options.failFast);
+  const interval = options.interval ?? DEFAULT_INTERVAL_SECONDS;
+  const registerAttempts =
+    options.registerAttempts ?? DEFAULT_REGISTER_ATTEMPTS;
+  const registerDelay = options.registerDelay ?? DEFAULT_REGISTER_DELAY_SECONDS;
+  const maxWait = options.maxWait ?? null;
+
+  const targets = normalizePrTargets(options.prs);
+  const needsDefaultRepo = targets.some((t) => !t.repo);
+
+  let defaultRepo = options.repo ?? null;
+  if (needsDefaultRepo && !defaultRepo) {
+    try {
+      defaultRepo = await resolveRepo(exec, cwd);
+    } catch (err) {
+      if (targets.length === 1) {
+        const single = makePrResultBase(null, targets[0].number, noWait);
+        single.stage = "resolve-repo";
+        single.error = err.message;
+        return single;
+      }
+      const failedPrs = targets.map((t) => {
+        const entry = makePrResultBase(t.repo ?? null, t.number, noWait);
+        entry.stage = "resolve-repo";
+        entry.error = err.message;
+        return entry;
+      });
+      return {
+        ok: false,
+        stage: "resolve-repo",
+        noWait,
+        totalPrs: failedPrs.length,
+        passedPrs: 0,
+        failedPrs: failedPrs.length,
+        error: err.message,
+        prs: failedPrs,
+      };
+    }
+  }
+
+  const states = targets.map((t) => ({
+    result: makePrResultBase(t.repo ?? defaultRepo, t.number, noWait),
+    settled: false,
+    registerPolls: 0,
+  }));
+
+  let elapsedSeconds = 0;
+
+  while (true) {
+    for (const item of states) {
+      if (item.settled) continue;
+      const { result } = item;
+
+      const prevSha = result.sha;
+      const prFetch = await fetchPrMetadataRest(
+        exec,
+        cwd,
+        result.repo,
+        result.pr,
+      );
+      if (!prFetch.ok) {
+        result.ok = false;
+        result.stage = "pr-fetch";
+        result.error = prFetch.error;
+        item.settled = true;
+        if (!noWait) emit(formatPrLine(result), { ok: false, isError: true });
+        continue;
+      }
+
+      applyPrMeta(result, prFetch.meta);
+
+      if (prevSha && prevSha !== result.sha) {
+        result.headUpdates += 1;
+        item.registerPolls = 0;
+        if (!noWait) {
+          emit(
+            `UPDATE: PR #${result.pr} (${result.repo}) head updated ${prevSha.slice(0, 12)} -> ${result.sha.slice(0, 12)} — watching new head`,
+            { ok: true, isError: false },
+          );
+        }
+      }
+
+      if (!noWait && result.state !== "open") {
+        result.ok = false;
+        result.stage = "pr-closed";
+        result.error = result.merged
+          ? `PR #${result.pr} is already merged`
+          : `PR #${result.pr} is ${result.state ?? "closed"}`;
+        item.settled = true;
+        emit(formatPrLine(result), { ok: false, isError: true });
+        continue;
+      }
+
+      const checksFetch = await fetchCheckRunsRest(
+        exec,
+        cwd,
+        result.repo,
+        result.sha,
+      );
+      if (!checksFetch.ok) {
+        result.ok = false;
+        result.stage = "check-runs";
+        result.error = checksFetch.error;
+        item.settled = true;
+        if (!noWait) emit(formatPrLine(result), { ok: false, isError: true });
+        continue;
+      }
+
+      const evaluation = evaluateCheckRuns(checksFetch.checkRuns);
+      applyEvaluation(result, evaluation);
+
+      if (noWait) {
+        result.ok = evaluation.ok;
+        result.stage = evaluation.ok ? "passed" : "check-runs";
+        result.error = evaluation.ok ? null : evaluation.reason;
+        item.settled = true;
+        continue;
+      }
+
+      if (evaluation.total === 0) {
+        item.registerPolls += 1;
+        if (item.registerPolls >= registerAttempts) {
+          result.ok = false;
+          result.stage = "register";
+          result.error = `no check runs registered for PR #${result.pr} (${result.sha.slice(0, 12)}) after ${registerAttempts} attempt(s)`;
+          item.settled = true;
+          emit(formatPrLine(result), { ok: false, isError: true });
+        }
+        continue;
+      }
+
+      if (evaluation.pending.length === 0) {
+        result.ok = evaluation.ok;
+        result.stage = evaluation.ok ? "passed" : "check-runs";
+        result.error = evaluation.ok ? null : evaluation.reason;
+        item.settled = true;
+        emit(formatPrLine(result), {
+          ok: result.ok,
+          isError: !result.ok,
+        });
+        continue;
+      }
+
+      if (failFast && evaluation.failed.length > 0) {
+        result.ok = false;
+        result.stage = "check-runs";
+        result.error = evaluation.reason;
+        item.settled = true;
+        emit(formatPrLine(result), { ok: false, isError: true });
+      }
+    }
+
+    const active = states.filter((s) => !s.settled);
+    if (active.length === 0) {
+      break;
+    }
+
+    if (maxWait !== null && elapsedSeconds >= maxWait) {
+      for (const item of active) {
+        const { result } = item;
+        result.ok = false;
+        result.stage = "timeout";
+        const pendingNames = result.pendingChecks
+          .map((c) => `${c.name}=${c.status}`)
+          .join(", ");
+        result.error = pendingNames
+          ? `timed out after ${maxWait}s with incomplete checks (${pendingNames})`
+          : `timed out after ${maxWait}s waiting for check runs`;
+        item.settled = true;
+        emit(formatPrLine(result), { ok: false, isError: true });
+      }
+      break;
+    }
+
+    const allWaitingRegistration = active.every(
+      (s) => s.result.totalChecks === 0,
+    );
+    let nextSleep = allWaitingRegistration ? registerDelay : interval;
+    if (maxWait !== null && elapsedSeconds + nextSleep > maxWait) {
+      nextSleep = Math.max(0, maxWait - elapsedSeconds);
+    }
+
+    if (nextSleep > 0) {
+      await sleep(nextSleep * 1000);
+      elapsedSeconds += nextSleep;
+    } else if (maxWait !== null) {
+      elapsedSeconds = maxWait;
+    }
+  }
+
+  const results = states.map((s) => s.result);
+  if (results.length === 1) {
+    return results[0];
+  }
+
+  const passedPrs = results.filter((r) => r.ok).length;
+  const failedPrs = results.length - passedPrs;
+  return {
+    ok: failedPrs === 0,
+    noWait,
+    totalPrs: results.length,
+    passedPrs,
+    failedPrs,
+    prs: results,
+  };
+}
+
 export async function waitCi(options = {}, deps = {}) {
+  if (Array.isArray(options.prs) && options.prs.length > 0) {
+    return waitPrs(options, deps);
+  }
+
   const exec = deps.exec ?? defaultExec;
   const sleep = deps.sleep ?? defaultSleep;
   const cwd = deps.cwd;
 
+  const noWait = Boolean(options.noWait);
   const workflow = options.workflow ?? DEFAULT_WORKFLOW;
   const interval = options.interval ?? DEFAULT_INTERVAL_SECONDS;
   const registerAttempts =
@@ -402,6 +873,45 @@ export async function waitCi(options = {}, deps = {}) {
         error: err.message,
       };
     }
+  }
+
+  if (noWait) {
+    const checksFetch = await fetchCheckRunsRest(exec, cwd, repo, sha);
+    if (!checksFetch.ok) {
+      return {
+        ok: false,
+        stage: "check-runs",
+        repo,
+        sha,
+        workflow,
+        runId: null,
+        registerAttemptsUsed: 0,
+        watchExitCode: null,
+        noWait: true,
+        totalChecks: 0,
+        passedChecks: 0,
+        failedChecks: [],
+        pendingChecks: [],
+        error: checksFetch.error,
+      };
+    }
+    const evaluation = evaluateCheckRuns(checksFetch.checkRuns);
+    return {
+      ok: evaluation.ok,
+      stage: evaluation.ok ? "passed" : "check-runs",
+      repo,
+      sha,
+      workflow,
+      runId: null,
+      registerAttemptsUsed: 0,
+      watchExitCode: null,
+      noWait: true,
+      totalChecks: evaluation.total,
+      passedChecks: evaluation.passed.length,
+      failedChecks: evaluation.failed,
+      pendingChecks: evaluation.pending,
+      error: evaluation.ok ? null : evaluation.reason,
+    };
   }
 
   let runId = null;
@@ -515,15 +1025,8 @@ export async function waitCi(options = {}, deps = {}) {
 
   // F-15 invariant: regardless of `gh run watch` exit code (including a
   // superseded/false-green 0), always verify every check run on <sha> via REST.
-  const apiRes = await exec(
-    "gh",
-    ["api", "--paginate", "--slurp", `repos/${repo}/commits/${sha}/check-runs`],
-    { cwd },
-  );
-
-  if (apiRes.exitCode !== 0) {
-    const detail =
-      String(apiRes.stderr ?? "").trim() || `exit ${apiRes.exitCode}`;
+  const checksFetch = await fetchCheckRunsRest(exec, cwd, repo, sha);
+  if (!checksFetch.ok) {
     return {
       ok: false,
       stage: "check-runs",
@@ -537,32 +1040,11 @@ export async function waitCi(options = {}, deps = {}) {
       passedChecks: 0,
       failedChecks: [],
       pendingChecks: [],
-      error: `gh api check-runs failed: ${detail}`,
+      error: checksFetch.error,
     };
   }
 
-  let checkRuns;
-  try {
-    checkRuns = parseCheckRunsPayload(apiRes.stdout);
-  } catch (err) {
-    return {
-      ok: false,
-      stage: "check-runs",
-      repo,
-      sha,
-      workflow,
-      runId,
-      registerAttemptsUsed: attemptsUsed,
-      watchExitCode,
-      totalChecks: 0,
-      passedChecks: 0,
-      failedChecks: [],
-      pendingChecks: [],
-      error: `failed to parse check-runs JSON: ${err.message}`,
-    };
-  }
-
-  const evaluation = evaluateCheckRuns(checkRuns);
+  const evaluation = evaluateCheckRuns(checksFetch.checkRuns);
   return {
     ok: evaluation.ok,
     stage: evaluation.ok ? "passed" : "check-runs",
@@ -581,8 +1063,33 @@ export async function waitCi(options = {}, deps = {}) {
 }
 
 export function formatSummary(result) {
+  if (Array.isArray(result.prs)) {
+    const lines = result.prs.map((pr) => formatPrLine(pr));
+    if (result.ok) {
+      lines.push(
+        `BATCH PASS: ${result.passedPrs}/${result.totalPrs} PRs passed`,
+      );
+    } else {
+      const failedNums = result.prs
+        .filter((pr) => !pr.ok)
+        .map((pr) => `#${pr.pr}`)
+        .join(", ");
+      lines.push(
+        `BATCH FAIL: ${result.passedPrs}/${result.totalPrs} PRs passed, ${result.failedPrs} failed (${failedNums})`,
+      );
+    }
+    return lines.join("\n");
+  }
+
+  if (result.pr != null) {
+    return formatPrLine(result);
+  }
+
   const shortSha = result.sha ? result.sha.slice(0, 12) : "unknown";
   if (result.ok) {
+    if (result.noWait) {
+      return `PASS: ${result.repo}@${shortSha} (snapshot) — ${result.passedChecks}/${result.totalChecks} check runs passed`;
+    }
     return `PASS: ${result.repo}@${shortSha} (${result.workflow} run ${result.runId}) — ${result.passedChecks}/${result.totalChecks} check runs passed`;
   }
 
@@ -591,6 +1098,8 @@ export function formatSummary(result) {
     lines.push(
       `FAIL: ${result.repo}@${shortSha} (${result.workflow} run ${result.runId}) — ${result.error}`,
     );
+  } else if (result.repo && result.sha && result.noWait) {
+    lines.push(`FAIL: ${result.repo}@${shortSha} (snapshot) — ${result.error}`);
   } else {
     lines.push(`FAIL [${result.stage}]: ${result.error}`);
   }
@@ -623,9 +1132,46 @@ export async function main(argv = process.argv.slice(2), io = {}, deps = {}) {
     return 0;
   }
 
-  const result = await waitCi(parsed, deps);
+  const isPrWaitMode = parsed.prs.length > 0 && !parsed.noWait;
+  let emittedCount = 0;
+  const effectiveDeps =
+    isPrWaitMode && !parsed.json
+      ? {
+          ...deps,
+          onProgress: (line, meta = {}) => {
+            emittedCount += 1;
+            if (meta.isError) {
+              writeErr(`${line}\n`);
+            } else {
+              writeOut(`${line}\n`);
+            }
+            if (typeof deps.onProgress === "function") {
+              deps.onProgress(line, meta);
+            }
+          },
+        }
+      : deps;
+
+  const result = await waitCi(parsed, effectiveDeps);
+
   if (parsed.json) {
     writeOut(`${JSON.stringify(result, null, 2)}\n`);
+  } else if (isPrWaitMode && emittedCount > 0) {
+    if (Array.isArray(result.prs)) {
+      if (result.ok) {
+        writeOut(
+          `BATCH PASS: ${result.passedPrs}/${result.totalPrs} PRs passed\n`,
+        );
+      } else {
+        const failedNums = result.prs
+          .filter((pr) => !pr.ok)
+          .map((pr) => `#${pr.pr}`)
+          .join(", ");
+        writeErr(
+          `BATCH FAIL: ${result.passedPrs}/${result.totalPrs} PRs passed, ${result.failedPrs} failed (${failedNums})\n`,
+        );
+      }
+    }
   } else if (result.ok) {
     writeOut(`${formatSummary(result)}\n`);
   } else {
