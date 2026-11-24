@@ -48,10 +48,10 @@ export function getPathValue(
 ): unknown {
   if (target == null) return undefined;
   const tokens = typeof path === "string" ? parsePath(path) : path;
-  let curr: any = target;
+  let curr: unknown = target;
   for (let i = 0; i < tokens.length; i++) {
     if (curr == null || typeof curr !== "object") return undefined;
-    curr = curr[tokens[i]];
+    curr = (curr as Record<string, unknown>)[tokens[i]];
   }
   return curr;
 }
@@ -66,25 +66,33 @@ export function extractRowValue(row: unknown, path: string): unknown {
   const direct = getPathValue(row, path);
   if (direct !== undefined) return direct;
 
-  const r = row as Record<string, any>;
+  const r = row as Record<string, unknown>;
 
   // 2. Events fallback: check envelope.payload or envelope root
-  if (r.envelope) {
-    if (r.envelope.payload) {
-      const fromPayload = getPathValue(r.envelope.payload, path);
+  const envelope =
+    r.envelope && typeof r.envelope === "object"
+      ? (r.envelope as Record<string, unknown>)
+      : null;
+  if (envelope) {
+    if (envelope.payload) {
+      const fromPayload = getPathValue(envelope.payload, path);
       if (fromPayload !== undefined) return fromPayload;
     }
-    const fromEnvelope = getPathValue(r.envelope, path);
+    const fromEnvelope = getPathValue(envelope, path);
     if (fromEnvelope !== undefined) return fromEnvelope;
   }
 
   // 3. Proposals & Runs fallback: check spec.input or spec root
-  if (r.spec) {
-    if (r.spec.input) {
-      const fromInput = getPathValue(r.spec.input, path);
+  const spec =
+    r.spec && typeof r.spec === "object"
+      ? (r.spec as Record<string, unknown>)
+      : null;
+  if (spec) {
+    if (spec.input) {
+      const fromInput = getPathValue(spec.input, path);
       if (fromInput !== undefined) return fromInput;
     }
-    const fromSpec = getPathValue(r.spec, path);
+    const fromSpec = getPathValue(spec, path);
     if (fromSpec !== undefined) return fromSpec;
   }
 

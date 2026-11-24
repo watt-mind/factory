@@ -37,6 +37,7 @@ export default [
     },
     rules: {
       ...js.configs.recommended.rules,
+      "no-eval": "error",
       "no-unused-vars": [
         "warn",
         {
@@ -58,6 +59,7 @@ export default [
     },
     rules: {
       ...reactHooks.configs.recommended.rules,
+      "no-eval": "error",
       "@typescript-eslint/no-unused-vars": [
         "warn",
         {
@@ -66,13 +68,6 @@ export default [
           caughtErrors: "none",
         },
       ],
-      // WM-607 downgrade: 39 pre-existing errors, one intentional pattern —
-      // untyped API responses and test mocks/spies across 10 files. Fixing
-      // each properly means writing real response/mock types, which is a
-      // typing project of its own, not a lint-adoption ticket. Left at warn
-      // (recommended's default is error) so new `any` still surfaces in
-      // review without a 39-file rewrite blocking WM-607.
-      "@typescript-eslint/no-explicit-any": "warn",
       // WM-607 downgrade: eslint-plugin-react-hooks v7's `recommended` bundles
       // new "React Compiler readiness" rules (beyond the classic
       // rules-of-hooks + exhaustive-deps pair) that flag structural patterns
@@ -91,6 +86,20 @@ export default [
       "react-hooks/preserve-manual-memoization": "warn",
       "react-hooks/error-boundaries": "warn",
       "react-hooks/immutability": "warn",
+    },
+  },
+  {
+    // Scope `no-explicit-any` relaxation strictly to TypeScript tests and test
+    // helpers so production TS/TSX enforces `@typescript-eslint/no-explicit-any`
+    // as an error without rewriting test mocks and spies (#2442).
+    files: [
+      "event-runtime/web/**/*.{test,spec,integration,e2e}.{ts,tsx,mts,cts}",
+      "event-runtime/web/**/__tests__/**/*.{ts,tsx,mts,cts}",
+      "event-runtime/web/src/test-render.tsx",
+      "event-runtime/web/e2e/**/*.{ts,tsx,mts,cts}",
+    ],
+    rules: {
+      "@typescript-eslint/no-explicit-any": "off",
     },
   },
 ];

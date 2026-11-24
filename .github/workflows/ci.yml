@@ -271,7 +271,7 @@ jobs:
       # if this fails on a warning-count bump, burn down warnings or bump the
       # number deliberately in the same PR, never drop the flag.
       - name: Lint (eslint)
-        run: bun run lint --max-warnings=627
+        run: bun run lint --max-warnings=572
 
       # Run tsc + Vite before tests so broken TSX imports and entry-chunk budget
       # regressions fail Verify immediately instead of reaching a later build.

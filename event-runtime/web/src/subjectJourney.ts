@@ -234,7 +234,7 @@ export interface JourneyRun {
   lifecycle: JourneyLifecycle[];
   /** Attempts emitted by `runView`, ordered by ascending attempt number. */
   attempts?: Array<Partial<Attempt>>;
-  result: Record<string, any> | null;
+  result: Record<string, unknown> | null;
   usage?: {
     totals?: { attempts?: number; totalTokens?: number; costUSD?: number };
     attempts?: unknown[];
@@ -686,8 +686,10 @@ function refusalOf(
         ? "failed"
         : null;
   if (!verb) return null;
+  const reasonCode =
+    typeof run.result?.reasonCode === "string" ? run.result.reasonCode : null;
   const code: string | null =
-    run.result?.reasonCode ?? lifecycleSorted(run).at(-1)?.reason ?? null;
+    reasonCode ?? lifecycleSorted(run).at(-1)?.reason ?? null;
   return { verb, code: code ?? verb, at: resultAt(run) };
 }
 
@@ -1114,7 +1116,10 @@ export function subjectJourney(
           kind: "merge",
           at: resultAt(run),
           label: merge,
-          detail: run.result?.reasonCode ?? null,
+          detail:
+            typeof run.result?.reasonCode === "string"
+              ? run.result.reasonCode
+              : null,
           href: runHref(run.run.runId),
           durationMs: null,
         });
@@ -1129,7 +1134,10 @@ export function subjectJourney(
         kind: "merge",
         at: resultAt(run),
         label: "merge applied",
-        detail: run.result?.reasonCode ?? null,
+        detail:
+          typeof run.result?.reasonCode === "string"
+            ? run.result.reasonCode
+            : null,
         href: runHref(run.run.runId),
         durationMs: null,
       });
