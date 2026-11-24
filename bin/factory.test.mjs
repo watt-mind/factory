@@ -617,3 +617,13 @@ test("factory wait-ci --help executes tools/wait-ci.mjs via CLI", () => {
   expect(res.exitCode).toBe(0);
   expect(res.stdout.toString()).toContain("factory wait-ci");
 });
+
+test("factory review --help executes via CLI", () => {
+  const res = Bun.spawnSync({
+    cmd: ["bash", FACTORY, "review", "--help"],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(res.exitCode).toBe(0);
+  expect(res.stdout.toString()).toContain("factory review");
+});
