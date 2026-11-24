@@ -211,7 +211,7 @@ case "$cmd" in
       trap 'exit 143' TERM
       bun "$ROOT/event-runtime/web/serve.mjs" &
       _web_pid=$!
-      bun "$ROOT/event-runtime/cli.mjs" serve "${_args[@]}" &
+      bun "$ROOT/event-runtime/cli.mjs" serve ${_args[@]+"${_args[@]}"} &
       _runtime_pid=$!
       _runtime_status=0
       wait "$_runtime_pid" || _runtime_status=$?
@@ -229,7 +229,7 @@ case "$cmd" in
     if [[ "$_dev" -eq 1 ]]; then
       _args=()
       for _a in "$@"; do [[ "$_a" != "--dev" ]] && _args+=("$_a"); done
-      cd "$ROOT/event-runtime/web" && exec bunx vite "${_args[@]}"
+      cd "$ROOT/event-runtime/web" && exec bunx vite ${_args[@]+"${_args[@]}"}
     else
       run_bun event-runtime/web/serve.mjs "$@"
     fi
