@@ -55,6 +55,11 @@ green because nothing looked at them:
   repo-wide run list by `in_progress` and `queued` missed `waiting` (an
   environment approval), `requested` and `pending`; the workflow's own run list
   is asked instead, and anything that is not `completed` counts as active.
+- **Paginated reads fail closed on truncation.** Workflow runs, run jobs, commit
+  check runs, and open PR lists walk every page rather than stopping at 100
+  items; a truncated response or one that hits the pagination ceiling is
+  reported as a FAIL rather than silently dropping red jobs, red checks, or
+  escalated PRs past the first page.
 
 Three deliberate refinements over a literal reading of the checks:
 

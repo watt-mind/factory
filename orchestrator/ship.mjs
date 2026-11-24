@@ -397,19 +397,62 @@ export function defaultDeps({ cwd } = {}) {
   };
 }
 
+const REST_PAGE_SIZE = 100;
+const MAX_REST_PAGES = 50;
+const OPEN_PR_LIMIT = 1000;
+
 const json = (forge, apiPath) => JSON.parse(forge.apiRaw(apiPath));
 
+/**
+ * Walk a paginated GitHub REST list endpoint (`?page=1, 2, ...`) until every
+ * item has been read, and fail closed if the response indicates truncation or
+ * hits the page ceiling. Truncating a release-gate read biases toward green
+ * (a red job, red check run, or newer CI run past item 100 would vanish).
+ */
+function jsonPages(
+  forge,
+  apiPath,
+  field,
+  { perPage = REST_PAGE_SIZE, maxPages = MAX_REST_PAGES } = {},
+) {
+  const sep = apiPath.includes("?") ? "&" : "?";
+  const items = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const response = json(
+      forge,
+      `${apiPath}${sep}per_page=${perPage}&page=${page}`,
+    );
+    const rows = response?.[field];
+    if (!Array.isArray(rows))
+      throw new Error(`${apiPath} page ${page} did not return ${field} array`);
+    items.push(...rows);
+    const total = response?.total_count;
+    if (Number.isFinite(total) && items.length >= total) return items;
+    if (rows.length < perPage) {
+      if (Number.isFinite(total) && items.length < total)
+        throw new Error(
+          `${apiPath} truncated at ${items.length}/${total} ${field} on page ${page}`,
+        );
+      return items;
+    }
+  }
+  throw new Error(
+    `${apiPath} exceeded pagination limit (${maxPages} pages / ${items.length} ${field}) — refusing truncated read`,
+  );
+}
+
 const runsForSha = (forge, repo, sha) =>
-  json(forge, `repos/${repo}/actions/runs?head_sha=${sha}&per_page=100`)
-    ?.workflow_runs ?? [];
+  jsonPages(
+    forge,
+    `repos/${repo}/actions/runs?head_sha=${sha}`,
+    "workflow_runs",
+  );
 
 const jobsForRun = (forge, repo, runId) =>
-  json(forge, `repos/${repo}/actions/runs/${runId}/jobs?per_page=100`)?.jobs ??
-  [];
+  jsonPages(forge, `repos/${repo}/actions/runs/${runId}/jobs`, "jobs");
 
 const checkRunsForSha = (forge, repo, sha) =>
-  json(forge, `repos/${repo}/commits/${sha}/check-runs?per_page=100`)
-    ?.check_runs ?? [];
+  jsonPages(forge, `repos/${repo}/commits/${sha}/check-runs`, "check_runs");
 
 /**
  * A workflow's own runs, newest first.
@@ -447,8 +490,20 @@ const runStartedAtLeast = (run, at) => {
   return !Number.isFinite(created) || created >= at - DISPATCH_CLOCK_SKEW_MS;
 };
 
-const openPrs = (forge, repo) =>
-  forge.prList(repo, { state: "open", limit: 100, fields: PR_FIELDS });
+const openPrs = (forge, repo) => {
+  const prs = forge.prList(repo, {
+    state: "open",
+    limit: OPEN_PR_LIMIT,
+    fields: PR_FIELDS,
+  });
+  if (!Array.isArray(prs))
+    throw new Error(`prList(${repo}) did not return an array`);
+  if (prs.length >= OPEN_PR_LIMIT)
+    throw new Error(
+      `open PR list hit the ${OPEN_PR_LIMIT}-PR limit (${prs.length} returned) — refusing truncated read`,
+    );
+  return prs;
+};
 
 /** Resolve the base tip. A failed fetch is reported, never assumed clean. */
 export function resolveTip(cfg, { git, fetch = true }) {

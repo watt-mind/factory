@@ -152,20 +152,38 @@ function fakeForge(state = {}) {
         const perPage = Number(/per_page=(\d+)/.exec(query)?.[1] ?? 30);
         return JSON.stringify({ workflow_runs: list.slice(0, perPage) });
       }
-      const headSha = /\/actions\/runs\?head_sha=([0-9a-f]+)/.exec(apiPath);
-      if (headSha)
+      const paginate = (list, query, field) => {
+        const perPage = Number(/(?:^|&)per_page=(\d+)/.exec(query)?.[1] ?? 30);
+        const page = Number(/(?:^|&)page=(\d+)/.exec(query)?.[1] ?? 1);
+        const start = (page - 1) * perPage;
         return JSON.stringify({
-          workflow_runs: world.runsBySha[headSha[1]] ?? world.runs,
+          total_count: list.length,
+          [field]: list.slice(start, start + perPage),
         });
-      if (/\/actions\/runs\/\d+\/jobs/.test(apiPath))
-        return JSON.stringify({ jobs: world.jobs });
-      if (/\/check-runs/.test(apiPath))
-        return JSON.stringify({ check_runs: world.checkRuns });
+      };
+      const headSha = /\/actions\/runs\?head_sha=([0-9a-f]+)(?:&(.*))?$/.exec(
+        apiPath,
+      );
+      if (headSha)
+        return paginate(
+          world.runsBySha[headSha[1]] ?? world.runs,
+          headSha[2] ?? "",
+          "workflow_runs",
+        );
+      const runJobs = /\/actions\/runs\/\d+\/jobs(?:\?(.*))?$/.exec(apiPath);
+      if (runJobs) return paginate(world.jobs, runJobs[1] ?? "", "jobs");
+      const checkRunsMatch = /\/check-runs(?:\?(.*))?$/.exec(apiPath);
+      if (checkRunsMatch)
+        return paginate(
+          world.checkRuns,
+          checkRunsMatch[1] ?? "",
+          "check_runs",
+        );
       throw new Error(`unseeded api path ${apiPath}`);
     },
-    prList() {
-      calls.push({ op: "prList" });
-      return world.prs;
+    prList(repo, opts = {}) {
+      calls.push({ op: "prList", repo, opts });
+      return opts.limit == null ? world.prs : world.prs.slice(0, opts.limit);
     },
     workflowDispatch(repo, workflow, opts) {
       calls.push({ op: "workflowDispatch", repo, workflow, opts });
@@ -1423,5 +1441,119 @@ describe("shipChain --until post-release", () => {
     await expect(
       shipChain(bare, { until: "post-release" }, deps()),
     ).rejects.toThrow(/no post_release_checks/);
+  });
+});
+
+// --------------------------------------------------------------- pagination (GH-2340)
+
+describe("pagination and truncation fail-closed (GH-2340)", () => {
+  test("150 jobs with a failure on page 2 makes base-green FAIL", () => {
+    const jobs = Array.from({ length: 150 }, (_, i) =>
+      job(`Job ${i + 1}`, i === 130 ? "failure" : "success"),
+    );
+    const forge = fakeForge({ jobs });
+    const check = checkById(preflight(cfg(), deps({ forge })), "base-green");
+    expect(check.status).toBe("fail");
+    expect(check.detail).toContain("Job 131 (failure)");
+  });
+
+  test("150 workflow runs with the newest CI run on page 2 selects page 2", () => {
+    const runs = [
+      ...Array.from({ length: 149 }, (_, i) => ({
+        id: i + 1,
+        name: "Other Workflow",
+        status: "completed",
+        conclusion: "success",
+        run_number: i + 1,
+      })),
+      {
+        id: 999,
+        name: "CI",
+        status: "completed",
+        conclusion: "failure",
+        run_number: 200,
+      },
+    ];
+    const forge = fakeForge({ runs });
+    const check = checkById(preflight(cfg(), deps({ forge })), "base-green");
+    expect(check.status).toBe("fail");
+    expect(check.detail).toContain("run 999 concluded failure");
+  });
+
+  test("150 check runs with a red check on page 2 makes mergeWhenGreen refuse", async () => {
+    const checkRuns = Array.from({ length: 150 }, (_, i) => ({
+      name: `Check ${i + 1}`,
+      status: "completed",
+      conclusion: i === 125 ? "failure" : "success",
+    }));
+    const forge = fakeForge({
+      checkRuns,
+      prs: [
+        {
+          number: 42,
+          title: "chore(runtime): adopt reviewed runtime images",
+          author: { login: "watt-mind-factory[bot]" },
+          labels: [],
+          isDraft: false,
+          baseRefName: "develop",
+          headRefOid: PIN_PR_HEAD,
+        },
+      ],
+    });
+    await expect(
+      shipChain(
+        cfg(),
+        { until: "pin", apply: true },
+        deps({ forge, git: fakeGit({ changed: ["docker/agent/x"] }) }),
+      ),
+    ).rejects.toThrow(/red check runs: Check 126 \(failure\)/);
+    expect(forge.calls.some((call) => call.op === "prMerge")).toBe(false);
+  });
+
+  test("150 open PRs with an escalated PR past 100 makes escalated-pr FAIL", () => {
+    const prs = Array.from({ length: 150 }, (_, i) => ({
+      number: i + 1,
+      title: `PR #${i + 1}`,
+      author: { login: "hdkiller" },
+      labels: i === 140 ? [{ name: "escalated" }] : [],
+      baseRefName: "develop",
+    }));
+    const forge = fakeForge({ prs });
+    const check = checkById(preflight(cfg(), deps({ forge })), "escalated-pr");
+    expect(check.status).toBe("fail");
+    expect(check.detail).toContain("#141");
+  });
+
+  test("open PR list hitting the hard limit fails closed instead of accepting truncation", () => {
+    const prs = Array.from({ length: 1000 }, (_, i) => ({
+      number: i + 1,
+      title: `PR #${i + 1}`,
+      author: { login: "hdkiller" },
+      labels: [],
+      baseRefName: "develop",
+    }));
+    const forge = fakeForge({ prs });
+    const report = preflight(cfg(), deps({ forge }));
+    expect(report.ok).toBe(false);
+    expect(checkById(report, "pin-pr").status).toBe("fail");
+    expect(checkById(report, "pin-pr").detail).toContain("truncated");
+    expect(checkById(report, "escalated-pr").status).toBe("fail");
+  });
+
+  test("a short page whose total_count indicates truncation fails closed", () => {
+    const forge = fakeForge();
+    const originalApi = forge.apiRaw;
+    forge.apiRaw = (apiPath) => {
+      if (/\/actions\/runs\/\d+\/jobs/.test(apiPath)) {
+        return JSON.stringify({
+          total_count: 150,
+          jobs: [job("Django Check", "success")],
+        });
+      }
+      return originalApi(apiPath);
+    };
+    const check = checkById(preflight(cfg(), deps({ forge })), "base-green");
+    expect(check.status).toBe("fail");
+    expect(check.detail).toContain("truncated");
   });
 });
