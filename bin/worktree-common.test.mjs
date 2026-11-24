@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   mkdirSync,
   writeFileSync,
@@ -692,7 +693,7 @@ test("normalize_path is portable and accepts a missing final component", () => {
       "#!/usr/bin/env bash\nprintf '%s\\n' 'realpath: illegal option -- m' >&2\nexit 1\n",
     );
     chmodSync(path.join(mockBin, "realpath"), 0o755);
-    const missing = path.join(root, "existing", "missing-leaf");
+    const missing = path.join(realpathSync(root), "existing", "missing-leaf");
     const r = sh(`normalize_path "${root}/existing/../existing/missing-leaf"`, {
       PATH: `${mockBin}:${TEST_PATH}`,
     });
@@ -1566,7 +1567,9 @@ test("ticket_number dies on malformed ticket inputs", () => {
   for (const input of invalidCases) {
     const r = sh(`ticket_number "${input}"`);
     expect(r.status).not.toBe(0);
-    expect(r.stderr).toContain("ticket must look like OPS-123");
+    expect(r.stderr).toContain(
+      "ticket must look like OPS-123, GH-123, or owner/repo#123",
+    );
   }
 });
 
@@ -1888,6 +1891,47 @@ test("locked_bun_install succeeds without a stamp when no sha256 tool is on PATH
     rmSync(mockBin, { recursive: true, force: true });
     rmSync(noShaPath, { recursive: true, force: true });
     rmSync(lockDir, { recursive: true, force: true });
+  }
+});
+
+test("write_bun_lock_stamp runs under /bin/bash without bash 4 substitution (GH-2338)", () => {
+  const target = bunInstallFixture("bash32-lock-fixture\n");
+  mkdirSync(path.join(target, "node_modules", "placeholder"), {
+    recursive: true,
+  });
+  const mockBin = mkdtempSync(path.join(tmpdir(), "mock-upper-sha-"));
+  const expectedSha = sha256Hex("bash32-lock-fixture\n");
+  // Emit uppercase hex to prove the portable lowercase conversion runs and
+  // normalizes the digest without bash 4's `${digest,,}` expansion.
+  writeFileSync(
+    path.join(mockBin, "sha256sum"),
+    `#!/usr/bin/env bash\nprintf '%s  %s\\n' "${expectedSha.toUpperCase()}" "$2"\n`,
+  );
+  chmodSync(path.join(mockBin, "sha256sum"), 0o755);
+  try {
+    const result = Bun.spawnSync({
+      cmd: [
+        "/bin/bash",
+        "-c",
+        `source "${COMMON}"\nwrite_bun_lock_stamp "${target}"`,
+      ],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        PATH: `${mockBin}:${TEST_PATH}`,
+        ...BAND_ENV,
+      },
+    });
+    const stderr = result.stderr.toString();
+    expect(stderr).not.toContain("bad substitution");
+    expect(result.exitCode).toBe(0);
+    const stamp = path.join(target, "node_modules", ".bun-lock-sha");
+    expect(existsSync(stamp)).toBe(true);
+    expect(readFileSync(stamp, "utf8").trim()).toBe(expectedSha);
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+    rmSync(mockBin, { recursive: true, force: true });
   }
 });
 

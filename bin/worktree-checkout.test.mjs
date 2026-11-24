@@ -3,6 +3,7 @@ import {
   rmSync,
   existsSync,
   readFileSync,
+  realpathSync,
   writeFileSync,
   mkdirSync,
 } from "node:fs";
@@ -275,7 +276,7 @@ if [[ "$1" == "install" ]]; then
   sleep 1
   exit 0
 fi
-exec bun "$@"
+exec "${process.execPath}" "$@"
 `,
       { mode: 0o755 },
     );
@@ -1463,6 +1464,124 @@ test("worktree_add retries transient worktree metadata read races", () => {
   }
 });
 
+test("worktree_add prunes stale worktree registration and emits actionable hints on branch conflicts (GH-2338)", () => {
+  const tempDir = mkdtempSync(path.join(tmpdir(), "factory-wt-stale-reg-"));
+  const attemptsFile = path.join(tempDir, "attempts");
+  const prunedFile = path.join(tempDir, "pruned");
+  const worktreePath = path.join(tempDir, "checkout");
+
+  try {
+    const prunedRetry = sh(
+      `
+      git() {
+        if [[ "$*" == *" show-ref --verify --quiet refs/heads/feat/GH-2338"* ]]; then
+          return 0
+        fi
+        if [[ "$*" == *" worktree prune"* ]]; then
+          printf 'pruned\n' >"$MOCK_GIT_PRUNED"
+          return 0
+        fi
+        if [[ "$*" == *" worktree add "* ]]; then
+          local attempts=0
+          [[ -f "$MOCK_GIT_ATTEMPTS" ]] && attempts=$(cat "$MOCK_GIT_ATTEMPTS")
+          attempts=$((attempts + 1))
+          printf '%s\n' "$attempts" >"$MOCK_GIT_ATTEMPTS"
+          if [[ "$attempts" -eq 1 ]]; then
+            printf '%s\n' "fatal: '${worktreePath}' is a missing but already registered worktree" >&2
+            return 1
+          fi
+          return 0
+        fi
+        return 1
+      }
+      worktree_add "${worktreePath}" "feat/GH-2338" "origin/develop" "/repo"
+    `,
+      { MOCK_GIT_ATTEMPTS: attemptsFile, MOCK_GIT_PRUNED: prunedFile },
+    );
+    expect(prunedRetry.status).toBe(0);
+    expect(readFileSync(attemptsFile, "utf8").trim()).toBe("2");
+    expect(readFileSync(prunedFile, "utf8").trim()).toBe("pruned");
+
+    const checkedOutElsewhere = sh(
+      `
+      git() {
+        if [[ "$*" == *" show-ref --verify --quiet refs/heads/feat/GH-2338"* ]]; then
+          return 0
+        fi
+        if [[ "$*" == *" worktree add "* ]]; then
+          printf '%s\n' "fatal: 'feat/GH-2338' is already used by worktree at '/other/wt'" >&2
+          return 1
+        fi
+        return 1
+      }
+      worktree_add "${worktreePath}" "feat/GH-2338" "origin/develop" "/repo"
+    `,
+    );
+    expect(checkedOutElsewhere.status).not.toBe(0);
+    expect(checkedOutElsewhere.stderr).toContain(
+      "remove that worktree first or pass a slug",
+    );
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+t(
+  "worktree-up attaches cleanly to an existing unattached GH branch and recovers after deleted worktree dir (GH-2338)",
+  () => {
+    if (handoffSandbox) return;
+    const tempWtRoot = mkdtempSync(
+      path.join(tmpdir(), "factory-wt-existing-br-"),
+    );
+    const ticketId = `GH-${(Date.now() % 1_000_000) + process.pid}`;
+    const branch = `feat/${ticketId}`;
+    const expectedPath = path.join(tempWtRoot, ticketId);
+    const repo = path.resolve(import.meta.dir, "..");
+
+    try {
+      // Pre-create an unattached local branch at origin/develop (simulating an
+      // aborted bring-up that left the branch behind with no worktree).
+      expect(
+        Bun.spawnSync({
+          cmd: ["git", "branch", branch, "origin/develop"],
+          cwd: repo,
+          stdout: "pipe",
+          stderr: "pipe",
+        }).exitCode,
+      ).toBe(0);
+
+      const upRes = Bun.spawnSync({
+        cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+      });
+      expect(upRes.exitCode).toBe(0);
+      expect(upRes.stdout.toString().trim()).toBe(expectedPath);
+      expect(existsSync(expectedPath)).toBe(true);
+
+      // Delete the worktree directory manually without `git worktree remove`
+      // (leaving a stale registration in .git/worktrees/) and re-run worktree-up.
+      rmSync(expectedPath, { recursive: true, force: true });
+      const recoverRes = Bun.spawnSync({
+        cmd: ["bash", UP, ticketId, "--checkout-only", "--no-fetch"],
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+      });
+      expect(recoverRes.exitCode).toBe(0);
+      expect(existsSync(expectedPath)).toBe(true);
+    } finally {
+      Bun.spawnSync({
+        cmd: ["bash", DOWN, ticketId, "--force"],
+        env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+      });
+      rmSync(tempWtRoot, { recursive: true, force: true });
+      Bun.spawnSync({ cmd: ["git", "branch", "-D", branch], cwd: repo });
+    }
+  },
+);
+
 // prettier-ignore
 t("high concurrency worktree-up --checkout-only with 4 parallel bring-ups succeeds", async () => {
   if (handoffSandbox) return;
@@ -1579,7 +1698,9 @@ test("worktree-up CLI argument parsing error paths", () => {
       stderr: "pipe",
     });
     expect(res.exitCode).not.toBe(0);
-    expect(res.stderr.toString()).toContain("ticket must look like OPS-123");
+    expect(res.stderr.toString()).toContain(
+      "ticket must look like OPS-123, GH-123, or owner/repo#123",
+    );
   }
 
   // 4. Unknown flag
@@ -1723,12 +1844,13 @@ t("worktree-down refuses dirty worktree without --force, leaves cwd-bound proces
     fakeServe.once("exit", (code, signal) => {
       fakeExit = { code, signal };
     });
+    const expectedRealPath = realpathSync(expectedPath);
     const readyDeadline = Date.now() + 5_000;
     while (Date.now() < readyDeadline) {
-      if (cwdForPid(fakeServe.pid) === expectedPath) break;
+      if (cwdForPid(fakeServe.pid) === expectedRealPath) break;
       await Bun.sleep(10);
     }
-    expect(cwdForPid(fakeServe.pid)).toBe(expectedPath);
+    expect(cwdForPid(fakeServe.pid)).toBe(expectedRealPath);
 
     // 4. Attempt teardown without --force -> should fail and preserve worktree
     const downDirty = Bun.spawnSync({
@@ -1747,7 +1869,7 @@ t("worktree-down refuses dirty worktree without --force, leaves cwd-bound proces
     expect(existsSync(expectedPath)).toBe(true);
     await Bun.sleep(100);
     expect(fakeExit).toBeNull();
-    expect(cwdForPid(fakeServe.pid)).toBe(expectedPath);
+    expect(cwdForPid(fakeServe.pid)).toBe(expectedRealPath);
 
     // 5. Teardown with --force -> should succeed, sweep the orphan, and
     //    remove the worktree
@@ -1796,13 +1918,14 @@ t("worktree teardown group-kills a cwd-bound fake serve with no pidfile", async 
       stdio: "ignore",
     });
 
+    const expectedRealPath = realpathSync(expectedPath);
     const readyDeadline = Date.now() + 5_000;
     while (Date.now() < readyDeadline) {
       const cwd = cwdForPid(fakeServe.pid);
-      if (cwd === expectedPath) break;
+      if (cwd === expectedRealPath) break;
       await Bun.sleep(10);
     }
-    expect(cwdForPid(fakeServe.pid)).toBe(expectedPath);
+    expect(cwdForPid(fakeServe.pid)).toBe(expectedRealPath);
 
     const exited = new Promise((resolve) => {
       fakeServe.once("exit", (code, signal) => resolve({ code, signal }));
