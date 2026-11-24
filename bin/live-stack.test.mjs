@@ -16,6 +16,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -1602,3 +1603,23 @@ test("SIGTERM to the supervisor drains the worker and stops — even if it exits
     f.cleanup();
   }
 }, 30_000);
+
+test("`up` enforces 0700 on RUN_DIR and HOME_DIR under permissive umask (GH-957)", () => {
+  if (process.platform === "win32") return; // POSIX mode bits not enforced on win32
+  const prevUmask = process.umask(0o022);
+  const f = makeFixture();
+  const homeDir = path.join(f.root, "home");
+  try {
+    mkdirSync(f.runDir, { recursive: true, mode: 0o755 });
+    mkdirSync(homeDir, { recursive: true, mode: 0o755 });
+    chmodSync(f.runDir, 0o755);
+    chmodSync(homeDir, 0o755);
+    const r = runStack(f, ["up"]);
+    expect(r.status).toBe(0);
+    expect(statSync(f.runDir).mode & 0o777).toBe(0o700);
+    expect(statSync(homeDir).mode & 0o777).toBe(0o700);
+  } finally {
+    process.umask(prevUmask);
+    f.cleanup();
+  }
+});

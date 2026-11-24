@@ -534,5 +534,8 @@ export async function dispatch(argv = process.argv.slice(2)) {
 }
 
 if (import.meta.main || process.argv[1]?.endsWith("cli.mjs")) {
+  if (process.platform !== "win32" && typeof process.umask === "function") {
+    process.umask(0o077);
+  }
   await dispatch();
 }

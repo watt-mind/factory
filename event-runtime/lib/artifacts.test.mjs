@@ -787,4 +787,32 @@ describe("store maintenance: referencedHashes, storeStats, pruneArtifacts, pinRu
       /stored no "other" artifact/,
     );
   });
+
+  test("storeCollected creates 0700 store directory and 0600 artifact files under permissive umask (GH-957)", () => {
+    if (process.platform === "win32") return; // POSIX mode bits not enforced on win32
+    const prevUmask = process.umask(0o022);
+    try {
+      const root = tmpDir("evrt-art-perms-");
+      const ws = path.join(root, "ws");
+      const storeRoot = path.join(root, "store");
+      mkdirSync(ws, { recursive: true });
+      const src = path.join(ws, "out.txt");
+      writeFileSync(src, "secret artifact bytes\n", { mode: 0o644 });
+      const sha256 = hashFile(src);
+
+      const stored = storeCollected({
+        entries: [{ kind: "report", sha256, uri: `file://${src}` }],
+        storeRoot,
+        workspaceDir: ws,
+      });
+
+      expect(stored).toHaveLength(1);
+      expect(statSync(storeRoot).mode & 0o777).toBe(0o700);
+      expect(statSync(artifactPath(storeRoot, sha256)).mode & 0o777).toBe(
+        0o600,
+      );
+    } finally {
+      process.umask(prevUmask);
+    }
+  });
 });

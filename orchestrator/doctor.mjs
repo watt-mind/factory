@@ -362,11 +362,68 @@ const commandResult = (result) => ({
  * Linear, fetching a checkout, or depending on the machine running the tests.
  * `run` accepts a shell command and returns spawnSync-shaped output.
  */
+/**
+ * Check that factory state and runtime-home directories are owner-only (0700).
+ * Missing directories are a normal not-yet-initialized condition (GH-957).
+ */
+export function runtimePermissionsDiagnostic({
+  dirs = [],
+  platform = process.platform,
+} = {}) {
+  const label = "runtime directory permissions";
+  if (platform === "win32") {
+    return {
+      ok: true,
+      label,
+      detail: "skipped — POSIX mode bits are not enforced on win32",
+      fix: null,
+    };
+  }
+  const unsafe = [];
+  const checked = [];
+  for (const dir of dirs) {
+    if (!dir) continue;
+    let st;
+    try {
+      st = lstatSync(dir);
+    } catch {
+      continue;
+    }
+    if (st.isSymbolicLink() || !st.isDirectory()) continue;
+    const mode = st.mode & 0o777;
+    checked.push(`${dir} (${mode.toString(8).padStart(4, "0")})`);
+    if ((mode & 0o077) !== 0) {
+      unsafe.push({ dir, mode: mode.toString(8).padStart(4, "0") });
+    }
+  }
+  if (unsafe.length > 0) {
+    const summary = unsafe.map((u) => `${u.dir} (${u.mode})`).join(", ");
+    const fixCmd = unsafe.map((u) => `chmod 700 ${u.dir}`).join(" && ");
+    return {
+      ok: false,
+      label,
+      detail: `group- or world-accessible factory directories: ${summary}`,
+      fix: fixCmd,
+    };
+  }
+  return {
+    ok: true,
+    label,
+    detail:
+      checked.length > 0
+        ? `owner-only (0700): ${checked.join(", ")}`
+        : "not yet initialized",
+    fix: null,
+  };
+}
+
 export function ossOnboardingDiagnostics({
   run,
   env = process.env,
   controlPlaneKind = "linear",
   linearConfigured = Boolean(env.LINEAR_API_KEY),
+  runtimeDirs,
+  platform = process.platform,
 } = {}) {
   if (typeof run !== "function") throw new TypeError("run must be a function");
   const execute = (command) => commandResult(run(command));
@@ -491,6 +548,12 @@ export function ossOnboardingDiagnostics({
       ? null
       : "install and start Docker Desktop, Colima, or a supported MicroVM runtime before using isolated worktrees",
   });
+
+  if (runtimeDirs !== undefined) {
+    diagnostics.push(
+      runtimePermissionsDiagnostic({ dirs: runtimeDirs, platform }),
+    );
+  }
 
   return diagnostics;
 }

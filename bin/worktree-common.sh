@@ -476,18 +476,48 @@ kill_worktree_cwd_processes() { # <worktree>
   done
 }
 
+# Create a runtime/run/lock directory with 0700 and repair broader modes
+# without following symlinks (GH-957).
+ensure_private_dir() { # <dir>
+  local dir="$1"
+  mkdir -p -m 700 "$dir"
+  if [[ -d "$dir" && ! -L "$dir" ]]; then
+    chmod 700 "$dir" 2>/dev/null || true
+  fi
+}
+
+ensure_private_file() { # <file>
+  local file="$1"
+  if [[ -f "$file" && ! -L "$file" ]]; then
+    chmod 600 "$file" 2>/dev/null || true
+  fi
+}
+
 # Spawn a detached daemon in its own process group (setsid) so it survives the
 # parent shell exiting (OPS-306).
 spawn_daemon() { # <pidfile> <logfile> <workdir> <cmd...>
   local pidfile="$1" logfile="$2" workdir="$3"
   shift 3
-  mkdir -p "$(dirname "$pidfile")" "$(dirname "$logfile")"
+  ensure_private_dir "$(dirname "$pidfile")"
+  ensure_private_dir "$(dirname "$logfile")"
   local pid
   pid=$(
+    umask 077
     SPAWN_CWD="$workdir" SPAWN_LOG="$logfile" bun --eval '
       import { spawn } from "node:child_process";
-      import { openSync } from "node:fs";
-      const out = openSync(process.env.SPAWN_LOG, "a");
+      import { openSync, chmodSync, lstatSync } from "node:fs";
+      if (process.platform !== "win32" && typeof process.umask === "function") {
+        process.umask(0o077);
+      }
+      const out = openSync(process.env.SPAWN_LOG, "a", 0o600);
+      if (process.platform !== "win32") {
+        try {
+          const st = lstatSync(process.env.SPAWN_LOG);
+          if (!st.isSymbolicLink() && st.isFile() && (st.mode & 0o177) !== 0) {
+            chmodSync(process.env.SPAWN_LOG, 0o600);
+          }
+        } catch {}
+      }
       const args = process.argv.slice(1);
       const child = spawn(args[0], args.slice(1), {
         cwd: process.env.SPAWN_CWD,
@@ -500,7 +530,9 @@ spawn_daemon() { # <pidfile> <logfile> <workdir> <cmd...>
     ' "$@"
   )
   if [[ "$pid" =~ ^[0-9]+$ ]]; then
-    printf '%s\n' "$pid" >"$pidfile"
+    (umask 077 && printf '%s\n' "$pid" >"$pidfile")
+    ensure_private_file "$pidfile"
+    ensure_private_file "$logfile"
   else
     die "failed to spawn daemon: $*"
   fi
@@ -598,16 +630,18 @@ read_ports() { # <worktree> → prints "api web"
 }
 
 write_ports() { # <worktree> <api> <web>
-  mkdir -p "$(run_dir "$1")"
-  printf 'api=%s\nweb=%s\n' "$2" "$3" >"$(run_dir "$1")/ports"
+  ensure_private_dir "$(run_dir "$1")"
+  (umask 077 && printf 'api=%s\nweb=%s\n' "$2" "$3" >"$(run_dir "$1")/ports")
+  ensure_private_file "$(run_dir "$1")/ports"
 }
 
 # Persist the adapter override separately from daemon pidfiles so a supervisor
 # can safely reconstruct a dead serve command. An empty value explicitly means
 # live adapters; a missing file is different and defaults to fake below.
 write_adapter_override() { # <worktree> <adapter-or-empty>
-  mkdir -p "$(run_dir "$1")"
-  printf 'adapter=%s\n' "$2" >"$(run_dir "$1")/adapter"
+  ensure_private_dir "$(run_dir "$1")"
+  (umask 077 && printf 'adapter=%s\n' "$2" >"$(run_dir "$1")/adapter")
+  ensure_private_file "$(run_dir "$1")/adapter"
 }
 
 read_adapter_override() { # <worktree> → prints adapter, including empty for live

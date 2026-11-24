@@ -38,6 +38,7 @@
 # so a `set -e` abort inside ensure_deps/spawn_daemon_tracked would exit the
 # shell with the trap never having fired.
 set -eEuo pipefail
+umask 077
 
 source "$(dirname "${BASH_SOURCE[0]}")/worktree-common.sh"
 
@@ -618,7 +619,11 @@ case "$ACTION" in
       exit 0
     fi
 
-    mkdir -p "$RUN_DIR" "$HOME_DIR"
+    mkdir -p -m 700 "$RUN_DIR" "$HOME_DIR"
+    if command -v chmod >/dev/null 2>&1; then
+      [[ -d "$RUN_DIR" && ! -L "$RUN_DIR" ]] && chmod 700 "$RUN_DIR" 2>/dev/null || true
+      [[ -d "$HOME_DIR" && ! -L "$HOME_DIR" ]] && chmod 700 "$HOME_DIR" 2>/dev/null || true
+    fi
     validate_log_knobs
     # This happens before any daemon is spawned. Existing live owners keep
     # their inode and are copy-truncated; stopped daemons get a cheap rename.

@@ -5,9 +5,11 @@
  * the existing orchestrator's state (docs/event-runtime.md §3).
  */
 import {
+  chmodSync,
   constants as fsConstants,
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   statSync,
@@ -138,10 +140,48 @@ export function artifactsRoot(home = runtimeHome()) {
   return path.join(home, "artifacts");
 }
 
+export const PRIVATE_DIR_MODE = 0o700;
+export const PRIVATE_FILE_MODE = 0o600;
+
+/**
+ * Create a runtime directory with 0700 and repair any broader existing
+ * directory without following symlinks (GH-957).
+ */
+export function ensurePrivateDir(dirPath) {
+  mkdirSync(dirPath, { recursive: true, mode: PRIVATE_DIR_MODE });
+  if (process.platform === "win32") return dirPath;
+  try {
+    const st = lstatSync(dirPath);
+    if (!st.isSymbolicLink() && st.isDirectory() && (st.mode & 0o077) !== 0) {
+      chmodSync(dirPath, PRIVATE_DIR_MODE);
+    }
+  } catch {
+    /* ignore transient race */
+  }
+  return dirPath;
+}
+
+/**
+ * Tighten a runtime file to 0600 without following symlinks (GH-957).
+ */
+export function ensurePrivateFile(filePath) {
+  if (process.platform === "win32") return filePath;
+  try {
+    const st = lstatSync(filePath);
+    if (!st.isSymbolicLink() && st.isFile() && (st.mode & 0o177) !== 0) {
+      chmodSync(filePath, PRIVATE_FILE_MODE);
+    }
+  } catch {
+    /* file may not exist yet (e.g. -wal/-shm before first write) */
+  }
+  return filePath;
+}
+
 export function ensureHome(home = runtimeHome()) {
-  mkdirSync(workspacesRoot(home), { recursive: true });
-  mkdirSync(artifactsRoot(home), { recursive: true });
-  mkdirSync(mirrorsRoot(home), { recursive: true });
+  ensurePrivateDir(home);
+  ensurePrivateDir(workspacesRoot(home));
+  ensurePrivateDir(artifactsRoot(home));
+  ensurePrivateDir(mirrorsRoot(home));
   return home;
 }
 
