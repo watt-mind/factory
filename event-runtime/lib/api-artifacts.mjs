@@ -17,14 +17,67 @@ import { findArtifact, hashFileAsync, pruneArtifacts } from "./artifacts.mjs";
 import { artifactsRoot } from "./config.mjs";
 import { ApiParameterError, parseListLimit } from "./api-params.mjs";
 
-/** Crude but honest content-type: render text in the browser, download the rest. */
-function looksLikeText(file) {
+/** Sniff common media magic bytes so screenshots/videos render inline, else text vs binary. */
+export function detectContentType(file) {
   let fd;
   try {
     fd = openSync(file, "r");
     const head = Buffer.alloc(512);
     const read = readSync(fd, head, 0, head.length, 0);
-    return !head.subarray(0, read).includes(0);
+    const slice = head.subarray(0, read);
+    if (
+      read >= 8 &&
+      slice[0] === 0x89 &&
+      slice[1] === 0x50 &&
+      slice[2] === 0x4e &&
+      slice[3] === 0x47 &&
+      slice[4] === 0x0d &&
+      slice[5] === 0x0a &&
+      slice[6] === 0x1a &&
+      slice[7] === 0x0a
+    ) {
+      return "image/png";
+    }
+    if (
+      read >= 3 &&
+      slice[0] === 0xff &&
+      slice[1] === 0xd8 &&
+      slice[2] === 0xff
+    ) {
+      return "image/jpeg";
+    }
+    if (
+      read >= 6 &&
+      (slice.subarray(0, 6).toString("ascii") === "GIF87a" ||
+        slice.subarray(0, 6).toString("ascii") === "GIF89a")
+    ) {
+      return "image/gif";
+    }
+    if (
+      read >= 12 &&
+      slice.subarray(0, 4).toString("ascii") === "RIFF" &&
+      slice.subarray(8, 12).toString("ascii") === "WEBP"
+    ) {
+      return "image/webp";
+    }
+    if (read >= 8 && slice.subarray(4, 8).toString("ascii") === "ftyp") {
+      return "video/mp4";
+    }
+    if (
+      read >= 4 &&
+      slice[0] === 0x1a &&
+      slice[1] === 0x45 &&
+      slice[2] === 0xdf &&
+      slice[3] === 0xa3
+    ) {
+      return "video/webm";
+    }
+    if (read >= 5 && slice.subarray(0, 5).toString("ascii") === "%PDF-") {
+      return "application/pdf";
+    }
+    return slice.includes(0)
+      ? "application/octet-stream"
+      : "text/plain; charset=utf-8";
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
@@ -222,9 +275,7 @@ export async function handleArtifactApiRoute({
       ? rawName.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 64)
       : "";
     res.writeHead(200, {
-      "content-type": looksLikeText(found.file)
-        ? "text/plain; charset=utf-8"
-        : "application/octet-stream",
+      "content-type": detectContentType(found.file),
       "content-length": found.sizeBytes,
       ...(safeName
         ? {

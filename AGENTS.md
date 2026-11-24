@@ -54,6 +54,18 @@ Non-negotiable for every agent in this repo, in any harness. Full protocol: `$FA
 
 **PR base is explicit.** Resolve the repository's `base` from `config/repos.yaml` and always create ticket PRs with `gh pr create --base <configured-base> ...`; GitHub's default branch is not a fallback. Read the opened PR's `baseRefName` back before handoff and stop if it differs from the configured base.
 
+**PR title, body, UX media, and bot findings.**
+
+- **Title:** Conventional commit in plain language with the ticket ID: `type(scope): concise summary (ISSUE-ID)` (e.g. `fix(web): new threads no longer spike CPU (CLNT-123)`).
+- **Body:** Keep it scannable and non-redundant — the diff already lists every symbol. Structure:
+  1. **Problem / Context** (1–2 sentences on why this change exists).
+  2. **What changed** (concise behavior bullets, not a file-by-file symbol catalog).
+  3. **UX Evidence** (required for UI-affecting PRs — see below).
+  4. **Verification** (exact command + pass summary).
+  5. **Footer** (always at the bottom): `Fixes <ISSUE-ID>` (one line per ticket in a bundle), followed by `run:<run-id>` in dispatched runs (when `$FACTORY_RUN_ID` is set) or the model and harness that did the work in interactive sessions.
+- **UX evidence (images & short videos):** UI changes require before/after screenshots; motion, drag-and-drop, modals, or timing-sensitive interactions require a short video (`.mp4`/`.webm`). Upload PR media with `factory artifact pr-media` (alias `factory pr-media`, backed by `artifacts.watt-mind.com`) — **never commit PR-only screenshots, videos, implementation plans, or scratch notes to git**.
+- **Bot review findings:** Verify every automated review comment against the source; fix real issues, and reply with a concise written reason when dismissing false positives. Never blindly apply or silently ignore bot findings.
+
 **Negative testing and falsifiability.** New regression tests must be observed failing before applying the fix to prove they test the actual failure mode and are not vacuous. Verify that tests distinguish correct implementations from plausible incorrect ones (without using `git stash`; use safe per-file reverts such as `git show <ref>:<path> > <path>`). A test that passes before the fix is applied tests nothing.
 
 **Mandatory `## Handoff` comment.** Before moving a ticket to `In Review`, post a structured `## Handoff` comment on the ticket with these exact fields:
@@ -219,7 +231,7 @@ A tool result is not paid for once. It stays in the context window and is re-sen
 - **Mandatory UI visual loop (`principle-experience-first` + `principle-exhaust-the-design-space`):**
   1. On net-new UI surfaces, material layout redesigns, or explicit design-exploration requests (never routine bugfixes), explore 2–3 distinct layout/interaction options (`principle-exhaust-the-design-space`, using `$TMPDIR` patches, never `git stash`), autonomously select and commit only the winner without pausing on an AFK human, and record the options + rationale in the ticket comment / `## Handoff` (or interactive summary).
   2. On **any** UI-affecting change, render the live UI, capture a bounded screenshot (prefer mobile viewport / element scope), critique visual hierarchy, spacing rhythm, alignment, contrast, truncation, and states coldly (`principle-experience-first`), and iterate **at least once** to polish rough first-draft UI (capping total captures to 2–4 bounded screenshots, `≤ 1 MB` each).
-  3. Surface screenshots by default (never commit to git or attach to Linear): in interactive sessions (`$FACTORY_RUN_ID` unset), save 1–3 post-polish screenshots to the session artifact/scratch dir and embed/link them in the response or walkthrough artifact without waiting to be asked; in dispatched runs (`$FACTORY_RUN_ID` set), publish 1–4 `ux-screenshot` artifacts and link `$FACTORY_WEB_URL/api/artifacts/<sha256>` in PR/Handoff (or state the concrete transport exception).
+  3. Surface screenshots and short videos by default (never commit to git or attach to Linear): upload PR visual evidence with `factory artifact pr-media` (alias `factory pr-media`, using `--before`/`--after` for UI diffs and `.mp4`/`.webm` for motion/drag-and-drop/modals) so GitHub renders it inline in `## UX Evidence`; in dispatched runs (`$FACTORY_RUN_ID` set), also declare 1–4 `ux-screenshot` artifacts in `result.json` (falling back to `$FACTORY_WEB_URL/api/artifacts/<sha256>` or a concrete transport exception only if remote upload is unavailable).
 
 **Don't re-read what you have already read.** 285 duplicate reads of an identical path inside a single run were measured. If you read a file, it is still in your context — scroll back rather than re-reading. For a large file, `offset`/`limit` the part you need instead of pulling all of it.
 
