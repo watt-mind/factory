@@ -28,6 +28,7 @@ import { handleChainApiRoute } from "./api-chain.mjs";
 import { handleConfigApiRoute } from "./api-config.mjs";
 import { handleMetricsApiRoute } from "./api-metrics.mjs";
 import { handlePanelsApiRoute } from "./api-panels.mjs";
+import { ApiParameterError, parseListLimit } from "./api-params.mjs";
 import { createRepoApi } from "./api-repos.mjs";
 import { handleRegistryApiRoute } from "./api-registry.mjs";
 import {
@@ -65,6 +66,7 @@ import {
 } from "./decision-effects.mjs";
 import { janitorArgv, spawnFactoryJanitor } from "./janitor.mjs";
 import { notifyCommand, sendNotification } from "./notify.mjs";
+import { createPrWatchHub } from "./pr-watch.mjs";
 import { loadRepos, reposRoot } from "./repos.mjs";
 import { scheduleView } from "./schedules.mjs";
 import { handleStatusApiRoute, workerCapacityView } from "./status-view.mjs";
@@ -100,6 +102,41 @@ const BEARER_EXEMPT_ROUTES = new Set([
   // exempt too — an external GitHub sender cannot present a bearer (WM-1150).
   "POST /webhooks/github",
 ]);
+
+const DEFAULT_PR_WATCH_KEEPALIVE_MS = 25_000;
+const PR_WATCH_RECENT_DEFAULT_LIMIT = 50;
+const PR_WATCH_RECENT_MAX_LIMIT = 200;
+
+function parsePrWatchFilter(url) {
+  const rawRepo = url.searchParams.get("repo");
+  const repo =
+    typeof rawRepo === "string" && rawRepo.trim() !== ""
+      ? rawRepo.trim()
+      : null;
+  const rawSha = url.searchParams.get("sha");
+  const sha =
+    typeof rawSha === "string" && rawSha.trim() !== "" ? rawSha.trim() : null;
+  const rawPrs = url.searchParams.getAll("pr");
+  const prs = new Set();
+  for (const raw of rawPrs) {
+    const trimmed = raw.trim();
+    if (trimmed === "") {
+      throw new ApiParameterError(
+        "invalid_pr",
+        "pr must be a positive integer",
+      );
+    }
+    const num = Number(trimmed);
+    if (!Number.isInteger(num) || num < 1) {
+      throw new ApiParameterError(
+        "invalid_pr",
+        "pr must be a positive integer",
+      );
+    }
+    prs.add(num);
+  }
+  return { repo, prs: prs.size > 0 ? prs : null, sha };
+}
 
 function payloadTooLargeBody(err) {
   if (!(err instanceof PayloadTooLargeError)) return null;
@@ -160,6 +197,8 @@ export function createApi({
   getLinearBudget = loadLinearBudget,
   // Injectable so dispatcher tests can prove a route group receives a path.
   registryApi = handleRegistryApiRoute,
+  prWatch = createPrWatchHub(),
+  prWatchKeepaliveMs = DEFAULT_PR_WATCH_KEEPALIVE_MS,
 } = {}) {
   const actor = "operator";
   const staticRegistryLoadedAt = new Date(now()).toISOString();
@@ -292,6 +331,7 @@ export function createApi({
         send,
         readBody,
         parseJson,
+        prWatch,
       };
 
       if (
@@ -408,6 +448,108 @@ export function createApi({
       if (url.pathname === "/chains" || url.pathname.startsWith("/chain/")) {
         const result = handleChainApiRoute(common);
         if (result !== false) return result;
+      }
+      if (route === "GET /pr-watch/recent") {
+        try {
+          const filter = parsePrWatchFilter(url);
+          const limit = parseListLimit(url, {
+            defaultLimit: PR_WATCH_RECENT_DEFAULT_LIMIT,
+            maxLimit: PR_WATCH_RECENT_MAX_LIMIT,
+          });
+          const events = prWatch.recent({
+            repo: filter.repo,
+            prs: filter.prs,
+            sha: filter.sha,
+            limit,
+          });
+          const { subscribers } = prWatch.stats();
+          return send(200, {
+            ok: true,
+            count: events.length,
+            events,
+            subscribers,
+          });
+        } catch (err) {
+          if (err instanceof ApiParameterError) return send(400, err.body);
+          throw err;
+        }
+      }
+      if (route === "GET /events/pr-watch") {
+        let filter;
+        try {
+          filter = parsePrWatchFilter(url);
+        } catch (err) {
+          if (err instanceof ApiParameterError) return send(400, err.body);
+          throw err;
+        }
+        let closed = false;
+        let keepaliveTimer = null;
+        let unsubscribe = null;
+        const cleanup = () => {
+          if (closed) return;
+          closed = true;
+          if (keepaliveTimer) {
+            clearInterval(keepaliveTimer);
+            keepaliveTimer = null;
+          }
+          if (unsubscribe) {
+            const fn = unsubscribe;
+            unsubscribe = null;
+            fn();
+          }
+        };
+        const safeWrite = (chunk) => {
+          if (closed || res.destroyed || res.writableEnded) {
+            cleanup();
+            return;
+          }
+          try {
+            res.write(chunk);
+          } catch {
+            cleanup();
+          }
+        };
+        unsubscribe = prWatch.subscribe(filter, (event) => {
+          safeWrite(`event: pr_watch\ndata: ${JSON.stringify(event)}\n\n`);
+        });
+        if (!unsubscribe) {
+          return send(503, {
+            error: "pr_watch_subscriber_limit",
+            message: "PR watch subscriber limit reached",
+          });
+        }
+        try {
+          res.writeHead(200, {
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+            connection: "keep-alive",
+            "x-accel-buffering": "no",
+          });
+          res.flushHeaders?.();
+          const readyPayload = {
+            ok: true,
+            repo: filter.repo,
+            prs: filter.prs ? [...filter.prs] : [],
+            sha: filter.sha,
+            subscribers: prWatch.stats().subscribers,
+          };
+          safeWrite(`event: ready\ndata: ${JSON.stringify(readyPayload)}\n\n`);
+          if (closed) return;
+          if (Number.isFinite(prWatchKeepaliveMs) && prWatchKeepaliveMs > 0) {
+            keepaliveTimer = setInterval(() => {
+              safeWrite(": keepalive\n\n");
+            }, prWatchKeepaliveMs);
+            keepaliveTimer.unref?.();
+          }
+          req.on("close", cleanup);
+          req.on("aborted", cleanup);
+          res.on("close", cleanup);
+          res.on("error", cleanup);
+        } catch (err) {
+          cleanup();
+          throw err;
+        }
+        return;
       }
       if (
         url.pathname === "/events" ||

@@ -32,6 +32,7 @@ import {
   sweepOrphanedNonRunProposals,
 } from "../lib/proposals.mjs";
 import { startApi } from "../lib/api.mjs";
+import { createPrWatchHub } from "../lib/pr-watch.mjs";
 import { codeStamp, REGISTRY_STAMP_PATHS } from "../lib/worker.mjs";
 import { reapExpiredLeases } from "../lib/reaper.mjs";
 import {
@@ -817,6 +818,7 @@ export default async function serve(args) {
     home: runtimeHome(),
     adapter: adapterOverride ?? null,
   };
+  const prWatch = createPrWatchHub();
   const server = startApi({
     db,
     registryRef,
@@ -824,6 +826,7 @@ export default async function serve(args) {
     port,
     env,
     getTickStats,
+    prWatch,
     onEvent: (kind) => {
       log(`event ${kind} — planning`);
       plannerWorker?.wake();

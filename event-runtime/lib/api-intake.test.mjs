@@ -4,6 +4,7 @@ import {
 } from "../test-support/tmp.mjs?file=event-runtime-lib-api-intake-test-mjs";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
+import { createPrWatchHub } from "./pr-watch.mjs";
 import {
   registerTestProcessCleanup,
   spawnTracked,
@@ -1482,6 +1483,162 @@ describe("missing FACTORY_EVENT_SECRET and FACTORY_GITHUB_WEBHOOK_SECRET visibil
     } finally {
       child.kill("SIGTERM");
       await new Promise((resolve) => child.once("exit", resolve));
+    }
+  });
+});
+
+describe("observe-only GitHub PR-watch fan-out (GH-2465)", () => {
+  const ghSign = (body) =>
+    `sha256=${createHmac("sha256", GH_SECRET).update(body).digest("hex")}`;
+
+  async function postWebhook(s, event, payload, deliveryId, signature) {
+    const body = JSON.stringify(payload);
+    return fetch(s.url("/webhooks/github"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-github-event": event,
+        "x-github-delivery": deliveryId,
+        "x-hub-signature-256": signature ?? ghSign(body),
+      },
+      body,
+    });
+  }
+
+  test("valid HMAC-signed check_suite, check_run, and workflow_run publish to prWatch without admitting planner events", async () => {
+    const prWatch = createPrWatchHub();
+    const nowMs = Date.parse("2026-11-24T22:10:00.000Z");
+    const s = await makeServer({ prWatch, now: () => nowMs });
+    const sha = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+    try {
+      const cs = await postWebhook(
+        s,
+        "check_suite",
+        {
+          action: "completed",
+          repository: { full_name: "watt-mind/unconfigured-observe" },
+          check_suite: {
+            head_sha: sha,
+            conclusion: "success",
+            pull_requests: [{ number: 12 }],
+          },
+        },
+        "d-watch-cs",
+      );
+      expect(cs.status).toBe(200);
+      expect(await cs.json()).toEqual({
+        admitted: false,
+        ignored: true,
+        reason: "unconfigured_repo",
+      });
+
+      const cr = await postWebhook(
+        s,
+        "check_run",
+        {
+          action: "completed",
+          repository: { full_name: "watt-mind/factory" },
+          check_run: {
+            head_sha: sha,
+            conclusion: "neutral",
+            pull_requests: [],
+          },
+        },
+        "d-watch-cr",
+      );
+      expect(cr.status).toBe(200);
+      expect(await cr.json()).toEqual({
+        admitted: false,
+        ignored: true,
+        reason: "not_pull_request_head",
+      });
+
+      const wr = await postWebhook(
+        s,
+        "workflow_run",
+        {
+          action: "completed",
+          repository: { full_name: "watt-mind/unconfigured-observe" },
+          workflow_run: {
+            head_sha: sha,
+            conclusion: "cancelled",
+            pull_requests: [{ number: 12 }],
+          },
+        },
+        "d-watch-wr",
+      );
+      expect(wr.status).toBe(200);
+      expect(await wr.json()).toMatchObject({
+        admitted: false,
+        ignored: true,
+      });
+
+      await flushPlanning();
+      expect(s.onEvents).toEqual([]);
+      expect(s.db.query(`SELECT COUNT(*) AS n FROM events`).get().n).toBe(0);
+
+      const recent = prWatch.recent();
+      expect(recent).toEqual([
+        {
+          repo: "watt-mind/unconfigured-observe",
+          pr: 12,
+          headSha: sha,
+          githubEvent: "workflow_run",
+          action: "completed",
+          conclusion: "cancelled",
+          deliveryId: "d-watch-wr",
+          at: "2026-11-24T22:10:00.000Z",
+        },
+        {
+          repo: "watt-mind/factory",
+          pr: null,
+          headSha: sha,
+          githubEvent: "check_run",
+          action: "completed",
+          conclusion: "neutral",
+          deliveryId: "d-watch-cr",
+          at: "2026-11-24T22:10:00.000Z",
+        },
+        {
+          repo: "watt-mind/unconfigured-observe",
+          pr: 12,
+          headSha: sha,
+          githubEvent: "check_suite",
+          action: "completed",
+          conclusion: "success",
+          deliveryId: "d-watch-cs",
+          at: "2026-11-24T22:10:00.000Z",
+        },
+      ]);
+    } finally {
+      s.close();
+    }
+  });
+
+  test("invalid HMAC signature does NOT publish to prWatch", async () => {
+    const prWatch = createPrWatchHub();
+    const s = await makeServer({ prWatch });
+    try {
+      const res = await postWebhook(
+        s,
+        "check_suite",
+        {
+          action: "completed",
+          repository: { full_name: "watt-mind/factory" },
+          check_suite: {
+            head_sha: "deadbeef".repeat(5),
+            conclusion: "success",
+            pull_requests: [{ number: 55 }],
+          },
+        },
+        "d-watch-forged",
+        "sha256=0000000000000000000000000000000000000000000000000000000000000000",
+      );
+      expect(res.status).toBe(401);
+      expect(prWatch.recent()).toEqual([]);
+      expect(prWatch.stats().recentCount).toBe(0);
+    } finally {
+      s.close();
     }
   });
 });
