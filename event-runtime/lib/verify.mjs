@@ -1558,25 +1558,24 @@ export function handoffFailureOutput(obs, { timeoutMs } = {}) {
 }
 
 function defaultDependencyInstaller({ cwd, timeoutMs }) {
-  // Source the worker checkout's helper, never the agent-writable worktree.
-  // This retains the same global Bun-cache lock and SQLITE_BUSY retry policy
-  // used while materializing worktrees without granting ticket code host-shell
+  // Run the worker checkout's static helper script directly (no bash -c
+  // string construction) so it retains the global Bun-cache lock and
+  // SQLITE_BUSY retry policy without granting ticket code host-shell
   // execution before the handoff sandbox is active.
-  const helper = path.resolve(import.meta.dir, "../../bin/worktree-common.sh");
-  const result = spawnSync(
-    "/bin/bash",
-    ["-c", 'source "$1"; locked_bun_install "$2"', "--", helper, cwd],
-    {
-      encoding: "utf8",
-      timeout: timeoutMs,
-      env: {
-        ...process.env,
-        FACTORY_LOCK_MAX_WAIT: String(
-          Math.min(120, Math.floor(timeoutMs / 1000)),
-        ),
-      },
-    },
+  const helper = path.resolve(
+    import.meta.dir,
+    "../../bin/locked-bun-install.sh",
   );
+  const result = spawnSync("/bin/bash", [helper, cwd], {
+    encoding: "utf8",
+    timeout: timeoutMs,
+    env: {
+      ...process.env,
+      FACTORY_LOCK_MAX_WAIT: String(
+        Math.min(120, Math.floor(timeoutMs / 1000)),
+      ),
+    },
+  });
   return {
     passed: result.status === 0 && !result.error,
     exitCode: result.status,

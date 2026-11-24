@@ -96,14 +96,21 @@ describe("tracked test processes (WM-654)", () => {
   test("cleanup kills a spawned wrapper and its long-lived grandchild", async () => {
     const dir = tmpDir("evrt-tracked-group-");
     const pidFile = path.join(dir, "grandchild.pid");
-    const child = spawnTracked(
-      "bash",
+    const wrapper = path.join(dir, "wrapper.mjs");
+    writeFileSync(
+      wrapper,
       [
-        "-c",
-        `sleep 60 & printf '%s\\n' "$!" > ${JSON.stringify(pidFile)}; wait`,
-      ],
-      { stdio: "ignore" },
+        'import { writeFileSync } from "node:fs";',
+        'const grandchild = Bun.spawn(["sleep", "60"], { stdio: ["ignore", "ignore", "ignore"] });',
+        'writeFileSync(process.argv[2], `${grandchild.pid}\\n`, "utf8");',
+        "await grandchild.exited;",
+        "",
+      ].join("\n"),
+      "utf8",
     );
+    const child = spawnTracked("bun", [wrapper, pidFile], {
+      stdio: "ignore",
+    });
     const grandchildPid = Number(await waitForFile(pidFile));
     expect(processExists(child.pid)).toBe(true);
     expect(processExists(grandchildPid)).toBe(true);

@@ -2,7 +2,12 @@ import { trackTmpDir } from "../test-support/tmp.mjs?file=event-runtime-lib-api-
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
-import { MAX_BODY_BYTES, PayloadTooLargeError, readBody } from "./api-http.mjs";
+import {
+  MAX_BODY_BYTES,
+  PayloadTooLargeError,
+  readBody,
+  send,
+} from "./api-http.mjs";
 import {
   GH_SECRET,
   PV,
@@ -290,5 +295,30 @@ describe("Host and Origin header security confinement (OPS-408)", () => {
       expect(stale.headers.etag).toBe(first.headers.etag);
       expect(stale.text).toBe(first.text);
     }
+  });
+
+  test("send() strips stack properties and Error instances so stack traces never leak (GH-2391)", () => {
+    let statusCode = null;
+    let body = "";
+    const res = {
+      req: { method: "POST", url: "/test", headers: {} },
+      writeHead(status) {
+        statusCode = status;
+      },
+      end(chunk = "") {
+        body += chunk;
+      },
+    };
+    const err = new Error("boom");
+    send(res, 500, {
+      error: "internal_error",
+      stack: err.stack,
+      cause: err,
+    });
+    expect(statusCode).toBe(500);
+    const parsed = JSON.parse(body);
+    expect(parsed).toEqual({ error: "internal_error", cause: "boom" });
+    expect(parsed.stack).toBeUndefined();
+    expect(body).not.toContain("at ");
   });
 });

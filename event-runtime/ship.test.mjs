@@ -364,12 +364,21 @@ describe("ship-apply is closed by construction (WM-111)", () => {
   // process's event loop, so an in-process Bun.serve could never answer.
   async function withSmokeServer(payload, fn) {
     const dir = tmpDir("evrt-ship-smoke-");
+    const payloadFile = path.join(dir, "payload.json");
     const script = path.join(dir, "server.mjs");
+    writeFileSync(payloadFile, JSON.stringify(payload), "utf8");
     writeFileSync(
       script,
-      `const server = Bun.serve({ port: 0, fetch: () => Response.json(${JSON.stringify(payload)}) });\nconsole.log(server.port);\n`,
+      [
+        'import { readFileSync } from "node:fs";',
+        'const payload = JSON.parse(readFileSync(process.argv[2], "utf8"));',
+        "const server = Bun.serve({ port: 0, fetch: () => Response.json(payload) });",
+        "console.log(server.port);",
+        "",
+      ].join("\n"),
+      "utf8",
     );
-    const proc = Bun.spawn(["bun", script], { stdout: "pipe" });
+    const proc = Bun.spawn(["bun", script, payloadFile], { stdout: "pipe" });
     const reader = proc.stdout.getReader();
     const { value } = await reader.read();
     const port = Number(new TextDecoder().decode(value).trim());

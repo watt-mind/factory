@@ -40,8 +40,14 @@ export function readBody(req) {
   });
 }
 
+function sanitizeResponseValue(key, value) {
+  if (key === "stack") return undefined;
+  if (value instanceof Error) return value.message;
+  return value;
+}
+
 export function send(res, status, body) {
-  const json = JSON.stringify(body);
+  const json = JSON.stringify(body, sanitizeResponseValue);
   const req = res.req;
   const pathname = req?.url?.split("?", 1)[0];
   const etagEligible =
