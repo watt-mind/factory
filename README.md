@@ -7,7 +7,7 @@
 
 <!-- factory-dogfood-badge -->
 
-[![Maintained by the factory](https://img.shields.io/static/v1?label=Maintained+by+the+factory&message=4+PRs+merged+autonomously+this+month&color=0B6E4F)](https://github.com/watt-mind/factory/pulls?q=is%3Apr+is%3Amerged)
+[![Maintained by the factory](https://img.shields.io/static/v1?label=Maintained+by+the+factory&message=34+PRs+merged+autonomously+this+month&color=0B6E4F)](https://github.com/watt-mind/factory/pulls?q=is%3Apr+is%3Amerged)
 
 <!-- /factory-dogfood-badge -->
 
