@@ -8,18 +8,21 @@
  *   bun orchestrator/friction.mjs --include-brain --since 2d
  *   bun orchestrator/friction.mjs --brain-only --since 1d
  *   bun orchestrator/friction.mjs --brain-only --brain-dir /path/to/brain --json
+ *   bun orchestrator/friction.mjs --sources all --since 2d
+ *   bun orchestrator/friction.mjs --sources claude,codex,t3code --since 2d --json
  *
  * Every orchestrator run writes a full JSONL transcript to ~/.factory/logs/.
- * Interactive Antigravity sessions also write JSONL transcripts to
- * ~/.gemini/antigravity/brain/<id>/.system_generated/logs/transcript.jsonl
- * (and ~/.gemini/antigravity-cli/brain/...), which can be mined alongside
- * orchestrator logs via --include-brain or standalone via --brain-only.
+ * Interactive sessions can also be mined alongside orchestrator logs:
+ *   - brain:  ~/.gemini/antigravity/brain/<id>/.system_generated/logs/transcript.jsonl
+ *   - claude: ~/.claude/projects/**\/*.jsonl
+ *   - codex:  ~/.codex/sessions/**\/*.jsonl and ~/.codex/archived_sessions/**\/*.jsonl
+ *   - t3code: ~/.t3/userdata/statev2.sqlite (run failures/interruptions & rejected receipts)
  * That is a record of what agents actually did, so friction can be MEASURED
  * rather than remembered — an agent that had to fight a cookie banner will not
  * reliably write that down, but its transcript shows the same click three runs
  * running.
  *
- * Parses every harness schema via lib/transcript.mjs (claude, codex, pi, agy, agy-brain).
+ * Parses every harness schema via lib/transcript.mjs (claude, codex, codex-session, pi, agy, agy-brain).
  * Interactive harness sessions without transcripts are captured separately via
  * /factory-friction; /factory-retro merges both sources.
  *
@@ -37,10 +40,22 @@ import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
 import path from "node:path";
 import {
   parseRun,
+  readT3CodeSummary,
   LOG_DIR,
   BRAIN_DIRS,
+  CLAUDE_PROJECTS_DIR,
+  CODEX_SESSIONS_DIRS,
+  T3_DB_PATH,
   parseDuration,
 } from "../lib/transcript.mjs";
+
+const VALID_SOURCES = new Set([
+  "factory",
+  "brain",
+  "claude",
+  "codex",
+  "t3code",
+]);
 
 const argv = process.argv.slice(2);
 const val = (f) => {
@@ -50,8 +65,50 @@ const val = (f) => {
 const JSON_OUT = argv.includes("--json");
 const BRAIN_ONLY = argv.includes("--brain-only");
 const brainDirArg = val("--brain-dir");
-const INCLUDE_BRAIN =
-  argv.includes("--include-brain") || BRAIN_ONLY || Boolean(brainDirArg);
+const claudeDirArg = val("--claude-dir");
+const codexDirArg = val("--codex-dir");
+const t3DbArg = val("--t3-db");
+const hasSourcesFlag = argv.includes("--sources");
+const sourcesArg = val("--sources");
+
+const sources = new Set();
+if (hasSourcesFlag) {
+  if (!sourcesArg || sourcesArg.startsWith("-")) {
+    console.error(
+      `--sources requires a comma-separated list (valid: ${[...VALID_SOURCES].join(",")},all)`,
+    );
+    process.exit(1);
+  }
+  for (const raw of sourcesArg.split(",")) {
+    const s = raw.trim().toLowerCase();
+    if (!s) continue;
+    if (s === "all") {
+      for (const name of VALID_SOURCES) sources.add(name);
+    } else if (VALID_SOURCES.has(s)) {
+      sources.add(s);
+    } else {
+      console.error(
+        `unknown source "${s}" (valid: ${[...VALID_SOURCES].join(",")},all)`,
+      );
+      process.exit(1);
+    }
+  }
+  if (sources.size === 0) {
+    console.error(
+      `--sources must include at least one source (valid: ${[...VALID_SOURCES].join(",")},all)`,
+    );
+    process.exit(1);
+  }
+  if (argv.includes("--include-brain") || BRAIN_ONLY) sources.add("brain");
+} else {
+  if (!BRAIN_ONLY) sources.add("factory");
+  if (argv.includes("--include-brain") || BRAIN_ONLY || Boolean(brainDirArg)) {
+    sources.add("brain");
+  }
+  if (claudeDirArg) sources.add("claude");
+  if (codexDirArg) sources.add("codex");
+  if (t3DbArg) sources.add("t3code");
+}
 
 const sinceArg = val("--since");
 const sinceMs = sinceArg ? Date.now() - parseDuration(sinceArg) : 0;
@@ -59,9 +116,31 @@ const onlyRun = val("--run");
 
 const files = [];
 
-if (!BRAIN_ONLY) {
+const collectJsonlRecursive = (root, prefix) => {
+  if (!existsSync(root)) return;
+  const stack = [root];
+  while (stack.length) {
+    const dir = stack.pop();
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(p);
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+      const id = entry.name.replace(/\.jsonl$/, "");
+      const f = `${prefix}:${id}`;
+      if (onlyRun && !f.startsWith(onlyRun) && !id.startsWith(onlyRun))
+        continue;
+      const t = statSync(p).mtimeMs;
+      if (t >= sinceMs) files.push({ f, p, t });
+    }
+  }
+};
+
+if (sources.has("factory")) {
   if (!existsSync(LOG_DIR)) {
-    if (!INCLUDE_BRAIN) {
+    if (sources.size === 1) {
       console.error(`no transcripts at ${LOG_DIR}`);
       process.exit(1);
     }
@@ -76,7 +155,7 @@ if (!BRAIN_ONLY) {
   }
 }
 
-if (INCLUDE_BRAIN) {
+if (sources.has("brain")) {
   const brainRoots = brainDirArg ? [brainDirArg] : BRAIN_DIRS;
   const collectBrainTranscript = (id, p) => {
     if (!existsSync(p)) return;
@@ -108,9 +187,25 @@ if (INCLUDE_BRAIN) {
   }
 }
 
+if (sources.has("claude")) {
+  const claudeRoot = claudeDirArg ?? CLAUDE_PROJECTS_DIR;
+  collectJsonlRecursive(claudeRoot, "claude");
+}
+
+if (sources.has("codex")) {
+  const codexRoots = codexDirArg ? [codexDirArg] : CODEX_SESSIONS_DIRS;
+  for (const root of codexRoots) {
+    collectJsonlRecursive(root, "codex");
+  }
+}
+
+const t3Summary = sources.has("t3code")
+  ? readT3CodeSummary(t3DbArg ?? T3_DB_PATH, { sinceMs })
+  : null;
+
 files.sort((a, b) => a.t - b.t);
 
-if (!files.length) {
+if (!files.length && !t3Summary) {
   console.error("no transcripts match");
   process.exit(1);
 }
@@ -167,34 +262,30 @@ for (const { f, p, t } of files) {
 }
 
 if (JSON_OUT) {
-  console.log(
-    JSON.stringify(
-      {
-        runs: runs.map((r) => ({
-          file: r.file,
-          harness: r.harness,
-          ok: r.ok,
-          turns: r.turns,
-          cost: r.cost,
-          tools: r.tools,
-          errors: r.errors,
-        })),
-        errors: [...errors.values()].map((e) => ({
-          tool: e.tool,
-          count: e.count,
-          sample: e.sample,
-          runs: e.runs.size,
-        })),
-        repeats: [...repeats.entries()].map(([cmd, v]) => ({
-          cmd,
-          count: v.count,
-          runs: v.runs.size,
-        })),
-      },
-      null,
-      2,
-    ),
-  );
+  const payload = {
+    runs: runs.map((r) => ({
+      file: r.file,
+      harness: r.harness,
+      ok: r.ok,
+      turns: r.turns,
+      cost: r.cost,
+      tools: r.tools,
+      errors: r.errors,
+    })),
+    errors: [...errors.values()].map((e) => ({
+      tool: e.tool,
+      count: e.count,
+      sample: e.sample,
+      runs: e.runs.size,
+    })),
+    repeats: [...repeats.entries()].map(([cmd, v]) => ({
+      cmd,
+      count: v.count,
+      runs: v.runs.size,
+    })),
+  };
+  if (t3Summary) payload.t3code = t3Summary;
+  console.log(JSON.stringify(payload, null, 2));
   process.exit(0);
 }
 
@@ -257,8 +348,34 @@ if (sortedRepeats.length) {
 }
 
 const topTools = [...toolUse.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
-console.log(c.bold(`\ntool usage\n`));
-console.log("  " + topTools.map(([n, k]) => `${n}×${k}`).join("  "));
+if (topTools.length) {
+  console.log(c.bold(`\ntool usage\n`));
+  console.log("  " + topTools.map(([n, k]) => `${n}×${k}`).join("  "));
+}
+
+if (t3Summary) {
+  const failed = t3Summary.statusCounts.failed ?? 0;
+  const interrupted = t3Summary.statusCounts.interrupted ?? 0;
+  const cancelled = t3Summary.statusCounts.cancelled ?? 0;
+  console.log(
+    c.bold(`\nt3code v2`) +
+      c.dim(
+        `  (${t3Summary.totalRuns} runs: ${failed} failed · ${interrupted} interrupted · ${cancelled} cancelled · ${t3Summary.rejectedReceiptsCount} rejected receipts)\n`,
+      ),
+  );
+  for (const r of t3Summary.problemRuns.slice(0, 10)) {
+    const label = r.threadTitle ? `${r.threadTitle} (${r.runId})` : r.runId;
+    const badge = r.status === "failed" ? c.red(r.status) : c.yellow(r.status);
+    console.log(`  ${badge.padEnd(20)} ${c.dim(`[${r.provider}]`)} ${label}`);
+  }
+  if (t3Summary.rejectedReceipts.length) {
+    console.log(c.bold(`\n  rejected command receipts\n`));
+    for (const r of t3Summary.rejectedReceipts.slice(0, 10)) {
+      console.log(`  ${c.yellow(`×${r.count}`)}  ${c.bold(r.commandType)}`);
+      console.log(c.dim(`     err: ${r.sample}`));
+    }
+  }
+}
 
 console.log(
   c.dim(
