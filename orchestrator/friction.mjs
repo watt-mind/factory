@@ -5,14 +5,21 @@
  *   bun orchestrator/friction.mjs                 # all captured runs
  *   bun orchestrator/friction.mjs --since 2d
  *   bun orchestrator/friction.mjs --run bj29-factory-work-20260803-230342
+ *   bun orchestrator/friction.mjs --include-brain --since 2d
+ *   bun orchestrator/friction.mjs --brain-only --since 1d
+ *   bun orchestrator/friction.mjs --brain-only --brain-dir /path/to/brain --json
  *
  * Every orchestrator run writes a full JSONL transcript to ~/.factory/logs/.
+ * Interactive Antigravity sessions also write JSONL transcripts to
+ * ~/.gemini/antigravity/brain/<id>/.system_generated/logs/transcript.jsonl
+ * (and ~/.gemini/antigravity-cli/brain/...), which can be mined alongside
+ * orchestrator logs via --include-brain or standalone via --brain-only.
  * That is a record of what agents actually did, so friction can be MEASURED
  * rather than remembered — an agent that had to fight a cookie banner will not
  * reliably write that down, but its transcript shows the same click three runs
  * running.
  *
- * Parses every harness schema via lib/transcript.mjs (claude, codex, pi, agy).
+ * Parses every harness schema via lib/transcript.mjs (claude, codex, pi, agy, agy-brain).
  * Interactive harness sessions without transcripts are captured separately via
  * /factory-friction; /factory-retro merges both sources.
  *
@@ -27,7 +34,13 @@
  * change" is not a job for a histogram.
  */
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
-import { parseRun, LOG_DIR, parseDuration } from "../lib/transcript.mjs";
+import path from "node:path";
+import {
+  parseRun,
+  LOG_DIR,
+  BRAIN_DIRS,
+  parseDuration,
+} from "../lib/transcript.mjs";
 
 const argv = process.argv.slice(2);
 const val = (f) => {
@@ -35,26 +48,67 @@ const val = (f) => {
   return i === -1 ? null : argv[i + 1];
 };
 const JSON_OUT = argv.includes("--json");
-
-if (!existsSync(LOG_DIR)) {
-  console.error(`no transcripts at ${LOG_DIR}`);
-  process.exit(1);
-}
+const BRAIN_ONLY = argv.includes("--brain-only");
+const brainDirArg = val("--brain-dir");
+const INCLUDE_BRAIN =
+  argv.includes("--include-brain") || BRAIN_ONLY || Boolean(brainDirArg);
 
 const sinceArg = val("--since");
 const sinceMs = sinceArg ? Date.now() - parseDuration(sinceArg) : 0;
 const onlyRun = val("--run");
 
-const files = readdirSync(LOG_DIR)
-  .filter((f) => f.endsWith(".jsonl"))
-  .filter((f) => !onlyRun || f.startsWith(onlyRun))
-  .map((f) => ({
-    f,
-    p: `${LOG_DIR}/${f}`,
-    t: statSync(`${LOG_DIR}/${f}`).mtimeMs,
-  }))
-  .filter((x) => x.t >= sinceMs)
-  .sort((a, b) => a.t - b.t);
+const files = [];
+
+if (!BRAIN_ONLY) {
+  if (!existsSync(LOG_DIR)) {
+    if (!INCLUDE_BRAIN) {
+      console.error(`no transcripts at ${LOG_DIR}`);
+      process.exit(1);
+    }
+  } else {
+    for (const f of readdirSync(LOG_DIR)) {
+      if (!f.endsWith(".jsonl")) continue;
+      if (onlyRun && !f.startsWith(onlyRun)) continue;
+      const p = path.join(LOG_DIR, f);
+      const t = statSync(p).mtimeMs;
+      if (t >= sinceMs) files.push({ f, p, t });
+    }
+  }
+}
+
+if (INCLUDE_BRAIN) {
+  const brainRoots = brainDirArg ? [brainDirArg] : BRAIN_DIRS;
+  const collectBrainTranscript = (id, p) => {
+    if (!existsSync(p)) return;
+    const f = `brain:${id}`;
+    if (onlyRun && !f.startsWith(onlyRun) && !id.startsWith(onlyRun)) return;
+    const t = statSync(p).mtimeMs;
+    if (t >= sinceMs) files.push({ f, p, t });
+  };
+
+  for (const root of brainRoots) {
+    if (!existsSync(root)) continue;
+    collectBrainTranscript(
+      path.basename(root),
+      path.join(root, ".system_generated", "logs", "transcript.jsonl"),
+    );
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      collectBrainTranscript(
+        entry.name,
+        path.join(
+          root,
+          entry.name,
+          ".system_generated",
+          "logs",
+          "transcript.jsonl",
+        ),
+      );
+    }
+  }
+}
+
+files.sort((a, b) => a.t - b.t);
 
 if (!files.length) {
   console.error("no transcripts match");
