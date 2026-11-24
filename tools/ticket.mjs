@@ -320,6 +320,7 @@ export async function fileTicket(
     project,
     parent,
     priority,
+    assignee,
     dedupeKey,
   },
   { emit = out, setExitCode = (code) => (process.exitCode = code) } = {},
@@ -335,6 +336,7 @@ export async function fileTicket(
     ...(project ? { project } : {}),
     ...(parent ? { parent } : {}),
     ...(priority !== undefined && priority !== null ? { priority } : {}),
+    ...(assignee ? { assignee } : {}),
     ...(key ? { dedupeKey: key, matchTitle: true } : {}),
   });
   const warnings = Array.isArray(created.warnings)
@@ -1055,9 +1057,49 @@ export function resolveRepoNameForFile({
   );
 }
 
+/**
+ * Resolve the control-plane target for `list` / `search`.
+ *
+ * Explicit `--repo` wins. Otherwise an explicit `--team` (when it doesn't
+ * match a GitHub-backed cwd repo's team) or a Linear-shaped `--parent` key
+ * routes to Linear even from a GitHub-backed repo checkout, matching `file`.
+ */
+export function resolveControlPlaneForList({
+  cwd = process.cwd(),
+  repos,
+  repoFlag = flag("repo"),
+  team = flag("team"),
+  parent = flag("parent"),
+} = {}) {
+  if (repoFlag) {
+    const repoName = resolveRepoName({ cwd, repos, repoFlag });
+    return { kind: null, repoName };
+  }
+  const cwdRepoName = resolveRepoName({ cwd, repos, repoFlag: undefined });
+  if (team) {
+    const cwdRepo = cwdRepoName ? repos?.get?.(cwdRepoName) : null;
+    const matchesGithubTeam =
+      cwdRepo?.controlPlane === "github" &&
+      typeof cwdRepo.team === "string" &&
+      cwdRepo.team.toUpperCase() === String(team).toUpperCase();
+    if (!matchesGithubTeam) {
+      return { kind: "linear", repoName: null };
+    }
+  }
+  if (parent && isLinearIssueKey(parent)) {
+    return { kind: "linear", repoName: null };
+  }
+  return { kind: null, repoName: cwdRepoName };
+}
+
 function controlPlane(
   ticketArg = positional[0],
-  { forFile = false, team = flag("team") } = {},
+  {
+    forFile = false,
+    forList = false,
+    team = flag("team"),
+    parent = flag("parent"),
+  } = {},
 ) {
   // All ticket verbs act on instance-local state. Resolve this before looking
   // at cwd or the identifier so a missing runner config is an explicit refusal
@@ -1091,9 +1133,84 @@ function controlPlane(
       "file cannot resolve a control plane outside a configured repository; pass --repo <name> or --from <owner/repo#N> (or --team <KEY> for a Linear team)",
     );
   }
+  if (forList) {
+    const { kind, repoName } = resolveControlPlaneForList({
+      repos,
+      repoFlag: flag("repo"),
+      team,
+      parent,
+    });
+    if (kind) return loadControlPlane({ root, kind });
+    return loadControlPlane(repoName ? { root, repoName } : { root });
+  }
   const { kind, repoName } = resolveControlPlaneTarget({ ticketArg, repos });
   if (kind) return loadControlPlane({ root, kind });
   return loadControlPlane(repoName ? { root, repoName } : { root });
+}
+
+/** Normalized JSON summary shape for `factory ticket list --json`. */
+export function summarizeTicketForList(ticket) {
+  const labels = Array.isArray(ticket.labels)
+    ? ticket.labels.map((l) => (typeof l === "string" ? l : l.name))
+    : (ticket.labels?.nodes ?? []).map((l) => l.name);
+  return {
+    identifier: ticket.identifier,
+    title: ticket.title,
+    state: ticket.state?.name ?? null,
+    labels,
+    assignee: ticket.assignee?.name ?? null,
+    priority: ticket.priority ?? null,
+    url: ticket.url ?? "",
+  };
+}
+
+/** One-line-per-ticket human rendering for `factory ticket list`. */
+export function formatTicketListLine(ticket) {
+  const item = summarizeTicketForList(ticket);
+  const state = item.state ?? "?";
+  const labelsPart = item.labels.length ? `  (${item.labels.join(", ")})` : "";
+  return `${item.identifier}  [${state}]${labelsPart}  ${item.title}`;
+}
+
+export function formatTicketList(tickets) {
+  if (!tickets.length) return "no matching tickets";
+  return tickets.map(formatTicketListLine).join("\n");
+}
+
+/** Validate and clamp `--limit <N>` for `list` (default 50, max 250). */
+export function parseListLimit(
+  rawLimit,
+  { defaultLimit = 50, maxLimit = 250 } = {},
+) {
+  if (rawLimit === null || rawLimit === undefined) return defaultLimit;
+  const trimmed = String(rawLimit).trim();
+  if (!/^[1-9]\d*$/.test(trimmed)) {
+    const err = new Error(
+      `invalid --limit ${JSON.stringify(rawLimit)}: expected a positive integer (1-${maxLimit})`,
+    );
+    err.exitCode = 2;
+    throw err;
+  }
+  return Math.min(Number(trimmed), maxLimit);
+}
+
+/** Read markdown body from a file path or `-` (stdin) for `file --body-file`. */
+export function readBodyFile(filePath, { readFile = readFileSync } = {}) {
+  if (typeof filePath !== "string" || !filePath.trim()) {
+    const err = new Error("--body-file requires a file path (or - for stdin)");
+    err.exitCode = 2;
+    throw err;
+  }
+  const target = filePath.trim();
+  try {
+    return target === "-" ? readFile(0, "utf8") : readFile(target, "utf8");
+  } catch (cause) {
+    const err = new Error(
+      `cannot read --body-file ${JSON.stringify(target)}: ${cause?.message ?? cause}`,
+    );
+    err.exitCode = 2;
+    throw err;
+  }
 }
 
 /** Compact ticket rendering — the fields the protocol actually acts on. */
@@ -1361,20 +1478,25 @@ const VALUE_FLAGS = new Set([
   "add",
   "agent",
   "area",
+  "assignee",
   "body",
+  "body-file",
   "comment",
   "dedupe-key",
   "from",
   "label",
+  "limit",
   "merge-sha",
   "minutes",
   "parent",
   "pr",
   "priority",
   "project",
+  "query",
   "remove",
   "repo",
   "source",
+  "state",
   "team",
   "title",
   "type",
@@ -1478,6 +1600,7 @@ const VERB_ALIASES = {
   view: "get",
   create: "file",
   label: "labels",
+  search: "list",
 };
 
 const VERB_HELP = {
@@ -1617,15 +1740,19 @@ const VERB_HELP = {
   },
   file: {
     aliases: ["create"],
-    summary: "File a new ticket in Triage (or Todo with --todo)",
+    summary: "File a new ticket in Triage (or Todo with --todo / --state)",
     usage:
-      'factory ticket file --title "<title>" [--team <KEY>] [--repo <name>] [--from <ref>] [--body "<md>"] [--type <type>] [--area <area>] [--source <src>] [--label <label>] [--project <name>] [--parent <ISSUE-ID>] [--priority <0-4>] [--todo] [--dedupe-key "<key>"]',
+      'factory ticket file --title "<title>" [--team <KEY>] [--repo <name>] [--from <ref>] [--body "<md>" | --body-file <path>] [--state "<name>" | --todo] [--assignee <name|self>] [--type <type>] [--area <area>] [--source <src>] [--label <label>] [--project <name>] [--parent <ISSUE-ID>] [--priority <0-4>] [--dedupe-key "<key>"]',
     flags: [
       '--title "<title>"       Required issue title',
       "--team <KEY>            Linear team key (required on Linear)",
       "--repo <name>           Target repository from config/repos.yaml",
       "--from <ref>            Source ticket ref (e.g. owner/repo#123)",
-      '--body "<md>"           Issue description markdown',
+      '--body "<md>"           Issue description markdown (mutually exclusive with --body-file)',
+      "--body-file <path>      Read description markdown from file (or - for stdin)",
+      '--state "<name>"        Target workflow state (mutually exclusive with --todo)',
+      "--todo                  Create in Todo with ai:agent-ready instead of Triage",
+      "--assignee <name|self>  Assign ticket on creation (self/@me resolves to viewer)",
       "--type <type>           Adds type:<type> label (bug, feature, maintenance, ...)",
       "--area <area>           Adds area:<area> label (repeatable)",
       "--source <src>          Adds source:<src> label (default: agent)",
@@ -1633,14 +1760,39 @@ const VERB_HELP = {
       "--project <name>        Linear project name (or UUID)",
       "--parent <ISSUE-ID>     Linear parent issue ID for sub-issues",
       "--priority <0-4>        Linear priority (0=none, 1=urgent, 2=high, 3=medium, 4=low)",
-      "--todo                  Create in Todo with ai:agent-ready instead of Triage",
       '--dedupe-key "<key>"    Idempotency key to reuse a matching open issue',
       "--json                  Print raw JSON output",
     ],
     examples: [
       'factory ticket file --team OPS --title "Fix cron" --type bug --project Ops --priority 2',
-      'factory ticket create --team WM --title "Sub-task" --parent WM-100 --body "Details"',
+      'factory ticket create --team WM --title "Sub-task" --parent WM-100 --state "In Progress" --assignee self --body-file spec.md',
       'factory ticket file --from watt-mind/factory#123 --title "Follow-up" --type maintenance',
+    ],
+  },
+  list: {
+    aliases: ["search"],
+    summary: "List or search tickets across Linear or GitHub with filters",
+    usage:
+      'factory ticket list [query] [--team <KEY>] [--project <name>] [--parent <ISSUE-ID>] [--state "<name>" | --open | --all-states] [--label <name>]... [--assignee <name|self>] [--query "<text>"] [--limit <N>] [--repo <name>] [--json]',
+    flags: [
+      "--team <KEY>            Linear team key (routes to Linear unless --repo is set)",
+      "--project <name>        Filter by project name",
+      "--parent <ISSUE-ID>     Filter by parent issue ID (Linear sub-issues)",
+      '--state "<name>"        Exact state filter (e.g. "In Progress", "Todo", "Done", "open", "closed")',
+      "--open                  Open tickets only (default when neither --state nor --all-states is set)",
+      "--all-states            Include completed, canceled, and closed tickets",
+      "--label <name>          Require label (repeatable)",
+      "--assignee <name|self>  Filter by assignee (self/@me resolves to viewer)",
+      '--query "<text>"        Case-insensitive substring match on title/description',
+      "--limit <N>             Max tickets to return (default: 50, max: 250)",
+      "--repo <name>           Force a configured repository's control plane",
+      "--json                  Print normalized JSON array",
+    ],
+    examples: [
+      "factory ticket list --team CLNT --project Desktop --open",
+      "factory ticket list --parent CLNT-9210 --all-states",
+      'factory ticket search "desktop" --team CLNT --assignee self --limit 20',
+      "factory ticket list --repo factory --label type:bug --json",
     ],
   },
   inflight: {
@@ -2015,6 +2167,24 @@ const VERBS = {
     const dedupeKey = flag("dedupe-key")?.trim() || undefined;
     const project = flag("project")?.trim() || undefined;
     const parent = flag("parent")?.trim() || undefined;
+    const assignee = flag("assignee")?.trim() || undefined;
+    const hasState = has("state");
+    const rawState = flag("state");
+    if (hasState && (!rawState || !rawState.trim())) {
+      const err = new Error("--state requires a non-empty state name");
+      err.exitCode = 2;
+      throw err;
+    }
+    if (has("todo") && hasState) {
+      const err = new Error("cannot combine --todo and --state");
+      err.exitCode = 2;
+      throw err;
+    }
+    if (has("body") && has("body-file")) {
+      const err = new Error("cannot combine --body and --body-file");
+      err.exitCode = 2;
+      throw err;
+    }
     const rawPriority = flag("priority");
     let priority;
     if (rawPriority !== null) {
@@ -2026,14 +2196,22 @@ const VERBS = {
       }
       priority = Number(trimmed);
     }
-    const usage = `usage: file --title "..." [--from owner/repo#N | --repo name] [--team CLNT] [--body "..."] [--type bug] [--area x] [--source agent] [--label x] [--project <name>] [--parent <ISSUE-ID>] [--priority <0-4>] [--todo] [--dedupe-key "..."]`;
+    const usage = `usage: file --title "..." [--from owner/repo#N | --repo name] [--team CLNT] [--body "..." | --body-file <path>] [--state "<name>" | --todo] [--assignee <name|self>] [--type bug] [--area x] [--source agent] [--label x] [--project <name>] [--parent <ISSUE-ID>] [--priority <0-4>] [--dedupe-key "..."]`;
     // Argument shape first: a missing title is a usage error, not a routing one.
     if (!title) throw new Error(usage);
+    const body = has("body-file")
+      ? readBodyFile(flag("body-file"))
+      : flag("body", "");
     const cp = controlPlane(undefined, { forFile: true, team });
     if (!team && cp.kind !== "github") throw new Error(usage);
 
-    // New findings land in Triage unless they already meet the agent-ready bar.
-    const stateName = has("todo") ? "Todo" : "Triage";
+    // New findings land in Triage unless they already meet the agent-ready bar
+    // or the caller explicitly passed --state.
+    const stateName = hasState
+      ? rawState.trim()
+      : has("todo")
+        ? "Todo"
+        : "Triage";
     const wanted = [
       ...(flag("type") ? [`type:${flag("type")}`] : []),
       ...flagAll("area").map((a) => `area:${a}`),
@@ -2044,18 +2222,76 @@ const VERBS = {
     await fileTicket(cp, {
       team,
       title,
-      body: flag("body", ""),
+      body,
       labels: wanted,
       state: stateName,
       project,
       parent,
       priority,
+      assignee,
       dedupeKey,
     });
   },
 
   async create() {
     return VERBS.file();
+  },
+
+  async list() {
+    if (has("open") && has("all-states")) {
+      const err = new Error("cannot combine --open and --all-states");
+      err.exitCode = 2;
+      throw err;
+    }
+    const hasState = has("state");
+    const rawState = flag("state");
+    if (hasState && (!rawState || !rawState.trim())) {
+      const err = new Error("--state requires a non-empty state name");
+      err.exitCode = 2;
+      throw err;
+    }
+    if (hasState && has("all-states")) {
+      const err = new Error("cannot combine --state and --all-states");
+      err.exitCode = 2;
+      throw err;
+    }
+    const limit = parseListLimit(has("limit") ? (flag("limit") ?? "") : null);
+    let team = flag("team")?.trim() || undefined;
+    let project = flag("project")?.trim() || undefined;
+    const parent = flag("parent")?.trim() || undefined;
+    const state = hasState ? rawState.trim() : undefined;
+    const allStates = has("all-states");
+    const open = has("open") || (!state && !allStates);
+    const labels = flagAll("label");
+    const assignee = flag("assignee")?.trim() || undefined;
+    const query = (flag("query") ?? positional[0] ?? "").trim() || undefined;
+
+    const repoFlag = flag("repo");
+    const cp = controlPlane(undefined, { forList: true, team, parent });
+    if (repoFlag && cp.kind === "linear") {
+      const repos = getRepos();
+      const repoName = resolveRepoName({ repos, repoFlag });
+      const cfg = repoName ? repos.get(repoName) : null;
+      if (!team && cfg?.team) team = cfg.team;
+      if (!project && cfg?.project) project = cfg.project;
+    }
+    const rows = await cp.list({
+      ...(team ? { team } : {}),
+      ...(project ? { project } : {}),
+      ...(parent ? { parent } : {}),
+      ...(state ? { state } : {}),
+      open,
+      allStates,
+      ...(labels.length ? { labels } : {}),
+      ...(assignee ? { assignee } : {}),
+      ...(query ? { query } : {}),
+      limit,
+    });
+    out(rows.map(summarizeTicketForList), formatTicketList(rows));
+  },
+
+  async search() {
+    return VERBS.list();
   },
 
   async inflight() {

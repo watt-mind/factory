@@ -50,6 +50,12 @@ import {
   isLinearIssueKey,
   parseGithubRemoteSlug,
   resolveControlPlaneTarget,
+  resolveControlPlaneForList,
+  summarizeTicketForList,
+  formatTicketListLine,
+  formatTicketList,
+  parseListLimit,
+  readBodyFile,
   formatHelp,
   hasHelpFlag,
   instanceConfigRoot,
@@ -62,6 +68,7 @@ import {
 } from "./ticket.mjs";
 import { gql } from "../orchestrator/reaper.mjs";
 import { clampGithubBody, stampRun } from "../lib/control-plane/labels.mjs";
+import { memoryControlPlane } from "../lib/control-plane/memory.mjs";
 
 const LABELS = [
   { id: "l-ready", name: "ai:agent-ready" },
@@ -2556,5 +2563,473 @@ test("GH-N resolved via git remote fallback routes to GitHub even when policy de
     expect(ghCalls).toContain("repos/acme/widget/issues/42");
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------- list/search & file extensions (GH-2461) ---
+test("unit helpers: summarizeTicketForList, formatTicketList, parseListLimit, readBodyFile, resolveControlPlaneForList (GH-2461)", () => {
+  const sample = {
+    identifier: "CLNT-101",
+    title: "Fix tray icon",
+    state: { name: "In Progress" },
+    labels: [{ name: "type:bug" }, { name: "area:desktop" }],
+    assignee: { id: "u-1", name: "Laszlo" },
+    priority: 2,
+    url: "https://linear.app/watt-mind/issue/CLNT-101",
+  };
+  expect(summarizeTicketForList(sample)).toEqual({
+    identifier: "CLNT-101",
+    title: "Fix tray icon",
+    state: "In Progress",
+    labels: ["type:bug", "area:desktop"],
+    assignee: "Laszlo",
+    priority: 2,
+    url: "https://linear.app/watt-mind/issue/CLNT-101",
+  });
+  expect(formatTicketListLine(sample)).toBe(
+    "CLNT-101  [In Progress]  (type:bug, area:desktop)  Fix tray icon",
+  );
+  expect(
+    formatTicketListLine({
+      identifier: "WM-2",
+      title: "Plain",
+      state: { name: "Todo" },
+      labels: [],
+    }),
+  ).toBe("WM-2  [Todo]  Plain");
+  expect(formatTicketList([])).toBe("no matching tickets");
+
+  expect(parseListLimit(null)).toBe(50);
+  expect(parseListLimit("20")).toBe(20);
+  expect(parseListLimit("999")).toBe(250);
+  for (const bad of ["0", "-5", "abc", "1.5", ""]) {
+    let err;
+    try {
+      parseListLimit(bad);
+    } catch (e) {
+      err = e;
+    }
+    expect(err?.exitCode).toBe(2);
+    expect(err?.message).toContain("invalid --limit");
+  }
+
+  // readBodyFile: file, stdin ("-"), and error cases
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "ticket-bodyfile-"));
+  try {
+    const mdFile = path.join(tmp, "spec.md");
+    writeFileSync(mdFile, "## Spec\nLine 1\n");
+    expect(readBodyFile(mdFile)).toBe("## Spec\nLine 1\n");
+    expect(
+      readBodyFile("-", {
+        readFile: (fd) => (fd === 0 ? "from stdin" : ""),
+      }),
+    ).toBe("from stdin");
+    let missingErr;
+    try {
+      readBodyFile(path.join(tmp, "does-not-exist.md"));
+    } catch (e) {
+      missingErr = e;
+    }
+    expect(missingErr?.exitCode).toBe(2);
+    expect(missingErr?.message).toContain("cannot read --body-file");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+
+  // VALUE_FLAGS includes --state, --assignee, --body-file, --query, --limit
+  expect(
+    parsePositionalArgs([
+      "file",
+      "--team",
+      "CLNT",
+      "--title",
+      "T",
+      "--state",
+      "In Progress",
+      "--assignee",
+      "self",
+      "--body-file",
+      "spec.md",
+    ]),
+  ).toEqual([]);
+  expect(
+    parsePositionalArgs([
+      "search",
+      "desktop",
+      "--team",
+      "CLNT",
+      "--limit",
+      "10",
+      "--query",
+      "override",
+    ]),
+  ).toEqual(["desktop"]);
+  expect(hasHelpFlag(["file", "--body-file", "--help"])).toBe(false);
+  expect(hasHelpFlag(["list", "--query", "-h"])).toBe(false);
+
+  // resolveControlPlaneForList routes --team and Linear --parent to Linear from GitHub cwd
+  const repos = new Map([
+    [
+      "factory",
+      {
+        name: "factory",
+        path: "/srv/factory",
+        github: "watt-mind/factory",
+        controlPlane: "github",
+      },
+    ],
+  ]);
+  expect(
+    resolveControlPlaneForList({
+      cwd: "/srv/factory",
+      repos,
+      repoFlag: null,
+      team: "CLNT",
+      parent: null,
+    }),
+  ).toEqual({ kind: "linear", repoName: null });
+  expect(
+    resolveControlPlaneForList({
+      cwd: "/srv/factory",
+      repos,
+      repoFlag: null,
+      team: null,
+      parent: "CLNT-9210",
+    }),
+  ).toEqual({ kind: "linear", repoName: null });
+  expect(
+    resolveControlPlaneForList({
+      cwd: "/srv/factory",
+      repos,
+      repoFlag: "factory",
+      team: "CLNT",
+      parent: null,
+    }),
+  ).toEqual({ kind: null, repoName: "factory" });
+});
+
+test("memoryControlPlane supports list() filters and file() assignee/state/parent (GH-2461)", async () => {
+  const cp = memoryControlPlane({
+    labels: [
+      { id: "l-bug", name: "type:bug" },
+      { id: "l-ready", name: "ai:agent-ready" },
+    ],
+  });
+  await cp.file({
+    team: "WM",
+    title: "Desktop sub-issue",
+    body: "Details about tray",
+    labels: ["type:bug"],
+    state: "In Progress",
+    assignee: "self",
+    parent: "WM-100",
+    project: "Factory",
+  });
+  await cp.file({
+    team: "WM",
+    title: "Closed item",
+    state: "Done",
+    assignee: "Bob",
+  });
+
+  expect((await cp.list({ team: "WM" })).map((t) => t.title)).toEqual([
+    "Desktop sub-issue",
+  ]);
+  expect(
+    (await cp.list({ team: "WM", allStates: true })).map((t) => t.title),
+  ).toEqual(["Desktop sub-issue", "Closed item"]);
+  expect(
+    (await cp.list({ team: "WM", parent: "WM-100", assignee: "@me" })).map(
+      (t) => t.title,
+    ),
+  ).toEqual(["Desktop sub-issue"]);
+  expect(
+    (await cp.list({ team: "WM", query: "tray", labels: ["type:bug"] })).map(
+      (t) => t.title,
+    ),
+  ).toEqual(["Desktop sub-issue"]);
+});
+
+test("help output documents list/search and new file flags (GH-2461)", () => {
+  expect(formatHelp()).toContain("list (search)");
+  for (const args of [
+    ["list", "--help"],
+    ["search", "--help"],
+    ["help", "list"],
+  ]) {
+    const res = spawnTicketInGithubRepo(args);
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toContain("--team");
+    expect(res.stdout).toContain("--parent");
+    expect(res.stdout).toContain("--all-states");
+    expect(res.stdout).toContain("--assignee");
+    expect(res.stdout).toContain("--limit");
+  }
+  const fileHelp = spawnTicketInGithubRepo(["file", "--help"]);
+  expect(fileHelp.exitCode).toBe(0);
+  expect(fileHelp.stdout).toContain("--state");
+  expect(fileHelp.stdout).toContain("--assignee");
+  expect(fileHelp.stdout).toContain("--body-file");
+});
+
+test("CLI list/search routes --team and --parent to Linear and queries GitHub in-repo (GH-2461)", () => {
+  // --team CLNT routes to Linear even from GitHub repo
+  const linearTeam = spawnTicketInGithubRepo(["list", "--team", "CLNT"]);
+  expect(linearTeam.exitCode).toBe(LINEAR_OFFLINE_GUARD_EXIT);
+  expect(linearTeam.stderr).toContain("linear_offline_guard:");
+  expect(linearTeam.ghCalls).toBe("");
+
+  // --parent CLNT-9210 routes to Linear even from GitHub repo
+  const linearParent = spawnTicketInGithubRepo([
+    "list",
+    "--parent",
+    "CLNT-9210",
+  ]);
+  expect(linearParent.exitCode).toBe(LINEAR_OFFLINE_GUARD_EXIT);
+  expect(linearParent.stderr).toContain("linear_offline_guard:");
+  expect(linearParent.ghCalls).toBe("");
+
+  // Negative validation: conflicting flags and bad --limit exit 2
+  expect(
+    spawnTicketInGithubRepo(["list", "--open", "--all-states"]).exitCode,
+  ).toBe(2);
+  expect(
+    spawnTicketInGithubRepo(["list", "--state", "Todo", "--all-states"])
+      .exitCode,
+  ).toBe(2);
+  expect(spawnTicketInGithubRepo(["list", "--limit", "0"]).exitCode).toBe(2);
+
+  // GitHub list & search --json end-to-end against stub gh
+  const issuesJson = JSON.stringify([
+    {
+      id: 1,
+      node_id: "I_1",
+      number: 42,
+      title: "Desktop tray bug",
+      body: "Repro steps",
+      html_url: "https://github.com/watt-mind/factory/issues/42",
+      state: "open",
+      assignee: { id: 7, login: "hdkiller" },
+      labels: [{ id: 1, name: "type:bug" }],
+      created_at: "2026-10-01T00:00:00Z",
+    },
+    {
+      id: 2,
+      node_id: "I_2",
+      number: 43,
+      title: "Unrelated task",
+      body: "Other work",
+      html_url: "https://github.com/watt-mind/factory/issues/43",
+      state: "open",
+      assignee: null,
+      labels: [],
+      created_at: "2026-10-02T00:00:00Z",
+    },
+  ]);
+  const projectJson = JSON.stringify({
+    data: {
+      repository: {
+        projectsV2: {
+          nodes: [
+            {
+              id: "P_1",
+              title: "Factory",
+              field: {
+                id: "F_1",
+                options: [
+                  { id: "o_todo", name: "Todo" },
+                  { id: "o_prog", name: "In Progress" },
+                ],
+              },
+            },
+          ],
+        },
+      },
+    },
+  });
+  const itemsJson = JSON.stringify({
+    data: {
+      node: {
+        items: {
+          nodes: [
+            {
+              id: "PI_42",
+              content: {
+                id: "I_1",
+                number: 42,
+                repository: { nameWithOwner: "watt-mind/factory" },
+              },
+              fieldValueByName: { name: "In Progress" },
+            },
+          ],
+          pageInfo: { hasNextPage: false, endCursor: null },
+        },
+      },
+    },
+  });
+  const extraGhScript = [
+    'case "$*" in',
+    "  *graphql*)",
+    '    case "$input" in',
+    `      *FindRepoProject*) printf '%s\\n' '${projectJson}' ;;`,
+    `      *ProjectItems*) printf '%s\\n' '${itemsJson}' ;;`,
+    `      *) printf '%s\\n' '{"data":{}}' ;;`,
+    "    esac ;;",
+    `  *repos/watt-mind/factory/issues*) printf '%s\\n' '${issuesJson}' ;;`,
+    `  *) printf '%s\\n' '{}' ;;`,
+    "esac",
+  ].join("\n");
+
+  const textRes = spawnTicketInGithubRepo(["search", "desktop"], {
+    extraGhScript,
+  });
+  expect(textRes.stderr).toBe("");
+  expect(textRes.exitCode).toBe(0);
+  expect(textRes.stdout.trim()).toBe(
+    "watt-mind/factory#42  [In Progress]  (type:bug)  Desktop tray bug",
+  );
+
+  const jsonRes = spawnTicketInGithubRepo(
+    ["list", "--query", "desktop", "--json"],
+    { extraGhScript },
+  );
+  expect(jsonRes.stderr).toBe("");
+  expect(jsonRes.exitCode).toBe(0);
+  expect(JSON.parse(jsonRes.stdout)).toEqual([
+    {
+      identifier: "watt-mind/factory#42",
+      title: "Desktop tray bug",
+      state: "In Progress",
+      labels: ["type:bug"],
+      assignee: "hdkiller",
+      priority: null,
+      url: "https://github.com/watt-mind/factory/issues/42",
+    },
+  ]);
+});
+
+test("CLI file validates --body-file / --body / --todo / --state conflicts and forwards --assignee (GH-2461)", async () => {
+  // Forward assignee through fileTicket
+  const { cp, calls, io } = fileHarness({ identifier: "WM-12", url: "u" });
+  await fileTicket(
+    cp,
+    {
+      team: "WM",
+      title: "Assigned",
+      body: "Body from file",
+      labels: [],
+      state: "In Progress",
+      assignee: "self",
+    },
+    io,
+  );
+  expect(calls[0]).toMatchObject({
+    team: "WM",
+    title: "Assigned",
+    body: "Body from file",
+    state: "In Progress",
+    assignee: "self",
+  });
+
+  // Negative CLI tests: conflicting flags and missing body-file exit 2
+  const conflictBody = spawnTicketInGithubRepo([
+    "file",
+    "--title",
+    "T",
+    "--body",
+    "a",
+    "--body-file",
+    "b.md",
+  ]);
+  expect(conflictBody.exitCode).toBe(2);
+  expect(conflictBody.stderr).toContain(
+    "cannot combine --body and --body-file",
+  );
+
+  const conflictState = spawnTicketInGithubRepo([
+    "file",
+    "--title",
+    "T",
+    "--todo",
+    "--state",
+    "In Progress",
+  ]);
+  expect(conflictState.exitCode).toBe(2);
+  expect(conflictState.stderr).toContain("cannot combine --todo and --state");
+
+  const missingFile = spawnTicketInGithubRepo([
+    "file",
+    "--title",
+    "T",
+    "--body-file",
+    "/nonexistent/path/ticket-body.md",
+  ]);
+  expect(missingFile.exitCode).toBe(2);
+  expect(missingFile.stderr).toContain("cannot read --body-file");
+
+  // Positive CLI test: --body-file + --state + --assignee against stub gh
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "ticket-gh2461-file-"));
+  try {
+    const bodyPath = path.join(tmp, "body.md");
+    writeFileSync(bodyPath, "## Problem\nFrom markdown file\n");
+    const projectJson = JSON.stringify({
+      data: {
+        repository: {
+          projectsV2: {
+            nodes: [
+              {
+                id: "P_1",
+                title: "Factory",
+                field: {
+                  id: "F_1",
+                  options: [
+                    { id: "o_triage", name: "Triage" },
+                    { id: "o_prog", name: "In Progress" },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      },
+    });
+    const res = spawnTicketInGithubRepo(
+      [
+        "file",
+        "--title",
+        "Body file test",
+        "--body-file",
+        bodyPath,
+        "--state",
+        "In Progress",
+        "--assignee",
+        "self",
+      ],
+      {
+        extraGhScript: [
+          'case "$*" in',
+          "  *graphql*)",
+          '    case "$input" in',
+          `      *FindRepoProject*) printf '%s\\n' '${projectJson}' ;;`,
+          `      *ProjectItems*) printf '%s\\n' '{"data":{"node":{"items":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}' ;;`,
+          `      *AddProjectItem*) printf '%s\\n' '{"data":{"addProjectV2ItemById":{"item":{"id":"PI_99"}}}}' ;;`,
+          `      *SetProjectStatus*) printf '%s\\n' '{"data":{"updateProjectV2ItemFieldValue":{"projectV2Item":{"id":"PI_99"}}}}' ;;`,
+          `      *) printf '%s\\n' '{"data":{}}' ;;`,
+          "    esac ;;",
+          `  *" user"*) printf '%s\\n' '{"id":7,"login":"hdkiller"}' ;;`,
+          `  *labels*) printf '%s\\n' '[{"id":1,"name":"source:agent"}]' ;;`,
+          `  *issues*) printf '%s\\n' '{"number":99,"node_id":"I_99","html_url":"https://github.com/watt-mind/factory/issues/99"}' ;;`,
+          `  *) printf '%s\\n' '{}' ;;`,
+          "esac",
+        ].join("\n"),
+      },
+    );
+    expect(res.stderr).toBe("");
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toContain("filed watt-mind/factory#99 in In Progress");
+    expect(res.ghStdin).toContain("From markdown file");
+    expect(res.ghStdin).toContain('"assignees":["hdkiller"]');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
   }
 });
