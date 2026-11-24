@@ -1472,3 +1472,38 @@ test("splitFrontmatter parses Prettier-wrapped multi-line YAML scalars", () => {
   expect(fm["argument-hint"]).toBe("[--dry-run] [--limit N]");
   expect(body.trim()).toBe("Body line.");
 });
+
+test("emit --link symlinks Gemini skills into ~/.gemini/config/skills for Antigravity", () => {
+  const readme = readFileSync(path.join(ROOT, "README.md"), "utf8");
+  expect(readme).toContain("`~/.gemini/config/skills/`");
+
+  const fixture = makeEmitFixture();
+  const tempHome = mkdtempSync(path.join(tmpdir(), "emit-antigravity-home-"));
+  try {
+    const result = Bun.spawnSync({
+      cmd: ["bun", "build/emit.mjs", "--link"],
+      cwd: fixture,
+      env: { ...process.env, HOME: tempHome },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(result.exitCode).toBe(0);
+
+    for (const [linkRel, targetRel] of [
+      [".gemini/skills/ticket-spec", "dist/gemini/skills/ticket-spec"],
+      [".gemini/skills/factory-work", "dist/gemini/skills/factory-work"],
+      [".gemini/config/skills/ticket-spec", "dist/gemini/skills/ticket-spec"],
+      [".gemini/config/skills/factory-work", "dist/gemini/skills/factory-work"],
+    ]) {
+      const linkPath = path.join(tempHome, linkRel);
+      expect(lstatSync(linkPath).isSymbolicLink()).toBe(true);
+      expect(readlinkSync(linkPath)).toContain(targetRel);
+      expect(realpathSync(linkPath)).toBe(
+        realpathSync(path.join(fixture, targetRel)),
+      );
+    }
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+    rmSync(tempHome, { recursive: true, force: true });
+  }
+});

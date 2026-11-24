@@ -910,6 +910,10 @@ function packLinks(loaded) {
       destJoin(pack, path.join(GEMINI, "skills"), s),
       destJoin(pack, path.join(homedir(), ".gemini/skills"), s),
     ]),
+    ...skillNames.map((s) => [
+      destJoin(pack, path.join(GEMINI, "skills"), s),
+      destJoin(pack, path.join(homedir(), ".gemini/config/skills"), s),
+    ]),
     ...commands.map((f) => [
       destFile(pack, path.join(CURSOR, "commands"), path.basename(f)),
       destFile(
