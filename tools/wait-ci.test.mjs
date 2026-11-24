@@ -6,10 +6,13 @@ import {
   DEFAULT_WORKFLOW,
   FAILING_CONCLUSIONS,
   evaluateCheckRuns,
+  formatPrLine,
   formatSummary,
   main,
   parseCheckRunsPayload,
   parseCliArgs,
+  parsePrPayload,
+  parsePrRef,
   parseRepoFromRemoteUrl,
   waitCi,
 } from "./wait-ci.mjs";
@@ -46,11 +49,75 @@ describe("parseRepoFromRemoteUrl", () => {
   });
 });
 
+describe("parsePrRef", () => {
+  test("parses PR numbers, #numbers, and GitHub PR URLs", () => {
+    expect(parsePrRef("2451")).toEqual({ number: 2451, repo: null });
+    expect(parsePrRef("#2451")).toEqual({ number: 2451, repo: null });
+    expect(
+      parsePrRef("https://github.com/watt-mind/factory/pull/2451"),
+    ).toEqual({ number: 2451, repo: "watt-mind/factory" });
+    expect(
+      parsePrRef("https://github.com/watt-mind/factory/pull/2451/files?w=1"),
+    ).toEqual({ number: 2451, repo: "watt-mind/factory" });
+  });
+
+  test("rejects invalid PR refs", () => {
+    expect(() => parsePrRef("")).toThrow(/--pr/);
+    expect(() => parsePrRef("0")).toThrow(/--pr/);
+    expect(() => parsePrRef("-5")).toThrow(/--pr/);
+    expect(() => parsePrRef("not-a-pr")).toThrow(/--pr/);
+    expect(() =>
+      parsePrRef("https://github.com/watt-mind/factory/issues/2451"),
+    ).toThrow(/--pr/);
+  });
+});
+
+describe("parsePrPayload", () => {
+  test("extracts REST pull request metadata", () => {
+    const meta = parsePrPayload(
+      JSON.stringify({
+        head: {
+          sha: "aaaa1111bbbb2222cccc3333dddd4444eeee5555",
+          ref: "feat/x",
+        },
+        base: { ref: "develop" },
+        state: "open",
+        merged: false,
+        draft: true,
+        mergeable: true,
+        mergeable_state: "clean",
+        title: "feat: test PR",
+      }),
+    );
+    expect(meta).toEqual({
+      headSha: "aaaa1111bbbb2222cccc3333dddd4444eeee5555",
+      state: "open",
+      merged: false,
+      draft: true,
+      mergeable: true,
+      mergeableState: "clean",
+      title: "feat: test PR",
+      baseRef: "develop",
+      headRef: "feat/x",
+    });
+  });
+
+  test("rejects missing head.sha or invalid payloads", () => {
+    expect(() => parsePrPayload("")).toThrow(/empty PR/);
+    expect(() => parsePrPayload("{}")).toThrow(/missing head\.sha/);
+    expect(() => parsePrPayload("[]")).toThrow(/unexpected PR JSON/);
+  });
+});
+
 describe("parseCliArgs", () => {
   test("applies defaults when invoked with no arguments", () => {
     expect(parseCliArgs([])).toEqual({
       help: false,
       sha: null,
+      prs: [],
+      noWait: false,
+      failFast: false,
+      maxWait: null,
       repo: null,
       workflow: DEFAULT_WORKFLOW,
       interval: DEFAULT_INTERVAL_SECONDS,
@@ -74,11 +141,16 @@ describe("parseCliArgs", () => {
         "4",
         "--register-delay",
         "5",
+        "--no-wait",
         "--json",
       ]),
     ).toEqual({
       help: false,
       sha: "deadbeef1234",
+      prs: [],
+      noWait: true,
+      failFast: false,
+      maxWait: null,
       repo: "watt-mind/factory",
       workflow: "release.yml",
       interval: 45,
@@ -86,6 +158,46 @@ describe("parseCliArgs", () => {
       registerDelay: 5,
       json: true,
     });
+  });
+
+  test("parses repeatable --pr flags and deduplicates identical refs", () => {
+    const parsed = parseCliArgs([
+      "--pr",
+      "2449",
+      "--pr",
+      "https://github.com/watt-mind/factory/pull/2450",
+      "--pr",
+      "2449",
+      "--fail-fast",
+      "--max-wait",
+      "300",
+    ]);
+    expect(parsed.prs).toEqual([
+      { number: 2449, repo: null },
+      { number: 2450, repo: "watt-mind/factory" },
+    ]);
+    expect(parsed.failFast).toBe(true);
+    expect(parsed.maxWait).toBe(300);
+  });
+
+  test("rejects combining positional sha and --pr with exit code 2 in main", async () => {
+    expect(() => parseCliArgs(["deadbeef", "--pr", "2451"])).toThrow(
+      /cannot combine positional <sha> with --pr/,
+    );
+
+    let stderr = "";
+    const code = await main(
+      ["deadbeef", "--pr", "2451"],
+      {
+        stdout: () => {},
+        stderr: (s) => {
+          stderr += s;
+        },
+      },
+      {},
+    );
+    expect(code).toBe(2);
+    expect(stderr).toContain("cannot combine positional <sha> with --pr");
   });
 
   test("supports --help and -h", () => {
@@ -103,7 +215,7 @@ describe("parseCliArgs", () => {
     expect(parseCliArgs(["--interval", "30"]).interval).toBe(30);
   });
 
-  test("rejects invalid repo, register options, and extra positionals", () => {
+  test("rejects invalid repo, register options, max-wait, and extra positionals", () => {
     expect(() => parseCliArgs(["--repo", "invalid"])).toThrow(/owner\/repo/);
     expect(() => parseCliArgs(["--register-attempts", "0"])).toThrow(
       /--register-attempts/,
@@ -111,6 +223,7 @@ describe("parseCliArgs", () => {
     expect(() => parseCliArgs(["--register-delay", "-1"])).toThrow(
       /--register-delay/,
     );
+    expect(() => parseCliArgs(["--max-wait", "0"])).toThrow(/--max-wait/);
     expect(() => parseCliArgs(["sha1", "sha2"])).toThrow(/extra positional/);
   });
 });
@@ -703,5 +816,816 @@ describe("waitCi workflow", () => {
         pendingChecks: [{ name: "e2e", status: "in_progress" }],
       }),
     ).toContain("  - unit: completed (failure)\n  - e2e: in_progress");
+  });
+});
+
+function prPayload(sha, overrides = {}) {
+  return JSON.stringify({
+    head: { sha, ref: "feat/test" },
+    base: { ref: "develop" },
+    state: "open",
+    merged: false,
+    draft: false,
+    mergeable: true,
+    mergeable_state: "clean",
+    title: "feat: test",
+    ...overrides,
+  });
+}
+
+function checkRunsPayload(runs) {
+  return JSON.stringify([{ total_count: runs.length, check_runs: runs }]);
+}
+
+describe("--no-wait snapshot mode", () => {
+  test("SHA --no-wait fetches check-runs once without calling gh run list/watch", async () => {
+    const fullSha = "1234567890abcdef1234567890abcdef12345678";
+    const { exec, calls } = makeExecMock([
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[3] === `repos/watt-mind/factory/commits/${fullSha}/check-runs`
+        ) {
+          return {
+            exitCode: 0,
+            stdout: checkRunsPayload([
+              { name: "lint", status: "completed", conclusion: "success" },
+              { name: "unit", status: "completed", conclusion: "success" },
+            ]),
+            stderr: "",
+          };
+        }
+      },
+    ]);
+
+    let stdout = "";
+    let stderr = "";
+    const code = await main(
+      [fullSha, "--repo", "watt-mind/factory", "--no-wait"],
+      {
+        stdout: (s) => {
+          stdout += s;
+        },
+        stderr: (s) => {
+          stderr += s;
+        },
+      },
+      { exec, sleep: async () => {} },
+    );
+
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(stdout).toContain("PASS: watt-mind/factory@1234567890ab (snapshot)");
+    expect(calls).toHaveLength(1);
+  });
+
+  test("SHA --no-wait exits 1 when any check is pending or missing", async () => {
+    const fullSha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const { exec } = makeExecMock([
+      (cmd, args) => {
+        if (cmd === "gh" && args[0] === "api") {
+          return {
+            exitCode: 0,
+            stdout: checkRunsPayload([
+              { name: "unit", status: "in_progress", conclusion: null },
+            ]),
+            stderr: "",
+          };
+        }
+      },
+    ]);
+
+    let stdout = "";
+    let stderr = "";
+    const code = await main(
+      [fullSha, "--repo", "watt-mind/factory", "--no-wait"],
+      {
+        stdout: (s) => {
+          stdout += s;
+        },
+        stderr: (s) => {
+          stderr += s;
+        },
+      },
+      { exec, sleep: async () => {} },
+    );
+
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toContain("FAIL: watt-mind/factory@aaaaaaaaaaaa (snapshot)");
+    expect(stderr).toContain("unit=in_progress");
+  });
+
+  test("PR --no-wait fetches REST PR metadata + check-runs once and prints 1-line summary", async () => {
+    const sha = "bbbb111122223333444455556666777788889999";
+    const sleeps = [];
+    const { exec, calls } = makeExecMock([
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[1] === "repos/watt-mind/factory/pulls/2451"
+        ) {
+          return { exitCode: 0, stdout: prPayload(sha), stderr: "" };
+        }
+      },
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[3] === `repos/watt-mind/factory/commits/${sha}/check-runs`
+        ) {
+          return {
+            exitCode: 0,
+            stdout: checkRunsPayload([
+              { name: "ci", status: "completed", conclusion: "success" },
+              { name: "security", status: "completed", conclusion: "neutral" },
+            ]),
+            stderr: "",
+          };
+        }
+      },
+    ]);
+
+    let stdout = "";
+    let stderr = "";
+    const code = await main(
+      ["--pr", "https://github.com/watt-mind/factory/pull/2451", "--no-wait"],
+      {
+        stdout: (s) => {
+          stdout += s;
+        },
+        stderr: (s) => {
+          stderr += s;
+        },
+      },
+      {
+        exec,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(sleeps).toEqual([]);
+    expect(stdout.trim()).toBe(
+      "PASS: PR #2451 (watt-mind/factory@bbbb11112222, open, clean) — 2/2 check runs passed",
+    );
+    // Zero GraphQL or gh repo view calls — repo came from PR URL
+    expect(calls).toHaveLength(2);
+  });
+
+  test("batch --pr --no-wait exits 1 when one PR has pending or 0 checks and emits pure JSON with --json", async () => {
+    const sha1 = "1111111111111111111111111111111111111111";
+    const sha2 = "2222222222222222222222222222222222222222";
+    const { exec } = makeExecMock([
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[1] === "repos/watt-mind/factory/pulls/2449"
+        ) {
+          return { exitCode: 0, stdout: prPayload(sha1), stderr: "" };
+        }
+      },
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[1] === "repos/watt-mind/factory/pulls/2450"
+        ) {
+          return {
+            exitCode: 0,
+            stdout: prPayload(sha2, { mergeable_state: "blocked" }),
+            stderr: "",
+          };
+        }
+      },
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[3] === `repos/watt-mind/factory/commits/${sha1}/check-runs`
+        ) {
+          return {
+            exitCode: 0,
+            stdout: checkRunsPayload([
+              { name: "ci", status: "completed", conclusion: "success" },
+            ]),
+            stderr: "",
+          };
+        }
+      },
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[3] === `repos/watt-mind/factory/commits/${sha2}/check-runs`
+        ) {
+          return { exitCode: 0, stdout: checkRunsPayload([]), stderr: "" };
+        }
+      },
+    ]);
+
+    let stdout = "";
+    let stderr = "";
+    const code = await main(
+      [
+        "--pr",
+        "2449",
+        "--pr",
+        "2450",
+        "--repo",
+        "watt-mind/factory",
+        "--no-wait",
+        "--json",
+      ],
+      {
+        stdout: (s) => {
+          stdout += s;
+        },
+        stderr: (s) => {
+          stderr += s;
+        },
+      },
+      { exec, sleep: async () => {} },
+    );
+
+    expect(code).toBe(1);
+    expect(stderr).toBe("");
+    const parsed = JSON.parse(stdout);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.noWait).toBe(true);
+    expect(parsed.totalPrs).toBe(2);
+    expect(parsed.passedPrs).toBe(1);
+    expect(parsed.failedPrs).toBe(1);
+    expect(parsed.prs[0].pr).toBe(2449);
+    expect(parsed.prs[0].ok).toBe(true);
+    expect(parsed.prs[1].pr).toBe(2450);
+    expect(parsed.prs[1].ok).toBe(false);
+    expect(parsed.prs[1].error).toContain("no check runs found");
+  });
+});
+
+describe("PR-native REST wait mode", () => {
+  test("retries initial 0 check runs with registerDelay then polls on interval until green", async () => {
+    const sha = "cccc111122223333444455556666777788889999";
+    let checkCalls = 0;
+    const sleeps = [];
+    const { exec } = makeExecMock([
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[1] === "repos/watt-mind/factory/pulls/2451"
+        ) {
+          return { exitCode: 0, stdout: prPayload(sha), stderr: "" };
+        }
+      },
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[3] === `repos/watt-mind/factory/commits/${sha}/check-runs`
+        ) {
+          checkCalls += 1;
+          if (checkCalls === 1) {
+            return { exitCode: 0, stdout: checkRunsPayload([]), stderr: "" };
+          }
+          if (checkCalls === 2) {
+            return {
+              exitCode: 0,
+              stdout: checkRunsPayload([
+                { name: "ci", status: "in_progress", conclusion: null },
+              ]),
+              stderr: "",
+            };
+          }
+          return {
+            exitCode: 0,
+            stdout: checkRunsPayload([
+              { name: "ci", status: "completed", conclusion: "success" },
+              { name: "lint", status: "completed", conclusion: "success" },
+            ]),
+            stderr: "",
+          };
+        }
+      },
+    ]);
+
+    let stdout = "";
+    let stderr = "";
+    const code = await main(
+      [
+        "--pr",
+        "2451",
+        "--repo",
+        "watt-mind/factory",
+        "--interval",
+        "60",
+        "--register-delay",
+        "15",
+      ],
+      {
+        stdout: (s) => {
+          stdout += s;
+        },
+        stderr: (s) => {
+          stderr += s;
+        },
+      },
+      {
+        exec,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(sleeps).toEqual([15_000, 60_000]);
+    expect(stdout.trim()).toBe(
+      "PASS: PR #2451 (watt-mind/factory@cccc11112222, open, clean) — 2/2 check runs passed",
+    );
+  });
+
+  test("follows superseded push when head.sha changes mid-wait and logs head update", async () => {
+    const oldSha = "old1111111111111111111111111111111111111";
+    const newSha = "new2222222222222222222222222222222222222";
+    let prCalls = 0;
+    const sleeps = [];
+    const { exec, calls } = makeExecMock([
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[1] === "repos/watt-mind/factory/pulls/2451"
+        ) {
+          prCalls += 1;
+          return {
+            exitCode: 0,
+            stdout: prPayload(prCalls === 1 ? oldSha : newSha),
+            stderr: "",
+          };
+        }
+      },
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[3] === `repos/watt-mind/factory/commits/${oldSha}/check-runs`
+        ) {
+          return {
+            exitCode: 0,
+            stdout: checkRunsPayload([
+              { name: "ci", status: "in_progress", conclusion: null },
+            ]),
+            stderr: "",
+          };
+        }
+      },
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[3] === `repos/watt-mind/factory/commits/${newSha}/check-runs`
+        ) {
+          return {
+            exitCode: 0,
+            stdout: checkRunsPayload([
+              { name: "ci", status: "completed", conclusion: "success" },
+            ]),
+            stderr: "",
+          };
+        }
+      },
+    ]);
+
+    let stdout = "";
+    let stderr = "";
+    const code = await main(
+      ["--pr", "2451", "--repo", "watt-mind/factory", "--interval", "30"],
+      {
+        stdout: (s) => {
+          stdout += s;
+        },
+        stderr: (s) => {
+          stderr += s;
+        },
+      },
+      {
+        exec,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    expect(sleeps).toEqual([30_000]);
+    expect(stdout).toContain(
+      "UPDATE: PR #2451 (watt-mind/factory) head updated old111111111 -> new222222222 — watching new head",
+    );
+    expect(stdout).toContain(
+      "PASS: PR #2451 (watt-mind/factory@new222222222, open, clean) — 1/1 check runs passed",
+    );
+    expect(calls).toContainEqual([
+      "gh",
+      "api",
+      "--paginate",
+      "--slurp",
+      `repos/watt-mind/factory/commits/${newSha}/check-runs`,
+    ]);
+  });
+
+  test("stops immediately when PR is closed or merged mid-wait", async () => {
+    const sha = "dddd111122223333444455556666777788889999";
+    let prCalls = 0;
+    const { exec } = makeExecMock([
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[1] === "repos/watt-mind/factory/pulls/2451"
+        ) {
+          prCalls += 1;
+          if (prCalls === 1) {
+            return { exitCode: 0, stdout: prPayload(sha), stderr: "" };
+          }
+          return {
+            exitCode: 0,
+            stdout: prPayload(sha, { state: "closed", merged: true }),
+            stderr: "",
+          };
+        }
+      },
+      (cmd, args) => {
+        if (cmd === "gh" && args[0] === "api" && args[1] === "--paginate") {
+          return {
+            exitCode: 0,
+            stdout: checkRunsPayload([
+              { name: "ci", status: "in_progress", conclusion: null },
+            ]),
+            stderr: "",
+          };
+        }
+      },
+    ]);
+
+    const result = await waitCi(
+      { prs: [{ number: 2451, repo: "watt-mind/factory" }], interval: 30 },
+      { exec, sleep: async () => {} },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.stage).toBe("pr-closed");
+    expect(result.merged).toBe(true);
+    expect(result.error).toContain("already merged");
+  });
+
+  test("supports --fail-fast while other checks are still in progress", async () => {
+    const sha = "eeee111122223333444455556666777788889999";
+    const sleeps = [];
+    const { exec } = makeExecMock([
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[1] === "repos/watt-mind/factory/pulls/2451"
+        ) {
+          return { exitCode: 0, stdout: prPayload(sha), stderr: "" };
+        }
+      },
+      (cmd, args) => {
+        if (cmd === "gh" && args[0] === "api" && args[1] === "--paginate") {
+          return {
+            exitCode: 0,
+            stdout: checkRunsPayload([
+              { name: "lint", status: "completed", conclusion: "failure" },
+              { name: "e2e", status: "in_progress", conclusion: null },
+            ]),
+            stderr: "",
+          };
+        }
+      },
+    ]);
+
+    const result = await waitCi(
+      {
+        prs: [{ number: 2451, repo: "watt-mind/factory" }],
+        failFast: true,
+        interval: 60,
+      },
+      {
+        exec,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.stage).toBe("check-runs");
+    expect(result.failedChecks.map((c) => c.name)).toEqual(["lint"]);
+    expect(result.pendingChecks.map((c) => c.name)).toEqual(["e2e"]);
+    expect(sleeps).toEqual([]);
+  });
+
+  test("enforces --max-wait safety ceiling and reports timeout", async () => {
+    const sha = "ffff111122223333444455556666777788889999";
+    const sleeps = [];
+    const { exec } = makeExecMock([
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[1] === "repos/watt-mind/factory/pulls/2451"
+        ) {
+          return { exitCode: 0, stdout: prPayload(sha), stderr: "" };
+        }
+      },
+      (cmd, args) => {
+        if (cmd === "gh" && args[0] === "api" && args[1] === "--paginate") {
+          return {
+            exitCode: 0,
+            stdout: checkRunsPayload([
+              { name: "e2e", status: "in_progress", conclusion: null },
+            ]),
+            stderr: "",
+          };
+        }
+      },
+    ]);
+
+    const result = await waitCi(
+      {
+        prs: [{ number: 2451, repo: "watt-mind/factory" }],
+        interval: 60,
+        maxWait: 90,
+      },
+      {
+        exec,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.stage).toBe("timeout");
+    expect(result.error).toContain("timed out after 90s");
+    expect(result.error).toContain("e2e=in_progress");
+    expect(sleeps).toEqual([60_000, 30_000]);
+  });
+
+  test("fails PR after registerAttempts exhausted when 0 check runs exist", async () => {
+    const sha = "9999111122223333444455556666777788880000";
+    const sleeps = [];
+    const { exec } = makeExecMock([
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[1] === "repos/watt-mind/factory/pulls/2451"
+        ) {
+          return { exitCode: 0, stdout: prPayload(sha), stderr: "" };
+        }
+      },
+      (cmd, args) => {
+        if (cmd === "gh" && args[0] === "api" && args[1] === "--paginate") {
+          return { exitCode: 0, stdout: checkRunsPayload([]), stderr: "" };
+        }
+      },
+    ]);
+
+    const result = await waitCi(
+      {
+        prs: [{ number: 2451, repo: "watt-mind/factory" }],
+        registerAttempts: 3,
+        registerDelay: 10,
+      },
+      {
+        exec,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.stage).toBe("register");
+    expect(result.error).toContain("no check runs registered for PR #2451");
+    expect(sleeps).toEqual([10_000, 10_000]);
+  });
+
+  test("multi-PR batch polls on one shared tick, emits settled PRs immediately, and drops them from later ticks", async () => {
+    const shaA = "aaaa000000000000000000000000000000000001";
+    const shaB = "bbbb000000000000000000000000000000000002";
+    let prACalls = 0;
+    let prBCalls = 0;
+    const sleeps = [];
+    const progressEvents = [];
+
+    const { exec } = makeExecMock([
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[1] === "repos/watt-mind/factory/pulls/2449"
+        ) {
+          prACalls += 1;
+          return { exitCode: 0, stdout: prPayload(shaA), stderr: "" };
+        }
+      },
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[1] === "repos/watt-mind/factory/pulls/2450"
+        ) {
+          prBCalls += 1;
+          return { exitCode: 0, stdout: prPayload(shaB), stderr: "" };
+        }
+      },
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[3] === `repos/watt-mind/factory/commits/${shaA}/check-runs`
+        ) {
+          // PR #2449 settles green on tick 1
+          return {
+            exitCode: 0,
+            stdout: checkRunsPayload([
+              { name: "ci", status: "completed", conclusion: "success" },
+            ]),
+            stderr: "",
+          };
+        }
+      },
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[3] === `repos/watt-mind/factory/commits/${shaB}/check-runs`
+        ) {
+          // PR #2450 is pending on tick 1, settles green on tick 2
+          return {
+            exitCode: 0,
+            stdout: checkRunsPayload([
+              prBCalls === 1
+                ? { name: "ci", status: "in_progress", conclusion: null }
+                : { name: "ci", status: "completed", conclusion: "success" },
+            ]),
+            stderr: "",
+          };
+        }
+      },
+    ]);
+
+    let stdout = "";
+    let stderr = "";
+    const code = await main(
+      [
+        "--pr",
+        "2449",
+        "--pr",
+        "2450",
+        "--repo",
+        "watt-mind/factory",
+        "--interval",
+        "60",
+      ],
+      {
+        stdout: (s) => {
+          stdout += s;
+        },
+        stderr: (s) => {
+          stderr += s;
+        },
+      },
+      {
+        exec,
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+        onProgress: (line) => {
+          progressEvents.push(line);
+        },
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(stderr).toBe("");
+    // PR #2449 was only fetched once (removed from active set after tick 1)
+    expect(prACalls).toBe(1);
+    expect(prBCalls).toBe(2);
+    // Single shared sleep between tick 1 and tick 2
+    expect(sleeps).toEqual([60_000]);
+    expect(progressEvents).toHaveLength(2);
+    expect(progressEvents[0]).toContain("PASS: PR #2449");
+    expect(progressEvents[1]).toContain("PASS: PR #2450");
+    expect(stdout).toContain("BATCH PASS: 2/2 PRs passed");
+  });
+
+  test("multi-PR batch --json emits pure JSON without progress lines and exits 1 if any PR fails", async () => {
+    const shaA = "aaaa000000000000000000000000000000000003";
+    const shaB = "bbbb000000000000000000000000000000000004";
+    const { exec } = makeExecMock([
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[1] === "repos/watt-mind/factory/pulls/2449"
+        ) {
+          return { exitCode: 0, stdout: prPayload(shaA), stderr: "" };
+        }
+      },
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[1] === "repos/watt-mind/factory/pulls/2450"
+        ) {
+          return { exitCode: 0, stdout: prPayload(shaB), stderr: "" };
+        }
+      },
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[3] === `repos/watt-mind/factory/commits/${shaA}/check-runs`
+        ) {
+          return {
+            exitCode: 0,
+            stdout: checkRunsPayload([
+              { name: "ci", status: "completed", conclusion: "success" },
+            ]),
+            stderr: "",
+          };
+        }
+      },
+      (cmd, args) => {
+        if (
+          cmd === "gh" &&
+          args[0] === "api" &&
+          args[3] === `repos/watt-mind/factory/commits/${shaB}/check-runs`
+        ) {
+          return {
+            exitCode: 0,
+            stdout: checkRunsPayload([
+              { name: "unit", status: "completed", conclusion: "failure" },
+            ]),
+            stderr: "",
+          };
+        }
+      },
+    ]);
+
+    let stdout = "";
+    let stderr = "";
+    const code = await main(
+      ["--pr", "2449", "--pr", "2450", "--repo", "watt-mind/factory", "--json"],
+      {
+        stdout: (s) => {
+          stdout += s;
+        },
+        stderr: (s) => {
+          stderr += s;
+        },
+      },
+      { exec, sleep: async () => {} },
+    );
+
+    expect(code).toBe(1);
+    expect(stderr).toBe("");
+    const parsed = JSON.parse(stdout);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.passedPrs).toBe(1);
+    expect(parsed.failedPrs).toBe(1);
+    expect(parsed.prs[1].failedChecks[0].name).toBe("unit");
+  });
+
+  test("formatPrLine formats draft and merged metadata cleanly", () => {
+    expect(
+      formatPrLine({
+        ok: true,
+        pr: 42,
+        repo: "watt-mind/factory",
+        sha: "abcdef1234567890",
+        state: "open",
+        draft: true,
+        mergeableState: "draft",
+        passedChecks: 4,
+        totalChecks: 4,
+      }),
+    ).toBe(
+      "PASS: PR #42 (watt-mind/factory@abcdef123456, open, draft) — 4/4 check runs passed",
+    );
   });
 });

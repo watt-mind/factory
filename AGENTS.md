@@ -140,27 +140,19 @@ For multi-file edits, multi-perspective reviews, or slow test and build runs, ke
 **For CI:**
 
 ```bash
-# Select the CI workflow's run for this exact commit. Without --workflow,
-# `gh run list` returns the newest run of ANY workflow (CLA, Security, ...)
-# and its verdict is not the CI verdict. The run can lag the push by a
-# minute or two, so retry (bounded) instead of failing on the first miss.
-run_id=""
-for i in $(seq 8); do
-  run_id="$(gh run list --workflow ci.yml --commit <sha> --json databaseId --limit 1 --jq '.[0].databaseId // empty')"
-  test -n "$run_id" && break
-  sleep 15
-done
-test -n "$run_id" || { echo "no CI workflow run found for this commit" >&2; exit 1; }
-gh run watch "$run_id" --exit-status --interval 60
+# Watch all REST check-runs on a PR (follows head SHA updates on push,
+# polls at >=60s interval, and enforces the F-15 all-check-runs gate):
+factory wait-ci --pr <N>
+
+# Watch multiple PRs on one shared REST tick, or take a one-shot REST snapshot:
+factory wait-ci --pr <N1> --pr <N2>
+factory wait-ci --pr <N> --no-wait
+
+# Watch a specific commit SHA (e.g. base branch after merge):
+factory wait-ci <sha>
 ```
 
-`gh run list` and `gh run watch` use GitHub's REST API. Do not default to the
-GraphQL-backed `gh pr checks` waiter: it polls every 10 seconds by default and
-can exhaust the shared GraphQL budget. If that fallback is unavoidable, use an
-interval of at least 60 seconds. A green `gh run watch` covers one
-workflow; before a merge that must be fully green, assert every check-run on
-the commit is completed and successful via REST
-(`gh api repos/<owner>/<repo>/commits/<sha>/check-runs`).
+`factory wait-ci` uses GitHub's REST API exclusively (`repos/<owner>/<repo>/pulls/<N>`, `gh run list`/`gh run watch`, and paginated `repos/<owner>/<repo>/commits/<sha>/check-runs`) with a 60-second poll interval (30s minimum floor) and enforces the F-15 gate: every check-run on the commit must be completed and successful, regardless of whether a single workflow run exited 0. Do not default to the GraphQL-backed `gh pr checks` waiter: it polls every 10 seconds by default and can exhaust the shared GraphQL budget. Use `factory wait-ci --pr <N> --no-wait` for a one-shot REST snapshot instead of `gh pr checks`.
 
 **For a dev server, migration, or anything with an observable ready state** — poll the condition on a short interval with a bounded ceiling, so it returns as soon as it is up and still terminates if it never is:
 
@@ -170,7 +162,7 @@ for i in $(seq 60); do curl -sf localhost:4222 >/dev/null && break; sleep 2; don
 
 **For a background job you started**, wait on the process (`wait`, or the harness's own background-task mechanism) rather than guessing how long it takes.
 
-**Never end your turn while background jobs are running.** Subagents must not park mid-flow or yield prematurely while waiting for slow commands, test suites, or background sub-processes. When an agent yields without active foreground execution, the orchestrator cannot distinguish between an agent legitimately waiting on slow work, an agent stalled needing a nudge, or an agent finished but under-reporting. Block on readiness (e.g. `gh run watch <run-id> --exit-status --interval 60`, `wait <pid>`, or bounded polling) until the work is complete before completing your turn.
+**Never end your turn while background jobs are running.** Subagents must not park mid-flow or yield prematurely while waiting for slow commands, test suites, or background sub-processes. When an agent yields without active foreground execution, the orchestrator cannot distinguish between an agent legitimately waiting on slow work, an agent stalled needing a nudge, or an agent finished but under-reporting. Block on readiness (e.g. `factory wait-ci --pr <N>`, `wait <pid>`, or bounded polling) until the work is complete before completing your turn.
 
 **Long-running verify commands: use the status-file idiom.** The Bash tool auto-backgrounds any foreground command that outlives its `timeout` (max 600000ms) — even one launched with `run_in_background` left false and an explicit large timeout. The auto-backgrounded call's framing exit code is not the command's exit code, so a `0` there proves nothing. For any verify command expected to exceed ~10 minutes, never trust the framing exit code; run the command so its own exit code is written to a status file, with output directed to a log file, then poll for the status file with repeated short Bash calls:
 
@@ -186,7 +178,7 @@ Once the status file exists, its content is the command's real exit code — rea
 
 Do not judge a long test run through `| tail -N` pipe framing either: piped stdout is fully buffered while the test runner's progress and summary on stderr are not, so the buffered stdout flushes at process exit and pushes the real summary out of the tail window — and the pipeline's exit code is the last command's (`tail`'s, always 0), not the test run's. That is a false-pass trap. Direct output to a log file and read the status file instead.
 
-**GitHub Actions secondary rate limits.** Avoid rapid, unthrottled polling of GitHub's Actions and jobs APIs (e.g. tight loops calling `gh run view` or `gh api`). Aggressive polling triggers GitHub's secondary rate limits and blocks the harness. Prefer the REST-backed `gh run watch <run-id> --exit-status --interval 60`; the GraphQL-backed PR-check fallback must use an interval of at least 60 seconds when unavoidable.
+**GitHub Actions secondary rate limits.** Avoid rapid, unthrottled polling of GitHub's Actions and jobs APIs (e.g. tight loops calling `gh run view` or `gh api`). Aggressive polling triggers GitHub's secondary rate limits and blocks the harness. Prefer `factory wait-ci` (REST-only, 60s default interval, 30s floor); the GraphQL-backed `gh pr checks` fallback must use an interval of at least 60 seconds when unavoidable.
 
 **Session scratchpad isolation.** Never use generic shared filenames (such as `pr-body.md` or `scratch/critique.json`) across concurrent tasks. Reviewer, implementer, and critic agents operating in shared session scratchpads must namespace all temporary files by ticket ID or session identifier (e.g. `pr-body-<TICKET-ID>.md`, `<TICKET-ID>-critique.json`) to prevent cross-agent collisions and silent overwrites.
 
