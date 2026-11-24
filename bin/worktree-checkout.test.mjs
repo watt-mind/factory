@@ -1,4 +1,5 @@
 import {
+  copyFileSync,
   mkdtempSync,
   rmSync,
   existsSync,
@@ -1787,8 +1788,32 @@ test("worktree-down CLI argument parsing error paths", () => {
     });
     expect(helpRes.exitCode).toBe(0);
     expect(helpRes.stdout.toString()).toContain("bin/worktree-down.sh OPS-123");
+    expect(helpRes.stdout.toString()).toContain("--delete-branch");
 
-    // 6. Non-existent worktree
+    // 6. Invalid ticket format matches worktree-up.sh
+    const badTicket = Bun.spawnSync({
+      cmd: ["bash", DOWN, "not-a-ticket"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+    });
+    expect(badTicket.exitCode).not.toBe(0);
+    expect(badTicket.stderr.toString()).toContain(
+      "ticket must look like OPS-123, GH-123, or owner/repo#123",
+    );
+
+    // 7. Conflicting --here with --delete-branch
+    const hereDelete = Bun.spawnSync({
+      cmd: ["bash", DOWN, "--here", "--delete-branch"],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(hereDelete.exitCode).not.toBe(0);
+    expect(hereDelete.stderr.toString()).toContain(
+      "--here cannot be combined with --delete-branch",
+    );
+
+    // 8. Non-existent worktree
     const nonExistent = Bun.spawnSync({
       cmd: ["bash", DOWN, "OPS-99999"],
       stdout: "pipe",
@@ -1799,6 +1824,141 @@ test("worktree-down CLI argument parsing error paths", () => {
     expect(nonExistent.stderr.toString()).toContain("no worktree at");
   } finally {
     rmSync(tempWtRoot, { recursive: true, force: true });
+  }
+});
+
+// prettier-ignore
+t("worktree-down --delete-branch deletes the local branch and succeeds idempotently when already gone", () => {
+  if (handoffSandbox) return;
+  const tempWtRoot = mkdtempSync(path.join(tmpdir(), "factory-down-delbr-"));
+  const ticket1 = makeTestTicket("DELBR");
+  const ticket2 = makeTestTicket("DELBRGONE");
+  const branch1 = `feat/${ticket1}`;
+  const branch2 = `feat/${ticket2}`;
+  const repoRoot = path.resolve(import.meta.dir, "..");
+  const branchExists = (branch) =>
+    Bun.spawnSync({
+      cmd: ["git", "-C", repoRoot, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
+    }).exitCode === 0;
+
+  try {
+    // 1. Create worktree and tear down with --delete-branch -> deletes branch
+    const up1 = Bun.spawnSync({
+      cmd: ["bash", UP, ticket1, "--checkout-only", "--no-fetch"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot, FACTORY_SKIP_FETCH: "1" },
+    });
+    expect(up1.exitCode).toBe(0);
+    expect(branchExists(branch1)).toBe(true);
+
+    const down1 = Bun.spawnSync({
+      cmd: ["bash", DOWN, ticket1, "--delete-branch"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+    });
+    expect(down1.exitCode).toBe(0);
+    expect(existsSync(path.join(tempWtRoot, ticket1))).toBe(false);
+    expect(branchExists(branch1)).toBe(false);
+    expect(down1.stdout.toString()).toContain(`deleted local branch '${branch1}'`);
+
+    // 2. Create worktree, delete its branch ref beforehand -> --delete-branch succeeds idempotently
+    const up2 = Bun.spawnSync({
+      cmd: ["bash", UP, ticket2, "--checkout-only", "--no-fetch"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot, FACTORY_SKIP_FETCH: "1" },
+    });
+    expect(up2.exitCode).toBe(0);
+    expect(branchExists(branch2)).toBe(true);
+    expect(
+      Bun.spawnSync({
+        cmd: ["git", "-C", repoRoot, "update-ref", "-d", `refs/heads/${branch2}`],
+      }).exitCode,
+    ).toBe(0);
+    expect(branchExists(branch2)).toBe(false);
+
+    const down2 = Bun.spawnSync({
+      cmd: ["bash", DOWN, ticket2, "--force", "--delete-branch"],
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+    });
+    expect(down2.exitCode).toBe(0);
+    expect(existsSync(path.join(tempWtRoot, ticket2))).toBe(false);
+    expect(down2.stdout.toString()).toContain(`branch '${branch2}' already deleted`);
+  } finally {
+    rmSync(tempWtRoot, { recursive: true, force: true });
+    Bun.spawnSync({ cmd: ["git", "-C", repoRoot, "branch", "-D", branch1, branch2] });
+  }
+});
+
+t("worktree-down --delete-branch refuses to delete protected branches", () => {
+  const tempDir = mkdtempSync(path.join(tmpdir(), "factory-down-prot-"));
+  const tempRepo = path.join(tempDir, "repo");
+  const tempBin = path.join(tempRepo, "bin");
+  const tempWtRoot = path.join(tempDir, "worktrees");
+  const ticketId = "OPS-777";
+  const wtPath = path.join(tempWtRoot, ticketId);
+
+  const gitIn = (cwd, args) =>
+    Bun.spawnSync({
+      cmd: ["git", "-C", cwd, ...args],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+  try {
+    mkdirSync(tempBin, { recursive: true });
+    mkdirSync(tempWtRoot, { recursive: true });
+    copyFileSync(DOWN, path.join(tempBin, "worktree-down.sh"));
+    copyFileSync(COMMON, path.join(tempBin, "worktree-common.sh"));
+    copyFileSync(
+      path.resolve(import.meta.dir, "worktree-daemons.sh"),
+      path.join(tempBin, "worktree-daemons.sh"),
+    );
+    expect(gitIn(tempRepo, ["init", "-b", "develop"]).exitCode).toBe(0);
+    expect(gitIn(tempRepo, ["add", "bin"]).exitCode).toBe(0);
+    expect(
+      gitIn(tempRepo, [
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-m",
+        "init",
+      ]).exitCode,
+    ).toBe(0);
+    expect(gitIn(tempRepo, ["branch", "main"]).exitCode).toBe(0);
+    expect(gitIn(tempRepo, ["worktree", "add", wtPath, "main"]).exitCode).toBe(
+      0,
+    );
+
+    const downRes = Bun.spawnSync({
+      cmd: [
+        "bash",
+        path.join(tempBin, "worktree-down.sh"),
+        ticketId,
+        "--delete-branch",
+      ],
+      cwd: tempRepo,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, FACTORY_WT_ROOT: tempWtRoot },
+    });
+    expect(downRes.exitCode).toBe(0);
+    expect(existsSync(wtPath)).toBe(false);
+    expect(downRes.stderr.toString()).toContain(
+      "refusing to delete protected branch 'main'",
+    );
+    expect(
+      gitIn(tempRepo, ["show-ref", "--verify", "--quiet", "refs/heads/main"])
+        .exitCode,
+    ).toBe(0);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
   }
 });
 
