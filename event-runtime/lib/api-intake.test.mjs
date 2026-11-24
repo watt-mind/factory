@@ -1473,7 +1473,10 @@ describe("missing FACTORY_EVENT_SECRET and FACTORY_GITHUB_WEBHOOK_SECRET visibil
     });
 
     const deadline = Date.now() + loadAdjustedTimeout(8000);
-    while (Date.now() < deadline && !out.includes("control API on")) {
+    while (
+      Date.now() < deadline &&
+      !out.includes("webhook intake: disabled (FACTORY_EVENT_SECRET is unset")
+    ) {
       await Bun.sleep(100);
     }
     try {
