@@ -406,8 +406,16 @@ describe("waitCi workflow", () => {
   test("falls back to raw sha when git rev-parse --verify fails (e.g. remote repo)", async () => {
     const { exec, calls } = makeExecMock([
       (cmd, args) => {
-        if (cmd === "git" && args[0] === "rev-parse" && args[1] === "--verify") {
-          return { exitCode: 128, stdout: "", stderr: "fatal: Needed a single revision" };
+        if (
+          cmd === "git" &&
+          args[0] === "rev-parse" &&
+          args[1] === "--verify"
+        ) {
+          return {
+            exitCode: 128,
+            stdout: "",
+            stderr: "fatal: Needed a single revision",
+          };
         }
       },
       (cmd, args) => {

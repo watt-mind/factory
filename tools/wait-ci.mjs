@@ -59,7 +59,9 @@ export function parseRepoFromRemoteUrl(url) {
   if (!trimmed) return null;
 
   // Match SSH (git@github.com:owner/repo.git) or URL (https://github.com/owner/repo.git, ssh://git@github.com/owner/repo.git)
-  const sshScp = trimmed.match(/^[^@]+@[^:]+:([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/);
+  const sshScp = trimmed.match(
+    /^[^@]+@[^:]+:([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/,
+  );
   if (sshScp) return sshScp[1];
 
   const httpOrSshUrl = trimmed.match(
@@ -72,7 +74,9 @@ export function parseRepoFromRemoteUrl(url) {
 
 function parseIntOption(raw, name, min) {
   if (!/^-?\d+$/.test(String(raw).trim())) {
-    throw new Error(`${name} must be an integer >= ${min} (got ${JSON.stringify(raw)})`);
+    throw new Error(
+      `${name} must be an integer >= ${min} (got ${JSON.stringify(raw)})`,
+    );
   }
   const value = Number.parseInt(String(raw).trim(), 10);
   if (!Number.isSafeInteger(value) || value < min) {
@@ -84,7 +88,9 @@ function parseIntOption(raw, name, min) {
 function parseNumberOption(raw, name, min) {
   const trimmed = String(raw).trim();
   if (!trimmed || !/^-?\d+(?:\.\d+)?$/.test(trimmed)) {
-    throw new Error(`${name} must be a number >= ${min} (got ${JSON.stringify(raw)})`);
+    throw new Error(
+      `${name} must be a number >= ${min} (got ${JSON.stringify(raw)})`,
+    );
   }
   const value = Number(trimmed);
   if (!Number.isFinite(value) || value < min) {
@@ -182,7 +188,11 @@ export function parseCheckRunsPayload(stdout) {
     return runs;
   }
 
-  if (parsed && typeof parsed === "object" && Array.isArray(parsed.check_runs)) {
+  if (
+    parsed &&
+    typeof parsed === "object" &&
+    Array.isArray(parsed.check_runs)
+  ) {
     return parsed.check_runs;
   }
 
@@ -221,7 +231,10 @@ export function evaluateCheckRuns(checkRuns) {
       pending.push(summary);
       continue;
     }
-    if (FAILING_SET.has(summary.conclusion) || !PASSING_SET.has(summary.conclusion)) {
+    if (
+      FAILING_SET.has(summary.conclusion) ||
+      !PASSING_SET.has(summary.conclusion)
+    ) {
       failed.push(summary);
       continue;
     }
@@ -345,8 +358,7 @@ export async function waitCi(options = {}, deps = {}) {
   const interval = options.interval ?? DEFAULT_INTERVAL_SECONDS;
   const registerAttempts =
     options.registerAttempts ?? DEFAULT_REGISTER_ATTEMPTS;
-  const registerDelay =
-    options.registerDelay ?? DEFAULT_REGISTER_DELAY_SECONDS;
+  const registerDelay = options.registerDelay ?? DEFAULT_REGISTER_DELAY_SECONDS;
 
   let sha;
   try {
@@ -505,12 +517,7 @@ export async function waitCi(options = {}, deps = {}) {
   // superseded/false-green 0), always verify every check run on <sha> via REST.
   const apiRes = await exec(
     "gh",
-    [
-      "api",
-      "--paginate",
-      "--slurp",
-      `repos/${repo}/commits/${sha}/check-runs`,
-    ],
+    ["api", "--paginate", "--slurp", `repos/${repo}/commits/${sha}/check-runs`],
     { cwd },
   );
 
@@ -589,7 +596,9 @@ export function formatSummary(result) {
   }
 
   for (const check of result.failedChecks ?? []) {
-    lines.push(`  - ${check.name}: ${check.status} (${check.conclusion ?? "null"})`);
+    lines.push(
+      `  - ${check.name}: ${check.status} (${check.conclusion ?? "null"})`,
+    );
   }
   for (const check of result.pendingChecks ?? []) {
     lines.push(`  - ${check.name}: ${check.status}`);
