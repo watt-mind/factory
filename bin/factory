@@ -122,6 +122,8 @@ run_sh() {
 
 case "$cmd" in
   ticket)       run_bun tools/ticket.mjs "$@" ;;
+  artifact)     run_bun tools/artifact.mjs "$@" ;;
+  pr-media)     run_bun tools/artifact.mjs pr-media "$@" ;;
   # Deprecated alias (WM-1026). Kept because agent prompts, shared commands and
   # every emitted harness bundle still say `factory linear`; those are swept
   # separately, and breaking them here would stop dispatch for one commit.
@@ -421,6 +423,8 @@ factory — control plane (FACTORY_ROOT=$ROOT)
 
   init          scaffold config/*.yaml from tracked examples (never overwrites)
   ticket        tools/ticket.mjs
+  artifact      tools/artifact.mjs (put, get, ls, rm, prune, backfill-results, pr-media)
+  pr-media      tools/artifact.mjs pr-media (upload PR screenshots/videos to artifacts.watt-mind.com)
   linear        tools/ticket.mjs (deprecated alias for 'ticket')
   ask           orchestrator/ask.mjs (read-only factory state: queue, in-flight,
                 held, recent runs, planner declines, spend; --json --section --repo)

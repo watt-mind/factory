@@ -595,3 +595,15 @@ test("factory recap --help and factory recap-video --help execute via CLI", () =
     expect(res.stdout.toString()).toContain(`factory ${sub}`);
   }
 });
+
+test("factory artifact --help and factory pr-media --help execute via CLI", () => {
+  for (const sub of ["artifact", "pr-media"]) {
+    const res = Bun.spawnSync({
+      cmd: ["bash", FACTORY, sub, "--help"],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout.toString()).toContain("factory artifact");
+  }
+});
