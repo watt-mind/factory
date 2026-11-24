@@ -406,7 +406,10 @@ export function createApi({
             const status = Number(err?.status) || 400;
             return send(status, {
               error: err?.code ?? "invalid_response",
-              message: err?.message ?? String(err),
+              message:
+                typeof err?.message === "string"
+                  ? err.message
+                  : "invalid_response",
               ...(err?.errors ? { errors: err.errors } : {}),
             });
           }
