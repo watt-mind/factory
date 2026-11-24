@@ -607,3 +607,13 @@ test("factory artifact --help and factory pr-media --help execute via CLI", () =
     expect(res.stdout.toString()).toContain("factory artifact");
   }
 });
+
+test("factory wait-ci --help executes tools/wait-ci.mjs via CLI", () => {
+  const res = Bun.spawnSync({
+    cmd: ["bash", FACTORY, "wait-ci", "--help"],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(res.exitCode).toBe(0);
+  expect(res.stdout.toString()).toContain("factory wait-ci");
+});
