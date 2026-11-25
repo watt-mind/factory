@@ -220,8 +220,9 @@ export default async function start() {
 // must leave room for signal delivery and process teardown on top of it.
 // Whether the graceful path beat the backstop is asserted from the child's
 // own log ("shutdown exceeded" is absent), not from the parent's wall clock,
-// which a loaded CI runner stretches (WM-1147).
-const SIGTERM_EXIT_WAIT_MS = HARD_EXIT_MS + 2_500;
+// which a loaded CI runner stretches (WM-1147). A 5s wait still flaked under
+// --max-concurrency=4 with other spawn suites, so leave a wide margin (WM-1148).
+const SIGTERM_EXIT_WAIT_MS = HARD_EXIT_MS + 7_500;
 
 describe("serve command", () => {
   test("registry ref swaps atomically and keeps last-good on invalid edits", async () => {
